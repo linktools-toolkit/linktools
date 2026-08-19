@@ -32,12 +32,16 @@ from ._store import (
     OperationQuery,
     RecordQuery,
     StateCallback,
+    StateGroupCallback,
+    StateStorageGroup,
+    StateTransaction,
     StoredAlias,
     StoredFact,
     StoredOperation,
     StoredRecord,
     active_state_transaction,
-    bind_state_transaction,
+    active_state_group_transaction,
+    bind_state_scope,
     reset_state_transaction,
     validate_record_identity,
     validate_record_replacement,
@@ -109,10 +113,374 @@ class _CowMap(MutableMapping[KeyT, MapValueT]):
         target.update(self._changes)
 
 
+class _FilesystemGroupTransaction:
+    def __init__(
+        self,
+        group: "FilesystemStateStorageGroup",
+        transactions: Mapping["FilesystemStateStore", StateTransaction],
+    ) -> None:
+        self._group = group
+        self._transactions = transactions
+
+    def transaction(self, store: "FilesystemStateStore") -> StateTransaction:
+        if store.storage_group is not self._group:
+            raise RuntimeError("store does not belong to this StateStorageGroup")
+        try:
+            return self._transactions[store]
+        except KeyError as error:
+            raise RuntimeError("store was not enlisted in the StateStorageGroup transaction") from error
+
+
+class FilesystemStateStorageGroup:
+    """Own one journal and coordinate independent filesystem domain views."""
+
+    def __init__(
+        self,
+        transaction_root: Path,
+        *,
+        namespace: str,
+        tenant_id: str,
+        scope_digest: str,
+        standalone: bool = False,
+    ) -> None:
+        self._transaction_root = transaction_root.resolve()
+        self._namespace = namespace
+        self._tenant_id = tenant_id
+        self._scope_digest = scope_digest
+        self._standalone = standalone
+        self._members: list[FilesystemStateStore] = []
+        self._operation_lock = asyncio.Lock()
+        self._group_lock = FilesystemWriterLock(self._metadata_root / "state.lock")
+        self._journal = FilesystemJournal(
+            self._transaction_root if not standalone else transaction_root,
+            error_code=ErrorCode.STORAGE_INTEGRITY_ERROR,
+            transaction_name=".txn" if standalone else f".txn-{scope_digest}",
+        )
+        self._generation_path = (
+            self._metadata_root / "generation"
+            if not standalone
+            else transaction_root / "generation"
+        )
+        self._initialized = False
+        self._closed = False
+        self._poisoned = False
+        self._generation: int | None = None
+
+    @property
+    def _metadata_root(self) -> Path:
+        return self._transaction_root / ".state-groups" / self._scope_digest
+
+    @property
+    def transaction_root(self) -> Path:
+        return self._transaction_root
+
+    def add_member(self, store: "FilesystemStateStore") -> None:
+        if self._initialized or self._closed:
+            raise AIError(ErrorCode.STORAGE_DEPENDENCY_NOT_READY)
+        if store._namespace != self._namespace or store._tenant_id != self._tenant_id:
+            raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
+        if any(member._runtime_domain == store._runtime_domain for member in self._members):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        if store not in self._members:
+            self._members.append(store)
+
+    async def initialize(self) -> None:
+        if self._closed:
+            raise AIError(ErrorCode.STORAGE_CLOSED)
+        if self._initialized:
+            return
+        ordered = tuple(sorted(self._members, key=lambda member: member.root.as_posix()))
+        acquired: list[FilesystemWriterLock] = []
+        try:
+            if self._standalone:
+                if len(ordered) != 1:
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                await ordered[0]._writer_lock.acquire()
+                acquired.append(ordered[0]._writer_lock)
+            else:
+                await self._group_lock.acquire()
+                acquired.append(self._group_lock)
+                for member in ordered:
+                    await member._writer_lock.acquire()
+                    acquired.append(member._writer_lock)
+                await _await_thread(self._validate_roots_sync)
+            await _await_thread(self._initialize_sync)
+            self._initialized = True
+            _logger.info(
+                "filesystem StateStorageGroup initialized: scope=%s domains=%s",
+                self._scope_digest,
+                ",".join(member._runtime_domain for member in ordered),
+            )
+        except BaseException:
+            for lock in reversed(acquired):
+                await lock.release()
+            raise
+
+    async def close(self) -> None:
+        if self._closed or not self._members or not all(member._closed for member in self._members):
+            return
+        async with self._operation_lock:
+            if self._closed:
+                return
+            self._closed = True
+            self._initialized = False
+            for member in sorted(self._members, key=lambda value: value.root.as_posix(), reverse=True):
+                await member._writer_lock.release()
+            if not self._standalone:
+                await self._group_lock.release()
+        _logger.debug("filesystem StateStorageGroup closed: scope=%s", self._scope_digest)
+
+    async def read(self, store: "FilesystemStateStore", fn: StateCallback[ValueT]) -> ValueT:
+        self._ensure_member(store)
+        active = active_state_transaction(store)
+        if active is not None:
+            return await fn(active)
+        async with self._operation_lock:
+            return await fn(_FilesystemTransaction(store.root, store._require_index()))
+
+    async def mutate(
+        self,
+        stores: Sequence["FilesystemStateStore"],
+        fn: StateGroupCallback[ValueT],
+    ) -> ValueT:
+        members = tuple(dict.fromkeys(stores))
+        if not members:
+            raise ValueError("StateStorageGroup mutation requires a store")
+        for store in members:
+            self._ensure_member(store)
+        active = active_state_transaction(members[0])
+        if active is not None:
+            return await fn(active_state_group_transaction(self, members))
+        async with self._operation_lock:
+            transaction_now = datetime.now(timezone.utc)
+            transactions = {
+                store: _FilesystemTransaction(
+                    store.root,
+                    store._require_index(),
+                    now=transaction_now,
+                )
+                for store in members
+            }
+            group_transaction = _FilesystemGroupTransaction(self, transactions)
+            token = bind_state_scope(self, transactions)
+            try:
+                result = await fn(group_transaction)
+            finally:
+                reset_state_transaction(token)
+            if any(transaction.has_changes for transaction in transactions.values()):
+                await self._commit(transactions)
+            return result
+
+    async def validate_integrity(self) -> None:
+        self._ensure_ready()
+        async with self._operation_lock:
+            for member in self._members:
+                member._ensure_ready()
+                await _await_thread(
+                    lambda member=member: member._validate_index(
+                        member._require_index(),
+                        decode_items=True,
+                    )
+                )
+
+    def _initialize_sync(self) -> None:
+        if self._standalone:
+            member = self._members[0]
+            index, generation = member._initialize_sync()
+            member._index = index
+            member._index_generation = generation
+            self._generation = generation
+            return
+        self._provision_group_sync()
+        for member in self._members:
+            member._provision()
+            member._recover_sync()
+        self._recover_sync()
+        for member in self._members:
+            member._index = member._load_index()
+            member._index_generation = member._generation()
+        self._generation = self._read_generation()
+
+    def _provision_group_sync(self) -> None:
+        self._metadata_root.mkdir(parents=True, exist_ok=True)
+        manifest = self._metadata_root / "manifest.json"
+        expected = self._expected_manifest()
+        if manifest.exists():
+            try:
+                actual = json.loads(manifest.read_text(encoding="utf-8"))
+            except (OSError, ValueError) as error:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
+            if actual != expected:
+                raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
+        else:
+            _write_json(manifest, expected)
+            _write_text(self._metadata_root / "generation", "0")
+            sync_directory(self._metadata_root)
+        if not (self._metadata_root / "generation").is_file():
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+
+    def _expected_manifest(self) -> dict[str, object]:
+        return {
+            "format": "linktools-ai-state-group",
+            "version": 1,
+            "transaction_root": self._transaction_root.as_posix(),
+            "namespace_digest": _digest(self._namespace),
+            "tenant_digest": _digest(self._tenant_id),
+            "members": [
+                {
+                    "runtime_domain": member._runtime_domain,
+                    "relative_path": member.root.relative_to(self._transaction_root).as_posix(),
+                }
+                for member in sorted(self._members, key=lambda value: value.root.as_posix())
+            ],
+        }
+
+    def _validate_roots_sync(self) -> None:
+        self._transaction_root.mkdir(parents=True, exist_ok=True)
+        device = os.stat(self._transaction_root).st_dev
+        paths = [member.root for member in self._members]
+        if len(paths) != len(set(paths)):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        for path in paths:
+            if path == self._transaction_root:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            try:
+                relative = path.relative_to(self._transaction_root)
+            except ValueError as error:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
+            if not relative.parts or relative.parts[0] == ".state-groups" or relative.parts[0].startswith(".txn-"):
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            if os.path.commonpath((self._transaction_root, path)) != str(self._transaction_root):
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            path.mkdir(parents=True, exist_ok=True)
+            if os.stat(path).st_dev != device:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        for index, left in enumerate(sorted(paths)):
+            for right in sorted(paths)[index + 1 :]:
+                if left in right.parents or right in left.parents:
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+
+    def _read_generation(self) -> int:
+        try:
+            return int(self._generation_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError) as error:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
+
+    def _write_generation(self, value: int) -> None:
+        _write_text(self._generation_path, str(value))
+
+    def _recover_sync(self) -> None:
+        self._journal.recover(self._read_generation, self._write_generation)
+
+    def _ensure_member(self, store: "FilesystemStateStore") -> None:
+        if store.storage_group is not self:
+            raise RuntimeError("store does not belong to this StateStorageGroup")
+        self._ensure_ready()
+        store._ensure_ready()
+
+    def _ensure_ready(self) -> None:
+        if self._closed:
+            raise AIError(ErrorCode.STORAGE_CLOSED)
+        if self._poisoned:
+            raise AIError(ErrorCode.STORAGE_COMMIT_UNKNOWN)
+        if not self._initialized:
+            raise AIError(ErrorCode.STORAGE_DEPENDENCY_NOT_READY)
+
+    async def _commit(self, transactions: Mapping["FilesystemStateStore", "_FilesystemTransaction"]) -> None:
+        if self._standalone:
+            member, transaction = next(iter(transactions.items()))
+            await member._commit(transaction)
+            return
+        base = self._generation
+        if base is None:
+            raise AIError(ErrorCode.STORAGE_DEPENDENCY_NOT_READY)
+        target = base + 1
+        writes: dict[str, bytes] = {}
+        deletes: set[str] = set()
+        for store, transaction in transactions.items():
+            prefix = "" if self._standalone else store.root.relative_to(self._transaction_root).as_posix()
+            for relative, value in transaction.writes.items():
+                writes[f"{prefix}/{relative}" if prefix else relative] = value
+            for relative in transaction.deletes:
+                deletes.add(f"{prefix}/{relative}" if prefix else relative)
+        started = monotonic()
+        physical = asyncio.create_task(
+            asyncio.to_thread(self._commit_sync, writes, deletes, base, target),
+            name=f"filesystem-group-commit-{self._scope_digest}",
+        )
+        cancellation: asyncio.CancelledError | None = None
+        error: BaseException | None = None
+        try:
+            await asyncio.shield(physical)
+        except asyncio.CancelledError as cancellation_error:
+            cancellation = cancellation_error
+            try:
+                await asyncio.shield(physical)
+            except BaseException as commit_error:
+                error = commit_error
+        except BaseException as commit_error:
+            error = commit_error
+        if error is not None:
+            outcome = await _await_thread(lambda: self._reconcile_sync(base, target))
+            if outcome == "unknown":
+                self._poisoned = True
+                for member in self._members:
+                    member._poisoned = True
+                _logger.error(
+                    "filesystem group mutation outcome unknown: scope=%s base=%s target=%s",
+                    self._scope_digest,
+                    base,
+                    target,
+                )
+                raise AIError(ErrorCode.STORAGE_COMMIT_UNKNOWN) from error
+            if outcome == "not_committed":
+                if cancellation is not None:
+                    raise cancellation
+                raise error
+        for store, transaction in transactions.items():
+            store._apply_transaction(transaction, generation=None)
+        self._generation = target
+        _logger.debug(
+            "state storage group committed: backend=filesystem domains=%s duration_ms=%.3f files=%s",
+            ",".join(store._runtime_domain for store in transactions),
+            (monotonic() - started) * 1000,
+            len(writes) + len(deletes),
+        )
+        if cancellation is not None:
+            raise cancellation
+
+    def _commit_sync(self, writes: Mapping[str, bytes], deletes: Sequence[str], base: int, target: int) -> None:
+        plan = self._journal.stage(writes, deletes, base_generation=base, target_generation=target)
+        self._journal.publish(plan)
+        self._write_generation(target)
+        sync_directory(self._transaction_root)
+        self._journal.complete()
+
+    def _reconcile_sync(self, base: int, target: int) -> _CommitOutcome:
+        try:
+            self._recover_sync()
+            generation = self._read_generation()
+        except BaseException:
+            return "unknown"
+        if generation == target:
+            return "committed"
+        if generation == base:
+            return "not_committed"
+        return "unknown"
+
+
 class FilesystemStateStore:
     """A domain-local StateStore with crash-safe granular commits."""
 
-    def __init__(self, root: str | Path, *, namespace: str, tenant_id: str, runtime_domain: str) -> None:
+    def __init__(
+        self,
+        root: str | Path,
+        *,
+        namespace: str,
+        tenant_id: str,
+        runtime_domain: str,
+        group: FilesystemStateStorageGroup | None = None,
+    ) -> None:
         self._root = Path(root).expanduser().resolve()
         self._namespace = namespace
         self._tenant_id = tenant_id
@@ -129,24 +497,27 @@ class FilesystemStateStore:
         self._close_task: asyncio.Task[None] | None = None
         self._index: _FilesystemIndex | None = None
         self._index_generation: int | None = None
+        self._storage_group = group or FilesystemStateStorageGroup(
+            self._root,
+            namespace=namespace,
+            tenant_id=tenant_id,
+            scope_digest=f"standalone-{runtime_domain}",
+            standalone=True,
+        )
+        self._storage_group.add_member(self)
 
     @property
     def root(self) -> Path:
         return self._root
 
+    @property
+    def storage_group(self) -> StateStorageGroup:
+        return self._storage_group
+
     async def initialize(self) -> None:
         if self._closed:
             raise AIError(ErrorCode.STORAGE_CLOSED)
-        if self._initialized:
-            return
-        await self._writer_lock.acquire()
-        try:
-            index, generation = await _await_thread(self._initialize_sync)
-        except BaseException:
-            await self._writer_lock.release()
-            raise
-        self._index = index
-        self._index_generation = generation
+        await self._storage_group.initialize()
         self._initialized = True
         _logger.info(
             "filesystem StateStore initialized: domain=%s root=%s",
@@ -171,34 +542,17 @@ class FilesystemStateStore:
         active = active_state_transaction(self)
         if active is not None:
             return await fn(active)
-        async with self._operation_lock:
-            self._ensure_ready()
-            index = self._require_index()
-            return await fn(_FilesystemTransaction(self._root, index))
+        return await self._storage_group.read(self, fn)
 
     async def mutate(self, fn: StateCallback[ValueT]) -> ValueT:
         self._ensure_ready()
         active = active_state_transaction(self)
         if active is not None:
             return await fn(active)
-        async with self._operation_lock:
-            self._ensure_ready()
-            transaction = _FilesystemTransaction(self._root, self._require_index())
-            token = bind_state_transaction(self, transaction)
-            try:
-                result = await fn(transaction)
-            finally:
-                reset_state_transaction(token)
-            if transaction.has_changes:
-                await self._commit(transaction)
-            return result
+        return await self._storage_group.mutate((self,), lambda group: fn(group.transaction(self)))
 
     async def validate_integrity(self) -> None:
-        async with self._operation_lock:
-            self._ensure_ready()
-            await _await_thread(
-                lambda: self._validate_index(self._require_index(), decode_items=True)
-            )
+        await self._storage_group.validate_integrity()
 
     def _ensure_ready(self) -> None:
         if self._closed:
@@ -214,10 +568,9 @@ class FilesystemStateStore:
         return self._index
 
     async def _close_inner(self) -> None:
-        async with self._operation_lock:
-            await self._writer_lock.release()
-            self._index = None
-            self._index_generation = None
+        await self._storage_group.close()
+        self._index = None
+        self._index_generation = None
         _logger.debug("filesystem StateStore closed: domain=%s", self._runtime_domain)
 
     def _initialize_sync(self) -> tuple[_FilesystemIndex, int]:
@@ -514,14 +867,19 @@ class FilesystemStateStore:
             return "not_committed"
         return "unknown"
 
-    def _apply_transaction(self, transaction: "_FilesystemTransaction", generation: int) -> None:
+    def _apply_transaction(
+        self,
+        transaction: "_FilesystemTransaction",
+        generation: int | None,
+    ) -> None:
         index = self._require_index()
         transaction.records.apply_to(index.records)
         transaction.aliases.apply_to(index.aliases)
         transaction.sequences.apply_to(index.sequences)
         transaction.fact_streams.apply_to(index.fact_streams)
         transaction.operations.apply_to(index.operations)
-        self._index_generation = generation
+        if generation is not None:
+            self._index_generation = generation
 
     def _recover_sync(self) -> None:
         self._journal.recover(
@@ -531,7 +889,13 @@ class FilesystemStateStore:
 
 
 class _FilesystemTransaction:
-    def __init__(self, root: Path, index: _FilesystemIndex) -> None:
+    def __init__(
+        self,
+        root: Path,
+        index: _FilesystemIndex,
+        *,
+        now: datetime | None = None,
+    ) -> None:
         self._root = root
         self.records = _CowMap(index.records)
         self.aliases = _CowMap(index.aliases)
@@ -542,6 +906,7 @@ class _FilesystemTransaction:
         self._facts: dict[tuple[bytes, int], StoredFact] = {}
         self._deleted_facts: set[tuple[bytes, int]] = set()
         self.guarded_record_keys: set[bytes] = set()
+        self._now = now
         self.writes: dict[str, bytes] = {}
         self.deletes: set[str] = set()
 
@@ -563,7 +928,9 @@ class _FilesystemTransaction:
         )
 
     async def now(self) -> datetime:
-        return datetime.now(timezone.utc)
+        if self._now is None:
+            self._now = datetime.now(timezone.utc)
+        return self._now
 
     async def validate_integrity(self) -> None:
         for key in self.aliases.values():
@@ -689,10 +1056,14 @@ class _FilesystemTransaction:
         return tuple(values)
 
     async def resolve_alias(self, alias: bytes) -> bytes | None:
-        value = self.aliases.get(alias)
-        if value is not None and value not in self.records:
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        return value
+        return (await self.resolve_aliases((alias,))).get(alias)
+
+    async def resolve_aliases(self, aliases: Sequence[bytes]) -> Mapping[bytes, bytes]:
+        values = {alias: self.aliases[alias] for alias in dict.fromkeys(aliases) if alias in self.aliases}
+        for value in values.values():
+            if value not in self.records:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        return values
 
     async def insert_alias(self, alias: StoredAlias) -> None:
         current = self.aliases.get(alias.alias_digest)
@@ -1044,4 +1415,4 @@ async def _await_thread(fn: Callable[[], ValueT]) -> ValueT:
         raise
 
 
-__all__ = ["FilesystemStateStore"]
+__all__ = ["FilesystemStateStorageGroup", "FilesystemStateStore"]

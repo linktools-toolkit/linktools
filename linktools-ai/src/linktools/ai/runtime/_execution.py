@@ -56,11 +56,11 @@ from .service_api import (
 from .state._contracts import (
     ExecutionCancelRequestCommit,
     ExecutionRecord,
-    ExecutionStartClaim,
     ExecutionStartReservation,
     ExecutionStartUnknownCommit,
     ExecutionState,
     ExecutionTerminalCommit,
+    ExecutionTerminalCommitResult,
     IdempotencyRecord,
     IdempotencyTerminalUpdate,
     OperationLedgerInput,
@@ -100,6 +100,15 @@ class _ExecutionReleaseCallback(Protocol):
 
 class _ExecutionTerminalVerifier(Protocol):
     async def __call__(self, execution: ExecutionRecord, status: ExecutionStatus, required_step_run_id: "str | None") -> None: ...
+
+
+class _ExecutionTerminalCommitter(Protocol):
+    async def commit_terminal_checkpoint(
+        self,
+        commit: ExecutionTerminalCommit,
+        *,
+        session_id: str | None,
+    ) -> ExecutionTerminalCommitResult: ...
 
 
 class _SubagentCancellation(Protocol):
@@ -169,7 +178,7 @@ class ExecutionBackend(Protocol):
         request: ExecutionRequest,
         execution: ExecutionRecord,
         identity: ExecutionStartIdentity,
-    ) -> None: ...
+    ) -> ExecutionRecord: ...
     async def abort_start(self, execution: ExecutionRecord) -> None: ...
     async def launch(self, request: ExecutionRequest, execution: ExecutionRecord) -> None: ...
     async def cancel(self, execution: ExecutionRecord) -> "CancelEffectOutcome": ...
@@ -209,6 +218,7 @@ class DefaultExecutionService:
         self._release_terminal = release_terminal or _no_release_terminal
         self._terminal_verifier = terminal_verifier or _missing_terminal_verifier
         self._terminal_verifier_is_default = terminal_verifier is None
+        self._terminal_committer: _ExecutionTerminalCommitter | None = None
         self._local_waiter = local_waiter
         self._subagent_cancellation: _SubagentCancellation | None = None
         self._session_locks: dict[tuple[str, str], _SessionLockEntry] = {}
@@ -230,6 +240,13 @@ class DefaultExecutionService:
             raise RuntimeError("terminal verifier is already bound")
         self._terminal_verifier = verifier
         self._terminal_verifier_is_default = False
+
+    def bind_terminal_committer(self, committer: _ExecutionTerminalCommitter) -> None:
+        if committer is None:
+            raise ValueError("terminal committer is required")
+        if self._terminal_committer is not None:
+            raise RuntimeError("terminal committer is already bound")
+        self._terminal_committer = committer
 
     def bind_subagent_cancellation(self, cancellation: _SubagentCancellation) -> None:
         if self._subagent_cancellation is not None:
@@ -633,7 +650,7 @@ class DefaultExecutionService:
             raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
         identity = ExecutionStartIdentity(scope, idempotency_key_digest, request_digest)
         try:
-            await self._backend.prepare_start(request, execution, identity)
+            started = await self._backend.prepare_start(request, execution, identity)
         except AIError as error:
             if error.code in {ErrorCode.SESSION_BUSY, ErrorCode.SESSION_CONFLICT}:
                 await self._reject_pending_start(
@@ -642,38 +659,8 @@ class DefaultExecutionService:
                     error=error,
                 )
             raise
-        try:
-            started = await self._state.executions.claim_start(
-                ExecutionStartClaim(
-                    execution.execution_id,
-                    execution.tenant_id,
-                    execution.revision,
-                    execution.event_sequence,
-                    scope,
-                    idempotency_key_digest,
-                    request_digest,
-                    datetime.now(timezone.utc),
-                )
-            )
-        except AIError as error:
-            current = await self._state.executions.get(
-                execution.execution_id,
-                tenant_id=execution.tenant_id,
-            )
-            if (
-                error.code is not ErrorCode.STORAGE_CONFLICT
-                or current is None
-                or current.status not in {
-                    ExecutionStatus.STARTED,
-                    ExecutionStatus.CANCELLING,
-                    ExecutionStatus.FINALIZING,
-                    ExecutionStatus.SUCCEEDED,
-                    ExecutionStatus.FAILED,
-                    ExecutionStatus.CANCELLED,
-                }
-            ):
-                raise
-            started = current
+        if started is None:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         await self._launch_started(
             request,
             started,
@@ -738,8 +725,10 @@ class DefaultExecutionService:
                 error_code=error.code.value,
                 terminal_event=True,
             )
+            if self._terminal_committer is None:
+                raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
             try:
-                await self._state.executions.commit_terminal(
+                await self._terminal_committer.commit_terminal_checkpoint(
                     ExecutionTerminalCommit(
                         expected_revision=current.revision,
                         expected_event_sequence=current.event_sequence,
@@ -769,7 +758,8 @@ class DefaultExecutionService:
                             None,
                             error.code.value,
                         ),
-                    )
+                    ),
+                    session_id=None,
                 )
             except AIError as commit_error:
                 if commit_error.code not in {
@@ -1218,18 +1208,22 @@ class DefaultExecutionService:
                 raise AIError(ErrorCode.STORAGE_CONFLICT)
             operation_update = OperationTerminalUpdate(operation.operation_id, current_operation.status, OperationStatus.SUCCEEDED, execution_id, None, None)
             await self._terminal_verifier(cancelling_current, ExecutionStatus.CANCELLED, None)
+            terminal_commit = ExecutionTerminalCommit(
+                expected_revision=cancelling_current.revision,
+                expected_event_sequence=cancelling_current.event_sequence,
+                execution=terminal,
+                result=result,
+                terminal_event_type=ExecutionEventType.EXECUTION_CANCELLED,
+                terminal_event_payload={},
+                idempotency=idempotency,
+                operation=operation_update,
+            )
+            if self._terminal_committer is None:
+                raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
             try:
-                await self._state.executions.commit_terminal(
-                    ExecutionTerminalCommit(
-                        expected_revision=cancelling_current.revision,
-                        expected_event_sequence=cancelling_current.event_sequence,
-                        execution=terminal,
-                        result=result,
-                        terminal_event_type=ExecutionEventType.EXECUTION_CANCELLED,
-                        terminal_event_payload={},
-                        idempotency=idempotency,
-                        operation=operation_update,
-                    )
+                await self._terminal_committer.commit_terminal_checkpoint(
+                    terminal_commit,
+                    session_id=cancelling_current.session_id,
                 )
             except AIError as error:
                 if error.code not in {ErrorCode.STORAGE_CONFLICT, ErrorCode.EXECUTION_RESULT_CONFLICT}:
@@ -1238,7 +1232,6 @@ class DefaultExecutionService:
                 if resolved is not None:
                     return resolved
                 raise
-            await self._release_session_admission(cancelling_current)
             if prepared_before_claim:
                 try:
                     await self._backend.abort_start(terminal)
@@ -1276,22 +1269,6 @@ class DefaultExecutionService:
                 )
             raise
         return CancelExecutionResult(execution_id, True)
-
-    async def _release_session_admission(self, execution: ExecutionRecord) -> None:
-        if execution.session_id is None:
-            return
-        try:
-            await self._sessions.release_execution(
-                execution.session_id,
-                tenant_id=execution.tenant_id,
-                execution_id=execution.execution_id,
-            )
-        except BaseException:
-            _logger.error(
-                "session admission release failed after cancellation: execution=%s",
-                execution.execution_id,
-                exc_info=environ.debug,
-            )
 
     async def _resolve_cancel_race(
         self,

@@ -16,13 +16,16 @@ from ._store import (
     OperationQuery,
     RecordQuery,
     StateCallback,
+    StateGroupCallback,
+    StateStorageGroup,
     StateTransaction,
     StoredAlias,
     StoredFact,
     StoredOperation,
     StoredRecord,
     active_state_transaction,
-    bind_state_transaction,
+    active_state_group_transaction,
+    bind_state_scope,
     reset_state_transaction,
     validate_record_identity,
     validate_record_replacement,
@@ -32,10 +35,97 @@ ValueT = TypeVar("ValueT")
 _logger = environ.get_logger("ai.runtime.state.memory")
 
 
+class _MemoryGroupTransaction:
+    def __init__(
+        self,
+        group: "MemoryStateStorageGroup",
+        transactions: Mapping["MemoryStateStore", StateTransaction],
+    ) -> None:
+        self._group = group
+        self._transactions = transactions
+
+    def transaction(self, store: "MemoryStateStore") -> StateTransaction:
+        if store.storage_group is not self._group:
+            raise RuntimeError("store does not belong to this StateStorageGroup")
+        try:
+            return self._transactions[store]
+        except KeyError as error:
+            raise RuntimeError("store was not enlisted in the StateStorageGroup transaction") from error
+
+
+class MemoryStateStorageGroup:
+    """Atomic group coordinator for independent in-memory logical stores."""
+
+    def __init__(self) -> None:
+        self._lock = asyncio.Lock()
+
+    async def read(self, store: "MemoryStateStore", fn: StateCallback[ValueT]) -> ValueT:
+        self._ensure_member(store)
+        active = active_state_transaction(store)
+        if active is not None:
+            return await fn(active)
+        async with self._lock:
+            return await fn(self._transaction(store))
+
+    async def mutate(
+        self,
+        stores: Sequence["MemoryStateStore"],
+        fn: StateGroupCallback[ValueT],
+    ) -> ValueT:
+        members = tuple(dict.fromkeys(stores))
+        if not members:
+            raise ValueError("StateStorageGroup mutation requires a store")
+        for store in members:
+            self._ensure_member(store)
+        active = active_state_transaction(members[0])
+        if active is not None:
+            group_transaction = active_state_group_transaction(self, members)
+            return await fn(group_transaction)
+        async with self._lock:
+            transaction_now = datetime.now(timezone.utc)
+            transactions = {
+                store: self._transaction(store, now=transaction_now)
+                for store in members
+            }
+            group_transaction = _MemoryGroupTransaction(self, transactions)
+            token = bind_state_scope(self, transactions)
+            try:
+                result = await fn(group_transaction)
+                for store, transaction in transactions.items():
+                    store._apply_transaction(transaction)
+                _logger.debug(
+                    "state storage group committed: backend=memory stores=%s",
+                    len(transactions),
+                )
+                return result
+            finally:
+                reset_state_transaction(token)
+
+    def _transaction(
+        self,
+        store: "MemoryStateStore",
+        *,
+        now: datetime | None = None,
+    ) -> "_MemoryTransaction":
+        return _MemoryTransaction(
+            dict(store._records),
+            dict(store._aliases),
+            dict(store._sequences),
+            dict(store._facts),
+            dict(store._operations),
+            now=now,
+        )
+
+    def _ensure_member(self, store: "MemoryStateStore") -> None:
+        if store.storage_group is not self:
+            raise RuntimeError("store does not belong to this StateStorageGroup")
+        store._ensure_ready()
+
+
 class MemoryStateStore:
     """Atomic process-local StateStore used by tests and volatile routes."""
 
-    def __init__(self) -> None:
+    def __init__(self, group: MemoryStateStorageGroup | None = None) -> None:
         self._records: dict[bytes, StoredRecord] = {}
         self._aliases: dict[bytes, bytes] = {}
         self._sequences: dict[bytes, int] = {}
@@ -44,7 +134,11 @@ class MemoryStateStore:
         self._lock = asyncio.Lock()
         self._closed = False
         self._initialized = False
-        self._active_depth = 0
+        self._storage_group = group or MemoryStateStorageGroup()
+
+    @property
+    def storage_group(self) -> StateStorageGroup:
+        return self._storage_group
 
     async def initialize(self) -> None:
         if self._closed:
@@ -62,47 +156,14 @@ class MemoryStateStore:
         active = active_state_transaction(self)
         if active is not None:
             return await fn(active)
-        async with self._lock:
-            transaction = _MemoryTransaction(
-                dict(self._records),
-                dict(self._aliases),
-                dict(self._sequences),
-                dict(self._facts),
-                dict(self._operations),
-            )
-            return await fn(transaction)
+        return await self._storage_group.read(self, fn)
 
     async def mutate(self, fn: StateCallback[ValueT]) -> ValueT:
         self._ensure_ready()
         active = active_state_transaction(self)
         if active is not None:
-            self._active_depth += 1
-            try:
-                return await fn(active)
-            finally:
-                self._active_depth -= 1
-        await self._lock.acquire()
-        transaction = _MemoryTransaction(
-            dict(self._records),
-            dict(self._aliases),
-            dict(self._sequences),
-            dict(self._facts),
-            dict(self._operations),
-        )
-        token = bind_state_transaction(self, transaction)
-        self._active_depth = 1
-        try:
-            result = await fn(transaction)
-            self._records = transaction.records
-            self._aliases = transaction.aliases
-            self._sequences = transaction.sequences
-            self._facts = transaction.facts
-            self._operations = transaction.operations
-            return result
-        finally:
-            reset_state_transaction(token)
-            self._active_depth = 0
-            self._lock.release()
+            return await fn(active)
+        return await self._storage_group.mutate((self,), lambda group: fn(group.transaction(self)))
 
     async def validate_integrity(self) -> None:
         self._ensure_ready()
@@ -118,6 +179,13 @@ class MemoryStateStore:
         if not self._initialized:
             raise AIError(ErrorCode.STORAGE_DEPENDENCY_NOT_READY)
 
+    def _apply_transaction(self, transaction: "_MemoryTransaction") -> None:
+        self._records = transaction.records
+        self._aliases = transaction.aliases
+        self._sequences = transaction.sequences
+        self._facts = transaction.facts
+        self._operations = transaction.operations
+
 
 class _MemoryTransaction:
     def __init__(
@@ -127,6 +195,8 @@ class _MemoryTransaction:
         sequences: dict[bytes, int],
         facts: dict[tuple[bytes, int], StoredFact],
         operations: dict[bytes, StoredOperation],
+        *,
+        now: datetime | None = None,
     ) -> None:
         self.records = records
         self.aliases = aliases
@@ -134,9 +204,12 @@ class _MemoryTransaction:
         self.facts = facts
         self.operations = operations
         self.guarded_record_keys: set[bytes] = set()
+        self._now = now
 
     async def now(self) -> datetime:
-        return datetime.now(timezone.utc)
+        if self._now is None:
+            self._now = datetime.now(timezone.utc)
+        return self._now
 
     async def validate_integrity(self) -> None:
         _validate_transaction_integrity(self)
@@ -238,10 +311,14 @@ class _MemoryTransaction:
         return tuple(values)
 
     async def resolve_alias(self, alias: bytes) -> bytes | None:
-        value = self.aliases.get(alias)
-        if value is not None and value not in self.records:
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        return value
+        return (await self.resolve_aliases((alias,))).get(alias)
+
+    async def resolve_aliases(self, aliases: Sequence[bytes]) -> Mapping[bytes, bytes]:
+        values = {alias: self.aliases[alias] for alias in dict.fromkeys(aliases) if alias in self.aliases}
+        for value in values.values():
+            if value not in self.records:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        return values
 
     async def insert_alias(self, alias: StoredAlias) -> None:
         current = self.aliases.get(alias.alias_digest)
@@ -377,4 +454,4 @@ def _validate_transaction_integrity(transaction: _MemoryTransaction) -> None:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
 
 
-__all__ = ["MemoryStateStore"]
+__all__ = ["MemoryStateStorageGroup", "MemoryStateStore"]

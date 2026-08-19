@@ -12,8 +12,10 @@ from linktools.ai.agent._capabilities import (
     ToolOperationDecision,
     _RuntimeStepPersistence,
 )
-from linktools.ai.core import Principal, TaskStatus
+from linktools.ai.core import Principal, TaskStatus, ToolOperationStatus
 from linktools.ai.errors import AIError, ErrorCode
+from linktools.ai.runtime._tool import RuntimeToolOperationBridge, ToolOperationRecord
+from linktools.ai.storage import PayloadPolicy
 from linktools.ai.task._graph import (
     CancelGraphRequest,
     TaskGraph,
@@ -88,6 +90,34 @@ class _ToolBridge:
         self.calls.append(("unknown", decision.operation_id))
 
 
+class _OperationRepository:
+    def __init__(self) -> None:
+        self.request: Any = None
+
+    async def admit(self, request: Any) -> ToolOperationRecord:
+        self.request = request
+        now = datetime.now(timezone.utc)
+        return ToolOperationRecord(
+            tool_operation_id=request.tool_operation_id,
+            tenant_id=request.tenant_id,
+            step_run_id=request.step_run_id,
+            tool_call_id=request.tool_call_id,
+            idempotency_key_digest=request.idempotency_key_digest,
+            tool_name=request.tool_name,
+            arguments_digest=request.arguments_digest,
+            binding_fingerprint=request.binding_fingerprint,
+            replay_safe=request.replay_safe,
+            status=ToolOperationStatus.CLAIMED,
+            owner=request.owner,
+            fence=1,
+            lease_expires_at=now,
+            result_object_ref=None,
+            error_code=None,
+            created_at=now,
+            updated_at=now,
+        )
+
+
 def _context() -> RunContext[None]:
     return RunContext(
         deps=None,
@@ -106,6 +136,25 @@ def _definition(replay_safe: bool) -> ToolDefinition:
         name="tool",
         metadata={"linktools.ai.replay_safe": replay_safe},
     )
+
+
+async def test_tool_operation_uses_runtime_step_id_for_admission() -> None:
+    repository = _OperationRepository()
+    bridge = RuntimeToolOperationBridge(
+        repository,
+        object(),
+        namespace="namespace",
+        tenant_id="tenant",
+        execution_id="execution",
+        step_run_id="runtime-step",
+        binding_fingerprint="binding",
+        owner="owner",
+        payload_policy=PayloadPolicy(),
+    )
+
+    await bridge.begin(_context(), _call(), _definition(replay_safe=True), {})
+
+    assert repository.request.step_run_id == "runtime-step"
 
 
 async def _capability(

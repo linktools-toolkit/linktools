@@ -6,9 +6,11 @@ import asyncio
 import hashlib
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
+from pathlib import Path
 
 from linktools.core import environ
 
+from ...core import canonical_sha256
 from ...errors import AIError, ErrorCode
 from ...storage import (
     FilesystemObjectStore,
@@ -32,8 +34,8 @@ from ._contracts import (
     RecoveryState,
     TaskState,
 )
-from ._filesystem import FilesystemStateStore
-from ._memory import MemoryStateStore
+from ._filesystem import FilesystemStateStorageGroup, FilesystemStateStore
+from ._memory import MemoryStateStorageGroup, MemoryStateStore
 from ._plan import (
     RuntimeDomain,
     RuntimeRetentionMode,
@@ -42,7 +44,7 @@ from ._plan import (
 )
 from ._repositories import build_repository_bundle
 from ._retention import RuntimeRetentionController
-from ._sql import SqlStateStore
+from ._sql import SqlStateStorageGroup, SqlStateStore
 from ._steps import (
     InMemoryStepArchive,
     RuntimeStepStore,
@@ -128,6 +130,9 @@ async def materialize_runtime_state(
     try:
         sql_groups: dict[tuple[str, object], list[RuntimeDomain]] = {}
         sql_routes: dict[tuple[str, object], RuntimeStateRoute] = {}
+        filesystem_domains: dict[Path, list[RuntimeDomain]] = {}
+        filesystem_routes: dict[Path, RuntimeStateRoute] = {}
+        memory_group = MemoryStateStorageGroup()
         for domain in RuntimeDomain:
             route = plan.route(domain)
             if route.kind in {"sqlite", "sql"}:
@@ -138,28 +143,51 @@ async def materialize_runtime_state(
                 else:
                     if route.engine is None:
                         raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
-                    key = ("sql", id(route.engine))
+                    key = ("sql", route.engine)
                 sql_groups.setdefault(key, []).append(domain)
                 sql_routes[key] = route
                 continue
             if route.kind == "memory":
-                store: object = MemoryStateStore()
-                await store.initialize()
-                cleanups.append(store.close)
+                stores[domain] = MemoryStateStore(memory_group)
             elif route.kind == "filesystem":
                 if route.path is None:
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                group_root = route.transaction_root or route.path
+                filesystem_domains.setdefault(group_root, []).append(domain)
+                filesystem_routes[group_root] = route
+            else:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+
+        for group_root, domains in filesystem_domains.items():
+            route = filesystem_routes[group_root]
+            member_roots = {
+                domain: _route_domain_path(plan.route(domain), namespace, tenant_id)
+                for domain in domains
+            }
+            standalone = route.transaction_root is None
+            scope = _filesystem_group_scope(namespace, tenant_id, group_root, member_roots)
+            group = FilesystemStateStorageGroup(
+                group_root if not standalone else member_roots[domains[0]],
+                namespace=namespace,
+                tenant_id=tenant_id,
+                scope_digest=scope,
+                standalone=standalone,
+            )
+            for domain in domains:
                 store = FilesystemStateStore(
-                    route.path / namespace_digest(namespace) / _tenant_scope_digest(tenant_id),
+                    member_roots[domain],
                     namespace=namespace,
                     tenant_id=tenant_id,
                     runtime_domain=domain.value,
+                    group=group,
                 )
-                await store.initialize()
+                stores[domain] = store
                 cleanups.append(store.close)
-            else:
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            stores[domain] = store
+            cleanups.append(group.close)
+
+        for store in stores.values():
+            if isinstance(store, MemoryStateStore) or isinstance(store, FilesystemStateStore):
+                await store.initialize()
 
         for key, domains in sql_groups.items():
             route = sql_routes[key]
@@ -176,6 +204,7 @@ async def materialize_runtime_state(
                     raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
                 context = create_sql_storage_context(route.engine)
             group_stores: list[SqlStateStore] = []
+            group: SqlStateStorageGroup | None = None
             try:
                 from sqlalchemy import MetaData
 
@@ -185,9 +214,19 @@ async def materialize_runtime_state(
                 build_runtime_sql_metadata(frozenset(domains), metadata=metadata)
                 if object_store is None and set(domains) & _OBJECT_DOMAINS:
                     build_object_sql_metadata(metadata=metadata)
-                await context.initialize(metadata=metadata)
+                group = SqlStateStorageGroup(
+                    context,
+                    metadata,
+                    owns_context=key[0] == "sqlite",
+                )
                 for domain in domains:
-                    store = SqlStateStore(context.engine, metadata=metadata, context=context)
+                    store = SqlStateStore(
+                        context.engine,
+                        metadata=metadata,
+                        context=context,
+                        runtime_domain=domain,
+                        group=group,
+                    )
                     await store.initialize()
                     group_stores.append(store)
                     stores[domain] = store
@@ -195,10 +234,12 @@ async def materialize_runtime_state(
             except BaseException:
                 for store in reversed(group_stores):
                     await store.close()
-                await context.close()
+                if group is not None:
+                    await group.close()
                 raise
             cleanups.extend(store.close for store in group_stores)
-            cleanups.append(context.close)
+            if group is not None:
+                cleanups.append(group.close)
 
         bundles = {
             domain: build_repository_bundle(stores[domain], namespace=namespace, tenant_id=tenant_id, domain=domain)
@@ -217,7 +258,6 @@ async def materialize_runtime_state(
         objects = _build_object_router(plan, object_store, stores, sql_contexts)
         steps = _build_steps(plan, stores, namespace=namespace, tenant_id=tenant_id)
         await steps.initialize()
-        cleanups.append(steps.close)
         retention = RuntimeRetentionController(
             conversation=states.conversation,
             execution=states.execution,
@@ -362,6 +402,34 @@ def _unique(values: tuple[object, ...]) -> tuple[object, ...]:
 
 def _tenant_scope_digest(tenant_id: str) -> str:
     return hashlib.sha256(("tenant:" + tenant_id).encode("utf-8")).hexdigest()
+
+
+def _route_domain_path(route: RuntimeStateRoute, namespace: str, tenant_id: str) -> Path:
+    if route.path is None:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    return route.path / namespace_digest(namespace) / _tenant_scope_digest(tenant_id)
+
+
+def _filesystem_group_scope(
+    namespace: str,
+    tenant_id: str,
+    transaction_root: Path,
+    member_roots: Mapping[RuntimeDomain, Path],
+) -> str:
+    members = tuple(
+        (
+            domain.value,
+            member_roots[domain].relative_to(transaction_root).as_posix(),
+        )
+        for domain in sorted(member_roots, key=lambda value: value.value)
+    )
+    return canonical_sha256(
+        {
+            "namespace": namespace,
+            "tenant_id": tenant_id,
+            "members": members,
+        }
+    )[:32]
 
 
 __all__ = ["materialize_runtime_state"]

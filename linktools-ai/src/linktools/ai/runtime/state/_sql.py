@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 """SQL implementation of the backend-neutral Runtime StateStore."""
 
+import asyncio
 from collections.abc import Mapping, Sequence
 from contextlib import asynccontextmanager
 from dataclasses import replace
@@ -22,12 +23,16 @@ from ._store import (
     OperationQuery,
     RecordQuery,
     StateCallback,
+    StateGroupCallback,
+    StateStorageGroup,
+    StateTransaction,
     StoredAlias,
     StoredFact,
     StoredOperation,
     StoredRecord,
     active_state_transaction,
-    bind_state_transaction,
+    active_state_group_transaction,
+    bind_state_scope,
     reset_state_transaction,
     validate_record_identity,
     validate_record_replacement,
@@ -41,36 +46,53 @@ ValueT = TypeVar("ValueT")
 _logger = environ.get_logger("ai.runtime.state.sql")
 
 
-class SqlStateStore:
-    """Optimistic SQL StateStore backed by the five primitive tables."""
+class _SqlGroupTransaction:
+    def __init__(self, group: "SqlStateStorageGroup", transactions: Mapping["SqlStateStore", StateTransaction]) -> None:
+        self._group = group
+        self._transactions = transactions
+
+    def transaction(self, store: "SqlStateStore") -> StateTransaction:
+        if store.storage_group is not self._group:
+            raise RuntimeError("store does not belong to this StateStorageGroup")
+        try:
+            return self._transactions[store]
+        except KeyError as error:
+            raise RuntimeError("store was not enlisted in the StateStorageGroup transaction") from error
+
+
+class SqlStateStorageGroup:
+    """Own one SQL context and one physical transaction for its logical stores."""
 
     def __init__(
         self,
-        engine: "AsyncEngine",
+        context: SqlStorageContext,
+        metadata: "MetaData",
         *,
-        metadata: "MetaData | None" = None,
-        context: "SqlStorageContext | None" = None,
+        owns_context: bool = False,
     ) -> None:
-        self._context = context or create_sql_storage_context(engine)
-        self._owns_context = context is None
-        self._metadata = (
-            metadata if metadata is not None else build_runtime_sql_metadata(frozenset({RuntimeDomain.CONVERSATION}))
-        )
+        self._context = context
+        self._metadata = metadata
+        self._owns_context = owns_context
         self._closed = False
         self._initialized = False
-        self._active_depth = 0
 
     @property
     def context(self) -> SqlStorageContext:
         return self._context
 
+    @property
+    def metadata(self) -> "MetaData":
+        return self._metadata
+
     async def initialize(self) -> None:
         if self._closed:
             raise AIError(ErrorCode.STORAGE_CLOSED)
+        if self._initialized:
+            return
         await self._context.initialize(metadata=self._metadata)
         self._initialized = True
         _logger.info(
-            "SQL StateStore initialized: dialect=%s tables=%s",
+            "SQL StateStorageGroup initialized: dialect=%s tables=%s",
             self._context.dialect.name,
             len(self._metadata.tables),
         )
@@ -82,6 +104,134 @@ class SqlStateStore:
         self._initialized = False
         if self._owns_context:
             await self._context.close()
+        _logger.debug("SQL StateStorageGroup closed")
+
+    async def read(self, store: "SqlStateStore", fn: StateCallback[ValueT]) -> ValueT:
+        self._ensure_member(store)
+        active = active_state_transaction(store)
+        if active is not None:
+            return await fn(active)
+        async with self._session() as session:
+            return await fn(_SqlTransaction(session, self._metadata, self._context))
+
+    async def mutate(
+        self,
+        stores: Sequence["SqlStateStore"],
+        fn: StateGroupCallback[ValueT],
+    ) -> ValueT:
+        members = tuple(dict.fromkeys(stores))
+        if not members:
+            raise ValueError("StateStorageGroup mutation requires a store")
+        for store in members:
+            self._ensure_member(store)
+        active = active_state_transaction(members[0])
+        if active is not None:
+            return await fn(active_state_group_transaction(self, members))
+
+        async def execute(session: "AsyncSession") -> ValueT:
+            transaction = _SqlTransaction(session, self._metadata, self._context)
+            transactions = {store: transaction for store in members}
+            group_transaction = _SqlGroupTransaction(self, transactions)
+            token = bind_state_scope(self, transactions)
+            try:
+                return await fn(group_transaction)
+            finally:
+                reset_state_transaction(token)
+
+        try:
+            domains = ",".join(store.runtime_domain.value for store in members)
+            return await self._context.run_mutation(
+                execute,
+                domain=f"runtime.state.group[{domains}]",
+            )
+        except asyncio.CancelledError:
+            raise
+        except AIError:
+            raise
+        except BaseException as error:
+            from sqlalchemy.exc import IntegrityError
+
+            if isinstance(error, IntegrityError):
+                raise AIError(ErrorCode.STORAGE_CONFLICT) from error
+            raise AIError(ErrorCode.STORAGE_UNAVAILABLE) from error
+
+    @asynccontextmanager
+    async def _session(self):
+        session = self._context.sessions()
+        try:
+            yield session
+        finally:
+            await session.close()
+
+    def _ensure_member(self, store: "SqlStateStore") -> None:
+        if store.storage_group is not self:
+            raise RuntimeError("store does not belong to this StateStorageGroup")
+        if store._closed:
+            raise AIError(ErrorCode.STORAGE_CLOSED)
+        if not store._initialized:
+            raise AIError(ErrorCode.STORAGE_DEPENDENCY_NOT_READY)
+        if self._closed:
+            raise AIError(ErrorCode.STORAGE_CLOSED)
+        if not self._initialized:
+            raise AIError(ErrorCode.STORAGE_DEPENDENCY_NOT_READY)
+
+
+class SqlStateStore:
+    """Optimistic SQL StateStore backed by the five primitive tables."""
+
+    def __init__(
+        self,
+        engine: "AsyncEngine",
+        *,
+        metadata: "MetaData | None" = None,
+        context: "SqlStorageContext | None" = None,
+        runtime_domain: RuntimeDomain = RuntimeDomain.CONVERSATION,
+        group: SqlStateStorageGroup | None = None,
+    ) -> None:
+        resolved_context = context or create_sql_storage_context(engine)
+        self._metadata = (
+            metadata if metadata is not None else build_runtime_sql_metadata(frozenset({RuntimeDomain.CONVERSATION}))
+        )
+        self._runtime_domain = runtime_domain
+        self._owns_group = group is None
+        self._storage_group = group or SqlStateStorageGroup(
+            resolved_context,
+            self._metadata,
+            owns_context=context is None,
+        )
+        self._closed = False
+        self._initialized = False
+
+    @property
+    def context(self) -> SqlStorageContext:
+        return self._storage_group.context
+
+    @property
+    def storage_group(self) -> StateStorageGroup:
+        return self._storage_group
+
+    @property
+    def runtime_domain(self) -> RuntimeDomain:
+        return self._runtime_domain
+
+    async def initialize(self) -> None:
+        if self._closed:
+            raise AIError(ErrorCode.STORAGE_CLOSED)
+        await self._storage_group.initialize()
+        self._initialized = True
+        _logger.info(
+            "SQL StateStore initialized: dialect=%s tables=%s",
+            self.context.dialect.name,
+            len(self._metadata.tables),
+        )
+
+    async def close(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        self._initialized = False
+        if self._owns_group:
+            await self._storage_group.close()
         _logger.debug("SQL StateStore closed")
 
     async def read(self, fn: StateCallback[ValueT]) -> ValueT:
@@ -89,40 +239,19 @@ class SqlStateStore:
         active = active_state_transaction(self)
         if active is not None:
             return await fn(active)
-        async with self._session() as session:
-            return await fn(_SqlTransaction(session, self._metadata, self._context))
+        return await self._storage_group.read(self, fn)
 
     async def mutate(self, fn: StateCallback[ValueT]) -> ValueT:
         self._ensure_ready()
         active = active_state_transaction(self)
         if active is not None:
-            self._active_depth += 1
-            try:
-                return await fn(active)
-            finally:
-                self._active_depth -= 1
-        async def execute(session: "AsyncSession") -> ValueT:
-            transaction = _SqlTransaction(session, self._metadata, self._context)
-            token = bind_state_transaction(self, transaction)
-            self._active_depth = 1
-            try:
-                return await fn(transaction)
-            finally:
-                reset_state_transaction(token)
-                self._active_depth = 0
-
-        try:
-            return await self._context.run_mutation(execute, domain="runtime.state")
-        except AIError:
-            raise
-        except BaseException as error:
-            await self._raise_storage_error(error)
-            raise AssertionError("storage error mapping did not raise")
+            return await fn(active)
+        return await self._storage_group.mutate((self,), lambda group: fn(group.transaction(self)))
 
     async def validate_integrity(self) -> None:
         self._ensure_ready()
-        async with self._session() as session:
-            transaction = _SqlTransaction(session, self._metadata, self._context)
+        async with self._storage_group._session() as session:
+            transaction = _SqlTransaction(session, self._metadata, self.context)
             from sqlalchemy import select
 
             records = transaction._table("ai_state_records")
@@ -164,29 +293,13 @@ class SqlStateStore:
             for values in grouped.values():
                 if sorted(values) != list(range(1, max(values) + 1)):
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        _logger.info("SQL StateStore integrity validated")
-
-    @asynccontextmanager
-    async def _session(self):
-        session = self._context.sessions()
-        try:
-            yield session
-        finally:
-            await session.close()
+        _logger.info("SQL StateStore integrity validated: domain=%s", self._runtime_domain.value)
 
     def _ensure_ready(self) -> None:
         if self._closed:
             raise AIError(ErrorCode.STORAGE_CLOSED)
         if not self._initialized:
             raise AIError(ErrorCode.STORAGE_DEPENDENCY_NOT_READY)
-
-    async def _raise_storage_error(self, error: BaseException) -> None:
-        from sqlalchemy.exc import IntegrityError
-
-        if isinstance(error, IntegrityError):
-            raise AIError(ErrorCode.STORAGE_CONFLICT) from error
-        raise AIError(ErrorCode.STORAGE_UNAVAILABLE) from error
-
 
 class _SqlTransaction:
     def __init__(
@@ -199,10 +312,14 @@ class _SqlTransaction:
         self._metadata = metadata
         self._context = context
         self._guarded_record_keys: set[bytes] = set()
-        self._record_cache: dict[bytes, StoredRecord] = {}
+        self._record_cache: dict[bytes, StoredRecord | None] = {}
+        self._alias_cache: dict[bytes, bytes | None] = {}
+        self._now: datetime | None = None
 
     async def now(self) -> datetime:
-        return await self._context.dialect.database_now(self._session)
+        if self._now is None:
+            self._now = await self._context.dialect.database_now(self._session)
+        return self._now
 
     async def get_record(self, key: bytes) -> StoredRecord | None:
         from sqlalchemy import select
@@ -214,6 +331,7 @@ class _SqlTransaction:
             (await self._session.execute(select(table).where(table.c.key_digest == _hex(key)))).mappings().one_or_none()
         )
         if row is None:
+            self._record_cache[key] = None
             return None
         value = _record_from_row(row)
         self._record_cache[key] = value
@@ -224,15 +342,31 @@ class _SqlTransaction:
             return {}
         from sqlalchemy import select
 
+        unique_keys = tuple(dict.fromkeys(keys))
+        missing = tuple(key for key in unique_keys if key not in self._record_cache)
         table = self._table("ai_state_records")
-        rows = (
-            (await self._session.execute(select(table).where(table.c.key_digest.in_(tuple(_hex(key) for key in keys)))))
-            .mappings()
-            .all()
-        )
+        rows = ()
+        if missing:
+            rows = (
+                (
+                    await self._session.execute(
+                        select(table).where(
+                            table.c.key_digest.in_(tuple(_hex(key) for key in missing))
+                        )
+                    )
+                )
+                .mappings()
+                .all()
+            )
         values = tuple(_record_from_row(row) for row in rows)
         self._record_cache.update({value.key_digest: value for value in values})
-        return {value.key_digest: value for value in values}
+        for key in missing:
+            self._record_cache.setdefault(key, None)
+        return {
+            key: value
+            for key in unique_keys
+            if (value := self._record_cache[key]) is not None
+        }
 
     async def insert_record(self, record: StoredRecord) -> None:
         from sqlalchemy import insert
@@ -323,9 +457,10 @@ class _SqlTransaction:
         )
         if result.rowcount == 1:
             self._guarded_record_keys.add(key)
-            if key in self._record_cache:
+            cached = self._record_cache.get(key)
+            if cached is not None:
                 self._record_cache[key] = replace(
-                    self._record_cache[key],
+                    cached,
                     lease_owner=lease_owner,
                     lease_fence=lease_fence,
                     lease_expires_at=lease_expires_at,
@@ -361,7 +496,10 @@ class _SqlTransaction:
         result = await self._session.execute(statement)
         if result.rowcount == 1:
             self._guarded_record_keys.discard(key)
-            self._record_cache.pop(key, None)
+            self._record_cache[key] = None
+            for alias, record_key in tuple(self._alias_cache.items()):
+                if record_key == key:
+                    self._alias_cache[alias] = None
         return result.rowcount == 1
 
     async def list_records(self, query: RecordQuery) -> tuple[StoredRecord, ...]:
@@ -401,17 +539,47 @@ class _SqlTransaction:
         return tuple(_record_from_row(row) for row in rows)
 
     async def resolve_alias(self, alias: bytes) -> bytes | None:
-        from sqlalchemy import select
+        return (await self.resolve_aliases((alias,))).get(alias)
 
-        table = self._table("ai_state_aliases")
-        row = (
-            await self._session.execute(
-                select(table.c.record_key_digest).where(table.c.alias_digest == _hex(alias))
+    async def resolve_aliases(self, aliases: Sequence[bytes]) -> Mapping[bytes, bytes]:
+        unique_aliases = tuple(dict.fromkeys(aliases))
+        missing = tuple(alias for alias in unique_aliases if alias not in self._alias_cache)
+        if missing:
+            from sqlalchemy import select
+
+            table = self._table("ai_state_aliases")
+            records = self._table("ai_state_records")
+            rows = (
+                (
+                    await self._session.execute(
+                        select(table.c.alias_digest, table.c.record_key_digest, records.c.id)
+                        .select_from(
+                            table.outerjoin(
+                                records,
+                                table.c.record_key_digest == records.c.key_digest,
+                            )
+                        )
+                        .where(table.c.alias_digest.in_(tuple(_hex(alias) for alias in missing)))
+                    )
+                )
+                .mappings()
+                .all()
             )
-        ).one_or_none()
-        if row is None:
-            return None
-        return _hex_or_none(row.record_key_digest)
+            if any(row["id"] is None for row in rows):
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            values = {
+                bytes.fromhex(str(row["alias_digest"])): _hex_or_none(row["record_key_digest"])
+                for row in rows
+            }
+            self._alias_cache.update(values)
+            for alias in missing:
+                self._alias_cache.setdefault(alias, None)
+        values = {
+            alias: value
+            for alias in unique_aliases
+            if (value := self._alias_cache[alias]) is not None
+        }
+        return values
 
     async def insert_alias(self, alias: StoredAlias) -> None:
         from sqlalchemy import insert
@@ -427,6 +595,7 @@ class _SqlTransaction:
                 }
             )
         )
+        self._alias_cache[alias.alias_digest] = alias.record_key_digest
 
     async def get_sequence(self, key: bytes) -> int:
         from sqlalchemy import select
@@ -738,4 +907,4 @@ def _datetime_or_none(value: object) -> datetime | None:
     return value if value.tzinfo is not None else value.replace(tzinfo=timezone.utc)
 
 
-__all__ = ["SqlStateStore"]
+__all__ = ["SqlStateStorageGroup", "SqlStateStore"]

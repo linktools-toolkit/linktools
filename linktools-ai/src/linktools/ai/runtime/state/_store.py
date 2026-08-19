@@ -19,35 +19,91 @@ from ...core import JsonValue, canonical_json_bytes
 ValueT = TypeVar("ValueT")
 
 
-_active_state_transaction: ContextVar[tuple["StateStore", asyncio.Task, "StateTransaction"] | None] = ContextVar(
+@dataclass(frozen=True, slots=True)
+class _ActiveStateScope:
+    group: "StateStorageGroup"
+    task: "asyncio.Task[object]"
+    transactions: Mapping["StateStore", "StateTransaction"]
+
+
+_active_state_scope: ContextVar[_ActiveStateScope | None] = ContextVar(
     "linktools_ai_active_state_transaction",
     default=None,
 )
 
 
 def active_state_transaction(store: "StateStore") -> "StateTransaction | None":
-    """Return the task-owned transaction, rejecting cross-store reuse."""
-    active = _active_state_transaction.get()
+    """Return the enlisted transaction, rejecting invalid scope reuse."""
+    active = _active_state_scope.get()
     if active is None:
         return None
-    active_store, active_task, transaction = active
     task = asyncio.current_task()
-    if active_store is not store:
-        raise RuntimeError("a task cannot mutate two StateStores at once")
-    if active_task is not task:
+    if active.task is not task:
         raise RuntimeError("a child task cannot reuse its parent StateStore transaction")
-    return transaction
+    try:
+        return active.transactions[store]
+    except KeyError as error:
+        if store.storage_group is active.group:
+            raise RuntimeError("a StateStore was not enlisted in the active group transaction") from error
+        raise RuntimeError("a task cannot mutate two StateStorageGroups at once") from error
 
 
 def bind_state_transaction(store: "StateStore", transaction: "StateTransaction") -> Token:
+    """Bind a compatibility single-store scope around one transaction."""
+    return bind_state_scope(
+        store.storage_group,
+        {store: transaction},
+    )
+
+
+def bind_state_scope(
+    group: "StateStorageGroup",
+    transactions: Mapping["StateStore", "StateTransaction"],
+) -> Token:
     task = asyncio.current_task()
     if task is None:
         raise RuntimeError("StateStore mutation requires an asyncio task")
-    return _active_state_transaction.set((store, task, transaction))
+    return _active_state_scope.set(_ActiveStateScope(group, task, transactions))
+
+
+class _BoundStateGroupTransaction:
+    def __init__(
+        self,
+        group: "StateStorageGroup",
+        transactions: Mapping["StateStore", "StateTransaction"],
+    ) -> None:
+        self._group = group
+        self._transactions = transactions
+
+    def transaction(self, store: "StateStore") -> "StateTransaction":
+        if store.storage_group is not self._group:
+            raise RuntimeError("store does not belong to this StateStorageGroup")
+        try:
+            return self._transactions[store]
+        except KeyError as error:
+            raise RuntimeError("store was not enlisted in the StateStorageGroup transaction") from error
+
+
+def active_state_group_transaction(
+    group: "StateStorageGroup",
+    stores: Sequence["StateStore"],
+) -> "StateGroupTransaction":
+    active = _active_state_scope.get()
+    if active is None:
+        raise RuntimeError("no active StateStorageGroup transaction")
+    task = asyncio.current_task()
+    if active.task is not task:
+        raise RuntimeError("a child task cannot reuse its parent StateStorageGroup transaction")
+    if active.group is not group:
+        raise RuntimeError("a task cannot mutate two StateStorageGroups at once")
+    for store in stores:
+        if store not in active.transactions:
+            raise RuntimeError("store was not enlisted in the StateStorageGroup transaction")
+    return _BoundStateGroupTransaction(group, active.transactions)
 
 
 def reset_state_transaction(token: Token) -> None:
-    _active_state_transaction.reset(token)
+    _active_state_scope.reset(token)
 
 
 def _digest(value: JsonValue) -> bytes:
@@ -254,6 +310,7 @@ class StateTransaction(Protocol):
     async def delete_record(self, key: bytes, *, expected_storage_version: int | None = None) -> bool: ...
     async def list_records(self, query: RecordQuery) -> tuple[StoredRecord, ...]: ...
     async def resolve_alias(self, alias: bytes) -> bytes | None: ...
+    async def resolve_aliases(self, aliases: Sequence[bytes]) -> Mapping[bytes, bytes]: ...
     async def insert_alias(self, alias: StoredAlias) -> None: ...
     async def get_sequence(self, key: bytes) -> int: ...
     async def get_sequences(self, keys: Sequence[bytes]) -> Mapping[bytes, int]: ...
@@ -273,6 +330,21 @@ class StateTransaction(Protocol):
 
 
 StateCallback = Callable[[StateTransaction], Awaitable[ValueT]]
+StateGroupCallback = Callable[["StateGroupTransaction"], Awaitable[ValueT]]
+
+
+class StateGroupTransaction(Protocol):
+    def transaction(self, store: "StateStore") -> StateTransaction: ...
+
+
+class StateStorageGroup(Protocol):
+    async def read(self, store: "StateStore", fn: StateCallback[ValueT]) -> ValueT: ...
+
+    async def mutate(
+        self,
+        stores: Sequence["StateStore"],
+        fn: StateGroupCallback[ValueT],
+    ) -> ValueT: ...
 
 
 class StateStore(Protocol):
@@ -284,6 +356,8 @@ class StateStore(Protocol):
 
     async def initialize(self) -> None: ...
     async def close(self) -> None: ...
+    @property
+    def storage_group(self) -> StateStorageGroup: ...
     async def read(self, fn: StateCallback[ValueT]) -> ValueT: ...
     async def mutate(self, fn: StateCallback[ValueT]) -> ValueT: ...
 
@@ -443,7 +517,9 @@ __all__ = [
     "Observed",
     "OperationQuery",
     "RecordQuery",
+    "StateGroupTransaction",
     "StateStore",
+    "StateStorageGroup",
     "StateTransaction",
     "StoredAlias",
     "StoredFact",

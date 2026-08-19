@@ -74,7 +74,13 @@ class RuntimeState:
         base = _normalize_path(path)
         return cls(
             RuntimeStatePlan(
-                **{domain.value: RuntimeStateRoute.filesystem(base / domain.value) for domain in RuntimeDomain}
+                **{
+                    domain.value: RuntimeStateRoute.filesystem(
+                        base / domain.value,
+                        transaction_root=base,
+                    )
+                    for domain in RuntimeDomain
+                }
             ),
             object_store=object_store,
         )

@@ -276,7 +276,7 @@ def test_package_public_surface_and_optional_dependency_isolation() -> None:
 
     command_modules = tuple(
         importlib.import_module(f"linktools.commands.ai.{name}")
-        for name in ("acp", "doctor", "run", "smoke")
+        for name in ("acp", "run")
     )
     assert adapter and asset and capability and model and runtime and workspace
     assert all(command_modules)

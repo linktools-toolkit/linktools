@@ -124,6 +124,7 @@ async def build_local_runtime(
         )
         execution.bind_backend(backend)
         execution.bind_local_waiter(backend)
+        execution.bind_terminal_committer(backend)
         execution.bind_terminal_verifier(backend.verify_terminal_projection)
         execution.bind_subagent_cancellation(dispatcher)
         session = DefaultSessionService(

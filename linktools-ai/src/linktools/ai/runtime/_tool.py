@@ -18,6 +18,7 @@ from pydantic_ai.messages import (
     ToolCallPart,
     ToolReturnPart,
 )
+from pydantic_ai_harness.step_persistence import RunRecord, StepStore, ToolEffectRecord
 from pydantic_ai.tools import RunContext, ToolDefinition
 
 from ..core import (
@@ -37,6 +38,7 @@ from ..storage import (
     payload_fits_inline,
 )
 from ._object import RuntimeObjectKeyFactory, put_runtime_object, read_runtime_object
+from .state._contracts import ToolOperationAdmission
 from .state._plan import RuntimeDomain
 
 _logger = environ.get_logger("ai.runtime.tool")
@@ -74,6 +76,7 @@ class ToolOperationRecord:
 
 
 class ToolStateRepository(Protocol):
+    async def admit(self, request: ToolOperationAdmission) -> ToolOperationRecord: ...
     async def reserve(self, record: ToolOperationRecord) -> ToolOperationRecord: ...
     async def get_operation(self, tool_operation_id: str, *, tenant_id: str) -> "ToolOperationRecord | None": ...
     async def claim(self, tool_operation_id: str, *, tenant_id: str, owner: str, lease_seconds: int) -> ToolOperationRecord: ...
@@ -83,6 +86,8 @@ class ToolStateRepository(Protocol):
 
 
 class _ToolOperationRuntimeRepository(Protocol):
+    async def admit(self, request: ToolOperationAdmission) -> ToolOperationRecord: ...
+
     async def get_by_call(
         self,
         step_run_id: str,
@@ -130,6 +135,27 @@ class _ToolOperationRuntimeRepository(Protocol):
         fence: int,
         error_code: str,
         error_payload: StoredPayload | None,
+    ) -> ToolOperationRecord: ...
+
+
+class _ToolTerminalCommands(Protocol):
+    async def commit_tool_admission(
+        self,
+        request: ToolOperationAdmission,
+    ) -> ToolOperationRecord: ...
+
+    async def commit_tool_terminal(
+        self,
+        tool_operation_id: str,
+        *,
+        tenant_id: str,
+        owner: str,
+        fence: int,
+        result_payload: StoredPayload | None = None,
+        error_code: str | None = None,
+        error_payload: StoredPayload | None = None,
+        run: "RunRecord | None" = None,
+        effect: ToolEffectRecord | None = None,
     ) -> ToolOperationRecord: ...
 
 
@@ -185,20 +211,26 @@ class RuntimeToolOperationBridge:
         namespace: str,
         tenant_id: str,
         execution_id: str,
+        step_run_id: str,
         binding_fingerprint: str,
         owner: str,
         payload_policy: PayloadPolicy,
         recovery_step_run_id: str | None = None,
+        terminal_commands: _ToolTerminalCommands | None = None,
+        step_store: StepStore | None = None,
     ) -> None:
         self._repository = repository
         self._recovery_objects = recovery_objects
         self._object_keys = RuntimeObjectKeyFactory(namespace)
         self._tenant_id = validate_tenant_id(tenant_id)
         self._execution_id = execution_id
+        self._step_run_id = step_run_id
         self._binding_fingerprint = binding_fingerprint
         self._owner = owner
         self._payload_policy = payload_policy
         self._recovery_step_run_id = recovery_step_run_id
+        self._terminal_commands = terminal_commands
+        self._step_store = step_store
         self._decisions: dict[tuple[str, str], Any] = {}
         self._lease_seconds = 60
 
@@ -215,6 +247,7 @@ class RuntimeToolOperationBridge:
         if prior is not None:
             return prior
         arguments_digest = canonical_sha256(args)
+        replay_step_run_id = self._recovery_step_run_id or self._run_id(ctx)
         operation_id = canonical_sha256(
             {
                 "tenant_id": self._tenant_id,
@@ -225,49 +258,27 @@ class RuntimeToolOperationBridge:
                 "binding_fingerprint": self._binding_fingerprint,
             }
         )
-        existing = await self._repository.get_by_call(
-            self._run_id(ctx),
-            call.tool_call_id,
+        admission = ToolOperationAdmission(
             tenant_id=self._tenant_id,
+            tool_operation_id=operation_id,
+            step_run_id=self._run_id(ctx),
+            recovery_step_run_id=self._recovery_step_run_id,
+            tool_call_id=call.tool_call_id,
+            idempotency_key_digest=canonical_sha256(
+                {"step_run_id": replay_step_run_id, "tool_call_id": call.tool_call_id}
+            ),
+            tool_name=tool_def.name,
+            arguments_digest=arguments_digest,
+            binding_fingerprint=self._binding_fingerprint,
+            replay_safe=replay_safe,
+            owner=self._owner,
+            lease_seconds=self._lease_seconds,
         )
-        if existing is None and self._recovery_step_run_id is not None:
-            existing = await self._repository.get_by_call(
-                self._recovery_step_run_id,
-                call.tool_call_id,
-                tenant_id=self._tenant_id,
-            )
-        if existing is None:
-            now = datetime.now(timezone.utc)
-            candidate = ToolOperationRecord(
-                tool_operation_id=operation_id,
-                tenant_id=self._tenant_id,
-                step_run_id=self._run_id(ctx),
-                tool_call_id=call.tool_call_id,
-                idempotency_key_digest=canonical_sha256(
-                    {"step_run_id": self._run_id(ctx), "tool_call_id": call.tool_call_id}
-                ),
-                tool_name=tool_def.name,
-                arguments_digest=arguments_digest,
-                binding_fingerprint=self._binding_fingerprint,
-                replay_safe=replay_safe,
-                status=ToolOperationStatus.PENDING,
-                owner=None,
-                fence=0,
-                lease_expires_at=None,
-                result_object_ref=None,
-                error_code=None,
-                created_at=now,
-                updated_at=now,
-            )
-            existing = await self._repository.reserve(candidate)
+        if self._terminal_commands is not None:
+            existing = await self._terminal_commands.commit_tool_admission(admission)
         else:
-            _validate_existing_operation(
-                existing,
-                candidate_name=tool_def.name,
-                arguments_digest=arguments_digest,
-                replay_safe=replay_safe,
-            )
-        decision = await self._resolve_existing(existing, key, replay_safe)
+            existing = await self._repository.admit(admission)
+        decision = await self._decision_from_record(existing, replay_safe)
         self._decisions[key] = decision
         _logger.debug(
             "tool operation admitted: execution=%s run=%s tool=%s call=%s operation=%s status=%s",
@@ -279,6 +290,32 @@ class RuntimeToolOperationBridge:
             "cached" if decision.has_cached_result or decision.cached_error is not None else "claimed",
         )
         return decision
+
+    async def _decision_from_record(self, existing: ToolOperationRecord, replay_safe: bool) -> Any:
+        from ..agent import ToolOperationDecision
+
+        if existing.status is ToolOperationStatus.COMPLETED:
+            return ToolOperationDecision(
+                existing.tool_operation_id,
+                self._owner,
+                existing.fence,
+                replay_safe,
+                cached_result=await self._decode_result(existing),
+                has_cached_result=True,
+            )
+        if existing.status is ToolOperationStatus.FAILED:
+            return ToolOperationDecision(
+                existing.tool_operation_id,
+                self._owner,
+                existing.fence,
+                replay_safe,
+                cached_error=await self._decode_error(existing),
+            )
+        if existing.status is ToolOperationStatus.EFFECT_UNKNOWN:
+            raise AIError(ErrorCode.TOOL_EFFECT_UNKNOWN)
+        if existing.status is not ToolOperationStatus.CLAIMED:
+            raise AIError(ErrorCode.TOOL_OPERATION_CONFLICT)
+        return ToolOperationDecision(existing.tool_operation_id, self._owner, existing.fence, replay_safe)
 
     async def renew(self, decision: Any) -> Any:
         try:
@@ -301,25 +338,32 @@ class RuntimeToolOperationBridge:
 
     async def complete(self, decision: Any, result: Any) -> None:
         payload = await self._result_payload(decision, result)
-        current = await self._repository.get_operation(
-            decision.operation_id,
-            tenant_id=self._tenant_id,
-        )
-        if current is not None and current.status is ToolOperationStatus.COMPLETED:
-            if current.result_payload == payload or (
-                current.result_payload is None
-                and canonical_sha256(await self._decode_result(current)) == canonical_sha256(result)
-            ):
-                return
-            raise AIError(ErrorCode.TOOL_RESULT_CONFLICT)
-        await self._finish_with_readback(
-            lambda: self._repository.complete_payload(
+
+        async def finish() -> ToolOperationRecord:
+            run, effect = await self._terminal_effect(
+                decision,
+                status="completed",
+            )
+            if self._terminal_commands is not None:
+                return await self._terminal_commands.commit_tool_terminal(
+                    decision.operation_id,
+                    tenant_id=self._tenant_id,
+                    owner=self._owner,
+                    fence=decision.fence,
+                    result_payload=payload,
+                    run=run,
+                    effect=effect,
+                )
+            return await self._repository.complete_payload(
                 decision.operation_id,
                 tenant_id=self._tenant_id,
                 owner=self._owner,
                 fence=decision.fence,
                 result_payload=payload,
-            ),
+            )
+
+        await self._finish_with_readback(
+            finish,
             decision,
             expected_status=ToolOperationStatus.COMPLETED,
             expected_payload=payload,
@@ -327,28 +371,85 @@ class RuntimeToolOperationBridge:
 
     async def fail(self, decision: Any, error: BaseException) -> None:
         code, payload = await self._error_payload(error)
-        current = await self._repository.get_operation(
-            decision.operation_id,
-            tenant_id=self._tenant_id,
-        )
-        if current is not None and current.status is ToolOperationStatus.FAILED:
-            if current.error_code == code and current.error_payload == payload:
-                return
-            raise AIError(ErrorCode.TOOL_OPERATION_CONFLICT)
-        await self._finish_with_readback(
-            lambda: self._repository.fail_payload(
+
+        async def finish() -> ToolOperationRecord:
+            run, effect = await self._terminal_effect(
+                decision,
+                status="failed",
+                effect_summary=repr(error),
+            )
+            if self._terminal_commands is not None:
+                return await self._terminal_commands.commit_tool_terminal(
+                    decision.operation_id,
+                    tenant_id=self._tenant_id,
+                    owner=self._owner,
+                    fence=decision.fence,
+                    error_code=code,
+                    error_payload=payload,
+                    run=run,
+                    effect=effect,
+                )
+            return await self._repository.fail_payload(
                 decision.operation_id,
                 tenant_id=self._tenant_id,
                 owner=self._owner,
                 fence=decision.fence,
                 error_code=code,
                 error_payload=payload,
-            ),
+            )
+
+        await self._finish_with_readback(
+            finish,
             decision,
             expected_status=ToolOperationStatus.FAILED,
             expected_payload=payload,
             expected_error=code,
         )
+
+    async def _terminal_effect(
+        self,
+        decision: Any,
+        *,
+        status: str,
+        effect_summary: str | None = None,
+    ) -> tuple[RunRecord | None, ToolEffectRecord | None]:
+        if self._terminal_commands is None:
+            return None, None
+        if self._step_store is None:
+            raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+        operation = await self._repository.get_operation(
+            decision.operation_id,
+            tenant_id=self._tenant_id,
+        )
+        if operation is None:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        run = await self._step_store.get_run(run_id=operation.step_run_id)
+        if run is None:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        prior = await self._step_store.get_tool_effect(
+            run_id=operation.step_run_id,
+            tool_call_id=operation.tool_call_id,
+        )
+        now = datetime.now(timezone.utc)
+        effect = ToolEffectRecord(
+            tool_call_id=operation.tool_call_id,
+            tool_name=operation.tool_name,
+            run_id=operation.step_run_id,
+            status=status,
+            started_at=prior.started_at if prior is not None else operation.created_at,
+            ended_at=now,
+            idempotency_key=(
+                prior.idempotency_key
+                if prior is not None
+                else operation.idempotency_key_digest
+            ),
+            effect_summary=(
+                effect_summary
+                if effect_summary is not None
+                else prior.effect_summary if prior is not None else None
+            ),
+        )
+        return run, effect
 
     async def unknown(self, decision: Any, error: BaseException) -> None:
         code = ErrorCode.TOOL_EFFECT_UNKNOWN.value
@@ -374,84 +475,6 @@ class RuntimeToolOperationBridge:
             self._execution_id,
             decision.operation_id,
             type(error).__name__,
-        )
-
-    async def _resolve_existing(
-        self,
-        existing: ToolOperationRecord,
-        key: tuple[str, str],
-        replay_safe: bool,
-    ) -> Any:
-        from ..agent import ToolOperationDecision
-
-        if existing.status is ToolOperationStatus.COMPLETED:
-            return ToolOperationDecision(
-                existing.tool_operation_id,
-                self._owner,
-                existing.fence,
-                replay_safe,
-                cached_result=await self._decode_result(existing),
-                has_cached_result=True,
-            )
-        if existing.status is ToolOperationStatus.FAILED:
-            return ToolOperationDecision(
-                existing.tool_operation_id,
-                self._owner,
-                existing.fence,
-                replay_safe,
-                cached_error=await self._decode_error(existing),
-            )
-        if existing.status is ToolOperationStatus.EFFECT_UNKNOWN:
-            raise AIError(ErrorCode.TOOL_EFFECT_UNKNOWN)
-        if existing.status is ToolOperationStatus.CLAIMED:
-            if existing.owner == self._owner and key in self._decisions:
-                return self._decisions[key]
-            if existing.lease_expires_at is not None and existing.lease_expires_at > datetime.now(timezone.utc):
-                raise AIError(ErrorCode.TOOL_OPERATION_CONFLICT)
-        try:
-            claimed = await self._repository.claim(
-                existing.tool_operation_id,
-                tenant_id=self._tenant_id,
-                owner=self._owner,
-                lease_seconds=self._lease_seconds,
-            )
-        except AIError as error:
-            if error.code is not ErrorCode.STORAGE_COMMIT_UNKNOWN:
-                raise
-            observed = await self._repository.get_operation(
-                existing.tool_operation_id,
-                tenant_id=self._tenant_id,
-            )
-            if observed is None:
-                raise
-            if observed.status is ToolOperationStatus.CLAIMED and observed.owner == self._owner:
-                claimed = observed
-            elif observed.status is ToolOperationStatus.PENDING:
-                try:
-                    claimed = await self._repository.claim(
-                        existing.tool_operation_id,
-                        tenant_id=self._tenant_id,
-                        owner=self._owner,
-                        lease_seconds=self._lease_seconds,
-                    )
-                except AIError as retry_error:
-                    if retry_error.code is not ErrorCode.STORAGE_COMMIT_UNKNOWN:
-                        raise
-                    claimed = await self._repository.get_operation(
-                        existing.tool_operation_id,
-                        tenant_id=self._tenant_id,
-                    )
-                    if claimed is None:
-                        raise
-            else:
-                return await self._resolve_existing(observed, key, replay_safe)
-        if claimed.status is not ToolOperationStatus.CLAIMED:
-            return await self._resolve_existing(claimed, key, replay_safe)
-        return ToolOperationDecision(
-            claimed.tool_operation_id,
-            self._owner,
-            claimed.fence,
-            replay_safe,
         )
 
     async def _result_payload(self, decision: Any, result: Any) -> StoredPayload:
@@ -623,9 +646,9 @@ class RuntimeToolOperationBridge:
             return StoredPayload.object(legacy_ref)
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
 
-    @staticmethod
-    def _run_id(ctx: RunContext[None]) -> str:
-        return ctx.run_id or ""
+    def _run_id(self, ctx: RunContext[None]) -> str:
+        del ctx
+        return self._step_run_id
 
 
 def _replay_safe(tool_def: ToolDefinition) -> bool:
@@ -634,21 +657,6 @@ def _replay_safe(tool_def: ToolDefinition) -> bool:
     if not isinstance(value, bool):
         raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
     return value
-
-
-def _validate_existing_operation(
-    record: ToolOperationRecord,
-    *,
-    candidate_name: str,
-    arguments_digest: str,
-    replay_safe: bool,
-) -> None:
-    if (
-        record.tool_name != candidate_name
-        or record.arguments_digest != arguments_digest
-        or record.replay_safe is not replay_safe
-    ):
-        raise AIError(ErrorCode.IDEMPOTENCY_CONFLICT)
 
 
 def _decision_type(decision: Any, *, fence: int) -> Any:
@@ -668,6 +676,7 @@ def _decision_type(decision: Any, *, fence: int) -> Any:
 __all__ = [
     "AllowAllToolPolicy",
     "RuntimeToolOperationBridge",
+    "ToolOperationAdmission",
     "ToolAuthorization",
     "ToolDescriptor",
     "ToolOperationRecord",

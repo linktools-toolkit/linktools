@@ -16,8 +16,9 @@ from pydantic_ai.exceptions import ModelAPIError, UserError
 
 from ...ai.core import ExecutionDeltaType, ExecutionEventType, ExecutionStatus
 from ...ai.errors import AIError
+from ...ai.migrate import provision_runtime_database
 from ...ai.model import ModelRegistry
-from ...ai.runtime import Runtime
+from ...ai.runtime import Runtime, RuntimeState
 from ...ai.workspace import Workspace, open_workspace_runtime
 
 if TYPE_CHECKING:
@@ -39,6 +40,12 @@ class Command(BaseCommand):
     def init_arguments(self, parser: "CommandParser") -> None:
         parser.add_argument("prompt", help="the prompt")
         parser.add_argument("--project", type=Path, default=None, help="working directory")
+        parser.add_argument(
+            "--storage",
+            choices=("filesystem", "sqlite"),
+            default="filesystem",
+            help="Runtime state storage backend (default: filesystem)",
+        )
         parser.add_argument("--base-url", action=ConfigAction, config=OPENAI_BASE_URL)
         parser.add_argument("--model", action=ConfigAction, config=OPENAI_MODEL)
         parser.add_argument("--api-key", action=ConfigAction, config=OPENAI_API_KEY)
@@ -58,8 +65,10 @@ class Command(BaseCommand):
         )
 
         async def execute() -> int:
+            state = await _build_runtime_state(workspace, args.storage)
             async with open_workspace_runtime(
                 workspace,
+                state=state,
                 models=ModelRegistry.openai(
                     model=args.model,
                     base_url=args.base_url,
@@ -78,6 +87,27 @@ class Command(BaseCommand):
             return asyncio.run(execute())
         except (TypeError, ValueError, AIError) as error:
             raise CommandError(str(error)) from error
+
+
+async def _build_runtime_state(workspace: Workspace, storage: str) -> RuntimeState:
+    if storage == "filesystem":
+        path = workspace.storage_root / "runtime"
+        _logger.info("ai run storage selected: backend=filesystem path=%s", path)
+        return RuntimeState.filesystem(path)
+    if storage != "sqlite":
+        raise ValueError(f"unsupported Runtime storage backend: {storage}")
+
+    path = workspace.storage_root / "runtime.db"
+    await asyncio.to_thread(path.parent.mkdir, parents=True, exist_ok=True)
+    from sqlalchemy.ext.asyncio import create_async_engine
+
+    engine = create_async_engine(f"sqlite+aiosqlite:///{path}")
+    try:
+        await provision_runtime_database(engine)
+    finally:
+        await engine.dispose()
+    _logger.info("ai run storage selected: backend=sqlite path=%s", path)
+    return RuntimeState.sqlite(path)
 
 
 async def _emit_result(

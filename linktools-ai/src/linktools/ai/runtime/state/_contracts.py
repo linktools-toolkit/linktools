@@ -6,7 +6,7 @@ This module contains no backend, filesystem, database, or workflow code.  It
 is the single semantic boundary shared by the local and SQL implementations.
 """
 
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from enum import StrEnum
@@ -44,6 +44,7 @@ from ._plan import RuntimeDomain
 
 if TYPE_CHECKING:
     from .._tool import ToolStateRepository
+    from ._store import StateStore, StateTransaction
 
 
 @dataclass(frozen=True, slots=True)
@@ -467,6 +468,8 @@ class RecoveryTerminalHandoff:
 class RuntimeRepository(Protocol):
     async def initialize(self) -> None: ...
     async def close(self) -> None: ...
+    @property
+    def state_store(self) -> "StateStore": ...
 
 
 class SessionRepository(RuntimeRepository, Protocol):
@@ -529,12 +532,27 @@ class SessionRepository(RuntimeRepository, Protocol):
         expected: "ConversationCursor | None",
         next_cursor: ConversationCursor,
     ) -> SessionRecord: ...
+    async def get_in_transaction(
+        self,
+        transaction: "StateTransaction",
+        session_id: str,
+        *,
+        tenant_id: str,
+    ) -> SessionRecord: ...
 
 
 class ExecutionRepository(RuntimeRepository, Protocol):
     async def create(self, record: ExecutionRecord) -> ExecutionRecord: ...
     async def get_header(self, execution_id: str, *, tenant_id: str) -> ResourceRef | None: ...
     async def get(self, execution_id: str, *, tenant_id: str) -> ExecutionRecord | None: ...
+    async def get_in_transaction(
+        self,
+        transaction: "StateTransaction",
+        execution_id: str,
+        *,
+        tenant_id: str,
+    ) -> ExecutionRecord | None: ...
+    async def get_start_idempotency(self, claim: ExecutionStartClaim) -> "IdempotencyRecord | None": ...
     async def compare_and_swap(
         self, execution_id: str, *, tenant_id: str, expected_revision: int, next_record: ExecutionRecord
     ) -> ExecutionRecord: ...
@@ -552,7 +570,12 @@ class ExecutionRepository(RuntimeRepository, Protocol):
     async def advance_event_sequence(
         self, execution_id: str, *, tenant_id: str, expected_sequence: int
     ) -> ExecutionRecord: ...
-    async def commit_terminal(self, commit: ExecutionTerminalCommit) -> ExecutionTerminalCommitResult: ...
+    async def commit_terminal(
+        self,
+        commit: ExecutionTerminalCommit,
+        *,
+        pending_events: Sequence["ExecutionEventAppend"] = (),
+    ) -> ExecutionTerminalCommitResult: ...
     async def get_result(self, execution_id: str, *, tenant_id: str) -> ResultRecord | None: ...
 
 
@@ -574,6 +597,15 @@ class IdempotencyRepository(RuntimeRepository, Protocol):
 
 
 class EventRepository(RuntimeRepository, Protocol):
+    async def append_many(
+        self,
+        execution_id: str,
+        *,
+        tenant_id: str,
+        events: Sequence["ExecutionEventAppend"],
+        expected_sequence: int | None = None,
+    ) -> tuple["ExecutionEventRecord", ...]: ...
+
     async def append_next(
         self,
         execution_id: str,
@@ -605,6 +637,28 @@ class EventRepository(RuntimeRepository, Protocol):
     async def list(
         self, execution_id: str, *, tenant_id: str, after_sequence: int, limit: int
     ) -> Page["ExecutionEventRecord"]: ...
+
+
+@dataclass(frozen=True, slots=True)
+class ExecutionEventAppend:
+    event_type: ExecutionEventType
+    payload: Mapping[str, JsonValue]
+
+
+@dataclass(frozen=True, slots=True)
+class ToolOperationAdmission:
+    tenant_id: str
+    tool_operation_id: str
+    step_run_id: str
+    recovery_step_run_id: "str | None"
+    tool_call_id: str
+    idempotency_key_digest: str
+    tool_name: str
+    arguments_digest: str
+    binding_fingerprint: str
+    replay_safe: bool
+    owner: str
+    lease_seconds: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -796,6 +850,7 @@ __all__ = [
     "EvaluationState",
     "EventRepository",
     "ExecutionCancelRequestCommit",
+    "ExecutionEventAppend",
     "ExecutionEventRecord",
     "ExecutionRecord",
     "ExecutionRepository",
@@ -832,4 +887,5 @@ __all__ = [
     "SessionRepository",
     "TaskRepository",
     "TaskState",
+    "ToolOperationAdmission",
 ]

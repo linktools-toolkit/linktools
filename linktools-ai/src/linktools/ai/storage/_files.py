@@ -109,9 +109,23 @@ def _sync_directories(paths: Collection[Path]) -> None:
 class FilesystemJournal:
     """Shared crash-safe journal for granular filesystem stores."""
 
-    def __init__(self, root: Path, *, error_code: ErrorCode) -> None:
+    def __init__(
+        self,
+        root: Path,
+        *,
+        error_code: ErrorCode,
+        transaction_name: str = ".txn",
+    ) -> None:
+        if (
+            not transaction_name
+            or Path(transaction_name).is_absolute()
+            or transaction_name in {".", ".."}
+            or "/" in transaction_name
+            or "\\" in transaction_name
+        ):
+            raise ValueError("transaction_name must be one direct child directory")
         self._root = root
-        self._transaction = root / ".txn"
+        self._transaction = root / transaction_name
         self._error_code = error_code
 
     def stage(

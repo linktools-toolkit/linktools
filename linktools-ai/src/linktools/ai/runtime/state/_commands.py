@@ -1,0 +1,1396 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""Named state commands for multi-record Runtime checkpoints."""
+
+from collections.abc import Sequence
+from dataclasses import replace
+
+from linktools.core import environ
+from pydantic_ai_harness.step_persistence import (
+    ContinuableSnapshot,
+    RunRecord,
+    StepEvent,
+    ToolEffectRecord,
+)
+
+from ...core import (
+    ExecutionEventType,
+    ExecutionStatus,
+    IdempotencyStatus,
+    SessionStatus,
+    ToolOperationStatus,
+)
+from ...errors import AIError, ErrorCode
+from ...storage import StoredPayload
+from .._tool import ToolOperationRecord
+from ._contracts import (
+    ConversationCursor,
+    ExecutionEventAppend,
+    ExecutionRecord,
+    ExecutionStartClaim,
+    ExecutionTerminalCommit,
+    ExecutionTerminalCommitResult,
+    RecoveryCheckpoint,
+    RecoveryCheckpointState,
+    RecoveryHandoffPhase,
+    SessionRecord,
+    ToolOperationAdmission,
+)
+from ._repositories import (
+    EventRepositoryImpl,
+    ExecutionRepositoryImpl,
+    OperationLedgerRepository,
+    RecoveryCheckpointRepositoryImpl,
+    SessionRepositoryImpl,
+    ToolRepositoryImpl,
+)
+from ._steps import StateStepArchive
+from ._store import StateGroupTransaction, StateStore, StateTransaction
+
+_logger = environ.get_logger("ai.runtime.state.commands")
+
+
+class RuntimeStateCommands:
+    """Named semantic commands that may enlist several Runtime domains."""
+
+    def __init__(
+        self,
+        execution: ExecutionRepositoryImpl,
+        *,
+        events: EventRepositoryImpl,
+        operations: OperationLedgerRepository | None = None,
+        conversation: SessionRepositoryImpl | None = None,
+        recovery: RecoveryCheckpointRepositoryImpl | None = None,
+        tools: ToolRepositoryImpl | None = None,
+        conversation_steps: StateStepArchive | None = None,
+        execution_steps: StateStepArchive | None = None,
+        recovery_steps: StateStepArchive | None = None,
+    ) -> None:
+        self._execution = execution
+        self._events = events
+        self._operations = operations
+        self._conversation = conversation
+        self._recovery = recovery
+        self._tools = tools
+        self._conversation_steps = conversation_steps
+        self._execution_steps = execution_steps
+        self._recovery_steps = recovery_steps
+
+    async def commit_start_checkpoint(
+        self,
+        claim: ExecutionStartClaim,
+        *,
+        recovery_checkpoint: RecoveryCheckpoint | None = None,
+        session_id: str | None = None,
+        expected_cursor: ConversationCursor | None = None,
+    ) -> ExecutionRecord:
+        _logger.debug(
+            "start checkpoint requested: execution=%s session=%s recovery=%s",
+            claim.execution_id,
+            session_id,
+            recovery_checkpoint is not None,
+        )
+        stores = [self._execution.state_store]
+        if recovery_checkpoint is not None:
+            self._require_recovery()
+            stores.append(self._recovery.state_store)
+        if session_id is not None:
+            self._require_conversation()
+            stores.append(self._conversation.state_store)
+        if _same_group(stores):
+            async def callback(group: StateGroupTransaction) -> ExecutionRecord:
+                transaction = group.transaction(self._execution.state_store)
+                if recovery_checkpoint is not None:
+                    await self._recovery.admit_in_transaction(
+                        group.transaction(self._recovery.state_store),
+                        recovery_checkpoint,
+                    )
+                if session_id is not None:
+                    session_transaction = group.transaction(self._conversation.state_store)
+                    session = await self._conversation.get_in_transaction(
+                        session_transaction,
+                        session_id,
+                        tenant_id=claim.tenant_id,
+                    )
+                    if session.active_execution_id not in {None, claim.execution_id}:
+                        owner = await self._execution.get_in_transaction(
+                            transaction,
+                            session.active_execution_id,
+                            tenant_id=claim.tenant_id,
+                        )
+                        if (
+                            owner is None
+                            or owner.tenant_id != claim.tenant_id
+                            or owner.session_id != session_id
+                            or owner.parent_execution_id is not None
+                        ):
+                            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                        if owner.status not in {
+                            ExecutionStatus.SUCCEEDED,
+                            ExecutionStatus.FAILED,
+                            ExecutionStatus.CANCELLED,
+                        }:
+                            if session.status is not SessionStatus.OPEN:
+                                raise AIError(ErrorCode.SESSION_CONFLICT)
+                            raise AIError(ErrorCode.SESSION_BUSY)
+                        await self._conversation.release_execution_in_transaction(
+                            session_transaction,
+                            session_id,
+                            tenant_id=claim.tenant_id,
+                            execution_id=owner.execution_id,
+                        )
+                    await self._conversation.admit_execution_in_transaction(
+                        session_transaction,
+                        session_id,
+                        tenant_id=claim.tenant_id,
+                        execution_id=claim.execution_id,
+                        expected=expected_cursor,
+                    )
+                return await self._execution.claim_start_in_transaction(transaction, claim)
+
+            try:
+                return await stores[0].storage_group.mutate(stores, callback)
+            except AIError as error:
+                if error.code is not ErrorCode.STORAGE_COMMIT_UNKNOWN:
+                    raise
+                observed = await self._reconcile_start_unknown(
+                    claim,
+                    recovery_checkpoint=recovery_checkpoint,
+                    session_id=session_id,
+                    expected_cursor=expected_cursor,
+                )
+                if observed is not None:
+                    return observed
+                return await stores[0].storage_group.mutate(stores, callback)
+        if recovery_checkpoint is not None:
+            for attempt in range(2):
+                try:
+                    await self._recovery.state_store.mutate(
+                        lambda transaction: self._recovery.admit_in_transaction(
+                            transaction,
+                            recovery_checkpoint,
+                        )
+                    )
+                    break
+                except AIError as error:
+                    if error.code is not ErrorCode.STORAGE_COMMIT_UNKNOWN or attempt == 1:
+                        raise
+                    actual = await self._recovery.get(
+                        recovery_checkpoint.execution_id,
+                        tenant_id=recovery_checkpoint.tenant_id,
+                    )
+                    if actual == recovery_checkpoint:
+                        break
+        if session_id is not None:
+            for attempt in range(2):
+                try:
+                    await self._admit_split_start(
+                        session_id,
+                        tenant_id=claim.tenant_id,
+                        execution_id=claim.execution_id,
+                        expected=expected_cursor,
+                    )
+                    break
+                except AIError as error:
+                    if error.code is not ErrorCode.STORAGE_COMMIT_UNKNOWN or attempt == 1:
+                        raise
+                    session = await self._conversation.get(
+                        session_id,
+                        tenant_id=claim.tenant_id,
+                    )
+                    if (
+                        session is not None
+                        and session.active_execution_id == claim.execution_id
+                        and session.continuation == expected_cursor
+                    ):
+                        break
+        return await self._execution.claim_start(claim)
+
+    async def commit_tool_terminal(
+        self,
+        tool_operation_id: str,
+        *,
+        tenant_id: str,
+        owner: str,
+        fence: int,
+        result_payload: StoredPayload | None = None,
+        error_code: str | None = None,
+        error_payload: StoredPayload | None = None,
+        run: RunRecord | None = None,
+        effect: ToolEffectRecord | None = None,
+    ) -> ToolOperationRecord:
+        if self._tools is None:
+            raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+        if result_payload is None and error_code is None:
+            raise ValueError("tool terminal command requires a result or error")
+        _logger.debug(
+            "tool terminal checkpoint requested: operation=%s effect=%s",
+            tool_operation_id,
+            effect is not None,
+        )
+        stores = [self._tools.state_store]
+        if effect is not None:
+            if self._recovery_steps is None or run is None:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            stores.append(self._recovery_steps.state_store)
+        if not _same_group(stores):
+            if effect is not None:
+                for attempt in range(2):
+                    try:
+                        await self._recovery_steps.materialize_effect(run, effect)
+                        break
+                    except AIError as error:
+                        if error.code is not ErrorCode.STORAGE_COMMIT_UNKNOWN or attempt == 1:
+                            raise
+                        archived = await self._recovery_steps.get_tool_effect(
+                            run_id=run.run_id,
+                            tool_call_id=effect.tool_call_id,
+                        )
+                        if archived == effect:
+                            break
+
+            async def finish() -> ToolOperationRecord:
+                if result_payload is not None:
+                    return await self._tools.complete_payload(
+                        tool_operation_id,
+                        tenant_id=tenant_id,
+                        owner=owner,
+                        fence=fence,
+                        result_payload=result_payload,
+                    )
+                return await self._tools.fail_payload(
+                    tool_operation_id,
+                    tenant_id=tenant_id,
+                    owner=owner,
+                    fence=fence,
+                    error_code=error_code or ErrorCode.EXECUTION_FAILED.value,
+                    error_payload=error_payload,
+                )
+
+            try:
+                return await finish()
+            except AIError as error:
+                if error.code is not ErrorCode.STORAGE_COMMIT_UNKNOWN:
+                    raise
+                observed = await self._tools.get_operation(
+                    tool_operation_id,
+                    tenant_id=tenant_id,
+                )
+                expected_status = (
+                    ToolOperationStatus.COMPLETED
+                    if result_payload is not None
+                    else ToolOperationStatus.FAILED
+                )
+                payload_matches = (
+                    observed is not None
+                    and observed.status is expected_status
+                    and (
+                        observed.result_payload == result_payload
+                        if result_payload is not None
+                        else observed.error_code == error_code
+                        and observed.error_payload == error_payload
+                    )
+                )
+                if payload_matches and (
+                    effect is None
+                    or await self._recovery_steps.get_tool_effect(
+                        run_id=run.run_id,
+                        tool_call_id=effect.tool_call_id,
+                    )
+                    == effect
+                ):
+                    return observed
+                return await finish()
+
+        async def callback(group: StateGroupTransaction) -> ToolOperationRecord:
+            transaction = group.transaction(self._tools.state_store)
+            if effect is not None:
+                await self._recovery_steps._materialize_effect_in_transaction(
+                    group.transaction(self._recovery_steps.state_store),
+                    run,
+                    effect,
+                )
+            if result_payload is not None:
+                return await self._tools.complete_in_transaction(
+                    transaction,
+                    tool_operation_id,
+                    tenant_id=tenant_id,
+                    owner=owner,
+                    fence=fence,
+                    result_payload=result_payload,
+                )
+            return await self._tools.fail_in_transaction(
+                transaction,
+                tool_operation_id,
+                tenant_id=tenant_id,
+                owner=owner,
+                fence=fence,
+                error_code=error_code or ErrorCode.EXECUTION_FAILED.value,
+                error_payload=error_payload,
+            )
+
+        try:
+            return await stores[0].storage_group.mutate(stores, callback)
+        except AIError as error:
+            if error.code is not ErrorCode.STORAGE_COMMIT_UNKNOWN:
+                raise
+            observed = await self._tools.get_operation(
+                tool_operation_id,
+                tenant_id=tenant_id,
+            )
+            expected_status = (
+                ToolOperationStatus.COMPLETED
+                if result_payload is not None
+                else ToolOperationStatus.FAILED
+            )
+            payload_matches = (
+                observed is not None
+                and observed.status is expected_status
+                and (
+                    observed.result_payload == result_payload
+                    if result_payload is not None
+                    else observed.error_code == error_code
+                    and observed.error_payload == error_payload
+                )
+            )
+            if effect is not None:
+                archived = await self._recovery_steps.get_tool_effect(
+                    run_id=run.run_id,
+                    tool_call_id=effect.tool_call_id,
+                )
+                payload_matches = payload_matches and archived == effect
+            if payload_matches:
+                return observed
+            return await stores[0].storage_group.mutate(stores, callback)
+
+    async def commit_tool_admission(
+        self,
+        request: ToolOperationAdmission,
+    ) -> ToolOperationRecord:
+        if self._tools is None:
+            raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+        _logger.debug(
+            "tool admission checkpoint requested: operation=%s",
+            request.tool_operation_id,
+        )
+        stores = [self._tools.state_store]
+
+        async def callback(group: StateGroupTransaction) -> ToolOperationRecord:
+            operation = await self._tools.admit_in_transaction(
+                group.transaction(self._tools.state_store),
+                request,
+            )
+            return operation
+
+        try:
+            return await stores[0].storage_group.mutate(stores, callback)
+        except AIError as error:
+            if error.code is not ErrorCode.STORAGE_COMMIT_UNKNOWN:
+                raise
+            observed = await self._tools.get_operation(
+                request.tool_operation_id,
+                tenant_id=request.tenant_id,
+            )
+            if observed is None:
+                return await stores[0].storage_group.mutate(stores, callback)
+            if not _tool_admission_matches(observed, request):
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
+            if observed.status is ToolOperationStatus.EFFECT_UNKNOWN:
+                raise AIError(ErrorCode.TOOL_EFFECT_UNKNOWN) from error
+            if observed.status is ToolOperationStatus.CANCELLED:
+                raise AIError(ErrorCode.TOOL_OPERATION_CONFLICT) from error
+            if observed.status in {
+                ToolOperationStatus.CLAIMED,
+                ToolOperationStatus.COMPLETED,
+                ToolOperationStatus.FAILED,
+            }:
+                return observed
+            return await stores[0].storage_group.mutate(stores, callback)
+
+    async def commit_terminal_checkpoint(
+        self,
+        commit: ExecutionTerminalCommit,
+        *,
+        session_id: str | None = None,
+        expected_cursor: ConversationCursor | None = None,
+        next_cursor: ConversationCursor | None = None,
+        conversation_run: RunRecord | None = None,
+        conversation_snapshot: ContinuableSnapshot | None = None,
+        recovery_checkpoint: RecoveryCheckpoint | None = None,
+        recovery_run: RunRecord | None = None,
+        recovery_snapshot: ContinuableSnapshot | None = None,
+        execution_run: RunRecord | None = None,
+        execution_events: Sequence[StepEvent] = (),
+        execution_snapshots: Sequence[ContinuableSnapshot] = (),
+        audit_events: Sequence[ExecutionEventAppend] = (),
+    ) -> ExecutionTerminalCommitResult:
+        if session_id is None and (conversation_run is not None or conversation_snapshot is not None):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        if recovery_checkpoint is None and (recovery_run is not None or recovery_snapshot is not None):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        _logger.debug(
+            "terminal checkpoint requested: execution=%s session=%s recovery=%s",
+            commit.execution.execution_id,
+            session_id,
+            recovery_checkpoint is not None,
+        )
+        stores = [self._execution.state_store]
+        if session_id is not None:
+            self._require_conversation()
+            stores.append(self._conversation.state_store)
+        if recovery_checkpoint is not None:
+            self._require_recovery()
+            stores.append(self._recovery.state_store)
+        if execution_run is not None:
+            if self._execution_steps is None:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            stores.append(self._execution_steps.state_store)
+        if conversation_run is not None or conversation_snapshot is not None:
+            if self._conversation_steps is None or conversation_run is None or conversation_snapshot is None:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            stores.append(self._conversation_steps.state_store)
+        if recovery_run is not None or recovery_snapshot is not None:
+            if self._recovery_steps is None or recovery_run is None or recovery_snapshot is None:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            stores.append(self._recovery_steps.state_store)
+        if _same_group(stores):
+            async def callback(group: StateGroupTransaction) -> ExecutionTerminalCommitResult:
+                execution_transaction = group.transaction(self._execution.state_store)
+                effective_commit = await self._effective_terminal_commit(
+                    execution_transaction,
+                    commit,
+                )
+                if session_id is not None:
+                    conversation_transaction = group.transaction(self._conversation.state_store)
+                    if conversation_run is None or conversation_snapshot is None:
+                        await self._conversation.release_execution_in_transaction(
+                            conversation_transaction,
+                            session_id,
+                            tenant_id=commit.execution.tenant_id,
+                            execution_id=commit.execution.execution_id,
+                        )
+                    else:
+                        if next_cursor is None or self._conversation_steps is None:
+                            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                        await self._conversation_steps._materialize_snapshot_in_transaction(
+                            group.transaction(self._conversation_steps.state_store),
+                            conversation_run,
+                            conversation_snapshot,
+                        )
+                        await self._conversation.complete_execution_in_transaction(
+                            conversation_transaction,
+                            session_id,
+                            tenant_id=commit.execution.tenant_id,
+                            execution_id=commit.execution.execution_id,
+                            expected=expected_cursor,
+                            next_cursor=next_cursor,
+                        )
+                if recovery_checkpoint is not None:
+                    if recovery_run is not None or recovery_snapshot is not None:
+                        if self._recovery_steps is None or recovery_run is None or recovery_snapshot is None:
+                            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                        await self._recovery_steps._materialize_snapshot_in_transaction(
+                            group.transaction(self._recovery_steps.state_store),
+                            recovery_run,
+                            recovery_snapshot,
+                        )
+                    await self._recovery.compare_and_swap_in_transaction(
+                        group.transaction(self._recovery.state_store),
+                        recovery_checkpoint.execution_id,
+                        tenant_id=recovery_checkpoint.tenant_id,
+                        expected_revision=recovery_checkpoint.revision - 1,
+                        next_record=recovery_checkpoint,
+                    )
+                if execution_run is not None:
+                    await self._execution_steps._sync_projection_in_transaction(
+                        group.transaction(self._execution_steps.state_store),
+                        execution_run,
+                        events=execution_events,
+                        snapshots=execution_snapshots,
+                    )
+                return await self._execution.commit_terminal_in_transaction(
+                    execution_transaction,
+                    effective_commit,
+                    pending_events=audit_events,
+                )
+
+            try:
+                return await stores[0].storage_group.mutate(stores, callback)
+            except AIError as error:
+                if error.code is not ErrorCode.STORAGE_COMMIT_UNKNOWN:
+                    raise
+                if await self._terminal_targets_visible(
+                    commit,
+                    pending_event_count=len(audit_events),
+                    session_id=session_id,
+                    next_cursor=next_cursor,
+                    conversation_run=conversation_run,
+                    conversation_snapshot=conversation_snapshot,
+                    recovery_checkpoint=recovery_checkpoint,
+                    recovery_run=recovery_run,
+                    recovery_snapshot=recovery_snapshot,
+                    execution_run=execution_run,
+                    execution_events=execution_events,
+                    execution_snapshots=execution_snapshots,
+                    audit_events=audit_events,
+                ):
+                    execution = await self._execution.get(
+                        commit.execution.execution_id,
+                        tenant_id=commit.execution.tenant_id,
+                    )
+                    if execution is None:
+                        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                    return ExecutionTerminalCommitResult(execution, commit.result)
+                return await stores[0].storage_group.mutate(stores, callback)
+        recovery_pending = False
+        if recovery_checkpoint is not None:
+            actual_recovery = await self._recovery.get(
+                recovery_checkpoint.execution_id,
+                tenant_id=recovery_checkpoint.tenant_id,
+            )
+            if actual_recovery is None:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            if actual_recovery == recovery_checkpoint:
+                if not await self._terminal_targets_visible(
+                    commit,
+                    pending_event_count=len(audit_events),
+                    session_id=session_id,
+                    next_cursor=next_cursor,
+                    conversation_run=conversation_run,
+                    conversation_snapshot=conversation_snapshot,
+                    recovery_checkpoint=recovery_checkpoint,
+                    recovery_run=recovery_run,
+                    recovery_snapshot=recovery_snapshot,
+                    execution_run=execution_run,
+                    execution_events=execution_events,
+                    execution_snapshots=execution_snapshots,
+                    audit_events=audit_events,
+                ):
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                execution = await self._execution.get(
+                    commit.execution.execution_id,
+                    tenant_id=commit.execution.tenant_id,
+                )
+                if execution is None:
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                return ExecutionTerminalCommitResult(execution, commit.result)
+            if not _recovery_completion_predecessor(actual_recovery, recovery_checkpoint):
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            recovery_pending = True
+        recovery_steps_merged = False
+        if session_id is not None and conversation_run is not None and conversation_snapshot is not None:
+            if next_cursor is None or self._conversation_steps is None:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+
+            conversation_stores = [
+                self._conversation.state_store,
+                self._conversation_steps.state_store,
+            ]
+
+            async def commit_conversation(group: StateGroupTransaction) -> None:
+                await self._conversation_steps._materialize_snapshot_in_transaction(
+                    group.transaction(self._conversation_steps.state_store),
+                    conversation_run,
+                    conversation_snapshot,
+                )
+                await self._conversation.advance_continuation_in_transaction(
+                    group.transaction(self._conversation.state_store),
+                    session_id,
+                    tenant_id=commit.execution.tenant_id,
+                    execution_id=commit.execution.execution_id,
+                    expected=expected_cursor,
+                    next_cursor=next_cursor,
+                    release_execution=False,
+                )
+
+            if _same_group(conversation_stores):
+                for attempt in range(2):
+                    try:
+                        await self._conversation.state_store.storage_group.mutate(
+                            conversation_stores,
+                            commit_conversation,
+                        )
+                        break
+                    except AIError as error:
+                        if error.code is not ErrorCode.STORAGE_COMMIT_UNKNOWN or attempt == 1:
+                            raise
+                        if await self._conversation_target_visible(
+                            session_id,
+                            tenant_id=commit.execution.tenant_id,
+                            execution_id=commit.execution.execution_id,
+                            next_cursor=next_cursor,
+                            run=conversation_run,
+                            snapshot=conversation_snapshot,
+                        ):
+                            break
+            else:
+                await self._materialize_snapshot_with_reconciliation(
+                    self._conversation_steps,
+                    conversation_run,
+                    conversation_snapshot,
+                )
+                for attempt in range(2):
+                    try:
+                        await self._conversation.advance_continuation(
+                            session_id,
+                            tenant_id=commit.execution.tenant_id,
+                            execution_id=commit.execution.execution_id,
+                            expected=expected_cursor,
+                            next_cursor=next_cursor,
+                        )
+                        break
+                    except AIError as error:
+                        if error.code is not ErrorCode.STORAGE_COMMIT_UNKNOWN or attempt == 1:
+                            raise
+                        session = await self._conversation.get(
+                            session_id,
+                            tenant_id=commit.execution.tenant_id,
+                        )
+                        if session is not None and session.continuation == next_cursor:
+                            break
+
+        execution_stores = [self._execution.state_store]
+        if execution_run is not None:
+            if self._execution_steps is None:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            execution_stores.append(self._execution_steps.state_store)
+        recovery_state_merged = (
+            recovery_pending
+            and recovery_checkpoint is not None
+            and self._recovery.state_store.storage_group is self._execution.state_store.storage_group
+        )
+        if recovery_state_merged:
+            if recovery_run is not None or recovery_snapshot is not None:
+                if self._recovery_steps is None or recovery_run is None or recovery_snapshot is None:
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                recovery_steps_merged = (
+                    self._recovery_steps.state_store.storage_group
+                    is self._execution.state_store.storage_group
+                )
+            execution_stores.append(self._recovery.state_store)
+            if recovery_steps_merged:
+                execution_stores.append(self._recovery_steps.state_store)
+        if recovery_pending and not recovery_steps_merged:
+            await self._materialize_recovery_snapshot(
+                recovery_run,
+                recovery_snapshot,
+            )
+
+        async def commit_execution(group: StateGroupTransaction) -> ExecutionTerminalCommitResult:
+            execution_transaction = group.transaction(self._execution.state_store)
+            effective_commit = await self._effective_terminal_commit(execution_transaction, commit)
+            if execution_run is not None:
+                await self._execution_steps._sync_projection_in_transaction(
+                    group.transaction(self._execution_steps.state_store),
+                    execution_run,
+                    events=execution_events,
+                    snapshots=execution_snapshots,
+                )
+            if recovery_state_merged:
+                if recovery_steps_merged:
+                    await self._recovery_steps._materialize_snapshot_in_transaction(
+                        group.transaction(self._recovery_steps.state_store),
+                        recovery_run,
+                        recovery_snapshot,
+                    )
+                await self._recovery.compare_and_swap_in_transaction(
+                    group.transaction(self._recovery.state_store),
+                    recovery_checkpoint.execution_id,
+                    tenant_id=recovery_checkpoint.tenant_id,
+                    expected_revision=recovery_checkpoint.revision - 1,
+                    next_record=recovery_checkpoint,
+                )
+            return await self._execution.commit_terminal_in_transaction(
+                execution_transaction,
+                effective_commit,
+                pending_events=audit_events,
+            )
+
+        async def execution_target_visible() -> bool:
+            return await self._terminal_targets_visible(
+                commit,
+                pending_event_count=len(audit_events),
+                session_id=session_id,
+                next_cursor=next_cursor,
+                conversation_run=conversation_run,
+                conversation_snapshot=conversation_snapshot,
+                recovery_checkpoint=None,
+                recovery_run=None,
+                recovery_snapshot=None,
+                execution_run=execution_run,
+                execution_events=execution_events,
+                execution_snapshots=execution_snapshots,
+                audit_events=audit_events,
+                require_session_release=False,
+                require_recovery=False,
+            )
+
+        if await execution_target_visible():
+            execution = await self._execution.get(
+                commit.execution.execution_id,
+                tenant_id=commit.execution.tenant_id,
+            )
+            if execution is None:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            result = ExecutionTerminalCommitResult(execution, commit.result)
+        elif _same_group(execution_stores):
+            try:
+                result = await self._execution.state_store.storage_group.mutate(
+                    execution_stores,
+                    commit_execution,
+                )
+            except AIError as error:
+                if error.code not in {
+                    ErrorCode.STORAGE_COMMIT_UNKNOWN,
+                    ErrorCode.EXECUTION_RESULT_CONFLICT,
+                } or not await execution_target_visible():
+                    raise
+                execution = await self._execution.get(
+                    commit.execution.execution_id,
+                    tenant_id=commit.execution.tenant_id,
+                )
+                if execution is None:
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                result = ExecutionTerminalCommitResult(execution, commit.result)
+        else:
+            try:
+                if execution_run is not None:
+                    await self._sync_projection_with_reconciliation(
+                        execution_run,
+                        events=execution_events,
+                        snapshots=execution_snapshots,
+                    )
+                result = await self._execution.commit_terminal(
+                    commit,
+                    pending_events=audit_events,
+                )
+            except AIError as error:
+                if error.code not in {
+                    ErrorCode.STORAGE_COMMIT_UNKNOWN,
+                    ErrorCode.EXECUTION_RESULT_CONFLICT,
+                } or not await execution_target_visible():
+                    raise
+                execution = await self._execution.get(
+                    commit.execution.execution_id,
+                    tenant_id=commit.execution.tenant_id,
+                )
+                if execution is None:
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                result = ExecutionTerminalCommitResult(execution, commit.result)
+        if recovery_state_merged and recovery_checkpoint is not None:
+            actual_recovery = await self._recovery.get(
+                recovery_checkpoint.execution_id,
+                tenant_id=recovery_checkpoint.tenant_id,
+            )
+            if actual_recovery == recovery_checkpoint:
+                recovery_pending = False
+            elif actual_recovery is not None and not _recovery_completion_predecessor(
+                actual_recovery,
+                recovery_checkpoint,
+            ):
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        if session_id is not None:
+            for attempt in range(2):
+                try:
+                    await self._conversation.release_execution(
+                        session_id,
+                        tenant_id=commit.execution.tenant_id,
+                        execution_id=commit.execution.execution_id,
+                    )
+                    break
+                except AIError as error:
+                    if error.code is not ErrorCode.STORAGE_COMMIT_UNKNOWN or attempt == 1:
+                        raise
+                    session = await self._conversation.get(
+                        session_id,
+                        tenant_id=commit.execution.tenant_id,
+                    )
+                    if session is not None and session.active_execution_id is None:
+                        break
+        if recovery_pending and recovery_checkpoint is not None:
+            await self._complete_recovery_checkpoint(recovery_checkpoint)
+        return result
+
+    async def _materialize_recovery_snapshot(
+        self,
+        run: RunRecord | None,
+        snapshot: ContinuableSnapshot | None,
+    ) -> None:
+        if run is None and snapshot is None:
+            return
+        if self._recovery_steps is None or run is None or snapshot is None:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        if await self._step_snapshot_visible(self._recovery_steps, run, snapshot):
+            return
+        stores = [self._recovery.state_store, self._recovery_steps.state_store]
+
+        async def materialize(group: StateGroupTransaction) -> None:
+            await self._recovery_steps._materialize_snapshot_in_transaction(
+                group.transaction(self._recovery_steps.state_store),
+                run,
+                snapshot,
+            )
+
+        if _same_group(stores):
+            for attempt in range(2):
+                try:
+                    await stores[0].storage_group.mutate(stores, materialize)
+                    break
+                except AIError as error:
+                    if error.code is not ErrorCode.STORAGE_COMMIT_UNKNOWN or attempt == 1:
+                        raise
+                    if await self._step_snapshot_visible(self._recovery_steps, run, snapshot):
+                        break
+        else:
+            await self._materialize_snapshot_with_reconciliation(
+                self._recovery_steps,
+                run,
+                snapshot,
+            )
+
+    async def _materialize_snapshot_with_reconciliation(
+        self,
+        archive: StateStepArchive,
+        run: RunRecord,
+        snapshot: ContinuableSnapshot,
+    ) -> None:
+        if await self._step_snapshot_visible(archive, run, snapshot):
+            return
+        for attempt in range(2):
+            try:
+                await archive.materialize_snapshot(run, snapshot)
+                return
+            except AIError as error:
+                if error.code is not ErrorCode.STORAGE_COMMIT_UNKNOWN or attempt == 1:
+                    raise
+                if await self._step_snapshot_visible(archive, run, snapshot):
+                    return
+
+    async def _step_snapshot_visible(
+        self,
+        archive: StateStepArchive,
+        run: RunRecord,
+        snapshot: ContinuableSnapshot,
+    ) -> bool:
+        return (
+            await archive.get_run(run_id=run.run_id) == run
+            and await archive.latest_snapshot(
+                run_id=run.run_id,
+                include_interrupted=True,
+            )
+            == snapshot
+        )
+
+    async def _conversation_target_visible(
+        self,
+        session_id: str,
+        *,
+        tenant_id: str,
+        execution_id: str,
+        next_cursor: ConversationCursor,
+        run: RunRecord,
+        snapshot: ContinuableSnapshot,
+    ) -> bool:
+        session = await self._conversation.get(session_id, tenant_id=tenant_id)
+        return (
+            session is not None
+            and session.active_execution_id == execution_id
+            and session.continuation == next_cursor
+            and self._conversation_steps is not None
+            and await self._step_snapshot_visible(self._conversation_steps, run, snapshot)
+        )
+
+    async def _sync_projection_with_reconciliation(
+        self,
+        run: RunRecord,
+        *,
+        events: Sequence[StepEvent],
+        snapshots: Sequence[ContinuableSnapshot],
+    ) -> None:
+        if self._execution_steps is None:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        for attempt in range(2):
+            try:
+                await self._execution_steps.sync_projection(
+                    run,
+                    events=events,
+                    snapshots=snapshots,
+                )
+                return
+            except AIError as error:
+                if error.code is not ErrorCode.STORAGE_COMMIT_UNKNOWN or attempt == 1:
+                    raise
+                stored_run = await self._execution_steps.get_run(run_id=run.run_id)
+                stored_events = await self._execution_steps.list_events(run_id=run.run_id)
+                stored_snapshots = await self._execution_steps.list_snapshots(run_id=run.run_id)
+                if (
+                    stored_run == run
+                    and (not events or tuple(stored_events[-len(events) :]) == tuple(events))
+                    and (
+                        not snapshots
+                        or tuple(stored_snapshots[-len(snapshots) :]) == tuple(snapshots)
+                    )
+                ):
+                    return
+
+    async def _complete_recovery_checkpoint(self, target: RecoveryCheckpoint) -> None:
+        current = await self._recovery.get(target.execution_id, tenant_id=target.tenant_id)
+        if current is None:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        if current == target:
+            return
+        if not _recovery_completion_predecessor(current, target):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        for _ in range(2):
+            try:
+                await self._recovery.compare_and_swap(
+                    target.execution_id,
+                    tenant_id=target.tenant_id,
+                    expected_revision=current.revision,
+                    next_record=target,
+                )
+                return
+            except AIError as error:
+                if error.code not in {
+                    ErrorCode.STORAGE_COMMIT_UNKNOWN,
+                    ErrorCode.STORAGE_CONFLICT,
+                }:
+                    raise
+                observed = await self._recovery.get(target.execution_id, tenant_id=target.tenant_id)
+                if observed == target:
+                    return
+                if error.code is not ErrorCode.STORAGE_COMMIT_UNKNOWN or observed is None:
+                    raise
+                if not _recovery_completion_predecessor(observed, target):
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
+                current = observed
+        raise AIError(ErrorCode.STORAGE_COMMIT_UNKNOWN)
+
+    def _require_conversation(self) -> None:
+        if self._conversation is None:
+            raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+
+    def _require_recovery(self) -> None:
+        if self._recovery is None:
+            raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+
+    async def _effective_terminal_commit(
+        self,
+        transaction: StateTransaction,
+        commit: ExecutionTerminalCommit,
+    ) -> ExecutionTerminalCommit:
+        if commit.idempotency is not None:
+            return commit
+        return replace(
+            commit,
+            idempotency=await self._execution.terminal_idempotency_in_transaction(
+                transaction,
+                commit,
+            ),
+        )
+
+    async def _reconcile_start_unknown(
+        self,
+        claim: ExecutionStartClaim,
+        *,
+        recovery_checkpoint: RecoveryCheckpoint | None,
+        session_id: str | None,
+        expected_cursor: ConversationCursor | None,
+    ) -> ExecutionRecord | None:
+        execution = await self._execution.get(
+            claim.execution_id,
+            tenant_id=claim.tenant_id,
+        )
+        if execution is None:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        if (
+            execution.status is ExecutionStatus.PENDING_START
+            and execution.revision == claim.expected_revision
+            and execution.event_sequence == claim.expected_event_sequence
+        ):
+            return None
+        if (
+            execution.status is not ExecutionStatus.STARTED
+            or execution.revision != claim.expected_revision + 1
+            or execution.event_sequence != claim.expected_event_sequence + 1
+        ):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        idempotency = await self._execution.get_start_idempotency(claim)
+        if idempotency is None or idempotency.status is not IdempotencyStatus.STARTED:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        started_events = await self._events.list(
+            claim.execution_id,
+            tenant_id=claim.tenant_id,
+            after_sequence=claim.expected_event_sequence,
+            limit=1,
+        )
+        if (
+            len(started_events.items) != 1
+            or started_events.items[0].sequence != claim.expected_event_sequence + 1
+            or started_events.items[0].event_type is not ExecutionEventType.EXECUTION_STARTED
+        ):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        if recovery_checkpoint is not None:
+            actual = await self._recovery.get(
+                recovery_checkpoint.execution_id,
+                tenant_id=recovery_checkpoint.tenant_id,
+            )
+            if (
+                actual is None
+                or actual.input != recovery_checkpoint.input
+                or actual.agent_run_sequence != 0
+                or actual.step_run_id is not None
+                or actual.state is not RecoveryCheckpointState.ADMITTED
+                or actual.handoff_phase is not RecoveryHandoffPhase.NONE
+            ):
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        if session_id is not None:
+            session = await self._conversation.get(session_id, tenant_id=claim.tenant_id)
+            if (
+                session is None
+                or session.status is not SessionStatus.OPEN
+                or session.active_execution_id != claim.execution_id
+                or session.continuation != expected_cursor
+            ):
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        return execution
+
+    async def _terminal_targets_visible(
+        self,
+        commit: ExecutionTerminalCommit,
+        *,
+        pending_event_count: int,
+        session_id: str | None,
+        next_cursor: ConversationCursor | None,
+        conversation_run: RunRecord | None,
+        conversation_snapshot: ContinuableSnapshot | None,
+        recovery_checkpoint: RecoveryCheckpoint | None,
+        recovery_run: RunRecord | None,
+        recovery_snapshot: ContinuableSnapshot | None,
+        execution_run: RunRecord | None,
+        execution_events: Sequence[StepEvent],
+        execution_snapshots: Sequence[ContinuableSnapshot],
+        audit_events: Sequence[ExecutionEventAppend],
+        require_session_release: bool = True,
+        require_recovery: bool = True,
+    ) -> bool:
+        execution = await self._execution.get(
+            commit.execution.execution_id,
+            tenant_id=commit.execution.tenant_id,
+        )
+        if execution is None:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        if (
+            execution.revision == commit.expected_revision
+            and execution.event_sequence == commit.expected_event_sequence
+        ):
+            return False
+        expected_revision = commit.expected_revision + pending_event_count + 1
+        expected_sequence = commit.expected_event_sequence + pending_event_count + 1
+        if (
+            execution.status is not commit.execution.status
+            or execution.revision != expected_revision
+            or execution.event_sequence != expected_sequence
+            or execution.result != commit.result
+        ):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        idempotency = await self._execution.get_terminal_idempotency(
+            commit.execution.execution_id,
+            tenant_id=commit.execution.tenant_id,
+        )
+        if idempotency is not None:
+            expected_status = (
+                IdempotencyStatus.COMPLETED
+                if commit.execution.status is ExecutionStatus.SUCCEEDED
+                else IdempotencyStatus.CANCELLED
+                if commit.execution.status is ExecutionStatus.CANCELLED
+                else IdempotencyStatus.FAILED
+            )
+            expected_digest = None if commit.result.output is None else commit.result.output.digest
+            if (
+                idempotency.status is not expected_status
+                or idempotency.result_digest != expected_digest
+                or idempotency.error_code != commit.execution.error_code
+            ):
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        if commit.operation is not None:
+            if self._operations is None:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            operation = await self._operations.get(
+                commit.operation.operation_id,
+                tenant_id=commit.execution.tenant_id,
+            )
+            if (
+                operation is None
+                or operation.status is not commit.operation.next_status
+                or operation.result_ref != commit.operation.result_ref
+                or operation.result_digest != commit.operation.result_digest
+                or operation.error_code != commit.operation.error_code
+            ):
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        events = await self._events.list(
+            commit.execution.execution_id,
+            tenant_id=commit.execution.tenant_id,
+            after_sequence=commit.expected_event_sequence,
+            limit=pending_event_count + 1,
+        )
+        expected_events = tuple(audit_events) + (
+            ExecutionEventAppend(commit.terminal_event_type, commit.terminal_event_payload),
+        )
+        if len(events.items) != len(expected_events) or any(
+            actual.sequence != commit.expected_event_sequence + index + 1
+            or actual.event_type is not expected.event_type
+            or actual.payload != expected.payload
+            for index, (actual, expected) in enumerate(
+                zip(events.items, expected_events, strict=True)
+            )
+        ):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        if session_id is not None:
+            session = await self._conversation.get(
+                session_id,
+                tenant_id=commit.execution.tenant_id,
+            )
+            if session is None or require_session_release and session.active_execution_id is not None:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            if conversation_run is not None and (
+                next_cursor is None or session.continuation != next_cursor
+            ):
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        if recovery_checkpoint is not None and require_recovery:
+            actual = await self._recovery.get(
+                recovery_checkpoint.execution_id,
+                tenant_id=recovery_checkpoint.tenant_id,
+            )
+            if actual != recovery_checkpoint:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        for archive, run, snapshot in (
+            (self._conversation_steps, conversation_run, conversation_snapshot),
+            (self._recovery_steps, recovery_run, recovery_snapshot),
+        ):
+            if run is None and snapshot is None:
+                continue
+            if archive is None or run is None or snapshot is None:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            stored_run = await archive.get_run(run_id=run.run_id)
+            stored_snapshot = await archive.latest_snapshot(
+                run_id=run.run_id,
+                include_interrupted=True,
+            )
+            if stored_run != run or stored_snapshot != snapshot:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        if execution_run is not None:
+            if self._execution_steps is None:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            stored_run = await self._execution_steps.get_run(run_id=execution_run.run_id)
+            stored_events = await self._execution_steps.list_events(run_id=execution_run.run_id)
+            stored_snapshots = await self._execution_steps.list_snapshots(run_id=execution_run.run_id)
+            if stored_run != execution_run:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            if execution_events and tuple(stored_events[-len(execution_events) :]) != tuple(execution_events):
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            if execution_snapshots and tuple(stored_snapshots[-len(execution_snapshots) :]) != tuple(
+                execution_snapshots
+            ):
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        return True
+
+    async def _admit_split_start(
+        self,
+        session_id: str,
+        *,
+        tenant_id: str,
+        execution_id: str,
+        expected: ConversationCursor | None,
+    ) -> None:
+        session = await self._conversation.get(session_id, tenant_id=tenant_id)
+        if session is None:
+            raise AIError(ErrorCode.STORAGE_NOT_FOUND)
+        owner_id = session.active_execution_id
+        if owner_id not in {None, execution_id}:
+            owner = await self._execution.get(owner_id, tenant_id=tenant_id)
+            if (
+                owner is None
+                or owner.tenant_id != tenant_id
+                or owner.session_id != session_id
+                or owner.parent_execution_id is not None
+            ):
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            if owner.status not in {
+                ExecutionStatus.SUCCEEDED,
+                ExecutionStatus.FAILED,
+                ExecutionStatus.CANCELLED,
+            }:
+                if session.status is not SessionStatus.OPEN:
+                    raise AIError(ErrorCode.SESSION_CONFLICT)
+                raise AIError(ErrorCode.SESSION_BUSY)
+            await self._conversation.release_execution(
+                session_id,
+                tenant_id=tenant_id,
+                execution_id=owner.execution_id,
+            )
+        await self._conversation.admit_execution(
+            session_id,
+            tenant_id=tenant_id,
+            execution_id=execution_id,
+            expected=expected,
+        )
+
+
+def _same_group(stores: Sequence[StateStore]) -> bool:
+    return bool(stores) and all(store.storage_group is stores[0].storage_group for store in stores[1:])
+
+
+def _tool_admission_matches(
+    operation: ToolOperationRecord,
+    request: ToolOperationAdmission,
+) -> bool:
+    return (
+        operation.tenant_id == request.tenant_id
+        and operation.tool_operation_id == request.tool_operation_id
+        and operation.step_run_id in {request.step_run_id, request.recovery_step_run_id}
+        and operation.tool_call_id == request.tool_call_id
+        and operation.idempotency_key_digest == request.idempotency_key_digest
+        and operation.tool_name == request.tool_name
+        and operation.arguments_digest == request.arguments_digest
+        and operation.binding_fingerprint == request.binding_fingerprint
+        and operation.replay_safe is request.replay_safe
+    )
+
+
+def _recovery_completion_predecessor(
+    current: RecoveryCheckpoint,
+    target: RecoveryCheckpoint,
+) -> bool:
+    return (
+        current.state is RecoveryCheckpointState.HANDOFF
+        and current.handoff_phase is RecoveryHandoffPhase.PREPARED
+        and target.state is RecoveryCheckpointState.COMPLETED
+        and target.handoff_phase is RecoveryHandoffPhase.COMPLETED
+        and replace(
+            current,
+            state=target.state,
+            handoff_phase=target.handoff_phase,
+            terminal_handoff=target.terminal_handoff,
+            handoff_contract_digest=target.handoff_contract_digest,
+            pending_operation_id=target.pending_operation_id,
+            revision=target.revision,
+            updated_at=target.updated_at,
+        )
+        == target
+    )
+
+
+class ExecutionStateCommands:
+    """Commit execution audit, step projection, and terminal state together."""
+
+    def __init__(
+        self,
+        state_store: StateStore,
+        executions: ExecutionRepositoryImpl,
+        steps: StateStepArchive | None,
+    ) -> None:
+        self._state_store = state_store
+        self._executions = executions
+        self._steps = steps
+
+    async def commit_terminal_checkpoint(
+        self,
+        commit: ExecutionTerminalCommit,
+        *,
+        step_run: RunRecord | None,
+        step_events: Sequence[StepEvent] = (),
+        snapshots: Sequence[ContinuableSnapshot] = (),
+        audit_events: Sequence[ExecutionEventAppend] = (),
+    ) -> ExecutionTerminalCommitResult:
+        async def mutate(
+            transaction: StateTransaction,
+        ) -> ExecutionTerminalCommitResult:
+            effective_commit = commit
+            if effective_commit.idempotency is None:
+                idempotency = (
+                    await self._executions.terminal_idempotency_in_transaction(
+                        transaction,
+                        effective_commit,
+                    )
+                )
+                effective_commit = replace(effective_commit, idempotency=idempotency)
+            if (
+                self._steps is None
+                and step_run is not None
+                and (step_events or snapshots)
+            ):
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            if self._steps is not None and step_run is not None:
+                await self._steps._sync_projection_in_transaction(
+                    transaction,
+                    step_run,
+                    events=step_events,
+                    snapshots=snapshots,
+                )
+            return await self._executions.commit_terminal_in_transaction(
+                transaction,
+                effective_commit,
+                pending_events=audit_events,
+            )
+
+        return await self._state_store.mutate(mutate)
+
+
+class ConversationStateCommands:
+    """Commit the durable conversation snapshot and continuation together."""
+
+    def __init__(
+        self,
+        state_store: StateStore,
+        sessions: SessionRepositoryImpl,
+        steps: StateStepArchive | None,
+    ) -> None:
+        self._state_store = state_store
+        self._sessions = sessions
+        self._steps = steps
+
+    async def commit_snapshot_and_advance(
+        self,
+        session_id: str,
+        *,
+        tenant_id: str,
+        execution_id: str,
+        expected: ConversationCursor | None,
+        next_cursor: ConversationCursor,
+        step_run: RunRecord,
+        snapshot: ContinuableSnapshot,
+    ) -> SessionRecord:
+        async def mutate(transaction: StateTransaction) -> SessionRecord:
+            if self._steps is None:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            current = await self._sessions.get_in_transaction(
+                transaction,
+                session_id,
+                tenant_id=tenant_id,
+            )
+            if current.continuation == next_cursor:
+                return current
+            await self._steps._sync_projection_in_transaction(
+                transaction,
+                step_run,
+                events=(),
+                snapshots=(snapshot,),
+            )
+            return await self._sessions.advance_continuation_in_transaction(
+                transaction,
+                session_id,
+                tenant_id=tenant_id,
+                execution_id=execution_id,
+                expected=expected,
+                next_cursor=next_cursor,
+            )
+
+        return await self._state_store.mutate(mutate)
+
+
+__all__ = [
+    "ConversationStateCommands",
+    "ExecutionStateCommands",
+    "RuntimeStateCommands",
+]

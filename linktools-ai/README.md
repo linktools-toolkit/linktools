@@ -15,11 +15,12 @@ AssetStore -> AssetRepository -> AgentCompiler -> AgentDefinition -> Runtime
 Run from an installed command or the unified LinkTools entry point:
 
 ```bash
-ai-run "review this change" --project /workspace/project --model gpt-4o-mini
+ai-run "review this change" --project /workspace/project --model gpt-4o-mini --storage filesystem
 python3 -m linktools ai run "review this change" --project /workspace/project --model gpt-4o-mini
 ```
 
 `--base-url`, `--api-key`, and `--model` also read `OPENAI_BASE_URL`, `OPENAI_API_KEY`, and `OPENAI_MODEL`. Add `--json` to emit one final result instead of streaming text and tool events.
+`--storage` selects `filesystem` or `sqlite` Runtime state storage. SQLite uses `.linktools/runtime.db` in the workspace.
 
 ### 1.2 Python API
 
@@ -173,9 +174,21 @@ The SQL schema must already exist. `AssetStore.initialize()` initializes its ove
 Filesystem RuntimeState is an embedded single-writer backend. For one
 resolved RuntimeDomain, namespace, and tenant StateStore root, only one active
 Runtime/process may own the filesystem StateStore. A second owner fails
-initialization with `STORAGE_CONFLICT`. Applications requiring concurrent
-Runtime/process access to the same persistent state must use SQLite or another
-SQL route.
+initialization with `STORAGE_CONFLICT`. A RuntimeDomain is a logical state
+boundary; it is not necessarily a physical transaction boundary.
+
+The default filesystem Runtime keeps each domain's logical path below the
+runtime base and assigns the base as `transaction_root`. Domains with the same
+canonical `transaction_root` share one `FilesystemStateStorageGroup`: the group
+owns the writer locks, journal, generation, and rollback outcome, while each
+domain keeps its own records and facts. A grouped commit publishes all member
+paths or none of them. Custom filesystem routes can opt into the same behavior
+with `RuntimeStateRoute.filesystem(path, transaction_root=...)`; member paths
+must be strict, disjoint descendants on the same filesystem device.
+
+Concurrent writers to one filesystem group are rejected by the group and legacy
+member locks. Applications requiring concurrent Runtime/process access to the
+same persistent state must use SQLite or another SQL route.
 
 Filesystem data layout is unchanged. Sequential reopen is supported, and a
 process crash releases the advisory lock automatically. The `state.lock` file
@@ -187,6 +200,12 @@ correctness does not require or support explicit pessimistic row, table, or
 advisory locks. Known transient transaction conflicts use a fixed bounded
 retry; unique and other integrity conflicts remain semantic arbitration
 signals and are not generic retry conditions.
+
+SQL routes sharing the exact same `AsyncEngine` object are materialized into one
+`SqlStateStorageGroup` and one physical SQL transaction for each named
+cross-domain checkpoint. SQLite routes sharing the same canonical database path
+use the same grouping rule. Independent engines or paths remain independent
+physical transaction domains.
 
 Unselected domains use process-local stores and are intentionally absent after restart.
 
