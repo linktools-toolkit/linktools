@@ -36,6 +36,7 @@ from ._contracts import (
 )
 from ._filesystem import FilesystemStateStorageGroup, FilesystemStateStore
 from ._memory import MemoryStateStorageGroup, MemoryStateStore
+from ._maintenance import RuntimeStorageMaintenance
 from ._plan import (
     RuntimeDomain,
     RuntimeRetentionMode,
@@ -77,6 +78,7 @@ class _MaterializedRuntimeState:
     objects: "_RuntimeObjectRouter"
     steps: RuntimeStepStore
     retention: RuntimeRetentionController
+    maintenance: RuntimeStorageMaintenance
     metrics: StorageMetrics
     close_actions: tuple[Callable[[], Awaitable[None]], ...]
 
@@ -256,7 +258,13 @@ async def materialize_runtime_state(
 
         states = _states(bundles)
         objects = _build_object_router(plan, object_store, stores, sql_contexts)
-        steps = _build_steps(plan, stores, namespace=namespace, tenant_id=tenant_id)
+        steps = _build_steps(
+            plan,
+            stores,
+            objects,
+            namespace=namespace,
+            tenant_id=tenant_id,
+        )
         await steps.initialize()
         retention = RuntimeRetentionController(
             conversation=states.conversation,
@@ -270,6 +278,11 @@ async def materialize_runtime_state(
             steps=steps,
             plan=plan,
             namespace=namespace,
+        )
+        maintenance = RuntimeStorageMaintenance(
+            {domain: stores[domain] for domain in RuntimeDomain},
+            objects,
+            durable_domains=plan.durable_domains,
         )
         actions: list[Callable[[], Awaitable[None]]] = [steps.preflight_close, retention.close, steps.close]
         actions.extend(cleanups)
@@ -289,6 +302,7 @@ async def materialize_runtime_state(
             objects=objects,
             steps=steps,
             retention=retention,
+            maintenance=maintenance,
             metrics=StorageMetrics(),
             close_actions=tuple(actions),
         )
@@ -366,7 +380,12 @@ def _build_object_router(
 
 
 def _build_steps(
-    plan: RuntimeStatePlan, stores: Mapping[RuntimeDomain, object], *, namespace: str, tenant_id: str
+    plan: RuntimeStatePlan,
+    stores: Mapping[RuntimeDomain, object],
+    objects: _RuntimeObjectRouter,
+    *,
+    namespace: str,
+    tenant_id: str,
 ) -> RuntimeStepStore:
     archives: dict[RuntimeDomain, object] = {}
     for domain in _STEP_DOMAINS:
@@ -374,8 +393,19 @@ def _build_steps(
         if route.retention is RuntimeRetentionMode.TRANSIENT and domain is not RuntimeDomain.CONVERSATION:
             continue
         if route.retention is RuntimeRetentionMode.DURABLE:
+            context_sources = None
+            conversation_archive = archives.get(RuntimeDomain.CONVERSATION)
+            if isinstance(conversation_archive, StateStepArchive):
+                context_sources = {
+                    RuntimeDomain.CONVERSATION: conversation_archive.transcript_repository,
+                }
             archives[domain] = StateStepArchive(
-                stores[domain], namespace=namespace, tenant_id=tenant_id, runtime_domain=domain
+                stores[domain],
+                object_store=objects.object_store(domain),
+                namespace=namespace,
+                tenant_id=tenant_id,
+                runtime_domain=domain,
+                context_sources=context_sources,
             )
         else:
             archives[domain] = InMemoryStepArchive(domain)

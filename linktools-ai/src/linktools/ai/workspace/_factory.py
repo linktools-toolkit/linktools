@@ -168,15 +168,19 @@ def _build_default_models(workspace: Workspace) -> ModelRegistry:
 
 
 def _default_runtime_state(workspace: Workspace) -> RuntimeState:
+    runtime_root = workspace.storage_root / "runtime"
     plan = RuntimeStatePlan(
         conversation=RuntimeStateRoute.filesystem(
-            workspace.storage_root / "runtime" / "conversation"
+            runtime_root / "conversation",
+            transaction_root=runtime_root,
         ),
         execution=RuntimeStateRoute.filesystem(
-            workspace.storage_root / "runtime" / "execution"
+            runtime_root / "execution",
+            transaction_root=runtime_root,
         ),
         recovery=RuntimeStateRoute.filesystem(
-            workspace.storage_root / "runtime" / "recovery"
+            runtime_root / "recovery",
+            transaction_root=runtime_root,
         ),
     )
     return RuntimeState.from_plan(plan)

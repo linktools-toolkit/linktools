@@ -52,6 +52,61 @@ class ConversationCursor:
     step_run_id: str
 
 
+class TranscriptOrigin(StrEnum):
+    RAW = "raw"
+    UNKNOWN = "unknown"
+
+
+@dataclass(frozen=True, slots=True)
+class RuntimePayloadRef:
+    payload: StoredPayload
+    source_domain: "RuntimeDomain | None"
+
+
+@dataclass(frozen=True, slots=True)
+class TranscriptChunk:
+    run_id: str
+    first_message_index: int
+    message_count: int
+    origin: TranscriptOrigin
+    codec: str
+    raw_digest: str
+    raw_size: int
+    content: RuntimePayloadRef
+
+
+@dataclass(frozen=True, slots=True)
+class TranscriptSpanRef:
+    source_domain: RuntimeDomain
+    owner_id: str
+    start: int
+    end: int
+
+
+@dataclass(frozen=True, slots=True)
+class InlineContextBlock:
+    content: RuntimePayloadRef
+
+
+ContextProjectionItem = TranscriptSpanRef | InlineContextBlock
+
+
+@dataclass(frozen=True, slots=True)
+class ContextProjection:
+    binding_digest: str
+    items: tuple[ContextProjectionItem, ...]
+    digest: str
+
+
+@dataclass(frozen=True, slots=True)
+class StoredStepSnapshot:
+    run_id: str
+    step_index: int
+    timestamp: datetime
+    state: str
+    projection_digest: str
+
+
 @dataclass(frozen=True, slots=True)
 class SessionRecord:
     session_id: str
@@ -68,6 +123,7 @@ class SessionRecord:
     closed_at: "datetime | None"
     active_execution_id: "str | None"
     continuation: "ConversationCursor | None" = None
+    history_quality: str = "complete"
 
     def __post_init__(self) -> None:
         if self.active_execution_id is not None and not self.active_execution_id.strip():
@@ -368,6 +424,29 @@ class RecoveryCheckpoint:
             raise ValueError("active recovery checkpoint handoff must be in handoff state")
 
 
+@dataclass(frozen=True, slots=True)
+class RecoveryAdmissionRecord:
+    execution_id: str
+    tenant_id: str
+    input: "RecoveryExecutionInput"
+    created_at: datetime
+
+
+@dataclass(frozen=True, slots=True)
+class RecoveryStateRecord:
+    execution_id: str
+    tenant_id: str
+    step_run_id: "str | None"
+    agent_run_sequence: int
+    state: "RecoveryCheckpointState"
+    handoff_phase: "RecoveryHandoffPhase"
+    terminal_handoff: "RecoveryTerminalHandoff | None"
+    handoff_contract_digest: "str | None"
+    pending_operation_id: "str | None"
+    revision: int
+    updated_at: datetime
+
+
 class RecoveryCheckpointState(StrEnum):
     ADMITTED = "admitted"
     ACTIVE = "active"
@@ -386,7 +465,7 @@ class RecoveryHandoffPhase(StrEnum):
 
 @dataclass(frozen=True, slots=True)
 class RecoveryExecutionInput:
-    user_prompt: str
+    user_prompt: StoredPayload | str
     principal_id: str
     principal_kind: str
     session_id: "str | None"
@@ -400,6 +479,19 @@ class RecoveryExecutionInput:
     base_execution_id: "str | None"
     conversation_step_run_id: "str | None"
     idempotency: "RecoveryIdempotencyInput"
+
+    def __post_init__(self) -> None:
+        prompt = self.user_prompt
+        if isinstance(prompt, str):
+            object.__setattr__(self, "user_prompt", StoredPayload.inline_text(prompt))
+        elif not isinstance(prompt, StoredPayload):
+            raise ValueError("recovery prompt payload is invalid")
+
+    def prompt_text(self) -> str:
+        value = self.user_prompt.decode()
+        if not isinstance(value, str):
+            raise ValueError("recovery prompt payload is not text")
+        return value
 
 
 @dataclass(frozen=True, slots=True)
@@ -844,6 +936,7 @@ __all__ = [
     "ArtifactRepository",
     "ArtifactState",
     "ConversationCursor",
+    "ContextProjection",
     "ConversationState",
     "EvaluationRecord",
     "EvaluationRepository",
@@ -872,6 +965,7 @@ __all__ = [
     "OperationLedgerRepository",
     "OperationTerminalUpdate",
     "RecoveryCheckpoint",
+    "RecoveryAdmissionRecord",
     "RecoveryCheckpointRepository",
     "RecoveryCheckpointState",
     "RecoveryConversationIntent",
@@ -879,9 +973,16 @@ __all__ = [
     "RecoveryHandoffPhase",
     "RecoveryIdempotencyInput",
     "RecoveryState",
+    "RecoveryStateRecord",
     "RecoveryTerminalHandoff",
     "RecoveryTerminalOutcome",
     "ResultRecord",
+    "InlineContextBlock",
+    "RuntimePayloadRef",
+    "StoredStepSnapshot",
+    "TranscriptChunk",
+    "TranscriptOrigin",
+    "TranscriptSpanRef",
     "RuntimeRepository",
     "SessionRecord",
     "SessionRepository",

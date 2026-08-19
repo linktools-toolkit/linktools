@@ -47,6 +47,7 @@ class RuntimeRetentionController:
         self._closed = False
 
     async def release_execution_handoff(self, execution_id: str, *, tenant_id: str) -> None:
+        await self._steps.flush_dirty_execution_projections()
         execution = await self._execution.executions.get(execution_id, tenant_id=tenant_id)
         if execution is not None and execution.session_id is not None:
             await self._conversation.sessions.release_execution(

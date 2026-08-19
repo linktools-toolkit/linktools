@@ -75,10 +75,7 @@ def build_asset_sql_metadata(*, metadata: "MetaData | None" = None) -> "MetaData
         Column(
             "store_revision", BigInteger, nullable=False, comment="Last committed namespace-wide AssetStore revision."
         ),
-        *sql_audit_columns(
-            "Database audit time of the latest committed namespace revision.",
-            "Database audit time when the namespace revision head was created.",
-        ),
+        *sql_audit_columns(),
         comment="Namespace-level optimistic revision head that serializes AssetStore mutations.",
         **sql_table_options(),
     )
@@ -116,10 +113,7 @@ def build_asset_sql_metadata(*, metadata: "MetaData | None" = None) -> "MetaData
                 "content reference, and semantic timestamps."
             ),
         ),
-        *sql_audit_columns(
-            "Database audit time of the latest current-projection update.",
-            "Database audit time when the current-projection row was first created.",
-        ),
+        *sql_audit_columns(),
         comment="Current AssetStore projection for the latest committed revision of each asset key.",
         **sql_table_options(),
     )
@@ -157,10 +151,7 @@ def build_asset_sql_metadata(*, metadata: "MetaData | None" = None) -> "MetaData
         Column(
             "payload_json", JSON, nullable=False, comment="Versioned canonical immutable AssetInfo history payload."
         ),
-        *sql_audit_columns(
-            "Database audit time of the physical history row; immutable history normally retains creation time.",
-            "Database audit time when the immutable history row was appended.",
-        ),
+        *sql_audit_columns(),
         comment="Immutable AssetStore history containing every committed per-asset revision.",
         **sql_table_options(),
     )

@@ -100,7 +100,7 @@ The DBA reference must also satisfy these schema constraints:
 4. Placeholder comments are prohibited.
 5. Every table uses an `id BIGINT AUTO_INCREMENT` surrogate primary key.
 6. `updated_at` is immediately before `created_at`.
-7. MySQL `updated_at` uses `DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP`.
+7. Audit fields use the fixed MySQL definitions `updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT 'Update timestamp'` and `created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT 'Creation timestamp'`; these built-in comments remain in English.
 8. Every table retains `ix_updated_at` and `ix_created_at`.
 9. Unique-key names use `uk_<ordered_columns>`.
 10. Index names use `ix_<ordered_columns>`.

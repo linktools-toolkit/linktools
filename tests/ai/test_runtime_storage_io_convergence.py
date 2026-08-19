@@ -5,12 +5,21 @@
 import asyncio
 import hashlib
 import threading
+from dataclasses import replace
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.migrate import provision_database
+from linktools.ai.migrate import build_sql_schema_metadata, provision_database
 from linktools.ai.runtime.state import RuntimeState
+from linktools.ai.runtime.state._contracts import (
+    RecoveryCheckpoint,
+    RecoveryCheckpointState,
+    RecoveryExecutionInput,
+    RecoveryHandoffPhase,
+    RecoveryIdempotencyInput,
+)
 from linktools.ai.runtime.state._filesystem import FilesystemStateStore
 from linktools.ai.runtime.state._materializer import materialize_runtime_state
 from linktools.ai.runtime.state._plan import RuntimeStatePlan, RuntimeStateRoute
@@ -24,9 +33,22 @@ from linktools.ai.storage import _database as database_module
 from linktools.ai.storage import _files as files_module
 from linktools.ai.storage import _object as object_module
 from sqlalchemy import MetaData
+from sqlalchemy.dialects import mysql
 from sqlalchemy.ext.asyncio import create_async_engine
+from sqlalchemy.schema import CreateTable
 
 pytestmark = pytest.mark.asyncio
+
+
+async def test_mysql_audit_columns_match_stg_contract() -> None:
+    metadata = build_sql_schema_metadata()
+    for table in metadata.tables.values():
+        ddl = str(CreateTable(table).compile(dialect=mysql.dialect()))
+        assert (
+            "updated_at DATETIME NOT NULL COMMENT 'Update timestamp' "
+            "DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP"
+        ) in ddl
+        assert "created_at DATETIME NOT NULL COMMENT 'Creation timestamp' DEFAULT CURRENT_TIMESTAMP" in ddl
 
 
 async def test_filesystem_state_store_is_single_writer_and_reopens(tmp_path: Path) -> None:
@@ -307,6 +329,72 @@ async def test_builtin_sql_runtime_uses_one_engine_and_context(
         assert engine_count == 1
     finally:
         await state.close()
+
+
+async def test_sql_recovery_checkpoint_compare_and_swap_uses_split_records(
+    tmp_path: Path,
+) -> None:
+    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'state.db'}")
+    await provision_database(engine)
+    state = RuntimeState.sql(engine)
+    await state.initialize(namespace="n", tenant_id="t")
+    now = datetime.now(timezone.utc)
+    checkpoint = RecoveryCheckpoint(
+        execution_id="execution",
+        tenant_id="t",
+        input=RecoveryExecutionInput(
+            user_prompt="prompt",
+            principal_id="principal",
+            principal_kind="local_trusted",
+            session_id=None,
+            memory_scope=None,
+            agent_id="agent",
+            binding_digest="a" * 64,
+            lineage_kind="RUN",
+            parent_execution_id=None,
+            root_execution_id="execution",
+            source_execution_id=None,
+            base_execution_id=None,
+            conversation_step_run_id=None,
+            idempotency=RecoveryIdempotencyInput(
+                scope="execution.start",
+                idempotency_key_digest="b" * 64,
+                request_digest="c" * 64,
+            ),
+        ),
+        step_run_id=None,
+        agent_run_sequence=0,
+        state=RecoveryCheckpointState.ADMITTED,
+        handoff_phase=RecoveryHandoffPhase.NONE,
+        terminal_handoff=None,
+        handoff_contract_digest=None,
+        pending_operation_id=None,
+        revision=0,
+        created_at=now,
+        updated_at=now,
+    )
+    try:
+        await state.recovery.checkpoints.create(checkpoint)
+        assert await state.recovery.checkpoints.list(tenant_id="t") == (checkpoint,)
+        updated = replace(
+            checkpoint,
+            step_run_id="run",
+            agent_run_sequence=1,
+            state=RecoveryCheckpointState.ACTIVE,
+            revision=1,
+            updated_at=datetime.now(timezone.utc),
+        )
+        assert await state.recovery.checkpoints.compare_and_swap(
+            "execution",
+            tenant_id="t",
+            expected_revision=0,
+            next_record=updated,
+        ) == updated
+        assert await state.recovery.checkpoints.get("execution", tenant_id="t") == updated
+        assert await state.recovery.checkpoints.list(tenant_id="t") == (updated,)
+    finally:
+        await state.close()
+        await engine.dispose()
 
 
 async def test_external_sql_runtime_groups_by_engine_identity_and_borrows_engine(

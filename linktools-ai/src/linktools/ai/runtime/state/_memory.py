@@ -335,6 +335,9 @@ class _MemoryTransaction:
             values = values[: query.limit]
         return tuple(values)
 
+    async def scan_records(self) -> tuple[StoredRecord, ...]:
+        return tuple(self.records.values())
+
     async def resolve_alias(self, alias: bytes) -> bytes | None:
         return (await self.resolve_aliases((alias,))).get(alias)
 
@@ -424,6 +427,9 @@ class _MemoryTransaction:
             values = values[: query.limit]
         return tuple(values)
 
+    async def scan_facts(self) -> tuple[StoredFact, ...]:
+        return tuple(self.facts.values())
+
     async def delete_fact_streams(self, owner_key: bytes) -> None:
         for key, fact in tuple(self.facts.items()):
             if fact.owner_key_digest == owner_key:
@@ -456,11 +462,15 @@ class _MemoryTransaction:
             if (query.stream_digest is None or operation.stream_digest == query.stream_digest)
             and (query.states is None or operation.state in query.states)
             and (query.through_sequence is None or operation.sequence <= query.through_sequence)
+            and (query.compactable is None or operation.compactable == query.compactable)
         ]
         values.sort(key=lambda operation: (operation.sequence, operation.key_digest))
         if query.limit is not None:
             values = values[: query.limit]
         return tuple(values)
+
+    async def scan_operations(self) -> tuple[StoredOperation, ...]:
+        return tuple(self.operations.values())
 
     async def delete_operations(self, query: OperationQuery) -> tuple[StoredOperation, ...]:
         values = await self.list_operations(query)

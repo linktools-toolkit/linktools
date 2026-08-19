@@ -65,8 +65,8 @@ from ._contracts import (
     IdempotencyTerminalUpdate,
     MemoryRecord,
     RecoveryCheckpoint,
-    RecoveryCheckpointState,
-    RecoveryHandoffPhase,
+    RecoveryAdmissionRecord,
+    RecoveryStateRecord,
     ResultRecord,
     SessionRecord,
     ToolOperationAdmission,
@@ -469,6 +469,7 @@ class OperationLedgerRepository(_RepositoryBase):
                     stream_digest=stream,
                     states=frozenset({"SUCCEEDED", "FAILED", "CANCELLED"}),
                     through_sequence=through_sequence,
+                    compactable=True,
                 )
             )
         )
@@ -1850,7 +1851,7 @@ class RecoveryCheckpointRepositoryImpl(_ResourceRepository[RecoveryCheckpoint]):
             namespace=namespace,
             tenant_id=tenant_id,
             domain=RuntimeDomain.RECOVERY,
-            kind="recovery_checkpoint",
+            kind="recovery_state",
             resource_kind=ResourceKind.EXECUTION,
             value_type=RecoveryCheckpoint,
             identity_field="execution_id",
@@ -1859,7 +1860,75 @@ class RecoveryCheckpointRepositoryImpl(_ResourceRepository[RecoveryCheckpoint]):
     async def list(self, *, tenant_id: str) -> tuple[RecoveryCheckpoint, ...]:
         if tenant_id != self._tenant_id:
             return ()
-        return await self.list_values()
+        async def read(transaction: StateTransaction) -> tuple[RecoveryCheckpoint, ...]:
+            admissions = await transaction.list_records(
+                RecordQuery(
+                    partition_digest=self._partition("recovery_admission"),
+                    kind="recovery_admission",
+                )
+            )
+            decoded_admissions = []
+            for record in admissions:
+                decoded_admissions.append(
+                    (record, await self._decode(record, RecoveryAdmissionRecord))
+                )
+            states = await transaction.get_records(
+                tuple(self._state_key(admission.execution_id) for _, admission in decoded_admissions)
+            )
+            values = []
+            for admission_record, admission in decoded_admissions:
+                state_record = states.get(self._state_key(admission.execution_id))
+                if state_record is None:
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                values.append(await self._compose(admission_record, state_record))
+            return tuple(values)
+
+        return await self._store.read(read)
+
+    async def get(self, execution_id: str, *, tenant_id: str) -> RecoveryCheckpoint | None:
+        if tenant_id != self._tenant_id:
+            return None
+
+        async def read(transaction: StateTransaction) -> RecoveryCheckpoint | None:
+            keys = (self._admission_key(execution_id), self._state_key(execution_id))
+            records = await transaction.get_records(keys)
+            admission = records.get(keys[0])
+            state = records.get(keys[1])
+            if admission is not None and state is not None:
+                return await self._compose(admission, state)
+            legacy = await transaction.get_record(self._legacy_key(execution_id))
+            return None if legacy is None else await self._decode(legacy, RecoveryCheckpoint)
+
+        return await self._store.read(read)
+
+    async def create(self, record: RecoveryCheckpoint) -> RecoveryCheckpoint:
+        return await self._store.mutate(
+            lambda transaction: self.admit_in_transaction(transaction, record)
+        )
+
+    async def compare_and_swap(
+        self,
+        execution_id: str,
+        *,
+        tenant_id: str,
+        expected_revision: int,
+        next_record: RecoveryCheckpoint,
+    ) -> RecoveryCheckpoint:
+        result = await self._store.mutate(
+            lambda transaction: self.compare_and_swap_in_transaction(
+                transaction,
+                execution_id,
+                tenant_id=tenant_id,
+                expected_revision=expected_revision,
+                next_record=next_record,
+            )
+        )
+        _logger.debug(
+            "recovery checkpoint compare-and-swap committed: execution=%s revision=%s",
+            execution_id,
+            next_record.revision,
+        )
+        return result
 
     async def admit_in_transaction(
         self,
@@ -1867,13 +1936,36 @@ class RecoveryCheckpointRepositoryImpl(_ResourceRepository[RecoveryCheckpoint]):
         record: RecoveryCheckpoint,
     ) -> RecoveryCheckpoint:
         _require_tenant(record, self._tenant_id)
-        current = await transaction.get_record(self._key(self._kind, record.execution_id))
+        keys = (self._admission_key(record.execution_id), self._state_key(record.execution_id))
+        records = await transaction.get_records(keys)
+        current = records.get(keys[0])
         if current is not None:
-            existing = await self._decode(current, RecoveryCheckpoint)
+            if keys[1] not in records:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            existing = await self._compose(current, records[keys[1]])
             if not _recovery_admission_matches(existing, record):
                 raise AIError(ErrorCode.IDEMPOTENCY_CONFLICT)
             return existing
-        await transaction.insert_record(self._stored(self._kind, record.execution_id, record))
+        legacy = await transaction.get_record(self._legacy_key(record.execution_id))
+        if legacy is not None:
+            existing = await self._decode(legacy, RecoveryCheckpoint)
+            if not _recovery_admission_matches(existing, record):
+                raise AIError(ErrorCode.IDEMPOTENCY_CONFLICT)
+            await self._split_legacy(transaction, existing)
+            return existing
+        admission = RecoveryAdmissionRecord(
+            record.execution_id,
+            record.tenant_id,
+            record.input,
+            record.created_at,
+        )
+        state = _recovery_state_record(record)
+        await transaction.insert_record(
+            self._stored("recovery_admission", record.execution_id, admission)
+        )
+        await transaction.insert_record(
+            self._stored("recovery_state", record.execution_id, state)
+        )
         return record
 
     async def compare_and_swap_in_transaction(
@@ -1888,18 +1980,91 @@ class RecoveryCheckpointRepositoryImpl(_ResourceRepository[RecoveryCheckpoint]):
         if tenant_id != self._tenant_id:
             raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
         _require_tenant(next_record, self._tenant_id)
-        record = await transaction.get_record(self._key(self._kind, execution_id))
-        if record is None:
-            raise AIError(ErrorCode.STORAGE_NOT_FOUND)
-        current = await self._decode(record, RecoveryCheckpoint)
+        keys = (self._admission_key(execution_id), self._state_key(execution_id))
+        records = await transaction.get_records(keys)
+        admission_record = records.get(keys[0])
+        state_record = records.get(keys[1])
+        if admission_record is None or state_record is None:
+            legacy = await transaction.get_record(self._legacy_key(execution_id))
+            if legacy is None:
+                raise AIError(ErrorCode.STORAGE_NOT_FOUND)
+            current = await self._decode(legacy, RecoveryCheckpoint)
+            await self._split_legacy(transaction, current)
+            records = await transaction.get_records(keys)
+            admission_record = records[keys[0]]
+            state_record = records[keys[1]]
+        current = await self._compose(admission_record, state_record)
         if current.revision != expected_revision:
             raise AIError(ErrorCode.STORAGE_CONFLICT)
+        if not _recovery_admission_matches(current, next_record):
+            raise AIError(ErrorCode.STORAGE_CONFLICT)
+        next_state = _recovery_state_record(next_record)
         await _replace_checked(
             transaction,
-            _projected_record(self, record, next_record),
-            record.storage_version,
+            replace(
+                self._stored("recovery_state", execution_id, next_state),
+                storage_version=state_record.storage_version + 1,
+            ),
+            state_record.storage_version,
         )
         return next_record
+
+    def _admission_key(self, execution_id: str) -> bytes:
+        return self._key("recovery_admission", execution_id)
+
+    def _state_key(self, execution_id: str) -> bytes:
+        return self._key("recovery_state", execution_id)
+
+    def _legacy_key(self, execution_id: str) -> bytes:
+        return self._key("recovery_checkpoint", execution_id)
+
+    async def _compose(
+        self,
+        admission_record: StoredRecord,
+        state_record: StoredRecord,
+    ) -> RecoveryCheckpoint:
+        admission = await self._decode(admission_record, RecoveryAdmissionRecord)
+        state = await self._decode(state_record, RecoveryStateRecord)
+        return RecoveryCheckpoint(
+            admission.execution_id,
+            admission.tenant_id,
+            admission.input,
+            state.step_run_id,
+            state.agent_run_sequence,
+            state.state,
+            state.handoff_phase,
+            state.terminal_handoff,
+            state.handoff_contract_digest,
+            state.pending_operation_id,
+            state.revision,
+            admission.created_at,
+            state.updated_at,
+        )
+
+    async def _split_legacy(
+        self,
+        transaction: StateTransaction,
+        value: RecoveryCheckpoint,
+    ) -> None:
+        await transaction.insert_record(
+            self._stored(
+                "recovery_admission",
+                value.execution_id,
+                RecoveryAdmissionRecord(
+                    value.execution_id,
+                    value.tenant_id,
+                    value.input,
+                    value.created_at,
+                ),
+            )
+        )
+        await transaction.insert_record(
+            self._stored(
+                "recovery_state",
+                value.execution_id,
+                _recovery_state_record(value),
+            )
+        )
 
 
 class EvaluationRepositoryImpl(_ResourceRepository[EvaluationRecord]):
@@ -2175,7 +2340,12 @@ class TaskRepositoryImpl(_RepositoryBase):
                     kind="task_node",
                 )
             )
-            current_nodes = {node.node_id: node for node in await self._decode_many(node_records)}
+            decoded_nodes = await self._decode_many(node_records)
+            node_records_by_id = {
+                node.node_id: record
+                for node, record in zip(decoded_nodes, node_records, strict=True)
+            }
+            current_nodes = {node.node_id: node for node in decoded_nodes}
             next_nodes = dict(current_nodes)
             changed_nodes: list[tuple[TaskNodeView, TaskNodeView]] = []
             changed = True
@@ -2212,16 +2382,11 @@ class TaskRepositoryImpl(_RepositoryBase):
             if not changed_nodes:
                 return TaskGraphView(graph.graph_id, _graph_status(tuple(next_nodes.values())), graph.nodes)
             next_graph = replace(graph, status=_graph_status(tuple(next_nodes.values())))
-            replacements = [
-                RecordReplacement(
-                    _projected_record(self, graph_record, next_graph),
-                    graph_record.storage_version,
-                )
-            ]
+            replacements: list[RecordReplacement] = []
             for current, value in changed_nodes:
-                node_record = await transaction.get_record(self._node_key(graph_id, current.node_id))
+                node_record = node_records_by_id.get(current.node_id)
                 if node_record is None:
-                    raise AIError(ErrorCode.STORAGE_CONFLICT)
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                 stored_node = await self._decode(node_record, TaskNodeView)
                 if stored_node != current:
                     raise AIError(ErrorCode.STORAGE_CONFLICT)
@@ -2255,6 +2420,10 @@ class TaskRepositoryImpl(_RepositoryBase):
                 )
             )
             nodes = await self._decode_many(node_records)
+            node_records_by_id = {
+                node.node_id: record
+                for node, record in zip(nodes, node_records, strict=True)
+            }
             changed = [
                 (node, replace(node, status=TaskStatus.CANCELLED, owner=None, lease_expires_at=None))
                 for node in nodes
@@ -2267,16 +2436,11 @@ class TaskRepositoryImpl(_RepositoryBase):
                 node for node in nodes if node.node_id not in changed_ids
             )
             next_graph = replace(graph, status=_graph_status(next_nodes))
-            replacements = [
-                RecordReplacement(
-                    _projected_record(self, graph_record, next_graph),
-                    graph_record.storage_version,
-                )
-            ]
+            replacements: list[RecordReplacement] = []
             for current, value in changed:
-                node_record = await transaction.get_record(self._node_key(graph_id, current.node_id))
+                node_record = node_records_by_id.get(current.node_id)
                 if node_record is None:
-                    raise AIError(ErrorCode.STORAGE_CONFLICT)
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                 replacements.append(
                     RecordReplacement(
                         _projected_record(self, node_record, value),
@@ -2305,15 +2469,18 @@ class TaskRepositoryImpl(_RepositoryBase):
                 raise AIError(ErrorCode.TASK_NOT_READY)
             graph = await self._decode(graph_record, TaskGraphView)
             node = await self._decode(record, TaskNodeView)
-            node_records = await transaction.list_records(
-                RecordQuery(
-                    parent_digest=self._parent("task_node", "graph", graph_id),
-                    kind="task_node",
-                )
+            dependency_keys = tuple(
+                self._node_key(graph_id, dependency)
+                for dependency in node.dependencies
             )
+            dependency_records = await transaction.get_records(dependency_keys)
             nodes = {
-                value.node_id: value
-                for value in await self._decode_many(node_records)
+                dependency: await self._decode(
+                    dependency_records[self._node_key(graph_id, dependency)],
+                    TaskNodeView,
+                )
+                for dependency in node.dependencies
+                if self._node_key(graph_id, dependency) in dependency_records
             }
             if graph.graph_id != graph_id or any(
                 dependency not in nodes for dependency in node.dependencies
@@ -2359,11 +2526,6 @@ class TaskRepositoryImpl(_RepositoryBase):
             now = await transaction.now()
             _require_live_task_lease(node, lease, now)
             expires = now + timedelta(seconds=lease_seconds)
-            if await transaction.guard_record(
-                graph_record.key_digest,
-                expected_storage_version=graph_record.storage_version,
-            ) is None:
-                raise AIError(ErrorCode.TASK_FENCE_STALE)
             if not await transaction.update_record_lease(
                 node_record.key_digest,
                 expected_storage_version=node_record.storage_version,
@@ -2484,19 +2646,12 @@ class TaskRepositoryImpl(_RepositoryBase):
         stored_node = await self._decode(node_record, TaskNodeView)
         if stored_node != current:
             raise AIError(ErrorCode.STORAGE_CONFLICT)
-        graph = await self._decode(graph_record, TaskGraphView)
-        node_records = await transaction.list_records(
-            RecordQuery(
-                parent_digest=self._parent("task_node", "graph", current.graph_id),
-                kind="task_node",
-            )
-        )
-        node_values = [await self._decode(item, TaskNodeView) for item in node_records]
-        node_values = [value if item.node_id == current.node_id else item for item in node_values]
-        graph_value = replace(graph, status=_graph_status(tuple(node_values)))
-        graph_candidate = _projected_record(self, graph_record, graph_value)
+        if await transaction.guard_record(
+            graph_record.key_digest,
+            expected_storage_version=graph_record.storage_version,
+        ) is None:
+            raise AIError(ErrorCode.STORAGE_CONFLICT)
         node_candidate = _projected_record(self, node_record, value)
-        await _replace_checked(transaction, graph_candidate, graph_record.storage_version)
         await _replace_checked(transaction, node_candidate, node_record.storage_version)
 
 
@@ -3396,16 +3551,23 @@ def _recovery_admission_matches(
         left.execution_id == right.execution_id
         and left.tenant_id == right.tenant_id
         and left.input == right.input
-        and left.step_run_id is None
-        and right.step_run_id is None
-        and left.agent_run_sequence == right.agent_run_sequence == 0
-        and left.state is RecoveryCheckpointState.ADMITTED
-        and right.state is RecoveryCheckpointState.ADMITTED
-        and left.handoff_phase is RecoveryHandoffPhase.NONE
-        and right.handoff_phase is RecoveryHandoffPhase.NONE
-        and left.terminal_handoff is None
-        and right.terminal_handoff is None
-        and left.revision == right.revision == 0
+        and left.created_at == right.created_at
+    )
+
+
+def _recovery_state_record(value: RecoveryCheckpoint) -> RecoveryStateRecord:
+    return RecoveryStateRecord(
+        value.execution_id,
+        value.tenant_id,
+        value.step_run_id,
+        value.agent_run_sequence,
+        value.state,
+        value.handoff_phase,
+        value.terminal_handoff,
+        value.handoff_contract_digest,
+        value.pending_operation_id,
+        value.revision,
+        value.updated_at,
     )
 
 

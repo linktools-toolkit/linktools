@@ -280,6 +280,7 @@ class SessionView:
     cwd: "str | None" = None
     active_execution_ids: "tuple[str, ...]" = ()
     metadata: "Mapping[str, JsonValue]" = field(default_factory=dict)
+    history_quality: str = "complete"
 
 
 @dataclass(frozen=True, slots=True)

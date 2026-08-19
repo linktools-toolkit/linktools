@@ -74,6 +74,9 @@ class _FilesystemCache:
         self._operations: dict[bytes, StoredOperation | None] = {}
         self._record_kinds: tuple[str, ...] | None = None
         self._loaded_record_kinds: set[str] = set()
+        self._aliases_complete = False
+        self._fact_streams_complete = False
+        self._operations_complete = False
         self._cache_hits = 0
         self._cache_misses = 0
         self._record_kind_scans = 0
@@ -109,12 +112,12 @@ class _FilesystemCache:
         for kind in kinds:
             self._load_record_kind(kind)
         values.extend(
-                value
-                for value in self._records.values()
-                if isinstance(value, StoredRecord)
-                and value.kind == kind
-                and _matches_record(value, query)
-            )
+            value
+            for value in self._records.values()
+            if isinstance(value, StoredRecord)
+            and value.kind in kinds
+            and _matches_record(value, query)
+        )
         values.sort(key=lambda record: (record.sort_key, record.key_digest))
         self._log_summary("record_kind_scan", len(kinds))
         return tuple(values)
@@ -136,12 +139,19 @@ class _FilesystemCache:
         return value
 
     def list_aliases(self) -> tuple[tuple[bytes, bytes], ...]:
+        if self._aliases_complete:
+            return tuple(
+                (alias, record_key)
+                for alias, record_key in self._aliases.items()
+                if record_key is not None
+            )
         values: list[tuple[bytes, bytes]] = []
         for path in (self._root / "aliases").glob("*/*.json"):
             value = decode_alias(_read_json(path))
             self._aliases[value.alias_digest] = value.record_key_digest
             self._business_files_read += 1
             values.append((value.alias_digest, value.record_key_digest))
+        self._aliases_complete = True
         return tuple(values)
 
     def get_sequence(self, key: bytes) -> int:
@@ -213,12 +223,15 @@ class _FilesystemCache:
         self._business_files_read += len(subjects)
 
     def list_fact_streams(self) -> tuple[_FactStreamInfo, ...]:
+        if self._fact_streams_complete:
+            return tuple(value for value in self._fact_streams.values() if value is not None)
         values: list[_FactStreamInfo] = []
         for path in (self._root / "facts").glob("*/*/meta.json"):
             stream = bytes.fromhex(str(_read_json(path)["stream"]))
             info = self.get_fact_stream(stream)
             if info is not None:
                 values.append(info)
+        self._fact_streams_complete = True
         return tuple(values)
 
     def get_operation(self, key: bytes) -> StoredOperation | None:
@@ -238,13 +251,35 @@ class _FilesystemCache:
         return value
 
     def list_operations(self) -> tuple[StoredOperation, ...]:
+        if self._operations_complete:
+            return tuple(value for value in self._operations.values() if value is not None)
         values: list[StoredOperation] = []
         for path in (self._root / "operations/by-key").glob("*/*.json"):
             value = decode_operation(_read_json(path))
             self._operations[value.key_digest] = value
             self._business_files_read += 1
             values.append(value)
+        self._operations_complete = True
         return tuple(values)
+
+    def scan_records(self) -> tuple[StoredRecord, ...]:
+        for kind in self._record_kind_names():
+            self._load_record_kind(kind)
+        return tuple(value for value in self._records.values() if value is not None)
+
+    def scan_facts(self) -> tuple[StoredFact, ...]:
+        values: list[StoredFact] = []
+        for info in self.list_fact_streams():
+            loaded = _read_fact_batch(
+                self._root,
+                info.stream_digest,
+                tuple(range(1, info.last_sequence + 1)),
+            )
+            values.extend(loaded.values())
+        return tuple(values)
+
+    def scan_operations(self) -> tuple[StoredOperation, ...]:
+        return self.list_operations()
 
     def _record_kind_names(self) -> tuple[str, ...]:
         if self._record_kinds is None:
@@ -279,6 +314,8 @@ class _FilesystemCache:
 
     def set_record(self, key: bytes, value: StoredRecord | None) -> None:
         self._records[key] = value
+        if isinstance(value, StoredRecord) and self._record_kinds is not None:
+            self._record_kinds = tuple(sorted(set(self._record_kinds) | {value.kind}))
 
     def set_alias(self, key: bytes, value: bytes | None) -> None:
         self._aliases[key] = value
@@ -1323,11 +1360,24 @@ class _FilesystemTransaction:
         return await asyncio.to_thread(self._cache.get_record, key)
 
     async def get_records(self, keys: Sequence[bytes]) -> Mapping[bytes, StoredRecord]:
-        values: dict[bytes, StoredRecord] = {}
-        for key in dict.fromkeys(keys):
-            value = await self.get_record(key)
-            if value is not None:
-                values[key] = value
+        unique_keys = tuple(dict.fromkeys(keys))
+        if not unique_keys:
+            return {}
+        cached = await asyncio.to_thread(
+            lambda: {key: self._cache.get_record(key) for key in unique_keys}
+        )
+        values = {
+            key: value
+            for key, value in cached.items()
+            if value is not None
+        }
+        values.update(
+            key_value
+            for key_value in self.records.changes().items()
+            if key_value[0] in unique_keys
+        )
+        for key in self.records.deleted():
+            values.pop(key, None)
         return values
 
     async def insert_record(self, record: StoredRecord) -> None:
@@ -1473,23 +1523,37 @@ class _FilesystemTransaction:
             values = values[: query.limit]
         return tuple(values)
 
+    async def scan_records(self) -> tuple[StoredRecord, ...]:
+        values = {
+            record.key_digest: record
+            for record in await asyncio.to_thread(self._cache.scan_records)
+        }
+        values.update(self.records.changes())
+        for key in self.records.deleted():
+            values.pop(key, None)
+        return tuple(values.values())
+
     async def resolve_alias(self, alias: bytes) -> bytes | None:
         return (await self.resolve_aliases((alias,))).get(alias)
 
     async def resolve_aliases(self, aliases: Sequence[bytes]) -> Mapping[bytes, bytes]:
-        values: dict[bytes, bytes] = {}
-        for alias in dict.fromkeys(aliases):
-            if alias in self.aliases.deleted():
-                continue
-            if alias in self.aliases:
-                values[alias] = self.aliases[alias]
-            else:
-                value = await asyncio.to_thread(self._cache.get_alias, alias)
-                if value is not None:
-                    values[alias] = value
-        for value in values.values():
-            if await self.get_record(value) is None:
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        unique_aliases = tuple(dict.fromkeys(aliases))
+        if not unique_aliases:
+            return {}
+        cached = await asyncio.to_thread(
+            lambda: {alias: self._cache.get_alias(alias) for alias in unique_aliases}
+        )
+        values = {alias: value for alias, value in cached.items() if value is not None}
+        values.update(
+            alias_value
+            for alias_value in self.aliases.changes().items()
+            if alias_value[0] in unique_aliases
+        )
+        for alias in self.aliases.deleted():
+            values.pop(alias, None)
+        records = await self.get_records(tuple(values.values()))
+        if len(records) != len(set(values.values())):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         return values
 
     async def insert_alias(self, alias: StoredAlias) -> None:
@@ -1517,7 +1581,16 @@ class _FilesystemTransaction:
         return await asyncio.to_thread(self._cache.get_sequence, key)
 
     async def get_sequences(self, keys: Sequence[bytes]) -> Mapping[bytes, int]:
-        return {key: await self.get_sequence(key) for key in dict.fromkeys(keys)}
+        unique_keys = tuple(dict.fromkeys(keys))
+        if not unique_keys:
+            return {}
+        cached = await asyncio.to_thread(
+            lambda: {key: self._cache.get_sequence(key) for key in unique_keys}
+        )
+        cached.update(self.sequences.changes())
+        for key in self.sequences.deleted():
+            cached[key] = 0
+        return cached
 
     async def next_sequence(self, key: bytes) -> int:
         value = await self.get_sequence(key) + 1
@@ -1633,6 +1706,16 @@ class _FilesystemTransaction:
             values = values[: query.limit]
         return tuple(values)
 
+    async def scan_facts(self) -> tuple[StoredFact, ...]:
+        values = {
+            (fact.stream_digest, fact.sequence): fact
+            for fact in await asyncio.to_thread(self._cache.scan_facts)
+        }
+        values.update(self._facts)
+        for key in self._deleted_facts:
+            values.pop(key, None)
+        return tuple(values.values())
+
     async def delete_fact_streams(self, owner_key: bytes) -> None:
         sources = {
             info.stream_digest: info
@@ -1693,11 +1776,22 @@ class _FilesystemTransaction:
             if (query.stream_digest is None or item.stream_digest == query.stream_digest)
             and (query.states is None or item.state in query.states)
             and (query.through_sequence is None or item.sequence <= query.through_sequence)
+            and (query.compactable is None or item.compactable == query.compactable)
         ]
         values.sort(key=lambda item: (item.sequence, item.key_digest))
         if query.limit is not None:
             values = values[: query.limit]
         return tuple(values)
+
+    async def scan_operations(self) -> tuple[StoredOperation, ...]:
+        values = {
+            item.key_digest: item
+            for item in await asyncio.to_thread(self._cache.scan_operations)
+        }
+        values.update(self.operations.changes())
+        for key in self.operations.deleted():
+            values.pop(key, None)
+        return tuple(values.values())
 
     async def delete_operations(self, query: OperationQuery) -> tuple[StoredOperation, ...]:
         values = await self.list_operations(query)

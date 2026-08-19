@@ -11,7 +11,7 @@ import tempfile
 from collections.abc import AsyncIterator, Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, BinaryIO, Protocol, TypeVar
+from typing import TYPE_CHECKING, BinaryIO, Protocol, TypeVar, runtime_checkable
 
 from linktools.core import environ
 
@@ -84,6 +84,13 @@ class ObjectStore(Protocol):
     def open(self, key: str) -> AsyncIterator[bytes]: ...
 
 
+@runtime_checkable
+class ObjectStoreMaintenance(Protocol):
+    def list_objects(self) -> AsyncIterator[ObjectStat]: ...
+
+    async def delete_object(self, key: str, *, expected_digest: str) -> bool: ...
+
+
 class InMemoryObjectStore:
     def __init__(self, store_id: str = "memory") -> None:
         _validate_store_id(store_id)
@@ -118,6 +125,23 @@ class InMemoryObjectStore:
 
     async def validate_integrity(self) -> None:
         return None
+
+    async def _list_objects(self) -> AsyncIterator[ObjectStat]:
+        for key, value in self._objects.items():
+            yield ObjectStat(key, _digest(value), len(value))
+
+    def list_objects(self) -> AsyncIterator[ObjectStat]:
+        return self._list_objects()
+
+    async def delete_object(self, key: str, *, expected_digest: str) -> bool:
+        _validate_key(key)
+        value = self._objects.get(key)
+        if value is None:
+            return False
+        if _digest(value) != expected_digest:
+            raise AIError(ErrorCode.STORAGE_CONFLICT)
+        del self._objects[key]
+        return True
 
     async def _open(self, key: str) -> AsyncIterator[bytes]:
         _validate_key(key)
@@ -178,6 +202,22 @@ class _ScopedObjectStore:
 
     async def validate_integrity(self) -> None:
         await self._parent.validate_integrity()
+
+    async def _list_objects(self) -> AsyncIterator[ObjectStat]:
+        values = [value async for value in self._parent.list_objects()]
+        prefix = f"{self._scope}/"
+        for value in values:
+            if value.key.startswith(prefix):
+                yield ObjectStat(value.key[len(prefix) :], value.digest, value.size)
+
+    def list_objects(self) -> AsyncIterator[ObjectStat]:
+        return self._list_objects()
+
+    async def delete_object(self, key: str, *, expected_digest: str) -> bool:
+        return await self._parent.delete_object(
+            self._physical_key(key),
+            expected_digest=expected_digest,
+        )
 
     def open(self, key: str) -> AsyncIterator[bytes]:
         return self._parent.open(self._physical_key(key))
@@ -241,6 +281,29 @@ class FilesystemObjectStore:
 
     async def validate_integrity(self) -> None:
         await _await_thread(lambda: _validate_filesystem_objects(self._root, self._store_id))
+
+    async def _list_objects(self) -> AsyncIterator[ObjectStat]:
+        values = await _await_thread(lambda: _list_filesystem_objects(self._root, self._store_id))
+        for value in values:
+            yield value
+
+    def list_objects(self) -> AsyncIterator[ObjectStat]:
+        return self._list_objects()
+
+    async def delete_object(self, key: str, *, expected_digest: str) -> bool:
+        _validate_key(key)
+        destination, metadata = self._paths(key)
+        async with FilesystemMutationLock(self._root / "object.lock"):
+            current = await _await_thread(
+                lambda: _stat_filesystem_object(metadata, destination, key)
+            )
+            if current is None:
+                return False
+            if current.digest != expected_digest:
+                raise AIError(ErrorCode.STORAGE_CONFLICT)
+            return await _await_thread(
+                lambda: _delete_filesystem_object(destination, metadata)
+            )
 
     async def _open(self, key: str) -> AsyncIterator[bytes]:
         _validate_key(key)
@@ -436,6 +499,64 @@ class SqlObjectStore:
             if size != int(header["size"]) or digest.hexdigest() != str(header["content_digest"]):
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
 
+    async def _list_objects(self) -> AsyncIterator[ObjectStat]:
+        from sqlalchemy import select
+
+        table = self._metadata.tables["ai_objects"]
+        session = self._context.sessions()
+        try:
+            rows = (
+                (await session.execute(select(table).where(table.c.store_id == self.store_id)))
+                .mappings()
+                .all()
+            )
+        finally:
+            await session.close()
+        for row in rows:
+            yield ObjectStat(
+                str(row["object_key"]),
+                str(row["content_digest"]),
+                int(row["size"]),
+            )
+
+    def list_objects(self) -> AsyncIterator[ObjectStat]:
+        return self._list_objects()
+
+    async def delete_object(self, key: str, *, expected_digest: str) -> bool:
+        _validate_key(key)
+        from sqlalchemy import delete, select
+
+        key_digest = _key_digest(self.store_id, key).hex()
+
+        async def execute(session) -> bool:
+            table = self._metadata.tables["ai_objects"]
+            current = (
+                await session.execute(
+                    select(table.c.content_digest).where(
+                        table.c.key_digest == key_digest,
+                        table.c.store_id == self.store_id,
+                    )
+                )
+            ).scalar_one_or_none()
+            if current is None:
+                return False
+            if str(current) != expected_digest:
+                raise AIError(ErrorCode.STORAGE_CONFLICT)
+            await session.execute(
+                delete(self._metadata.tables["ai_object_chunks"]).where(
+                    self._metadata.tables["ai_object_chunks"].c.key_digest == key_digest
+                )
+            )
+            result = await session.execute(
+                delete(table).where(
+                    self._metadata.tables["ai_objects"].c.key_digest == key_digest,
+                    self._metadata.tables["ai_objects"].c.store_id == self.store_id,
+                )
+            )
+            return result.rowcount == 1
+
+        return await self._context.run_mutation(execute, domain="storage.object")
+
     async def _open(self, key: str) -> AsyncIterator[bytes]:
         _validate_key(key)
         from sqlalchemy import select
@@ -509,10 +630,7 @@ def build_object_sql_metadata(metadata: "MetaData | None" = None) -> "MetaData":
         ),
         Column("content_digest", digest, nullable=False, comment="SHA-256 digest of the immutable object bytes."),
         Column("size", BigInteger, nullable=False, comment="Exact immutable object size in bytes."),
-        *sql_audit_columns(
-            "Database audit time of the physical immutable object row; normally equal to creation time.",
-            "Database audit time when the immutable object header was created.",
-        ),
+        *sql_audit_columns(),
         comment="Immutable ObjectStore headers containing canonical object identity, content digest, and size.",
         **sql_table_options(),
     )
@@ -540,10 +658,7 @@ def build_object_sql_metadata(metadata: "MetaData | None" = None) -> "MetaData":
             nullable=False,
             comment="Binary content bytes for this immutable object chunk.",
         ),
-        *sql_audit_columns(
-            "Database audit time of the physical immutable chunk row; normally equal to creation time.",
-            "Database audit time when the immutable chunk row was inserted.",
-        ),
+        *sql_audit_columns(),
         comment="Ordered binary chunks that compose immutable ObjectStore content.",
         **sql_table_options(),
     )
@@ -590,7 +705,9 @@ async def _spool_file(chunks: AsyncIterator[bytes], path: Path, expected_size: i
             if size > expected_size:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             digest.update(chunk)
-            await _await_thread(lambda chunk=chunk: handle.write(chunk))
+            for offset in range(0, len(chunk), _CHUNK_SIZE):
+                value = chunk[offset : offset + _CHUNK_SIZE]
+                await _await_thread(lambda value=value: handle.write(value))
         await _await_thread(lambda: _flush_file(handle))
     finally:
         await _await_thread(handle.close)
@@ -664,6 +781,32 @@ def _validate_filesystem_objects(root: Path, store_id: str) -> None:
     actual_files = {path for path in (root / "objects").rglob("*") if path.is_file()}
     if actual_files != expected_files:
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+
+
+def _list_filesystem_objects(root: Path, store_id: str) -> tuple[ObjectStat, ...]:
+    values: list[ObjectStat] = []
+    for metadata in (root / "objects").glob("*/*.json"):
+        try:
+            value = json.loads(metadata.read_text(encoding="utf-8"))
+            key = value["key"]
+            destination = metadata.with_suffix(".bin")
+            stat = _read_filesystem_metadata(metadata, destination, str(key))
+            if _key_digest(store_id, str(key)).hex() != metadata.stem:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        except (OSError, TypeError, ValueError, KeyError) as error:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
+        values.append(stat)
+    return tuple(values)
+
+
+def _delete_filesystem_object(destination: Path, metadata: Path) -> bool:
+    present = destination.exists() or metadata.exists()
+    if not present:
+        return False
+    destination.unlink(missing_ok=True)
+    metadata.unlink(missing_ok=True)
+    sync_directory(destination.parent)
+    return True
 
 
 def _read_payload_batch(
@@ -769,6 +912,7 @@ __all__ = [
     "ObjectRef",
     "ObjectStat",
     "ObjectStore",
+    "ObjectStoreMaintenance",
     "SqlObjectStore",
     "TransientObjectStore",
     "build_object_sql_metadata",

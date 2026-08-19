@@ -5,6 +5,7 @@
 import asyncio
 import hashlib
 from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 from typing import Protocol, runtime_checkable
@@ -25,6 +26,23 @@ from ..storage import (
 from ._domain import AssetInfo, AssetKey, AssetRoot
 
 _logger = environ.get_logger("ai.asset.directory")
+
+
+@dataclass(frozen=True, slots=True)
+class _DirectoryEntry:
+    key: AssetKey
+    digest: str
+    size: int
+    modified_at: datetime
+
+
+@dataclass(frozen=True, slots=True)
+class _DirectorySignature:
+    device: int
+    inode: int
+    size: int
+    modified_ns: int
+    changed_ns: int
 
 
 @runtime_checkable
@@ -146,6 +164,8 @@ class DirectoryAssetBackend:
             for kind in self._kinds:
                 _safe_asset_parts(self._path_adapter.root_path(kind))
         self._lock = asyncio.Lock()
+        self._entries: dict[AssetKey, tuple[_DirectorySignature, _DirectoryEntry]] = {}
+        self._revision = _store_revision(())
 
     @property
     def root(self) -> AssetRoot:
@@ -169,7 +189,8 @@ class DirectoryAssetBackend:
     async def head_revision(self) -> StorageRevision:
         async with self._lock:
             entries = await asyncio.to_thread(self._scan)
-            return _store_revision(entries)
+            self._revision = _store_revision(entries)
+            return self._revision
 
     async def load_metadata(
         self,
@@ -178,14 +199,15 @@ class DirectoryAssetBackend:
         async with self._lock:
             entries = await asyncio.to_thread(self._scan)
             revision = _store_revision(entries)
+            self._revision = revision
             if after_revision == revision:
                 return MetadataLoad(MetadataLoadMode.PATCH, revision, ())
             return MetadataLoad(
                 MetadataLoadMode.REPLACE,
                 revision,
                 tuple(
-                    MetadataChange(key, self._info(key, content, modified, revision))
-                    for key, content, modified in entries
+                    MetadataChange(entry.key, self._info(entry, revision))
+                    for entry in entries
                 ),
             )
 
@@ -212,15 +234,16 @@ class DirectoryAssetBackend:
         result = await asyncio.to_thread(_stat_file, path)
         if result is None:
             return None
-        content, modified = result
+        signature, modified = result
         async with self._lock:
-            revision = _store_revision(await asyncio.to_thread(self._scan))
-        return self._info(key, content, modified, revision)
+            entry = self._cached_entry(key, path, signature, modified)
+            return self._info(entry, self._revision)
 
-    def _scan(self) -> "tuple[tuple[AssetKey, bytes, datetime], ...]":
+    def _scan(self) -> "tuple[_DirectoryEntry, ...]":
         if not self._directory.is_dir():
+            self._entries.clear()
             return ()
-        values: dict[AssetKey, tuple[bytes, datetime]] = {}
+        values: dict[AssetKey, _DirectoryEntry] = {}
         roots = (
             (self._path_adapter.root_path(kind), kind)
             for kind in sorted(self._kinds or ())
@@ -240,13 +263,27 @@ class DirectoryAssetBackend:
                     continue
                 if key in values:
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR, "asset path adapter produced duplicate keys")
-                values[key] = (
-                    read_bytes(path),
-                    datetime.fromtimestamp(path.stat().st_mtime, timezone.utc),
-                )
+                stat = path.stat()
+                signature = _directory_signature(stat)
+                cached = self._entries.get(key)
+                if cached is not None and cached[0] == signature:
+                    entry = cached[1]
+                else:
+                    content = read_bytes(path)
+                    entry = _DirectoryEntry(
+                        key,
+                        _etag(content),
+                        len(content),
+                        datetime.fromtimestamp(stat.st_mtime, timezone.utc),
+                    )
+                values[key] = entry
+                self._entries[key] = (signature, entry)
+        self._entries = {
+            key: value for key, value in self._entries.items() if key in values
+        }
         return tuple(
-            (key, content, modified)
-            for key, (content, modified) in sorted(
+            entry
+            for key, entry in sorted(
                 values.items(),
                 key=lambda item: (item[0].kind, item[0].id),
             )
@@ -278,24 +315,33 @@ class DirectoryAssetBackend:
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID, "asset kind is not registered")
         return key
 
-    def _info(
-        self,
-        key: AssetKey,
-        content: bytes,
-        modified_at: datetime,
-        store_revision: StorageRevision,
-    ) -> AssetInfo:
+    def _info(self, entry: _DirectoryEntry, store_revision: StorageRevision) -> AssetInfo:
         return AssetInfo(
-            key,
-            _entry_revision(content),
+            entry.key,
+            _entry_revision(entry.digest),
             store_revision,
-            _etag(content),
-            len(content),
+            entry.digest,
+            entry.size,
             StorageEntryStatus.NORMAL,
             self._root.root_id,
             self._root.digest,
-            modified_at,
+            entry.modified_at,
         )
+
+    def _cached_entry(
+        self,
+        key: AssetKey,
+        path: Path,
+        signature: _DirectorySignature,
+        modified_at: datetime,
+    ) -> _DirectoryEntry:
+        cached = self._entries.get(key)
+        if cached is not None and cached[0] == signature:
+            return cached[1]
+        content = read_bytes(path)
+        entry = _DirectoryEntry(key, _etag(content), len(content), modified_at)
+        self._entries[key] = (signature, entry)
+        return entry
 
 
 def directory_root(locator: str) -> AssetRoot:
@@ -304,17 +350,17 @@ def directory_root(locator: str) -> AssetRoot:
     return AssetRoot(f"file:{digest[:16]}", "file", str(path), digest)
 
 
-def _store_revision(entries: "Sequence[tuple[AssetKey, bytes, datetime]]") -> StorageRevision:
+def _store_revision(entries: "Sequence[_DirectoryEntry]") -> StorageRevision:
     return StorageRevision(
         canonical_sha256(
             [
                 {
-                    "kind": key.kind,
-                    "id": key.id,
-                    "etag": _etag(content),
-                    "modified_at": modified.isoformat(),
+                    "kind": entry.key.kind,
+                    "id": entry.key.id,
+                    "etag": entry.digest,
+                    "modified_at": entry.modified_at.isoformat(),
                 }
-                for key, content, modified in entries
+                for entry in entries
             ]
         )
     )
@@ -324,8 +370,8 @@ def _etag(value: bytes) -> str:
     return hashlib.sha256(value).hexdigest()
 
 
-def _entry_revision(value: bytes) -> StorageEntryRevision:
-    return StorageEntryRevision(int.from_bytes(hashlib.sha256(value).digest(), "big"))
+def _entry_revision(value: str) -> StorageEntryRevision:
+    return StorageEntryRevision(int(value, 16))
 
 
 def _safe_asset_parts(value: str) -> tuple[str, ...]:
@@ -349,10 +395,21 @@ def _read_optional(path: Path) -> bytes | None:
     return read_bytes(path) if path.is_file() else None
 
 
-def _stat_file(path: Path) -> tuple[bytes, datetime] | None:
+def _stat_file(path: Path) -> tuple[_DirectorySignature, datetime] | None:
     if not path.is_file():
         return None
-    return read_bytes(path), datetime.fromtimestamp(path.stat().st_mtime, timezone.utc)
+    stat = path.stat()
+    return _directory_signature(stat), datetime.fromtimestamp(stat.st_mtime, timezone.utc)
+
+
+def _directory_signature(stat: object) -> _DirectorySignature:
+    return _DirectorySignature(
+        int(stat.st_dev),
+        int(stat.st_ino),
+        int(stat.st_size),
+        int(stat.st_mtime_ns),
+        int(stat.st_ctime_ns),
+    )
 
 
 __all__ = [

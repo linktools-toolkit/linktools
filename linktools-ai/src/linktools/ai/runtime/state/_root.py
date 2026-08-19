@@ -27,6 +27,7 @@ if TYPE_CHECKING:
 
     from ._materializer import _MaterializedRuntimeState, _RuntimeObjectRouter
     from ._retention import RuntimeRetentionController
+    from ._maintenance import RuntimeStorageMaintenance
     from ._steps import RuntimeStepStore
 
 
@@ -62,6 +63,7 @@ class RuntimeState:
         self._objects: "_RuntimeObjectRouter | None" = None
         self._steps: "RuntimeStepStore | None" = None
         self._retention: "RuntimeRetentionController | None" = None
+        self._maintenance: "RuntimeStorageMaintenance | None" = None
         self._metrics: StorageMetrics | None = None
         self._handoff_contract_digest: str | None = None
 
@@ -150,6 +152,14 @@ class RuntimeState:
     def retention(self) -> "RuntimeRetentionController":
         return self._require_state(self._retention)
 
+    @property
+    def maintenance(self) -> "RuntimeStorageMaintenance":
+        return self._require_state(self._maintenance)
+
+    @property
+    def metrics(self) -> StorageMetrics:
+        return self._require_state(self._metrics)
+
     async def initialize(self, *, namespace: str, tenant_id: str) -> None:
         async with self._lock:
             if self._lifecycle is not _RuntimeStateLifecycle.NEW:
@@ -213,6 +223,7 @@ class RuntimeState:
         self._objects = value.objects
         self._steps = value.steps
         self._retention = value.retention
+        self._maintenance = value.maintenance
         self._metrics = value.metrics
         self._close_actions = value.close_actions
         self._namespace = namespace
@@ -228,17 +239,23 @@ class RuntimeState:
             raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY, "RuntimeState is not ready")
         return value
 
-    def _object_store(self, domain: RuntimeDomain) -> ObjectStore:
+    def object_store(self, domain: RuntimeDomain) -> ObjectStore:
         self._require_ready()
         if self._objects is None:
             raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
         return self._objects.object_store(domain)
 
-    def _working_object_store(self, domain: RuntimeDomain, *, owner_scope: str) -> ObjectStore:
+    def _object_store(self, domain: RuntimeDomain) -> ObjectStore:
+        return self.object_store(domain)
+
+    def working_object_store(self, domain: RuntimeDomain, *, owner_scope: str) -> ObjectStore:
         self._require_ready()
         if self._objects is None:
             raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
         return self._objects.working_object_store(domain, owner_scope=owner_scope)
+
+    def _working_object_store(self, domain: RuntimeDomain, *, owner_scope: str) -> ObjectStore:
+        return self.working_object_store(domain, owner_scope=owner_scope)
 
     async def _release_object_scope(self, domain: RuntimeDomain, *, owner_scope: str) -> None:
         self._require_ready()

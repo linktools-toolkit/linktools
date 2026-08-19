@@ -258,7 +258,13 @@ class DefaultExecutionService:
             raise RuntimeError("local execution waiter is already bound")
         self._local_waiter = waiter
 
-    async def _acquire_dependency_hold(self, execution_id: str, *, tenant_id: str, hold_id: str) -> None:
+    async def acquire_dependency_hold(
+        self,
+        execution_id: str,
+        *,
+        tenant_id: str,
+        hold_id: str,
+    ) -> None:
         if not hold_id:
             raise ValueError("execution dependency hold id is required")
         async with self._handoff_condition:
@@ -267,7 +273,13 @@ class DefaultExecutionService:
                 await self._handoff_condition.wait()
             state.dependency_holds.add(hold_id)
 
-    async def _release_dependency_hold(self, execution_id: str, *, tenant_id: str, hold_id: str) -> None:
+    async def release_dependency_hold(
+        self,
+        execution_id: str,
+        *,
+        tenant_id: str,
+        hold_id: str,
+    ) -> None:
         owner = False
         state: _ExecutionHandoffState | None = None
         async with self._handoff_condition:
@@ -281,7 +293,7 @@ class DefaultExecutionService:
         if owner and state is not None:
             await self._run_handoff_cleanup(execution_id, tenant_id, state)
 
-    async def _request_terminal_handoff(self, execution_id: str, *, tenant_id: str) -> None:
+    async def request_terminal_handoff(self, execution_id: str, *, tenant_id: str) -> None:
         owner = False
         state: _ExecutionHandoffState
         async with self._handoff_condition:
@@ -294,7 +306,7 @@ class DefaultExecutionService:
     async def _request_handoff_if_terminal(self, execution_id: str, tenant_id: str) -> None:
         current = await self._state.executions.get(execution_id, tenant_id=tenant_id)
         if current is not None and current.status in {ExecutionStatus.SUCCEEDED, ExecutionStatus.FAILED, ExecutionStatus.CANCELLED}:
-            await self._request_terminal_handoff(execution_id, tenant_id=tenant_id)
+            await self.request_terminal_handoff(execution_id, tenant_id=tenant_id)
 
     def _claim_cleanup_locked(self, state: _ExecutionHandoffState) -> bool:
         if state.active_consumers == 0 and not state.dependency_holds and state.release_requested and not state.release_in_progress:

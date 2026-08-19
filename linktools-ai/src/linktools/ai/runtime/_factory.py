@@ -53,7 +53,7 @@ async def build_local_runtime(
         raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
     execution = DefaultExecutionService(
         state.execution,
-        state._object_store(RuntimeDomain.EXECUTION),
+        state.object_store(RuntimeDomain.EXECUTION),
         authorization,
         sessions=state.conversation.sessions,
         history_reader=history_reader,
@@ -72,9 +72,12 @@ async def build_local_runtime(
         route = state.plan.route(RuntimeDomain.MEMORY)
         transient = route.retention is RuntimeRetentionMode.TRANSIENT
         store = (
-            state._working_object_store(RuntimeDomain.MEMORY, owner_scope=f"execution:{execution_id}")
+            state.working_object_store(
+                RuntimeDomain.MEMORY,
+                owner_scope=f"execution:{execution_id}",
+            )
             if transient
-            else state._object_store(RuntimeDomain.MEMORY)
+            else state.object_store(RuntimeDomain.MEMORY)
         )
         return memory_store_factory(
             memory_tenant,
@@ -92,9 +95,9 @@ async def build_local_runtime(
             state.conversation,
             state.execution,
             state.recovery,
-            state._object_store(RuntimeDomain.EXECUTION),
-            state._object_store(RuntimeDomain.RECOVERY),
-            state._metrics,
+            state.object_store(RuntimeDomain.EXECUTION),
+            state.object_store(RuntimeDomain.RECOVERY),
+            state.metrics,
             namespace,
             state.steps,
             executor,
@@ -134,6 +137,7 @@ async def build_local_runtime(
             execution,
             _cursor_signer("session", grant_key),
             history_reader=session_history_reader,
+            transcript_store=state.steps.read_store(RuntimeDomain.CONVERSATION),
             release_terminal=state.retention.release_session,
             gated_execution=execution,
         )
@@ -156,9 +160,9 @@ async def build_local_runtime(
             authorization,
             execution,
             release_terminal=state.retention.release_evaluation,
-            acquire_execution_hold=execution._acquire_dependency_hold,
-            release_execution_hold=execution._release_dependency_hold,
-            request_execution_handoff=execution._request_terminal_handoff,
+            acquire_execution_hold=execution.acquire_dependency_hold,
+            release_execution_hold=execution.release_dependency_hold,
+            request_execution_handoff=execution.request_terminal_handoff,
         )
         approval = DefaultApprovalService(state.recovery.approvals, authorization)
         event = DefaultEventService(

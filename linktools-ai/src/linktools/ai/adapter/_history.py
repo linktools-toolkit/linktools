@@ -286,11 +286,11 @@ class StepSessionHistoryReader:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         if snapshot.state != "complete":
             raise AIError(ErrorCode.SESSION_HISTORY_UNAVAILABLE)
-        projected = [
-            item
-            for message in snapshot.messages
-            for item in _project_message(message)
+        messages = [
+            message
+            async for message in self._store.iter_messages(run_id=continuation_step_run_id)
         ]
+        projected = [item for message in messages for item in _project_message(message)]
         source_revision = canonical_sha256(
             {
                 "session_id": session_id,

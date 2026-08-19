@@ -272,11 +272,8 @@ def sql_table_options() -> "Mapping[str, str]":
     return {"mysql_engine": "InnoDB", "mysql_charset": "utf8mb4", "mysql_collate": "utf8mb4_bin"}
 
 
-def sql_audit_columns(
-    updated_comment: str = "Update timestamp",
-    created_comment: str = "Creation timestamp",
-) -> "tuple[Column, Column]":
-    from sqlalchemy import TIMESTAMP, Column, DefaultClause
+def sql_audit_columns() -> "tuple[Column, Column]":
+    from sqlalchemy import Column, DateTime, DefaultClause
     from sqlalchemy.dialects import mysql
     from sqlalchemy.ext.compiler import compiles
     from sqlalchemy.sql.elements import ClauseElement
@@ -285,7 +282,7 @@ def sql_audit_columns(
         inherit_cache = True
 
         def __str__(self) -> str:
-            return "CURRENT_TIMESTAMP(6)"
+            return "CURRENT_TIMESTAMP"
 
     class AuditCreatedTimestamp(ClauseElement):
         inherit_cache = True
@@ -296,7 +293,7 @@ def sql_audit_columns(
 
     @compiles(AuditCurrentTimestamp, "mysql")
     def compile_mysql_audit_timestamp(element: object, compiler: object, **kwargs: object) -> str:
-        return "CURRENT_TIMESTAMP(6) ON UPDATE CURRENT_TIMESTAMP(6)"
+        return "CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP"
 
     @compiles(AuditCreatedTimestamp)
     def compile_created_timestamp(element: object, compiler: object, **kwargs: object) -> str:
@@ -304,23 +301,23 @@ def sql_audit_columns(
 
     @compiles(AuditCreatedTimestamp, "mysql")
     def compile_mysql_created_timestamp(element: object, compiler: object, **kwargs: object) -> str:
-        return "CURRENT_TIMESTAMP(6)"
+        return "CURRENT_TIMESTAMP"
 
-    timestamp_type = TIMESTAMP(timezone=True).with_variant(mysql.TIMESTAMP(fsp=6), "mysql")
+    timestamp_type = DateTime(timezone=True).with_variant(mysql.DATETIME(), "mysql")
     return (
         Column(
             "updated_at",
             timestamp_type,
             nullable=False,
             server_default=DefaultClause(AuditCurrentTimestamp()),
-            comment=updated_comment,
+            comment="Update timestamp",
         ),
         Column(
             "created_at",
             timestamp_type,
             nullable=False,
             server_default=DefaultClause(AuditCreatedTimestamp()),
-            comment=created_comment,
+            comment="Creation timestamp",
         ),
     )
 
@@ -616,7 +613,13 @@ def _validate_server_default(
         if dialect_name == "postgresql":
             allowed.add("now()")
         if dialect_name == "mysql" and expected.name == "updated_at":
-            allowed.add("current_timestamp(6)onupdatecurrent_timestamp(6)")
+            allowed.update(
+                {
+                    "current_timestamponupdatecurrent_timestamp",
+                    "current_timestamp()onupdatecurrent_timestamp()",
+                    "current_timestamp(6)onupdatecurrent_timestamp(6)",
+                }
+            )
         if actual_value not in allowed:
             _schema_mismatch(table=table_name, category="server_default", column=expected.name)
         return

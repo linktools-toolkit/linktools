@@ -593,6 +593,15 @@ class _SqlTransaction:
         if query.limit is not None:
             statement = statement.limit(query.limit)
         rows = (await self._session.execute(statement)).mappings().all()
+        values = tuple(_record_from_row(row) for row in rows)
+        self._record_cache.update({value.key_digest: value for value in values})
+        return values
+
+    async def scan_records(self) -> tuple[StoredRecord, ...]:
+        from sqlalchemy import select
+
+        table = self._table("ai_state_records")
+        rows = (await self._session.execute(select(table))).mappings().all()
         return tuple(_record_from_row(row) for row in rows)
 
     async def resolve_alias(self, alias: bytes) -> bytes | None:
@@ -818,6 +827,13 @@ class _SqlTransaction:
             facts = facts[: query.limit]
         return facts
 
+    async def scan_facts(self) -> tuple[StoredFact, ...]:
+        from sqlalchemy import select
+
+        table = self._table("ai_state_facts")
+        rows = (await self._session.execute(select(table))).mappings().all()
+        return tuple(_fact_from_row(row) for row in rows)
+
     async def delete_fact_streams(self, owner_key: bytes) -> None:
         from sqlalchemy import delete
 
@@ -863,10 +879,19 @@ class _SqlTransaction:
             conditions.append(table.c.state.in_(tuple(query.states)))
         if query.through_sequence is not None:
             conditions.append(table.c.sequence <= query.through_sequence)
+        if query.compactable is not None:
+            conditions.append(table.c.compactable == query.compactable)
         statement = select(table).where(*conditions).order_by(table.c.sequence, table.c.key_digest)
         if query.limit is not None:
             statement = statement.limit(query.limit)
         rows = (await self._session.execute(statement)).mappings().all()
+        return tuple(_operation_from_row(row) for row in rows)
+
+    async def scan_operations(self) -> tuple[StoredOperation, ...]:
+        from sqlalchemy import select
+
+        table = self._table("ai_state_operations")
+        rows = (await self._session.execute(select(table))).mappings().all()
         return tuple(_operation_from_row(row) for row in rows)
 
     async def delete_operations(self, query: OperationQuery) -> tuple[StoredOperation, ...]:

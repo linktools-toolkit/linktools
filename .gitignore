@@ -7,9 +7,16 @@
 /dist/
 /__pycache__/
 /venv/
+/.venv/
 
-.linktools.json
 .linktools/
+.linktools.json
+.claude/
+.vscode/
+.worktrees/
+.docs/
+.superpowers/
+docs/superpowers/
 
 linktools*/build/
 linktools*/dist/
@@ -18,5 +25,3 @@ linktools*/src/linktools/assets/__init__.py
 linktools*/src/linktools/commands/__init__.py
 linktools*/src/linktools/references/__init__.py
 linktools*/src/linktools/capabilities/*.py
-.worktrees/
-.superpowers/

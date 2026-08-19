@@ -305,7 +305,7 @@ class LocalExecutionBackend:
             updated_at=now,
         )
         expected = await self._expected_session_cursor(execution) if execution.session_id is not None else None
-        started = await self._runtime_commands.commit_start_checkpoint(
+        started = await self._runtime_commands.commit_agent_attempt_checkpoint(
             ExecutionStartClaim(
                 execution.execution_id,
                 execution.tenant_id,
@@ -740,7 +740,7 @@ class LocalExecutionBackend:
             else:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             request = ExecutionRequest(
-                user_prompt=recovery_input.user_prompt,
+                user_prompt=recovery_input.prompt_text(),
                 principal=principal,
                 idempotency_key=f"recovery:{checkpoint.execution_id}",
                 memory_scope=recovery_input.memory_scope,
@@ -2135,6 +2135,7 @@ class LocalExecutionBackend:
                     next_cursor=next_cursor,
                     step_run=run,
                     snapshot=snapshot,
+                    binding_digest=execution.binding_digest,
                 )
             except AIError as error:
                 if error.code is not ErrorCode.STORAGE_COMMIT_UNKNOWN:
@@ -2597,7 +2598,10 @@ class LocalExecutionBackend:
             self._step_reads[RuntimeDomain.EXECUTION],
             StateStepArchive,
         ):
-            async with self._steps.execution_projection_checkpoint(run_id) as checkpoint:
+            async with self._steps.execution_projection_checkpoint(
+                run_id,
+                binding_digest=current.binding_digest,
+            ) as checkpoint:
                 projection = checkpoint.batch
                 committed = await self._commit_execution_terminal_checkpoint_locked(
                     current,

@@ -123,10 +123,7 @@ def build_runtime_sql_metadata(
             nullable=False,
             comment="Versioned canonical domain payload not needed by SQL identity, query, CAS, or lease predicates.",
         ),
-        *_audit(
-            "Database audit time of the latest physical row update.",
-            "Database audit time when the physical row was created.",
-        ),
+        *_audit(),
         comment=_RECORD_COMMENT,
         **sql_table_options(),
     )
@@ -153,10 +150,7 @@ def build_runtime_sql_metadata(
             nullable=False,
             comment="Canonical SHA-256 identity of the runtime record resolved by this alias.",
         ),
-        *_audit(
-            "Database audit time of the latest physical alias row update.",
-            "Database audit time when the alias row was created.",
-        ),
+        *_audit(),
         comment=_ALIAS_COMMENT,
         **sql_table_options(),
     )
@@ -205,10 +199,7 @@ def build_runtime_sql_metadata(
             comment="Queryable fact state such as snapshot completeness or tool-effect lifecycle state.",
         ),
         Column("payload_json", JSON, nullable=False, comment="Versioned canonical immutable fact payload."),
-        *_audit(
-            "Database audit time of the physical fact row; immutable facts normally retain creation time.",
-            "Database audit time when the fact row was appended.",
-        ),
+        *_audit(),
         comment=_FACT_COMMENT,
         **sql_table_options(),
     )
@@ -228,10 +219,7 @@ def build_runtime_sql_metadata(
             comment="Canonical SHA-256 identity of the monotonic sequence counter.",
         ),
         Column("value", BigInteger, nullable=False, comment="Last committed value allocated by the sequence."),
-        *_audit(
-            "Database audit time of the latest committed sequence increment.",
-            "Database audit time when the sequence was created.",
-        ),
+        *_audit(),
         comment=_SEQUENCE_COMMENT,
         **sql_table_options(),
     )
@@ -273,10 +261,7 @@ def build_runtime_sql_metadata(
             nullable=False,
             comment="Versioned canonical operation request, result, error, resource identity, and semantic timestamps.",
         ),
-        *_audit(
-            "Database audit time of the latest operation state transition.",
-            "Database audit time when the durable operation was appended.",
-        ),
+        *_audit(),
         comment=_OPERATION_COMMENT,
         **sql_table_options(),
     )
@@ -302,8 +287,8 @@ def required_runtime_sql_tables(plan: RuntimeStatePlan) -> frozenset[str]:
     )
 
 
-def _audit(updated_comment: str, created_comment: str) -> tuple[object, object]:
-    return sql_audit_columns(updated_comment, created_comment)
+def _audit() -> tuple[object, object]:
+    return sql_audit_columns()
 
 
 __all__ = [

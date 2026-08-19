@@ -6,12 +6,14 @@ import asyncio
 import json
 import time
 from binascii import Error as Base64Error
+from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from typing import Protocol
 
 from linktools.core import environ
+from pydantic_ai_harness.step_persistence import ContinuableSnapshot
 
 from ..core import (
     AuthorizationAction,
@@ -76,6 +78,26 @@ class _GatedExecutionService(Protocol):
         request: ExecutionRequest,
     ) -> ExecutionHandle: ...
 
+
+class _SessionTranscriptStore(Protocol):
+    async def has_canonical_transcript(self, *, run_id: str) -> bool: ...
+
+    async def iter_messages(self, *, run_id: str) -> AsyncIterator[object]: ...
+
+    async def load_model_context(
+        self,
+        *,
+        run_id: str,
+        binding_digest: str,
+    ) -> tuple[object, ...]: ...
+
+    async def latest_snapshot(
+        self,
+        *,
+        run_id: str,
+        include_interrupted: bool = False,
+    ) -> ContinuableSnapshot | None: ...
+
     async def _run_for_session_with_launch_gate(
         self,
         binding_digest: str,
@@ -109,6 +131,18 @@ class SessionQueryApi(Protocol):
         limit: int = 100,
     ) -> "Page[SessionHistoryItem]": ...
     async def load(self, session_id: str, *, principal: Principal) -> LoadedSession: ...
+    def iter_session_messages(
+        self,
+        session_id: str,
+        *,
+        principal: Principal,
+    ) -> AsyncIterator[object]: ...
+    async def load_model_context(
+        self,
+        session_id: str,
+        *,
+        principal: Principal,
+    ) -> tuple[object, ...]: ...
 
 
 class SessionApi(SessionQueryApi, Protocol):
@@ -131,6 +165,7 @@ class DefaultSessionService:
         cursor_signer: CursorSigner,
         *,
         history_reader: SessionHistoryReader,
+        transcript_store: "_SessionTranscriptStore | None" = None,
         release_terminal: _SessionReleaseCallback | None = None,
         gated_execution: "_GatedExecutionService | None" = None,
     ) -> None:
@@ -140,6 +175,7 @@ class DefaultSessionService:
         self._execution = execution
         self._cursor_signer = cursor_signer
         self._history_reader = history_reader
+        self._transcript_store = transcript_store
         self._release_terminal = release_terminal or _no_release_terminal
         self._gated_execution = gated_execution
         self._handoff_states: dict[tuple[str, str], _SessionHandoffState] = {}
@@ -260,6 +296,44 @@ class DefaultSessionService:
             active_execution = await self._active_admitted_execution(record)
             active = () if active_execution is None else (active_execution.execution_id,)
             return LoadedSession(await self._view(record, principal), active)
+
+    async def load_model_context(
+        self,
+        session_id: str,
+        *,
+        principal: Principal,
+    ) -> tuple[object, ...]:
+        async with self._session_consumer(session_id, principal.tenant_id):
+            record = await self._authorized(session_id, principal, AuthorizationAction.SESSION_READ)
+            if self._transcript_store is None or record.continuation is None:
+                return ()
+            return await self._transcript_store.load_model_context(
+                run_id=record.continuation.step_run_id,
+                binding_digest=record.binding_digest,
+            )
+
+    async def _iter_session_messages(
+        self,
+        session_id: str,
+        *,
+        principal: Principal,
+    ) -> AsyncIterator[object]:
+        async with self._session_consumer(session_id, principal.tenant_id):
+            record = await self._authorized(session_id, principal, AuthorizationAction.SESSION_READ)
+            if self._transcript_store is None or record.continuation is None:
+                return
+            async for message in self._transcript_store.iter_messages(
+                run_id=record.continuation.step_run_id,
+            ):
+                yield message
+
+    def iter_session_messages(
+        self,
+        session_id: str,
+        *,
+        principal: Principal,
+    ) -> AsyncIterator[object]:
+        return self._iter_session_messages(session_id, principal=principal)
 
     async def resume(self, binding_digest: str, session_id: str, request: ResumeSessionRequest) -> ExecutionHandle:
         return await self._resume(binding_digest, session_id, request, launch_gate=None)
@@ -765,6 +839,16 @@ class DefaultSessionService:
     async def _view(self, record: SessionRecord, principal: Principal) -> SessionView:
         active_execution = await self._active_admitted_execution(record)
         active = () if active_execution is None else (active_execution.execution_id,)
+        history_quality = record.history_quality
+        if (
+            history_quality == "complete"
+            and record.continuation is not None
+            and self._transcript_store is not None
+            and not await self._transcript_store.has_canonical_transcript(
+                run_id=record.continuation.step_run_id,
+            )
+        ):
+            history_quality = "legacy_partial"
         return SessionView(
             record.session_id,
             record.binding_digest,
@@ -774,6 +858,7 @@ class DefaultSessionService:
             record.cwd,
             active,
             record.metadata,
+            history_quality,
         )
 
     async def _active_admitted_execution(

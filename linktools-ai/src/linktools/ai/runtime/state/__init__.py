@@ -14,11 +14,13 @@ from ._codec import (
     encode_fact,
     encode_operation,
     encode_record,
+    iter_runtime_object_refs,
 )
 from ._commands import ConversationStateCommands, ExecutionStateCommands, RuntimeStateCommands
 from ._contracts import (
     ApprovalRepository,
     ArtifactState,
+    ContextProjection,
     ConversationState,
     EvaluationState,
     EventRepository,
@@ -26,17 +28,26 @@ from ._contracts import (
     ExecutionRecord,
     ExecutionRepository,
     ExecutionState,
+    InlineContextBlock,
     MemoryRecord,
     MemoryState,
     RecoveryCheckpointState,
+    RecoveryAdmissionRecord,
     RecoveryHandoffPhase,
     RecoveryState,
+    RecoveryStateRecord,
+    RuntimePayloadRef,
     SessionRecord,
     SessionRepository,
+    StoredStepSnapshot,
     TaskState,
     ToolOperationAdmission,
+    TranscriptChunk,
+    TranscriptOrigin,
+    TranscriptSpanRef,
 )
 from ._filesystem import FilesystemStateStorageGroup, FilesystemStateStore
+from ._maintenance import RuntimeStorageMaintenance
 from ._memory import MemoryStateStorageGroup, MemoryStateStore
 from ._plan import (
     RuntimeDomain,
@@ -48,7 +59,14 @@ from ._repositories import ExecutionRepositoryImpl, SessionRepositoryImpl
 from ._root import RuntimeState
 from ._schema import build_runtime_sql_metadata
 from ._sql import SqlStateStorageGroup, SqlStateStore
-from ._steps import ExecutionProjectionBatch, ExecutionProjectionCheckpoint, StateStepArchive
+from ._steps import (
+    ExecutionProjectionBatch,
+    ExecutionProjectionCheckpoint,
+    LegacyMaterializationResult,
+    PreparedStepSnapshot,
+    StateStepArchive,
+)
+from ._history import TranscriptRepository
 from ._store import (
     FactQuery,
     Observed,
@@ -80,6 +98,7 @@ __all__ = [
     "CURRENT_DATA_VERSION",
     "ApprovalRepository",
     "ArtifactState",
+    "ContextProjection",
     "ConversationState",
     "ConversationStateCommands",
     "EvaluationState",
@@ -95,6 +114,9 @@ __all__ = [
     "FilesystemStateStorageGroup",
     "FactQuery",
     "FilesystemStateStore",
+    "InlineContextBlock",
+    "LegacyMaterializationResult",
+    "PreparedStepSnapshot",
     "MemoryRecord",
     "MemoryState",
     "MemoryStateStore",
@@ -104,17 +126,22 @@ __all__ = [
     "RecordQuery",
     "RecordReplacement",
     "RecoveryCheckpointState",
+    "RecoveryAdmissionRecord",
     "RecoveryHandoffPhase",
     "RecoveryState",
+    "RecoveryStateRecord",
     "RuntimeDomain",
     "RuntimeRetentionMode",
     "RuntimeState",
     "RuntimeStatePlan",
     "RuntimeStateRoute",
     "RuntimeStateCommands",
+    "RuntimeStorageMaintenance",
+    "RuntimePayloadRef",
     "SessionRecord",
     "SessionRepository",
     "SessionRepositoryImpl",
+    "StoredStepSnapshot",
     "SqlStateStore",
     "SqlStateStorageGroup",
     "StateStepArchive",
@@ -128,6 +155,10 @@ __all__ = [
     "StoredRecord",
     "TaskState",
     "ToolOperationAdmission",
+    "TranscriptChunk",
+    "TranscriptOrigin",
+    "TranscriptRepository",
+    "TranscriptSpanRef",
     "alias_digest",
     "build_runtime_sql_metadata",
     "decode_alias",
@@ -140,6 +171,7 @@ __all__ = [
     "encode_fact",
     "encode_operation",
     "encode_record",
+    "iter_runtime_object_refs",
     "operation_key",
     "parent_digest",
     "partition_digest",

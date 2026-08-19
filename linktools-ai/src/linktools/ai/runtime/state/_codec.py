@@ -4,7 +4,7 @@
 
 import base64
 import types
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping
 from dataclasses import MISSING, fields, is_dataclass
 from datetime import datetime
 from enum import Enum
@@ -45,9 +45,18 @@ from ._contracts import (
     IdempotencyRecord,
     MemoryRecord,
     RecoveryCheckpoint,
+    RecoveryAdmissionRecord,
+    RecoveryStateRecord,
     ResultRecord,
+    ContextProjection,
+    InlineContextBlock,
+    RuntimePayloadRef,
     SessionRecord,
+    TranscriptChunk,
+    TranscriptOrigin,
+    TranscriptSpanRef,
 )
+from ._plan import RuntimeDomain
 from ._store import (
     StoredAlias,
     StoredFact,
@@ -62,9 +71,10 @@ DomainT = TypeVar("DomainT")
 _DOMAIN_TYPES = {
     value.__name__: value
     for value in (
-        ApprovalRecord,
+    ApprovalRecord,
         ArtifactRecord,
-        ConversationCursor,
+    ConversationCursor,
+        ContextProjection,
         EvaluationRecord,
         ExecutionEventRecord,
         ExecutionRecord,
@@ -75,11 +85,19 @@ _DOMAIN_TYPES = {
         OperationLedgerRecord,
         Principal,
         RecoveryCheckpoint,
+        RecoveryAdmissionRecord,
+        RecoveryStateRecord,
         ResourceRef,
         ResultRecord,
         SessionRecord,
         ObjectRef,
         StoredPayload,
+        InlineContextBlock,
+        RuntimePayloadRef,
+        TranscriptChunk,
+        TranscriptOrigin,
+        TranscriptSpanRef,
+        RuntimeDomain,
         TaskGraph,
         TaskGraphLimits,
         TaskGraphView,
@@ -303,6 +321,95 @@ def encode_domain(value: DomainT) -> JsonValue:
 def decode_domain(value: JsonValue, target: type[DomainT]) -> DomainT:
     """Decode a canonical value using the declared domain type."""
     return _decode_domain(value, target)  # type: ignore[return-value]
+
+
+def iter_runtime_object_refs(
+    value: JsonValue,
+    *,
+    default_domain: RuntimeDomain,
+) -> Iterator[tuple[RuntimeDomain, ObjectRef]]:
+    """Yield object references without depending on a storage backend."""
+    yield from _iter_runtime_object_refs(value, default_domain)
+
+
+def _iter_runtime_object_refs(
+    value: object,
+    domain: RuntimeDomain,
+) -> Iterator[tuple[RuntimeDomain, ObjectRef]]:
+    if isinstance(value, StoredPayload):
+        if value.ref is not None:
+            yield domain, value.ref
+        return
+    if isinstance(value, ObjectRef):
+        yield domain, value
+        return
+    if isinstance(value, RuntimePayloadRef):
+        source_domain = value.source_domain or domain
+        yield from _iter_runtime_object_refs(value.payload, source_domain)
+        return
+    if isinstance(value, Mapping):
+        dataclass_name = value.get("$dataclass")
+        if dataclass_name == "RuntimePayloadRef":
+            decoded = decode_domain(value, RuntimePayloadRef)
+            yield from _iter_runtime_object_refs(decoded, domain)
+            return
+        if dataclass_name == "StoredPayload":
+            decoded = decode_domain(value, StoredPayload)
+            yield from _iter_runtime_object_refs(decoded, domain)
+            return
+        if dataclass_name == "ObjectRef":
+            decoded = decode_domain(value, ObjectRef)
+            yield domain, decoded
+            return
+        if dataclass_name == "RecoveryTerminalOutcome":
+            fields_value = value.get("fields")
+            if isinstance(fields_value, Mapping):
+                output = fields_value.get("output")
+                source_domain = _decode_runtime_domain(
+                    fields_value.get("object_source_domain"),
+                    domain,
+                )
+                if output is not None:
+                    yield from _iter_runtime_object_refs(
+                        output,
+                        source_domain,
+                    )
+                for key, item in fields_value.items():
+                    if key not in {"output", "object_source_domain"}:
+                        yield from _iter_runtime_object_refs(item, domain)
+                return
+        if {"kind", "digest", "size"}.issubset(value):
+            try:
+                decoded = StoredPayload.from_json(value)
+            except (TypeError, ValueError):
+                decoded = None
+            if decoded is not None:
+                yield from _iter_runtime_object_refs(decoded, domain)
+                return
+        for item in value.values():
+            yield from _iter_runtime_object_refs(item, domain)
+        return
+    if isinstance(value, (list, tuple, frozenset)):
+        for item in value:
+            yield from _iter_runtime_object_refs(item, domain)
+
+
+def _decode_runtime_domain(value: object, default: RuntimeDomain) -> RuntimeDomain:
+    if value is None:
+        return default
+    if isinstance(value, Mapping) and value.get("$enum") == "RuntimeDomain":
+        enum_value = value.get("value")
+        if isinstance(enum_value, str):
+            try:
+                return RuntimeDomain(enum_value)
+            except ValueError as error:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
+    if isinstance(value, str):
+        try:
+            return RuntimeDomain(value)
+        except ValueError as error:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
+    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
 
 
 def _decode_domain(value: object, target: object) -> object:
@@ -561,4 +668,5 @@ __all__ = [
     "encode_fact",
     "encode_operation",
     "encode_record",
+    "iter_runtime_object_refs",
 ]

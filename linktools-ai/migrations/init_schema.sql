@@ -15,8 +15,8 @@ CREATE TABLE ai_state_records (
     lease_fence BIGINT NOT NULL DEFAULT 0 COMMENT 'Monotonic fencing token for the current durable record lease.',
     lease_expires_at TIMESTAMP(6) NULL COMMENT 'Database-authoritative expiry time of the current durable lease.',
     payload_json JSON NOT NULL COMMENT 'Versioned canonical domain payload not needed by SQL identity, query, CAS, or lease predicates.',
-    updated_at TIMESTAMP(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6) ON UPDATE CURRENT_TIMESTAMP(6) COMMENT 'Database audit time of the latest physical row update.',
-    created_at TIMESTAMP(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6) COMMENT 'Database audit time when the physical row was created.',
+    updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT 'Update timestamp',
+    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT 'Creation timestamp',
     PRIMARY KEY (id), UNIQUE KEY uk_key_digest (key_digest),
     KEY ix_partition_digest_sort_key (partition_digest, sort_key),
     KEY ix_scope_digest_sort_key (scope_digest, sort_key),
@@ -29,8 +29,8 @@ CREATE TABLE ai_state_aliases (
     id BIGINT NOT NULL AUTO_INCREMENT COMMENT 'Surrogate row identifier used only by the SQL backend.',
     alias_digest CHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Canonical SHA-256 identity of a secondary unique runtime lookup key.',
     record_key_digest CHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Canonical SHA-256 identity of the runtime record resolved by this alias.',
-    updated_at TIMESTAMP(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6) ON UPDATE CURRENT_TIMESTAMP(6) COMMENT 'Database audit time of the latest physical alias row update.',
-    created_at TIMESTAMP(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6) COMMENT 'Database audit time when the alias row was created.',
+    updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT 'Update timestamp',
+    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT 'Creation timestamp',
     PRIMARY KEY (id), UNIQUE KEY uk_alias_digest (alias_digest),
     KEY ix_record_key_digest (record_key_digest), KEY ix_updated_at (updated_at), KEY ix_created_at (created_at)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin COMMENT='Secondary unique lookup identities that resolve to canonical runtime records.';
@@ -44,8 +44,8 @@ CREATE TABLE ai_state_facts (
     subject_digest CHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NULL COMMENT 'Canonical SHA-256 grouping identity for multiple facts of one logical subject such as a tool call.',
     state VARCHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NULL COMMENT 'Queryable fact state such as snapshot completeness or tool-effect lifecycle state.',
     payload_json JSON NOT NULL COMMENT 'Versioned canonical immutable fact payload.',
-    updated_at TIMESTAMP(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6) ON UPDATE CURRENT_TIMESTAMP(6) COMMENT 'Database audit time of the physical fact row; immutable facts normally retain creation time.',
-    created_at TIMESTAMP(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6) COMMENT 'Database audit time when the fact row was appended.',
+    updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT 'Update timestamp',
+    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT 'Creation timestamp',
     PRIMARY KEY (id), UNIQUE KEY uk_stream_digest_sequence (stream_digest, sequence),
     KEY ix_owner_key_digest (owner_key_digest), KEY ix_stream_digest_subject_digest_sequence (stream_digest, subject_digest, sequence),
     KEY ix_updated_at (updated_at), KEY ix_created_at (created_at)
@@ -55,8 +55,8 @@ CREATE TABLE ai_state_sequences (
     id BIGINT NOT NULL AUTO_INCREMENT COMMENT 'Surrogate row identifier used only by the SQL backend.',
     key_digest CHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Canonical SHA-256 identity of the monotonic sequence counter.',
     value BIGINT NOT NULL COMMENT 'Last committed value allocated by the sequence.',
-    updated_at TIMESTAMP(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6) ON UPDATE CURRENT_TIMESTAMP(6) COMMENT 'Database audit time of the latest committed sequence increment.',
-    created_at TIMESTAMP(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6) COMMENT 'Database audit time when the sequence was created.',
+    updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT 'Update timestamp',
+    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT 'Creation timestamp',
     PRIMARY KEY (id), UNIQUE KEY uk_key_digest (key_digest), KEY ix_updated_at (updated_at), KEY ix_created_at (created_at)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin COMMENT='Durable monotonic counters used to allocate ordered runtime and step sequence numbers.';
 
@@ -68,8 +68,8 @@ CREATE TABLE ai_state_operations (
     state VARCHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Current durable operation state used by replay and completion logic.',
     compactable BOOLEAN NOT NULL COMMENT 'Whether a terminal operation may be removed by ledger compaction.',
     payload_json JSON NOT NULL COMMENT 'Versioned canonical operation request, result, error, resource identity, and semantic timestamps.',
-    updated_at TIMESTAMP(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6) ON UPDATE CURRENT_TIMESTAMP(6) COMMENT 'Database audit time of the latest operation state transition.',
-    created_at TIMESTAMP(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6) COMMENT 'Database audit time when the durable operation was appended.',
+    updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT 'Update timestamp',
+    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT 'Creation timestamp',
     PRIMARY KEY (id), UNIQUE KEY uk_key_digest (key_digest), UNIQUE KEY uk_stream_digest_sequence (stream_digest, sequence),
     KEY ix_stream_digest_state_sequence (stream_digest, state, sequence), KEY ix_updated_at (updated_at), KEY ix_created_at (created_at)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin COMMENT='Ordered durable operation ledger for replay, result recovery, status transition, and compaction.';
@@ -78,8 +78,8 @@ CREATE TABLE ai_asset_heads (
     id BIGINT NOT NULL AUTO_INCREMENT COMMENT 'Surrogate row identifier used only by the SQL backend.',
     namespace_digest CHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Canonical SHA-256 identity of the AssetStore namespace.',
     store_revision BIGINT NOT NULL COMMENT 'Last committed namespace-wide AssetStore revision.',
-    updated_at TIMESTAMP(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6) ON UPDATE CURRENT_TIMESTAMP(6) COMMENT 'Database audit time of the latest committed namespace revision.',
-    created_at TIMESTAMP(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6) COMMENT 'Database audit time when the namespace revision head was created.',
+    updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT 'Update timestamp',
+    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT 'Creation timestamp',
     PRIMARY KEY (id), UNIQUE KEY uk_namespace_digest (namespace_digest), KEY ix_updated_at (updated_at), KEY ix_created_at (created_at)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin COMMENT='Namespace-level optimistic revision head that serializes AssetStore mutations.';
 
@@ -90,8 +90,8 @@ CREATE TABLE ai_asset_entries (
     entry_revision BIGINT NOT NULL COMMENT 'Latest committed per-asset revision.',
     store_revision BIGINT NOT NULL COMMENT 'Namespace-wide revision that produced this current projection.',
     payload_json JSON NOT NULL COMMENT 'Versioned canonical current AssetInfo payload including status, metadata, content reference, and semantic timestamps.',
-    updated_at TIMESTAMP(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6) ON UPDATE CURRENT_TIMESTAMP(6) COMMENT 'Database audit time of the latest current-projection update.',
-    created_at TIMESTAMP(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6) COMMENT 'Database audit time when the current-projection row was first created.',
+    updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT 'Update timestamp',
+    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT 'Creation timestamp',
     PRIMARY KEY (id), UNIQUE KEY uk_key_digest (key_digest), KEY ix_namespace_digest_store_revision (namespace_digest, store_revision),
     KEY ix_updated_at (updated_at), KEY ix_created_at (created_at)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin COMMENT='Current AssetStore projection for the latest committed revision of each asset key.';
@@ -103,8 +103,8 @@ CREATE TABLE ai_asset_changes (
     namespace_digest CHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Canonical SHA-256 identity of the AssetStore namespace.',
     store_revision BIGINT NOT NULL COMMENT 'Namespace-wide revision in which this asset change committed.',
     payload_json JSON NOT NULL COMMENT 'Versioned canonical immutable AssetInfo history payload.',
-    updated_at TIMESTAMP(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6) ON UPDATE CURRENT_TIMESTAMP(6) COMMENT 'Database audit time of the physical history row; immutable history normally retains creation time.',
-    created_at TIMESTAMP(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6) COMMENT 'Database audit time when the immutable history row was appended.',
+    updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT 'Update timestamp',
+    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT 'Creation timestamp',
     PRIMARY KEY (id), UNIQUE KEY uk_key_digest_entry_revision (key_digest, entry_revision),
     UNIQUE KEY uk_namespace_digest_store_revision_key_digest (namespace_digest, store_revision, key_digest),
     KEY ix_updated_at (updated_at), KEY ix_created_at (created_at)
@@ -117,8 +117,8 @@ CREATE TABLE ai_objects (
     object_key TEXT NOT NULL COMMENT 'Original opaque object key exposed by the ObjectStore API.',
     content_digest CHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'SHA-256 digest of the immutable object bytes.',
     size BIGINT NOT NULL COMMENT 'Exact immutable object size in bytes.',
-    updated_at TIMESTAMP(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6) ON UPDATE CURRENT_TIMESTAMP(6) COMMENT 'Database audit time of the physical immutable object row; normally equal to creation time.',
-    created_at TIMESTAMP(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6) COMMENT 'Database audit time when the immutable object header was created.',
+    updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT 'Update timestamp',
+    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT 'Creation timestamp',
     PRIMARY KEY (id), UNIQUE KEY uk_key_digest (key_digest), KEY ix_updated_at (updated_at), KEY ix_created_at (created_at)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin COMMENT='Immutable ObjectStore headers containing canonical object identity, content digest, and size.';
 
@@ -127,7 +127,7 @@ CREATE TABLE ai_object_chunks (
     key_digest CHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Canonical SHA-256 identity of the immutable ObjectStore object owning this chunk.',
     chunk_index BIGINT NOT NULL COMMENT 'Zero-based ordered chunk position within the immutable object.',
     content LONGBLOB NOT NULL COMMENT 'Binary content bytes for this immutable object chunk.',
-    updated_at TIMESTAMP(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6) ON UPDATE CURRENT_TIMESTAMP(6) COMMENT 'Database audit time of the physical immutable chunk row; normally equal to creation time.',
-    created_at TIMESTAMP(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6) COMMENT 'Database audit time when the immutable chunk row was inserted.',
+    updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT 'Update timestamp',
+    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT 'Creation timestamp',
     PRIMARY KEY (id), UNIQUE KEY uk_key_digest_chunk_index (key_digest, chunk_index), KEY ix_updated_at (updated_at), KEY ix_created_at (created_at)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin COMMENT='Ordered binary chunks that compose immutable ObjectStore content.';
