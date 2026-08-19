@@ -69,23 +69,15 @@ from .service_api import ExecutionRequest
 from .state import (
     ConversationState,
     ConversationStateCommands,
-    ExecutionProjectionBatch,
     ExecutionProjectionCheckpoint,
     ExecutionRepositoryImpl,
     ExecutionState,
-    ExecutionStateCommands,
+    ExecutionTerminalSealPlan,
     RecoveryState,
     RuntimeStateCommands,
     RuntimeStepStore,
     SessionRepositoryImpl,
     StateStepArchive,
-)
-from .state._repositories import (
-    ConversationHistoryRepositoryImpl,
-    EventRepositoryImpl,
-    OperationLedgerRepository,
-    RecoveryCheckpointRepositoryImpl,
-    ToolRepositoryImpl,
 )
 from .state._contracts import (
     AgentAttemptClaim,
@@ -95,8 +87,8 @@ from .state._contracts import (
     ExecutionStartClaim,
     ExecutionTerminalCommit,
     ExecutionTerminalCommitResult,
-    LoadedModelContext,
     IdempotencyRecord,
+    LoadedModelContext,
     RecoveryCheckpoint,
     RecoveryCheckpointState,
     RecoveryConversationIntent,
@@ -108,6 +100,13 @@ from .state._contracts import (
     ResultRecord,
 )
 from .state._plan import RuntimeDomain
+from .state._repositories import (
+    ConversationHistoryRepositoryImpl,
+    EventRepositoryImpl,
+    OperationLedgerRepository,
+    RecoveryCheckpointRepositoryImpl,
+    ToolRepositoryImpl,
+)
 
 
 class _SubagentDispatcher(Protocol):
@@ -143,6 +142,21 @@ class _StepLifecycle(Protocol):
     async def verify_terminal_attempts(self, *, candidate_step_run_ids: tuple[str, ...], required_step_run_id: str | None) -> None: ...
     async def release_staging_many(self, *, candidate_step_run_ids: tuple[str, ...]) -> None: ...
     async def flush_execution_projection(self, step_run_id: str) -> None: ...
+    async def prepare_execution_terminal_seal(
+        self,
+        *,
+        execution_id: str,
+        run_ids: Sequence[str],
+        binding_digest: str,
+    ) -> ExecutionTerminalSealPlan: ...
+    async def finalize_execution_terminal_seal(
+        self,
+        plan: ExecutionTerminalSealPlan,
+    ) -> None: ...
+    async def discard_execution_terminal_seal(
+        self,
+        plan: ExecutionTerminalSealPlan,
+    ) -> None: ...
 
 
 class LocalExecutionBackend:
@@ -210,11 +224,6 @@ class LocalExecutionBackend:
         conversation_steps = self._step_reads[RuntimeDomain.CONVERSATION]
         execution_repository = cast(ExecutionRepositoryImpl, self._execution.executions)
         session_repository = cast(SessionRepositoryImpl, self._conversation.sessions)
-        self._execution_commands = ExecutionStateCommands(
-            execution_repository.state_store,
-            execution_repository,
-            execution_steps if isinstance(execution_steps, StateStepArchive) else None,
-        )
         self._conversation_commands = ConversationStateCommands(
             session_repository.state_store,
             session_repository,
@@ -1444,8 +1453,16 @@ class LocalExecutionBackend:
             outcome.result_created_at,
         )
         try:
-            pending_audit = tuple(self._pending_audit_events.get(current.execution_id, ()))
-            committed = await self._execution_commands.commit_terminal_checkpoint(
+            terminal_run_id = handoff.source_step_run_id
+            if terminal_run_id is None and current.agent_run_sequence > 0:
+                terminal_run_id = step_run_id(
+                    namespace=self._namespace,
+                    tenant_id=current.tenant_id,
+                    execution_id=current.execution_id,
+                    segment_sequence=current.agent_run_sequence,
+                )
+            committed = await self._commit_execution_terminal_checkpoint(
+                current,
                 ExecutionTerminalCommit(
                     current.revision,
                     current.event_sequence,
@@ -1454,8 +1471,7 @@ class LocalExecutionBackend:
                     outcome.terminal_event_type,
                     dict(outcome.terminal_event_payload),
                 ),
-                step_run=None,
-                audit_events=pending_audit,
+                run_id=terminal_run_id,
             )
             self._pending_audit_events.pop(current.execution_id, None)
             self._live_broker.publish_durable(
@@ -2708,30 +2724,81 @@ class LocalExecutionBackend:
         recovery_checkpoint: RecoveryCheckpoint | None = None,
         recovery_run: RunRecord | None = None,
         recovery_snapshot: ContinuableSnapshot | None = None,
+        terminal_plan: ExecutionTerminalSealPlan | None = None,
     ) -> ExecutionTerminalCommitResult:
-        if run_id is not None and isinstance(
-            self._step_reads[RuntimeDomain.EXECUTION],
-            StateStepArchive,
-        ):
-            async with self._steps.execution_projection_checkpoint(
-                run_id,
-                binding_digest=current.binding_digest,
-            ) as checkpoint:
-                projection = checkpoint.batch
-                committed = await self._commit_execution_terminal_checkpoint_locked(
-                    current,
-                    commit,
-                    run_id=run_id,
-                    expected_cursor=expected_cursor,
-                    conversation_run=conversation_run,
-                    conversation_snapshot=conversation_snapshot,
-                    recovery_checkpoint=recovery_checkpoint,
-                    recovery_run=recovery_run,
-                    recovery_snapshot=recovery_snapshot,
-                    projection=projection,
+        if isinstance(self._step_reads[RuntimeDomain.EXECUTION], StateStepArchive):
+            if terminal_plan is None:
+                candidate_run_ids = tuple(
+                    step_run_id(
+                        namespace=self._namespace,
+                        tenant_id=current.tenant_id,
+                        execution_id=current.execution_id,
+                        segment_sequence=sequence,
+                    )
+                    for sequence in range(1, current.agent_run_sequence + 1)
                 )
-                await self._acknowledge_projection_after_commit(checkpoint)
+                terminal_plan = await self._step_lifecycle.prepare_execution_terminal_seal(
+                    execution_id=current.execution_id,
+                    run_ids=candidate_run_ids,
+                    binding_digest=current.binding_digest,
+                )
+            durable_commit = False
+            try:
+                commit_task = asyncio.create_task(
+                    self._commit_execution_terminal_checkpoint_locked(
+                        current,
+                        commit,
+                        run_id=run_id,
+                        expected_cursor=expected_cursor,
+                        conversation_run=conversation_run,
+                        conversation_snapshot=conversation_snapshot,
+                        recovery_checkpoint=recovery_checkpoint,
+                        recovery_run=recovery_run,
+                        recovery_snapshot=recovery_snapshot,
+                        terminal_plan=terminal_plan,
+                    ),
+                    name=f"ai-terminal-commit-{current.execution_id}",
+                )
+                cancellation: asyncio.CancelledError | None = None
+                try:
+                    committed = await asyncio.shield(commit_task)
+                except asyncio.CancelledError as error:
+                    cancellation = error
+                    committed = await asyncio.shield(commit_task)
+                durable_commit = True
+                finalizer = asyncio.create_task(
+                    self._step_lifecycle.finalize_execution_terminal_seal(
+                        terminal_plan
+                    ),
+                    name=f"ai-terminal-seal-{current.execution_id}",
+                )
+                try:
+                    await asyncio.shield(finalizer)
+                except asyncio.CancelledError:
+                    _logger.warning(
+                        "terminal seal finalization continues after cancellation: execution=%s",
+                        current.execution_id,
+                    )
+                    raise
+                except BaseException:
+                    _logger.error(
+                        "terminal seal finalization failed after durable commit: execution=%s",
+                        current.execution_id,
+                        exc_info=environ.debug,
+                    )
+                    raise
+                if cancellation is not None:
+                    raise cancellation
                 return committed
+            except BaseException as error:
+                if isinstance(error, asyncio.CancelledError):
+                    raise
+                if durable_commit:
+                    raise
+                if isinstance(error, AIError) and error.code is ErrorCode.STORAGE_COMMIT_UNKNOWN:
+                    raise
+                await self._step_lifecycle.discard_execution_terminal_seal(terminal_plan)
+                raise
         if run_id is not None:
             await self._step_lifecycle.flush_execution_projection(run_id)
         return await self._commit_execution_terminal_checkpoint_locked(
@@ -2744,7 +2811,7 @@ class LocalExecutionBackend:
             recovery_checkpoint=recovery_checkpoint,
             recovery_run=recovery_run,
             recovery_snapshot=recovery_snapshot,
-            projection=None,
+            terminal_plan=terminal_plan,
         )
 
     async def _commit_execution_terminal_checkpoint_locked(
@@ -2759,16 +2826,18 @@ class LocalExecutionBackend:
         recovery_checkpoint: RecoveryCheckpoint | None = None,
         recovery_run: RunRecord | None = None,
         recovery_snapshot: ContinuableSnapshot | None = None,
-        projection: ExecutionProjectionBatch | None,
+        terminal_plan: ExecutionTerminalSealPlan | None,
     ) -> ExecutionTerminalCommitResult:
         pending_audit = tuple(self._pending_audit_events.get(current.execution_id, ()))
         step_run = None
         step_events: Sequence[StepEvent] = ()
         snapshots: Sequence[ContinuableSnapshot] = ()
-        if projection is not None:
-            step_run = projection.run
-            step_events = projection.events
-            snapshots = projection.snapshots
+        if terminal_plan is not None:
+            execution_projections = terminal_plan.projections
+            if execution_projections:
+                step_run = execution_projections[0].run
+        else:
+            execution_projections = ()
         next_cursor = None
         if run_id is not None:
             history_id = None
@@ -2794,6 +2863,7 @@ class LocalExecutionBackend:
             execution_run=step_run,
             execution_events=step_events,
             execution_snapshots=snapshots,
+            execution_projections=execution_projections,
             audit_events=pending_audit,
         )
         self._pending_audit_events.pop(current.execution_id, None)
@@ -2803,14 +2873,7 @@ class LocalExecutionBackend:
         self,
         checkpoint: ExecutionProjectionCheckpoint,
     ) -> None:
-        task = asyncio.create_task(
-            checkpoint.acknowledge()
-        )
-        try:
-            await asyncio.shield(task)
-        except asyncio.CancelledError:
-            await task
-            raise
+        await checkpoint.acknowledge()
 
     async def _release_session_admission_best_effort(
         self,

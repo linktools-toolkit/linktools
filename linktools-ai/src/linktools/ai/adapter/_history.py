@@ -462,17 +462,47 @@ class StepExecutionHistoryReader:
                                 "projected_item_offset": projected_offset,
                             }
                         )
-        source = sorted(
-            (
-                item.execution_id,
-                item.revision,
-                item.status.value,
-                item.agent_run_sequence,
+        source = []
+        for item, _depth in entries:
+            source.append(
+                (
+                    item.execution_id,
+                    item.parent_execution_id or "",
+                    item.status,
+                    await self._executions.get_history_seal(
+                        item.execution_id,
+                        tenant_id=tenant_id,
+                    ),
+                )
             )
-            for item, _depth in entries
-        )
+        source.sort(key=lambda value: value[0])
+        seals = []
+        for execution_id, parent_execution_id, status, seal in source:
+            if (
+                seal is None
+                or seal.execution_id != execution_id
+                or seal.tenant_id != tenant_id
+                or status
+                not in {
+                    ExecutionStatus.SUCCEEDED,
+                    ExecutionStatus.FAILED,
+                    ExecutionStatus.CANCELLED,
+                }
+            ):
+                raise AIError(ErrorCode.EXECUTION_HISTORY_UNAVAILABLE)
+            seals.append(
+                {
+                    "execution_id": execution_id,
+                    "parent_execution_id": parent_execution_id,
+                    "seal_digest": seal.seal_digest,
+                }
+            )
         source_digest = canonical_sha256(
-            {"model_version": 1, "execution_id": root.execution_id, "source": source}
+            {
+                "model_version": 2,
+                "root_execution_id": root.execution_id,
+                "seals": seals,
+            }
         )
         return ExecutionReadModelBuild(
             root.execution_id,

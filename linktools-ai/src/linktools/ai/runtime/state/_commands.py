@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 """Named state commands for multi-record Runtime checkpoints."""
 
+import hashlib
 from collections.abc import Sequence
 from dataclasses import replace
 
@@ -19,6 +20,7 @@ from ...core import (
     IdempotencyStatus,
     SessionStatus,
     ToolOperationStatus,
+    canonical_json_bytes,
     step_run_id,
 )
 from ...errors import AIError, ErrorCode
@@ -29,7 +31,9 @@ from ._contracts import (
     ConversationCursor,
     ConversationHistoryRecord,
     ExecutionEventAppend,
+    ExecutionHistorySealRecord,
     ExecutionRecord,
+    ExecutionRunSealHead,
     ExecutionStartClaim,
     ExecutionTerminalCommit,
     ExecutionTerminalCommitResult,
@@ -49,7 +53,12 @@ from ._repositories import (
     SessionRepositoryImpl,
     ToolRepositoryImpl,
 )
-from ._steps import PreparedStepSnapshot, StateStepArchive
+from ._steps import (
+    PreparedExecutionProjection,
+    PreparedStepSnapshot,
+    PreparedStepSnapshotBatch,
+    StateStepArchive,
+)
 from ._store import StateGroupTransaction, StateStore, StateTransaction
 
 _logger = environ.get_logger("ai.runtime.state.commands")
@@ -629,8 +638,13 @@ class RuntimeStateCommands:
         execution_run: RunRecord | None = None,
         execution_events: Sequence[StepEvent] = (),
         execution_snapshots: Sequence[ContinuableSnapshot] = (),
+        execution_projections: Sequence[PreparedExecutionProjection] = (),
         audit_events: Sequence[ExecutionEventAppend] = (),
     ) -> ExecutionTerminalCommitResult:
+        if execution_projections and (
+            self._execution_steps is None or execution_run is None
+        ):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         if session_id is None and (conversation_run is not None or conversation_snapshot is not None):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         if recovery_checkpoint is None and (recovery_run is not None or recovery_snapshot is not None):
@@ -663,13 +677,30 @@ class RuntimeStateCommands:
                 (recovery_snapshot,),
                 binding_digest=commit.execution.binding_digest,
             )
-        prepared_execution = ()
-        if self._execution_steps is not None and execution_run is not None and execution_snapshots:
+        prepared_execution: PreparedStepSnapshotBatch | tuple[()] = ()
+        if (
+            not execution_projections
+            and self._execution_steps is not None
+            and execution_run is not None
+            and execution_snapshots
+        ):
             prepared_execution = await self._execution_steps.prepare_snapshots(
                 execution_run,
                 execution_snapshots,
                 binding_digest=commit.execution.binding_digest,
             )
+        seal = _execution_history_seal(
+            commit,
+            audit_events=audit_events,
+            projections=execution_projections,
+            current_run=execution_run,
+            current_events=execution_events,
+            current_batch=(
+                prepared_execution
+                if isinstance(prepared_execution, PreparedStepSnapshotBatch)
+                else None
+            ),
+        )
         stores = [self._execution.state_store]
         if session_id is not None:
             self._require_conversation()
@@ -750,12 +781,35 @@ class RuntimeStateCommands:
                         next_record=recovery_checkpoint,
                     )
                 if execution_run is not None:
-                    await self._execution_steps.sync_projection_in_transaction(
-                        group.transaction(self._execution_steps.state_store),
-                        execution_run,
-                        events=execution_events,
-                        snapshots=prepared_execution,
+                    execution_transaction_for_steps = group.transaction(
+                        self._execution_steps.state_store
                     )
+                    if execution_projections:
+                        for projection in execution_projections:
+                            await self._execution_steps.sync_projection_in_transaction(
+                                execution_transaction_for_steps,
+                                projection.run,
+                                events=projection.events,
+                                snapshots=projection.snapshots,
+                            )
+                    else:
+                        await self._execution_steps.sync_projection_in_transaction(
+                            execution_transaction_for_steps,
+                            execution_run,
+                            events=execution_events,
+                            snapshots=(
+                                prepared_execution.snapshots
+                                if isinstance(
+                                    prepared_execution,
+                                    PreparedStepSnapshotBatch,
+                                )
+                                else ()
+                            ),
+                        )
+                await self._execution.put_history_seal_in_transaction(
+                    execution_transaction,
+                    seal,
+                )
                 return await self._execution.commit_terminal_in_transaction(
                     execution_transaction,
                     effective_commit,
@@ -763,7 +817,14 @@ class RuntimeStateCommands:
                 )
 
             try:
-                return await stores[0].storage_group.mutate(stores, callback)
+                result = await stores[0].storage_group.mutate(stores, callback)
+                if isinstance(prepared_conversation, PreparedStepSnapshotBatch):
+                    self._conversation_steps.apply_prepared_batch(
+                        prepared_conversation
+                    )
+                if isinstance(prepared_recovery, PreparedStepSnapshotBatch):
+                    self._recovery_steps.apply_prepared_batch(prepared_recovery)
+                return result
             except AIError as error:
                 if error.code is not ErrorCode.STORAGE_COMMIT_UNKNOWN:
                     raise
@@ -780,6 +841,7 @@ class RuntimeStateCommands:
                     execution_run=execution_run,
                     execution_events=execution_events,
                     execution_snapshots=execution_snapshots,
+                    execution_projections=execution_projections,
                     audit_events=audit_events,
                 ):
                     execution = await self._execution.get(
@@ -812,6 +874,7 @@ class RuntimeStateCommands:
                     execution_run=execution_run,
                     execution_events=execution_events,
                     execution_snapshots=execution_snapshots,
+                    execution_projections=execution_projections,
                     audit_events=audit_events,
                 ):
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -886,11 +949,10 @@ class RuntimeStateCommands:
                         ):
                             break
             else:
-                await self._materialize_snapshot_with_reconciliation(
+                await self._materialize_prepared_snapshot_with_reconciliation(
                     self._conversation_steps,
                     conversation_run,
-                    conversation_snapshot,
-                    binding_digest=commit.execution.binding_digest,
+                    prepared_conversation,
                 )
                 for attempt in range(2):
                     try:
@@ -934,22 +996,49 @@ class RuntimeStateCommands:
             if recovery_steps_merged:
                 execution_stores.append(self._recovery_steps.state_store)
         if recovery_pending and not recovery_steps_merged:
-            await self._materialize_recovery_snapshot(
+            if self._recovery_steps is None or recovery_run is None or recovery_snapshot is None:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            await self._materialize_prepared_snapshot_with_reconciliation(
+                self._recovery_steps,
                 recovery_run,
-                recovery_snapshot,
-                binding_digest=commit.execution.binding_digest,
+                prepared_recovery,
             )
+
+        execution_steps_in_transaction = False
 
         async def commit_execution(group: StateGroupTransaction) -> ExecutionTerminalCommitResult:
             execution_transaction = group.transaction(self._execution.state_store)
             effective_commit = await self._effective_terminal_commit(execution_transaction, commit)
-            if execution_run is not None:
-                await self._execution_steps.sync_projection_in_transaction(
-                        group.transaction(self._execution_steps.state_store),
+            if execution_run is not None and execution_steps_in_transaction:
+                execution_transaction_for_steps = group.transaction(
+                    self._execution_steps.state_store
+                )
+                if execution_projections:
+                    for projection in execution_projections:
+                        await self._execution_steps.sync_projection_in_transaction(
+                            execution_transaction_for_steps,
+                            projection.run,
+                            events=projection.events,
+                            snapshots=projection.snapshots,
+                        )
+                else:
+                    await self._execution_steps.sync_projection_in_transaction(
+                        execution_transaction_for_steps,
                         execution_run,
                         events=execution_events,
-                        snapshots=prepared_execution,
-                )
+                        snapshots=(
+                            prepared_execution.snapshots
+                            if isinstance(
+                                prepared_execution,
+                                PreparedStepSnapshotBatch,
+                            )
+                            else ()
+                        ),
+                    )
+            await self._execution.put_history_seal_in_transaction(
+                execution_transaction,
+                seal,
+            )
             if recovery_state_merged:
                 if recovery_steps_merged:
                     await self._recovery_steps.materialize_snapshot_in_transaction(
@@ -984,6 +1073,7 @@ class RuntimeStateCommands:
                 execution_run=execution_run,
                 execution_events=execution_events,
                 execution_snapshots=execution_snapshots,
+                execution_projections=execution_projections,
                 audit_events=audit_events,
                 require_session_release=False,
                 require_recovery=False,
@@ -998,6 +1088,7 @@ class RuntimeStateCommands:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             result = ExecutionTerminalCommitResult(execution, commit.result)
         elif _same_group(execution_stores):
+            execution_steps_in_transaction = execution_run is not None
             try:
                 result = await self._execution.state_store.storage_group.mutate(
                     execution_stores,
@@ -1018,16 +1109,27 @@ class RuntimeStateCommands:
                 result = ExecutionTerminalCommitResult(execution, commit.result)
         else:
             try:
-                if execution_run is not None:
+                if execution_projections:
+                    for projection in execution_projections:
+                        await self._sync_prepared_projection_with_reconciliation(
+                            self._execution_steps,
+                            projection,
+                        )
+                elif execution_run is not None:
                     await self._sync_projection_with_reconciliation(
                         execution_run,
                         events=execution_events,
                         snapshots=execution_snapshots,
                         binding_digest=commit.execution.binding_digest,
                     )
-                result = await self._execution.commit_terminal(
-                    commit,
-                    pending_events=audit_events,
+                terminal_stores = [self._execution.state_store]
+                if recovery_state_merged:
+                    terminal_stores.append(self._recovery.state_store)
+                    if recovery_steps_merged:
+                        terminal_stores.append(self._recovery_steps.state_store)
+                result = await self._execution.state_store.storage_group.mutate(
+                    terminal_stores,
+                    commit_execution,
                 )
             except AIError as error:
                 if error.code not in {
@@ -1164,6 +1266,99 @@ class RuntimeStateCommands:
                     binding_digest=binding_digest,
                 ):
                     return
+
+    async def _materialize_prepared_snapshot_with_reconciliation(
+        self,
+        archive: StateStepArchive,
+        run: RunRecord,
+        batch: PreparedStepSnapshotBatch,
+    ) -> None:
+        if len(batch) != 1:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        prepared = batch[0]
+        if await self._prepared_snapshot_visible(archive, run, prepared):
+            archive.apply_prepared_batch(batch)
+            return
+
+        async def materialize(transaction: StateTransaction) -> None:
+            await archive.materialize_snapshot_in_transaction(
+                transaction,
+                run,
+                prepared,
+            )
+
+        for attempt in range(2):
+            try:
+                await archive.state_store.mutate(materialize)
+                archive.apply_prepared_batch(batch)
+                return
+            except AIError as error:
+                if error.code is not ErrorCode.STORAGE_COMMIT_UNKNOWN or attempt == 1:
+                    raise
+                if await self._prepared_snapshot_visible(archive, run, prepared):
+                    archive.apply_prepared_batch(batch)
+                    return
+
+    async def _sync_prepared_projection_with_reconciliation(
+        self,
+        archive: StateStepArchive | None,
+        projection: PreparedExecutionProjection,
+    ) -> None:
+        if archive is None:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+
+        async def sync(transaction: StateTransaction) -> None:
+            await archive.sync_projection_in_transaction(
+                transaction,
+                projection.run,
+                events=projection.events,
+                snapshots=projection.snapshots,
+            )
+
+        for attempt in range(2):
+            try:
+                await archive.state_store.mutate(sync)
+                if projection.accumulator_advance is not None:
+                    archive.apply_accumulator_advance(
+                        projection.run.run_id,
+                        projection.accumulator_advance,
+                    )
+                return
+            except AIError as error:
+                if error.code is not ErrorCode.STORAGE_COMMIT_UNKNOWN or attempt == 1:
+                    raise
+                if await archive.verify_execution_projection_head(projection):
+                    if projection.accumulator_advance is not None:
+                        archive.apply_accumulator_advance(
+                            projection.run.run_id,
+                            projection.accumulator_advance,
+                        )
+                    return
+
+    async def _prepared_snapshot_visible(
+        self,
+        archive: StateStepArchive,
+        run: RunRecord,
+        prepared: PreparedStepSnapshot,
+    ) -> bool:
+        if await archive.get_run(run_id=run.run_id) != run:
+            return False
+        snapshot = await archive.latest_snapshot(
+            run_id=run.run_id,
+            include_interrupted=True,
+        )
+        if snapshot is None:
+            return False
+        projection = await archive.transcript_repository.load_projection(
+            prepared.owner_id
+        )
+        return (
+            snapshot.step_index == prepared.stored.step_index
+            and snapshot.timestamp == prepared.stored.timestamp
+            and snapshot.state == prepared.stored.state
+            and projection is not None
+            and projection.digest == prepared.projection.digest
+        )
 
     async def _step_snapshot_visible(
         self,
@@ -1382,6 +1577,7 @@ class RuntimeStateCommands:
         execution_run: RunRecord | None,
         execution_events: Sequence[StepEvent],
         execution_snapshots: Sequence[ContinuableSnapshot],
+        execution_projections: Sequence[PreparedExecutionProjection],
         audit_events: Sequence[ExecutionEventAppend],
         require_session_release: bool = True,
         require_recovery: bool = True,
@@ -1406,6 +1602,31 @@ class RuntimeStateCommands:
             or execution.result != commit.result
         ):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        history_seal = await self._execution.get_history_seal(
+            commit.execution.execution_id,
+            tenant_id=commit.execution.tenant_id,
+        )
+        if history_seal is None:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        if execution_projections or execution_run is None:
+            expected_seal = _execution_history_seal(
+                commit,
+                audit_events=audit_events,
+                projections=execution_projections,
+                current_run=execution_run,
+                current_events=execution_events,
+                current_batch=None,
+            )
+            if history_seal != expected_seal:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        if execution_projections:
+            if self._execution_steps is None:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            for projection in execution_projections:
+                if not await self._execution_steps.verify_execution_projection_head(
+                    projection
+                ):
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         idempotency = await self._execution.get_terminal_idempotency(
             commit.execution.execution_id,
             tenant_id=commit.execution.tenant_id,
@@ -1665,7 +1886,11 @@ class ExecutionStateCommands:
                     transaction,
                     step_run,
                     events=step_events,
-                    snapshots=prepared_snapshots,
+                    snapshots=(
+                        prepared_snapshots.snapshots
+                        if isinstance(prepared_snapshots, PreparedStepSnapshotBatch)
+                        else ()
+                    ),
                     binding_digest=commit.execution.binding_digest,
                 )
             return await self._executions.commit_terminal_in_transaction(
@@ -1674,7 +1899,14 @@ class ExecutionStateCommands:
                 pending_events=audit_events,
             )
 
-        return await self._state_store.mutate(mutate)
+        result = await self._state_store.mutate(mutate)
+        if (
+            self._steps is not None
+            and step_run is not None
+            and isinstance(prepared_snapshots, PreparedStepSnapshotBatch)
+        ):
+            self._steps.apply_prepared_batch(prepared_snapshots)
+        return result
 
 
 class ConversationStateCommands:
@@ -1726,7 +1958,7 @@ class ConversationStateCommands:
                 transaction,
                 step_run,
                 events=(),
-                snapshots=prepared,
+                snapshots=prepared.snapshots,
                 binding_digest=binding_digest,
             )
             if self._histories is None:
@@ -1776,7 +2008,73 @@ class ConversationStateCommands:
                 history_quality=next_history.history_quality.value,
             )
 
-        return await self._state_store.mutate(mutate)
+        result = await self._state_store.mutate(mutate)
+        self._steps.apply_prepared_batch(prepared)
+        return result
+
+
+def _execution_history_seal(
+    commit: ExecutionTerminalCommit,
+    *,
+    audit_events: Sequence[ExecutionEventAppend],
+    projections: Sequence[PreparedExecutionProjection],
+    current_run: RunRecord | None,
+    current_events: Sequence[StepEvent],
+    current_batch: PreparedStepSnapshotBatch | None,
+) -> ExecutionHistorySealRecord:
+    heads = list(
+        ExecutionRunSealHead(
+            projection.run.run_id,
+            projection.target_event_offset,
+            projection.target_snapshot_offset,
+            projection.target_transcript_message_count,
+            projection.projection_digest,
+        )
+        for projection in projections
+    )
+    if not projections and current_run is not None:
+        heads.append(
+            ExecutionRunSealHead(
+                current_run.run_id,
+                len(current_events),
+                0 if current_batch is None else len(current_batch.snapshots),
+                0
+                if current_batch is None
+                else current_batch.target_transcript_message_count,
+                "empty"
+                if current_batch is None or not current_batch.snapshots
+                else current_batch.snapshots[-1].projection.digest,
+            )
+        )
+    ordered_heads = tuple(sorted(heads, key=lambda head: head.run_id))
+    execution_event_high_water = (
+        commit.expected_event_sequence + len(audit_events) + 1
+    )
+    digest_input = {
+        "execution_id": commit.execution.execution_id,
+        "tenant_id": commit.execution.tenant_id,
+        "seal_version": 1,
+        "run_heads": [
+            {
+                "run_id": head.run_id,
+                "event_count": head.event_count,
+                "snapshot_count": head.snapshot_count,
+                "transcript_message_count": head.transcript_message_count,
+                "projection_digest": head.projection_digest,
+            }
+            for head in ordered_heads
+        ],
+        "execution_event_high_water": execution_event_high_water,
+    }
+    seal_digest = hashlib.sha256(canonical_json_bytes(digest_input)).hexdigest()
+    return ExecutionHistorySealRecord(
+        commit.execution.execution_id,
+        commit.execution.tenant_id,
+        1,
+        ordered_heads,
+        execution_event_high_water,
+        seal_digest,
+    )
 
 
 __all__ = [

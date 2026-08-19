@@ -8,10 +8,9 @@ import zlib
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
 
+from linktools.core import environ
 from pydantic_ai import ModelMessagesTypeAdapter
 from pydantic_ai.messages import ModelMessage
-
-from linktools.core import environ
 
 from ...core import canonical_json_bytes
 from ...errors import AIError, ErrorCode
@@ -19,8 +18,8 @@ from ...storage import ObjectRef, ObjectStore, StoredPayload, runtime_object_key
 from ._codec import decode_domain, encode_domain
 from ._contracts import (
     ContextProjection,
-    ConversationHistoryRepository,
     ConversationHistoryRecord,
+    ConversationHistoryRepository,
     HistoryQuality,
     InlineContextBlock,
     LoadedContextMessage,
@@ -79,6 +78,18 @@ class TranscriptCapture:
 
 
 @dataclass(frozen=True, slots=True)
+class TranscriptAccumulatorAdvance:
+    run_id: str
+    base_generation: int
+    target_generation: int
+    base_message_count: int
+    target_message_count: int
+    delta_messages: tuple[ModelMessage, ...]
+    delta_signatures: tuple[bytes, ...]
+    target_quality: HistoryQuality
+
+
+@dataclass(frozen=True, slots=True)
 class _HistorySegment:
     history_id: str
     start: int
@@ -102,92 +113,163 @@ class _TranscriptAccumulator:
     ) -> None:
         self._run_id = run_id
         self._messages: list[ModelMessage] = []
+        self._signatures: list[bytes] = []
         self._quality = HistoryQuality.COMPLETE
+        self._generation = 0
         self._seeded = False
+        self._signature_cache: dict[int, bytes] = {}
 
     @property
     def messages(self) -> tuple[ModelMessage, ...]:
         return tuple(self._messages)
 
+    @property
+    def quality(self) -> HistoryQuality:
+        return self._quality
+
+    @property
+    def generation(self) -> int:
+        return self._generation
+
     def seed(self, messages: Sequence[ModelMessage]) -> None:
-        if self._messages:
+        if self._seeded:
             raise RuntimeError("transcript accumulator is already seeded")
         self._messages.extend(messages)
+        self._signatures.extend(self.signature(message) for message in messages)
         self._seeded = True
 
-    def capture(
+    def signature(self, message: ModelMessage) -> bytes:
+        key = id(message)
+        value = self._signature_cache.get(key)
+        if value is None:
+            value = _message_signature(message)
+            self._signature_cache[key] = value
+        return value
+
+    def plan(
         self,
         messages: Sequence[ModelMessage],
-        *,
-        origin: TranscriptOrigin = TranscriptOrigin.RAW,
-    ) -> TranscriptCapture:
+    ) -> TranscriptAccumulatorAdvance:
         incoming = tuple(messages)
+        incoming_signatures = tuple(self.signature(message) for message in incoming)
         known = tuple(
             message
             for message in incoming
             if message.run_id == self._run_id
         )
+        known_signatures = tuple(
+            signature
+            for message, signature in zip(
+                incoming,
+                incoming_signatures,
+                strict=True,
+            )
+            if message.run_id == self._run_id
+        )
         stored_known = tuple(
             message
-            for message in self._messages
+            for message, _signature in zip(
+                self._messages,
+                self._signatures,
+                strict=True,
+            )
             if self._seeded or message.run_id == self._run_id
         )
+        stored_known_signatures = tuple(
+            signature
+            for message, signature in zip(
+                self._messages,
+                self._signatures,
+                strict=True,
+            )
+            if self._seeded or message.run_id == self._run_id
+        )
+        quality = self._quality
         if len(known) < len(stored_known):
-            self._quality = HistoryQuality.CONSERVATIVE
-        overlap = self._overlap(known, stored_known)
+            quality = HistoryQuality.CONSERVATIVE
+        overlap = self._overlap(known_signatures, stored_known_signatures)
         if known and stored_known and overlap == 0:
-            self._quality = HistoryQuality.CONSERVATIVE
+            quality = HistoryQuality.CONSERVATIVE
         delta = list(known[overlap:])
-        delta_origins = [origin] * len(delta)
-        known_values = list(self._messages)
-        for message in incoming:
-            message_run_id = message.run_id
-            if message_run_id is not None:
+        delta_signatures = list(known_signatures[overlap:])
+        known_signatures_set = set(self._signatures)
+        known_signatures_set.update(delta_signatures)
+        for message, signature in zip(incoming, incoming_signatures, strict=True):
+            if message.run_id is not None:
                 continue
-            if any(
-                self._message_matches(message, known_value)
-                for known_value in known_values
-            ):
+            if signature in known_signatures_set:
                 continue
             delta.append(message)
-            delta_origins.append(TranscriptOrigin.UNKNOWN)
-            known_values.append(message)
-            self._quality = HistoryQuality.CONSERVATIVE
-        first = len(self._messages)
-        self._messages.extend(delta)
-        return TranscriptCapture(
-            first,
+            delta_signatures.append(signature)
+            known_signatures_set.add(signature)
+            quality = HistoryQuality.CONSERVATIVE
+        base_count = len(self._messages)
+        return TranscriptAccumulatorAdvance(
+            self._run_id,
+            self._generation,
+            self._generation + 1,
+            base_count,
+            base_count + len(delta),
             tuple(delta),
-            tuple(delta_origins),
-            self._quality,
+            tuple(delta_signatures),
+            quality,
         )
+
+    def apply(self, advance: TranscriptAccumulatorAdvance) -> None:
+        if advance.run_id != self._run_id:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        if (
+            self._generation == advance.target_generation
+            and len(self._messages) == advance.target_message_count
+        ):
+            signatures = (
+                ()
+                if not advance.delta_signatures
+                else tuple(self._signatures[-len(advance.delta_signatures) :])
+            )
+            if (
+                signatures != advance.delta_signatures
+                or self._quality is not advance.target_quality
+            ):
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            return
+        if (
+            self._generation != advance.base_generation
+            or len(self._messages) != advance.base_message_count
+            or len(self._signatures) != advance.base_message_count
+        ):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        self._messages.extend(advance.delta_messages)
+        self._signatures.extend(advance.delta_signatures)
+        self._quality = advance.target_quality
+        self._generation = advance.target_generation
 
     def _overlap(
         self,
-        incoming: tuple[ModelMessage, ...],
-        stored: tuple[ModelMessage, ...],
+        incoming: tuple[bytes, ...],
+        stored: tuple[bytes, ...],
     ) -> int:
         if not incoming or not stored:
             return 0
-        maximum = min(len(stored), len(incoming))
-        for size in range(maximum, 0, -1):
-            if all(
-                self._message_matches(left, right)
-                for left, right in zip(
-                    stored[-size:],
-                    incoming[:size],
-                    strict=True,
-                )
-            ):
-                return size
-        return 0
-
-    def _message_matches(
-        self,
-        left: ModelMessage,
-        right: ModelMessage,
-    ) -> bool:
-        return _message_signature(left) == _message_signature(right)
+        prefix = [0] * len(incoming)
+        matched = 0
+        for index in range(1, len(incoming)):
+            while matched and incoming[index] != incoming[matched]:
+                matched = prefix[matched - 1]
+            if incoming[index] == incoming[matched]:
+                matched += 1
+            prefix[index] = matched
+        matched = 0
+        for index, value in enumerate(stored):
+            while matched and value != incoming[matched]:
+                matched = prefix[matched - 1]
+            if value == incoming[matched]:
+                matched += 1
+            if matched == len(incoming):
+                if index == len(stored) - 1:
+                    return matched
+                matched = prefix[matched - 1]
+        return matched
 
 
 class _ContextProjector:
@@ -312,21 +394,23 @@ class TranscriptRepository:
     ) -> tuple[TranscriptChunk, ...]:
         values = tuple(messages)
         chunks: list[TranscriptChunk] = []
-        current: list[object] = []
+        current: list[ModelMessage] = []
         current_start = first_message_index
+        current_size = 2
         for message in values:
-            candidate = current + [message]
-            raw = ModelMessagesTypeAdapter.dump_json(candidate)
-            if current and len(raw) > _CHUNK_TARGET:
+            encoded = ModelMessagesTypeAdapter.dump_json([message])
+            part = encoded[1:-1]
+            candidate_size = current_size + len(part) + (1 if current else 0)
+            if current and candidate_size > _CHUNK_TARGET:
                 chunks.append(
                     await self._make_chunk(owner_id, current_start, current, origin)
                 )
+                current_start += len(current)
                 current = [message]
-                current_start = first_message_index + sum(
-                    item.message_count for item in chunks
-                )
+                current_size = len(part) + 2
             else:
-                current = candidate
+                current.append(message)
+                current_size = candidate_size
         if current:
             chunks.append(await self._make_chunk(owner_id, current_start, current, origin))
         return tuple(chunks)
@@ -744,6 +828,13 @@ class TranscriptRepository:
         return resolution.legacy_message_limit + sum(
             segment.end - segment.start for segment in resolution.segments
         )
+
+    async def transcript_message_count(self, owner_id: str) -> int:
+        async def read(transaction: StateTransaction) -> int:
+            owner = await transaction.get_record(self._owner_key(owner_id))
+            return await self._owner_message_count(transaction, owner_id, owner)
+
+        return await self._store.read(read)
 
     async def load_session_model_context(
         self,
@@ -1329,4 +1420,4 @@ async def _one_chunk(value: bytes) -> AsyncIterator[bytes]:
     yield value
 
 
-__all__ = ["TranscriptRepository"]
+__all__ = ["TranscriptAccumulatorAdvance", "TranscriptRepository"]

@@ -19,11 +19,20 @@ from ...core import JsonValue, canonical_json_bytes
 ValueT = TypeVar("ValueT")
 
 
+class StateLockOrderError(RuntimeError):
+    """Raised when a state callback requests an invalid synchronization edge."""
+
+
+class StateTransactionNestingError(RuntimeError):
+    """Raised when a callback requests an invalid nested state operation."""
+
+
 @dataclass(frozen=True, slots=True)
 class _ActiveStateScope:
     group: "StateStorageGroup"
     task: "asyncio.Task[object]"
     transactions: Mapping["StateStore", "StateTransaction"]
+    writable: bool
 
 
 _active_state_scope: ContextVar[_ActiveStateScope | None] = ContextVar(
@@ -32,20 +41,47 @@ _active_state_scope: ContextVar[_ActiveStateScope | None] = ContextVar(
 )
 
 
-def active_state_transaction(store: "StateStore") -> "StateTransaction | None":
-    """Return the enlisted transaction, rejecting invalid scope reuse."""
+def active_state_transaction(
+    store: "StateStore",
+    *,
+    writable: bool = False,
+) -> "StateTransaction | None":
+    """Return the active transaction, rejecting invalid scope reuse."""
+    return _active_transaction(store, writable=writable)
+
+
+def _active_transaction(
+    store: "StateStore",
+    *,
+    writable: bool,
+) -> "StateTransaction | None":
     active = _active_state_scope.get()
     if active is None:
         return None
     task = asyncio.current_task()
     if active.task is not task:
-        raise RuntimeError("a child task cannot reuse its parent StateStore transaction")
+        raise StateTransactionNestingError(
+            "a child task cannot reuse its parent StateStore transaction"
+        )
+    if writable and not active.writable:
+        raise StateTransactionNestingError(
+            "a read-only StateStore callback cannot mutate state"
+        )
     try:
         return active.transactions[store]
     except KeyError as error:
         if store.storage_group is active.group:
-            raise RuntimeError("a StateStore was not enlisted in the active group transaction") from error
-        raise RuntimeError("a task cannot mutate two StateStorageGroups at once") from error
+            raise StateTransactionNestingError(
+                "a StateStore was not enlisted in the active group transaction"
+            ) from error
+        raise StateTransactionNestingError(
+            "a task cannot access two StateStorageGroups at once"
+        ) from error
+
+
+def active_state_scope() -> _ActiveStateScope | None:
+    """Return the current scope for synchronization-order checks."""
+    return _active_state_scope.get()
 
 
 def bind_state_transaction(store: "StateStore", transaction: "StateTransaction") -> Token:
@@ -59,11 +95,21 @@ def bind_state_transaction(store: "StateStore", transaction: "StateTransaction")
 def bind_state_scope(
     group: "StateStorageGroup",
     transactions: Mapping["StateStore", "StateTransaction"],
+    *,
+    writable: bool = True,
 ) -> Token:
     task = asyncio.current_task()
     if task is None:
         raise RuntimeError("StateStore mutation requires an asyncio task")
-    return _active_state_scope.set(_ActiveStateScope(group, task, transactions))
+    bound = (
+        transactions
+        if writable
+        else {
+            store: _ReadOnlyStateTransaction(transaction)
+            for store, transaction in transactions.items()
+        }
+    )
+    return _active_state_scope.set(_ActiveStateScope(group, task, bound, writable))
 
 
 class _BoundStateGroupTransaction:
@@ -93,12 +139,22 @@ def active_state_group_transaction(
         raise RuntimeError("no active StateStorageGroup transaction")
     task = asyncio.current_task()
     if active.task is not task:
-        raise RuntimeError("a child task cannot reuse its parent StateStorageGroup transaction")
+        raise StateTransactionNestingError(
+            "a child task cannot reuse its parent StateStorageGroup transaction"
+        )
+    if not active.writable:
+        raise StateTransactionNestingError(
+            "a read-only StateStore callback cannot mutate state"
+        )
     if active.group is not group:
-        raise RuntimeError("a task cannot mutate two StateStorageGroups at once")
+        raise StateTransactionNestingError(
+            "a task cannot mutate two StateStorageGroups at once"
+        )
     for store in stores:
         if store not in active.transactions:
-            raise RuntimeError("store was not enlisted in the StateStorageGroup transaction")
+            raise StateTransactionNestingError(
+                "store was not enlisted in the StateStorageGroup transaction"
+            )
     return _BoundStateGroupTransaction(group, active.transactions)
 
 
@@ -359,6 +415,165 @@ class StateTransaction(Protocol):
     async def delete_operations(self, query: OperationQuery) -> tuple[StoredOperation, ...]: ...
 
 
+class _ReadOnlyStateTransaction(StateTransaction):
+    def __init__(self, transaction: StateTransaction) -> None:
+        self._transaction = transaction
+
+    async def now(self) -> datetime:
+        return await self._transaction.now()
+
+    async def get_record(self, key: bytes) -> StoredRecord | None:
+        return await self._transaction.get_record(key)
+
+    async def get_records(self, keys: Sequence[bytes]) -> Mapping[bytes, StoredRecord]:
+        return await self._transaction.get_records(keys)
+
+    async def guard_record(
+        self,
+        key: bytes,
+        *,
+        expected_storage_version: int,
+    ) -> StoredRecord | None:
+        del key, expected_storage_version
+        self._reject("guard_record")
+        return None
+
+    async def list_records(self, query: RecordQuery) -> tuple[StoredRecord, ...]:
+        return await self._transaction.list_records(query)
+
+    async def scan_records(self) -> tuple[StoredRecord, ...]:
+        return await self._transaction.scan_records()
+
+    async def resolve_alias(self, alias: bytes) -> bytes | None:
+        return await self._transaction.resolve_alias(alias)
+
+    async def resolve_aliases(self, aliases: Sequence[bytes]) -> Mapping[bytes, bytes]:
+        return await self._transaction.resolve_aliases(aliases)
+
+    async def get_sequence(self, key: bytes) -> int:
+        return await self._transaction.get_sequence(key)
+
+    async def get_sequences(self, keys: Sequence[bytes]) -> Mapping[bytes, int]:
+        return await self._transaction.get_sequences(keys)
+
+    async def list_facts(self, query: FactQuery) -> tuple[StoredFact, ...]:
+        return await self._transaction.list_facts(query)
+
+    async def scan_facts(self) -> tuple[StoredFact, ...]:
+        return await self._transaction.scan_facts()
+
+    async def get_operation(self, key: bytes) -> StoredOperation | None:
+        return await self._transaction.get_operation(key)
+
+    async def list_operations(self, query: OperationQuery) -> tuple[StoredOperation, ...]:
+        return await self._transaction.list_operations(query)
+
+    async def scan_operations(self) -> tuple[StoredOperation, ...]:
+        return await self._transaction.scan_operations()
+
+    def _reject(self, operation: str) -> None:
+        raise StateTransactionNestingError(
+            f"read-only StateTransaction cannot perform {operation}"
+        )
+
+    async def insert_record(self, record: StoredRecord) -> None:
+        del record
+        self._reject("insert_record")
+
+    async def insert_records(self, records: Sequence[StoredRecord]) -> None:
+        del records
+        self._reject("insert_records")
+
+    async def replace_record(self, record: StoredRecord, *, expected_storage_version: int) -> bool:
+        del record, expected_storage_version
+        self._reject("replace_record")
+        return False
+
+    async def replace_records(self, replacements: Sequence[RecordReplacement]) -> None:
+        del replacements
+        self._reject("replace_records")
+
+    async def update_record_lease(
+        self,
+        key: bytes,
+        *,
+        expected_storage_version: int,
+        lease_owner: str | None,
+        lease_fence: int,
+        lease_expires_at: datetime | None,
+    ) -> bool:
+        del key, expected_storage_version, lease_owner, lease_fence, lease_expires_at
+        self._reject("update_record_lease")
+        return False
+
+    async def delete_record(self, key: bytes, *, expected_storage_version: int | None = None) -> bool:
+        del key, expected_storage_version
+        self._reject("delete_record")
+        return False
+
+    async def insert_alias(self, alias: StoredAlias) -> None:
+        del alias
+        self._reject("insert_alias")
+
+    async def insert_aliases(self, aliases: Sequence[StoredAlias]) -> None:
+        del aliases
+        self._reject("insert_aliases")
+
+    async def next_sequence(self, key: bytes) -> int:
+        del key
+        self._reject("next_sequence")
+        return 0
+
+    async def reserve_sequence(self, key: bytes, count: int) -> int:
+        del key, count
+        self._reject("reserve_sequence")
+        return 0
+
+    async def reserve_sequences(self, reservations: Mapping[bytes, int]) -> Mapping[bytes, int]:
+        del reservations
+        self._reject("reserve_sequences")
+        return {}
+
+    async def advance_sequence(self, key: bytes, expected: int) -> int:
+        del key, expected
+        self._reject("advance_sequence")
+        return 0
+
+    async def delete_sequence(self, key: bytes) -> None:
+        del key
+        self._reject("delete_sequence")
+
+    async def delete_sequences(self, keys: Sequence[bytes]) -> None:
+        del keys
+        self._reject("delete_sequences")
+
+    async def insert_fact(self, fact: StoredFact) -> None:
+        del fact
+        self._reject("insert_fact")
+
+    async def insert_facts(self, facts: Sequence[StoredFact]) -> None:
+        del facts
+        self._reject("insert_facts")
+
+    async def delete_fact_streams(self, owner_key: bytes) -> None:
+        del owner_key
+        self._reject("delete_fact_streams")
+
+    async def insert_operation(self, value: StoredOperation) -> None:
+        del value
+        self._reject("insert_operation")
+
+    async def replace_operation(self, value: StoredOperation, *, expected_state: str) -> bool:
+        del value, expected_state
+        self._reject("replace_operation")
+        return False
+
+    async def delete_operations(self, query: OperationQuery) -> tuple[StoredOperation, ...]:
+        del query
+        self._reject("delete_operations")
+        return ()
+
+
 StateCallback = Callable[[StateTransaction], Awaitable[ValueT]]
 StateGroupCallback = Callable[["StateGroupTransaction"], Awaitable[ValueT]]
 
@@ -563,8 +778,10 @@ __all__ = [
     "RecordQuery",
     "RecordReplacement",
     "StateGroupTransaction",
+    "StateLockOrderError",
     "StateStore",
     "StateStorageGroup",
+    "StateTransactionNestingError",
     "StateTransaction",
     "StoredAlias",
     "StoredFact",
@@ -584,7 +801,7 @@ __all__ = [
     "sortable_timestamp",
     "stream_digest",
     "subject_digest",
+    "validate_operation_replacement",
     "validate_record_identity",
     "validate_record_replacement",
-    "validate_operation_replacement",
 ]

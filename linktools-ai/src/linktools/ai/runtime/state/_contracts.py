@@ -228,6 +228,47 @@ class ExecutionRecord:
 
 
 @dataclass(frozen=True, slots=True)
+class ExecutionRunSealHead:
+    run_id: str
+    event_count: int
+    snapshot_count: int
+    transcript_message_count: int
+    projection_digest: str
+
+    def __post_init__(self) -> None:
+        if any(
+            value < 0
+            for value in (
+                self.event_count,
+                self.snapshot_count,
+                self.transcript_message_count,
+            )
+        ):
+            raise ValueError("execution run seal counts cannot be negative")
+        if not self.run_id or not self.projection_digest:
+            raise ValueError("execution run seal identity cannot be empty")
+
+
+@dataclass(frozen=True, slots=True)
+class ExecutionHistorySealRecord:
+    execution_id: str
+    tenant_id: str
+    seal_version: int
+    run_heads: tuple[ExecutionRunSealHead, ...]
+    execution_event_high_water: int
+    seal_digest: str
+
+    def __post_init__(self) -> None:
+        if self.seal_version < 1 or self.execution_event_high_water < 0:
+            raise ValueError("execution history seal values are invalid")
+        if not self.execution_id or not self.tenant_id or not self.seal_digest:
+            raise ValueError("execution history seal identity cannot be empty")
+        run_ids = tuple(head.run_id for head in self.run_heads)
+        if run_ids != tuple(sorted(run_ids)) or len(run_ids) != len(set(run_ids)):
+            raise ValueError("execution history seal heads must be sorted and unique")
+
+
+@dataclass(frozen=True, slots=True)
 class ExecutionStartClaim:
     execution_id: str
     tenant_id: str
@@ -827,6 +868,17 @@ class ExecutionRepository(RuntimeRepository, Protocol):
         pending_events: Sequence["ExecutionEventAppend"] = (),
     ) -> ExecutionTerminalCommitResult: ...
     async def get_result(self, execution_id: str, *, tenant_id: str) -> ResultRecord | None: ...
+    async def get_history_seal(
+        self,
+        execution_id: str,
+        *,
+        tenant_id: str,
+    ) -> ExecutionHistorySealRecord | None: ...
+    async def put_history_seal_in_transaction(
+        self,
+        transaction: "StateTransaction",
+        seal: ExecutionHistorySealRecord,
+    ) -> ExecutionHistorySealRecord: ...
 
 
 class IdempotencyRepository(RuntimeRepository, Protocol):
@@ -1130,8 +1182,10 @@ __all__ = [
     "ExecutionCancelRequestCommit",
     "ExecutionEventAppend",
     "ExecutionEventRecord",
+    "ExecutionHistorySealRecord",
     "ExecutionRecord",
     "ExecutionRepository",
+    "ExecutionRunSealHead",
     "ExecutionStartClaim",
     "AgentAttemptClaim",
     "ExecutionStartReservation",

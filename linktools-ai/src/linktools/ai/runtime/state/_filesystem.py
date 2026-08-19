@@ -7,8 +7,15 @@ import hashlib
 import json
 import os
 from bisect import bisect_right
+from collections.abc import (
+    AsyncIterator,
+    Callable,
+    Iterator,
+    Mapping,
+    MutableMapping,
+    Sequence,
+)
 from contextlib import asynccontextmanager
-from collections.abc import AsyncIterator, Callable, Iterator, Mapping, MutableMapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
@@ -42,13 +49,13 @@ from ._store import (
     StoredFact,
     StoredOperation,
     StoredRecord,
-    active_state_transaction,
     active_state_group_transaction,
+    active_state_transaction,
     bind_state_scope,
     reset_state_transaction,
+    validate_operation_replacement,
     validate_record_identity,
     validate_record_replacement,
-    validate_operation_replacement,
 )
 
 ValueT = TypeVar("ValueT")
@@ -645,9 +652,19 @@ class FilesystemStateStorageGroup:
             store._runtime_domain,
             (monotonic() - started) * 1000,
         )
+        transaction = _FilesystemTransaction(store.root, store._require_index())
+        token = bind_state_scope(
+            self,
+            {store: transaction},
+            writable=False,
+        )
         try:
-            return await fn(_FilesystemTransaction(store.root, store._require_index()))
+            readonly = active_state_transaction(store)
+            if readonly is None:
+                raise RuntimeError("read-only StateTransaction scope was not bound")
+            return await fn(readonly)
         finally:
+            reset_state_transaction(token)
             store._consistency_lock.release()
 
     async def mutate(
@@ -660,7 +677,7 @@ class FilesystemStateStorageGroup:
             raise ValueError("StateStorageGroup mutation requires a store")
         for store in members:
             self._ensure_member(store)
-        active = active_state_transaction(members[0])
+        active = active_state_transaction(members[0], writable=True)
         if active is not None:
             return await fn(active_state_group_transaction(self, members))
         mutation_started = monotonic()
@@ -1026,7 +1043,7 @@ class FilesystemStateStore:
 
     async def mutate(self, fn: StateCallback[ValueT]) -> ValueT:
         self._ensure_ready()
-        active = active_state_transaction(self)
+        active = active_state_transaction(self, writable=True)
         if active is not None:
             return await fn(active)
         return await self._storage_group.mutate((self,), lambda group: fn(group.transaction(self)))

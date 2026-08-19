@@ -21,9 +21,9 @@ from ...core import (
     ExternalCallStatus,
     IdempotencyStatus,
     JsonValue,
+    OperationKind,
     OperationLedgerInput,
     OperationLedgerRecord,
-    OperationKind,
     OperationStatus,
     Page,
     ResourceKind,
@@ -31,8 +31,8 @@ from ...core import (
     SessionStatus,
     TaskStatus,
     ToolOperationStatus,
-    canonical_sha256,
     canonical_json_bytes,
+    canonical_sha256,
     operation_replay_matches,
     validate_lease_owner,
     validate_lease_seconds,
@@ -49,15 +49,16 @@ from ...task import (
 from .._tool import ToolOperationRecord
 from ._codec import decode_domain, decode_envelope, encode_domain, encode_envelope
 from ._contracts import (
-    ConversationHistoryRecord,
     ApprovalRecord,
     ArtifactRecord,
     ConversationCursor,
     ConversationHistoryParent,
+    ConversationHistoryRecord,
     EvaluationRecord,
     ExecutionCancelRequestCommit,
     ExecutionEventAppend,
     ExecutionEventRecord,
+    ExecutionHistorySealRecord,
     ExecutionRecord,
     ExecutionStartClaim,
     ExecutionStartReservation,
@@ -70,10 +71,10 @@ from ._contracts import (
     IdempotencyRecord,
     IdempotencyTerminalUpdate,
     MemoryRecord,
+    RecoveryActiveRecord,
+    RecoveryAdmissionRecord,
     RecoveryCheckpoint,
     RecoveryCheckpointState,
-    RecoveryAdmissionRecord,
-    RecoveryActiveRecord,
     RecoveryStateRecord,
     ResultRecord,
     SessionRecord,
@@ -2108,6 +2109,63 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
         execution = await self.get(execution_id, tenant_id=tenant_id)
         return None if execution is None else execution.result
 
+    async def get_history_seal(
+        self,
+        execution_id: str,
+        *,
+        tenant_id: str,
+    ) -> ExecutionHistorySealRecord | None:
+        _require_repository_tenant(tenant_id, self._tenant_id)
+
+        async def read(transaction: StateTransaction) -> ExecutionHistorySealRecord | None:
+            return await self._get_history_seal_in_transaction(transaction, execution_id)
+
+        return await self._store.read(read)
+
+    async def _get_history_seal_in_transaction(
+        self,
+        transaction: StateTransaction,
+        execution_id: str,
+    ) -> ExecutionHistorySealRecord | None:
+        record = await transaction.get_record(
+            self._key("execution_history_seal", execution_id)
+        )
+        if record is None:
+            return None
+        if record.kind != "execution_history_seal":
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        value = await self._decode(record, ExecutionHistorySealRecord)
+        if value.execution_id != execution_id or value.tenant_id != self._tenant_id:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        return value
+
+    async def put_history_seal_in_transaction(
+        self,
+        transaction: StateTransaction,
+        seal: ExecutionHistorySealRecord,
+    ) -> ExecutionHistorySealRecord:
+        _require_repository_tenant(seal.tenant_id, self._tenant_id)
+        key = self._key("execution_history_seal", seal.execution_id)
+        current = await transaction.get_record(key)
+        if current is not None:
+            existing = await self._decode(current, ExecutionHistorySealRecord)
+            if existing != seal:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            return existing
+        await transaction.insert_record(
+            self._stored(
+                "execution_history_seal",
+                seal.execution_id,
+                seal,
+            )
+        )
+        _logger.info(
+            "execution history seal persisted: execution=%s runs=%s",
+            seal.execution_id,
+            len(seal.run_heads),
+        )
+        return seal
+
 
 class EventRepositoryImpl(_RepositoryBase):
     def __init__(self, store: StateStore, *, namespace: str, tenant_id: str) -> None:
@@ -2549,9 +2607,21 @@ class RecoveryCheckpointRepositoryImpl(_ResourceRepository[RecoveryCheckpoint]):
                     )
                     if state_record is None:
                         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                    checkpoint = await self._compose(record, state_record)
+                    guarded_state = await transaction.guard_record(
+                        state_record.key_digest,
+                        expected_storage_version=state_record.storage_version,
+                    )
+                    if guarded_state is None:
+                        raise AIError(ErrorCode.STORAGE_CONFLICT)
+                    checkpoint = await self._compose(record, guarded_state)
                 else:
-                    checkpoint = await self._decode(record, RecoveryCheckpoint)
+                    guarded_legacy = await transaction.guard_record(
+                        record.key_digest,
+                        expected_storage_version=record.storage_version,
+                    )
+                    if guarded_legacy is None:
+                        raise AIError(ErrorCode.STORAGE_CONFLICT)
+                    checkpoint = await self._decode(guarded_legacy, RecoveryCheckpoint)
                     await self._split_legacy(transaction, checkpoint)
                 await self._ensure_active_in_transaction(transaction, checkpoint)
             if len(records) < _RECOVERY_PAGE_SIZE:
@@ -2565,13 +2635,14 @@ class RecoveryCheckpointRepositoryImpl(_ResourceRepository[RecoveryCheckpoint]):
         if current is not None:
             self._validate_active_marker(current)
             return
+        await self._validate_active_index_in_transaction(transaction)
         await transaction.insert_record(
             StoredRecord(
                 self._active_marker_key(),
-                self._partition("recovery_active_index_v1"),
+                self._partition("recovery_active_index_v2"),
                 None,
                 None,
-                "recovery_active_index_v1",
+                "recovery_active_index_v2",
                 "ready",
                 "ready",
                 0,
@@ -2579,16 +2650,57 @@ class RecoveryCheckpointRepositoryImpl(_ResourceRepository[RecoveryCheckpoint]):
                 0,
                 None,
                 {
-                    "type": "recovery_active_index_v1",
+                    "type": "recovery_active_index_v2",
                     "tenant_id": self._tenant_id,
                 },
             )
         )
 
+    async def _validate_active_index_in_transaction(
+        self,
+        transaction: StateTransaction,
+    ) -> None:
+        cursor: tuple[str, bytes] | None = None
+        while True:
+            query = RecordQuery(
+                partition_digest=self._partition("recovery_active"),
+                kind="recovery_active",
+                after_sort_key=None if cursor is None else cursor[0],
+                after_key_digest=None if cursor is None else cursor[1],
+                limit=_RECOVERY_PAGE_SIZE,
+            )
+            records = await transaction.list_records(query)
+            for record in records:
+                active = await self._decode(record, RecoveryActiveRecord)
+                self._validate_active_record(record, active, active.execution_id)
+                admission = await transaction.get_record(
+                    self._admission_key(active.execution_id)
+                )
+                state = await transaction.get_record(self._state_key(active.execution_id))
+                if admission is None or state is None:
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                guarded_state = await transaction.guard_record(
+                    state.key_digest,
+                    expected_storage_version=state.storage_version,
+                )
+                if guarded_state is None:
+                    raise AIError(ErrorCode.STORAGE_CONFLICT)
+                checkpoint = await self._compose(admission, guarded_state)
+                if checkpoint.state is RecoveryCheckpointState.COMPLETED:
+                    if not await transaction.delete_record(
+                        record.key_digest,
+                        expected_storage_version=record.storage_version,
+                    ):
+                        raise AIError(ErrorCode.STORAGE_CONFLICT)
+            if len(records) < _RECOVERY_PAGE_SIZE:
+                return
+            last = records[-1]
+            cursor = (last.sort_key, last.key_digest)
+
     def _validate_active_marker(self, record: StoredRecord) -> None:
         if (
-            record.kind != "recovery_active_index_v1"
-            or record.data.get("type") != "recovery_active_index_v1"
+            record.kind != "recovery_active_index_v2"
+            or record.data.get("type") != "recovery_active_index_v2"
             or record.data.get("tenant_id") != self._tenant_id
             or record.state != "ready"
         ):
@@ -2642,7 +2754,7 @@ class RecoveryCheckpointRepositoryImpl(_ResourceRepository[RecoveryCheckpoint]):
         return self._key("recovery_active", execution_id)
 
     def _active_marker_key(self) -> bytes:
-        return self._key("recovery_active_index_v1", "ready")
+        return self._key("recovery_active_index_v2", "ready")
 
     async def get(self, execution_id: str, *, tenant_id: str) -> RecoveryCheckpoint | None:
         if tenant_id != self._tenant_id:

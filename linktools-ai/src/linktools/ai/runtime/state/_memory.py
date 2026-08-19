@@ -24,13 +24,13 @@ from ._store import (
     StoredFact,
     StoredOperation,
     StoredRecord,
-    active_state_transaction,
     active_state_group_transaction,
+    active_state_transaction,
     bind_state_scope,
     reset_state_transaction,
+    validate_operation_replacement,
     validate_record_identity,
     validate_record_replacement,
-    validate_operation_replacement,
 )
 
 ValueT = TypeVar("ValueT")
@@ -69,7 +69,19 @@ class MemoryStateStorageGroup:
         if active is not None:
             return await fn(active)
         async with self._lock:
-            return await fn(self._transaction(store))
+            transaction = self._transaction(store)
+            token = bind_state_scope(
+                self,
+                {store: transaction},
+                writable=False,
+            )
+            try:
+                readonly = active_state_transaction(store)
+                if readonly is None:
+                    raise RuntimeError("read-only StateTransaction scope was not bound")
+                return await fn(readonly)
+            finally:
+                reset_state_transaction(token)
 
     async def mutate(
         self,
@@ -81,7 +93,7 @@ class MemoryStateStorageGroup:
             raise ValueError("StateStorageGroup mutation requires a store")
         for store in members:
             self._ensure_member(store)
-        active = active_state_transaction(members[0])
+        active = active_state_transaction(members[0], writable=True)
         if active is not None:
             group_transaction = active_state_group_transaction(self, members)
             return await fn(group_transaction)
@@ -166,7 +178,7 @@ class MemoryStateStore:
 
     async def mutate(self, fn: StateCallback[ValueT]) -> ValueT:
         self._ensure_ready()
-        active = active_state_transaction(self)
+        active = active_state_transaction(self, writable=True)
         if active is not None:
             return await fn(active)
         return await self._storage_group.mutate((self,), lambda group: fn(group.transaction(self)))

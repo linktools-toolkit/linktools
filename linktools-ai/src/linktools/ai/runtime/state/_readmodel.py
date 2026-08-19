@@ -5,7 +5,7 @@
 import asyncio
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from enum import StrEnum
 from uuid import uuid4
 
@@ -13,6 +13,8 @@ from linktools.core import environ
 
 from ...core import JsonValue
 from ...errors import AIError, ErrorCode
+from ._codec import decode_domain, decode_envelope
+from ._contracts import ExecutionHistorySealRecord
 from ._store import (
     FactQuery,
     StateStore,
@@ -29,6 +31,7 @@ from ._store import (
 _logger = environ.get_logger("ai.runtime.state.readmodel")
 _CHUNK_SIZE = 128
 _LEASE_SECONDS = 30
+_MODEL_VERSION = 2
 
 
 class ExecutionReadModelStatus(StrEnum):
@@ -49,7 +52,7 @@ class ExecutionReadModelRecord:
     revision: int
 
     def __post_init__(self) -> None:
-        if self.model_version != 1:
+        if self.model_version != _MODEL_VERSION:
             raise ValueError("unsupported execution read model version")
         if self.revision < 0 or any(
             count < 0
@@ -72,6 +75,44 @@ class ExecutionReadModelBuild:
     transcript_items: tuple[Mapping[str, JsonValue], ...]
 
 
+class _ExecutionBuildFlights:
+    def __init__(self) -> None:
+        self._guard = asyncio.Lock()
+        self._flights: dict[str, asyncio.Task[ExecutionReadModelRecord]] = {}
+
+    async def run(
+        self,
+        execution_id: str,
+        builder: Callable[[], Awaitable[ExecutionReadModelRecord]],
+    ) -> ExecutionReadModelRecord:
+        async with self._guard:
+            task = self._flights.get(execution_id)
+            if task is None:
+                task = asyncio.create_task(builder())
+                self._flights[execution_id] = task
+                task.add_done_callback(
+                    lambda completed: asyncio.create_task(
+                        self._remove(execution_id, completed)
+                    )
+                )
+        try:
+            return await asyncio.shield(task)
+        finally:
+            if task.done():
+                async with self._guard:
+                    if self._flights.get(execution_id) is task:
+                        self._flights.pop(execution_id, None)
+
+    async def _remove(
+        self,
+        execution_id: str,
+        task: asyncio.Task[ExecutionReadModelRecord],
+    ) -> None:
+        async with self._guard:
+            if self._flights.get(execution_id) is task:
+                self._flights.pop(execution_id, None)
+
+
 class ExecutionReadModelRepository:
     """Build and page derived terminal execution streams."""
 
@@ -79,6 +120,7 @@ class ExecutionReadModelRepository:
         self._store = store
         self._namespace = namespace
         self._tenant_id = tenant_id
+        self._flights = _ExecutionBuildFlights()
 
     async def ensure(
         self,
@@ -89,35 +131,54 @@ class ExecutionReadModelRepository:
     ) -> ExecutionReadModelRecord:
         if tenant_id != self._tenant_id:
             raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
-        owner, fence, existing = await self._claim(execution_id)
-        if existing is not None:
-            return existing
-        build = await builder()
-        if (
-            build.execution_id != execution_id
-            or build.tenant_id != tenant_id
-        ):
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        await self._write_build(build, owner, fence)
-        result = ExecutionReadModelRecord(
-            execution_id,
-            tenant_id,
-            build.source_digest,
-            1,
-            ExecutionReadModelStatus.COMPLETE,
-            len(build.trace_items),
-            len(build.history_items),
-            len(build.transcript_items),
-            1,
-        )
-        _logger.info(
-            "execution read model completed: execution=%s trace=%s history=%s transcript=%s",
-            execution_id,
-            result.trace_count,
-            result.history_count,
-            result.transcript_count,
-        )
-        return result
+        seal = await self._load_history_seal(execution_id)
+        if seal is None:
+            raise AIError(ErrorCode.EXECUTION_HISTORY_UNAVAILABLE)
+
+        async def build_and_publish() -> ExecutionReadModelRecord:
+            existing = await self.get_complete(
+                execution_id,
+                tenant_id=tenant_id,
+            )
+            if existing is not None:
+                return existing
+            build = await builder()
+            if (
+                build.execution_id != execution_id
+                or build.tenant_id != tenant_id
+                or not build.source_digest
+            ):
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            owner, fence, claimed = await self._claim(execution_id)
+            if claimed is not None:
+                if claimed.source_digest != build.source_digest:
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                return claimed
+            current_seal = await self._load_history_seal(execution_id)
+            if current_seal != seal:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            await self._write_build(build, owner, fence)
+            result = ExecutionReadModelRecord(
+                execution_id,
+                tenant_id,
+                build.source_digest,
+                _MODEL_VERSION,
+                ExecutionReadModelStatus.COMPLETE,
+                len(build.trace_items),
+                len(build.history_items),
+                len(build.transcript_items),
+                1,
+            )
+            _logger.info(
+                "execution read model completed: execution=%s trace=%s history=%s transcript=%s",
+                execution_id,
+                result.trace_count,
+                result.history_count,
+                result.transcript_count,
+            )
+            return result
+
+        return await self._flights.run(execution_id, build_and_publish)
 
     async def get_complete(
         self,
@@ -127,12 +188,16 @@ class ExecutionReadModelRepository:
     ) -> ExecutionReadModelRecord | None:
         if tenant_id != self._tenant_id:
             return None
+        if await self._load_history_seal(execution_id) is None:
+            return None
         record = await self._store.read(
             lambda transaction: transaction.get_record(self._record_key(execution_id))
         )
         if record is None:
             return None
         self._validate_stored_record(record, execution_id)
+        if self._stored_model_version(record) != _MODEL_VERSION:
+            return None
         value = self._decode_record(record)
         self._validate_owner(value, execution_id)
         return value if value.status is ExecutionReadModelStatus.COMPLETE else None
@@ -150,6 +215,8 @@ class ExecutionReadModelRepository:
             raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
         if offset < 0 or limit < 1:
             raise AIError(ErrorCode.PAGE_LIMIT_INVALID)
+        if await self._load_history_seal(execution_id) is None:
+            raise AIError(ErrorCode.EXECUTION_HISTORY_UNAVAILABLE)
 
         async def read(
             transaction: StateTransaction,
@@ -158,6 +225,8 @@ class ExecutionReadModelRepository:
             if record is None:
                 raise AIError(ErrorCode.EXECUTION_HISTORY_UNAVAILABLE)
             self._validate_stored_record(record, execution_id)
+            if self._stored_model_version(record) != _MODEL_VERSION:
+                raise AIError(ErrorCode.EXECUTION_HISTORY_UNAVAILABLE)
             value = self._decode_record(record)
             self._validate_owner(value, execution_id)
             if value.status is not ExecutionReadModelStatus.COMPLETE:
@@ -208,7 +277,7 @@ class ExecutionReadModelRepository:
         execution_id: str,
     ) -> tuple[str, int, ExecutionReadModelRecord | None]:
         owner = uuid4().hex
-        for _ in range(100):
+        while True:
             result = await self._store.mutate(
                 lambda transaction: self._claim_in_transaction(
                     transaction,
@@ -220,8 +289,46 @@ class ExecutionReadModelRepository:
                 return result
             if result[0] == owner:
                 return result
-            await asyncio.sleep(0.05)
-        raise AIError(ErrorCode.STORAGE_UNAVAILABLE)
+            current = await self._store.read(
+                lambda transaction: transaction.get_record(
+                    self._record_key(execution_id)
+                )
+            )
+            if current is None or current.lease_expires_at is None:
+                await asyncio.sleep(0.05)
+                continue
+            remaining = (
+                current.lease_expires_at - datetime.now(timezone.utc)
+            ).total_seconds()
+            await asyncio.sleep(max(0.01, min(0.25, remaining)))
+
+    async def _load_history_seal(
+        self,
+        execution_id: str,
+    ) -> ExecutionHistorySealRecord | None:
+        async def read(transaction: StateTransaction) -> ExecutionHistorySealRecord | None:
+            record = await transaction.get_record(self._history_seal_key(execution_id))
+            if record is None:
+                return None
+            if record.kind != "execution_history_seal":
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            try:
+                payload = decode_envelope(record.data).get("payload")
+                if payload is None:
+                    raise ValueError("history seal payload is missing")
+                value = decode_domain(payload, ExecutionHistorySealRecord)
+            except (TypeError, ValueError, KeyError, AIError) as error:
+                if isinstance(error, AIError):
+                    raise
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
+            if (
+                value.execution_id != execution_id
+                or value.tenant_id != self._tenant_id
+            ):
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            return value
+
+        return await self._store.read(read)
 
     async def _claim_in_transaction(
         self,
@@ -239,6 +346,33 @@ class ExecutionReadModelRepository:
             )
             return owner, 1, None
         self._validate_stored_record(current, execution_id)
+        if self._stored_model_version(current) != _MODEL_VERSION:
+            next_value = self._building_value(execution_id)
+            next_fence = current.lease_fence + 1
+            candidate = self._stored_record(
+                next_value,
+                storage_version=current.storage_version + 1,
+                lease_owner=owner,
+                lease_fence=next_fence,
+                expires=now,
+            )
+            if not await transaction.replace_record(
+                candidate,
+                expected_storage_version=current.storage_version,
+            ):
+                raise AIError(ErrorCode.STORAGE_CONFLICT)
+            await transaction.delete_fact_streams(key)
+            await transaction.delete_sequences(
+                tuple(
+                    self._sequence_key(execution_id, stream_name)
+                    for stream_name in ("trace", "history", "transcript")
+                )
+            )
+            _logger.info(
+                "execution read model v1 replaced: execution=%s",
+                execution_id,
+            )
+            return owner, next_fence, None
         value = self._decode_record(current)
         self._validate_owner(value, execution_id)
         if value.status is ExecutionReadModelStatus.COMPLETE:
@@ -311,7 +445,7 @@ class ExecutionReadModelRepository:
                 build.execution_id,
                 build.tenant_id,
                 build.source_digest,
-                1,
+                _MODEL_VERSION,
                 ExecutionReadModelStatus.COMPLETE,
                 len(build.trace_items),
                 len(build.history_items),
@@ -390,7 +524,7 @@ class ExecutionReadModelRepository:
             execution_id,
             self._tenant_id,
             "",
-            1,
+            _MODEL_VERSION,
             ExecutionReadModelStatus.BUILDING,
             0,
             0,
@@ -446,6 +580,15 @@ class ExecutionReadModelRepository:
             execution_id,
         )
 
+    def _history_seal_key(self, execution_id: str) -> bytes:
+        return record_key_digest(
+            self._namespace,
+            self._tenant_id,
+            "execution",
+            "execution_history_seal",
+            execution_id,
+        )
+
     def _stream(self, execution_id: str, stream_name: str) -> bytes:
         return stream_digest(
             self._namespace,
@@ -480,6 +623,12 @@ class ExecutionReadModelRepository:
             )
         except (KeyError, TypeError, ValueError) as error:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
+
+    def _stored_model_version(self, record: StoredRecord) -> int:
+        value = record.data.get("model_version")
+        if isinstance(value, bool) or not isinstance(value, int):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        return value
 
     def _stream_count(self, value: ExecutionReadModelRecord, stream_name: str) -> int:
         try:
