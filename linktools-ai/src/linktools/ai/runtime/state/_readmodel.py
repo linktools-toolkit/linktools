@@ -1,0 +1,526 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""Terminal execution read models backed by Runtime StateStore facts."""
+
+import asyncio
+from collections.abc import Awaitable, Callable, Mapping, Sequence
+from dataclasses import dataclass
+from datetime import datetime, timedelta
+from enum import StrEnum
+from uuid import uuid4
+
+from linktools.core import environ
+
+from ...core import JsonValue
+from ...errors import AIError, ErrorCode
+from ._store import (
+    FactQuery,
+    StateStore,
+    StateTransaction,
+    StoredFact,
+    StoredRecord,
+    partition_digest,
+    record_key_digest,
+    sequence_key,
+    sortable_identity,
+    stream_digest,
+)
+
+_logger = environ.get_logger("ai.runtime.state.readmodel")
+_CHUNK_SIZE = 128
+_LEASE_SECONDS = 30
+
+
+class ExecutionReadModelStatus(StrEnum):
+    BUILDING = "BUILDING"
+    COMPLETE = "COMPLETE"
+
+
+@dataclass(frozen=True, slots=True)
+class ExecutionReadModelRecord:
+    execution_id: str
+    tenant_id: str
+    source_digest: str
+    model_version: int
+    status: ExecutionReadModelStatus
+    trace_count: int
+    history_count: int
+    transcript_count: int
+    revision: int
+
+    def __post_init__(self) -> None:
+        if self.model_version != 1:
+            raise ValueError("unsupported execution read model version")
+        if self.revision < 0 or any(
+            count < 0
+            for count in (
+                self.trace_count,
+                self.history_count,
+                self.transcript_count,
+            )
+        ):
+            raise ValueError("execution read model counts are invalid")
+
+
+@dataclass(frozen=True, slots=True)
+class ExecutionReadModelBuild:
+    execution_id: str
+    tenant_id: str
+    source_digest: str
+    trace_items: tuple[Mapping[str, JsonValue], ...]
+    history_items: tuple[Mapping[str, JsonValue], ...]
+    transcript_items: tuple[Mapping[str, JsonValue], ...]
+
+
+class ExecutionReadModelRepository:
+    """Build and page derived terminal execution streams."""
+
+    def __init__(self, store: StateStore, *, namespace: str, tenant_id: str) -> None:
+        self._store = store
+        self._namespace = namespace
+        self._tenant_id = tenant_id
+
+    async def ensure(
+        self,
+        execution_id: str,
+        *,
+        tenant_id: str,
+        builder: Callable[[], Awaitable[ExecutionReadModelBuild]],
+    ) -> ExecutionReadModelRecord:
+        if tenant_id != self._tenant_id:
+            raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
+        owner, fence, existing = await self._claim(execution_id)
+        if existing is not None:
+            return existing
+        build = await builder()
+        if (
+            build.execution_id != execution_id
+            or build.tenant_id != tenant_id
+        ):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        await self._write_build(build, owner, fence)
+        result = ExecutionReadModelRecord(
+            execution_id,
+            tenant_id,
+            build.source_digest,
+            1,
+            ExecutionReadModelStatus.COMPLETE,
+            len(build.trace_items),
+            len(build.history_items),
+            len(build.transcript_items),
+            1,
+        )
+        _logger.info(
+            "execution read model completed: execution=%s trace=%s history=%s transcript=%s",
+            execution_id,
+            result.trace_count,
+            result.history_count,
+            result.transcript_count,
+        )
+        return result
+
+    async def get_complete(
+        self,
+        execution_id: str,
+        *,
+        tenant_id: str,
+    ) -> ExecutionReadModelRecord | None:
+        if tenant_id != self._tenant_id:
+            return None
+        record = await self._store.read(
+            lambda transaction: transaction.get_record(self._record_key(execution_id))
+        )
+        if record is None:
+            return None
+        self._validate_stored_record(record, execution_id)
+        value = self._decode_record(record)
+        self._validate_owner(value, execution_id)
+        return value if value.status is ExecutionReadModelStatus.COMPLETE else None
+
+    async def page(
+        self,
+        execution_id: str,
+        *,
+        tenant_id: str,
+        stream_name: str,
+        offset: int,
+        limit: int,
+    ) -> tuple[ExecutionReadModelRecord, tuple[Mapping[str, JsonValue], ...]]:
+        if tenant_id != self._tenant_id:
+            raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
+        if offset < 0 or limit < 1:
+            raise AIError(ErrorCode.PAGE_LIMIT_INVALID)
+
+        async def read(
+            transaction: StateTransaction,
+        ) -> tuple[ExecutionReadModelRecord, tuple[Mapping[str, JsonValue], ...]]:
+            record = await transaction.get_record(self._record_key(execution_id))
+            if record is None:
+                raise AIError(ErrorCode.EXECUTION_HISTORY_UNAVAILABLE)
+            self._validate_stored_record(record, execution_id)
+            value = self._decode_record(record)
+            self._validate_owner(value, execution_id)
+            if value.status is not ExecutionReadModelStatus.COMPLETE:
+                raise AIError(ErrorCode.EXECUTION_HISTORY_UNAVAILABLE)
+            count = self._stream_count(value, stream_name)
+            if offset > count:
+                raise AIError(ErrorCode.CURSOR_INVALID)
+            if offset == count:
+                return value, ()
+            first_chunk = offset // _CHUNK_SIZE
+            local_offset = offset % _CHUNK_SIZE
+            after_sequence = first_chunk
+            selected: list[Mapping[str, JsonValue]] = []
+            while len(selected) < limit and after_sequence < (count + _CHUNK_SIZE - 1) // _CHUNK_SIZE:
+                facts = await transaction.list_facts(
+                    FactQuery(
+                        self._stream(execution_id, stream_name),
+                        after_sequence=after_sequence,
+                        limit=1,
+                    )
+                )
+                if not facts:
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                fact = facts[0]
+                if (
+                    fact.owner_key_digest != self._record_key(execution_id)
+                    or fact.kind != f"execution_read_{stream_name}"
+                    or fact.sequence != after_sequence + 1
+                ):
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                after_sequence = fact.sequence
+                items = fact.data.get("items")
+                if not isinstance(items, list):
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                for item in items[local_offset:]:
+                    if not isinstance(item, Mapping):
+                        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                    selected.append(item)
+                    if len(selected) == limit:
+                        break
+                local_offset = 0
+            return value, tuple(selected)
+
+        return await self._store.read(read)
+
+    async def _claim(
+        self,
+        execution_id: str,
+    ) -> tuple[str, int, ExecutionReadModelRecord | None]:
+        owner = uuid4().hex
+        for _ in range(100):
+            result = await self._store.mutate(
+                lambda transaction: self._claim_in_transaction(
+                    transaction,
+                    execution_id,
+                    owner,
+                )
+            )
+            if result[2] is not None:
+                return result
+            if result[0] == owner:
+                return result
+            await asyncio.sleep(0.05)
+        raise AIError(ErrorCode.STORAGE_UNAVAILABLE)
+
+    async def _claim_in_transaction(
+        self,
+        transaction: StateTransaction,
+        execution_id: str,
+        owner: str,
+    ) -> tuple[str, int, ExecutionReadModelRecord | None]:
+        key = self._record_key(execution_id)
+        current = await transaction.get_record(key)
+        now = await transaction.now()
+        if current is None:
+            value = self._building_value(execution_id)
+            await transaction.insert_record(
+                self._stored_record(value, lease_owner=owner, lease_fence=1, expires=now)
+            )
+            return owner, 1, None
+        self._validate_stored_record(current, execution_id)
+        value = self._decode_record(current)
+        self._validate_owner(value, execution_id)
+        if value.status is ExecutionReadModelStatus.COMPLETE:
+            return owner, current.lease_fence, value
+        if (
+            current.lease_owner is not None
+            and current.lease_expires_at is not None
+            and current.lease_expires_at > now
+        ):
+            return current.lease_owner, current.lease_fence, None
+        next_value = self._building_value(execution_id)
+        next_fence = current.lease_fence + 1
+        candidate = self._stored_record(
+            next_value,
+            storage_version=current.storage_version + 1,
+            lease_owner=owner,
+            lease_fence=next_fence,
+            expires=now,
+        )
+        if not await transaction.replace_record(
+            candidate,
+            expected_storage_version=current.storage_version,
+        ):
+            raise AIError(ErrorCode.STORAGE_CONFLICT)
+        await transaction.delete_fact_streams(key)
+        await transaction.delete_sequences(
+            tuple(
+                self._sequence_key(execution_id, stream_name)
+                for stream_name in ("trace", "history", "transcript")
+            )
+        )
+        _logger.warning("execution read model rebuild claimed: execution=%s", execution_id)
+        return owner, next_fence, None
+
+    async def _write_build(
+        self,
+        build: ExecutionReadModelBuild,
+        owner: str,
+        fence: int,
+    ) -> None:
+        for stream_name, values in (
+            ("trace", build.trace_items),
+            ("history", build.history_items),
+            ("transcript", build.transcript_items),
+        ):
+            for start in range(0, len(values), _CHUNK_SIZE):
+                await self._write_chunk(
+                    build.execution_id,
+                    stream_name,
+                    values[start : start + _CHUNK_SIZE],
+                    owner,
+                    fence,
+                )
+
+        async def complete(transaction: StateTransaction) -> None:
+            key = self._record_key(build.execution_id)
+            current = await transaction.get_record(key)
+            if current is None:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            self._validate_stored_record(current, build.execution_id)
+            value = self._decode_record(current)
+            self._validate_owner(value, build.execution_id)
+            if (
+                value.status is not ExecutionReadModelStatus.BUILDING
+                or current.lease_owner != owner
+                or current.lease_fence != fence
+            ):
+                raise AIError(ErrorCode.STORAGE_CONFLICT)
+            complete_value = ExecutionReadModelRecord(
+                build.execution_id,
+                build.tenant_id,
+                build.source_digest,
+                1,
+                ExecutionReadModelStatus.COMPLETE,
+                len(build.trace_items),
+                len(build.history_items),
+                len(build.transcript_items),
+                value.revision + 1,
+            )
+            candidate = self._stored_record(
+                complete_value,
+                storage_version=current.storage_version + 1,
+                lease_owner=None,
+                lease_fence=fence,
+                expires=None,
+            )
+            if not await transaction.replace_record(
+                candidate,
+                expected_storage_version=current.storage_version,
+            ):
+                raise AIError(ErrorCode.STORAGE_CONFLICT)
+
+        await self._store.mutate(complete)
+
+    async def _write_chunk(
+        self,
+        execution_id: str,
+        stream_name: str,
+        values: Sequence[Mapping[str, JsonValue]],
+        owner: str,
+        fence: int,
+    ) -> None:
+        async def mutate(transaction: StateTransaction) -> None:
+            key = self._record_key(execution_id)
+            current = await transaction.get_record(key)
+            if current is None:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            self._validate_stored_record(current, execution_id)
+            value = self._decode_record(current)
+            self._validate_owner(value, execution_id)
+            now = await transaction.now()
+            if (
+                value.status is not ExecutionReadModelStatus.BUILDING
+                or current.lease_owner != owner
+                or current.lease_fence != fence
+            ):
+                raise AIError(ErrorCode.STORAGE_CONFLICT)
+            renewed = self._stored_record(
+                value,
+                storage_version=current.storage_version + 1,
+                lease_owner=owner,
+                lease_fence=fence,
+                expires=now,
+            )
+            if not await transaction.replace_record(
+                renewed,
+                expected_storage_version=current.storage_version,
+            ):
+                raise AIError(ErrorCode.STORAGE_CONFLICT)
+            sequence = await transaction.next_sequence(
+                self._sequence_key(execution_id, stream_name)
+            )
+            await transaction.insert_fact(
+                StoredFact(
+                    self._stream(execution_id, stream_name),
+                    sequence,
+                    key,
+                    f"execution_read_{stream_name}",
+                    None,
+                    None,
+                    {"items": [dict(item) for item in values]},
+                )
+            )
+
+        await self._store.mutate(mutate)
+
+    def _building_value(self, execution_id: str) -> ExecutionReadModelRecord:
+        return ExecutionReadModelRecord(
+            execution_id,
+            self._tenant_id,
+            "",
+            1,
+            ExecutionReadModelStatus.BUILDING,
+            0,
+            0,
+            0,
+            0,
+        )
+
+    def _stored_record(
+        self,
+        value: ExecutionReadModelRecord,
+        *,
+        storage_version: int = 0,
+        lease_owner: str | None,
+        lease_fence: int,
+        expires: datetime | None,
+    ) -> StoredRecord:
+        return StoredRecord(
+            self._record_key(value.execution_id),
+            partition_digest(
+                self._namespace,
+                self._tenant_id,
+                "execution",
+                "execution_read_model",
+            ),
+            None,
+            None,
+            "execution_read_model",
+            sortable_identity(value.execution_id),
+            value.status.value,
+            storage_version,
+            lease_owner,
+            lease_fence,
+            None if expires is None else expires + timedelta(seconds=_LEASE_SECONDS),
+            {
+                "execution_id": value.execution_id,
+                "tenant_id": value.tenant_id,
+                "source_digest": value.source_digest,
+                "model_version": value.model_version,
+                "status": value.status.value,
+                "trace_count": value.trace_count,
+                "history_count": value.history_count,
+                "transcript_count": value.transcript_count,
+                "revision": value.revision,
+            },
+        )
+
+    def _record_key(self, execution_id: str) -> bytes:
+        return record_key_digest(
+            self._namespace,
+            self._tenant_id,
+            "execution",
+            "execution_read_model",
+            execution_id,
+        )
+
+    def _stream(self, execution_id: str, stream_name: str) -> bytes:
+        return stream_digest(
+            self._namespace,
+            self._tenant_id,
+            "execution",
+            f"execution_read_{stream_name}",
+            execution_id,
+        )
+
+    def _sequence_key(self, execution_id: str, stream_name: str) -> bytes:
+        return sequence_key(
+            self._namespace,
+            self._tenant_id,
+            "execution",
+            f"execution_read_{stream_name}",
+            execution_id,
+        )
+
+    def _decode_record(self, record: StoredRecord) -> ExecutionReadModelRecord:
+        try:
+            data = record.data
+            return ExecutionReadModelRecord(
+                str(data["execution_id"]),
+                str(data["tenant_id"]),
+                str(data["source_digest"]),
+                int(data["model_version"]),
+                ExecutionReadModelStatus(str(data["status"])),
+                int(data["trace_count"]),
+                int(data["history_count"]),
+                int(data["transcript_count"]),
+                int(data["revision"]),
+            )
+        except (KeyError, TypeError, ValueError) as error:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
+
+    def _stream_count(self, value: ExecutionReadModelRecord, stream_name: str) -> int:
+        try:
+            return {
+                "trace": value.trace_count,
+                "history": value.history_count,
+                "transcript": value.transcript_count,
+            }[stream_name]
+        except KeyError as error:
+            raise ValueError("unknown execution read model stream") from error
+
+    def _validate_owner(
+        self,
+        value: ExecutionReadModelRecord,
+        execution_id: str,
+    ) -> None:
+        if value.execution_id != execution_id or value.tenant_id != self._tenant_id:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+
+    def _validate_stored_record(
+        self,
+        record: StoredRecord,
+        execution_id: str,
+    ) -> None:
+        if (
+            record.key_digest != self._record_key(execution_id)
+            or record.partition_digest
+            != partition_digest(
+                self._namespace,
+                self._tenant_id,
+                "execution",
+                "execution_read_model",
+            )
+            or record.kind != "execution_read_model"
+        ):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+
+
+__all__ = [
+    "ExecutionReadModelBuild",
+    "ExecutionReadModelRecord",
+    "ExecutionReadModelRepository",
+    "ExecutionReadModelStatus",
+]

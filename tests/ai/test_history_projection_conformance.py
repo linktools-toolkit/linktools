@@ -18,7 +18,11 @@ from linktools.ai.core import (
 )
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.runtime import RuntimeState
-from linktools.ai.runtime.state import ExecutionRecord, RuntimeDomain
+from linktools.ai.runtime.state import (
+    ExecutionReadModelRepository,
+    ExecutionRecord,
+    RuntimeDomain,
+)
 
 
 def _record(status: ExecutionStatus, sequence: int) -> ExecutionRecord:
@@ -122,6 +126,48 @@ def _reader(state: RuntimeState) -> StepExecutionHistoryReader:
         store=state.steps.read_store(RuntimeDomain.EXECUTION),
         cursor_signer=HmacCursorSigner("history", b"history-key"),
     )
+
+
+@pytest.mark.asyncio
+async def test_terminal_reader_pages_from_execution_read_model() -> None:
+    state = RuntimeState.in_memory()
+    await state.initialize(namespace="history", tenant_id="tenant")
+    try:
+        await state.execution.executions.create(_record(ExecutionStatus.SUCCEEDED, 1))
+        await _materialize_attempt(state, 1, "read-model")
+        await state.retention.release_execution_handoff("execution", tenant_id="tenant")
+        read_model = ExecutionReadModelRepository(
+            state.execution.executions.state_store,
+            namespace="history",
+            tenant_id="tenant",
+        )
+        reader = StepExecutionHistoryReader(
+            namespace="history",
+            executions=state.execution.executions,
+            store=state.steps.read_store(RuntimeDomain.EXECUTION),
+            cursor_signer=HmacCursorSigner("history", b"history-key"),
+            read_model=read_model,
+        )
+
+        trace = await reader.trace("execution", tenant_id="tenant", cursor=None, limit=1)
+        history = await reader.history("execution", tenant_id="tenant", cursor=None, limit=1)
+        transcript = await reader.transcript(
+            "execution",
+            tenant_id="tenant",
+            cursor=None,
+            limit=1,
+        )
+
+        assert trace.next_cursor == "1"
+        assert history.next_cursor is not None
+        assert transcript.next_cursor == "1"
+        model = await read_model.get_complete("execution", tenant_id="tenant")
+        assert model is not None
+        assert model.trace_count == 2
+        assert model.history_count == 3
+        assert model.transcript_count == 2
+    finally:
+        await state.close()
 
 
 @pytest.mark.asyncio

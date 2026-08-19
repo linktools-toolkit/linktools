@@ -37,6 +37,7 @@ from ._store import (
     reset_state_transaction,
     validate_record_identity,
     validate_record_replacement,
+    validate_operation_replacement,
 )
 
 if TYPE_CHECKING:
@@ -815,17 +816,22 @@ class _SqlTransaction:
                 .where(*conditions)
                 .subquery()
             )
-            statement = select(ranked).where(ranked.c._subject_rank == 1).order_by(ranked.c.sequence)
+            statement = (
+                select(ranked)
+                .where(ranked.c._subject_rank == 1)
+                .order_by(ranked.c.sequence)
+            )
         else:
             if query.latest:
-                statement = select(table).where(*conditions).order_by(table.c.sequence.desc()).limit(1)
+                statement = select(table).where(*conditions).order_by(table.c.sequence.desc())
             else:
                 statement = select(table).where(*conditions).order_by(table.c.sequence)
-        rows = (await self._session.execute(statement)).mappings().all()
-        facts = tuple(_fact_from_row(row) for row in rows)
         if query.limit is not None:
-            facts = facts[: query.limit]
-        return facts
+            statement = statement.limit(1 if query.latest else query.limit)
+        elif query.latest:
+            statement = statement.limit(1)
+        rows = (await self._session.execute(statement)).mappings().all()
+        return tuple(_fact_from_row(row) for row in rows)
 
     async def scan_facts(self) -> tuple[StoredFact, ...]:
         from sqlalchemy import select
@@ -858,6 +864,10 @@ class _SqlTransaction:
         return None if row is None else _operation_from_row(row)
 
     async def replace_operation(self, value: StoredOperation, *, expected_state: str) -> bool:
+        current = await self.get_operation(value.key_digest)
+        if current is None or current.state != expected_state:
+            return False
+        validate_operation_replacement(current, value)
         from sqlalchemy import update
 
         table = self._table("ai_state_operations")

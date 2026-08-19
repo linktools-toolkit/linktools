@@ -125,6 +125,7 @@ async def build_local_runtime(
             ),
             tool_operations=state.recovery.tools,
         )
+        state.retention.bind_execution_runtime_release(backend.release_runtime_execution)
         execution.bind_backend(backend)
         execution.bind_local_waiter(backend)
         execution.bind_terminal_committer(backend)
@@ -219,36 +220,43 @@ async def _validate_recovery_definitions(
     *,
     tenant_id: str,
 ) -> None:
-    checkpoints = await state.recovery.checkpoints.list(tenant_id=tenant_id)
-    for checkpoint in checkpoints:
-        if (
-            checkpoint.state is RecoveryCheckpointState.COMPLETED
-        ):
-            continue
-        try:
-            definition = (
-                catalog.subagent_definition(checkpoint.input.agent_id)
-                if checkpoint.input.parent_execution_id is not None
-                else catalog.root_definition(checkpoint.input.agent_id)
-            )
-        except AIError as error:
-            raise AIError(
-                ErrorCode.AGENT_DEFINITION_UNAVAILABLE,
-                safe_details={
-                    "execution_id": checkpoint.execution_id,
-                    "agent_id": checkpoint.input.agent_id,
-                },
-            ) from error
-        if definition.spec.id != checkpoint.input.agent_id:
-            raise AIError(
-                ErrorCode.AGENT_DEFINITION_UNAVAILABLE,
-                safe_details={"execution_id": checkpoint.execution_id},
-            )
-        if definition.digest != checkpoint.input.binding_digest:
-            raise AIError(
-                ErrorCode.AGENT_DEFINITION_UNAVAILABLE,
-                safe_details={"execution_id": checkpoint.execution_id},
-            )
+    cursor: str | None = None
+    while True:
+        page = await state.recovery.checkpoints.list_recoverable_page(
+            tenant_id=tenant_id,
+            cursor=cursor,
+            limit=128,
+        )
+        for checkpoint in page.items:
+            if checkpoint.state is RecoveryCheckpointState.COMPLETED:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            try:
+                definition = (
+                    catalog.subagent_definition(checkpoint.input.agent_id)
+                    if checkpoint.input.parent_execution_id is not None
+                    else catalog.root_definition(checkpoint.input.agent_id)
+                )
+            except AIError as error:
+                raise AIError(
+                    ErrorCode.AGENT_DEFINITION_UNAVAILABLE,
+                    safe_details={
+                        "execution_id": checkpoint.execution_id,
+                        "agent_id": checkpoint.input.agent_id,
+                    },
+                ) from error
+            if definition.spec.id != checkpoint.input.agent_id:
+                raise AIError(
+                    ErrorCode.AGENT_DEFINITION_UNAVAILABLE,
+                    safe_details={"execution_id": checkpoint.execution_id},
+                )
+            if definition.digest != checkpoint.input.binding_digest:
+                raise AIError(
+                    ErrorCode.AGENT_DEFINITION_UNAVAILABLE,
+                    safe_details={"execution_id": checkpoint.execution_id},
+                )
+        if page.next_cursor is None:
+            return
+        cursor = page.next_cursor
 
 
 def _cursor_signer(name: str, grant_key: bytes) -> HmacCursorSigner:

@@ -116,6 +116,19 @@ The DBA reference must also satisfy these schema constraints:
 20. `JSON` and `LONGBLOB` are limited to the real fields in this schema.
 21. The DDL and canonical metadata describe the same schema.
 
+The fixed English audit columns apply to every Runtime, Asset, and ObjectStore
+table, including `ai_state_records`, `ai_state_aliases`, `ai_state_facts`,
+`ai_state_sequences`, `ai_state_operations`, `ai_asset_heads`,
+`ai_asset_entries`, `ai_asset_changes`, `ai_objects`, and
+`ai_object_chunks`:
+
+```sql
+updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+    ON UPDATE CURRENT_TIMESTAMP COMMENT 'Update timestamp',
+created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+    COMMENT 'Creation timestamp'
+```
+
 ## 6. Python and logging style
 
 - Python 3.10 or newer; do not use `from __future__ import annotations`.

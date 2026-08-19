@@ -40,6 +40,7 @@ from ._contracts import (
     MemoryState,
     RecoveryCheckpointState,
     RecoveryAdmissionRecord,
+    RecoveryActiveRecord,
     RecoveryHandoffPhase,
     RecoveryState,
     RecoveryStateRecord,
@@ -66,6 +67,12 @@ from ._plan import (
     RuntimeRetentionMode,
     RuntimeStatePlan,
     RuntimeStateRoute,
+)
+from ._readmodel import (
+    ExecutionReadModelBuild,
+    ExecutionReadModelRecord,
+    ExecutionReadModelRepository,
+    ExecutionReadModelStatus,
 )
 from ._repositories import (
     ConversationHistoryRepositoryImpl,
@@ -131,6 +138,10 @@ __all__ = [
     "ExecutionRepositoryImpl",
     "ExecutionProjectionBatch",
     "ExecutionProjectionCheckpoint",
+    "ExecutionReadModelBuild",
+    "ExecutionReadModelRecord",
+    "ExecutionReadModelRepository",
+    "ExecutionReadModelStatus",
     "ExecutionState",
     "ExecutionStateCommands",
     "FilesystemStateStorageGroup",
@@ -152,6 +163,7 @@ __all__ = [
     "RecordReplacement",
     "RecoveryCheckpointState",
     "RecoveryAdmissionRecord",
+    "RecoveryActiveRecord",
     "RecoveryHandoffPhase",
     "RecoveryState",
     "RecoveryStateRecord",

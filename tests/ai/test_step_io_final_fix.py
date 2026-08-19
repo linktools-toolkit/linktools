@@ -73,6 +73,8 @@ async def test_step_events_wait_for_a_safe_snapshot(tmp_path: Path) -> None:
             timestamp=now,
         )
         await state.steps.save_snapshot(snapshot)
+        assert await execution.list_events(run_id=run.run_id) == []
+        await state.steps.flush_execution_projection(run.run_id)
         assert len(await execution.list_events(run_id=run.run_id)) == 3
         assert await execution.latest_snapshot(run_id=run.run_id) == snapshot
         assert await recovery.get_run(run_id=run.run_id) == run

@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """Offline Runtime storage validation and object mark-and-sweep."""
 
-from collections.abc import Mapping
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from contextlib import AsyncExitStack
 from typing import AsyncContextManager, Protocol
 
@@ -43,16 +43,18 @@ class RuntimeStorageInspection:
         objects: ObjectRouter,
         *,
         durable_domains: frozenset[RuntimeDomain],
+        state_validators: Sequence[Callable[[], Awaitable[None]]] = (),
     ) -> None:
         self._stores = dict(stores)
         self._objects = objects
         self._durable_domains = durable_domains
+        self._state_validators = tuple(state_validators)
 
     async def inspect_objects(self) -> Mapping[int, frozenset[str]]:
         references: dict[int, set[str]] = {}
+        await self.validate_state_stores()
         for domain in self._durable_domains:
             store = self._stores[domain]
-            await store.validate_integrity()
             records, facts, operations = await store.read(_scan_state)
             self._collect_references(
                 domain,
@@ -66,6 +68,8 @@ class RuntimeStorageInspection:
     async def validate_state_stores(self) -> None:
         for domain in self._durable_domains:
             await self._stores[domain].validate_integrity()
+        for validator in self._state_validators:
+            await validator()
 
     async def estimate_orphans(self) -> int:
         references = await self.inspect_objects()

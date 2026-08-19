@@ -284,6 +284,7 @@ async def materialize_runtime_state(
             {domain: stores[domain] for domain in RuntimeDomain},
             objects,
             durable_domains=plan.durable_domains,
+            state_validators=(steps.validate_integrity,),
         )
         actions: list[Callable[[], Awaitable[None]]] = [steps.preflight_close, retention.close, steps.close]
         actions.extend(cleanups)
@@ -365,6 +366,7 @@ def _build_object_router(
     contexts: Mapping[RuntimeDomain, SqlStorageContext],
 ) -> _RuntimeObjectRouter:
     values: dict[RuntimeDomain, ObjectStore] = {}
+    sql_objects: dict[int, SqlObjectStore] = {}
     for domain in _OBJECT_DOMAINS:
         route = plan.route(domain)
         if route.retention is RuntimeRetentionMode.DURABLE and external is not None:
@@ -376,7 +378,13 @@ def _build_object_router(
         elif route.kind == "filesystem" and route.path is not None:
             values[domain] = FilesystemObjectStore(route.path / "objects")
         elif route.kind in {"sqlite", "sql"} and domain in contexts:
-            values[domain] = SqlObjectStore.from_context(contexts[domain])
+            context = contexts[domain]
+            context_key = id(context)
+            object_store = sql_objects.get(context_key)
+            if object_store is None:
+                object_store = SqlObjectStore.from_context(context)
+                sql_objects[context_key] = object_store
+            values[domain] = object_store
         else:
             raise AIError(ErrorCode.STORAGE_DEPENDENCY_NOT_READY)
     return _RuntimeObjectRouter(values)

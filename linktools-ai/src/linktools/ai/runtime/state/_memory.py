@@ -3,10 +3,10 @@
 """In-memory implementation of the Runtime StateStore primitives."""
 
 import asyncio
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterator, Mapping, MutableMapping, Sequence
 from dataclasses import replace
 from datetime import datetime, timezone
-from typing import TypeVar
+from typing import Generic, TypeVar
 
 from linktools.core import environ
 
@@ -30,9 +30,12 @@ from ._store import (
     reset_state_transaction,
     validate_record_identity,
     validate_record_replacement,
+    validate_operation_replacement,
 )
 
 ValueT = TypeVar("ValueT")
+KeyT = TypeVar("KeyT")
+MapValueT = TypeVar("MapValueT")
 _logger = environ.get_logger("ai.runtime.state.memory")
 
 
@@ -109,11 +112,12 @@ class MemoryStateStorageGroup:
         now: datetime | None = None,
     ) -> "_MemoryTransaction":
         return _MemoryTransaction(
-            dict(store._records),
-            dict(store._aliases),
-            dict(store._sequences),
-            dict(store._facts),
-            dict(store._operations),
+            store._records,
+            store._aliases,
+            store._sequences,
+            store._facts,
+            store._operations,
+            store._operation_streams,
             now=now,
         )
 
@@ -132,6 +136,7 @@ class MemoryStateStore:
         self._sequences: dict[bytes, int] = {}
         self._facts: dict[tuple[bytes, int], StoredFact] = {}
         self._operations: dict[bytes, StoredOperation] = {}
+        self._operation_streams: dict[bytes, dict[int, bytes]] = {}
         self._lock = asyncio.Lock()
         self._closed = False
         self._initialized = False
@@ -181,29 +186,83 @@ class MemoryStateStore:
             raise AIError(ErrorCode.STORAGE_DEPENDENCY_NOT_READY)
 
     def _apply_transaction(self, transaction: "_MemoryTransaction") -> None:
-        self._records = transaction.records
-        self._aliases = transaction.aliases
-        self._sequences = transaction.sequences
-        self._facts = transaction.facts
-        self._operations = transaction.operations
+        transaction.records.apply_to(self._records)
+        transaction.aliases.apply_to(self._aliases)
+        transaction.sequences.apply_to(self._sequences)
+        transaction.facts.apply_to(self._facts)
+        transaction.operations.apply_to(self._operations)
+        for stream, changes in transaction.operation_stream_changes.items():
+            values = self._operation_streams.setdefault(stream, {})
+            for sequence, key in changes.items():
+                if key is None:
+                    values.pop(sequence, None)
+                else:
+                    values[sequence] = key
+            if not values:
+                self._operation_streams.pop(stream, None)
+
+
+class _MemoryOverlay(Generic[KeyT, MapValueT], MutableMapping[KeyT, MapValueT]):
+    def __init__(self, base: Mapping[KeyT, MapValueT]) -> None:
+        self._base = base
+        self._changes: dict[KeyT, MapValueT] = {}
+        self._deleted: set[KeyT] = set()
+
+    def __getitem__(self, key: KeyT) -> MapValueT:
+        if key in self._changes:
+            return self._changes[key]
+        if key in self._deleted:
+            raise KeyError(key)
+        return self._base[key]
+
+    def __setitem__(self, key: KeyT, value: MapValueT) -> None:
+        self._deleted.discard(key)
+        self._changes[key] = value
+
+    def __delitem__(self, key: KeyT) -> None:
+        if key not in self:
+            raise KeyError(key)
+        self._changes.pop(key, None)
+        self._deleted.add(key)
+
+    def __iter__(self) -> Iterator[KeyT]:
+        keys = set(self._base) | set(self._changes)
+        return iter(keys - self._deleted)
+
+    def __len__(self) -> int:
+        return sum(1 for _ in self)
+
+    def changes(self) -> Mapping[KeyT, MapValueT]:
+        return self._changes
+
+    def deleted(self) -> frozenset[KeyT]:
+        return frozenset(self._deleted)
+
+    def apply_to(self, target: MutableMapping[KeyT, MapValueT]) -> None:
+        for key in self._deleted:
+            target.pop(key, None)
+        target.update(self._changes)
 
 
 class _MemoryTransaction:
     def __init__(
         self,
-        records: dict[bytes, StoredRecord],
-        aliases: dict[bytes, bytes],
-        sequences: dict[bytes, int],
-        facts: dict[tuple[bytes, int], StoredFact],
-        operations: dict[bytes, StoredOperation],
+        records: Mapping[bytes, StoredRecord],
+        aliases: Mapping[bytes, bytes],
+        sequences: Mapping[bytes, int],
+        facts: Mapping[tuple[bytes, int], StoredFact],
+        operations: Mapping[bytes, StoredOperation],
+        operation_streams: Mapping[bytes, Mapping[int, bytes]],
         *,
         now: datetime | None = None,
     ) -> None:
-        self.records = records
-        self.aliases = aliases
-        self.sequences = sequences
-        self.facts = facts
-        self.operations = operations
+        self.records = _MemoryOverlay(records)
+        self.aliases = _MemoryOverlay(aliases)
+        self.sequences = _MemoryOverlay(sequences)
+        self.facts = _MemoryOverlay(facts)
+        self.operations = _MemoryOverlay(operations)
+        self._operation_streams = operation_streams
+        self.operation_stream_changes: dict[bytes, dict[int, bytes | None]] = {}
         self.guarded_record_keys: set[bytes] = set()
         self._now = now
 
@@ -438,12 +497,10 @@ class _MemoryTransaction:
     async def insert_operation(self, value: StoredOperation) -> None:
         if value.key_digest in self.operations:
             raise AIError(ErrorCode.STORAGE_CONFLICT)
-        if any(
-            operation.stream_digest == value.stream_digest and operation.sequence == value.sequence
-            for operation in self.operations.values()
-        ):
+        if self._operation_key(value.stream_digest, value.sequence) is not None:
             raise AIError(ErrorCode.STORAGE_CONFLICT)
         self.operations[value.key_digest] = value
+        self._set_operation_key(value.stream_digest, value.sequence, value.key_digest)
 
     async def get_operation(self, key: bytes) -> StoredOperation | None:
         return self.operations.get(key)
@@ -452,6 +509,7 @@ class _MemoryTransaction:
         current = self.operations.get(value.key_digest)
         if current is None or current.state != expected_state:
             return False
+        validate_operation_replacement(current, value)
         self.operations[value.key_digest] = value
         return True
 
@@ -476,7 +534,17 @@ class _MemoryTransaction:
         values = await self.list_operations(query)
         for value in values:
             del self.operations[value.key_digest]
+            self._set_operation_key(value.stream_digest, value.sequence, None)
         return values
+
+    def _operation_key(self, stream: bytes, sequence: int) -> bytes | None:
+        changes = self.operation_stream_changes.get(stream)
+        if changes is not None and sequence in changes:
+            return changes[sequence]
+        return self._operation_streams.get(stream, {}).get(sequence)
+
+    def _set_operation_key(self, stream: bytes, sequence: int, key: bytes | None) -> None:
+        self.operation_stream_changes.setdefault(stream, {})[sequence] = key
 
 
 def _matches_record(record: StoredRecord, query: RecordQuery) -> bool:

@@ -43,7 +43,12 @@ from ..core import (
 from ..errors import AIError, ErrorCode
 from ..model import ModelRegistry
 from ..runtime import Runtime, RuntimeState, build_local_runtime
-from ..runtime.state import RuntimeDomain, RuntimeStatePlan, RuntimeStateRoute
+from ..runtime.state import (
+    ExecutionReadModelRepository,
+    RuntimeDomain,
+    RuntimeStatePlan,
+    RuntimeStateRoute,
+)
 from ..spec import AgentCapabilityRef, AgentSpec, builtin_asset_bindings
 from ..storage import ObjectStore, StorageLayer, StorageOverlay
 from ._root import Workspace
@@ -313,6 +318,11 @@ async def _compose_runtime(
         executions=state.execution.executions,
         store=state.steps.read_store(RuntimeDomain.EXECUTION),
         cursor_signer=HmacCursorSigner("execution-history", grant_key),
+        read_model=ExecutionReadModelRepository(
+            state.execution.executions.state_store,
+            namespace=workspace.workspace_id,
+            tenant_id=tenant_id,
+        ),
     )
     session_history = StepSessionHistoryReader(
         store=state.steps.read_store(RuntimeDomain.CONVERSATION),

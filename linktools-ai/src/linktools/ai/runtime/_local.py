@@ -654,109 +654,132 @@ class LocalExecutionBackend:
         """Rebuild transient execution state from recovery-owned checkpoints."""
         if not self._recovery_enabled:
             return
-        checkpoints = await self._recovery.checkpoints.list(tenant_id=self._tenant_id)
-        for checkpoint in checkpoints:
-            if checkpoint.state is RecoveryCheckpointState.COMPLETED:
-                continue
-            if checkpoint.handoff_phase is not RecoveryHandoffPhase.NONE:
-                if self._handoff_contract_digest is None or checkpoint.handoff_contract_digest != self._handoff_contract_digest:
-                    _logger.error("recovery handoff contract mismatch: execution=%s", checkpoint.execution_id)
-                    raise AIError(ErrorCode.STORAGE_DEPENDENCY_NOT_READY)
-                await self._reconcile_handoff(checkpoint)
-                continue
-            recovery_input = checkpoint.input
-            principal = Principal(recovery_input.principal_id, checkpoint.tenant_id, recovery_input.principal_kind)
-            execution = await self._execution.executions.get(checkpoint.execution_id, tenant_id=checkpoint.tenant_id)
-            if execution is not None and execution.status in {ExecutionStatus.SUCCEEDED, ExecutionStatus.FAILED, ExecutionStatus.CANCELLED}:
-                if execution.session_id is not None:
-                    await self._conversation.sessions.release_execution(
-                        execution.session_id,
-                        tenant_id=execution.tenant_id,
-                        execution_id=execution.execution_id,
-                    )
-                await self._finish_checkpoint(checkpoint)
-                continue
-            if execution is not None:
-                if (
-                    execution.binding_digest != recovery_input.binding_digest
-                    or execution.parent_execution_id != recovery_input.parent_execution_id
-                    or execution.root_execution_id != recovery_input.root_execution_id
-                    or execution.source_execution_id != recovery_input.source_execution_id
-                    or execution.base_execution_id != recovery_input.base_execution_id
-                    or execution.conversation_step_run_id != recovery_input.conversation_step_run_id
-                    or execution.lineage_kind.value != recovery_input.lineage_kind
-                ):
-                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            if execution is None:
-                execution = await self._create_recovery_execution(checkpoint)
-            if checkpoint.state in {
-                RecoveryCheckpointState.ADMITTED,
-                RecoveryCheckpointState.ACTIVE,
-                RecoveryCheckpointState.WAITING,
-            }:
-                if not await self._reconcile_session_recovery(execution):
-                    continue
-            if (
-                checkpoint.state is RecoveryCheckpointState.ADMITTED
-                and execution.status is ExecutionStatus.PENDING_START
-            ):
-                expected = (
-                    await self._expected_session_cursor(execution)
-                    if execution.session_id is not None
-                    else None
-                )
-                started = await self._runtime_commands.commit_start_checkpoint(
-                    ExecutionStartClaim(
-                        execution.execution_id,
-                        execution.tenant_id,
-                        execution.revision,
-                        execution.event_sequence,
-                        recovery_input.idempotency.scope,
-                        recovery_input.idempotency.idempotency_key_digest,
-                        recovery_input.idempotency.request_digest,
-                        datetime.now(timezone.utc),
-                    ),
-                    recovery_checkpoint=checkpoint,
-                    session_id=execution.session_id,
-                    expected_cursor=expected,
-                )
-                execution = started
-            elif execution.status is ExecutionStatus.CANCELLING:
-                await self._commit_terminal(
-                    execution,
-                    ExecutionStatus.CANCELLED,
-                    None,
-                    ErrorCode.EXECUTION_CANCELLED.value,
-                    StopReason.CANCELLED,
-                )
-                continue
-            elif execution.status is ExecutionStatus.START_UNKNOWN:
-                raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
-            elif checkpoint.state is RecoveryCheckpointState.ADMITTED and execution.status is ExecutionStatus.STARTED:
-                await self._ensure_recovery_idempotency(
-                    checkpoint,
-                    expected_status=IdempotencyStatus.STARTED,
-                )
-            elif checkpoint.state in {
-                RecoveryCheckpointState.ACTIVE,
-                RecoveryCheckpointState.WAITING,
-            }:
-                if execution.status is not ExecutionStatus.STARTED:
-                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                await self._ensure_recovery_idempotency(
-                    checkpoint,
-                    expected_status=IdempotencyStatus.STARTED,
-                )
-            else:
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            request = ExecutionRequest(
-                user_prompt=recovery_input.prompt_text(),
-                principal=principal,
-                idempotency_key=f"recovery:{checkpoint.execution_id}",
-                memory_scope=recovery_input.memory_scope,
+        cursor: str | None = None
+        while True:
+            page = await self._recovery.checkpoints.list_recoverable_page(
+                tenant_id=self._tenant_id,
+                cursor=cursor,
+                limit=128,
             )
-            await self.launch(request, execution)
-            _logger.info("local recovery execution relaunched: tenant=%s execution=%s", checkpoint.tenant_id, checkpoint.execution_id)
+            for checkpoint in page.items:
+                if checkpoint.state is RecoveryCheckpointState.COMPLETED:
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                await self._reconcile_checkpoint(checkpoint)
+            if page.next_cursor is None:
+                return
+            cursor = page.next_cursor
+
+    async def _reconcile_checkpoint(self, checkpoint: RecoveryCheckpoint) -> None:
+        if checkpoint.handoff_phase is not RecoveryHandoffPhase.NONE:
+            if (
+                self._handoff_contract_digest is None
+                or checkpoint.handoff_contract_digest != self._handoff_contract_digest
+            ):
+                _logger.error("recovery handoff contract mismatch: execution=%s", checkpoint.execution_id)
+                raise AIError(ErrorCode.STORAGE_DEPENDENCY_NOT_READY)
+            await self._reconcile_handoff(checkpoint)
+            return
+        recovery_input = checkpoint.input
+        principal = Principal(recovery_input.principal_id, checkpoint.tenant_id, recovery_input.principal_kind)
+        execution = await self._execution.executions.get(checkpoint.execution_id, tenant_id=checkpoint.tenant_id)
+        if execution is not None and execution.status in {
+            ExecutionStatus.SUCCEEDED,
+            ExecutionStatus.FAILED,
+            ExecutionStatus.CANCELLED,
+        }:
+            if execution.session_id is not None:
+                await self._conversation.sessions.release_execution(
+                    execution.session_id,
+                    tenant_id=execution.tenant_id,
+                    execution_id=execution.execution_id,
+                )
+            await self._finish_checkpoint(checkpoint)
+            return
+        if execution is not None:
+            if (
+                execution.binding_digest != recovery_input.binding_digest
+                or execution.parent_execution_id != recovery_input.parent_execution_id
+                or execution.root_execution_id != recovery_input.root_execution_id
+                or execution.source_execution_id != recovery_input.source_execution_id
+                or execution.base_execution_id != recovery_input.base_execution_id
+                or execution.conversation_step_run_id != recovery_input.conversation_step_run_id
+                or execution.lineage_kind.value != recovery_input.lineage_kind
+            ):
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        if execution is None:
+            execution = await self._create_recovery_execution(checkpoint)
+        if checkpoint.state in {
+            RecoveryCheckpointState.ADMITTED,
+            RecoveryCheckpointState.ACTIVE,
+            RecoveryCheckpointState.WAITING,
+        }:
+            if not await self._reconcile_session_recovery(execution):
+                return
+        if (
+            checkpoint.state is RecoveryCheckpointState.ADMITTED
+            and execution.status is ExecutionStatus.PENDING_START
+        ):
+            expected = (
+                await self._expected_session_cursor(execution)
+                if execution.session_id is not None
+                else None
+            )
+            started = await self._runtime_commands.commit_start_checkpoint(
+                ExecutionStartClaim(
+                    execution.execution_id,
+                    execution.tenant_id,
+                    execution.revision,
+                    execution.event_sequence,
+                    recovery_input.idempotency.scope,
+                    recovery_input.idempotency.idempotency_key_digest,
+                    recovery_input.idempotency.request_digest,
+                    datetime.now(timezone.utc),
+                ),
+                recovery_checkpoint=checkpoint,
+                session_id=execution.session_id,
+                expected_cursor=expected,
+            )
+            execution = started
+        elif execution.status is ExecutionStatus.CANCELLING:
+            await self._commit_terminal(
+                execution,
+                ExecutionStatus.CANCELLED,
+                None,
+                ErrorCode.EXECUTION_CANCELLED.value,
+                StopReason.CANCELLED,
+            )
+            return
+        elif execution.status is ExecutionStatus.START_UNKNOWN:
+            raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
+        elif checkpoint.state is RecoveryCheckpointState.ADMITTED and execution.status is ExecutionStatus.STARTED:
+            await self._ensure_recovery_idempotency(
+                checkpoint,
+                expected_status=IdempotencyStatus.STARTED,
+            )
+        elif checkpoint.state in {
+            RecoveryCheckpointState.ACTIVE,
+            RecoveryCheckpointState.WAITING,
+        }:
+            if execution.status is not ExecutionStatus.STARTED:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            await self._ensure_recovery_idempotency(
+                checkpoint,
+                expected_status=IdempotencyStatus.STARTED,
+            )
+        else:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        request = ExecutionRequest(
+            user_prompt=recovery_input.prompt_text(),
+            principal=principal,
+            idempotency_key=f"recovery:{checkpoint.execution_id}",
+            memory_scope=recovery_input.memory_scope,
+        )
+        await self.launch(request, execution)
+        _logger.info(
+            "local recovery execution relaunched: tenant=%s execution=%s",
+            checkpoint.tenant_id,
+            checkpoint.execution_id,
+        )
 
     async def _reconcile_session_recovery(self, execution: ExecutionRecord) -> bool:
         if execution.session_id is None:
@@ -1557,6 +1580,30 @@ class LocalExecutionBackend:
         self._captured_usage.clear()
         self._terminal_events.clear()
         self._worker_failures.clear()
+        self._pending_audit_events.clear()
+
+    async def release_runtime_execution(
+        self,
+        execution_id: str,
+        *,
+        tenant_id: str,
+    ) -> None:
+        if tenant_id != self._tenant_id:
+            raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
+        task = self._tasks.get(execution_id)
+        if task is not None and not task.done():
+            raise AIError(ErrorCode.STORAGE_CONFLICT)
+        if task is not None:
+            self._tasks.pop(execution_id, None)
+        self._terminal_events.pop(execution_id, None)
+        self._worker_failures.pop(execution_id, None)
+        self._captured_usage.pop(execution_id, None)
+        self._pending_audit_events.pop(execution_id, None)
+        _logger.debug(
+            "local execution runtime cache released: tenant=%s execution=%s",
+            tenant_id,
+            execution_id,
+        )
 
     async def _reconcile_unresolved_tool_effects(
         self,

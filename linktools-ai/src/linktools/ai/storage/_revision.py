@@ -139,6 +139,10 @@ class LayerMetadataView(Generic[KeyT, ValueT, InfoT]):
     async def head_revision(self) -> 'StorageRevision | None':
         if self.policy is LayerRefreshPolicy.ALWAYS:
             return None
+        if self.revision_source is not None:
+            cached = await self.revision_source.head_revision()
+            if cached is not None:
+                return cached
         return await self.backend.head_revision()
 
     def invalidate(self) -> None:

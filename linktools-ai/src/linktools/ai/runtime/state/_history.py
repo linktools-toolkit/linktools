@@ -6,7 +6,7 @@ import hashlib
 import json
 import zlib
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from pydantic_ai import ModelMessagesTypeAdapter
 from pydantic_ai.messages import ModelMessage
@@ -399,10 +399,11 @@ class TranscriptRepository:
             return
         stream = self._transcript_stream(owner_id)
         owner = self._owner_key(owner_id)
-        await self._ensure_owner(transaction, owner_id, owner)
-        current_count = await self._message_count_in_transaction(
+        owner_record = await transaction.get_record(owner)
+        current_count = await self._owner_message_count(
             transaction,
             owner_id,
+            owner_record,
         )
         expected = current_count
         for chunk in chunks:
@@ -421,6 +422,21 @@ class TranscriptRepository:
                 )
                 raise AIError(ErrorCode.STORAGE_CONFLICT)
             expected += chunk.message_count
+        if owner_record is None:
+            await transaction.insert_record(
+                self._new_owner_record(owner_id, owner, expected)
+            )
+        else:
+            upgraded = replace(
+                owner_record,
+                storage_version=owner_record.storage_version + 1,
+                data={**owner_record.data, "message_count": expected},
+            )
+            if not await transaction.replace_record(
+                upgraded,
+                expected_storage_version=owner_record.storage_version,
+            ):
+                raise AIError(ErrorCode.STORAGE_CONFLICT)
         final = await transaction.reserve_sequence(
             self._transcript_sequence(owner_id),
             len(chunks),
@@ -488,36 +504,52 @@ class TranscriptRepository:
             return 0
         return latest.first_message_index + latest.message_count
 
-    async def _ensure_owner(
+    async def _owner_message_count(
         self,
         transaction: StateTransaction,
         owner_id: str,
+        owner_record: StoredRecord | None,
+    ) -> int:
+        if owner_record is None:
+            return 0
+        value = owner_record.data.get("message_count")
+        if value is not None:
+            if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            return value
+        count = await self._message_count_in_transaction(transaction, owner_id)
+        _logger.info(
+            "legacy transcript owner upgraded: domain=%s owner=%s message_count=%s",
+            self._runtime_domain.value,
+            owner_id,
+            count,
+        )
+        return count
+
+    def _new_owner_record(
+        self,
+        owner_id: str,
         owner: bytes,
-    ) -> None:
-        current = await transaction.get_record(owner)
-        if current is None:
-            await transaction.insert_record(
-                StoredRecord(
-                    owner,
-                    self._partition("history_owner"),
-                    None,
-                    owner,
-                    "history_owner",
-                    owner_id,
-                    None,
-                    0,
-                    None,
-                    0,
-                    None,
-                    {"type": "history_owner", "owner_id": owner_id},
-                )
-            )
-            return
-        if await transaction.guard_record(
+        message_count: int,
+    ) -> StoredRecord:
+        return StoredRecord(
             owner,
-            expected_storage_version=current.storage_version,
-        ) is None:
-            raise AIError(ErrorCode.STORAGE_CONFLICT)
+            self._partition("history_owner"),
+            None,
+            owner,
+            "history_owner",
+            owner_id,
+            None,
+            0,
+            None,
+            0,
+            None,
+            {
+                "type": "history_owner",
+                "owner_id": owner_id,
+                "message_count": message_count,
+            },
+        )
 
     async def prepare_projection(
         self,
@@ -634,9 +666,76 @@ class TranscriptRepository:
     async def load_messages(self, owner_id: str) -> tuple[ModelMessage, ...]:
         return tuple([message async for message in self.iter_messages(owner_id)])
 
+    async def validate_integrity(self) -> None:
+        async def read(transaction: StateTransaction) -> None:
+            records = await transaction.scan_records()
+            facts = await transaction.scan_facts()
+            owners = {
+                record.key_digest: record
+                for record in records
+                if record.kind in {"history_owner", "step_run"}
+            }
+            facts_by_owner: dict[bytes, list[StoredFact]] = {}
+            for fact in facts:
+                if fact.kind != "transcript_chunk":
+                    continue
+                try:
+                    chunk = self.decode_chunk(fact)
+                except (TypeError, ValueError) as error:
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
+                if (
+                    fact.owner_key_digest != self._owner_key(chunk.owner_id)
+                    or fact.stream_digest != self._transcript_stream(chunk.owner_id)
+                ):
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                if fact.owner_key_digest not in owners:
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                facts_by_owner.setdefault(fact.owner_key_digest, []).append(fact)
+            for owner_key, record in owners.items():
+                value = record.data.get("message_count")
+                if value is None:
+                    continue
+                if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                expected = 0
+                for fact in sorted(
+                    facts_by_owner.get(owner_key, ()),
+                    key=lambda item: item.sequence,
+                ):
+                    try:
+                        chunk = self.decode_chunk(fact)
+                    except (TypeError, ValueError) as error:
+                        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
+                    if (
+                        chunk.message_count <= 0
+                        or chunk.first_message_index != expected
+                    ):
+                        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                    expected += chunk.message_count
+                if expected != value:
+                    _logger.error(
+                        "history owner count mismatch: domain=%s owner=%s "
+                        "record_count=%s fact_count=%s",
+                        self._runtime_domain.value,
+                        record.data.get("owner_id"),
+                        value,
+                        expected,
+                    )
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+
+        await self._store.read(read)
+
     async def history_message_count(self, history_id: str, *, tenant_id: str) -> int:
         if self._history_repository is None:
             return 0
+        record = await self._history_repository.get(
+            history_id,
+            tenant_id=tenant_id,
+        )
+        if record is not None:
+            if record.inherited_message_count < 0 or record.local_message_count < 0:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            return record.inherited_message_count + record.local_message_count
         resolution = await self._history_segments(
             history_id,
             tenant_id=tenant_id,
@@ -999,46 +1098,56 @@ class TranscriptRepository:
     ) -> _HistoryResolution:
         if self._history_repository is None:
             raise AIError(ErrorCode.STORAGE_DEPENDENCY_NOT_READY)
-        records: list[ConversationHistoryRecord] = []
-        current_id: str | None = history_id
-        visited: set[str] = set()
-        legacy_source_id: str | None = None
-        legacy_message_limit = 0
-        legacy_messages: tuple[ModelMessage, ...] | None = None
-        while current_id is not None:
-            if current_id in visited:
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            visited.add(current_id)
-            try:
-                record = await self._history_repository.get(
+        async def read_lineage(
+            transaction: StateTransaction,
+        ) -> tuple[tuple[ConversationHistoryRecord, ...], str | None]:
+            records: list[ConversationHistoryRecord] = []
+            current_id: str | None = history_id
+            visited: set[str] = set()
+            while current_id is not None:
+                if current_id in visited:
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                visited.add(current_id)
+                record = await self._history_repository.get_in_transaction(
+                    transaction,
                     current_id,
                     tenant_id=tenant_id,
                 )
-            except (TypeError, ValueError) as error:
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
-            if record is None:
-                if not records or self._legacy_message_loader is None:
-                    raise AIError(ErrorCode.SESSION_HISTORY_UNAVAILABLE)
-                legacy_source_id = current_id
-                legacy_message_limit = (
-                    records[-1].parent.through_message_count
-                    if records[-1].parent is not None
-                    else 0
-                )
-                if load_legacy:
-                    recovered = await self._legacy_message_loader(current_id)
-                    legacy_messages = recovered[:legacy_message_limit]
-                    if len(recovered) < legacy_message_limit:
-                        _logger.warning(
-                            "legacy transcript is partial: owner=%s "
-                            "frozen_count=%s recovered_count=%s",
-                            current_id,
-                            legacy_message_limit,
-                            len(recovered),
-                        )
-                break
-            records.append(record)
-            current_id = None if record.parent is None else record.parent.history_id
+                if record is None:
+                    return tuple(records), current_id
+                records.append(record)
+                current_id = None if record.parent is None else record.parent.history_id
+            return tuple(records), None
+
+        try:
+            records, missing_id = await self._history_repository.state_store.read(
+                read_lineage
+            )
+        except (TypeError, ValueError) as error:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
+        legacy_source_id: str | None = None
+        legacy_message_limit = 0
+        legacy_messages: tuple[ModelMessage, ...] | None = None
+        if missing_id is not None:
+            if not records or self._legacy_message_loader is None:
+                raise AIError(ErrorCode.SESSION_HISTORY_UNAVAILABLE)
+            legacy_source_id = missing_id
+            legacy_message_limit = (
+                records[-1].parent.through_message_count
+                if records[-1].parent is not None
+                else 0
+            )
+            if load_legacy:
+                recovered = await self._legacy_message_loader(missing_id)
+                legacy_messages = recovered[:legacy_message_limit]
+                if len(recovered) < legacy_message_limit:
+                    _logger.warning(
+                        "legacy transcript is partial: owner=%s "
+                        "frozen_count=%s recovered_count=%s",
+                        missing_id,
+                        legacy_message_limit,
+                        len(recovered),
+                    )
         visible_total = (
             records[0].inherited_message_count
             + records[0].local_message_count

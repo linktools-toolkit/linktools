@@ -404,6 +404,9 @@ class StateStepArchive(StepStore):
     def transcript_repository(self) -> TranscriptRepository:
         return self._history
 
+    async def validate_integrity(self) -> None:
+        await self._history.validate_integrity()
+
     def bind_history_lock(self, history_lock: _RunHistoryLock) -> None:
         self._history_lock = history_lock
 
@@ -899,19 +902,7 @@ class StateStepArchive(StepStore):
                 raise AIError(ErrorCode.STORAGE_CONFLICT)
             return
         owner = self._run_key(run.run_id)
-        owner_record = await transaction.get_record(owner)
-        if owner_record is None:
-            await transaction.insert_record(self._stored_run(run))
-            owner_record = await transaction.get_record(owner)
-        elif _decode_step(owner_record.data) != run:
-            raise AIError(ErrorCode.STORAGE_CONFLICT)
-        if owner_record is None:
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        if await transaction.guard_record(
-            owner,
-            expected_storage_version=owner_record.storage_version,
-        ) is None:
-            raise AIError(ErrorCode.STORAGE_CONFLICT)
+        owner_record = await self._ensure_run_in_transaction(transaction, run)
         grouped: dict[str, list[object]] = {"event": [], "snapshot": []}
         kinds: dict[str, list[str]] = {"event": [], "snapshot": []}
         for family, value, kind in facts:
@@ -945,18 +936,31 @@ class StateStepArchive(StepStore):
                         _encode_step(value),
                     )
                 )
-        await _insert_facts(transaction, tuple(stored_facts))
-        for snapshot in snapshots:
+        if snapshots:
             await self._history.append_chunks(
                 transaction,
-                snapshot.owner_id,
-                snapshot.chunks,
+                snapshots[0].owner_id,
+                tuple(
+                    chunk
+                    for snapshot in snapshots
+                    for chunk in snapshot.chunks
+                ),
             )
-            await self._history.store_projection(
-                transaction,
-                snapshot.owner_id,
-                snapshot.projection,
-            )
+            for snapshot in snapshots:
+                await self._history.store_projection(
+                    transaction,
+                    snapshot.owner_id,
+                    snapshot.projection,
+                )
+        owner_record = await transaction.get_record(owner)
+        if owner_record is None:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        if await transaction.guard_record(
+            owner,
+            expected_storage_version=owner_record.storage_version,
+        ) is None:
+            raise AIError(ErrorCode.STORAGE_CONFLICT)
+        await _insert_facts(transaction, tuple(stored_facts))
 
     async def materialize_snapshot(
         self,
@@ -996,6 +1000,25 @@ class StateStepArchive(StepStore):
                     binding_digest=binding_digest,
                 )
             )[0]
+        await self._ensure_run_in_transaction(transaction, run)
+        if await self._has_existing_fact_in_transaction(
+            transaction,
+            run,
+            "snapshot",
+            snapshot.stored,
+            snapshot.stored.state,
+        ):
+            return
+        await self._history.append_chunks(
+            transaction,
+            snapshot.owner_id,
+            snapshot.chunks,
+        )
+        await self._history.store_projection(
+            transaction,
+            snapshot.owner_id,
+            snapshot.projection,
+        )
         await self._materialize_fact_in_transaction(
             transaction,
             run,
@@ -1003,8 +1026,6 @@ class StateStepArchive(StepStore):
             snapshot.stored,
             snapshot.stored.state,
         )
-        await self._history.append_chunks(transaction, snapshot.owner_id, snapshot.chunks)
-        await self._history.store_projection(transaction, snapshot.owner_id, snapshot.projection)
 
     async def materialize_snapshot_in_transaction(
         self,
@@ -1087,12 +1108,13 @@ class StateStepArchive(StepStore):
             raise AIError(ErrorCode.STORAGE_CONFLICT)
         if owner_record is None:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        existing = (
-            await transaction.list_facts(FactQuery(stream, subject_digest=subject, latest=True))
-            if subject is not None
-            else await transaction.list_facts(FactQuery(stream, latest=True))
-        )
-        if any(fact.data == data and fact.state == kind for fact in existing):
+        if await self._has_existing_fact_in_transaction(
+            transaction,
+            run,
+            family,
+            value,
+            kind,
+        ):
             return
         if await transaction.guard_record(
             owner,
@@ -1104,6 +1126,42 @@ class StateStepArchive(StepStore):
             transaction,
             (StoredFact(stream, sequence, owner, fact_kind, subject, kind, data),),
         )
+
+    async def _ensure_run_in_transaction(
+        self,
+        transaction: StateTransaction,
+        run: RunRecord,
+    ) -> StoredRecord:
+        owner = self._run_key(run.run_id)
+        owner_record = await transaction.get_record(owner)
+        if owner_record is None:
+            await transaction.insert_record(self._stored_run(run))
+            owner_record = await transaction.get_record(owner)
+        elif _decode_step(owner_record.data) != run:
+            raise AIError(ErrorCode.STORAGE_CONFLICT)
+        if owner_record is None:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        return owner_record
+
+    async def _has_existing_fact_in_transaction(
+        self,
+        transaction: StateTransaction,
+        run: RunRecord,
+        family: str,
+        value: object,
+        kind: str,
+    ) -> bool:
+        stream = self._stream(run.run_id, family)
+        subject = _step_subject(value)
+        data = _encode_step(value)
+        existing = await transaction.list_facts(
+            FactQuery(
+                stream,
+                subject_digest=subject,
+                latest=True,
+            )
+        )
+        return any(fact.data == data and fact.state == kind for fact in existing)
 
     async def materialize_effect_in_transaction(
         self,
@@ -1421,6 +1479,11 @@ class StateStepArchive(StepStore):
             self._transcript_offsets.pop(run_id, None)
             self._context_baselines.pop(run_id, None)
 
+    def release_runtime_cache(self, run_id: str) -> None:
+        self._transcript_accumulators.pop(run_id, None)
+        self._transcript_offsets.pop(run_id, None)
+        self._context_baselines.pop(run_id, None)
+
     async def _append(self, run_id: str, family: str, value: object, kind: str) -> None:
         stream = self._stream(run_id, family)
         owner = self._run_key(run_id)
@@ -1519,6 +1582,12 @@ class RuntimeStepStore(StepStore):
         self._projection_dirty.clear()
         self._initialized = True
 
+    async def validate_integrity(self) -> None:
+        await self._ensure_business()
+        for archive in self._archives.values():
+            if isinstance(archive, StateStepArchive):
+                await archive.validate_integrity()
+
     def register_context_baseline(
         self,
         step_run_id: str,
@@ -1563,7 +1632,6 @@ class RuntimeStepStore(StepStore):
                 if run is None:
                     raise AIError(ErrorCode.STORAGE_NOT_FOUND)
                 await _materialize_snapshot(recovery, run, snapshot)
-            await self._flush_execution_projection_locked(snapshot.run_id)
 
     async def latest_snapshot(self, *, run_id: str, include_interrupted: bool = False) -> ContinuableSnapshot | None:
         await self._ensure_business()
@@ -1855,6 +1923,9 @@ class RuntimeStepStore(StepStore):
                 self._projection_offsets.pop(run_id, None)
                 self._projection_bindings.pop(run_id, None)
                 self._projection_dirty.discard(run_id)
+                for archive in self._archives.values():
+                    if isinstance(archive, StateStepArchive):
+                        archive.release_runtime_cache(run_id)
 
     async def release_archive(self, runtime_domain: RuntimeDomain, step_run_id: str) -> None:
         archive = self._archives.get(runtime_domain)

@@ -378,7 +378,7 @@ async def test_sqlite_pragmas_apply_to_preexisting_pool_connections(
 
 
 def test_sqlite_checkout_configuration_propagates_pragma_failure() -> None:
-    from linktools.ai.storage._database import _configure_sqlite_connection
+    from linktools.ai.storage._dialects import configure_sqlite_connection
 
     class _Cursor:
         closed = False
@@ -399,5 +399,5 @@ def test_sqlite_checkout_configuration_propagates_pragma_failure() -> None:
 
     cursor = _Cursor()
     with pytest.raises(RuntimeError, match="pragma failed"):
-        _configure_sqlite_connection(_Connection(cursor), object(), object())
+        configure_sqlite_connection(_Connection(cursor), object(), object())
     assert cursor.closed

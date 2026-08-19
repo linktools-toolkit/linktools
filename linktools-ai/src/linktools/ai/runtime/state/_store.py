@@ -537,6 +537,20 @@ def validate_record_replacement(current: StoredRecord, candidate: StoredRecord) 
         raise ValueError("record physical identity cannot change")
 
 
+def validate_operation_replacement(
+    current: StoredOperation,
+    candidate: StoredOperation,
+) -> None:
+    """Keep immutable operation identity stable across a state replacement."""
+    if (
+        current.key_digest != candidate.key_digest
+        or current.stream_digest != candidate.stream_digest
+        or current.sequence != candidate.sequence
+        or current.compactable != candidate.compactable
+    ):
+        raise ValueError("operation physical identity cannot change")
+
+
 def _validate_limit(limit: int | None) -> None:
     if limit is not None and (not isinstance(limit, int) or not 0 < limit <= 1000):
         raise ValueError("limit must be between 1 and 1000")
@@ -572,4 +586,5 @@ __all__ = [
     "subject_digest",
     "validate_record_identity",
     "validate_record_replacement",
+    "validate_operation_replacement",
 ]

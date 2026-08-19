@@ -514,6 +514,12 @@ class RecoveryAdmissionRecord:
 
 
 @dataclass(frozen=True, slots=True)
+class RecoveryActiveRecord:
+    execution_id: str
+    tenant_id: str
+
+
+@dataclass(frozen=True, slots=True)
 class RecoveryStateRecord:
     execution_id: str
     tenant_id: str
@@ -962,6 +968,13 @@ class RecoveryCheckpointRepository(RuntimeRepository, Protocol):
         tenant_id: str,
     ) -> "RecoveryCheckpoint | None": ...
     async def list(self, *, tenant_id: str) -> tuple[RecoveryCheckpoint, ...]: ...
+    async def list_recoverable_page(
+        self,
+        *,
+        tenant_id: str,
+        cursor: "str | None",
+        limit: int,
+    ) -> "Page[RecoveryCheckpoint]": ...
     async def compare_and_swap(
         self, execution_id: str, *, tenant_id: str, expected_revision: int, next_record: RecoveryCheckpoint
     ) -> RecoveryCheckpoint: ...
@@ -1139,6 +1152,7 @@ __all__ = [
     "OperationTerminalUpdate",
     "RecoveryCheckpoint",
     "RecoveryAdmissionRecord",
+    "RecoveryActiveRecord",
     "RecoveryCheckpointRepository",
     "RecoveryCheckpointState",
     "RecoveryConversationIntent",

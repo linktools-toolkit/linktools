@@ -6,12 +6,17 @@ from typing import Protocol
 
 from linktools.core import environ
 
+from ...core import step_run_id
 from ...storage import ObjectStore
 from ._contracts import ConversationCursor, ConversationState, ExecutionState
 from ._plan import RuntimeDomain, RuntimeRetentionMode, RuntimeStatePlan
 from ._steps import RuntimeStepStore
 
 _logger = environ.get_logger("ai.runtime.state.retention")
+
+
+class _ExecutionRuntimeRelease(Protocol):
+    async def __call__(self, execution_id: str, *, tenant_id: str) -> None: ...
 
 
 class _RuntimeObjectRouter(Protocol):
@@ -36,18 +41,25 @@ class RuntimeRetentionController:
         plan: RuntimeStatePlan,
         namespace: str,
     ) -> None:
-        del memory, artifact, task, evaluation, recovery, namespace
+        del memory, artifact, task, evaluation, recovery
         self._conversation = conversation
         self._execution = execution
+        self._namespace = namespace
         self._objects = objects
         self._steps = steps
         self._transient_domains = frozenset(
             domain for domain in RuntimeDomain if plan.route(domain).retention is RuntimeRetentionMode.TRANSIENT
         )
+        self._execution_runtime_release: _ExecutionRuntimeRelease | None = None
         self._closed = False
 
+    def bind_execution_runtime_release(
+        self,
+        callback: _ExecutionRuntimeRelease,
+    ) -> None:
+        self._execution_runtime_release = callback
+
     async def release_execution_handoff(self, execution_id: str, *, tenant_id: str) -> None:
-        await self._steps.flush_dirty_execution_projections()
         execution = await self._execution.executions.get(execution_id, tenant_id=tenant_id)
         if execution is not None and execution.session_id is not None:
             await self._conversation.sessions.release_execution(
@@ -56,10 +68,20 @@ class RuntimeRetentionController:
                 execution_id=execution_id,
             )
         if execution is not None:
-            run_ids = tuple(f"{execution_id}:{sequence}" for sequence in range(1, execution.agent_run_sequence + 1))
+            run_ids = tuple(
+                step_run_id(
+                    namespace=self._namespace,
+                    tenant_id=tenant_id,
+                    execution_id=execution_id,
+                    segment_sequence=sequence,
+                )
+                for sequence in range(1, execution.agent_run_sequence + 1)
+            )
             await self._steps.release_staging_many(candidate_step_run_ids=run_ids)
         for domain in self._transient_domains:
             await self._objects.release_object_scope(domain, owner_scope=f"execution:{execution_id}")
+        if self._execution_runtime_release is not None:
+            await self._execution_runtime_release(execution_id, tenant_id=tenant_id)
         _logger.info("execution transient handoff released: tenant=%s execution=%s", tenant_id, execution_id)
 
     async def release_session(

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Vendor-specific SQLAlchemy statements used by storage backends."""
+"""Vendor-specific SQLAlchemy column types, statements, and engine configuration."""
 
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -15,12 +15,34 @@ SqlValue: TypeAlias = str | int | bool | bytes | datetime | None
 _logger = environ.get_logger("ai.storage.dialects")
 _SQL_DELETE_RETURNING_BATCH_LIMIT = 64
 
+
+class _SqliteCursor(Protocol):
+    def execute(self, statement: str) -> object: ...
+
+    def close(self) -> None: ...
+
+
+class _SqliteConnection(Protocol):
+    def cursor(self) -> _SqliteCursor: ...
+
+
+class _SqliteEventValue(Protocol):
+    pass
+
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
 
-    from sqlalchemy import Table
-    from sqlalchemy.engine import RowMapping
-    from sqlalchemy.ext.asyncio import AsyncSession
+    from sqlalchemy import (
+        CHAR,
+        BigInteger,
+        Column,
+        Index,
+        LargeBinary,
+        String,
+        Table,
+    )
+    from sqlalchemy.engine import Connection, RowMapping
+    from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
     from sqlalchemy.sql.elements import ColumnElement
 
 
@@ -698,6 +720,307 @@ def resolve_dialect(session: "AsyncSession") -> SqlAlchemyDialect:
     return dialect_for_name(bind.dialect.name)
 
 
+def sql_integer_id() -> "BigInteger":
+    from sqlalchemy import BigInteger, Integer
+
+    return BigInteger().with_variant(Integer, "sqlite")
+
+
+def sql_id_column(
+    comment: str = "Surrogate row identifier used only by the SQL backend.",
+) -> "Column":
+    from sqlalchemy import Column
+
+    return Column(
+        "id",
+        sql_integer_id(),
+        primary_key=True,
+        autoincrement=True,
+        comment=comment,
+    )
+
+
+def sql_text_key(length: int = 256) -> "String":
+    from sqlalchemy import String
+    from sqlalchemy.dialects import mysql
+
+    return String(length).with_variant(
+        mysql.VARCHAR(length, charset="utf8mb4", collation="utf8mb4_bin"),
+        "mysql",
+    )
+
+
+def sql_sha256() -> "CHAR":
+    from sqlalchemy import CHAR
+    from sqlalchemy.dialects import mysql
+
+    return CHAR(64).with_variant(mysql.CHAR(64, charset="utf8mb4", collation="utf8mb4_bin"), "mysql")
+
+
+def sql_digest() -> "CHAR":
+    """Return the canonical SQL SHA-256 type."""
+    return sql_sha256()
+
+
+def sql_state() -> "String":
+    from sqlalchemy import String
+    from sqlalchemy.dialects import mysql
+
+    return String(64).with_variant(
+        mysql.VARCHAR(64, charset="utf8mb4", collation="utf8mb4_bin"),
+        "mysql",
+    )
+
+
+def sql_sort_key() -> "String":
+    from sqlalchemy import String
+    from sqlalchemy.dialects import mysql
+
+    return String(128).with_variant(
+        mysql.VARCHAR(128, charset="utf8mb4", collation="utf8mb4_bin"),
+        "mysql",
+    )
+
+
+def sql_blob() -> "LargeBinary":
+    from sqlalchemy import LargeBinary
+    from sqlalchemy.dialects import mysql
+
+    return LargeBinary().with_variant(mysql.LONGBLOB(), "mysql")
+
+
+def sql_table_options() -> "Mapping[str, str]":
+    return {"mysql_engine": "InnoDB", "mysql_charset": "utf8mb4", "mysql_collate": "utf8mb4_bin"}
+
+
+def sql_audit_columns() -> "tuple[Column, Column]":
+    from sqlalchemy import Column, DateTime, DefaultClause
+    from sqlalchemy.dialects import mysql
+    from sqlalchemy.ext.compiler import compiles
+    from sqlalchemy.sql.elements import ClauseElement
+
+    class AuditCurrentTimestamp(ClauseElement):
+        inherit_cache = True
+
+        def __str__(self) -> str:
+            return "CURRENT_TIMESTAMP"
+
+    class AuditCreatedTimestamp(ClauseElement):
+        inherit_cache = True
+
+    @compiles(AuditCurrentTimestamp)
+    def compile_audit_timestamp(element: object, compiler: object, **kwargs: object) -> str:
+        return "CURRENT_TIMESTAMP"
+
+    @compiles(AuditCurrentTimestamp, "mysql")
+    def compile_mysql_audit_timestamp(element: object, compiler: object, **kwargs: object) -> str:
+        return "CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP"
+
+    @compiles(AuditCreatedTimestamp)
+    def compile_created_timestamp(element: object, compiler: object, **kwargs: object) -> str:
+        return "CURRENT_TIMESTAMP"
+
+    @compiles(AuditCreatedTimestamp, "mysql")
+    def compile_mysql_created_timestamp(element: object, compiler: object, **kwargs: object) -> str:
+        return "CURRENT_TIMESTAMP"
+
+    timestamp_type = DateTime(timezone=True).with_variant(mysql.DATETIME(), "mysql")
+    return (
+        Column(
+            "updated_at",
+            timestamp_type,
+            nullable=False,
+            server_default=DefaultClause(AuditCurrentTimestamp()),
+            comment="Update timestamp",
+        ),
+        Column(
+            "created_at",
+            timestamp_type,
+            nullable=False,
+            server_default=DefaultClause(AuditCreatedTimestamp()),
+            comment="Creation timestamp",
+        ),
+    )
+
+
+def sql_audit_indexes(table: "Table") -> "tuple[Index, Index]":
+    """Return the required timestamp query indexes for a physical table."""
+    return (
+        sql_query_index(table, "updated_at"),
+        sql_query_index(table, "created_at"),
+    )
+
+
+def sql_unique(table: "Table", *columns: str) -> None:
+    from sqlalchemy import Index, UniqueConstraint
+
+    _validate_index_columns(columns)
+    constraint = UniqueConstraint(*(table.c[column] for column in columns))
+    constraint.info["ddl_dialect"] = "portable"
+    constraint.ddl_if(dialect=("sqlite", "postgresql"))
+    table.append_constraint(constraint)
+    index = Index(
+        f"uk_{'_'.join(columns)}",
+        *(table.c[column] for column in columns),
+        unique=True,
+    )
+    index.info["ddl_dialect"] = "mysql"
+    index.ddl_if(dialect="mysql")
+
+
+def sql_query_index(table: "Table", *columns: str, mysql_length: int | None = None) -> "Index":
+    from sqlalchemy import Index
+
+    _validate_index_columns(columns)
+    column_objects = tuple(table.c[column] for column in columns)
+    portable = Index(
+        f"ix_{table.name}_{'_'.join(columns)}",
+        *column_objects,
+    )
+    portable.info["ddl_dialect"] = "portable"
+    portable.ddl_if(dialect=("sqlite", "postgresql"))
+    mysql_options: dict[str, object] = {}
+    if mysql_length is not None:
+        mysql_options["mysql_length"] = {columns[-1]: mysql_length}
+    mysql = Index(
+        f"ix_{'_'.join(columns)}",
+        *column_objects,
+        **mysql_options,
+    )
+    mysql.info["ddl_dialect"] = "mysql"
+    mysql.ddl_if(dialect="mysql")
+    return portable
+
+
+def _validate_index_columns(columns: tuple[str, ...]) -> None:
+    if not columns or len(columns) > 3:
+        raise ValueError("SQL composite indexes must contain one to three columns")
+
+
+async def configure_sqlite_engine(engine: "AsyncEngine") -> None:
+    if engine.dialect.name != "sqlite":
+        raise AIError(ErrorCode.STORAGE_CAPABILITY_MISSING)
+    from sqlalchemy import event
+
+    sync_engine = engine.sync_engine
+    if not event.contains(sync_engine, "checkout", configure_sqlite_connection):
+        event.listen(sync_engine, "checkout", configure_sqlite_connection)
+        _logger.debug("SQLite checkout PRAGMA listener registered")
+
+
+def configure_sqlite_connection(
+    dbapi_connection: _SqliteConnection,
+    _connection_record: _SqliteEventValue,
+    _connection_proxy: _SqliteEventValue,
+) -> None:
+    cursor = dbapi_connection.cursor()
+    try:
+        cursor.execute("PRAGMA foreign_keys=ON")
+        cursor.execute("PRAGMA busy_timeout=5000")
+    finally:
+        cursor.close()
+
+
+def column_type_matches(
+    connection: "Connection",
+    *,
+    expected: "Column",
+    actual: "Mapping[str, object]",
+) -> bool:
+    """Return whether an expected column type is compatible with the reflected one."""
+    from sqlalchemy import JSON, LargeBinary
+
+    expected_type = expected.type.dialect_impl(connection.dialect)
+    actual_type = actual.get("type")
+    dialect_name = connection.dialect.name
+    if _type_family(expected_type) != _type_family(actual_type) and not _boolean_compatible(
+        dialect_name, expected_type, actual_type
+    ):
+        return False
+    if isinstance(expected_type, LargeBinary) and not _binary_compatible(dialect_name, expected_type, actual_type):
+        return False
+    if isinstance(expected_type, JSON) and not _json_compatible(expected_type, actual_type):
+        return False
+    if _type_family(expected_type) == "integer" and not _integer_compatible(dialect_name, expected_type, actual_type):
+        return False
+    return True
+
+
+def _type_family(value: object) -> str:
+    from sqlalchemy import JSON, Boolean, DateTime, LargeBinary, Text
+
+    name = type(value).__name__.lower() if value is not None else ""
+    rendered = str(value).lower()
+    if isinstance(value, (DateTime,)) or "datetime" in name or "timestamp" in rendered:
+        return "datetime"
+    if isinstance(value, (JSON,)) or name == "json" or "json" in rendered:
+        return "json"
+    if isinstance(value, (Boolean,)) or name == "boolean" or "bool" in rendered:
+        return "boolean"
+    if isinstance(value, (LargeBinary,)) or "binary" in name or "blob" in rendered:
+        return "binary"
+    if isinstance(value, Text) or "char" in rendered or "text" in rendered or "clob" in rendered:
+        return "text"
+    if "int" in name or "int" in rendered or "numeric" in rendered or "decimal" in rendered:
+        return "integer"
+    if "float" in name or "real" in rendered:
+        return "float"
+    return name or rendered
+
+
+def _type_name(value: object) -> str:
+    return str(value).replace(" ", "").lower()
+
+
+def _boolean_compatible(dialect_name: str, expected: object, actual: object) -> bool:
+    from sqlalchemy import Boolean
+
+    if not isinstance(expected, Boolean):
+        return False
+    rendered = _type_name(actual)
+    if dialect_name == "mysql":
+        if rendered in {"boolean", "bool"}:
+            return True
+        if rendered.startswith("tinyint"):
+            from sqlalchemy.dialects.mysql import TINYINT
+
+            width = actual.display_width if isinstance(actual, TINYINT) else None
+            return width == 1 or rendered == "tinyint(1)"
+    return type(actual).__name__.lower() in {"boolean", "bool"} or rendered in {"boolean", "bool"}
+
+
+def _binary_compatible(dialect_name: str, expected: object, actual: object) -> bool:
+    rendered = _type_name(actual)
+    if dialect_name == "mysql":
+        return rendered == "longblob" or type(actual).__name__.lower() == "longblob"
+    if dialect_name == "postgresql":
+        return rendered == "bytea" or type(actual).__name__.lower() == "bytea"
+    return rendered in {"blob", "largebinary"} or type(actual).__name__.lower() in {"blob", "largebinary"}
+
+
+def _json_compatible(expected: object, actual: object) -> bool:
+    expected_name = type(expected).__name__.lower()
+    actual_name = type(actual).__name__.lower()
+    rendered = _type_name(actual)
+    if expected_name == "jsonb":
+        return actual_name == "jsonb" or rendered == "jsonb"
+    return (actual_name == "json" or rendered == "json") and "jsonb" not in rendered
+
+
+def _integer_compatible(dialect_name: str, expected: object, actual: object) -> bool:
+    if _type_family(actual) != "integer":
+        return False
+    if dialect_name == "sqlite":
+        return True
+    expected_name = _type_name(expected)
+    actual_name = _type_name(actual)
+    if "bigint" in expected_name:
+        return "bigint" in actual_name
+    if "smallint" in expected_name:
+        return any(name in actual_name for name in ("smallint", "integer", "int", "bigint"))
+    return any(name in actual_name for name in ("integer", "int", "bigint"))
+
+
 def classify_integrity_error_by_message(
     error: BaseException,
     *,
@@ -847,7 +1170,22 @@ __all__ = [
     "SqlValue",
     "classify_integrity_error_by_message",
     "classify_sql_error",
+    "column_type_matches",
+    "configure_sqlite_engine",
     "dialect_for_name",
     "is_retryable_sql_transaction",
     "resolve_dialect",
+    "sql_audit_columns",
+    "sql_audit_indexes",
+    "sql_blob",
+    "sql_digest",
+    "sql_id_column",
+    "sql_integer_id",
+    "sql_query_index",
+    "sql_sha256",
+    "sql_sort_key",
+    "sql_state",
+    "sql_table_options",
+    "sql_text_key",
+    "sql_unique",
 ]
