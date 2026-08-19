@@ -31,6 +31,7 @@ from ._store import (
     FactQuery,
     OperationQuery,
     RecordQuery,
+    RecordReplacement,
     StateCallback,
     StateGroupCallback,
     StateStorageGroup,
@@ -60,6 +61,248 @@ class _FactStreamInfo:
     owner_key_digest: bytes
     last_sequence: int
     subjects: dict[bytes, int]
+    subjects_loaded: bool = True
+
+
+class _FilesystemCache:
+    def __init__(self, root: Path) -> None:
+        self._root = root
+        self._records: dict[bytes, StoredRecord | None] = {}
+        self._aliases: dict[bytes, bytes | None] = {}
+        self._sequences: dict[bytes, int] = {}
+        self._fact_streams: dict[bytes, _FactStreamInfo | None] = {}
+        self._operations: dict[bytes, StoredOperation | None] = {}
+        self._record_kinds: tuple[str, ...] | None = None
+        self._loaded_record_kinds: set[str] = set()
+        self._cache_hits = 0
+        self._cache_misses = 0
+        self._record_kind_scans = 0
+        self._business_files_read = 0
+
+    def get_record(self, key: bytes) -> StoredRecord | None:
+        if key in self._records:
+            self._cache_hits += 1
+            return self._records[key]
+        self._cache_misses += 1
+        value_hex = key.hex()
+        matches: list[StoredRecord] = []
+        for kind in self._record_kind_names():
+            path = self._root / "records" / kind / value_hex[:2] / f"{value_hex}.json"
+            if not path.is_file():
+                continue
+            value = decode_record(_read_json(path))
+            if value.key_digest != key or value.kind != kind:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            self._business_files_read += 1
+            matches.append(value)
+        if len(matches) > 1:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        if matches:
+            self._records[key] = matches[0]
+            return matches[0]
+        self._records[key] = None
+        return None
+
+    def list_records(self, query: RecordQuery) -> tuple[StoredRecord, ...]:
+        kinds = (query.kind,) if query.kind is not None else self._record_kind_names()
+        values: list[StoredRecord] = []
+        for kind in kinds:
+            self._load_record_kind(kind)
+        values.extend(
+                value
+                for value in self._records.values()
+                if isinstance(value, StoredRecord)
+                and value.kind == kind
+                and _matches_record(value, query)
+            )
+        values.sort(key=lambda record: (record.sort_key, record.key_digest))
+        self._log_summary("record_kind_scan", len(kinds))
+        return tuple(values)
+
+    def get_alias(self, alias: bytes) -> bytes | None:
+        if alias in self._aliases:
+            self._cache_hits += 1
+            return self._aliases[alias]
+        self._cache_misses += 1
+        value = None
+        path = self._root / _alias_path(self._root, alias)
+        if path.is_file():
+            decoded = decode_alias(_read_json(path))
+            if decoded.alias_digest != alias:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            value = decoded.record_key_digest
+            self._business_files_read += 1
+        self._aliases[alias] = value
+        return value
+
+    def list_aliases(self) -> tuple[tuple[bytes, bytes], ...]:
+        values: list[tuple[bytes, bytes]] = []
+        for path in (self._root / "aliases").glob("*/*.json"):
+            value = decode_alias(_read_json(path))
+            self._aliases[value.alias_digest] = value.record_key_digest
+            self._business_files_read += 1
+            values.append((value.alias_digest, value.record_key_digest))
+        return tuple(values)
+
+    def get_sequence(self, key: bytes) -> int:
+        if key in self._sequences:
+            self._cache_hits += 1
+            return self._sequences[key]
+        self._cache_misses += 1
+        value = 0
+        path = self._root / _sequence_path(self._root, key)
+        if path.is_file():
+            raw = _read_json(path)
+            if raw.get("key") != key.hex():
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            value = int(raw["value"])
+            if value < 0:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            self._business_files_read += 1
+        self._sequences[key] = value
+        return value
+
+    def get_fact_stream(self, stream: bytes) -> _FactStreamInfo | None:
+        if stream in self._fact_streams:
+            self._cache_hits += 1
+            return self._fact_streams[stream]
+        self._cache_misses += 1
+        path = self._root / _fact_meta_path(self._root, stream)
+        if not path.is_file():
+            self._fact_streams[stream] = None
+            return None
+        try:
+            raw = _read_json(path)
+            _require_layout_path(path, self._root, _fact_meta_path(self._root, stream))
+            if raw.get("stream") != stream.hex():
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            owner = bytes.fromhex(str(raw["owner_key"]))
+            last_sequence = int(raw["last_sequence"])
+            if len(owner) != 32 or last_sequence < 1:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        except AIError:
+            raise
+        except (KeyError, TypeError, ValueError) as error:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
+        value = _FactStreamInfo(stream, owner, last_sequence, {}, False)
+        self._fact_streams[stream] = value
+        self._business_files_read += 1
+        return value
+
+    def load_fact_subjects(self, info: _FactStreamInfo) -> None:
+        if info.subjects_loaded:
+            return
+        subjects: dict[bytes, int] = {}
+        root = self._root / _fact_directory(info.stream_digest) / "subjects"
+        for ref in root.glob("*.ref"):
+            try:
+                subject = bytes.fromhex(ref.stem)
+                _require_layout_path(
+                    ref,
+                    self._root,
+                    _fact_subject_path(self._root, info.stream_digest, subject),
+                )
+                sequence = int(_read_json(ref)["sequence"])
+            except (KeyError, TypeError, ValueError) as error:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
+            if len(subject) != 32 or not 1 <= sequence <= info.last_sequence:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            subjects[subject] = sequence
+        info.subjects.update(subjects)
+        info.subjects_loaded = True
+        self._business_files_read += len(subjects)
+
+    def list_fact_streams(self) -> tuple[_FactStreamInfo, ...]:
+        values: list[_FactStreamInfo] = []
+        for path in (self._root / "facts").glob("*/*/meta.json"):
+            stream = bytes.fromhex(str(_read_json(path)["stream"]))
+            info = self.get_fact_stream(stream)
+            if info is not None:
+                values.append(info)
+        return tuple(values)
+
+    def get_operation(self, key: bytes) -> StoredOperation | None:
+        if key in self._operations:
+            self._cache_hits += 1
+            return self._operations[key]
+        self._cache_misses += 1
+        value = None
+        key_hex = key.hex()
+        path = self._root / "operations" / "by-key" / key_hex[:2] / f"{key_hex}.json"
+        if path.is_file():
+            value = decode_operation(_read_json(path))
+            if value.key_digest != key:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            self._business_files_read += 1
+        self._operations[key] = value
+        return value
+
+    def list_operations(self) -> tuple[StoredOperation, ...]:
+        values: list[StoredOperation] = []
+        for path in (self._root / "operations/by-key").glob("*/*.json"):
+            value = decode_operation(_read_json(path))
+            self._operations[value.key_digest] = value
+            self._business_files_read += 1
+            values.append(value)
+        return tuple(values)
+
+    def _record_kind_names(self) -> tuple[str, ...]:
+        if self._record_kinds is None:
+            root = self._root / "records"
+            self._record_kinds = (
+                tuple(sorted(path.name for path in root.iterdir() if path.is_dir()))
+                if root.is_dir()
+                else ()
+            )
+            self._record_kind_scans += 1
+        return self._record_kinds
+
+    def _load_record_kind(self, kind: str) -> None:
+        if kind in self._loaded_record_kinds:
+            self._cache_hits += 1
+            return
+        self._cache_misses += 1
+        root = self._root / "records" / kind
+        for path in root.glob("*/*.json"):
+            value = decode_record(_read_json(path))
+            if value.kind != kind:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            _require_layout_path(
+                path,
+                self._root,
+                f"records/{kind}/{value.key_digest.hex()[:2]}/{value.key_digest.hex()}.json",
+            )
+            self._business_files_read += 1
+            self._records[value.key_digest] = value
+        self._loaded_record_kinds.add(kind)
+        self._record_kind_scans += 1
+
+    def set_record(self, key: bytes, value: StoredRecord | None) -> None:
+        self._records[key] = value
+
+    def set_alias(self, key: bytes, value: bytes | None) -> None:
+        self._aliases[key] = value
+
+    def set_sequence(self, key: bytes, value: int) -> None:
+        self._sequences[key] = value
+
+    def set_fact_stream(self, key: bytes, value: _FactStreamInfo | None) -> None:
+        self._fact_streams[key] = value
+
+    def set_operation(self, key: bytes, value: StoredOperation | None) -> None:
+        self._operations[key] = value
+
+    def _log_summary(self, event: str, value: int) -> None:
+        _logger.debug(
+            "filesystem cache summary: event=%s value=%s cache_hit=%s cache_miss=%s "
+            "record_kind_scan=%s business_files_read=%s",
+            event,
+            value,
+            self._cache_hits,
+            self._cache_misses,
+            self._record_kind_scans,
+            self._business_files_read,
+        )
 
 
 @dataclass(slots=True)
@@ -69,6 +312,7 @@ class _FilesystemIndex:
     sequences: dict[bytes, int]
     fact_streams: dict[bytes, _FactStreamInfo]
     operations: dict[bytes, StoredOperation]
+    cache: _FilesystemCache
 
 
 class _CowMap(MutableMapping[KeyT, MapValueT]):
@@ -149,7 +393,7 @@ class FilesystemStateStorageGroup:
         self._scope_digest = scope_digest
         self._standalone = standalone
         self._members: list[FilesystemStateStore] = []
-        self._operation_lock = asyncio.Lock()
+        self._mutation_lock = asyncio.Lock()
         self._group_lock = FilesystemWriterLock(self._metadata_root / "state.lock")
         self._journal = FilesystemJournal(
             self._transaction_root if not standalone else transaction_root,
@@ -187,8 +431,12 @@ class FilesystemStateStorageGroup:
     async def initialize(self) -> None:
         if self._closed:
             raise AIError(ErrorCode.STORAGE_CLOSED)
-        if self._initialized:
-            return
+        async with self._mutation_lock:
+            if self._initialized:
+                return
+            await self._initialize_locked()
+
+    async def _initialize_locked(self) -> None:
         ordered = tuple(sorted(self._members, key=lambda member: member.root.as_posix()))
         acquired: list[FilesystemWriterLock] = []
         try:
@@ -219,13 +467,18 @@ class FilesystemStateStorageGroup:
     async def close(self) -> None:
         if self._closed or not self._members or not all(member._closed for member in self._members):
             return
-        async with self._operation_lock:
+        async with self._mutation_lock:
             if self._closed:
                 return
             self._closed = True
             self._initialized = False
+            locks = tuple(sorted(self._members, key=lambda value: value.root.as_posix()))
+            for member in locks:
+                await member._consistency_lock.acquire()
             for member in sorted(self._members, key=lambda value: value.root.as_posix(), reverse=True):
                 await member._writer_lock.release()
+            for member in reversed(locks):
+                member._consistency_lock.release()
             if not self._standalone:
                 await self._group_lock.release()
         _logger.debug("filesystem StateStorageGroup closed: scope=%s", self._scope_digest)
@@ -235,15 +488,24 @@ class FilesystemStateStorageGroup:
         active = active_state_transaction(store)
         if active is not None:
             return await fn(active)
-        async with self._operation_lock:
+        started = monotonic()
+        await store._consistency_lock.acquire()
+        _logger.debug(
+            "filesystem member lock acquired: domain=%s member_lock_wait_ms=%.3f",
+            store._runtime_domain,
+            (monotonic() - started) * 1000,
+        )
+        try:
             return await fn(_FilesystemTransaction(store.root, store._require_index()))
+        finally:
+            store._consistency_lock.release()
 
     async def mutate(
         self,
         stores: Sequence["FilesystemStateStore"],
         fn: StateGroupCallback[ValueT],
     ) -> ValueT:
-        members = tuple(dict.fromkeys(stores))
+        members = tuple(sorted(dict.fromkeys(stores), key=lambda value: value.root.as_posix()))
         if not members:
             raise ValueError("StateStorageGroup mutation requires a store")
         for store in members:
@@ -251,37 +513,64 @@ class FilesystemStateStorageGroup:
         active = active_state_transaction(members[0])
         if active is not None:
             return await fn(active_state_group_transaction(self, members))
-        async with self._operation_lock:
+        mutation_started = monotonic()
+        await self._mutation_lock.acquire()
+        _logger.debug(
+            "filesystem group mutation lock acquired: scope=%s "
+            "group_mutation_wait_ms=%.3f",
+            self._scope_digest,
+            (monotonic() - mutation_started) * 1000,
+        )
+        locked: list[FilesystemStateStore] = []
+        try:
+            member_wait_started = monotonic()
+            for store in members:
+                await store._consistency_lock.acquire()
+                locked.append(store)
+            _logger.debug(
+                "filesystem mutation members locked: scope=%s "
+                "member_lock_wait_ms=%.3f",
+                self._scope_digest,
+                (monotonic() - member_wait_started) * 1000,
+            )
             transaction_now = datetime.now(timezone.utc)
-            transactions = {
-                store: _FilesystemTransaction(
-                    store.root,
-                    store._require_index(),
-                    now=transaction_now,
-                )
-                for store in members
-            }
-            group_transaction = _FilesystemGroupTransaction(self, transactions)
-            token = bind_state_scope(self, transactions)
             try:
-                result = await fn(group_transaction)
+                transactions = {
+                    store: _FilesystemTransaction(
+                        store.root,
+                        store._require_index(),
+                        now=transaction_now,
+                    )
+                    for store in members
+                }
+                group_transaction = _FilesystemGroupTransaction(self, transactions)
+                token = bind_state_scope(self, transactions)
+                try:
+                    result = await fn(group_transaction)
+                finally:
+                    reset_state_transaction(token)
+                if any(transaction.has_changes for transaction in transactions.values()):
+                    await self._commit(transactions)
+                return result
             finally:
-                reset_state_transaction(token)
-            if any(transaction.has_changes for transaction in transactions.values()):
-                await self._commit(transactions)
-            return result
+                for store in reversed(locked):
+                    store._consistency_lock.release()
+        finally:
+            self._mutation_lock.release()
 
     async def validate_integrity(self) -> None:
         self._ensure_ready()
-        async with self._operation_lock:
-            for member in self._members:
-                member._ensure_ready()
-                await _await_thread(
-                    lambda member=member: member._validate_index(
-                        member._require_index(),
-                        decode_items=True,
-                    )
-                )
+        async with self._mutation_lock:
+            ordered = tuple(sorted(self._members, key=lambda value: value.root.as_posix()))
+            for member in ordered:
+                await member._consistency_lock.acquire()
+            try:
+                for member in ordered:
+                    member._ensure_ready()
+                    await _await_thread(member._validate_integrity_sync)
+            finally:
+                for member in reversed(ordered):
+                    member._consistency_lock.release()
 
     def _initialize_sync(self) -> None:
         if self._standalone:
@@ -292,12 +581,13 @@ class FilesystemStateStorageGroup:
             self._generation = generation
             return
         self._provision_group_sync()
+        self._check_foreign_group_journals_sync()
         for member in self._members:
             member._provision()
             member._recover_sync()
         self._recover_sync()
         for member in self._members:
-            member._index = member._load_index()
+            member._index = member._new_index()
             member._index_generation = member._generation()
         self._generation = self._read_generation()
 
@@ -310,7 +600,7 @@ class FilesystemStateStorageGroup:
                 actual = json.loads(manifest.read_text(encoding="utf-8"))
             except (OSError, ValueError) as error:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
-            if actual != expected:
+            if not self._manifest_matches(actual, expected):
                 raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
         else:
             _write_json(manifest, expected)
@@ -318,6 +608,43 @@ class FilesystemStateStorageGroup:
             sync_directory(self._metadata_root)
         if not (self._metadata_root / "generation").is_file():
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+
+    @staticmethod
+    def _manifest_matches(actual: Mapping[str, object], expected: Mapping[str, object]) -> bool:
+        if not isinstance(actual, Mapping):
+            return False
+        fields = ("format", "version", "namespace_digest", "tenant_digest", "members")
+        return all(actual.get(field) == expected.get(field) for field in fields)
+
+    def _check_foreign_group_journals_sync(self) -> None:
+        if self._standalone:
+            return
+        member_paths = tuple(
+            member.root.relative_to(self._transaction_root).as_posix()
+            for member in self._members
+        )
+        own_name = f".txn-{self._scope_digest}"
+        try:
+            journals = tuple(
+                path
+                for path in self._transaction_root.iterdir()
+                if path.is_dir() and path.name.startswith(".txn-") and path.name != own_name
+            )
+            for journal in journals:
+                if not (journal / "commit").is_file():
+                    continue
+                plan = _read_json(journal / "plan.json")
+                paths = tuple(plan.get("writes", ())) + tuple(plan.get("deletes", ()))
+                for item in paths:
+                    value = item.get("path") if isinstance(item, Mapping) else item
+                    if not isinstance(value, str):
+                        raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
+                    if any(value == root or value.startswith(root + "/") for root in member_paths):
+                        raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
+        except AIError:
+            raise
+        except (OSError, TypeError, ValueError, KeyError) as error:
+            raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED) from error
 
     def _expected_manifest(self) -> dict[str, object]:
         return {
@@ -399,6 +726,8 @@ class FilesystemStateStorageGroup:
         deletes: set[str] = set()
         for store, transaction in transactions.items():
             prefix = "" if self._standalone else store.root.relative_to(self._transaction_root).as_posix()
+            if not self._standalone:
+                writes[f"{prefix}/generation"] = str(target).encode("utf-8")
             for relative, value in transaction.writes.items():
                 writes[f"{prefix}/{relative}" if prefix else relative] = value
             for relative in transaction.deletes:
@@ -438,10 +767,11 @@ class FilesystemStateStorageGroup:
                     raise cancellation
                 raise error
         for store, transaction in transactions.items():
-            store._apply_transaction(transaction, generation=None)
+            store._apply_transaction(transaction, generation=target)
         self._generation = target
         _logger.debug(
-            "state storage group committed: backend=filesystem domains=%s duration_ms=%.3f files=%s",
+            "state storage group committed: backend=filesystem domains=%s "
+            "group_commit_ms=%.3f files=%s",
             ",".join(store._runtime_domain for store in transactions),
             (monotonic() - started) * 1000,
             len(writes) + len(deletes),
@@ -486,7 +816,7 @@ class FilesystemStateStore:
         self._tenant_id = tenant_id
         self._runtime_domain = runtime_domain
         self._writer_lock = FilesystemWriterLock(self._root / "state.lock")
-        self._operation_lock = asyncio.Lock()
+        self._consistency_lock = asyncio.Lock()
         self._journal = FilesystemJournal(
             self._root,
             error_code=ErrorCode.STORAGE_INTEGRITY_ERROR,
@@ -576,10 +906,16 @@ class FilesystemStateStore:
     def _initialize_sync(self) -> tuple[_FilesystemIndex, int]:
         self._provision()
         self._recover_sync()
-        index = self._load_index()
+        index = self._new_index()
         generation = self._generation()
-        self._validate_index(index, decode_items=False)
         return index, generation
+
+    def _new_index(self) -> _FilesystemIndex:
+        return _FilesystemIndex({}, {}, {}, {}, {}, _FilesystemCache(self._root))
+
+    def _validate_integrity_sync(self) -> None:
+        index = self._load_index()
+        self._validate_index(index, decode_items=True)
 
     def _generation(self) -> int:
         if not self._root.exists():
@@ -713,7 +1049,14 @@ class FilesystemStateStore:
             }
             if references != expected:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            index = _FilesystemIndex(records, aliases, sequences, streams, operations)
+            index = _FilesystemIndex(
+                records,
+                aliases,
+                sequences,
+                streams,
+                operations,
+                _FilesystemCache(self._root),
+            )
             self._validate_index(index, decode_items=False)
             return index
         except AIError:
@@ -878,6 +1221,26 @@ class FilesystemStateStore:
         transaction.sequences.apply_to(index.sequences)
         transaction.fact_streams.apply_to(index.fact_streams)
         transaction.operations.apply_to(index.operations)
+        for key in transaction.records.deleted():
+            index.cache.set_record(key, None)
+        for key, value in transaction.records.changes().items():
+            index.cache.set_record(key, value)
+        for key in transaction.aliases.deleted():
+            index.cache.set_alias(key, None)
+        for key, value in transaction.aliases.changes().items():
+            index.cache.set_alias(key, value)
+        for key in transaction.sequences.deleted():
+            index.cache.set_sequence(key, 0)
+        for key, value in transaction.sequences.changes().items():
+            index.cache.set_sequence(key, value)
+        for key in transaction.fact_streams.deleted():
+            index.cache.set_fact_stream(key, None)
+        for key, value in transaction.fact_streams.changes().items():
+            index.cache.set_fact_stream(key, value)
+        for key in transaction.operations.deleted():
+            index.cache.set_operation(key, None)
+        for key, value in transaction.operations.changes().items():
+            index.cache.set_operation(key, value)
         if generation is not None:
             self._index_generation = generation
 
@@ -897,6 +1260,7 @@ class _FilesystemTransaction:
         now: datetime | None = None,
     ) -> None:
         self._root = root
+        self._cache = index.cache
         self.records = _CowMap(index.records)
         self.aliases = _CowMap(index.aliases)
         self.sequences = _CowMap(index.sequences)
@@ -933,29 +1297,57 @@ class _FilesystemTransaction:
         return self._now
 
     async def validate_integrity(self) -> None:
-        for key in self.aliases.values():
-            if key not in self.records:
+        aliases = dict(await asyncio.to_thread(self._cache.list_aliases))
+        aliases.update(self.aliases.changes())
+        for alias in self.aliases.deleted():
+            aliases.pop(alias, None)
+        for key in aliases.values():
+            if await self.get_record(key) is None:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        for info in self.fact_streams.values():
-            if info.owner_key_digest not in self.records:
+        streams = {
+            info.stream_digest: info
+            for info in await asyncio.to_thread(self._cache.list_fact_streams)
+        }
+        streams.update(self.fact_streams.changes())
+        for stream in self.fact_streams.deleted():
+            streams.pop(stream, None)
+        for info in streams.values():
+            if await self.get_record(info.owner_key_digest) is None:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
 
     async def get_record(self, key: bytes) -> StoredRecord | None:
-        return self.records.get(key)
+        if key in self.records.deleted():
+            return None
+        if key in self.records:
+            return self.records[key]
+        return await asyncio.to_thread(self._cache.get_record, key)
 
     async def get_records(self, keys: Sequence[bytes]) -> Mapping[bytes, StoredRecord]:
-        return {key: self.records[key] for key in keys if key in self.records}
+        values: dict[bytes, StoredRecord] = {}
+        for key in dict.fromkeys(keys):
+            value = await self.get_record(key)
+            if value is not None:
+                values[key] = value
+        return values
 
     async def insert_record(self, record: StoredRecord) -> None:
-        validate_record_identity(record)
-        if record.key_digest in self.records:
-            raise AIError(ErrorCode.STORAGE_CONFLICT)
-        self.records[record.key_digest] = record
-        self.guarded_record_keys.add(record.key_digest)
-        self._write(_record_path(record), encode_record(record))
+        await self.insert_records((record,))
+
+    async def insert_records(self, records: Sequence[StoredRecord]) -> None:
+        values = tuple(records)
+        keys = [record.key_digest for record in values]
+        if len(keys) != len(set(keys)):
+            raise ValueError("insert_records contains duplicate keys")
+        for record in sorted(values, key=lambda value: value.key_digest):
+            if await self.get_record(record.key_digest) is not None:
+                raise AIError(ErrorCode.STORAGE_CONFLICT)
+            validate_record_identity(record)
+            self.records[record.key_digest] = record
+            self.guarded_record_keys.add(record.key_digest)
+            self._write(_record_path(record), encode_record(record))
 
     async def guard_record(self, key: bytes, *, expected_storage_version: int) -> StoredRecord | None:
-        current = self.records.get(key)
+        current = await self.get_record(key)
         if key in self.guarded_record_keys:
             return current
         if current is None or current.storage_version != expected_storage_version:
@@ -980,17 +1372,33 @@ class _FilesystemTransaction:
         return guarded
 
     async def replace_record(self, record: StoredRecord, *, expected_storage_version: int) -> bool:
-        current = self.records.get(record.key_digest)
-        if current is None or current.storage_version != expected_storage_version:
-            return False
-        validate_record_replacement(current, record)
-        validate_record_identity(record)
-        if record.storage_version != expected_storage_version + 1:
-            raise ValueError("replacement must increment storage_version exactly once")
-        self.records[record.key_digest] = record
-        self.guarded_record_keys.add(record.key_digest)
-        self._write(_record_path(record), encode_record(record))
+        try:
+            await self.replace_records((RecordReplacement(record, expected_storage_version),))
+        except AIError as error:
+            if error.code is ErrorCode.STORAGE_CONFLICT:
+                return False
+            raise
         return True
+
+    async def replace_records(self, replacements: Sequence[RecordReplacement]) -> None:
+        values = tuple(replacements)
+        keys = [replacement.record.key_digest for replacement in values]
+        if len(keys) != len(set(keys)):
+            raise ValueError("replace_records contains duplicate keys")
+        candidates: list[StoredRecord] = []
+        for replacement in sorted(values, key=lambda value: value.record.key_digest):
+            current = await self.get_record(replacement.record.key_digest)
+            if current is None or current.storage_version != replacement.expected_storage_version:
+                raise AIError(ErrorCode.STORAGE_CONFLICT)
+            validate_record_replacement(current, replacement.record)
+            validate_record_identity(replacement.record)
+            if replacement.record.storage_version != replacement.expected_storage_version + 1:
+                raise ValueError("replacement must increment storage_version exactly once")
+            candidates.append(replacement.record)
+        for record in candidates:
+            self.records[record.key_digest] = record
+            self.guarded_record_keys.add(record.key_digest)
+            self._write(_record_path(record), encode_record(record))
 
     async def update_record_lease(
         self,
@@ -1001,7 +1409,7 @@ class _FilesystemTransaction:
         lease_fence: int,
         lease_expires_at: datetime | None,
     ) -> bool:
-        current = self.records.get(key)
+        current = await self.get_record(key)
         if current is None or current.storage_version != expected_storage_version:
             return False
         if lease_fence < 0 or lease_expires_at is not None and lease_expires_at.tzinfo is None:
@@ -1026,15 +1434,18 @@ class _FilesystemTransaction:
         return True
 
     async def delete_record(self, key: bytes, *, expected_storage_version: int | None = None) -> bool:
-        current = self.records.get(key)
+        current = await self.get_record(key)
         if current is None:
             return False
         expected = current.storage_version if expected_storage_version is None else expected_storage_version
         if await self.guard_record(key, expected_storage_version=expected) is None:
             return False
         await self.delete_fact_streams(key)
-        for alias, record_key in tuple(self.aliases.items()):
+        aliases = dict(await asyncio.to_thread(self._cache.list_aliases))
+        aliases.update(self.aliases.changes())
+        for alias, record_key in tuple(aliases.items()):
             if record_key == key:
+                self.aliases[alias] = record_key
                 del self.aliases[alias]
                 self._delete(_alias_path(self._root, alias))
         del self.records[key]
@@ -1043,7 +1454,14 @@ class _FilesystemTransaction:
         return True
 
     async def list_records(self, query: RecordQuery) -> tuple[StoredRecord, ...]:
-        values = [record for record in self.records.values() if _matches_record(record, query)]
+        values = {
+            record.key_digest: record
+            for record in await asyncio.to_thread(self._cache.list_records, query)
+        }
+        values.update(self.records.changes())
+        for key in self.records.deleted():
+            values.pop(key, None)
+        values = [record for record in values.values() if _matches_record(record, query)]
         values.sort(key=lambda record: (record.sort_key, record.key_digest))
         if query.after_sort_key is not None and query.after_key_digest is not None:
             values = [
@@ -1059,54 +1477,90 @@ class _FilesystemTransaction:
         return (await self.resolve_aliases((alias,))).get(alias)
 
     async def resolve_aliases(self, aliases: Sequence[bytes]) -> Mapping[bytes, bytes]:
-        values = {alias: self.aliases[alias] for alias in dict.fromkeys(aliases) if alias in self.aliases}
+        values: dict[bytes, bytes] = {}
+        for alias in dict.fromkeys(aliases):
+            if alias in self.aliases.deleted():
+                continue
+            if alias in self.aliases:
+                values[alias] = self.aliases[alias]
+            else:
+                value = await asyncio.to_thread(self._cache.get_alias, alias)
+                if value is not None:
+                    values[alias] = value
         for value in values.values():
-            if value not in self.records:
+            if await self.get_record(value) is None:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         return values
 
     async def insert_alias(self, alias: StoredAlias) -> None:
-        current = self.aliases.get(alias.alias_digest)
-        if current is not None and current != alias.record_key_digest:
-            raise AIError(ErrorCode.STORAGE_CONFLICT)
-        if alias.record_key_digest not in self.guarded_record_keys:
-            raise RuntimeError("alias owner must be guarded in the current transaction")
-        self.aliases[alias.alias_digest] = alias.record_key_digest
-        self._write(_alias_path(self._root, alias.alias_digest), encode_alias(alias))
+        await self.insert_aliases((alias,))
+
+    async def insert_aliases(self, aliases: Sequence[StoredAlias]) -> None:
+        for alias in sorted(aliases, key=lambda value: value.alias_digest):
+            current = None
+            if alias.alias_digest not in self.aliases.deleted():
+                current = await asyncio.to_thread(self._cache.get_alias, alias.alias_digest)
+            if alias.alias_digest in self.aliases:
+                current = self.aliases[alias.alias_digest]
+            if current is not None and current != alias.record_key_digest:
+                raise AIError(ErrorCode.STORAGE_CONFLICT)
+            if alias.record_key_digest not in self.guarded_record_keys:
+                raise RuntimeError("alias owner must be guarded in the current transaction")
+            self.aliases[alias.alias_digest] = alias.record_key_digest
+            self._write(_alias_path(self._root, alias.alias_digest), encode_alias(alias))
 
     async def get_sequence(self, key: bytes) -> int:
-        return self.sequences.get(key, 0)
+        if key in self.sequences.deleted():
+            return 0
+        if key in self.sequences:
+            return self.sequences[key]
+        return await asyncio.to_thread(self._cache.get_sequence, key)
 
     async def get_sequences(self, keys: Sequence[bytes]) -> Mapping[bytes, int]:
-        return {key: self.sequences.get(key, 0) for key in keys}
+        return {key: await self.get_sequence(key) for key in dict.fromkeys(keys)}
 
     async def next_sequence(self, key: bytes) -> int:
-        value = self.sequences.get(key, 0) + 1
+        value = await self.get_sequence(key) + 1
         self.sequences[key] = value
         self._write(_sequence_path(self._root, key), {"key": key.hex(), "value": value})
         return value
 
     async def reserve_sequence(self, key: bytes, count: int) -> int:
-        if count < 1:
+        return (await self.reserve_sequences({key: count}))[key]
+
+    async def reserve_sequences(self, requests: Mapping[bytes, int]) -> Mapping[bytes, int]:
+        if any(count < 1 for count in requests.values()):
             raise ValueError("sequence reservation count must be positive")
-        value = self.sequences.get(key, 0) + count
-        self.sequences[key] = value
-        self._write(_sequence_path(self._root, key), {"key": key.hex(), "value": value})
-        return value
+        values = {
+            key: await self.get_sequence(key) + requests[key]
+            for key in sorted(requests)
+        }
+        for key, value in values.items():
+            self.sequences[key] = value
+            self._write(_sequence_path(self._root, key), {"key": key.hex(), "value": value})
+        return values
 
     async def advance_sequence(self, key: bytes, expected: int) -> int:
-        if self.sequences.get(key, 0) != expected:
+        if await self.get_sequence(key) != expected:
             raise AIError(ErrorCode.STORAGE_CONFLICT)
         return await self.next_sequence(key)
 
     async def delete_sequence(self, key: bytes) -> None:
-        self.sequences.pop(key, None)
-        self._delete(_sequence_path(self._root, key))
+        await self.delete_sequences((key,))
+
+    async def delete_sequences(self, keys: Sequence[bytes]) -> None:
+        for key in sorted(set(keys)):
+            if key in self.sequences:
+                del self.sequences[key]
+            else:
+                self.sequences[key] = 0
+                del self.sequences[key]
+            self._delete(_sequence_path(self._root, key))
 
     async def insert_fact(self, fact: StoredFact) -> None:
         if fact.owner_key_digest not in self.guarded_record_keys:
             raise RuntimeError("fact owner must be guarded in the current transaction")
-        info = self._own_fact_stream(fact.stream_digest)
+        info = await self._own_fact_stream(fact.stream_digest)
         if info is None:
             info = _FactStreamInfo(fact.stream_digest, fact.owner_key_digest, 0, {})
             self.fact_streams[fact.stream_digest] = info
@@ -1129,13 +1583,18 @@ class _FilesystemTransaction:
             await self.insert_fact(fact)
 
     async def list_facts(self, query: FactQuery) -> tuple[StoredFact, ...]:
+        if query.stream_digest in self.fact_streams.deleted():
+            return ()
         info = self.fact_streams.get(query.stream_digest)
+        if info is None and query.stream_digest not in self.fact_streams:
+            info = await asyncio.to_thread(self._cache.get_fact_stream, query.stream_digest)
         if info is None:
             return ()
         if query.latest:
             if query.subject_digest is None:
                 latest = info.last_sequence
             else:
+                await self._load_fact_subjects(info)
                 latest = info.subjects.get(query.subject_digest)
             if latest is None or query.after_sequence is not None and latest <= query.after_sequence:
                 return ()
@@ -1143,6 +1602,7 @@ class _FilesystemTransaction:
             value = self._facts.get((info.stream_digest, latest))
             return () if value is None else (value,)
         if query.latest_per_subject:
+            await self._load_fact_subjects(info)
             sequences = tuple(
                 sequence
                 for sequence in info.subjects.values()
@@ -1174,10 +1634,17 @@ class _FilesystemTransaction:
         return tuple(values)
 
     async def delete_fact_streams(self, owner_key: bytes) -> None:
-        for stream, source in tuple(self.fact_streams.items()):
+        sources = {
+            info.stream_digest: info
+            for info in await asyncio.to_thread(self._cache.list_fact_streams)
+        }
+        sources.update(self.fact_streams.changes())
+        for stream in self.fact_streams.deleted():
+            sources.pop(stream, None)
+        for stream, source in tuple(sources.items()):
             if source.owner_key_digest != owner_key:
                 continue
-            info = self._own_fact_stream(stream)
+            info = await self._own_fact_stream(stream)
             if info is None:
                 continue
             for sequence in range(1, info.last_sequence + 1):
@@ -1188,9 +1655,9 @@ class _FilesystemTransaction:
             del self.fact_streams[stream]
 
     async def insert_operation(self, value: StoredOperation) -> None:
-        if value.key_digest in self.operations or any(
+        if await self.get_operation(value.key_digest) is not None or any(
             item.stream_digest == value.stream_digest and item.sequence == value.sequence
-            for item in self.operations.values()
+            for item in await asyncio.to_thread(self._cache.list_operations)
         ):
             raise AIError(ErrorCode.STORAGE_CONFLICT)
         self.operations[value.key_digest] = value
@@ -1198,10 +1665,14 @@ class _FilesystemTransaction:
         self._write(_operation_ref_path(self._root, value), {"key": value.key_digest.hex()})
 
     async def get_operation(self, key: bytes) -> StoredOperation | None:
-        return self.operations.get(key)
+        if key in self.operations.deleted():
+            return None
+        if key in self.operations:
+            return self.operations[key]
+        return await asyncio.to_thread(self._cache.get_operation, key)
 
     async def replace_operation(self, value: StoredOperation, *, expected_state: str) -> bool:
-        current = self.operations.get(value.key_digest)
+        current = await self.get_operation(value.key_digest)
         if current is None or current.state != expected_state:
             return False
         self.operations[value.key_digest] = value
@@ -1209,9 +1680,16 @@ class _FilesystemTransaction:
         return True
 
     async def list_operations(self, query: OperationQuery) -> tuple[StoredOperation, ...]:
+        values_by_key = {
+            item.key_digest: item
+            for item in await asyncio.to_thread(self._cache.list_operations)
+        }
+        values_by_key.update(self.operations.changes())
+        for key in self.operations.deleted():
+            values_by_key.pop(key, None)
         values = [
             item
-            for item in self.operations.values()
+            for item in values_by_key.values()
             if (query.stream_digest is None or item.stream_digest == query.stream_digest)
             and (query.states is None or item.state in query.states)
             and (query.through_sequence is None or item.sequence <= query.through_sequence)
@@ -1224,6 +1702,7 @@ class _FilesystemTransaction:
     async def delete_operations(self, query: OperationQuery) -> tuple[StoredOperation, ...]:
         values = await self.list_operations(query)
         for value in values:
+            self.operations[value.key_digest] = value
             del self.operations[value.key_digest]
             self._delete(_operation_path(self._root, value))
             self._delete(_operation_ref_path(self._root, value))
@@ -1241,19 +1720,30 @@ class _FilesystemTransaction:
         values = await asyncio.to_thread(_read_fact_batch, self._root, info.stream_digest, missing)
         self._facts.update(values)
 
-    def _own_fact_stream(self, stream: bytes) -> _FactStreamInfo | None:
+    async def _own_fact_stream(self, stream: bytes) -> _FactStreamInfo | None:
+        if stream in self.fact_streams.deleted():
+            return None
         info = self.fact_streams.get(stream)
+        if info is None and stream not in self.fact_streams:
+            info = await asyncio.to_thread(self._cache.get_fact_stream, stream)
         if info is None or stream in self._owned_fact_streams:
             return info
+        await self._load_fact_subjects(info)
         owned = _FactStreamInfo(
             info.stream_digest,
             info.owner_key_digest,
             info.last_sequence,
             dict(info.subjects),
+            info.subjects_loaded,
         )
         self.fact_streams[stream] = owned
         self._owned_fact_streams.add(stream)
         return owned
+
+    async def _load_fact_subjects(self, info: _FactStreamInfo) -> None:
+        if info.subjects_loaded:
+            return
+        await asyncio.to_thread(self._cache.load_fact_subjects, info)
 
     def _sync_fact_stream(
         self,
@@ -1302,6 +1792,7 @@ def _matches_record(record: StoredRecord, query: RecordQuery) -> bool:
         (query.partition_digest is None or record.partition_digest == query.partition_digest)
         and (query.scope_digest is None or record.scope_digest == query.scope_digest)
         and (query.parent_digest is None or record.parent_digest == query.parent_digest)
+        and (query.kind is None or record.kind == query.kind)
         and (query.states is None or record.state in query.states)
     )
 
@@ -1374,10 +1865,13 @@ def _read_fact_batch(
     stream: bytes,
     sequences: Sequence[int],
 ) -> dict[tuple[bytes, int], StoredFact]:
-    return {
-        (stream, sequence): decode_fact(_read_json(_fact_item_path(root, stream, sequence)))
-        for sequence in sequences
-    }
+    values: dict[tuple[bytes, int], StoredFact] = {}
+    for sequence in sequences:
+        fact = decode_fact(_read_json(_fact_item_path(root, stream, sequence)))
+        if fact.stream_digest != stream or fact.sequence != sequence:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        values[(stream, sequence)] = fact
+    return values
 
 
 def _write_json(path: Path, value: Mapping[str, object]) -> None:

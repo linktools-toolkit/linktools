@@ -76,6 +76,7 @@ from ._store import (
     FactQuery,
     OperationQuery,
     RecordQuery,
+    RecordReplacement,
     StateStore,
     StateTransaction,
     StoredAlias,
@@ -202,6 +203,7 @@ class _RepositoryBase:
                     partition_digest=(self._partition(kind) if scope is None and parent is None else None),
                     scope_digest=scope,
                     parent_digest=parent,
+                    kind=kind,
                     states=states,
                     after_sort_key=after_sort_key,
                     after_key_digest=after_key_digest,
@@ -567,6 +569,7 @@ class SessionRepositoryImpl(_ResourceRepository[SessionRecord]):
                 RecordQuery(
                     partition_digest=self._partition("session") if scope is None else None,
                     scope_digest=scope,
+                    kind="session",
                 )
             )
             return tuple([await self._decode(record, SessionRecord) for record in records])
@@ -603,6 +606,7 @@ class SessionRepositoryImpl(_ResourceRepository[SessionRecord]):
                 RecordQuery(
                     partition_digest=self._partition("session") if scope is None else None,
                     scope_digest=scope,
+                    kind="session",
                     after_sort_key=after_sort_key,
                     after_key_digest=after_key_digest,
                     limit=limit + 1,
@@ -1374,7 +1378,7 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
             "resource",
             [ResourceKind.EXECUTION.value, commit.execution.execution_id],
         )
-        records = await transaction.list_records(RecordQuery(scope_digest=scope))
+        records = await transaction.list_records(RecordQuery(scope_digest=scope, kind="idempotency"))
         if len(records) > 1:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         if not records:
@@ -2128,13 +2132,13 @@ class TaskRepositoryImpl(_RepositoryBase):
         view = TaskGraphView(graph.graph_id, TaskStatus.PENDING, graph.nodes)
 
         async def mutate(transaction: StateTransaction) -> TaskGraphView:
-            await transaction.insert_record(self._stored("task_graph", graph.graph_id, view, state=view.status.value))
+            records = [self._stored("task_graph", graph.graph_id, view, state=view.status.value)]
             for node in graph.nodes:
                 status = TaskStatus.READY if not node.dependencies else TaskStatus.PENDING
                 node_view = TaskNodeView(
                     graph.graph_id, node.node_id, node.dependencies, status, None, 0, None, None, None, None
                 )
-                await transaction.insert_record(
+                records.append(
                     self._stored(
                         "task_node",
                         [graph.graph_id, node.node_id],
@@ -2143,6 +2147,7 @@ class TaskRepositoryImpl(_RepositoryBase):
                         state=status.value,
                     )
                 )
+            await transaction.insert_records(records)
             return view
 
         return await self._store.mutate(mutate)
@@ -2165,7 +2170,10 @@ class TaskRepositoryImpl(_RepositoryBase):
                 raise AIError(ErrorCode.STORAGE_NOT_FOUND)
             graph = await self._decode(graph_record, TaskGraphView)
             node_records = await transaction.list_records(
-                RecordQuery(parent_digest=self._parent("task_node", "graph", graph_id))
+                RecordQuery(
+                    parent_digest=self._parent("task_node", "graph", graph_id),
+                    kind="task_node",
+                )
             )
             current_nodes = {node.node_id: node for node in await self._decode_many(node_records)}
             next_nodes = dict(current_nodes)
@@ -2204,11 +2212,12 @@ class TaskRepositoryImpl(_RepositoryBase):
             if not changed_nodes:
                 return TaskGraphView(graph.graph_id, _graph_status(tuple(next_nodes.values())), graph.nodes)
             next_graph = replace(graph, status=_graph_status(tuple(next_nodes.values())))
-            await _replace_checked(
-                transaction,
-                _projected_record(self, graph_record, next_graph),
-                graph_record.storage_version,
-            )
+            replacements = [
+                RecordReplacement(
+                    _projected_record(self, graph_record, next_graph),
+                    graph_record.storage_version,
+                )
+            ]
             for current, value in changed_nodes:
                 node_record = await transaction.get_record(self._node_key(graph_id, current.node_id))
                 if node_record is None:
@@ -2216,11 +2225,13 @@ class TaskRepositoryImpl(_RepositoryBase):
                 stored_node = await self._decode(node_record, TaskNodeView)
                 if stored_node != current:
                     raise AIError(ErrorCode.STORAGE_CONFLICT)
-                await _replace_checked(
-                    transaction,
-                    _projected_record(self, node_record, value),
-                    node_record.storage_version,
+                replacements.append(
+                    RecordReplacement(
+                        _projected_record(self, node_record, value),
+                        node_record.storage_version,
+                    )
                 )
+            await transaction.replace_records(replacements)
             _logger.info(
                 "task graph reconciled atomically: graph_id=%s changed_nodes=%s",
                 graph_id,
@@ -2238,7 +2249,10 @@ class TaskRepositoryImpl(_RepositoryBase):
                 raise AIError(ErrorCode.STORAGE_NOT_FOUND)
             graph = await self._decode(graph_record, TaskGraphView)
             node_records = await transaction.list_records(
-                RecordQuery(parent_digest=self._parent("task_node", "graph", graph_id))
+                RecordQuery(
+                    parent_digest=self._parent("task_node", "graph", graph_id),
+                    kind="task_node",
+                )
             )
             nodes = await self._decode_many(node_records)
             changed = [
@@ -2253,20 +2267,23 @@ class TaskRepositoryImpl(_RepositoryBase):
                 node for node in nodes if node.node_id not in changed_ids
             )
             next_graph = replace(graph, status=_graph_status(next_nodes))
-            await _replace_checked(
-                transaction,
-                _projected_record(self, graph_record, next_graph),
-                graph_record.storage_version,
-            )
+            replacements = [
+                RecordReplacement(
+                    _projected_record(self, graph_record, next_graph),
+                    graph_record.storage_version,
+                )
+            ]
             for current, value in changed:
                 node_record = await transaction.get_record(self._node_key(graph_id, current.node_id))
                 if node_record is None:
                     raise AIError(ErrorCode.STORAGE_CONFLICT)
-                await _replace_checked(
-                    transaction,
-                    _projected_record(self, node_record, value),
-                    node_record.storage_version,
+                replacements.append(
+                    RecordReplacement(
+                        _projected_record(self, node_record, value),
+                        node_record.storage_version,
+                    )
                 )
+            await transaction.replace_records(replacements)
             _logger.info("task graph cancelled atomically: graph_id=%s changed_nodes=%s", graph_id, len(changed))
             return TaskGraphView(graph.graph_id, next_graph.status, graph.nodes)
 
@@ -2289,7 +2306,10 @@ class TaskRepositoryImpl(_RepositoryBase):
             graph = await self._decode(graph_record, TaskGraphView)
             node = await self._decode(record, TaskNodeView)
             node_records = await transaction.list_records(
-                RecordQuery(parent_digest=self._parent("task_node", "graph", graph_id))
+                RecordQuery(
+                    parent_digest=self._parent("task_node", "graph", graph_id),
+                    kind="task_node",
+                )
             )
             nodes = {
                 value.node_id: value
@@ -2466,7 +2486,10 @@ class TaskRepositoryImpl(_RepositoryBase):
             raise AIError(ErrorCode.STORAGE_CONFLICT)
         graph = await self._decode(graph_record, TaskGraphView)
         node_records = await transaction.list_records(
-            RecordQuery(parent_digest=self._parent("task_node", "graph", current.graph_id))
+            RecordQuery(
+                parent_digest=self._parent("task_node", "graph", current.graph_id),
+                kind="task_node",
+            )
         )
         node_values = [await self._decode(item, TaskNodeView) for item in node_records]
         node_values = [value if item.node_id == current.node_id else item for item in node_values]
@@ -2561,22 +2584,25 @@ class ToolRepositoryImpl(_RepositoryBase):
                         state=value.status.value,
                     )
                 )
-                for alias in aliases:
-                    await transaction.insert_alias(StoredAlias(alias, self._tool_key(request.tool_operation_id)))
+                await transaction.insert_aliases(
+                    tuple(StoredAlias(alias, self._tool_key(request.tool_operation_id)) for alias in aliases)
+                )
                 return value
             current = await self._decode(record, ToolOperationRecord)
             if not _tool_admission_matches(current, request):
                 raise AIError(ErrorCode.IDEMPOTENCY_CONFLICT)
-            for alias in aliases:
-                if resolved.get(alias) is None:
-                    guarded = await transaction.guard_record(
-                        record.key_digest,
-                        expected_storage_version=record.storage_version,
-                    )
-                    if guarded is None:
-                        raise AIError(ErrorCode.STORAGE_CONFLICT)
-                    record = guarded
-                    await transaction.insert_alias(StoredAlias(alias, record.key_digest))
+            missing_aliases = tuple(alias for alias in aliases if resolved.get(alias) is None)
+            if missing_aliases:
+                guarded = await transaction.guard_record(
+                    record.key_digest,
+                    expected_storage_version=record.storage_version,
+                )
+                if guarded is None:
+                    raise AIError(ErrorCode.STORAGE_CONFLICT)
+                record = guarded
+                await transaction.insert_aliases(
+                    tuple(StoredAlias(alias, record.key_digest) for alias in missing_aliases)
+                )
             now = await transaction.now() if current.status in {
                 ToolOperationStatus.PENDING,
                 ToolOperationStatus.CLAIMED,
@@ -2652,7 +2678,7 @@ class ToolRepositoryImpl(_RepositoryBase):
                     )
                     if guarded is None:
                         raise AIError(ErrorCode.STORAGE_CONFLICT)
-                    await transaction.insert_alias(StoredAlias(replay_alias, existing_key))
+                    await transaction.insert_aliases((StoredAlias(replay_alias, existing_key),))
                 return existing
             stored = self._stored(
                 "tool_operation",
@@ -2662,7 +2688,7 @@ class ToolRepositoryImpl(_RepositoryBase):
                 state=record.status.value,
             )
             await transaction.insert_record(stored)
-            await transaction.insert_alias(StoredAlias(replay_alias, key))
+            await transaction.insert_aliases((StoredAlias(replay_alias, key),))
             return record
 
         return await self._store.mutate(mutate)

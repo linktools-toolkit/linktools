@@ -232,6 +232,7 @@ class RuntimeToolOperationBridge:
         self._terminal_commands = terminal_commands
         self._step_store = step_store
         self._decisions: dict[tuple[str, str], Any] = {}
+        self._admitted_operations: dict[str, ToolOperationRecord] = {}
         self._lease_seconds = 60
 
     async def begin(
@@ -278,6 +279,7 @@ class RuntimeToolOperationBridge:
             existing = await self._terminal_commands.commit_tool_admission(admission)
         else:
             existing = await self._repository.admit(admission)
+        self._admitted_operations[existing.tool_operation_id] = existing
         decision = await self._decision_from_record(existing, replay_safe)
         self._decisions[key] = decision
         _logger.debug(
@@ -334,6 +336,7 @@ class RuntimeToolOperationBridge:
                 error.code.value,
             )
             raise
+        self._update_admitted_operation(record)
         return _decision_type(decision, fence=record.fence)
 
     async def complete(self, decision: Any, result: Any) -> None:
@@ -417,10 +420,7 @@ class RuntimeToolOperationBridge:
             return None, None
         if self._step_store is None:
             raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
-        operation = await self._repository.get_operation(
-            decision.operation_id,
-            tenant_id=self._tenant_id,
-        )
+        operation = self._admitted_operations.get(decision.operation_id)
         if operation is None:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         run = await self._step_store.get_run(run_id=operation.step_run_id)
@@ -450,6 +450,11 @@ class RuntimeToolOperationBridge:
             ),
         )
         return run, effect
+
+    def _update_admitted_operation(self, record: ToolOperationRecord) -> None:
+        current = self._admitted_operations.get(record.tool_operation_id)
+        if current is not None:
+            self._admitted_operations[record.tool_operation_id] = record
 
     async def unknown(self, decision: Any, error: BaseException) -> None:
         code = ErrorCode.TOOL_EFFECT_UNKNOWN.value

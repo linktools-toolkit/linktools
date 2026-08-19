@@ -69,6 +69,8 @@ from .service_api import ExecutionRequest
 from .state import (
     ConversationState,
     ConversationStateCommands,
+    ExecutionProjectionBatch,
+    ExecutionProjectionCheckpoint,
     ExecutionRepositoryImpl,
     ExecutionState,
     ExecutionStateCommands,
@@ -2591,17 +2593,63 @@ class LocalExecutionBackend:
         recovery_run: RunRecord | None = None,
         recovery_snapshot: ContinuableSnapshot | None = None,
     ) -> ExecutionTerminalCommitResult:
+        if run_id is not None and isinstance(
+            self._step_reads[RuntimeDomain.EXECUTION],
+            StateStepArchive,
+        ):
+            async with self._steps.execution_projection_checkpoint(run_id) as checkpoint:
+                projection = checkpoint.batch
+                committed = await self._commit_execution_terminal_checkpoint_locked(
+                    current,
+                    commit,
+                    run_id=run_id,
+                    expected_cursor=expected_cursor,
+                    conversation_run=conversation_run,
+                    conversation_snapshot=conversation_snapshot,
+                    recovery_checkpoint=recovery_checkpoint,
+                    recovery_run=recovery_run,
+                    recovery_snapshot=recovery_snapshot,
+                    projection=projection,
+                )
+                await self._acknowledge_projection_after_commit(checkpoint)
+                return committed
+        if run_id is not None:
+            await self._step_lifecycle.flush_execution_projection(run_id)
+        return await self._commit_execution_terminal_checkpoint_locked(
+            current,
+            commit,
+            run_id=run_id,
+            expected_cursor=expected_cursor,
+            conversation_run=conversation_run,
+            conversation_snapshot=conversation_snapshot,
+            recovery_checkpoint=recovery_checkpoint,
+            recovery_run=recovery_run,
+            recovery_snapshot=recovery_snapshot,
+            projection=None,
+        )
+
+    async def _commit_execution_terminal_checkpoint_locked(
+        self,
+        current: ExecutionRecord,
+        commit: ExecutionTerminalCommit,
+        *,
+        run_id: str | None,
+        expected_cursor: ConversationCursor | None = None,
+        conversation_run: RunRecord | None = None,
+        conversation_snapshot: ContinuableSnapshot | None = None,
+        recovery_checkpoint: RecoveryCheckpoint | None = None,
+        recovery_run: RunRecord | None = None,
+        recovery_snapshot: ContinuableSnapshot | None = None,
+        projection: ExecutionProjectionBatch | None,
+    ) -> ExecutionTerminalCommitResult:
         pending_audit = tuple(self._pending_audit_events.get(current.execution_id, ()))
         step_run = None
         step_events: Sequence[StepEvent] = ()
         snapshots: Sequence[ContinuableSnapshot] = ()
-        if run_id is not None:
-            if isinstance(self._step_reads[RuntimeDomain.EXECUTION], StateStepArchive):
-                step_run, step_events, snapshots = await self._steps.pending_execution_projection(run_id)
-                if step_run is None:
-                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            else:
-                await self._step_lifecycle.flush_execution_projection(run_id)
+        if projection is not None:
+            step_run = projection.run
+            step_events = projection.events
+            snapshots = projection.snapshots
         committed = await self._runtime_commands.commit_terminal_checkpoint(
             commit,
             session_id=current.session_id,
@@ -2617,13 +2665,21 @@ class LocalExecutionBackend:
             execution_snapshots=snapshots,
             audit_events=pending_audit,
         )
-        if run_id is not None and isinstance(
-            self._step_reads[RuntimeDomain.EXECUTION],
-            StateStepArchive,
-        ):
-            await self._steps.acknowledge_execution_projection(run_id)
         self._pending_audit_events.pop(current.execution_id, None)
         return committed
+
+    async def _acknowledge_projection_after_commit(
+        self,
+        checkpoint: ExecutionProjectionCheckpoint,
+    ) -> None:
+        task = asyncio.create_task(
+            checkpoint.acknowledge()
+        )
+        try:
+            await asyncio.shield(task)
+        except asyncio.CancelledError:
+            await task
+            raise
 
     async def _release_session_admission_best_effort(
         self,

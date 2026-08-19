@@ -222,10 +222,21 @@ class Observed(Generic[ValueT]):
 
 
 @dataclass(frozen=True, slots=True)
+class RecordReplacement:
+    record: StoredRecord
+    expected_storage_version: int
+
+    def __post_init__(self) -> None:
+        if self.expected_storage_version < 0:
+            raise ValueError("expected_storage_version must be non-negative")
+
+
+@dataclass(frozen=True, slots=True)
 class RecordQuery:
     partition_digest: bytes | None = None
     scope_digest: bytes | None = None
     parent_digest: bytes | None = None
+    kind: str | None = None
     states: frozenset[str] | None = None
     after_sort_key: str | None = None
     after_key_digest: bytes | None = None
@@ -241,6 +252,14 @@ class RecordQuery:
         ):
             if value is not None:
                 _require_digest(value, name)
+        if self.kind is not None:
+            if (
+                not isinstance(self.kind, str)
+                or not 0 < len(self.kind) <= 32
+                or self.kind in {".", ".."}
+                or any(character in self.kind for character in "/\\")
+            ):
+                raise ValueError("record kind contains a path separator")
         if self.after_sort_key is not None and self.after_key_digest is None:
             raise ValueError("after_key_digest is required with after_sort_key")
         if self.after_key_digest is not None:
@@ -291,6 +310,7 @@ class StateTransaction(Protocol):
     async def get_record(self, key: bytes) -> StoredRecord | None: ...
     async def get_records(self, keys: Sequence[bytes]) -> Mapping[bytes, StoredRecord]: ...
     async def insert_record(self, record: StoredRecord) -> None: ...
+    async def insert_records(self, records: Sequence[StoredRecord]) -> None: ...
     async def guard_record(
         self,
         key: bytes,
@@ -298,6 +318,7 @@ class StateTransaction(Protocol):
         expected_storage_version: int,
     ) -> StoredRecord | None: ...
     async def replace_record(self, record: StoredRecord, *, expected_storage_version: int) -> bool: ...
+    async def replace_records(self, replacements: Sequence["RecordReplacement"]) -> None: ...
     async def update_record_lease(
         self,
         key: bytes,
@@ -312,12 +333,15 @@ class StateTransaction(Protocol):
     async def resolve_alias(self, alias: bytes) -> bytes | None: ...
     async def resolve_aliases(self, aliases: Sequence[bytes]) -> Mapping[bytes, bytes]: ...
     async def insert_alias(self, alias: StoredAlias) -> None: ...
+    async def insert_aliases(self, aliases: Sequence[StoredAlias]) -> None: ...
     async def get_sequence(self, key: bytes) -> int: ...
     async def get_sequences(self, keys: Sequence[bytes]) -> Mapping[bytes, int]: ...
     async def next_sequence(self, key: bytes) -> int: ...
     async def reserve_sequence(self, key: bytes, count: int) -> int: ...
+    async def reserve_sequences(self, reservations: Mapping[bytes, int]) -> Mapping[bytes, int]: ...
     async def advance_sequence(self, key: bytes, expected: int) -> int: ...
     async def delete_sequence(self, key: bytes) -> None: ...
+    async def delete_sequences(self, keys: Sequence[bytes]) -> None: ...
     async def insert_fact(self, fact: StoredFact) -> None: ...
     async def insert_facts(self, facts: Sequence[StoredFact]) -> None: ...
     async def list_facts(self, query: FactQuery) -> tuple[StoredFact, ...]: ...
@@ -517,6 +541,7 @@ __all__ = [
     "Observed",
     "OperationQuery",
     "RecordQuery",
+    "RecordReplacement",
     "StateGroupTransaction",
     "StateStore",
     "StateStorageGroup",

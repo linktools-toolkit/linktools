@@ -111,6 +111,16 @@ class SqlAlchemyDialect(Protocol):
         step: int = 1,
     ) -> int: ...
 
+    async def upsert_increment_many(
+        self,
+        session: "AsyncSession",
+        *,
+        table: "Table",
+        rows: "Sequence[Mapping[str, SqlValue]]",
+        column: str,
+        index_elements: "Sequence[str]",
+    ) -> "Mapping[str, int]": ...
+
     async def delete_returning(
         self,
         session: "AsyncSession",
@@ -264,6 +274,43 @@ class SQLiteDialect:
         )
         await session.execute(statement)
 
+    async def upsert_increment_many(
+        self,
+        session: "AsyncSession",
+        *,
+        table: "Table",
+        rows: "Sequence[Mapping[str, SqlValue]]",
+        column: str,
+        index_elements: "Sequence[str]",
+    ) -> "Mapping[str, int]":
+        if not rows:
+            return {}
+        from sqlalchemy.dialects.sqlite import insert
+
+        value_column = table.c[column]
+        insert_statement = insert(table).values([dict(row) for row in rows])
+        set_values = {column: value_column + insert_statement.excluded[column]}
+        if "updated_at" in table.c:
+            from sqlalchemy import func
+
+            set_values["updated_at"] = func.current_timestamp()
+        statement = (
+            insert_statement
+            .on_conflict_do_update(
+                index_elements=list(index_elements),
+                set_=set_values,
+            )
+            .returning(table.c[index_elements[0]], value_column)
+        )
+        result = (await session.execute(statement)).all()
+        _logger.debug(
+            "SQL batch executed: backend=%s operation=reserve_sequences "
+            "batch_size=%s statement_count=1",
+            self.name,
+            len(rows),
+        )
+        return {str(row[0]): int(row[1]) for row in result}
+
     async def delete_returning(
         self,
         session: "AsyncSession",
@@ -410,6 +457,43 @@ class PostgreSQLDialect(SQLiteDialect):
         )
         await session.execute(statement)
 
+    async def upsert_increment_many(
+        self,
+        session: "AsyncSession",
+        *,
+        table: "Table",
+        rows: "Sequence[Mapping[str, SqlValue]]",
+        column: str,
+        index_elements: "Sequence[str]",
+    ) -> "Mapping[str, int]":
+        if not rows:
+            return {}
+        from sqlalchemy.dialects.postgresql import insert
+
+        value_column = table.c[column]
+        insert_statement = insert(table).values([dict(row) for row in rows])
+        set_values = {column: value_column + insert_statement.excluded[column]}
+        if "updated_at" in table.c:
+            from sqlalchemy import func
+
+            set_values["updated_at"] = func.current_timestamp()
+        statement = (
+            insert_statement
+            .on_conflict_do_update(
+                index_elements=list(index_elements),
+                set_=set_values,
+            )
+            .returning(table.c[index_elements[0]], value_column)
+        )
+        result = (await session.execute(statement)).all()
+        _logger.debug(
+            "SQL batch executed: backend=%s operation=reserve_sequences "
+            "batch_size=%s statement_count=1",
+            self.name,
+            len(rows),
+        )
+        return {str(row[0]): int(row[1]) for row in result}
+
 
 class MySQLDialect(SQLiteDialect):
     @property
@@ -513,6 +597,42 @@ class MySQLDialect(SQLiteDialect):
         await session.execute(
             statement.on_duplicate_key_update(**{column: statement.inserted[column] for column in set_columns})
         )
+
+    async def upsert_increment_many(
+        self,
+        session: "AsyncSession",
+        *,
+        table: "Table",
+        rows: "Sequence[Mapping[str, SqlValue]]",
+        column: str,
+        index_elements: "Sequence[str]",
+    ) -> "Mapping[str, int]":
+        if not rows:
+            return {}
+        from sqlalchemy import select
+        from sqlalchemy.dialects.mysql import insert
+
+        insert_statement = insert(table).values([dict(row) for row in rows])
+        value_column = table.c[column]
+        set_values = {column: value_column + insert_statement.inserted[column]}
+        if "updated_at" in table.c:
+            from sqlalchemy import func
+
+            set_values["updated_at"] = func.current_timestamp()
+        await session.execute(insert_statement.on_duplicate_key_update(**set_values))
+        key_column = index_elements[0]
+        result = await session.execute(
+            select(table.c[key_column], value_column).where(
+                table.c[key_column].in_([row[key_column] for row in rows])
+            )
+        )
+        _logger.debug(
+            "SQL batch executed: backend=%s operation=reserve_sequences "
+            "batch_size=%s statement_count=2",
+            self.name,
+            len(rows),
+        )
+        return {str(row[0]): int(row[1]) for row in result.all()}
 
     async def delete_returning(
         self,

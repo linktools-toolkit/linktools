@@ -59,21 +59,33 @@ async def _build_asset_repository(
     asset: AssetStore | None,
     sources: Sequence[CapabilitySource],
 ) -> AssetRepository:
+    registry = AssetTypeRegistry()
+    builtins = {binding.kind: binding for binding in builtin_asset_bindings()}
+    bindings_by_kind = dict(builtins)
+    bindings_by_kind.update(
+        (source.asset_binding.kind, source.asset_binding)
+        for source in sources
+    )
+    bindings = tuple(bindings_by_kind.values())
+    for binding in bindings:
+        registry.register(binding)
+    snapshot = registry.freeze()
     path_adapter: PrefixAssetPathAdapter | None = None
     if asset is None:
         prefixes = {
             "agent": "agents",
             "skill": "skills",
             **{
-                source.asset_binding.kind: source.asset_binding.kind
-                for source in sources
-                if source.asset_binding.kind not in {"agent", "skill"}
+                kind: kind
+                for kind in snapshot.kinds
+                if kind not in {"agent", "skill"}
             },
         }
         path_adapter = PrefixAssetPathAdapter(prefixes)
         source = DirectoryAssetBackend(
             str(workspace.storage_root),
             path_adapter=path_adapter,
+            kinds=snapshot.kinds,
         )
         writable = InMemoryAssetBackend()
         asset = AssetStore(
@@ -86,13 +98,6 @@ async def _build_asset_repository(
         await asset.initialize()
     elif not asset.ready:
         raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
-    registry = AssetTypeRegistry()
-    builtins = {binding.kind: binding for binding in builtin_asset_bindings()}
-    bindings = [builtins["agent"]]
-    bindings.extend(source.asset_binding for source in sources)
-    for binding in bindings:
-        registry.register(binding)
-    snapshot = registry.freeze()
     if path_adapter is not None:
         path_adapter.validate(snapshot.kinds)
     return AssetRepository(asset, snapshot)

@@ -48,12 +48,13 @@ from ._repositories import ExecutionRepositoryImpl, SessionRepositoryImpl
 from ._root import RuntimeState
 from ._schema import build_runtime_sql_metadata
 from ._sql import SqlStateStorageGroup, SqlStateStore
-from ._steps import StateStepArchive
+from ._steps import ExecutionProjectionBatch, ExecutionProjectionCheckpoint, StateStepArchive
 from ._store import (
     FactQuery,
     Observed,
     OperationQuery,
     RecordQuery,
+    RecordReplacement,
     StateGroupTransaction,
     StateStore,
     StateStorageGroup,
@@ -87,6 +88,8 @@ __all__ = [
     "ExecutionRecord",
     "ExecutionRepository",
     "ExecutionRepositoryImpl",
+    "ExecutionProjectionBatch",
+    "ExecutionProjectionCheckpoint",
     "ExecutionState",
     "ExecutionStateCommands",
     "FilesystemStateStorageGroup",
@@ -99,6 +102,7 @@ __all__ = [
     "Observed",
     "OperationQuery",
     "RecordQuery",
+    "RecordReplacement",
     "RecoveryCheckpointState",
     "RecoveryHandoffPhase",
     "RecoveryState",

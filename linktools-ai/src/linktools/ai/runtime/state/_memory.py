@@ -15,6 +15,7 @@ from ._store import (
     FactQuery,
     OperationQuery,
     RecordQuery,
+    RecordReplacement,
     StateCallback,
     StateGroupCallback,
     StateStorageGroup,
@@ -221,11 +222,19 @@ class _MemoryTransaction:
         return {key: self.records[key] for key in keys if key in self.records}
 
     async def insert_record(self, record: StoredRecord) -> None:
-        validate_record_identity(record)
-        if record.key_digest in self.records:
-            raise AIError(ErrorCode.STORAGE_CONFLICT)
-        self.records[record.key_digest] = record
-        self.guarded_record_keys.add(record.key_digest)
+        await self.insert_records((record,))
+
+    async def insert_records(self, records: Sequence[StoredRecord]) -> None:
+        values = tuple(records)
+        keys = [record.key_digest for record in values]
+        if len(keys) != len(set(keys)):
+            raise ValueError("insert_records contains duplicate keys")
+        for record in sorted(values, key=lambda value: value.key_digest):
+            validate_record_identity(record)
+            if record.key_digest in self.records:
+                raise AIError(ErrorCode.STORAGE_CONFLICT)
+            self.records[record.key_digest] = record
+            self.guarded_record_keys.add(record.key_digest)
 
     async def guard_record(
         self,
@@ -244,16 +253,32 @@ class _MemoryTransaction:
         return current
 
     async def replace_record(self, record: StoredRecord, *, expected_storage_version: int) -> bool:
-        current = self.records.get(record.key_digest)
-        if current is None or current.storage_version != expected_storage_version:
-            return False
-        validate_record_replacement(current, record)
-        validate_record_identity(record)
-        if record.storage_version != expected_storage_version + 1:
-            raise ValueError("replacement must increment storage_version exactly once")
-        self.records[record.key_digest] = record
-        self.guarded_record_keys.add(record.key_digest)
+        try:
+            await self.replace_records((RecordReplacement(record, expected_storage_version),))
+        except AIError as error:
+            if error.code is ErrorCode.STORAGE_CONFLICT:
+                return False
+            raise
         return True
+
+    async def replace_records(self, replacements: Sequence[RecordReplacement]) -> None:
+        values = tuple(replacements)
+        keys = [replacement.record.key_digest for replacement in values]
+        if len(keys) != len(set(keys)):
+            raise ValueError("replace_records contains duplicate keys")
+        candidates: list[StoredRecord] = []
+        for replacement in sorted(values, key=lambda value: value.record.key_digest):
+            current = self.records.get(replacement.record.key_digest)
+            if current is None or current.storage_version != replacement.expected_storage_version:
+                raise AIError(ErrorCode.STORAGE_CONFLICT)
+            validate_record_replacement(current, replacement.record)
+            validate_record_identity(replacement.record)
+            if replacement.record.storage_version != replacement.expected_storage_version + 1:
+                raise ValueError("replacement must increment storage_version exactly once")
+            candidates.append(replacement.record)
+        for record in candidates:
+            self.records[record.key_digest] = record
+            self.guarded_record_keys.add(record.key_digest)
 
     async def update_record_lease(
         self,
@@ -321,12 +346,16 @@ class _MemoryTransaction:
         return values
 
     async def insert_alias(self, alias: StoredAlias) -> None:
-        current = self.aliases.get(alias.alias_digest)
-        if current is not None and current != alias.record_key_digest:
-            raise AIError(ErrorCode.STORAGE_CONFLICT)
-        if alias.record_key_digest not in self.guarded_record_keys:
-            raise RuntimeError("alias owner must be guarded in the current transaction")
-        self.aliases[alias.alias_digest] = alias.record_key_digest
+        await self.insert_aliases((alias,))
+
+    async def insert_aliases(self, aliases: Sequence[StoredAlias]) -> None:
+        for alias in sorted(aliases, key=lambda value: value.alias_digest):
+            current = self.aliases.get(alias.alias_digest)
+            if current is not None and current != alias.record_key_digest:
+                raise AIError(ErrorCode.STORAGE_CONFLICT)
+            if alias.record_key_digest not in self.guarded_record_keys:
+                raise RuntimeError("alias owner must be guarded in the current transaction")
+            self.aliases[alias.alias_digest] = alias.record_key_digest
 
     async def get_sequence(self, key: bytes) -> int:
         return self.sequences.get(key, 0)
@@ -340,11 +369,17 @@ class _MemoryTransaction:
         return value
 
     async def reserve_sequence(self, key: bytes, count: int) -> int:
-        if count < 1:
+        return (await self.reserve_sequences({key: count}))[key]
+
+    async def reserve_sequences(self, requests: Mapping[bytes, int]) -> Mapping[bytes, int]:
+        if any(count < 1 for count in requests.values()):
             raise ValueError("sequence reservation count must be positive")
-        value = self.sequences.get(key, 0) + count
-        self.sequences[key] = value
-        return value
+        values = {
+            key: self.sequences.get(key, 0) + requests[key]
+            for key in sorted(requests)
+        }
+        self.sequences.update(values)
+        return values
 
     async def advance_sequence(self, key: bytes, expected: int) -> int:
         current = self.sequences.get(key, 0)
@@ -353,7 +388,11 @@ class _MemoryTransaction:
         return await self.next_sequence(key)
 
     async def delete_sequence(self, key: bytes) -> None:
-        self.sequences.pop(key, None)
+        await self.delete_sequences((key,))
+
+    async def delete_sequences(self, keys: Sequence[bytes]) -> None:
+        for key in sorted(set(keys)):
+            self.sequences.pop(key, None)
 
     async def insert_fact(self, fact: StoredFact) -> None:
         key = (fact.stream_digest, fact.sequence)
@@ -436,6 +475,8 @@ def _matches_record(record: StoredRecord, query: RecordQuery) -> bool:
     if query.scope_digest is not None and record.scope_digest != query.scope_digest:
         return False
     if query.parent_digest is not None and record.parent_digest != query.parent_digest:
+        return False
+    if query.kind is not None and record.kind != query.kind:
         return False
     return query.states is None or record.state in query.states
 

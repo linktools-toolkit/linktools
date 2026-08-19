@@ -33,6 +33,8 @@ class AssetPathAdapter(Protocol):
 
     def validate(self, kinds: Sequence[str]) -> None: ...
 
+    def root_path(self, kind: str) -> str: ...
+
     def to_path(self, key: AssetKey) -> str: ...
 
     def from_path(self, path: str) -> "AssetKey | None": ...
@@ -69,7 +71,10 @@ class PrefixAssetPathAdapter:
                 raise AIError(ErrorCode.ASSET_LAYOUT_CONFLICT) from error
 
     def to_path(self, key: AssetKey) -> str:
-        return f"{self._prefixes.get(key.kind, key.kind)}/{key.id}"
+        return f"{self.root_path(key.kind)}/{key.id}"
+
+    def root_path(self, kind: str) -> str:
+        return self._prefixes.get(kind, kind)
 
     def from_path(self, path: str) -> "AssetKey | None":
         if not isinstance(path, str) or not path or "\\" in path or "\x00" in path:
@@ -127,6 +132,7 @@ class DirectoryAssetBackend:
         root: "AssetRoot | str" = "assets",
         *,
         path_adapter: "AssetPathAdapter | None" = None,
+        kinds: "Sequence[str] | None" = None,
     ) -> None:
         resolved = directory_root(root) if isinstance(root, str) else root
         if resolved.scheme != "file":
@@ -134,6 +140,11 @@ class DirectoryAssetBackend:
         self._root = resolved
         self._directory = Path(resolved.locator)
         self._path_adapter = path_adapter or PrefixAssetPathAdapter()
+        self._kinds = None if kinds is None else frozenset(kinds)
+        if kinds is not None:
+            self._path_adapter.validate(tuple(kinds))
+            for kind in self._kinds:
+                _safe_asset_parts(self._path_adapter.root_path(kind))
         self._lock = asyncio.Lock()
 
     @property
@@ -180,47 +191,59 @@ class DirectoryAssetBackend:
 
     async def get(self, key: AssetKey) -> "bytes | None":
         async with self._lock:
-            path = self._file_path(key)
-            if not path.is_file():
-                return None
-            return await asyncio.to_thread(read_bytes, path)
+            self._validate_key(key)
+            path = await asyncio.to_thread(self._file_path, key)
+        return await asyncio.to_thread(_read_optional, path)
 
     async def get_many(self, keys: "Sequence[AssetKey]") -> "dict[AssetKey, bytes]":
-        result: dict[AssetKey, bytes] = {}
         async with self._lock:
-            for key in keys:
-                path = self._file_path(key)
-                if path.is_file():
-                    result[key] = await asyncio.to_thread(read_bytes, path)
-        return result
+            paths = await asyncio.to_thread(
+                lambda: {
+                    key: self._file_path(self._validate_key(key))
+                    for key in dict.fromkeys(keys)
+                }
+            )
+        return await asyncio.to_thread(_read_many_sync, paths)
 
     async def stat(self, key: AssetKey) -> "AssetInfo | None":
         async with self._lock:
-            path = self._file_path(key)
-            if not path.is_file():
-                return None
-            content = await asyncio.to_thread(read_bytes, path)
-            modified = datetime.fromtimestamp(path.stat().st_mtime, timezone.utc)
+            self._validate_key(key)
+            path = await asyncio.to_thread(self._file_path, key)
+        result = await asyncio.to_thread(_stat_file, path)
+        if result is None:
+            return None
+        content, modified = result
+        async with self._lock:
             revision = _store_revision(await asyncio.to_thread(self._scan))
-            return self._info(key, content, modified, revision)
+        return self._info(key, content, modified, revision)
 
     def _scan(self) -> "tuple[tuple[AssetKey, bytes, datetime], ...]":
         if not self._directory.is_dir():
             return ()
         values: dict[AssetKey, tuple[bytes, datetime]] = {}
-        for path in self._directory.rglob("*"):
-            if not path.is_file() or path.is_symlink():
+        roots = (
+            (self._path_adapter.root_path(kind), kind)
+            for kind in sorted(self._kinds or ())
+        ) if self._kinds is not None else (("", None),)
+        for relative_root, expected_kind in roots:
+            scan_root = self._directory / Path(*PurePosixPath(relative_root).parts)
+            if not scan_root.is_dir():
                 continue
-            relative = path.relative_to(self._directory).as_posix()
-            key = self._path_adapter.from_path(relative)
-            if key is None:
-                continue
-            if key in values:
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR, "asset path adapter produced duplicate keys")
-            values[key] = (
-                read_bytes(path),
-                datetime.fromtimestamp(path.stat().st_mtime, timezone.utc),
-            )
+            for path in scan_root.rglob("*"):
+                if not path.is_file() or path.is_symlink():
+                    continue
+                relative = path.relative_to(self._directory).as_posix()
+                key = self._path_adapter.from_path(relative)
+                if key is None or self._kinds is not None and key.kind not in self._kinds:
+                    continue
+                if expected_kind is not None and key.kind != expected_kind:
+                    continue
+                if key in values:
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR, "asset path adapter produced duplicate keys")
+                values[key] = (
+                    read_bytes(path),
+                    datetime.fromtimestamp(path.stat().st_mtime, timezone.utc),
+                )
         return tuple(
             (key, content, modified)
             for key, (content, modified) in sorted(
@@ -240,12 +263,20 @@ class DirectoryAssetBackend:
             or any(part in {"", ".", ".."} for part in pure.parts)
         ):
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID, "asset path adapter returned an invalid path")
+        root_parts = _safe_asset_parts(self._path_adapter.root_path(key.kind))
+        if pure.parts[: len(root_parts)] != root_parts or len(pure.parts) <= len(root_parts):
+            raise AIError(ErrorCode.REQUEST_FIELD_INVALID, "asset path is outside its kind root")
         path = (self._directory / Path(*pure.parts)).resolve()
         try:
             path.relative_to(self._directory.resolve())
         except ValueError as error:
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID, "asset path escapes local directory") from error
         return path
+
+    def _validate_key(self, key: AssetKey) -> AssetKey:
+        if self._kinds is not None and key.kind not in self._kinds:
+            raise AIError(ErrorCode.REQUEST_FIELD_INVALID, "asset kind is not registered")
+        return key
 
     def _info(
         self,
@@ -295,6 +326,33 @@ def _etag(value: bytes) -> str:
 
 def _entry_revision(value: bytes) -> StorageEntryRevision:
     return StorageEntryRevision(int.from_bytes(hashlib.sha256(value).digest(), "big"))
+
+
+def _safe_asset_parts(value: str) -> tuple[str, ...]:
+    pure = PurePosixPath(value)
+    if (
+        not value
+        or pure.is_absolute()
+        or "\\" in value
+        or "\x00" in value
+        or any(part in {"", ".", ".."} for part in pure.parts)
+    ):
+        raise AIError(ErrorCode.ASSET_LAYOUT_CONFLICT)
+    return pure.parts
+
+
+def _read_many_sync(paths: Mapping[AssetKey, Path]) -> dict[AssetKey, bytes]:
+    return {key: read_bytes(path) for key, path in paths.items() if path.is_file()}
+
+
+def _read_optional(path: Path) -> bytes | None:
+    return read_bytes(path) if path.is_file() else None
+
+
+def _stat_file(path: Path) -> tuple[bytes, datetime] | None:
+    if not path.is_file():
+        return None
+    return read_bytes(path), datetime.fromtimestamp(path.stat().st_mtime, timezone.utc)
 
 
 __all__ = [

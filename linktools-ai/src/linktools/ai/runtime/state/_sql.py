@@ -22,6 +22,7 @@ from ._store import (
     FactQuery,
     OperationQuery,
     RecordQuery,
+    RecordReplacement,
     StateCallback,
     StateGroupCallback,
     StateStorageGroup,
@@ -314,6 +315,7 @@ class _SqlTransaction:
         self._guarded_record_keys: set[bytes] = set()
         self._record_cache: dict[bytes, StoredRecord | None] = {}
         self._alias_cache: dict[bytes, bytes | None] = {}
+        self._sequence_cache: dict[bytes, int] = {}
         self._now: datetime | None = None
 
     async def now(self) -> datetime:
@@ -369,11 +371,28 @@ class _SqlTransaction:
         }
 
     async def insert_record(self, record: StoredRecord) -> None:
+        await self.insert_records((record,))
+
+    async def insert_records(self, records: Sequence[StoredRecord]) -> None:
+        values = tuple(records)
+        keys = [record.key_digest for record in values]
+        if len(keys) != len(set(keys)):
+            raise ValueError("insert_records contains duplicate keys")
+        if not values:
+            return
+        for record in values:
+            validate_record_identity(record)
         from sqlalchemy import insert
 
-        await self._session.execute(insert(self._table("ai_state_records")).values(_record_values(record)))
-        self._guarded_record_keys.add(record.key_digest)
-        self._record_cache[record.key_digest] = record
+        await self._session.execute(
+            insert(self._table("ai_state_records")).values(
+                [_record_values(record) for record in sorted(values, key=lambda value: value.key_digest)]
+            )
+        )
+        self._log_batch("insert_records", len(values), 1)
+        for record in values:
+            self._guarded_record_keys.add(record.key_digest)
+            self._record_cache[record.key_digest] = record
 
     async def guard_record(
         self,
@@ -405,27 +424,63 @@ class _SqlTransaction:
         return guarded
 
     async def replace_record(self, record: StoredRecord, *, expected_storage_version: int) -> bool:
-        from sqlalchemy import update
+        try:
+            await self.replace_records((RecordReplacement(record, expected_storage_version),))
+        except AIError as error:
+            if error.code is ErrorCode.STORAGE_CONFLICT:
+                return False
+            raise
+        return True
 
-        current = await self.get_record(record.key_digest)
-        if current is None or current.storage_version != expected_storage_version:
-            return False
-        validate_record_identity(record)
-        validate_record_replacement(current, record)
-        if record.storage_version != expected_storage_version + 1:
-            raise ValueError("replacement must increment storage_version exactly once")
-        result = await self._session.execute(
-            update(self._table("ai_state_records"))
+    async def replace_records(self, replacements: Sequence[RecordReplacement]) -> None:
+        values = tuple(replacements)
+        keys = [replacement.record.key_digest for replacement in values]
+        if len(keys) != len(set(keys)):
+            raise ValueError("replace_records contains duplicate keys")
+        if not values:
+            return
+        current = await self.get_records(keys)
+        ordered = tuple(sorted(values, key=lambda value: value.record.key_digest))
+        for replacement in ordered:
+            existing = current.get(replacement.record.key_digest)
+            if existing is None or existing.storage_version != replacement.expected_storage_version:
+                raise AIError(ErrorCode.STORAGE_CONFLICT)
+            validate_record_identity(replacement.record)
+            validate_record_replacement(existing, replacement.record)
+            if replacement.record.storage_version != replacement.expected_storage_version + 1:
+                raise ValueError("replacement must increment storage_version exactly once")
+        from sqlalchemy import bindparam, func, update
+
+        table = self._table("ai_state_records")
+        statement = (
+            update(table)
             .where(
-                self._table("ai_state_records").c.key_digest == _hex(record.key_digest),
-                self._table("ai_state_records").c.storage_version == expected_storage_version,
+                table.c.key_digest == bindparam("_replacement_key_digest"),
+                table.c.storage_version == bindparam("_replacement_expected_version"),
             )
-            .values(_record_values(record, updating=True))
+            .values(
+                partition_digest=bindparam("_replacement_partition_digest"),
+                scope_digest=bindparam("_replacement_scope_digest"),
+                parent_digest=bindparam("_replacement_parent_digest"),
+                kind=bindparam("_replacement_kind"),
+                sort_key=bindparam("_replacement_sort_key"),
+                state=bindparam("_replacement_state"),
+                storage_version=bindparam("_replacement_storage_version"),
+                lease_owner=bindparam("_replacement_lease_owner"),
+                lease_fence=bindparam("_replacement_lease_fence"),
+                lease_expires_at=bindparam("_replacement_lease_expires_at"),
+                payload_json=bindparam("_replacement_payload_json"),
+                updated_at=func.current_timestamp(),
+            )
         )
-        if result.rowcount == 1:
-            self._guarded_record_keys.add(record.key_digest)
-            self._record_cache[record.key_digest] = record
-        return result.rowcount == 1
+        parameters = [_record_replacement_values(replacement) for replacement in ordered]
+        result = await self._session.execute(statement, parameters)
+        self._log_batch("replace_records", len(parameters), 1)
+        if result.rowcount != len(parameters):
+            raise AIError(ErrorCode.STORAGE_CONFLICT)
+        for replacement in ordered:
+            self._guarded_record_keys.add(replacement.record.key_digest)
+            self._record_cache[replacement.record.key_digest] = replacement.record
 
     async def update_record_lease(
         self,
@@ -513,6 +568,8 @@ class _SqlTransaction:
             conditions.append(table.c.scope_digest == _hex(query.scope_digest))
         if query.parent_digest is not None:
             conditions.append(table.c.parent_digest == _hex(query.parent_digest))
+        if query.kind is not None:
+            conditions.append(table.c.kind == query.kind)
         if query.states is not None:
             conditions.append(table.c.state.in_(tuple(query.states)))
         if query.after_sort_key is not None and query.after_key_digest is not None:
@@ -582,63 +639,99 @@ class _SqlTransaction:
         return values
 
     async def insert_alias(self, alias: StoredAlias) -> None:
-        from sqlalchemy import insert
+        await self.insert_aliases((alias,))
 
-        if alias.record_key_digest not in self._guarded_record_keys:
+    async def insert_aliases(self, aliases: Sequence[StoredAlias]) -> None:
+        if not aliases:
+            return
+        by_alias: dict[bytes, StoredAlias] = {}
+        for alias in aliases:
+            current = by_alias.get(alias.alias_digest)
+            if current is not None and current.record_key_digest != alias.record_key_digest:
+                raise AIError(ErrorCode.STORAGE_CONFLICT)
+            by_alias[alias.alias_digest] = alias
+        values = tuple(sorted(by_alias.values(), key=lambda value: value.alias_digest))
+        if any(alias.record_key_digest not in self._guarded_record_keys for alias in values):
             raise RuntimeError("alias owner must be guarded in the current transaction")
-
-        await self._session.execute(
-            insert(self._table("ai_state_aliases")).values(
+        existing = await self.resolve_aliases(tuple(alias.alias_digest for alias in values))
+        rows: list[dict[str, object]] = []
+        for alias in values:
+            current = existing.get(alias.alias_digest)
+            if current is not None:
+                if current != alias.record_key_digest:
+                    raise AIError(ErrorCode.STORAGE_CONFLICT)
+                continue
+            rows.append(
                 {
                     "alias_digest": _hex(alias.alias_digest),
                     "record_key_digest": _hex(alias.record_key_digest),
                 }
             )
-        )
-        self._alias_cache[alias.alias_digest] = alias.record_key_digest
+        if rows:
+            from sqlalchemy import insert
+
+            await self._session.execute(insert(self._table("ai_state_aliases")).values(rows))
+        self._log_batch("insert_aliases", len(values), 1 if rows else 0)
+        for alias in values:
+            self._alias_cache[alias.alias_digest] = alias.record_key_digest
 
     async def get_sequence(self, key: bytes) -> int:
-        from sqlalchemy import select
-
-        table = self._table("ai_state_sequences")
-        value = await self._session.scalar(select(table.c.value).where(table.c.key_digest == _hex(key)))
-        return 0 if value is None else int(value)
+        if key in self._sequence_cache:
+            return self._sequence_cache[key]
+        values = await self.get_sequences((key,))
+        return values[key]
 
     async def get_sequences(self, keys: Sequence[bytes]) -> Mapping[bytes, int]:
         if not keys:
             return {}
         from sqlalchemy import select
 
+        unique_keys = tuple(dict.fromkeys(keys))
+        missing = tuple(key for key in unique_keys if key not in self._sequence_cache)
         table = self._table("ai_state_sequences")
-        rows = (
-            (await self._session.execute(select(table).where(table.c.key_digest.in_(tuple(_hex(key) for key in keys)))))
-            .mappings()
-            .all()
-        )
-        return {bytes.fromhex(str(row["key_digest"])): int(row["value"]) for row in rows}
+        if missing:
+            rows = (
+                (
+                    await self._session.execute(
+                        select(table).where(table.c.key_digest.in_(tuple(_hex(key) for key in missing)))
+                    )
+                )
+                .mappings()
+                .all()
+            )
+            self._sequence_cache.update(
+                {bytes.fromhex(str(row["key_digest"])): int(row["value"]) for row in rows}
+            )
+            for key in missing:
+                self._sequence_cache.setdefault(key, 0)
+        return {key: self._sequence_cache[key] for key in unique_keys}
 
     async def next_sequence(self, key: bytes) -> int:
-        table = self._table("ai_state_sequences")
-        return await self._context.dialect.upsert_increment(
-            self._session,
-            table=table,
-            values={"key_digest": _hex(key), "value": 1},
-            column="value",
-            index_elements=("key_digest",),
-        )
+        return await self.reserve_sequence(key, 1)
 
     async def reserve_sequence(self, key: bytes, count: int) -> int:
-        if count < 1:
+        return (await self.reserve_sequences({key: count}))[key]
+
+    async def reserve_sequences(self, requests: Mapping[bytes, int]) -> Mapping[bytes, int]:
+        if any(count < 1 for count in requests.values()):
             raise ValueError("sequence reservation count must be positive")
+        if not requests:
+            return {}
         table = self._table("ai_state_sequences")
-        return await self._context.dialect.upsert_increment(
+        rows = [
+            {"key_digest": _hex(key), "value": requests[key]}
+            for key in sorted(requests)
+        ]
+        values = await self._context.dialect.upsert_increment_many(
             self._session,
             table=table,
-            values={"key_digest": _hex(key), "value": count},
+            rows=rows,
             column="value",
             index_elements=("key_digest",),
-            step=count,
         )
+        result = {bytes.fromhex(key): int(value) for key, value in values.items()}
+        self._sequence_cache.update(result)
+        return {key: result[key] for key in requests}
 
     async def advance_sequence(self, key: bytes, expected: int) -> int:
         from sqlalchemy import func, update
@@ -654,11 +747,22 @@ class _SqlTransaction:
         return expected + 1
 
     async def delete_sequence(self, key: bytes) -> None:
+        await self.delete_sequences((key,))
+
+    async def delete_sequences(self, keys: Sequence[bytes]) -> None:
+        values = tuple(sorted(set(keys)))
+        if not values:
+            return
         from sqlalchemy import delete
 
         await self._session.execute(
-            delete(self._table("ai_state_sequences")).where(self._table("ai_state_sequences").c.key_digest == _hex(key))
+            delete(self._table("ai_state_sequences")).where(
+                self._table("ai_state_sequences").c.key_digest.in_(tuple(_hex(key) for key in values))
+            )
         )
+        self._log_batch("delete_sequences", len(values), 1)
+        for key in values:
+            self._sequence_cache[key] = 0
 
     async def insert_fact(self, fact: StoredFact) -> None:
         from sqlalchemy import insert
@@ -677,6 +781,7 @@ class _SqlTransaction:
         await self._session.execute(
             insert(self._table("ai_state_facts")).values([_fact_values(fact) for fact in facts])
         )
+        self._log_batch("insert_facts", len(facts), 1)
 
     async def list_facts(self, query: FactQuery) -> tuple[StoredFact, ...]:
         from sqlalchemy import func, select
@@ -784,6 +889,15 @@ class _SqlTransaction:
         except KeyError as error:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
 
+    def _log_batch(self, operation: str, batch_size: int, statement_count: int) -> None:
+        _logger.debug(
+            "SQL batch executed: backend=%s operation=%s batch_size=%s statement_count=%s",
+            self._context.dialect.name,
+            operation,
+            batch_size,
+            statement_count,
+        )
+
 
 def _record_values(record: StoredRecord, *, updating: bool = False) -> dict[str, object]:
     values: dict[str, object] = {
@@ -805,6 +919,29 @@ def _record_values(record: StoredRecord, *, updating: bool = False) -> dict[str,
 
         values["updated_at"] = func.current_timestamp()
     return values
+
+
+def _record_replacement_values(replacement: RecordReplacement) -> dict[str, object]:
+    record = replacement.record
+    return {
+        "_replacement_key_digest": _hex(record.key_digest),
+        "_replacement_expected_version": replacement.expected_storage_version,
+        "_replacement_partition_digest": _hex(record.partition_digest),
+        "_replacement_scope_digest": None
+        if record.scope_digest is None
+        else _hex(record.scope_digest),
+        "_replacement_parent_digest": None
+        if record.parent_digest is None
+        else _hex(record.parent_digest),
+        "_replacement_kind": record.kind,
+        "_replacement_sort_key": record.sort_key,
+        "_replacement_state": record.state,
+        "_replacement_storage_version": record.storage_version,
+        "_replacement_lease_owner": record.lease_owner,
+        "_replacement_lease_fence": record.lease_fence,
+        "_replacement_lease_expires_at": record.lease_expires_at,
+        "_replacement_payload_json": dict(record.data),
+    }
 
 
 def _record_from_row(row: Mapping[str, object]) -> StoredRecord:
