@@ -3,6 +3,7 @@
 """Canonical transcript chunks and bounded context projections."""
 
 import hashlib
+import json
 import zlib
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
@@ -50,12 +51,46 @@ _COMPRESS_RATIO = 0.9
 _TRANSCRIPT_PAGE_SIZE = 64
 
 
+def _message_signature(message: ModelMessage) -> bytes:
+    value = json.loads(
+        ModelMessagesTypeAdapter.dump_json([message]).decode("utf-8")
+    )
+
+    def remove_timestamps(candidate: object) -> object:
+        if isinstance(candidate, list):
+            return [remove_timestamps(item) for item in candidate]
+        if isinstance(candidate, dict):
+            return {
+                key: remove_timestamps(item)
+                for key, item in candidate.items()
+                if key != "timestamp"
+            }
+        return candidate
+
+    return canonical_json_bytes(remove_timestamps(value))
+
+
 @dataclass(frozen=True, slots=True)
 class TranscriptCapture:
     first_message_index: int
     messages: tuple[ModelMessage, ...]
     origins: tuple[TranscriptOrigin, ...]
     quality: HistoryQuality
+
+
+@dataclass(frozen=True, slots=True)
+class _HistorySegment:
+    history_id: str
+    start: int
+    end: int
+
+
+@dataclass(frozen=True, slots=True)
+class _HistoryResolution:
+    segments: tuple[_HistorySegment, ...]
+    legacy_source_id: str | None
+    legacy_message_limit: int
+    legacy_messages: tuple[ModelMessage, ...] | None
 
 
 class _TranscriptAccumulator:
@@ -68,10 +103,17 @@ class _TranscriptAccumulator:
         self._run_id = run_id
         self._messages: list[ModelMessage] = []
         self._quality = HistoryQuality.COMPLETE
+        self._seeded = False
 
     @property
     def messages(self) -> tuple[ModelMessage, ...]:
         return tuple(self._messages)
+
+    def seed(self, messages: Sequence[ModelMessage]) -> None:
+        if self._messages:
+            raise RuntimeError("transcript accumulator is already seeded")
+        self._messages.extend(messages)
+        self._seeded = True
 
     def capture(
         self,
@@ -88,7 +130,7 @@ class _TranscriptAccumulator:
         stored_known = tuple(
             message
             for message in self._messages
-            if message.run_id == self._run_id
+            if self._seeded or message.run_id == self._run_id
         )
         if len(known) < len(stored_known):
             self._quality = HistoryQuality.CONSERVATIVE
@@ -102,7 +144,10 @@ class _TranscriptAccumulator:
             message_run_id = message.run_id
             if message_run_id is not None:
                 continue
-            if message in known_values:
+            if any(
+                self._message_matches(message, known_value)
+                for known_value in known_values
+            ):
                 continue
             delta.append(message)
             delta_origins.append(TranscriptOrigin.UNKNOWN)
@@ -126,9 +171,23 @@ class _TranscriptAccumulator:
             return 0
         maximum = min(len(stored), len(incoming))
         for size in range(maximum, 0, -1):
-            if stored[-size:] == incoming[:size]:
+            if all(
+                self._message_matches(left, right)
+                for left, right in zip(
+                    stored[-size:],
+                    incoming[:size],
+                    strict=True,
+                )
+            ):
                 return size
         return 0
+
+    def _message_matches(
+        self,
+        left: ModelMessage,
+        right: ModelMessage,
+    ) -> bool:
+        return _message_signature(left) == _message_signature(right)
 
 
 class _ContextProjector:
@@ -341,6 +400,27 @@ class TranscriptRepository:
         stream = self._transcript_stream(owner_id)
         owner = self._owner_key(owner_id)
         await self._ensure_owner(transaction, owner_id, owner)
+        current_count = await self._message_count_in_transaction(
+            transaction,
+            owner_id,
+        )
+        expected = current_count
+        for chunk in chunks:
+            if (
+                chunk.owner_id != owner_id
+                or chunk.message_count <= 0
+                or chunk.first_message_index != expected
+            ):
+                _logger.info(
+                    "transcript append conflict: domain=%s owner=%s "
+                    "expected_index=%s actual_index=%s",
+                    self._runtime_domain.value,
+                    owner_id,
+                    expected,
+                    chunk.first_message_index,
+                )
+                raise AIError(ErrorCode.STORAGE_CONFLICT)
+            expected += chunk.message_count
         final = await transaction.reserve_sequence(
             self._transcript_sequence(owner_id),
             len(chunks),
@@ -363,6 +443,50 @@ class TranscriptRepository:
                 for sequence, chunk in zip(sequences, chunks, strict=True)
             )
         )
+        _logger.debug(
+            "transcript chunks appended: domain=%s owner=%s "
+            "first_index=%s message_count=%s chunks=%s",
+            self._runtime_domain.value,
+            owner_id,
+            current_count,
+            expected - current_count,
+            len(chunks),
+        )
+
+    async def _message_count_in_transaction(
+        self,
+        transaction: StateTransaction,
+        owner_id: str,
+    ) -> int:
+        values = await transaction.list_facts(
+            FactQuery(self._transcript_stream(owner_id))
+        )
+        expected = 0
+        latest: TranscriptChunk | None = None
+        for fact in values:
+            try:
+                chunk = self.decode_chunk(fact)
+            except (TypeError, ValueError) as error:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
+            if (
+                chunk.owner_id != owner_id
+                or chunk.message_count <= 0
+                or chunk.first_message_index != expected
+            ):
+                _logger.error(
+                    "transcript integrity failure: domain=%s owner=%s "
+                    "expected_index=%s actual_index=%s",
+                    self._runtime_domain.value,
+                    owner_id,
+                    expected,
+                    chunk.first_message_index,
+                )
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            expected += chunk.message_count
+            latest = chunk
+        if latest is None:
+            return 0
+        return latest.first_message_index + latest.message_count
 
     async def _ensure_owner(
         self,
@@ -513,13 +637,14 @@ class TranscriptRepository:
     async def history_message_count(self, history_id: str, *, tenant_id: str) -> int:
         if self._history_repository is None:
             return 0
-        record = await self._history_repository.get(
+        resolution = await self._history_segments(
             history_id,
             tenant_id=tenant_id,
+            load_legacy=False,
         )
-        if record is None:
-            raise AIError(ErrorCode.SESSION_HISTORY_UNAVAILABLE)
-        return record.inherited_message_count + record.local_message_count
+        return resolution.legacy_message_limit + sum(
+            segment.end - segment.start for segment in resolution.segments
+        )
 
     async def load_session_model_context(
         self,
@@ -532,38 +657,49 @@ class TranscriptRepository:
         if projection is not None:
             if binding_digest is not None and projection.binding_digest != binding_digest:
                 raise AIError(ErrorCode.SESSION_BINDING_MISMATCH)
+            resolution = await self._history_segments(
+                history_id,
+                tenant_id=tenant_id,
+                load_legacy=False,
+            )
+            self._validate_session_projection_ranges(projection, resolution)
             return await self.load_model_context(
                 history_id,
                 binding_digest=binding_digest,
             )
-        records, legacy_source_id, legacy_messages = await self._history_segments(
+        resolution = await self._history_segments(
             history_id,
             tenant_id=tenant_id,
         )
         values: list[LoadedContextMessage] = []
-        if legacy_messages is not None and legacy_source_id is not None:
+        if (
+            resolution.legacy_messages is not None
+            and resolution.legacy_source_id is not None
+        ):
             values.extend(
                 LoadedContextMessage(
                     message,
                     TranscriptMessageRef(
                         RuntimeDomain.CONVERSATION,
-                        legacy_source_id,
+                        resolution.legacy_source_id,
                         index,
                     ),
                 )
-                for index, message in enumerate(legacy_messages)
+                for index, message in enumerate(resolution.legacy_messages)
             )
-        for record in records:
-            start = record.inherited_message_count
-            end = start + record.local_message_count
-            messages = await self.load_message_span(record.history_id, start, end)
+        for segment in resolution.segments:
+            messages = await self.load_message_span(
+                segment.history_id,
+                segment.start,
+                segment.end,
+            )
             values.extend(
                 LoadedContextMessage(
                     message,
                     TranscriptMessageRef(
                         RuntimeDomain.CONVERSATION,
-                        record.history_id,
-                        start + index,
+                        segment.history_id,
+                        segment.start + index,
                     ),
                 )
                 for index, message in enumerate(messages)
@@ -578,22 +714,58 @@ class TranscriptRepository:
     ) -> AsyncIterator[ModelMessage]:
         if self._runtime_domain is not RuntimeDomain.CONVERSATION:
             raise ValueError("session messages require the conversation archive")
-        records, _legacy_source_id, legacy_messages = await self._history_segments(
+        resolution = await self._history_segments(
             history_id,
             tenant_id=tenant_id,
         )
-        if legacy_messages is not None:
-            for message in legacy_messages:
+        if resolution.legacy_messages is not None:
+            for message in resolution.legacy_messages:
                 yield message
-        for record in records:
-            start = record.inherited_message_count
-            end = start + record.local_message_count
+        for segment in resolution.segments:
             async for message in self._iter_range(
-                self.history_stream(record.history_id),
-                start=start,
-                end=end,
+                self.history_stream(segment.history_id),
+                start=segment.start,
+                end=segment.end,
             ):
                 yield message
+
+    async def iter_session_message_range(
+        self,
+        history_id: str,
+        *,
+        tenant_id: str,
+        start: int,
+        end: int,
+    ) -> AsyncIterator[ModelMessage]:
+        if start < 0 or end < start:
+            raise AIError(ErrorCode.STORAGE_CONFLICT)
+        resolution = await self._history_segments(
+            history_id,
+            tenant_id=tenant_id,
+        )
+        if end > resolution.legacy_message_limit + sum(
+            segment.end - segment.start for segment in resolution.segments
+        ):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        position = 0
+        if resolution.legacy_messages is not None:
+            legacy_end = min(end, resolution.legacy_message_limit)
+            if start < legacy_end:
+                for message in resolution.legacy_messages[start:legacy_end]:
+                    yield message
+            position = resolution.legacy_message_limit
+        for segment in resolution.segments:
+            segment_length = segment.end - segment.start
+            window_start = max(start - position, 0)
+            window_end = min(end - position, segment_length)
+            if window_start < window_end:
+                async for message in self._iter_range(
+                    self.history_stream(segment.history_id),
+                    start=segment.start + window_start,
+                    end=segment.start + window_end,
+                ):
+                    yield message
+            position += segment_length
 
     async def store_projection(
         self,
@@ -823,36 +995,99 @@ class TranscriptRepository:
         history_id: str,
         *,
         tenant_id: str,
-    ) -> tuple[
-        tuple[ConversationHistoryRecord, ...],
-        str | None,
-        tuple[ModelMessage, ...] | None,
-    ]:
+        load_legacy: bool = True,
+    ) -> _HistoryResolution:
         if self._history_repository is None:
             raise AIError(ErrorCode.STORAGE_DEPENDENCY_NOT_READY)
         records: list[ConversationHistoryRecord] = []
         current_id: str | None = history_id
         visited: set[str] = set()
         legacy_source_id: str | None = None
+        legacy_message_limit = 0
         legacy_messages: tuple[ModelMessage, ...] | None = None
         while current_id is not None:
             if current_id in visited:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             visited.add(current_id)
-            record = await self._history_repository.get(
-                current_id,
-                tenant_id=tenant_id,
-            )
+            try:
+                record = await self._history_repository.get(
+                    current_id,
+                    tenant_id=tenant_id,
+                )
+            except (TypeError, ValueError) as error:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
             if record is None:
                 if not records or self._legacy_message_loader is None:
                     raise AIError(ErrorCode.SESSION_HISTORY_UNAVAILABLE)
                 legacy_source_id = current_id
-                legacy_messages = await self._legacy_message_loader(current_id)
+                legacy_message_limit = (
+                    records[-1].parent.through_message_count
+                    if records[-1].parent is not None
+                    else 0
+                )
+                if load_legacy:
+                    recovered = await self._legacy_message_loader(current_id)
+                    legacy_messages = recovered[:legacy_message_limit]
+                    if len(recovered) < legacy_message_limit:
+                        _logger.warning(
+                            "legacy transcript is partial: owner=%s "
+                            "frozen_count=%s recovered_count=%s",
+                            current_id,
+                            legacy_message_limit,
+                            len(recovered),
+                        )
                 break
             records.append(record)
             current_id = None if record.parent is None else record.parent.history_id
-        records.reverse()
-        return tuple(records), legacy_source_id, legacy_messages
+        visible_total = (
+            records[0].inherited_message_count
+            + records[0].local_message_count
+        )
+        segments: list[_HistorySegment] = []
+        for record in records:
+            start = record.inherited_message_count
+            end = min(visible_total, start + record.local_message_count)
+            if end < start:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            segments.append(_HistorySegment(record.history_id, start, end))
+            if record.parent is not None:
+                if record.parent.through_message_count != record.inherited_message_count:
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                visible_total = record.parent.through_message_count
+        segments.reverse()
+        return _HistoryResolution(
+            tuple(segments),
+            legacy_source_id,
+            legacy_message_limit,
+            legacy_messages,
+        )
+
+    def _validate_session_projection_ranges(
+        self,
+        projection: ContextProjection,
+        resolution: _HistoryResolution,
+    ) -> None:
+        ranges = {
+            segment.history_id: (segment.start, segment.end)
+            for segment in resolution.segments
+        }
+        if resolution.legacy_source_id is not None:
+            ranges[resolution.legacy_source_id] = (
+                0,
+                resolution.legacy_message_limit,
+            )
+        for item in projection.items:
+            if not isinstance(item, TranscriptSpanRef):
+                continue
+            if item.source_domain is not RuntimeDomain.CONVERSATION:
+                continue
+            allowed = ranges.get(item.owner_id)
+            if (
+                allowed is None
+                or item.start < allowed[0]
+                or item.end > allowed[1]
+            ):
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
 
     async def _iter_range(
         self,

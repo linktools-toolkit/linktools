@@ -33,9 +33,13 @@ class CursorPayload:
     snapshot_or_store_revision: int
     expires_at: int
     include_deleted: bool = False
+    history_id: "str | None" = None
+    snapshot_message_count: "int | None" = None
+    next_message_index: "int | None" = None
+    next_projected_item_offset: "int | None" = None
 
     def as_json(self) -> dict[str, JsonValue]:
-        return {
+        value: dict[str, JsonValue] = {
             "cursor_version": self.cursor_version,
             "tenant_id": self.tenant_id,
             "resource_kind": self.resource_kind,
@@ -45,6 +49,15 @@ class CursorPayload:
             "expires_at": self.expires_at,
             "include_deleted": self.include_deleted,
         }
+        if self.history_id is not None:
+            value["history_id"] = self.history_id
+        if self.snapshot_message_count is not None:
+            value["snapshot_message_count"] = self.snapshot_message_count
+        if self.next_message_index is not None:
+            value["next_message_index"] = self.next_message_index
+        if self.next_projected_item_offset is not None:
+            value["next_projected_item_offset"] = self.next_projected_item_offset
+        return value
 
 
 class CursorSigner(Protocol):
@@ -92,6 +105,10 @@ class HmacCursorSigner:
                 int(value["snapshot_or_store_revision"]),
                 int(value["expires_at"]),
                 value["include_deleted"],
+                None if value.get("history_id") is None else str(value["history_id"]),
+                _optional_nonnegative_int(value.get("snapshot_message_count")),
+                _optional_nonnegative_int(value.get("next_message_index")),
+                _optional_nonnegative_int(value.get("next_projected_item_offset")),
             )
             if payload.expires_at < int(time.time()):
                 raise ValueError("expired")
@@ -106,6 +123,15 @@ def _b64(value: bytes) -> str:
 
 def _unb64(value: str) -> bytes:
     return base64.urlsafe_b64decode(value + "=" * (-len(value) % 4))
+
+
+def _optional_nonnegative_int(value: object) -> "int | None":
+    if value is None:
+        return None
+    result = int(value)
+    if result < 0:
+        raise ValueError("cursor offset cannot be negative")
+    return result
 
 
 __all__ = ["CursorPayload", "CursorSigner", "HmacCursorSigner", "Page"]

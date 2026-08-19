@@ -653,6 +653,14 @@ class SessionRepository(RuntimeRepository, Protocol):
         *,
         operation: OperationLedgerInput,
     ) -> "tuple[SessionRecord, bool]": ...
+    async def create_fork_with_operation(
+        self,
+        source_session_id: str,
+        target: SessionRecord,
+        *,
+        expected_source_revision: int,
+        operation: OperationLedgerInput,
+    ) -> "tuple[SessionRecord, bool]": ...
     async def list(self, *, tenant_id: str, owner_principal_id: str | None = None) -> tuple[SessionRecord, ...]: ...
     async def list_page(
         self,

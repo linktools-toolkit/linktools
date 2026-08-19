@@ -134,6 +134,8 @@ class ExecutionProjectionCheckpoint:
 class _ProjectionLockEntry:
     lock: asyncio.Lock
     references: int = 0
+    owner: asyncio.Task[object] | None = None
+    depth: int = 0
 
 
 class _RunHistoryLock:
@@ -143,21 +145,42 @@ class _RunHistoryLock:
 
     @asynccontextmanager
     async def hold(self, run_id: str):
+        current_task = asyncio.current_task()
         async with self._guard:
             entry = self._entries.get(run_id)
             if entry is None:
                 entry = _ProjectionLockEntry(asyncio.Lock())
                 self._entries[run_id] = entry
             entry.references += 1
+            if entry.owner is current_task:
+                entry.depth += 1
+                nested = True
+            else:
+                nested = False
+        if nested:
+            try:
+                yield
+            finally:
+                async with self._guard:
+                    entry.depth -= 1
+                    entry.references -= 1
+                    if entry.references == 0 and self._entries.get(run_id) is entry:
+                        self._entries.pop(run_id, None)
+            return
         acquired = False
         try:
             await entry.lock.acquire()
             acquired = True
+            async with self._guard:
+                entry.owner = current_task
+                entry.depth = 1
             yield
         finally:
             if acquired:
                 entry.lock.release()
             async with self._guard:
+                entry.owner = None
+                entry.depth = 0
                 entry.references -= 1
                 if entry.references == 0 and self._entries.get(run_id) is entry:
                     self._entries.pop(run_id, None)
@@ -364,6 +387,9 @@ class StateStepArchive(StepStore):
             legacy_message_loader=self._legacy_messages,
         )
         self._context_baselines: dict[str, LoadedModelContext] = {}
+        self._transcript_accumulators: dict[str, _TranscriptAccumulator] = {}
+        self._transcript_offsets: dict[str, int] = {}
+        self._history_lock = _RunHistoryLock()
         self._closed = False
 
     @property
@@ -377,6 +403,9 @@ class StateStepArchive(StepStore):
     @property
     def transcript_repository(self) -> TranscriptRepository:
         return self._history
+
+    def bind_history_lock(self, history_lock: _RunHistoryLock) -> None:
+        self._history_lock = history_lock
 
     def register_context_baseline(
         self,
@@ -393,17 +422,24 @@ class StateStepArchive(StepStore):
         binding_digest: str | None = None,
     ) -> tuple[PreparedStepSnapshot, ...]:
         self._ensure_open()
-        return await self._prepare_snapshots(
-            run,
-            snapshots,
-            binding_digest=binding_digest,
-        )
+        async with self._history_lock.hold(run.run_id):
+            return await self._prepare_snapshots(
+                run,
+                snapshots,
+                binding_digest=binding_digest,
+            )
 
     async def initialize(self) -> None:
         self._closed = False
+        self._transcript_accumulators.clear()
+        self._transcript_offsets.clear()
+        self._context_baselines.clear()
 
     async def close(self) -> None:
         self._closed = True
+        self._transcript_accumulators.clear()
+        self._transcript_offsets.clear()
+        self._context_baselines.clear()
 
     def _run_key(self, run_id: str) -> bytes:
         return record_key_digest(self._namespace, self._tenant_id, self._runtime_domain.value, "step_run", run_id)
@@ -516,16 +552,22 @@ class StateStepArchive(StepStore):
     ) -> tuple[PreparedStepSnapshot, ...]:
         prepared: list[PreparedStepSnapshot] = []
         owner_id = run.run_id
-        message_index_offset = 0
         if self._runtime_domain is RuntimeDomain.CONVERSATION:
             owner_id = self._history_id(run)
-            if run.metadata.get("history_id") is not None:
+        baseline = self._context_baselines.get(run.run_id)
+        accumulator = await self._transcript_accumulator(run, owner_id)
+        message_index_offset = self._transcript_offsets.get(run.run_id)
+        if message_index_offset is None:
+            message_index_offset = 0
+            if (
+                self._runtime_domain is RuntimeDomain.CONVERSATION
+                and run.metadata.get("history_id") is not None
+            ):
                 message_index_offset = await self._history.history_message_count(
                     owner_id,
                     tenant_id=self._tenant_id,
                 )
-        baseline = self._context_baselines.get(run.run_id)
-        accumulator = _TranscriptAccumulator(run.run_id)
+            self._transcript_offsets[run.run_id] = message_index_offset
         projection_binding = binding_digest or run.run_id
         for snapshot in snapshots:
             capture = accumulator.capture(snapshot.messages)
@@ -567,6 +609,29 @@ class StateStepArchive(StepStore):
                 )
             )
         return tuple(prepared)
+
+    async def _transcript_accumulator(
+        self,
+        run: RunRecord,
+        owner_id: str,
+    ) -> _TranscriptAccumulator:
+        accumulator = self._transcript_accumulators.get(run.run_id)
+        if accumulator is not None:
+            return accumulator
+        accumulator = _TranscriptAccumulator(run.run_id)
+        if self._runtime_domain is not RuntimeDomain.CONVERSATION:
+            persisted = await self._history.load_messages(owner_id)
+            accumulator.seed(persisted)
+            _logger.debug(
+                "transcript accumulator seeded: domain=%s run=%s "
+                "owner=%s messages=%s",
+                self._runtime_domain.value,
+                run.run_id,
+                owner_id,
+                len(persisted),
+            )
+        self._transcript_accumulators[run.run_id] = accumulator
+        return accumulator
 
     def _history_id(self, run: RunRecord) -> str:
         history_id = run.metadata.get("history_id")
@@ -788,19 +853,20 @@ class StateStepArchive(StepStore):
         binding_digest: str | None = None,
     ) -> None:
         self._ensure_open()
-        prepared = await self._prepare_snapshots(
-            run,
-            snapshots,
-            binding_digest=binding_digest,
-        )
-        await self._store.mutate(
-            lambda transaction: self._sync_projection_in_transaction(
-                transaction,
+        async with self._history_lock.hold(run.run_id):
+            prepared = await self._prepare_snapshots(
                 run,
-                events=events,
-                snapshots=prepared,
+                snapshots,
+                binding_digest=binding_digest,
             )
-        )
+            await self._store.mutate(
+                lambda transaction: self._sync_projection_in_transaction(
+                    transaction,
+                    run,
+                    events=events,
+                    snapshots=prepared,
+                )
+            )
 
     async def _sync_projection_in_transaction(
         self,
@@ -899,18 +965,19 @@ class StateStepArchive(StepStore):
         *,
         binding_digest: str | None = None,
     ) -> None:
-        prepared = await self._prepare_snapshots(
-            run,
-            (snapshot,),
-            binding_digest=binding_digest,
-        )
-        await self._store.mutate(
-            lambda transaction: self._materialize_snapshot_in_transaction(
-                transaction,
+        async with self._history_lock.hold(run.run_id):
+            prepared = await self._prepare_snapshots(
                 run,
-                prepared[0],
+                (snapshot,),
+                binding_digest=binding_digest,
             )
-        )
+            await self._store.mutate(
+                lambda transaction: self._materialize_snapshot_in_transaction(
+                    transaction,
+                    run,
+                    prepared[0],
+                )
+            )
 
     async def _materialize_snapshot_in_transaction(
         self,
@@ -972,13 +1039,14 @@ class StateStepArchive(StepStore):
         )
 
     async def materialize_effect(self, run: RunRecord, effect: ToolEffectRecord) -> None:
-        await self._store.mutate(
-            lambda transaction: self._materialize_effect_in_transaction(
-                transaction,
-                run,
-                effect,
+        async with self._history_lock.hold(run.run_id):
+            await self._store.mutate(
+                lambda transaction: self._materialize_effect_in_transaction(
+                    transaction,
+                    run,
+                    effect,
+                )
             )
-        )
 
     async def _materialize_effect_in_transaction(
         self,
@@ -1126,6 +1194,32 @@ class StateStepArchive(StepStore):
             tenant_id=tenant_id,
         ):
             yield message
+
+    async def session_message_count(
+        self,
+        history_id: str,
+        *,
+        tenant_id: str,
+    ) -> int:
+        return await self._history.history_message_count(
+            history_id,
+            tenant_id=tenant_id,
+        )
+
+    def iter_session_message_range(
+        self,
+        history_id: str,
+        *,
+        tenant_id: str,
+        start: int,
+        end: int,
+    ) -> AsyncIterator[object]:
+        return self._history.iter_session_message_range(
+            history_id,
+            tenant_id=tenant_id,
+            start=start,
+            end=end,
+        )
 
     async def load_session_model_context(
         self,
@@ -1312,13 +1406,20 @@ class StateStepArchive(StepStore):
         return [value for value in values if value.status == "started"]
 
     async def release_run(self, run_id: str) -> None:
-        async def mutate(transaction: StateTransaction) -> None:
-            await transaction.delete_record(self._run_key(run_id))
-            await transaction.delete_sequences(
-                tuple(self._sequence(run_id, family) for family in ("event", "snapshot", "effect"))
-            )
+        async with self._history_lock.hold(run_id):
+            async def mutate(transaction: StateTransaction) -> None:
+                await transaction.delete_record(self._run_key(run_id))
+                await transaction.delete_sequences(
+                    tuple(
+                        self._sequence(run_id, family)
+                        for family in ("event", "snapshot", "effect")
+                    )
+                )
 
-        await self._store.mutate(mutate)
+            await self._store.mutate(mutate)
+            self._transcript_accumulators.pop(run_id, None)
+            self._transcript_offsets.pop(run_id, None)
+            self._context_baselines.pop(run_id, None)
 
     async def _append(self, run_id: str, family: str, value: object, kind: str) -> None:
         stream = self._stream(run_id, family)
@@ -1405,6 +1506,9 @@ class RuntimeStepStore(StepStore):
         self._projection_bindings: dict[str, str] = {}
         self._projection_dirty: set[str] = set()
         self._history_lock = _RunHistoryLock()
+        for archive in self._archives.values():
+            if isinstance(archive, StateStepArchive):
+                archive.bind_history_lock(self._history_lock)
 
     async def initialize(self) -> None:
         await self._staging.initialize()
@@ -1459,6 +1563,7 @@ class RuntimeStepStore(StepStore):
                 if run is None:
                     raise AIError(ErrorCode.STORAGE_NOT_FOUND)
                 await _materialize_snapshot(recovery, run, snapshot)
+            await self._flush_execution_projection_locked(snapshot.run_id)
 
     async def latest_snapshot(self, *, run_id: str, include_interrupted: bool = False) -> ContinuableSnapshot | None:
         await self._ensure_business()
@@ -1520,6 +1625,54 @@ class RuntimeStepStore(StepStore):
         async for message in archive.transcript_repository.iter_session_messages(
             history_id,
             tenant_id=tenant_id,
+        ):
+            yield message
+
+    async def session_message_count(
+        self,
+        history_id: str,
+        *,
+        tenant_id: str,
+    ) -> int:
+        archive = self._archives.get(RuntimeDomain.CONVERSATION)
+        if not isinstance(archive, StateStepArchive):
+            raise AIError(ErrorCode.STORAGE_DEPENDENCY_NOT_READY)
+        return await archive.transcript_repository.history_message_count(
+            history_id,
+            tenant_id=tenant_id,
+        )
+
+    def iter_session_message_range(
+        self,
+        history_id: str,
+        *,
+        tenant_id: str,
+        start: int,
+        end: int,
+    ) -> AsyncIterator[object]:
+        return self._iter_session_message_range(
+            history_id,
+            tenant_id=tenant_id,
+            start=start,
+            end=end,
+        )
+
+    async def _iter_session_message_range(
+        self,
+        history_id: str,
+        *,
+        tenant_id: str,
+        start: int,
+        end: int,
+    ) -> AsyncIterator[object]:
+        archive = self._archives.get(RuntimeDomain.CONVERSATION)
+        if not isinstance(archive, StateStepArchive):
+            raise AIError(ErrorCode.STORAGE_DEPENDENCY_NOT_READY)
+        async for message in archive.transcript_repository.iter_session_message_range(
+            history_id,
+            tenant_id=tenant_id,
+            start=start,
+            end=end,
         ):
             yield message
 
@@ -1663,14 +1816,18 @@ class RuntimeStepStore(StepStore):
         )
 
     async def _acknowledge_execution_projection(self, projection: ExecutionProjectionBatch) -> None:
-        offset = self._projection_offsets.setdefault(projection.run.run_id, _ProjectionOffset())
-        offset.events = max(offset.events, projection.target_event_offset)
-        offset.snapshots = max(offset.snapshots, projection.target_snapshot_offset)
-        offset.transcript_messages = max(
-            offset.transcript_messages,
-            projection.target_message_index,
-        )
-        self._projection_dirty.discard(projection.run.run_id)
+        async with self._history_lock.hold(projection.run.run_id):
+            offset = self._projection_offsets.setdefault(
+                projection.run.run_id,
+                _ProjectionOffset(),
+            )
+            offset.events = max(offset.events, projection.target_event_offset)
+            offset.snapshots = max(offset.snapshots, projection.target_snapshot_offset)
+            offset.transcript_messages = max(
+                offset.transcript_messages,
+                projection.target_message_index,
+            )
+            self._projection_dirty.discard(projection.run.run_id)
 
     async def verify_terminal_attempts(
         self, *, candidate_step_run_ids: tuple[str, ...], required_step_run_id: str | None

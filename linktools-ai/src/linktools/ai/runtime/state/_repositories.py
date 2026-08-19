@@ -22,6 +22,7 @@ from ...core import (
     JsonValue,
     OperationLedgerInput,
     OperationLedgerRecord,
+    OperationKind,
     OperationStatus,
     Page,
     ResourceKind,
@@ -599,7 +600,10 @@ class ConversationHistoryRepositoryImpl(_RepositoryBase):
             )
             if source is None:
                 raise AIError(ErrorCode.SESSION_HISTORY_UNAVAILABLE)
-            inherited = source.inherited_message_count + source.local_message_count
+            inherited = await self._visible_message_count_in_transaction(
+                transaction,
+                source,
+            )
             child = ConversationHistoryRecord(
                 history_id=child_history_id,
                 session_id=session_id,
@@ -642,6 +646,40 @@ class ConversationHistoryRepositoryImpl(_RepositoryBase):
             return existing
 
         return await self._store.mutate(mutate)
+
+    async def _visible_message_count_in_transaction(
+        self,
+        transaction: StateTransaction,
+        record: ConversationHistoryRecord,
+    ) -> int:
+        visible_total = record.inherited_message_count + record.local_message_count
+        count = 0
+        current = record
+        visited: set[str] = set()
+        while True:
+            if current.history_id in visited:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            visited.add(current.history_id)
+            start = current.inherited_message_count
+            end = min(
+                visible_total,
+                current.inherited_message_count + current.local_message_count,
+            )
+            if end < start:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            count += end - start
+            if current.parent is None:
+                return count
+            if current.parent.through_message_count != current.inherited_message_count:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            parent = await transaction.get_record(
+                self._key("conversation_history", current.parent.history_id)
+            )
+            if parent is None:
+                return count + current.parent.through_message_count
+            current = await self._decode_history(parent)
+            if current.tenant_id != self._tenant_id:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
 
     async def _decode_history(self, record: StoredRecord) -> ConversationHistoryRecord:
         return decode_domain(_domain_payload(record), ConversationHistoryRecord)
@@ -733,6 +771,270 @@ class SessionRepositoryImpl(_ResourceRepository[SessionRecord]):
             return record, False
 
         return await self._store.mutate(mutate)
+
+    async def create_fork_with_operation(
+        self,
+        source_session_id: str,
+        target: SessionRecord,
+        *,
+        expected_source_revision: int,
+        operation: OperationLedgerInput,
+    ) -> tuple[SessionRecord, bool]:
+        _require_tenant(target, self._tenant_id)
+        _require_tenant(operation, self._tenant_id)
+        if (
+            operation.resource_kind is not ResourceKind.SESSION
+            or operation.resource_id != target.session_id
+            or operation.operation_kind is not OperationKind.SESSION_FORK
+        ):
+            raise AIError(ErrorCode.STORAGE_CONFLICT)
+        if expected_source_revision < 0:
+            raise AIError(ErrorCode.STORAGE_CONFLICT)
+        target = _ensure_session_history(replace(target, history_id=None))
+
+        async def mutate(transaction: StateTransaction) -> tuple[SessionRecord, bool]:
+            _, replayed = await _append_operation(transaction, self, operation)
+            source_stored = await transaction.get_record(
+                self._key("session", source_session_id)
+            )
+            if source_stored is None:
+                raise AIError(ErrorCode.STORAGE_NOT_FOUND)
+            source = await self._decode(source_stored, SessionRecord)
+            if source.tenant_id != self._tenant_id:
+                raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
+            if not replayed and source.revision != expected_source_revision:
+                raise AIError(ErrorCode.STORAGE_CONFLICT)
+            if source.history_id is None:
+                raise AIError(ErrorCode.SESSION_HISTORY_UNAVAILABLE)
+            source_history_stored = await transaction.get_record(
+                self._key("conversation_history", source.history_id)
+            )
+            if source_history_stored is None:
+                raise AIError(ErrorCode.SESSION_HISTORY_UNAVAILABLE)
+            source_history = await self._decode_history(source_history_stored)
+            if (
+                source_history.session_id != source.session_id
+                or source_history.tenant_id != self._tenant_id
+            ):
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            inherited = await self._visible_history_count_in_transaction(
+                transaction,
+                source_history,
+            )
+            child_history_id = target.history_id
+            if child_history_id is None:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            child = ConversationHistoryRecord(
+                history_id=child_history_id,
+                session_id=target.session_id,
+                tenant_id=self._tenant_id,
+                parent=ConversationHistoryParent(source.history_id, inherited),
+                inherited_message_count=inherited,
+                local_message_count=0,
+                history_quality=source_history.history_quality,
+                revision=0,
+            )
+            expected_target = replace(
+                target,
+                history_id=child_history_id,
+                history_quality=source_history.history_quality.value,
+                continuation=(
+                    None
+                    if target.continuation is None
+                    else replace(
+                        target.continuation,
+                        history_id=child_history_id,
+                    )
+                ),
+            )
+            target_stored = await transaction.get_record(
+                self._key("session", expected_target.session_id)
+            )
+            child_stored = await transaction.get_record(
+                self._key("conversation_history", child_history_id)
+            )
+            if replayed:
+                if target_stored is None:
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                existing_target = await self._decode(target_stored, SessionRecord)
+                existing_child = (
+                    None
+                    if child_stored is None
+                    else await self._decode_history(child_stored)
+                )
+                replay_child = child if existing_child is None else existing_child
+                replay_target = (
+                    expected_target
+                    if existing_child is None
+                    else replace(
+                        expected_target,
+                        history_quality=existing_child.history_quality.value,
+                    )
+                )
+                repaired = await self._validate_fork_replay(
+                    transaction,
+                    existing_target,
+                    target_stored,
+                    existing_child,
+                    replay_target,
+                    replay_child,
+                    source.history_id,
+                )
+                _logger.info(
+                    "session fork replayed: source=%s target=%s repaired=%s",
+                    source_session_id,
+                    existing_target.session_id,
+                    repaired != existing_target,
+                )
+                return repaired, True
+            if target_stored is not None or child_stored is not None:
+                raise AIError(ErrorCode.STORAGE_CONFLICT)
+            await transaction.insert_record(
+                self._stored(
+                    "session",
+                    expected_target.session_id,
+                    expected_target,
+                    scope=self._scope(
+                        "session",
+                        "owner",
+                        expected_target.owner_principal_id,
+                    ),
+                    state=expected_target.status.value,
+                )
+            )
+            await transaction.insert_record(
+                self._stored(
+                    "conversation_history",
+                    child.history_id,
+                    child,
+                )
+            )
+            await self._bump_list_generation(
+                transaction,
+                expected_target.owner_principal_id,
+            )
+            _logger.info(
+                "session fork committed: source=%s target=%s inherited=%s",
+                source_session_id,
+                expected_target.session_id,
+                inherited,
+            )
+            return expected_target, False
+
+        return await self._store.mutate(mutate)
+
+    async def _validate_fork_replay(
+        self,
+        transaction: StateTransaction,
+        target: SessionRecord,
+        target_stored: StoredRecord,
+        child: ConversationHistoryRecord | None,
+        expected_target: SessionRecord,
+        expected_child: ConversationHistoryRecord,
+        source_history_id: str,
+    ) -> SessionRecord:
+        if target.history_id != expected_child.history_id:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        if child is None:
+            if (
+                target.continuation is not None
+                and target.continuation.history_id == source_history_id
+            ):
+                raise AIError(ErrorCode.SESSION_HISTORY_UNAVAILABLE)
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        if (
+            child.parent is None
+            and child.inherited_message_count == 0
+            and child.local_message_count == 0
+            and target.continuation is not None
+            and target.continuation.history_id == source_history_id
+        ):
+            raise AIError(ErrorCode.SESSION_HISTORY_UNAVAILABLE)
+        if (
+            child.session_id != expected_child.session_id
+            or child.tenant_id != expected_child.tenant_id
+            or child.parent != expected_child.parent
+            or child.inherited_message_count != expected_child.inherited_message_count
+            or child.local_message_count != 0
+            or child.history_quality is not expected_child.history_quality
+        ):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        if (
+            target.session_id != expected_target.session_id
+            or target.tenant_id != expected_target.tenant_id
+            or target.owner_principal_id != expected_target.owner_principal_id
+            or target.binding_digest != expected_target.binding_digest
+        ):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        if target.continuation == expected_target.continuation:
+            if target.history_quality != expected_target.history_quality:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            return target
+        if (
+            expected_target.continuation is not None
+            and target.continuation is not None
+            and target.continuation.history_id == source_history_id
+            and target.session_id == expected_target.session_id
+            and target.tenant_id == expected_target.tenant_id
+            and target.history_id == expected_target.history_id
+        ):
+            now = await transaction.now()
+            repaired = replace(
+                expected_target,
+                revision=target.revision + 1,
+                resource_generation=target.resource_generation + 1,
+                updated_at=now,
+            )
+            await _replace_checked(
+                transaction,
+                _projected_record(self, target_stored, repaired),
+                target_stored.storage_version,
+            )
+            await self._bump_list_generation(
+                transaction,
+                repaired.owner_principal_id,
+            )
+            _logger.warning(
+                "session fork continuation repaired: target=%s history=%s",
+                repaired.session_id,
+                repaired.history_id,
+            )
+            return repaired
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+
+    async def _visible_history_count_in_transaction(
+        self,
+        transaction: StateTransaction,
+        record: ConversationHistoryRecord,
+    ) -> int:
+        visible_total = record.inherited_message_count + record.local_message_count
+        count = 0
+        current = record
+        visited: set[str] = set()
+        while True:
+            if current.history_id in visited:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            visited.add(current.history_id)
+            start = current.inherited_message_count
+            end = min(
+                visible_total,
+                current.inherited_message_count + current.local_message_count,
+            )
+            if end < start:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            count += end - start
+            if current.parent is None:
+                return count
+            if current.parent.through_message_count != current.inherited_message_count:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            parent_stored = await transaction.get_record(
+                self._key("conversation_history", current.parent.history_id)
+            )
+            if parent_stored is None:
+                return count + current.parent.through_message_count
+            current = await self._decode_history(parent_stored)
+            if current.tenant_id != self._tenant_id:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
 
     async def list(self, *, tenant_id: str, owner_principal_id: str | None = None) -> tuple[SessionRecord, ...]:
         if tenant_id != self._tenant_id:

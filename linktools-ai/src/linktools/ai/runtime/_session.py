@@ -541,30 +541,14 @@ class DefaultSessionService:
                 digest,
                 target.revision,
             )
-            target, _ = await self._conversation.sessions.create_with_operation(
+            if source.history_id is None:
+                raise AIError(ErrorCode.SESSION_HISTORY_UNAVAILABLE)
+            target, _ = await self._conversation.sessions.create_fork_with_operation(
+                session_id,
                 target,
+                expected_source_revision=source.revision,
                 operation=operation,
             )
-            if source.history_id is not None and target.history_id is not None:
-                await self._conversation.histories.fork(
-                    source.history_id,
-                    target.history_id,
-                    session_id=target.session_id,
-                    tenant_id=target.tenant_id,
-                )
-                if target.continuation is not None:
-                    target = await self._conversation.sessions.compare_and_swap(
-                        target.session_id,
-                        tenant_id=target.tenant_id,
-                        expected_revision=target.revision,
-                        next_record=replace(
-                            target,
-                            continuation=replace(
-                                target.continuation,
-                                history_id=target.history_id,
-                            ),
-                        ),
-                    )
             _logger.debug("session forked: source=%s target=%s", session_id, target.session_id)
             return await self._view(target, request.principal)
 
