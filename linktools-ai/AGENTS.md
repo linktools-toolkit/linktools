@@ -127,7 +127,17 @@ The DBA reference must also satisfy these schema constraints:
 - Obtain loggers through `from linktools.core import environ` and `environ.get_logger(...)` with a relative logger name.
 - Log state transitions and decisions, not raw secrets or large payloads. Guard only expensive debug formatting with `if environ.debug`.
 - Do not add compatibility shims, dynamic imports, migration fallbacks, or reflection-based adapters.
-- Comments explain constraints that naming and structure cannot express. Remove comments made stale by the current edit.
+- Comments explain constraints that naming and structure cannot express. All new or corrected comments must be in English.
+  Remove comments made stale by the current edit.
+- Keep lines readable by wrapping long signatures, expressions, and log calls instead of allowing dense overlong lines.
+
+## 6.1 Specification conformance
+
+- For specification-driven work, extract a requirement matrix before editing.
+  Keep module ownership, public contracts, logs, tests, and evidence aligned with it.
+- Perform a fresh cold-start review against the complete specification after implementation.
+  Repeat the review and verification loop until no Critical or Important gap remains.
+- Treat compatibility and migration as out of scope unless the specification explicitly requires a legacy decoder, first-read adapter, or rollback materialization path.
 
 ## 7. Temporal and external effects
 

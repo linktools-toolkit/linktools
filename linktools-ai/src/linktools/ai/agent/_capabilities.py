@@ -381,6 +381,7 @@ class AgentRunScope:
     memory_scope: "str | None"
     step_store: StepStore
     memory_store: "SearchableMemoryStore | None"
+    history_id: "str | None" = None
     platform_tool_names: "tuple[str, ...]" = ()
     context_target_tokens: "int | None" = None
     parent_step_run_id: "str | None" = None
@@ -410,6 +411,7 @@ async def compose_platform_capabilities(
             metadata={
                 "capability_scope": "parent",
                 "agent_name": scope.agent_name,
+                **({} if scope.history_id is None else {"history_id": scope.history_id}),
                 **({} if scope.segment_sequence is None else {"segment_sequence": str(scope.segment_sequence)}),
             },
         )

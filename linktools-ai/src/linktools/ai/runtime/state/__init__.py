@@ -18,10 +18,14 @@ from ._codec import (
 )
 from ._commands import ConversationStateCommands, ExecutionStateCommands, RuntimeStateCommands
 from ._contracts import (
+    AgentAttemptClaim,
     ApprovalRepository,
     ArtifactState,
     ContextProjection,
     ConversationState,
+    ConversationHistoryParent,
+    ConversationHistoryRecord,
+    ConversationHistoryRepository,
     EvaluationState,
     EventRepository,
     ExecutionEventAppend,
@@ -29,6 +33,9 @@ from ._contracts import (
     ExecutionRepository,
     ExecutionState,
     InlineContextBlock,
+    HistoryQuality,
+    LoadedContextMessage,
+    LoadedModelContext,
     MemoryRecord,
     MemoryState,
     RecoveryCheckpointState,
@@ -43,11 +50,16 @@ from ._contracts import (
     TaskState,
     ToolOperationAdmission,
     TranscriptChunk,
+    TranscriptMessageRef,
     TranscriptOrigin,
     TranscriptSpanRef,
 )
 from ._filesystem import FilesystemStateStorageGroup, FilesystemStateStore
-from ._maintenance import RuntimeStorageMaintenance
+from ._maintenance import (
+    OfflineRuntimeStorageMaintenance,
+    RuntimeStorageInspection,
+    RuntimeStorageMaintenance,
+)
 from ._memory import MemoryStateStorageGroup, MemoryStateStore
 from ._plan import (
     RuntimeDomain,
@@ -55,7 +67,11 @@ from ._plan import (
     RuntimeStatePlan,
     RuntimeStateRoute,
 )
-from ._repositories import ExecutionRepositoryImpl, SessionRepositoryImpl
+from ._repositories import (
+    ConversationHistoryRepositoryImpl,
+    ExecutionRepositoryImpl,
+    SessionRepositoryImpl,
+)
 from ._root import RuntimeState
 from ._schema import build_runtime_sql_metadata
 from ._sql import SqlStateStorageGroup, SqlStateStore
@@ -64,6 +80,7 @@ from ._steps import (
     ExecutionProjectionCheckpoint,
     LegacyMaterializationResult,
     PreparedStepSnapshot,
+    RuntimeStepStore,
     StateStepArchive,
 )
 from ._history import TranscriptRepository
@@ -96,10 +113,15 @@ from ._store import (
 
 __all__ = [
     "CURRENT_DATA_VERSION",
+    "AgentAttemptClaim",
     "ApprovalRepository",
     "ArtifactState",
     "ContextProjection",
     "ConversationState",
+    "ConversationHistoryParent",
+    "ConversationHistoryRecord",
+    "ConversationHistoryRepository",
+    "ConversationHistoryRepositoryImpl",
     "ConversationStateCommands",
     "EvaluationState",
     "EventRepository",
@@ -115,6 +137,9 @@ __all__ = [
     "FactQuery",
     "FilesystemStateStore",
     "InlineContextBlock",
+    "HistoryQuality",
+    "LoadedContextMessage",
+    "LoadedModelContext",
     "LegacyMaterializationResult",
     "PreparedStepSnapshot",
     "MemoryRecord",
@@ -136,7 +161,10 @@ __all__ = [
     "RuntimeStatePlan",
     "RuntimeStateRoute",
     "RuntimeStateCommands",
+    "RuntimeStepStore",
+    "RuntimeStorageInspection",
     "RuntimeStorageMaintenance",
+    "OfflineRuntimeStorageMaintenance",
     "RuntimePayloadRef",
     "SessionRecord",
     "SessionRepository",
@@ -156,6 +184,7 @@ __all__ = [
     "TaskState",
     "ToolOperationAdmission",
     "TranscriptChunk",
+    "TranscriptMessageRef",
     "TranscriptOrigin",
     "TranscriptRepository",
     "TranscriptSpanRef",

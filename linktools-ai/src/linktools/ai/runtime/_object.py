@@ -9,7 +9,13 @@ from dataclasses import dataclass
 
 from ..core import validate_tenant_id
 from ..errors import AIError, ErrorCode
-from ..storage import ObjectRef, ObjectStore, namespace_digest, read_object
+from ..storage import (
+    ObjectRef,
+    ObjectStore,
+    namespace_digest,
+    read_object,
+    runtime_object_key,
+)
 from .state._plan import RuntimeDomain
 
 _DIGEST = re.compile(r"[0-9a-f]{64}\Z")
@@ -43,8 +49,12 @@ class RuntimeObjectKeyFactory:
         tenant_id = validate_tenant_id(tenant_id)
         if _DIGEST.fullmatch(digest) is None:
             raise ValueError("Runtime object digest is invalid")
-        tenant_scope_key = hashlib.sha256(("tenant:" + tenant_id).encode("utf-8")).hexdigest()
-        return f"v1/runtime/{self.namespace_digest}/{runtime_domain.value}/{tenant_scope_key}/{digest}"
+        tenant_scope_key = hashlib.sha256(tenant_id.encode("utf-8")).hexdigest()
+        return runtime_object_key(
+            namespace_digest=self.namespace_digest,
+            tenant_digest=tenant_scope_key,
+            stored_digest=digest,
+        )
 
 
 async def put_runtime_object(

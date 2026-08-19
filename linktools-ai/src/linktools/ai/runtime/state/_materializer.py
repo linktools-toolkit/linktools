@@ -262,6 +262,7 @@ async def materialize_runtime_state(
             plan,
             stores,
             objects,
+            history_repository=bundles[RuntimeDomain.CONVERSATION]["histories"],
             namespace=namespace,
             tenant_id=tenant_id,
         )
@@ -322,7 +323,9 @@ def _states(bundles: Mapping[RuntimeDomain, Mapping[str, object]]) -> object:
             (),
             {
                 "conversation": ConversationState(
-                    bundles[RuntimeDomain.CONVERSATION]["sessions"], bundles[RuntimeDomain.CONVERSATION]["operations"]
+                    bundles[RuntimeDomain.CONVERSATION]["sessions"],
+                    bundles[RuntimeDomain.CONVERSATION]["histories"],
+                    bundles[RuntimeDomain.CONVERSATION]["operations"],
                 ),
                 "execution": ExecutionState(
                     bundles[RuntimeDomain.EXECUTION]["executions"],
@@ -383,6 +386,7 @@ def _build_steps(
     plan: RuntimeStatePlan,
     stores: Mapping[RuntimeDomain, object],
     objects: _RuntimeObjectRouter,
+    history_repository: object,
     *,
     namespace: str,
     tenant_id: str,
@@ -406,6 +410,11 @@ def _build_steps(
                 tenant_id=tenant_id,
                 runtime_domain=domain,
                 context_sources=context_sources,
+                history_repository=(
+                    history_repository
+                    if domain is RuntimeDomain.CONVERSATION
+                    else None
+                ),
             )
         else:
             archives[domain] = InMemoryStepArchive(domain)

@@ -8,13 +8,14 @@ import hashlib
 import zlib
 from collections.abc import AsyncIterator, Mapping, Sequence
 from contextlib import asynccontextmanager
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from datetime import datetime
 from time import monotonic
 from typing import Protocol, runtime_checkable
 
 from linktools.core import environ
 from pydantic_ai import ModelMessagesTypeAdapter
+from pydantic_ai.messages import ModelMessage
 from pydantic_ai_harness.step_persistence import (
     ContinuableSnapshot,
     RunRecord,
@@ -27,13 +28,18 @@ from ...errors import AIError, ErrorCode
 from ...storage import ObjectStore, StoredPayload
 from ._codec import decode_domain, decode_envelope, encode_domain, encode_envelope
 from ._contracts import (
+    ConversationHistoryRepository,
     ContextProjection,
+    HistoryQuality,
+    LoadedContextMessage,
+    LoadedModelContext,
     RuntimePayloadRef,
     StoredStepSnapshot,
     TranscriptChunk,
+    TranscriptMessageRef,
     TranscriptOrigin,
 )
-from ._history import TranscriptRepository, _TranscriptAccumulator
+from ._history import TranscriptCapture, TranscriptRepository, _TranscriptAccumulator
 from ._plan import RuntimeDomain, RuntimeRetentionMode
 from ._store import (
     FactQuery,
@@ -93,9 +99,11 @@ class ExecutionProjectionBatch:
 
 @dataclass(frozen=True, slots=True)
 class PreparedStepSnapshot:
+    owner_id: str
     stored: StoredStepSnapshot
     chunks: tuple[TranscriptChunk, ...]
     projection: ContextProjection
+    history_quality: HistoryQuality = HistoryQuality.COMPLETE
 
 
 @dataclass(frozen=True, slots=True)
@@ -339,6 +347,7 @@ class StateStepArchive(StepStore):
         tenant_id: str,
         runtime_domain: RuntimeDomain,
         context_sources: Mapping[RuntimeDomain, TranscriptRepository] | None = None,
+        history_repository: "ConversationHistoryRepository | None" = None,
     ) -> None:
         self._store = store
         self._namespace = namespace
@@ -351,7 +360,10 @@ class StateStepArchive(StepStore):
             tenant_id=tenant_id,
             runtime_domain=runtime_domain,
             context_sources=context_sources,
+            history_repository=history_repository,
+            legacy_message_loader=self._legacy_messages,
         )
+        self._context_baselines: dict[str, LoadedModelContext] = {}
         self._closed = False
 
     @property
@@ -365,6 +377,13 @@ class StateStepArchive(StepStore):
     @property
     def transcript_repository(self) -> TranscriptRepository:
         return self._history
+
+    def register_context_baseline(
+        self,
+        step_run_id: str,
+        context: LoadedModelContext,
+    ) -> None:
+        self._context_baselines[step_run_id] = context
 
     async def prepare_snapshots(
         self,
@@ -496,52 +515,45 @@ class StateStepArchive(StepStore):
         binding_digest: str | None = None,
     ) -> tuple[PreparedStepSnapshot, ...]:
         prepared: list[PreparedStepSnapshot] = []
-        session_context = (
-            self._runtime_domain is RuntimeDomain.EXECUTION
-            and run.conversation_id is not None
-        )
-        latest_chunk = None if session_context else await self._history.latest_chunk(run.run_id)
-        canonical_count = (
-            0
-            if latest_chunk is None
-            else latest_chunk.first_message_index + latest_chunk.message_count
-        )
+        owner_id = run.run_id
+        message_index_offset = 0
+        if self._runtime_domain is RuntimeDomain.CONVERSATION:
+            owner_id = self._history_id(run)
+            if run.metadata.get("history_id") is not None:
+                message_index_offset = await self._history.history_message_count(
+                    owner_id,
+                    tenant_id=self._tenant_id,
+                )
+        baseline = self._context_baselines.get(run.run_id)
+        accumulator = _TranscriptAccumulator(run.run_id)
         projection_binding = binding_digest or run.run_id
         for snapshot in snapshots:
-            if session_context:
-                chunks = ()
-                context_origins = ()
-                projected_count = len(snapshot.messages)
-                source_domain = RuntimeDomain.CONVERSATION
-            elif len(snapshot.messages) >= canonical_count:
-                delta = snapshot.messages[canonical_count:]
-                chunks = await self._history.prepare_chunks(
-                    run.run_id,
-                    delta,
-                    first_message_index=canonical_count,
-                )
-                context_origins = ()
-                projected_count = len(snapshot.messages)
-                canonical_count = projected_count
-                source_domain = None
-            else:
-                chunks = ()
-                context_origins = tuple(
-                    [TranscriptOrigin.UNKNOWN] * len(snapshot.messages)
-                )
-                projected_count = canonical_count
-                source_domain = None
-            projection = self._history.project_context(
+            capture = accumulator.capture(snapshot.messages)
+            chunks = await self._prepare_captured_chunks(
+                owner_id,
+                capture,
+                message_index_offset=message_index_offset,
+            )
+            sources = self._message_sources(
                 run.run_id,
+                owner_id,
+                snapshot.messages,
+                baseline,
+                accumulator.messages,
+                message_index_offset,
+            )
+            origins = self._message_origins(sources)
+            projection = self._history.project_context(
+                owner_id,
                 snapshot.messages,
                 binding_digest=projection_binding,
-                canonical_message_count=projected_count,
-                origins=context_origins,
-                source_domain=source_domain,
+                origins=origins,
+                sources=sources,
             )
-            projection = await self._history.prepare_projection(run.run_id, projection)
+            projection = await self._history.prepare_projection(owner_id, projection)
             prepared.append(
                 PreparedStepSnapshot(
+                    owner_id,
                     StoredStepSnapshot(
                         run.run_id,
                         snapshot.step_index,
@@ -551,9 +563,107 @@ class StateStepArchive(StepStore):
                     ),
                     chunks,
                     projection,
+                    capture.quality,
                 )
             )
         return tuple(prepared)
+
+    def _history_id(self, run: RunRecord) -> str:
+        history_id = run.metadata.get("history_id")
+        return history_id or run.run_id
+
+    async def _prepare_captured_chunks(
+        self,
+        owner_id: str,
+        capture: TranscriptCapture,
+        *,
+        message_index_offset: int = 0,
+    ) -> tuple[TranscriptChunk, ...]:
+        messages = capture.messages
+        origins = capture.origins
+        result: list[TranscriptChunk] = []
+        offset = message_index_offset + capture.first_message_index
+        start = 0
+        while start < len(messages):
+            origin = origins[start]
+            end = start + 1
+            while end < len(messages) and origins[end] is origin:
+                end += 1
+            result.extend(
+                await self._history.prepare_chunks(
+                    owner_id,
+                    messages[start:end],
+                    first_message_index=offset,
+                    origin=origin,
+                )
+            )
+            offset += end - start
+            start = end
+        return tuple(result)
+
+    def _message_sources(
+        self,
+        run_id: str,
+        owner_id: str,
+        messages: Sequence[ModelMessage],
+        baseline: LoadedModelContext | None,
+        captured_messages: Sequence[ModelMessage],
+        message_index_offset: int = 0,
+    ) -> tuple[TranscriptMessageRef | None, ...]:
+        baseline_values = () if baseline is None else baseline.messages
+        sources: list[TranscriptMessageRef | None] = []
+        captured_positions: list[tuple[object, int]] = []
+        for index, value in enumerate(captured_messages):
+            captured_positions.append((value, index))
+        used_positions: set[int] = set()
+        baseline_positions: list[int] = []
+        used_baseline_positions: set[int] = set()
+        for index, _message in enumerate(baseline_values):
+            baseline_positions.append(index)
+        for message in messages:
+            if message.run_id == run_id:
+                position = -1
+                for candidate, candidate_index in captured_positions:
+                    if candidate_index not in used_positions and candidate == message:
+                        used_positions.add(candidate_index)
+                        position = candidate_index
+                        break
+                sources.append(
+                    None
+                    if position < 0
+                    else TranscriptMessageRef(
+                        self._runtime_domain,
+                        owner_id,
+                        message_index_offset + position,
+                    )
+                )
+                continue
+            baseline_position = next(
+                (
+                    index
+                    for index in baseline_positions
+                    if index not in used_baseline_positions
+                    and baseline_values[index].message == message
+                ),
+                None,
+            )
+            if baseline_position is not None:
+                used_baseline_positions.add(baseline_position)
+                sources.append(baseline_values[baseline_position].source)
+                continue
+            sources.append(None)
+        return tuple(sources)
+
+    def _message_origins(
+        self,
+        sources: Sequence[TranscriptMessageRef | None],
+    ) -> tuple[TranscriptOrigin, ...]:
+        return tuple(
+            TranscriptOrigin.RAW
+            if source is not None
+            else TranscriptOrigin.UNKNOWN
+            for source in sources
+        )
 
     async def _normalize_snapshots_in_transaction(
         self,
@@ -571,29 +681,19 @@ class StateStepArchive(StepStore):
             )
             if binding_digest is None:
                 return values
-            return tuple(
-                PreparedStepSnapshot(
-                    replace(
-                        snapshot.stored,
-                        projection_digest=self._history.rebind_projection(
-                            snapshot.projection,
-                            binding_digest=binding_digest,
-                        ).digest,
-                    ),
-                    snapshot.chunks,
-                    self._history.rebind_projection(
-                        snapshot.projection,
-                        binding_digest=binding_digest,
-                    ),
-                )
+            if any(
+                snapshot.projection.binding_digest != binding_digest
                 for snapshot in values
-            )
-        session_context = (
-            self._runtime_domain is RuntimeDomain.EXECUTION
-            and run.conversation_id is not None
+            ):
+                raise AIError(ErrorCode.SESSION_BINDING_MISMATCH)
+            return values
+        owner_id = (
+            run.run_id
+            if self._runtime_domain is not RuntimeDomain.CONVERSATION
+            else self._history_id(run)
         )
         facts = await transaction.list_facts(
-            FactQuery(self._history.transcript_stream(run.run_id), latest=True)
+            FactQuery(self._history.transcript_stream(owner_id), latest=True)
         )
         canonical_count = 0
         if facts:
@@ -605,35 +705,31 @@ class StateStepArchive(StepStore):
             if isinstance(snapshot, PreparedStepSnapshot):
                 values.append(snapshot)
                 continue
-            if session_context:
-                chunks = ()
-                origins = ()
-                canonical_count = len(snapshot.messages)
-                source_domain = RuntimeDomain.CONVERSATION
-            elif len(snapshot.messages) >= canonical_count:
+            if len(snapshot.messages) >= canonical_count:
                 delta = snapshot.messages[canonical_count:]
                 chunks = self._inline_chunks(
-                    run.run_id,
+                    owner_id,
                     delta,
                     first_message_index=canonical_count,
+                    origin=TranscriptOrigin.UNKNOWN,
                 )
-                origins = ()
+                origins = tuple(
+                    [TranscriptOrigin.UNKNOWN] * len(snapshot.messages)
+                )
                 canonical_count = len(snapshot.messages)
-                source_domain = None
             else:
                 chunks = ()
                 origins = tuple([TranscriptOrigin.UNKNOWN] * len(snapshot.messages))
-                source_domain = None
             projection = self._history.project_context(
-                run.run_id,
+                owner_id,
                 snapshot.messages,
                 binding_digest=projection_binding,
-                canonical_message_count=canonical_count,
                 origins=origins,
-                source_domain=source_domain,
+                sources=tuple([None] * len(snapshot.messages)),
             )
             values.append(
                 PreparedStepSnapshot(
+                    owner_id,
                     StoredStepSnapshot(
                         run.run_id,
                         snapshot.step_index,
@@ -643,6 +739,7 @@ class StateStepArchive(StepStore):
                     ),
                     chunks,
                     projection,
+                    HistoryQuality.CONSERVATIVE,
                 )
             )
         return tuple(values)
@@ -653,6 +750,7 @@ class StateStepArchive(StepStore):
         messages: Sequence[object],
         *,
         first_message_index: int,
+        origin: TranscriptOrigin = TranscriptOrigin.RAW,
     ) -> tuple[TranscriptChunk, ...]:
         if not messages:
             return ()
@@ -670,7 +768,7 @@ class StateStepArchive(StepStore):
                 run_id,
                 first_message_index,
                 len(messages),
-                TranscriptOrigin.RAW,
+                origin,
                 codec,
                 raw_digest,
                 len(raw),
@@ -785,12 +883,12 @@ class StateStepArchive(StepStore):
         for snapshot in snapshots:
             await self._history.append_chunks(
                 transaction,
-                run.run_id,
+                snapshot.owner_id,
                 snapshot.chunks,
             )
             await self._history.store_projection(
                 transaction,
-                run.run_id,
+                snapshot.owner_id,
                 snapshot.projection,
             )
 
@@ -838,8 +936,8 @@ class StateStepArchive(StepStore):
             snapshot.stored,
             snapshot.stored.state,
         )
-        await self._history.append_chunks(transaction, run.run_id, snapshot.chunks)
-        await self._history.store_projection(transaction, run.run_id, snapshot.projection)
+        await self._history.append_chunks(transaction, snapshot.owner_id, snapshot.chunks)
+        await self._history.store_projection(transaction, snapshot.owner_id, snapshot.projection)
 
     async def materialize_snapshot_in_transaction(
         self,
@@ -962,7 +1060,9 @@ class StateStepArchive(StepStore):
         if emitted:
             return
         if await self._history.load_projection(run_id) is not None:
-            for message in await self._history.load_model_context(run_id):
+            for message in (
+                await self._history.load_model_context(run_id)
+            ).model_messages():
                 yield message
             return
         for message in await self._legacy_messages(run_id):
@@ -978,18 +1078,94 @@ class StateStepArchive(StepStore):
             run_id,
             binding_digest=binding_digest,
         )
-        if values or await self._history.latest_chunk(run_id) is not None:
-            return values
+        if values.messages or await self._history.latest_chunk(run_id) is not None:
+            return values.model_messages()
         legacy = await self.latest_snapshot(run_id=run_id, include_interrupted=True)
         return () if legacy is None else tuple(legacy.messages)
 
-    async def _legacy_messages(self, run_id: str) -> tuple[object, ...]:
-        accumulator = _TranscriptAccumulator()
+    async def load_loaded_model_context(
+        self,
+        *,
+        owner_id: str,
+        binding_digest: str | None = None,
+    ) -> LoadedModelContext:
+        if self._runtime_domain is RuntimeDomain.CONVERSATION:
+            return await self._history.load_session_model_context(
+                owner_id,
+                tenant_id=self._tenant_id,
+                binding_digest=binding_digest,
+            )
+        values = await self._history.load_model_context(
+            owner_id,
+            binding_digest=binding_digest,
+        )
+        if (
+            values.messages
+            or await self._history.latest_chunk(owner_id) is not None
+            or await self._history.load_projection(owner_id) is not None
+        ):
+            return values
+        legacy = await self.latest_snapshot(
+            run_id=owner_id,
+            include_interrupted=True,
+        )
+        if legacy is None:
+            return values
+        return LoadedModelContext(
+            tuple(LoadedContextMessage(message, None) for message in legacy.messages)
+        )
+
+    async def iter_session_messages(
+        self,
+        history_id: str,
+        *,
+        tenant_id: str,
+    ) -> AsyncIterator[object]:
+        async for message in self._history.iter_session_messages(
+            history_id,
+            tenant_id=tenant_id,
+        ):
+            yield message
+
+    async def load_session_model_context(
+        self,
+        history_id: str,
+        *,
+        tenant_id: str,
+        binding_digest: str | None = None,
+    ) -> tuple[object, ...]:
+        return (
+            await self._history.load_session_model_context(
+                history_id,
+                tenant_id=tenant_id,
+                binding_digest=binding_digest,
+            )
+        ).model_messages()
+
+    async def _legacy_messages(self, run_id: str) -> tuple[ModelMessage, ...]:
+        messages: list[ModelMessage] = []
         for fact in await self._facts(run_id, "snapshot"):
             value = _decode_step(fact.data)
             if isinstance(value, ContinuableSnapshot):
-                accumulator.capture(value.messages)
-        return accumulator.messages
+                incoming = tuple(value.messages)
+                if len(incoming) < len(messages):
+                    continue
+                overlap = self._legacy_overlap(messages, incoming)
+                messages.extend(incoming[overlap:])
+        return tuple(messages)
+
+    def _legacy_overlap(
+        self,
+        stored: Sequence[ModelMessage],
+        incoming: Sequence[ModelMessage],
+    ) -> int:
+        if not stored or not incoming:
+            return 0
+        maximum = min(len(stored), len(incoming))
+        for size in range(maximum, 0, -1):
+            if tuple(stored[-size:]) == tuple(incoming[:size]):
+                return size
+        return 0
 
     async def materialize_legacy_state(self, *, run_id: str) -> LegacyMaterializationResult:
         snapshots = [
@@ -1004,18 +1180,43 @@ class StateStepArchive(StepStore):
             raise AIError(ErrorCode.STORAGE_NOT_FOUND)
         messages = await self._legacy_messages(run_id)
         latest = legacy[-1]
-        await self.materialize_snapshot(
-            run,
-            ContinuableSnapshot(
-                run_id=latest.run_id,
-                step_index=latest.step_index,
-                messages=list(messages),
-                conversation_id=latest.conversation_id,
-                parent_run_id=latest.parent_run_id,
-                agent_name=latest.agent_name,
-                timestamp=latest.timestamp,
-                state=latest.state,
+        owner_id = (
+            self._history_id(run)
+            if self._runtime_domain is RuntimeDomain.CONVERSATION
+            else run_id
+        )
+        chunks = await self._history.prepare_chunks(
+            owner_id,
+            messages,
+            first_message_index=0,
+            origin=TranscriptOrigin.UNKNOWN,
+        )
+        projection = self._history.project_context(
+            owner_id,
+            messages,
+            binding_digest=run.run_id,
+            origins=tuple([TranscriptOrigin.UNKNOWN] * len(messages)),
+            sources=tuple([None] * len(messages)),
+        )
+        prepared = PreparedStepSnapshot(
+            owner_id,
+            StoredStepSnapshot(
+                latest.run_id,
+                latest.step_index,
+                latest.timestamp,
+                latest.state,
+                projection.digest,
             ),
+            chunks,
+            projection,
+            HistoryQuality.LEGACY_PARTIAL,
+        )
+        await self._store.mutate(
+            lambda transaction: self._materialize_snapshot_in_transaction(
+                transaction,
+                run,
+                prepared,
+            )
         )
         return LegacyMaterializationResult(run_id, len(messages))
 
@@ -1046,7 +1247,7 @@ class StateStepArchive(StepStore):
             and stored.step_index == snapshot.step_index
             and stored.timestamp == snapshot.timestamp
             and stored.state == snapshot.state
-            and tuple(context) == tuple(snapshot.messages)
+            and context.model_messages() == tuple(snapshot.messages)
         )
 
     async def has_canonical_transcript(self, *, run_id: str) -> bool:
@@ -1064,7 +1265,7 @@ class StateStepArchive(StepStore):
             return None
         latest = _decode_step(values[0].data)
         if isinstance(latest, StoredStepSnapshot):
-            messages = await self._history.load_model_context(run_id)
+            messages = (await self._history.load_model_context(run_id)).model_messages()
             run = await self.get_run(run_id=run_id)
             latest = ContinuableSnapshot(
                 run_id=latest.run_id,
@@ -1214,6 +1415,15 @@ class RuntimeStepStore(StepStore):
         self._projection_dirty.clear()
         self._initialized = True
 
+    def register_context_baseline(
+        self,
+        step_run_id: str,
+        context: LoadedModelContext,
+    ) -> None:
+        for archive in self._archives.values():
+            if isinstance(archive, StateStepArchive):
+                archive.register_context_baseline(step_run_id, context)
+
     async def register_run(self, record: RunRecord) -> None:
         await self._ensure_business()
         await self._staging.register_run(record)
@@ -1282,6 +1492,50 @@ class RuntimeStepStore(StepStore):
         if runtime_domain not in self._archives:
             return self._staging
         return self._archives[runtime_domain]
+
+    async def load_loaded_model_context(
+        self,
+        runtime_domain: RuntimeDomain,
+        owner_id: str,
+        *,
+        binding_digest: str | None = None,
+    ) -> LoadedModelContext:
+        archive = self._archives.get(runtime_domain)
+        if not isinstance(archive, StateStepArchive):
+            raise AIError(ErrorCode.STORAGE_DEPENDENCY_NOT_READY)
+        return await archive.load_loaded_model_context(
+            owner_id=owner_id,
+            binding_digest=binding_digest,
+        )
+
+    async def iter_session_messages(
+        self,
+        history_id: str,
+        *,
+        tenant_id: str,
+    ) -> AsyncIterator[object]:
+        archive = self._archives.get(RuntimeDomain.CONVERSATION)
+        if not isinstance(archive, StateStepArchive):
+            raise AIError(ErrorCode.STORAGE_DEPENDENCY_NOT_READY)
+        async for message in archive.transcript_repository.iter_session_messages(
+            history_id,
+            tenant_id=tenant_id,
+        ):
+            yield message
+
+    async def load_session_model_context(
+        self,
+        history_id: str,
+        *,
+        binding_digest: str | None = None,
+    ) -> LoadedModelContext:
+        archive = self._archives.get(RuntimeDomain.CONVERSATION)
+        if not isinstance(archive, StateStepArchive):
+            raise AIError(ErrorCode.STORAGE_DEPENDENCY_NOT_READY)
+        return await archive.load_loaded_model_context(
+            owner_id=history_id,
+            binding_digest=binding_digest,
+        )
 
     async def materialize_recovery_snapshot(self, *, step_run_id: str, require_complete: bool) -> None:
         snapshot = await self._staging.latest_snapshot(run_id=step_run_id, include_interrupted=True)

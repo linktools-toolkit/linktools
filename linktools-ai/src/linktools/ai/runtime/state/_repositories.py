@@ -29,6 +29,7 @@ from ...core import (
     SessionStatus,
     TaskStatus,
     ToolOperationStatus,
+    canonical_sha256,
     canonical_json_bytes,
     operation_replay_matches,
     validate_lease_owner,
@@ -46,9 +47,11 @@ from ...task import (
 from .._tool import ToolOperationRecord
 from ._codec import decode_domain, decode_envelope, encode_domain, encode_envelope
 from ._contracts import (
+    ConversationHistoryRecord,
     ApprovalRecord,
     ArtifactRecord,
     ConversationCursor,
+    ConversationHistoryParent,
     EvaluationRecord,
     ExecutionCancelRequestCommit,
     ExecutionEventAppend,
@@ -61,6 +64,7 @@ from ._contracts import (
     ExecutionTerminalCommit,
     ExecutionTerminalCommitResult,
     ExternalCallRecord,
+    HistoryQuality,
     IdempotencyRecord,
     IdempotencyTerminalUpdate,
     MemoryRecord,
@@ -488,6 +492,161 @@ class OperationLedgerRepository(_RepositoryBase):
         ).hexdigest()
 
 
+class ConversationHistoryRepositoryImpl(_RepositoryBase):
+    """Persist one append-only history branch per Session."""
+
+    def __init__(self, store: StateStore, *, namespace: str, tenant_id: str) -> None:
+        super().__init__(
+            store,
+            namespace=namespace,
+            tenant_id=tenant_id,
+            domain=RuntimeDomain.CONVERSATION,
+        )
+
+    async def create(self, record: ConversationHistoryRecord) -> ConversationHistoryRecord:
+        _require_tenant(record, self._tenant_id)
+
+        async def mutate(transaction: StateTransaction) -> ConversationHistoryRecord:
+            return await self.create_in_transaction(transaction, record)
+
+        return await self._store.mutate(mutate)
+
+    async def create_in_transaction(
+        self,
+        transaction: StateTransaction,
+        record: ConversationHistoryRecord,
+    ) -> ConversationHistoryRecord:
+        _require_tenant(record, self._tenant_id)
+        key = self._key("conversation_history", record.history_id)
+        current = await transaction.get_record(key)
+        if current is not None:
+            existing = await self._decode_history(current)
+            if existing != record:
+                raise AIError(ErrorCode.IDEMPOTENCY_CONFLICT)
+            return existing
+        await transaction.insert_record(
+            self._stored("conversation_history", record.history_id, record)
+        )
+        return record
+
+    async def get(
+        self,
+        history_id: str,
+        *,
+        tenant_id: str,
+    ) -> ConversationHistoryRecord | None:
+        if tenant_id != self._tenant_id:
+            return None
+        record = await self._record(self._key("conversation_history", history_id))
+        return None if record is None else await self._decode_history(record)
+
+    async def get_in_transaction(
+        self,
+        transaction: StateTransaction,
+        history_id: str,
+        *,
+        tenant_id: str,
+    ) -> ConversationHistoryRecord | None:
+        _require_repository_tenant(tenant_id, self._tenant_id)
+        record = await transaction.get_record(self._key("conversation_history", history_id))
+        return None if record is None else await self._decode_history(record)
+
+    async def compare_and_swap_in_transaction(
+        self,
+        transaction: StateTransaction,
+        history_id: str,
+        *,
+        tenant_id: str,
+        expected_revision: int,
+        next_record: ConversationHistoryRecord,
+    ) -> ConversationHistoryRecord:
+        _require_repository_tenant(tenant_id, self._tenant_id)
+        _require_tenant(next_record, self._tenant_id)
+        key = self._key("conversation_history", history_id)
+        current = await transaction.get_record(key)
+        if current is None:
+            raise AIError(ErrorCode.STORAGE_NOT_FOUND)
+        value = await self._decode_history(current)
+        if value.revision != expected_revision:
+            raise AIError(ErrorCode.STORAGE_CONFLICT)
+        if next_record.history_id != history_id:
+            raise AIError(ErrorCode.STORAGE_CONFLICT)
+        await _replace_checked(
+            transaction,
+            replace(
+                self._stored("conversation_history", history_id, next_record),
+                storage_version=current.storage_version + 1,
+            ),
+            current.storage_version,
+        )
+        return next_record
+
+    async def fork(
+        self,
+        source_history_id: str,
+        child_history_id: str,
+        *,
+        session_id: str,
+        tenant_id: str,
+    ) -> ConversationHistoryRecord:
+        _require_repository_tenant(tenant_id, self._tenant_id)
+
+        async def mutate(transaction: StateTransaction) -> ConversationHistoryRecord:
+            source = await self.get_in_transaction(
+                transaction,
+                source_history_id,
+                tenant_id=tenant_id,
+            )
+            if source is None:
+                raise AIError(ErrorCode.SESSION_HISTORY_UNAVAILABLE)
+            inherited = source.inherited_message_count + source.local_message_count
+            child = ConversationHistoryRecord(
+                history_id=child_history_id,
+                session_id=session_id,
+                tenant_id=tenant_id,
+                parent=ConversationHistoryParent(
+                    source_history_id,
+                    inherited,
+                ),
+                inherited_message_count=inherited,
+                local_message_count=0,
+                history_quality=source.history_quality,
+                revision=0,
+            )
+            key = self._key("conversation_history", child_history_id)
+            current = await transaction.get_record(key)
+            if current is None:
+                return await self.create_in_transaction(transaction, child)
+            existing = await self._decode_history(current)
+            if (
+                existing.session_id == session_id
+                and existing.parent is None
+                and existing.inherited_message_count == 0
+                and existing.local_message_count == 0
+            ):
+                await _replace_checked(
+                    transaction,
+                    replace(
+                        self._stored(
+                            "conversation_history",
+                            child_history_id,
+                            child,
+                        ),
+                        storage_version=current.storage_version + 1,
+                    ),
+                    current.storage_version,
+                )
+                return child
+            if existing != child:
+                raise AIError(ErrorCode.IDEMPOTENCY_CONFLICT)
+            return existing
+
+        return await self._store.mutate(mutate)
+
+    async def _decode_history(self, record: StoredRecord) -> ConversationHistoryRecord:
+        return decode_domain(_domain_payload(record), ConversationHistoryRecord)
+
+
 class SessionRepositoryImpl(_ResourceRepository[SessionRecord]):
     def __init__(self, store: StateStore, *, namespace: str, tenant_id: str) -> None:
         super().__init__(
@@ -516,6 +675,7 @@ class SessionRepositoryImpl(_ResourceRepository[SessionRecord]):
 
     async def create(self, value: SessionRecord) -> SessionRecord:
         _require_tenant(value, self._tenant_id)
+        value = _ensure_session_history(value)
 
         async def mutate(transaction: StateTransaction) -> SessionRecord:
             await transaction.insert_record(
@@ -525,6 +685,13 @@ class SessionRepositoryImpl(_ResourceRepository[SessionRecord]):
                     value,
                     scope=self._scope("session", "owner", value.owner_principal_id),
                     state=value.status.value,
+                )
+            )
+            await transaction.insert_record(
+                self._stored(
+                    "conversation_history",
+                    value.history_id,
+                    _new_session_history(value),
                 )
             )
             await self._bump_list_generation(transaction, value.owner_principal_id)
@@ -537,6 +704,7 @@ class SessionRepositoryImpl(_ResourceRepository[SessionRecord]):
     ) -> tuple[SessionRecord, bool]:
         _require_tenant(record, self._tenant_id)
         _require_tenant(operation, self._tenant_id)
+        record = _ensure_session_history(record)
 
         async def mutate(transaction: StateTransaction) -> tuple[SessionRecord, bool]:
             _, replayed = await _append_operation(transaction, self, operation)
@@ -552,6 +720,13 @@ class SessionRepositoryImpl(_ResourceRepository[SessionRecord]):
                     record,
                     scope=self._scope("session", "owner", record.owner_principal_id),
                     state=record.status.value,
+                )
+            )
+            await transaction.insert_record(
+                self._stored(
+                    "conversation_history",
+                    record.history_id,
+                    _new_session_history(record),
                 )
             )
             await self._bump_list_generation(transaction, record.owner_principal_id)
@@ -821,6 +996,7 @@ class SessionRepositoryImpl(_ResourceRepository[SessionRecord]):
         execution_id: str,
         expected: ConversationCursor | None,
         next_cursor: ConversationCursor,
+        history_quality: str | None = None,
     ) -> SessionRecord:
         if tenant_id != self._tenant_id:
             raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
@@ -833,6 +1009,7 @@ class SessionRepositoryImpl(_ResourceRepository[SessionRecord]):
                 execution_id=execution_id,
                 expected=expected,
                 next_cursor=next_cursor,
+                history_quality=history_quality,
             )
         )
 
@@ -850,6 +1027,58 @@ class SessionRepositoryImpl(_ResourceRepository[SessionRecord]):
             raise AIError(ErrorCode.STORAGE_NOT_FOUND)
         return await self._decode(record, SessionRecord)
 
+    async def ensure_history(
+        self,
+        session_id: str,
+        *,
+        tenant_id: str,
+        expected_revision: int,
+        history: ConversationHistoryRecord,
+    ) -> SessionRecord:
+        _require_repository_tenant(tenant_id, self._tenant_id)
+        _require_tenant(history, self._tenant_id)
+        if history.session_id != session_id:
+            raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
+
+        async def mutate(transaction: StateTransaction) -> SessionRecord:
+            record = await transaction.get_record(self._key("session", session_id))
+            if record is None:
+                raise AIError(ErrorCode.STORAGE_NOT_FOUND)
+            current = await self._decode(record, SessionRecord)
+            if current.history_id == history.history_id:
+                return current
+            if current.history_id is not None or current.revision != expected_revision:
+                raise AIError(ErrorCode.STORAGE_CONFLICT)
+            history_key = self._key("conversation_history", history.history_id)
+            stored_history = await transaction.get_record(history_key)
+            if stored_history is None:
+                await transaction.insert_record(
+                    self._stored("conversation_history", history.history_id, history)
+                )
+            elif await self._decode_history(stored_history) != history:
+                raise AIError(ErrorCode.IDEMPOTENCY_CONFLICT)
+            now = await transaction.now()
+            updated = replace(
+                current,
+                history_id=history.history_id,
+                history_quality=history.history_quality.value,
+                revision=current.revision + 1,
+                resource_generation=current.resource_generation + 1,
+                updated_at=now,
+            )
+            await _replace_checked(
+                transaction,
+                self._projected_record(record, updated),
+                record.storage_version,
+            )
+            await self._bump_list_generation(transaction, current.owner_principal_id)
+            return updated
+
+        return await self._store.mutate(mutate)
+
+    async def _decode_history(self, record: StoredRecord) -> ConversationHistoryRecord:
+        return decode_domain(_domain_payload(record), ConversationHistoryRecord)
+
     async def advance_continuation_in_transaction(
         self,
         transaction: StateTransaction,
@@ -860,6 +1089,7 @@ class SessionRepositoryImpl(_ResourceRepository[SessionRecord]):
         expected: ConversationCursor | None,
         next_cursor: ConversationCursor,
         release_execution: bool = False,
+        history_quality: str | None = None,
     ) -> SessionRecord:
         if tenant_id != self._tenant_id:
             raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
@@ -885,6 +1115,11 @@ class SessionRepositoryImpl(_ResourceRepository[SessionRecord]):
         next_value = replace(
             current,
             continuation=next_cursor,
+            history_quality=(
+                current.history_quality
+                if history_quality is None
+                else history_quality
+            ),
             active_execution_id=None if release_execution else current.active_execution_id,
             revision=current.revision + 1,
             resource_generation=current.resource_generation + 1,
@@ -907,6 +1142,7 @@ class SessionRepositoryImpl(_ResourceRepository[SessionRecord]):
         execution_id: str,
         expected: ConversationCursor | None,
         next_cursor: ConversationCursor,
+        history_quality: str | None = None,
     ) -> SessionRecord:
         return await self.advance_continuation_in_transaction(
             transaction,
@@ -916,6 +1152,7 @@ class SessionRepositoryImpl(_ResourceRepository[SessionRecord]):
             expected=expected,
             next_cursor=next_cursor,
             release_execution=True,
+            history_quality=history_quality,
         )
 
 
@@ -1241,26 +1478,47 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
         _require_repository_tenant(tenant_id, self._tenant_id)
 
         async def mutate(transaction: StateTransaction) -> ExecutionRecord:
-            record = await transaction.get_record(self._key("execution", execution_id))
-            if record is None:
-                raise AIError(ErrorCode.STORAGE_NOT_FOUND)
-            current = await self._decode(record, ExecutionRecord)
-            if current.revision != expected_revision or current.agent_run_sequence != expected_agent_run_sequence:
-                raise AIError(ErrorCode.STORAGE_CONFLICT)
-            next_value = replace(
-                current,
-                agent_run_sequence=current.agent_run_sequence + 1,
-                revision=current.revision + 1,
-                updated_at=await transaction.now(),
-            )
-            await _replace_checked(
+            return await self.claim_next_agent_run_in_transaction(
                 transaction,
-                _projected_record(self, record, next_value),
-                record.storage_version,
+                execution_id,
+                tenant_id=tenant_id,
+                expected_revision=expected_revision,
+                expected_agent_run_sequence=expected_agent_run_sequence,
             )
-            return next_value
 
         return await self._store.mutate(mutate)
+
+    async def claim_next_agent_run_in_transaction(
+        self,
+        transaction: StateTransaction,
+        execution_id: str,
+        *,
+        tenant_id: str,
+        expected_revision: int,
+        expected_agent_run_sequence: int,
+    ) -> ExecutionRecord:
+        _require_repository_tenant(tenant_id, self._tenant_id)
+        record = await transaction.get_record(self._key("execution", execution_id))
+        if record is None:
+            raise AIError(ErrorCode.STORAGE_NOT_FOUND)
+        current = await self._decode(record, ExecutionRecord)
+        if (
+            current.revision != expected_revision
+            or current.agent_run_sequence != expected_agent_run_sequence
+        ):
+            raise AIError(ErrorCode.STORAGE_CONFLICT)
+        next_value = replace(
+            current,
+            agent_run_sequence=current.agent_run_sequence + 1,
+            revision=current.revision + 1,
+            updated_at=await transaction.now(),
+        )
+        await _replace_checked(
+            transaction,
+            _projected_record(self, record, next_value),
+            record.storage_version,
+        )
+        return next_value
 
     async def mark_start_unknown(self, commit: ExecutionStartUnknownCommit) -> ExecutionRecord:
         return await self._transition_execution(
@@ -1890,16 +2148,31 @@ class RecoveryCheckpointRepositoryImpl(_ResourceRepository[RecoveryCheckpoint]):
             return None
 
         async def read(transaction: StateTransaction) -> RecoveryCheckpoint | None:
-            keys = (self._admission_key(execution_id), self._state_key(execution_id))
-            records = await transaction.get_records(keys)
-            admission = records.get(keys[0])
-            state = records.get(keys[1])
-            if admission is not None and state is not None:
-                return await self._compose(admission, state)
-            legacy = await transaction.get_record(self._legacy_key(execution_id))
-            return None if legacy is None else await self._decode(legacy, RecoveryCheckpoint)
+            return await self.get_in_transaction(
+                transaction,
+                execution_id,
+                tenant_id=tenant_id,
+            )
 
         return await self._store.read(read)
+
+    async def get_in_transaction(
+        self,
+        transaction: StateTransaction,
+        execution_id: str,
+        *,
+        tenant_id: str,
+    ) -> RecoveryCheckpoint | None:
+        if tenant_id != self._tenant_id:
+            return None
+        keys = (self._admission_key(execution_id), self._state_key(execution_id))
+        records = await transaction.get_records(keys)
+        admission = records.get(keys[0])
+        state = records.get(keys[1])
+        if admission is not None and state is not None:
+            return await self._compose(admission, state)
+        legacy = await transaction.get_record(self._legacy_key(execution_id))
+        return None if legacy is None else await self._decode(legacy, RecoveryCheckpoint)
 
     async def create(self, record: RecoveryCheckpoint) -> RecoveryCheckpoint:
         return await self._store.mutate(
@@ -3228,7 +3501,14 @@ def build_repository_bundle(
         "operations": OperationLedgerRepository(store, namespace=namespace, tenant_id=tenant_id, domain=domain)
     }
     if domain is RuntimeDomain.CONVERSATION:
-        values["sessions"] = SessionRepositoryImpl(store, namespace=namespace, tenant_id=tenant_id)
+        values.update(
+            sessions=SessionRepositoryImpl(store, namespace=namespace, tenant_id=tenant_id),
+            histories=ConversationHistoryRepositoryImpl(
+                store,
+                namespace=namespace,
+                tenant_id=tenant_id,
+            ),
+        )
     elif domain is RuntimeDomain.EXECUTION:
         values.update(
             executions=ExecutionRepositoryImpl(store, namespace=namespace, tenant_id=tenant_id),
@@ -3282,6 +3562,34 @@ def _canonical_record_identity(kind: str, value: object) -> object:
     if isinstance(value, ExternalCallRecord):
         return value.call_id
     raise TypeError(f"unsupported record kind: {kind}")
+
+
+def _ensure_session_history(value: SessionRecord) -> SessionRecord:
+    if value.history_id is not None:
+        return value
+    history_id = canonical_sha256(
+        {
+            "kind": "conversation_history",
+            "session_id": value.session_id,
+            "tenant_id": value.tenant_id,
+        }
+    )
+    return replace(value, history_id=history_id)
+
+
+def _new_session_history(value: SessionRecord) -> ConversationHistoryRecord:
+    if value.history_id is None:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    return ConversationHistoryRecord(
+        history_id=value.history_id,
+        session_id=value.session_id,
+        tenant_id=value.tenant_id,
+        parent=None,
+        inherited_message_count=0,
+        local_message_count=0,
+        history_quality=HistoryQuality.COMPLETE,
+        revision=0,
+    )
 
 
 def _domain_data(value: object) -> dict[str, object]:
@@ -3341,6 +3649,7 @@ def _require_tenant(value: object, tenant_id: str) -> None:
             ApprovalRecord,
             ExternalCallRecord,
             RecoveryCheckpoint,
+            ConversationHistoryRecord,
             ToolOperationRecord,
         ),
     ):

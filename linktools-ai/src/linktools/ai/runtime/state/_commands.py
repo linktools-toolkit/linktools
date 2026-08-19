@@ -19,17 +19,21 @@ from ...core import (
     IdempotencyStatus,
     SessionStatus,
     ToolOperationStatus,
+    step_run_id,
 )
 from ...errors import AIError, ErrorCode
 from ...storage import StoredPayload
 from .._tool import ToolOperationRecord
 from ._contracts import (
+    AgentAttemptClaim,
     ConversationCursor,
+    ConversationHistoryRecord,
     ExecutionEventAppend,
     ExecutionRecord,
     ExecutionStartClaim,
     ExecutionTerminalCommit,
     ExecutionTerminalCommitResult,
+    HistoryQuality,
     RecoveryCheckpoint,
     RecoveryCheckpointState,
     RecoveryHandoffPhase,
@@ -37,6 +41,7 @@ from ._contracts import (
     ToolOperationAdmission,
 )
 from ._repositories import (
+    ConversationHistoryRepositoryImpl,
     EventRepositoryImpl,
     ExecutionRepositoryImpl,
     OperationLedgerRepository,
@@ -44,7 +49,7 @@ from ._repositories import (
     SessionRepositoryImpl,
     ToolRepositoryImpl,
 )
-from ._steps import StateStepArchive
+from ._steps import PreparedStepSnapshot, StateStepArchive
 from ._store import StateGroupTransaction, StateStore, StateTransaction
 
 _logger = environ.get_logger("ai.runtime.state.commands")
@@ -57,24 +62,87 @@ class RuntimeStateCommands:
         self,
         execution: ExecutionRepositoryImpl,
         *,
+        namespace: str,
         events: EventRepositoryImpl,
         operations: OperationLedgerRepository | None = None,
         conversation: SessionRepositoryImpl | None = None,
         recovery: RecoveryCheckpointRepositoryImpl | None = None,
+        conversation_history: ConversationHistoryRepositoryImpl | None = None,
         tools: ToolRepositoryImpl | None = None,
         conversation_steps: StateStepArchive | None = None,
         execution_steps: StateStepArchive | None = None,
         recovery_steps: StateStepArchive | None = None,
     ) -> None:
         self._execution = execution
+        self._namespace = namespace
         self._events = events
         self._operations = operations
         self._conversation = conversation
         self._recovery = recovery
+        self._conversation_history = conversation_history
         self._tools = tools
         self._conversation_steps = conversation_steps
         self._execution_steps = execution_steps
         self._recovery_steps = recovery_steps
+
+    async def _promote_history_in_transaction(
+        self,
+        transaction: StateTransaction,
+        session: SessionRecord,
+        prepared: PreparedStepSnapshot,
+    ) -> ConversationHistoryRecord:
+        if self._conversation_history is None:
+            raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+        history_id = session.history_id or prepared.owner_id
+        history = await self._conversation_history.get_in_transaction(
+            transaction,
+            history_id,
+            tenant_id=session.tenant_id,
+        )
+        if history is None:
+            history = ConversationHistoryRecord(
+                history_id=history_id,
+                session_id=session.session_id,
+                tenant_id=session.tenant_id,
+                parent=None,
+                inherited_message_count=0,
+                local_message_count=0,
+                history_quality=HistoryQuality.LEGACY_PARTIAL,
+                revision=0,
+            )
+            await self._conversation_history.create_in_transaction(transaction, history)
+        end = max(
+            (
+                chunk.first_message_index + chunk.message_count
+                for chunk in prepared.chunks
+            ),
+            default=history.inherited_message_count + history.local_message_count,
+        )
+        next_local_count = max(
+            history.local_message_count,
+            end - history.inherited_message_count,
+        )
+        quality = history.history_quality
+        if prepared.history_quality is HistoryQuality.CONSERVATIVE:
+            quality = HistoryQuality.CONSERVATIVE
+        if (
+            next_local_count == history.local_message_count
+            and quality is history.history_quality
+        ):
+            return history
+        next_history = replace(
+            history,
+            local_message_count=next_local_count,
+            history_quality=quality,
+            revision=history.revision + 1,
+        )
+        return await self._conversation_history.compare_and_swap_in_transaction(
+            transaction,
+            history_id,
+            tenant_id=session.tenant_id,
+            expected_revision=history.revision,
+            next_record=next_history,
+        )
 
     async def commit_start_checkpoint(
         self,
@@ -208,17 +276,136 @@ class RuntimeStateCommands:
 
     async def commit_agent_attempt_checkpoint(
         self,
+        claim: AgentAttemptClaim,
+    ) -> tuple[ExecutionRecord, RecoveryCheckpoint]:
+        """Atomically publish the execution sequence and active recovery run."""
+        self._require_recovery()
+        stores = [self._execution.state_store, self._recovery.state_store]
+        if not _same_group(stores):
+            raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+        next_sequence = claim.expected_agent_run_sequence + 1
+        next_run_id = step_run_id(
+            namespace=self._namespace,
+            tenant_id=claim.tenant_id,
+            execution_id=claim.execution_id,
+            segment_sequence=next_sequence,
+        )
+
+        async def callback(
+            group: StateGroupTransaction,
+        ) -> tuple[ExecutionRecord, RecoveryCheckpoint]:
+            execution_transaction = group.transaction(self._execution.state_store)
+            recovery_transaction = group.transaction(self._recovery.state_store)
+            current_execution = await self._execution.get_in_transaction(
+                execution_transaction,
+                claim.execution_id,
+                tenant_id=claim.tenant_id,
+            )
+            if current_execution is None:
+                raise AIError(ErrorCode.STORAGE_NOT_FOUND)
+            current_recovery = await self._recovery.get_in_transaction(
+                recovery_transaction,
+                claim.execution_id,
+                tenant_id=claim.tenant_id,
+            )
+            if current_recovery is None:
+                raise AIError(ErrorCode.STORAGE_NOT_FOUND)
+            if (
+                current_execution.revision != claim.expected_execution_revision
+                or current_execution.agent_run_sequence
+                != claim.expected_agent_run_sequence
+                or current_recovery.revision != claim.expected_recovery_revision
+                or current_recovery.state is not claim.expected_recovery_state
+            ):
+                raise AIError(ErrorCode.STORAGE_CONFLICT)
+            if current_recovery.state is not RecoveryCheckpointState.ADMITTED:
+                raise AIError(ErrorCode.STORAGE_CONFLICT)
+            updated_execution = await self._execution.claim_next_agent_run_in_transaction(
+                execution_transaction,
+                claim.execution_id,
+                tenant_id=claim.tenant_id,
+                expected_revision=claim.expected_execution_revision,
+                expected_agent_run_sequence=claim.expected_agent_run_sequence,
+            )
+            updated_recovery = replace(
+                current_recovery,
+                step_run_id=next_run_id,
+                agent_run_sequence=next_sequence,
+                state=RecoveryCheckpointState.ACTIVE,
+                revision=current_recovery.revision + 1,
+                updated_at=updated_execution.updated_at,
+            )
+            updated_recovery = await self._recovery.compare_and_swap_in_transaction(
+                recovery_transaction,
+                claim.execution_id,
+                tenant_id=claim.tenant_id,
+                expected_revision=claim.expected_recovery_revision,
+                next_record=updated_recovery,
+            )
+            return updated_execution, updated_recovery
+
+        _logger.debug(
+            "agent attempt checkpoint requested: execution=%s sequence=%s",
+            claim.execution_id,
+            next_sequence,
+        )
+        try:
+            return await stores[0].storage_group.mutate(stores, callback)
+        except AIError as error:
+            if error.code is not ErrorCode.STORAGE_COMMIT_UNKNOWN:
+                raise
+            execution = await self._execution.get(
+                claim.execution_id,
+                tenant_id=claim.tenant_id,
+            )
+            recovery = await self._recovery.get(
+                claim.execution_id,
+                tenant_id=claim.tenant_id,
+            )
+            execution_target = (
+                execution is not None
+                and execution.revision == claim.expected_execution_revision + 1
+                and execution.agent_run_sequence == next_sequence
+            )
+            recovery_target = (
+                recovery is not None
+                and recovery.revision == claim.expected_recovery_revision + 1
+                and recovery.state is RecoveryCheckpointState.ACTIVE
+                and recovery.step_run_id == next_run_id
+                and recovery.agent_run_sequence == next_sequence
+            )
+            execution_predecessor = (
+                execution is not None
+                and execution.revision == claim.expected_execution_revision
+                and execution.agent_run_sequence == claim.expected_agent_run_sequence
+            )
+            recovery_predecessor = (
+                recovery is not None
+                and recovery.revision == claim.expected_recovery_revision
+                and recovery.state is claim.expected_recovery_state
+                and recovery.step_run_id is None
+                and recovery.agent_run_sequence == claim.expected_agent_run_sequence
+            )
+            if execution_target and recovery_target:
+                _logger.warning(
+                    "agent attempt commit outcome reconciled: execution=%s sequence=%s",
+                    claim.execution_id,
+                    next_sequence,
+                )
+                return execution, recovery
+            if not (execution_predecessor and recovery_predecessor):
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
+            return await stores[0].storage_group.mutate(stores, callback)
+
+    async def commit_start_attempt_checkpoint(
+        self,
         claim: ExecutionStartClaim,
         *,
         recovery_checkpoint: RecoveryCheckpoint | None = None,
         session_id: str | None = None,
         expected_cursor: ConversationCursor | None = None,
     ) -> ExecutionRecord:
-        """Atomically claim an execution and admit its recovery attempt."""
-        _logger.debug(
-            "agent attempt checkpoint requested: execution=%s",
-            claim.execution_id,
-        )
+        """Commit the initial execution start and optional recovery admission."""
         return await self.commit_start_checkpoint(
             claim,
             recovery_checkpoint=recovery_checkpoint,
@@ -527,6 +714,16 @@ class RuntimeStateCommands:
                             prepared_conversation[0],
                             binding_digest=commit.execution.binding_digest,
                         )
+                        session = await self._conversation.get_in_transaction(
+                            conversation_transaction,
+                            session_id,
+                            tenant_id=commit.execution.tenant_id,
+                        )
+                        promoted_history = await self._promote_history_in_transaction(
+                            conversation_transaction,
+                            session,
+                            prepared_conversation[0],
+                        )
                         await self._conversation.complete_execution_in_transaction(
                             conversation_transaction,
                             session_id,
@@ -534,6 +731,7 @@ class RuntimeStateCommands:
                             execution_id=commit.execution.execution_id,
                             expected=expected_cursor,
                             next_cursor=next_cursor,
+                            history_quality=promoted_history.history_quality.value,
                         )
                 if recovery_checkpoint is not None:
                     if recovery_run is not None or recovery_snapshot is not None:
@@ -638,11 +836,22 @@ class RuntimeStateCommands:
             ]
 
             async def commit_conversation(group: StateGroupTransaction) -> None:
+                conversation_transaction = group.transaction(self._conversation.state_store)
                 await self._conversation_steps.materialize_snapshot_in_transaction(
                     group.transaction(self._conversation_steps.state_store),
                     conversation_run,
                     prepared_conversation[0],
                     binding_digest=commit.execution.binding_digest,
+                )
+                session = await self._conversation.get_in_transaction(
+                    conversation_transaction,
+                    session_id,
+                    tenant_id=commit.execution.tenant_id,
+                )
+                promoted_history = await self._promote_history_in_transaction(
+                    conversation_transaction,
+                    session,
+                    prepared_conversation[0],
                 )
                 await self._conversation.advance_continuation_in_transaction(
                     group.transaction(self._conversation.state_store),
@@ -652,6 +861,7 @@ class RuntimeStateCommands:
                     expected=expected_cursor,
                     next_cursor=next_cursor,
                     release_execution=False,
+                    history_quality=promoted_history.history_quality.value,
                 )
 
             if _same_group(conversation_stores):
@@ -1475,10 +1685,12 @@ class ConversationStateCommands:
         state_store: StateStore,
         sessions: SessionRepositoryImpl,
         steps: StateStepArchive | None,
+        histories: ConversationHistoryRepositoryImpl | None = None,
     ) -> None:
         self._state_store = state_store
         self._sessions = sessions
         self._steps = steps
+        self._histories = histories
 
     async def commit_snapshot_and_advance(
         self,
@@ -1517,6 +1729,43 @@ class ConversationStateCommands:
                 snapshots=prepared,
                 binding_digest=binding_digest,
             )
+            if self._histories is None:
+                raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+            history_id = current.history_id or prepared[0].owner_id
+            history = await self._histories.get_in_transaction(
+                transaction,
+                history_id,
+                tenant_id=tenant_id,
+            )
+            if history is None:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            end = max(
+                (
+                    chunk.first_message_index + chunk.message_count
+                    for chunk in prepared[0].chunks
+                ),
+                default=history.inherited_message_count + history.local_message_count,
+            )
+            quality = history.history_quality
+            if prepared[0].history_quality is HistoryQuality.CONSERVATIVE:
+                quality = HistoryQuality.CONSERVATIVE
+            next_history = replace(
+                history,
+                local_message_count=max(
+                    history.local_message_count,
+                    end - history.inherited_message_count,
+                ),
+                history_quality=quality,
+                revision=history.revision + 1,
+            )
+            if next_history != history:
+                await self._histories.compare_and_swap_in_transaction(
+                    transaction,
+                    history_id,
+                    tenant_id=tenant_id,
+                    expected_revision=history.revision,
+                    next_record=next_history,
+                )
             return await self._sessions.advance_continuation_in_transaction(
                 transaction,
                 session_id,
@@ -1524,6 +1773,7 @@ class ConversationStateCommands:
                 execution_id=execution_id,
                 expected=expected,
                 next_cursor=next_cursor,
+                history_quality=next_history.history_quality.value,
             )
 
         return await self._state_store.mutate(mutate)

@@ -9,9 +9,17 @@ import os
 import shutil
 import tempfile
 from collections.abc import AsyncIterator, Callable, Mapping
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, BinaryIO, Protocol, TypeVar, runtime_checkable
+from typing import (
+    TYPE_CHECKING,
+    AsyncContextManager,
+    BinaryIO,
+    Protocol,
+    TypeVar,
+    runtime_checkable,
+)
 
 from linktools.core import environ
 
@@ -84,11 +92,28 @@ class ObjectStore(Protocol):
     def open(self, key: str) -> AsyncIterator[bytes]: ...
 
 
+def runtime_object_key(
+    *,
+    namespace_digest: str,
+    tenant_digest: str,
+    stored_digest: str,
+) -> str:
+    """Build the tenant-scoped physical key for immutable Runtime bytes."""
+    for value in (namespace_digest, tenant_digest, stored_digest):
+        _validate_digest(value)
+    return f"v2/runtime/{namespace_digest}/{tenant_digest}/{stored_digest}"
+
+
 @runtime_checkable
-class ObjectStoreMaintenance(Protocol):
+class ObjectStoreInspection(Protocol):
     def list_objects(self) -> AsyncIterator[ObjectStat]: ...
 
+
+@runtime_checkable
+class ObjectStoreMaintenance(ObjectStoreInspection, Protocol):
     async def delete_object(self, key: str, *, expected_digest: str) -> bool: ...
+
+    def offline_exclusivity(self) -> AsyncContextManager[None]: ...
 
 
 class InMemoryObjectStore:
@@ -125,6 +150,10 @@ class InMemoryObjectStore:
 
     async def validate_integrity(self) -> None:
         return None
+
+    @asynccontextmanager
+    async def offline_exclusivity(self) -> AsyncIterator[None]:
+        yield
 
     async def _list_objects(self) -> AsyncIterator[ObjectStat]:
         for key, value in self._objects.items():
@@ -203,6 +232,9 @@ class _ScopedObjectStore:
     async def validate_integrity(self) -> None:
         await self._parent.validate_integrity()
 
+    def offline_exclusivity(self) -> AsyncContextManager[None]:
+        return self._parent.offline_exclusivity()
+
     async def _list_objects(self) -> AsyncIterator[ObjectStat]:
         values = [value async for value in self._parent.list_objects()]
         prefix = f"{self._scope}/"
@@ -232,6 +264,7 @@ class FilesystemObjectStore:
         _validate_store_id(store_id)
         self._root = Path(root).expanduser().resolve()
         self._store_id = store_id
+        self._offline_exclusive = False
 
     @property
     def store_id(self) -> str:
@@ -282,6 +315,15 @@ class FilesystemObjectStore:
     async def validate_integrity(self) -> None:
         await _await_thread(lambda: _validate_filesystem_objects(self._root, self._store_id))
 
+    @asynccontextmanager
+    async def offline_exclusivity(self) -> AsyncIterator[None]:
+        async with FilesystemMutationLock(self._root / "object.lock"):
+            self._offline_exclusive = True
+            try:
+                yield
+            finally:
+                self._offline_exclusive = False
+
     async def _list_objects(self) -> AsyncIterator[ObjectStat]:
         values = await _await_thread(lambda: _list_filesystem_objects(self._root, self._store_id))
         for value in values:
@@ -293,7 +335,7 @@ class FilesystemObjectStore:
     async def delete_object(self, key: str, *, expected_digest: str) -> bool:
         _validate_key(key)
         destination, metadata = self._paths(key)
-        async with FilesystemMutationLock(self._root / "object.lock"):
+        async def delete() -> bool:
             current = await _await_thread(
                 lambda: _stat_filesystem_object(metadata, destination, key)
             )
@@ -304,6 +346,10 @@ class FilesystemObjectStore:
             return await _await_thread(
                 lambda: _delete_filesystem_object(destination, metadata)
             )
+        if self._offline_exclusive:
+            return await delete()
+        async with FilesystemMutationLock(self._root / "object.lock"):
+            return await delete()
 
     async def _open(self, key: str) -> AsyncIterator[bytes]:
         _validate_key(key)
@@ -696,6 +742,7 @@ async def _spool_memory(chunks: AsyncIterator[bytes], expected_size: int) -> tup
 async def _spool_file(chunks: AsyncIterator[bytes], path: Path, expected_size: int) -> tuple[int, str]:
     digest = hashlib.sha256()
     size = 0
+    buffer = bytearray()
     handle = await _await_thread(lambda: path.open("wb"))
     try:
         async for chunk in chunks:
@@ -706,8 +753,14 @@ async def _spool_file(chunks: AsyncIterator[bytes], path: Path, expected_size: i
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             digest.update(chunk)
             for offset in range(0, len(chunk), _CHUNK_SIZE):
-                value = chunk[offset : offset + _CHUNK_SIZE]
-                await _await_thread(lambda value=value: handle.write(value))
+                buffer.extend(chunk[offset : offset + _CHUNK_SIZE])
+                while len(buffer) >= _CHUNK_SIZE:
+                    value = bytes(buffer[:_CHUNK_SIZE])
+                    del buffer[:_CHUNK_SIZE]
+                    await _await_thread(lambda value=value: handle.write(value))
+        if buffer:
+            value = bytes(buffer)
+            await _await_thread(lambda value=value: handle.write(value))
         await _await_thread(lambda: _flush_file(handle))
     finally:
         await _await_thread(handle.close)
@@ -912,7 +965,9 @@ __all__ = [
     "ObjectRef",
     "ObjectStat",
     "ObjectStore",
+    "ObjectStoreInspection",
     "ObjectStoreMaintenance",
+    "runtime_object_key",
     "SqlObjectStore",
     "TransientObjectStore",
     "build_object_sql_metadata",

@@ -196,6 +196,7 @@ class SessionHistoryReader(Protocol):
         *,
         tenant_id: str,
         continuation_step_run_id: "str | None",
+        continuation_history_id: "str | None" = None,
         cursor: "str | None",
         limit: int,
     ) -> "Page[SessionHistoryItem]": ...

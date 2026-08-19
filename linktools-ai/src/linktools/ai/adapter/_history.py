@@ -4,8 +4,10 @@
 
 import re
 import time
+from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from typing import Protocol, runtime_checkable
 
 from linktools.core import environ
 from pydantic_ai.messages import (
@@ -51,6 +53,16 @@ class _ProjectedHistoryItem:
     content: JsonValue
     tool_name: "str | None" = None
     tool_call_id: "str | None" = None
+
+
+@runtime_checkable
+class _SessionHistoryStore(Protocol):
+    async def iter_session_messages(
+        self,
+        history_id: str,
+        *,
+        tenant_id: str,
+    ) -> AsyncIterator[object]: ...
 
 
 class StepExecutionHistoryReader:
@@ -259,6 +271,7 @@ class StepSessionHistoryReader:
         *,
         tenant_id: str,
         continuation_step_run_id: "str | None",
+        continuation_history_id: "str | None" = None,
         cursor: "str | None",
         limit: int,
     ) -> "Page[SessionHistoryItem]":
@@ -268,33 +281,48 @@ class StepSessionHistoryReader:
             if cursor is not None:
                 raise AIError(ErrorCode.CURSOR_INVALID)
             return Page((), None)
-        run = await self._store.get_run(run_id=continuation_step_run_id)
-        if run is None:
-            raise AIError(ErrorCode.SESSION_HISTORY_UNAVAILABLE)
-        if run.run_id != continuation_step_run_id:
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        snapshot = await self._store.latest_snapshot(
-            run_id=continuation_step_run_id,
-            include_interrupted=True,
-        )
-        if snapshot is None:
-            raise AIError(ErrorCode.SESSION_HISTORY_UNAVAILABLE)
-        if (
-            snapshot.run_id != continuation_step_run_id
-            or snapshot.conversation_id != run.conversation_id
-        ):
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        if snapshot.state != "complete":
-            raise AIError(ErrorCode.SESSION_HISTORY_UNAVAILABLE)
-        messages = [
-            message
-            async for message in self._store.iter_messages(run_id=continuation_step_run_id)
-        ]
+        if continuation_history_id is not None and isinstance(self._store, _SessionHistoryStore):
+            history_store = self._store
+            messages = [
+                message
+                async for message in history_store.iter_session_messages(
+                    continuation_history_id,
+                    tenant_id=tenant_id,
+                )
+            ]
+            if not messages:
+                continuation_history_id = None
+        elif continuation_history_id is not None:
+            continuation_history_id = None
+        if continuation_history_id is None:
+            run = await self._store.get_run(run_id=continuation_step_run_id)
+            if run is None:
+                raise AIError(ErrorCode.SESSION_HISTORY_UNAVAILABLE)
+            if run.run_id != continuation_step_run_id:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            snapshot = await self._store.latest_snapshot(
+                run_id=continuation_step_run_id,
+                include_interrupted=True,
+            )
+            if snapshot is None:
+                raise AIError(ErrorCode.SESSION_HISTORY_UNAVAILABLE)
+            if (
+                snapshot.run_id != continuation_step_run_id
+                or snapshot.conversation_id != run.conversation_id
+            ):
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            if snapshot.state != "complete":
+                raise AIError(ErrorCode.SESSION_HISTORY_UNAVAILABLE)
+            messages = [
+                message
+                async for message in self._store.iter_messages(run_id=continuation_step_run_id)
+            ]
         projected = [item for message in messages for item in _project_message(message)]
         source_revision = canonical_sha256(
             {
                 "session_id": session_id,
                 "continuation_step_run_id": continuation_step_run_id,
+                "continuation_history_id": continuation_history_id,
                 "items": [
                     {
                         "item_kind": item.item_kind,

@@ -6,7 +6,8 @@ import asyncio
 import hashlib
 import json
 import os
-from collections.abc import Callable, Iterator, Mapping, MutableMapping, Sequence
+from contextlib import asynccontextmanager
+from collections.abc import AsyncIterator, Callable, Iterator, Mapping, MutableMapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -519,6 +520,24 @@ class FilesystemStateStorageGroup:
             if not self._standalone:
                 await self._group_lock.release()
         _logger.debug("filesystem StateStorageGroup closed: scope=%s", self._scope_digest)
+
+    @asynccontextmanager
+    async def offline_exclusivity(self) -> AsyncIterator[None]:
+        if self._initialized or self._closed:
+            raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+        members = tuple(sorted(self._members, key=lambda value: value.root.as_posix()))
+        acquired: list[FilesystemWriterLock] = []
+        if not self._standalone:
+            await self._group_lock.acquire()
+            acquired.append(self._group_lock)
+        try:
+            for member in members:
+                await member._writer_lock.acquire()
+                acquired.append(member._writer_lock)
+            yield
+        finally:
+            for lock in reversed(acquired):
+                await lock.release()
 
     async def read(self, store: "FilesystemStateStore", fn: StateCallback[ValueT]) -> ValueT:
         self._ensure_member(store)

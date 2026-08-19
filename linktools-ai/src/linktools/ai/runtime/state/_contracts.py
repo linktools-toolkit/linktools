@@ -12,6 +12,8 @@ from datetime import datetime
 from enum import StrEnum
 from typing import TYPE_CHECKING, Protocol
 
+from pydantic_ai.messages import ModelMessage
+
 from ...core import (
     ApprovalDecision,
     ApprovalStatus,
@@ -50,6 +52,49 @@ if TYPE_CHECKING:
 @dataclass(frozen=True, slots=True)
 class ConversationCursor:
     step_run_id: str
+    history_id: "str | None" = None
+    message_count: "int | None" = None
+
+
+@dataclass(frozen=True, slots=True)
+class ConversationHistoryParent:
+    history_id: str
+    through_message_count: int
+
+    def __post_init__(self) -> None:
+        if self.through_message_count < 0:
+            raise ValueError("history parent message count cannot be negative")
+
+
+class HistoryQuality(StrEnum):
+    COMPLETE = "complete"
+    CONSERVATIVE = "conservative"
+    LEGACY_PARTIAL = "legacy_partial"
+
+
+@dataclass(frozen=True, slots=True)
+class ConversationHistoryRecord:
+    history_id: str
+    session_id: str
+    tenant_id: str
+    parent: "ConversationHistoryParent | None"
+    inherited_message_count: int
+    local_message_count: int
+    history_quality: HistoryQuality
+    revision: int
+
+    def __post_init__(self) -> None:
+        if self.inherited_message_count < 0 or self.local_message_count < 0:
+            raise ValueError("history message counts cannot be negative")
+        if self.revision < 0:
+            raise ValueError("history revision cannot be negative")
+        if self.parent is None and self.inherited_message_count != 0:
+            raise ValueError("root history cannot inherit messages")
+        if (
+            self.parent is not None
+            and self.inherited_message_count != self.parent.through_message_count
+        ):
+            raise ValueError("history inherited count must match parent reference")
 
 
 class TranscriptOrigin(StrEnum):
@@ -65,7 +110,7 @@ class RuntimePayloadRef:
 
 @dataclass(frozen=True, slots=True)
 class TranscriptChunk:
-    run_id: str
+    owner_id: str
     first_message_index: int
     message_count: int
     origin: TranscriptOrigin
@@ -81,6 +126,31 @@ class TranscriptSpanRef:
     owner_id: str
     start: int
     end: int
+
+
+@dataclass(frozen=True, slots=True)
+class TranscriptMessageRef:
+    source_domain: RuntimeDomain
+    owner_id: str
+    message_index: int
+
+    def __post_init__(self) -> None:
+        if self.message_index < 0:
+            raise ValueError("transcript message index cannot be negative")
+
+
+@dataclass(frozen=True, slots=True)
+class LoadedContextMessage:
+    message: ModelMessage
+    source: "TranscriptMessageRef | None"
+
+
+@dataclass(frozen=True, slots=True)
+class LoadedModelContext:
+    messages: tuple[LoadedContextMessage, ...]
+
+    def model_messages(self) -> tuple[ModelMessage, ...]:
+        return tuple(value.message for value in self.messages)
 
 
 @dataclass(frozen=True, slots=True)
@@ -124,6 +194,7 @@ class SessionRecord:
     active_execution_id: "str | None"
     continuation: "ConversationCursor | None" = None
     history_quality: str = "complete"
+    history_id: "str | None" = None
 
     def __post_init__(self) -> None:
         if self.active_execution_id is not None and not self.active_execution_id.strip():
@@ -201,6 +272,16 @@ class ExecutionStartReservationResult:
     execution: ExecutionRecord
     idempotency: "IdempotencyRecord"
     created: bool
+
+
+@dataclass(frozen=True, slots=True)
+class AgentAttemptClaim:
+    execution_id: str
+    tenant_id: str
+    expected_execution_revision: int
+    expected_agent_run_sequence: int
+    expected_recovery_revision: int
+    expected_recovery_state: "RecoveryCheckpointState"
 
 
 @dataclass(frozen=True, slots=True)
@@ -604,7 +685,28 @@ class SessionRepository(RuntimeRepository, Protocol):
         execution_id: str,
         expected: "ConversationCursor | None",
     ) -> SessionRecord: ...
-    async def release_execution(self, session_id: str, *, tenant_id: str, execution_id: str) -> SessionRecord: ...
+    async def get_in_transaction(
+        self,
+        transaction: "StateTransaction",
+        session_id: str,
+        *,
+        tenant_id: str,
+    ) -> SessionRecord: ...
+    async def ensure_history(
+        self,
+        session_id: str,
+        *,
+        tenant_id: str,
+        expected_revision: int,
+        history: ConversationHistoryRecord,
+    ) -> SessionRecord: ...
+    async def release_execution(
+        self,
+        session_id: str,
+        *,
+        tenant_id: str,
+        execution_id: str,
+    ) -> SessionRecord: ...
     async def transition_status(
         self,
         session_id: str,
@@ -623,14 +725,47 @@ class SessionRepository(RuntimeRepository, Protocol):
         execution_id: str,
         expected: "ConversationCursor | None",
         next_cursor: ConversationCursor,
+        history_quality: "str | None" = None,
     ) -> SessionRecord: ...
+
+
+class ConversationHistoryRepository(RuntimeRepository, Protocol):
+    async def create(self, record: ConversationHistoryRecord) -> ConversationHistoryRecord: ...
+    async def create_in_transaction(
+        self,
+        transaction: "StateTransaction",
+        record: ConversationHistoryRecord,
+    ) -> ConversationHistoryRecord: ...
+    async def get(
+        self,
+        history_id: str,
+        *,
+        tenant_id: str,
+    ) -> "ConversationHistoryRecord | None": ...
     async def get_in_transaction(
         self,
         transaction: "StateTransaction",
-        session_id: str,
+        history_id: str,
         *,
         tenant_id: str,
-    ) -> SessionRecord: ...
+    ) -> "ConversationHistoryRecord | None": ...
+    async def compare_and_swap_in_transaction(
+        self,
+        transaction: "StateTransaction",
+        history_id: str,
+        *,
+        tenant_id: str,
+        expected_revision: int,
+        next_record: ConversationHistoryRecord,
+    ) -> ConversationHistoryRecord: ...
+    async def fork(
+        self,
+        source_history_id: str,
+        child_history_id: str,
+        *,
+        session_id: str,
+        tenant_id: str,
+    ) -> ConversationHistoryRecord: ...
 
 
 class ExecutionRepository(RuntimeRepository, Protocol):
@@ -656,6 +791,15 @@ class ExecutionRepository(RuntimeRepository, Protocol):
     async def reserve_start(self, reservation: ExecutionStartReservation) -> ExecutionStartReservationResult: ...
     async def claim_next_agent_run(
         self, execution_id: str, *, tenant_id: str, expected_revision: int, expected_agent_run_sequence: int
+    ) -> ExecutionRecord: ...
+    async def claim_next_agent_run_in_transaction(
+        self,
+        transaction: "StateTransaction",
+        execution_id: str,
+        *,
+        tenant_id: str,
+        expected_revision: int,
+        expected_agent_run_sequence: int,
     ) -> ExecutionRecord: ...
     async def mark_start_unknown(self, commit: ExecutionStartUnknownCommit) -> ExecutionRecord: ...
     async def request_cancel(self, commit: ExecutionCancelRequestCommit) -> ExecutionRecord: ...
@@ -802,9 +946,25 @@ class ExternalCallRepository(RuntimeRepository, Protocol):
 class RecoveryCheckpointRepository(RuntimeRepository, Protocol):
     async def create(self, record: RecoveryCheckpoint) -> RecoveryCheckpoint: ...
     async def get(self, execution_id: str, *, tenant_id: str) -> RecoveryCheckpoint | None: ...
+    async def get_in_transaction(
+        self,
+        transaction: "StateTransaction",
+        execution_id: str,
+        *,
+        tenant_id: str,
+    ) -> "RecoveryCheckpoint | None": ...
     async def list(self, *, tenant_id: str) -> tuple[RecoveryCheckpoint, ...]: ...
     async def compare_and_swap(
         self, execution_id: str, *, tenant_id: str, expected_revision: int, next_record: RecoveryCheckpoint
+    ) -> RecoveryCheckpoint: ...
+    async def compare_and_swap_in_transaction(
+        self,
+        transaction: "StateTransaction",
+        execution_id: str,
+        *,
+        tenant_id: str,
+        expected_revision: int,
+        next_record: RecoveryCheckpoint,
     ) -> RecoveryCheckpoint: ...
 
 
@@ -884,6 +1044,7 @@ class ArtifactRepository(RuntimeRepository, Protocol):
 @dataclass(frozen=True, slots=True)
 class ConversationState:
     sessions: "SessionRepository"
+    histories: "ConversationHistoryRepository"
     operations: "OperationLedgerRepository"
 
 
@@ -936,6 +1097,9 @@ __all__ = [
     "ArtifactRepository",
     "ArtifactState",
     "ConversationCursor",
+    "ConversationHistoryParent",
+    "ConversationHistoryRecord",
+    "ConversationHistoryRepository",
     "ContextProjection",
     "ConversationState",
     "EvaluationRecord",
@@ -948,6 +1112,7 @@ __all__ = [
     "ExecutionRecord",
     "ExecutionRepository",
     "ExecutionStartClaim",
+    "AgentAttemptClaim",
     "ExecutionStartReservation",
     "ExecutionStartReservationResult",
     "ExecutionStartUnknownCommit",
@@ -978,6 +1143,9 @@ __all__ = [
     "RecoveryTerminalOutcome",
     "ResultRecord",
     "InlineContextBlock",
+    "HistoryQuality",
+    "LoadedContextMessage",
+    "LoadedModelContext",
     "RuntimePayloadRef",
     "StoredStepSnapshot",
     "TranscriptChunk",

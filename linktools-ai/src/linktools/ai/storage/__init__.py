@@ -110,11 +110,13 @@ from ._object import (
     ObjectRef,
     ObjectStat,
     ObjectStore,
+    ObjectStoreInspection,
     ObjectStoreMaintenance,
     SqlObjectStore,
     TransientObjectStore,
     build_object_sql_metadata,
     read_object,
+    runtime_object_key,
 )
 from ._payload import PayloadPolicy, StoredPayload, payload_fits_inline
 from ._revision import LayerMetadataView, RevisionSource, StorageRevisionSource
@@ -148,7 +150,9 @@ __all__ = [
     "ObjectRef",
     "ObjectStat",
     "ObjectStore",
+    "ObjectStoreInspection",
     "ObjectStoreMaintenance",
+    "runtime_object_key",
     "PayloadPolicy",
     "StoredPayload",
     "payload_fits_inline",

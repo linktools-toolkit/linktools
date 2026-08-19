@@ -220,7 +220,7 @@ class SqlStateStore:
             raise AIError(ErrorCode.STORAGE_CLOSED)
         await self._storage_group.initialize()
         self._initialized = True
-        _logger.info(
+        _logger.debug(
             "SQL StateStore initialized: dialect=%s tables=%s",
             self.context.dialect.name,
             len(self._metadata.tables),
