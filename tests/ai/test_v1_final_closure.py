@@ -138,6 +138,87 @@ def test_v1_set_and_scalar_wrappers_have_no_alternate_reader() -> None:
     _assert_integrity(lambda: decode_domain(None, datetime))
 
 
+def test_v1_tagged_scalars_require_canonical_inverse() -> None:
+    timestamp = datetime(2025, 1, 1, 12, 30, 45, tzinfo=timezone.utc)
+    datetime_wire = encode_domain(timestamp)
+    assert datetime_wire == {"$datetime": "2025-01-01T12:30:45+00:00"}
+    assert decode_domain(datetime_wire, datetime) == timestamp
+    assert encode_domain(decode_domain(datetime_wire, datetime)) == datetime_wire
+    for raw in (
+        "2025-01-01 12:30:45+00:00",
+        "2025-01-01T12:30:45Z",
+        "2025-01-01T12:30:45+0000",
+        "2025-01-01T12:30:45",
+    ):
+        _assert_integrity(lambda raw=raw: decode_domain({"$datetime": raw}, datetime))
+
+    payload = b"a"
+    bytes_wire = encode_domain(payload)
+    assert bytes_wire == {"$bytes": "YQ=="}
+    assert decode_domain(bytes_wire, bytes) == payload
+    assert encode_domain(decode_domain(bytes_wire, bytes)) == bytes_wire
+    assert decode_domain({"$bytes": "/w=="}, bytes) == b"\xff"
+    for raw in ("YR==", "/x==", "YQ", "YQ===", " YQ==", "bad!"):
+        _assert_integrity(lambda raw=raw: decode_domain({"$bytes": raw}, bytes))
+
+    assert decode_domain(datetime_wire, Any) == timestamp
+    assert decode_domain(bytes_wire, Any) == payload
+    _assert_integrity(lambda: decode_domain({"$datetime": "2025-01-01T12:30:45Z"}, Any))
+    _assert_integrity(lambda: decode_domain({"$bytes": "YR=="}, Any))
+
+    list_wire = encode_domain([timestamp, payload])
+    assert decode_domain(list_wire, list[Any]) == [timestamp, payload]
+    _assert_integrity(
+        lambda: decode_domain(
+            [{"$datetime": "2025-01-01T12:30:45Z"}, bytes_wire],
+            list[Any],
+        )
+    )
+
+    tuple_wire = encode_domain((timestamp, payload))
+    assert decode_domain(tuple_wire, tuple[Any, ...]) == (timestamp, payload)
+    _assert_integrity(
+        lambda: decode_domain(
+            {"$tuple": [datetime_wire, {"$bytes": "YR=="}]},
+            tuple[Any, ...],
+        )
+    )
+
+    mapping_value = {"bytes": payload, "datetime": timestamp}
+    mapping_wire = encode_domain(mapping_value)
+    assert decode_domain(mapping_wire, Mapping[str, Any]) == mapping_value
+    _assert_integrity(
+        lambda: decode_domain(
+            {
+                "$mapping": [
+                    ["bytes", {"$bytes": "YR=="}],
+                    ["datetime", datetime_wire],
+                ]
+            },
+            Mapping[str, Any],
+        )
+    )
+
+    frozen_wire = encode_domain(frozenset({timestamp}))
+    assert decode_domain(frozen_wire, frozenset[Any]) == frozenset({timestamp})
+    _assert_integrity(
+        lambda: decode_domain(
+            {"$frozenset": [{"$datetime": "2025-01-01T12:30:45Z"}]},
+            frozenset[Any],
+        )
+    )
+
+    stored = StoredStepSnapshot("run", 1, timestamp, "complete", "d" * 64)
+    stored_wire = encode_domain(stored)
+    stored_fields = dict(stored_wire["fields"])
+    stored_fields["timestamp"] = {"$datetime": "2025-01-01T12:30:45Z"}
+    noncanonical_stored_wire = dict(stored_wire)
+    noncanonical_stored_wire["fields"] = stored_fields
+    _assert_integrity(
+        lambda: decode_domain(noncanonical_stored_wire, StoredStepSnapshot)
+    )
+
+
 def test_v1_dataclass_and_any_readers_require_exact_shapes() -> None:
     cursor = ConversationCursor("run")
     wire = encode_domain(cursor)

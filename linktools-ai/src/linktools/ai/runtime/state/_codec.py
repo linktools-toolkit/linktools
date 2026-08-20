@@ -3,6 +3,7 @@
 """Canonical versioned codecs for Runtime persistence values."""
 
 import base64
+import binascii
 import hashlib
 import math
 import types
@@ -1254,6 +1255,11 @@ def _decode_domain(
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
         if result.tzinfo is None:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        if result.isoformat() != raw:
+            raise AIError(
+                ErrorCode.STORAGE_INTEGRITY_ERROR,
+                "GA v1 datetime wire is not canonical",
+            )
         return result
     if target is bytes:
         if not isinstance(value, Mapping):
@@ -1263,9 +1269,16 @@ def _decode_domain(
         if not isinstance(raw, str):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         try:
-            return base64.b64decode(raw, validate=True)
-        except (TypeError, ValueError) as error:
+            result = base64.b64decode(raw, validate=True)
+        except (ValueError, binascii.Error) as error:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
+        canonical = base64.b64encode(result).decode("ascii")
+        if canonical != raw:
+            raise AIError(
+                ErrorCode.STORAGE_INTEGRITY_ERROR,
+                "GA v1 bytes wire is not canonical",
+            )
+        return result
     if isinstance(target, type) and is_dataclass(target):
         return _decode_dataclass(value, target, codec)
     if target is float:
