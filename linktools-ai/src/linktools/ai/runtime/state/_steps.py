@@ -3,14 +3,12 @@
 """PydanticAI StepStore adapter backed by Runtime StateStore facts."""
 
 import asyncio
-import base64
 import hashlib
 import zlib
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
 from contextlib import asynccontextmanager
 from contextvars import ContextVar, Token
 from dataclasses import dataclass, replace
-from datetime import datetime
 from enum import StrEnum
 from time import monotonic
 from typing import Protocol, runtime_checkable
@@ -30,11 +28,9 @@ from pydantic_ai_harness.step_persistence import (
 from ...errors import AIError, ErrorCode
 from ...storage import ObjectStore, StoredPayload
 from ._codec import (
-    decode_domain,
-    decode_envelope,
-    encode_domain,
-    encode_envelope,
-    wire_type_id,
+    _decode_enveloped_domain,
+    _decode_step_envelope,
+    _encode_step_envelope,
 )
 from ._durability import (
     CommitObservation,
@@ -56,6 +52,7 @@ from ._contracts import (
     TranscriptChunk,
     TranscriptMessageRef,
     TranscriptOrigin,
+    TranscriptSpanRef,
 )
 from ._history import (
     TranscriptCapture,
@@ -673,20 +670,9 @@ class InMemoryStepArchive(StagingStepStore):
         self,
         refs: Sequence[TranscriptMessageRef],
     ) -> tuple[LoadedContextMessage, ...]:
-        result: list[LoadedContextMessage] = []
-        for ref in refs:
-            if ref.source_domain is not self._runtime_domain:
-                raise AIError(ErrorCode.STORAGE_DEPENDENCY_NOT_READY)
-            snapshot = self.latest_snapshot_local(
-                ref.owner_id,
-                include_interrupted=True,
-            )
-            if snapshot is None or ref.message_index >= len(snapshot.messages):
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            result.append(
-                LoadedContextMessage(snapshot.messages[ref.message_index], ref)
-            )
-        return tuple(result)
+        if not refs:
+            return ()
+        raise AIError(ErrorCode.STORAGE_DEPENDENCY_NOT_READY)
 
     async def execution_transcript_item_count(self, run_id: str) -> int:
         snapshot = self.latest_snapshot_local(run_id, include_interrupted=True)
@@ -813,14 +799,16 @@ class StateStepArchive(StepStore):
             self._history.projection_key(run_id) for run_id in unique_run_ids
         )
         head_keys = tuple(self._history.head_key(run_id) for run_id in unique_run_ids)
-        records = await self._store.read(
-            lambda transaction: transaction.get_records(
+        async def read(
+            transaction: StateTransaction,
+        ) -> tuple[Mapping[bytes, StoredRecord], Mapping[bytes, int]]:
+            records = await transaction.get_records(
                 (*run_keys, *projection_keys, *head_keys)
             )
-        )
-        sequences = await self._store.read(
-            lambda transaction: transaction.get_sequences(sequence_keys)
-        )
+            sequences = await transaction.get_sequences(sequence_keys)
+            return records, sequences
+
+        records, sequences = await self._store.read(read)
         result: dict[str, ExecutionRunSealHead] = {}
         for run_id in unique_run_ids:
             run_record = records.get(self._run_key(run_id))
@@ -838,10 +826,10 @@ class StateStepArchive(StepStore):
             head = self._history.decode_head(head_record)
             projection_digest = "empty"
             if projection_record is not None:
-                payload = decode_envelope(projection_record.data).get("payload")
-                if not isinstance(payload, dict):
-                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                projection = decode_domain(payload, ContextProjection)
+                projection = _decode_enveloped_domain(
+                    projection_record.data,
+                    ContextProjection,
+                )
                 projection_digest = projection.digest
             result[run_id] = ExecutionRunSealHead(
                 run_id,
@@ -1153,6 +1141,7 @@ class StateStepArchive(StepStore):
                 origins=origins,
                 sources=sources,
             )
+            self._validate_projection_sources(projection, sources)
             projection = await self._history.prepare_projection(owner_id, projection)
             prepared.append(
                 PreparedStepSnapshot(
@@ -1184,6 +1173,39 @@ class StateStepArchive(StepStore):
             0,
             target_message_count,
         )
+
+    def _validate_projection_sources(
+        self,
+        projection: ContextProjection,
+        sources: Sequence[TranscriptMessageRef | None],
+    ) -> None:
+        allowed: dict[tuple[RuntimeDomain, str], list[int]] = {}
+        for source in sources:
+            if source is None:
+                continue
+            allowed.setdefault(
+                (source.source_domain, source.owner_id),
+                [],
+            ).append(source.message_index)
+        spans: dict[tuple[RuntimeDomain, str], list[tuple[int, int]]] = {}
+        for key, indexes in allowed.items():
+            for index in sorted(set(indexes)):
+                values = spans.setdefault(key, [])
+                if values and values[-1][1] == index:
+                    values[-1] = (values[-1][0], index + 1)
+                else:
+                    values.append((index, index + 1))
+        for item in projection.items:
+            if not isinstance(item, TranscriptSpanRef):
+                continue
+            if item.end <= item.start:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            allowed_spans = spans.get((item.source_domain, item.owner_id), ())
+            if not any(
+                item.start >= start and item.end <= end
+                for start, end in allowed_spans
+            ):
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
 
     def _history_id(self, run: RunRecord) -> str:
         history_id = run.metadata.get("history_id")
@@ -2401,19 +2423,33 @@ class RuntimeStepStore(StepStore):
             if recovery_run is None or flight is None:
                 raise AIError(ErrorCode.STORAGE_NOT_FOUND)
 
-            async def operation() -> None:
-                await _materialize_snapshot(recovery, recovery_run, snapshot)
+            async def operation(
+                target_recovery: StepStore = recovery,
+                target_run: RunRecord = recovery_run,
+                target_snapshot: ContinuableSnapshot = snapshot,
+            ) -> None:
+                await _materialize_snapshot(
+                    target_recovery,
+                    target_run,
+                    target_snapshot,
+                )
 
-            async def readback() -> CommitObservation[None]:
+            async def readback(
+                target_recovery: StepStore = recovery,
+                target_run: RunRecord = recovery_run,
+                target_snapshot: ContinuableSnapshot = snapshot,
+            ) -> CommitObservation[None]:
                 try:
-                    observed_run = await recovery.get_run(run_id=snapshot.run_id)
-                    observed_snapshot = await recovery.latest_snapshot(
-                        run_id=snapshot.run_id,
+                    observed_run = await target_recovery.get_run(
+                        run_id=target_snapshot.run_id
+                    )
+                    observed_snapshot = await target_recovery.latest_snapshot(
+                        run_id=target_snapshot.run_id,
                         include_interrupted=True,
                     )
                 except AIError as error:
                     return CommitObservation(DurableCommitState.UNRESOLVED, error=error)
-                if observed_run == recovery_run and observed_snapshot == snapshot:
+                if observed_run == target_run and observed_snapshot == target_snapshot:
                     return CommitObservation(DurableCommitState.COMMITTED)
                 return CommitObservation(DurableCommitState.NOT_COMMITTED)
 
@@ -2459,18 +2495,29 @@ class RuntimeStepStore(StepStore):
             if recovery_run is None or flight is None:
                 raise AIError(ErrorCode.STORAGE_NOT_FOUND)
 
-            async def operation() -> None:
-                await _materialize_effect(recovery, recovery_run, record)
+            async def operation(
+                target_recovery: StepStore = recovery,
+                target_run: RunRecord = recovery_run,
+                target_record: ToolEffectRecord = record,
+            ) -> None:
+                await _materialize_effect(
+                    target_recovery,
+                    target_run,
+                    target_record,
+                )
 
-            async def readback() -> CommitObservation[None]:
+            async def readback(
+                target_recovery: StepStore = recovery,
+                target_record: ToolEffectRecord = record,
+            ) -> CommitObservation[None]:
                 try:
-                    observed = await recovery.get_tool_effect(
-                        run_id=record.run_id,
-                        tool_call_id=record.tool_call_id,
+                    observed = await target_recovery.get_tool_effect(
+                        run_id=target_record.run_id,
+                        tool_call_id=target_record.tool_call_id,
                     )
                 except AIError as error:
                     return CommitObservation(DurableCommitState.UNRESOLVED, error=error)
-                if observed == record:
+                if observed == target_record:
                     return CommitObservation(DurableCommitState.COMMITTED)
                 return CommitObservation(DurableCommitState.NOT_COMMITTED)
 
@@ -3176,7 +3223,13 @@ class RuntimeStepStore(StepStore):
                     raise result.error
                 raise AIError(ErrorCode.STORAGE_CONFLICT)
             if result.state is DurableCommitState.PARTIAL_INTEGRITY_ERROR:
-                await self.abandon_execution_projection(flight)
+                await self._fence_durability_flight(
+                    flight,
+                    AIError(
+                        ErrorCode.STORAGE_INTEGRITY_ERROR,
+                        "projection commit left partial durable state",
+                    ),
+                )
                 raise AIError(
                     ErrorCode.STORAGE_INTEGRITY_ERROR,
                     "projection commit left partial durable state",
@@ -3186,7 +3239,12 @@ class RuntimeStepStore(StepStore):
                 flight.run_id,
                 flight.token,
             )
-            raise AIError(ErrorCode.STORAGE_COMMIT_UNKNOWN) from result.error
+            unknown = AIError(
+                ErrorCode.STORAGE_COMMIT_UNKNOWN,
+                "projection commit outcome is unresolved",
+            )
+            await self._fence_durability_flight(flight, unknown)
+            raise unknown from result.error
         if not captured.events and not captured.snapshots:
             await self.finalize_execution_projection(flight, captured)
             return
@@ -3293,18 +3351,24 @@ class RuntimeStepStore(StepStore):
                 raise result.error
             raise AIError(ErrorCode.STORAGE_CONFLICT)
         elif result.state is DurableCommitState.PARTIAL_INTEGRITY_ERROR:
-            await self.abandon_execution_projection(flight)
-            raise AIError(
+            integrity = AIError(
                 ErrorCode.STORAGE_INTEGRITY_ERROR,
                 "projection commit left partial durable state",
-            ) from result.error
+            )
+            await self._fence_durability_flight(flight, integrity)
+            raise integrity from result.error
         else:
             _logger.error(
                 "projection commit unresolved; flight retained: run=%s token=%s",
                 flight.run_id,
                 flight.token,
             )
-            raise AIError(ErrorCode.STORAGE_COMMIT_UNKNOWN) from result.error
+            unknown = AIError(
+                ErrorCode.STORAGE_COMMIT_UNKNOWN,
+                "projection commit outcome is unresolved",
+            )
+            await self._fence_durability_flight(flight, unknown)
+            raise unknown from result.error
         _logger.debug(
             "step projection flushed: domain=%s backend=%s run=%s "
             "events=%s snapshots=%s duration_ms=%.3f",
@@ -3512,6 +3576,31 @@ class RuntimeStepStore(StepStore):
             flight.kind.value,
         )
 
+    async def _fence_durability_flight(
+        self,
+        flight: _RunDurabilityFlight,
+        error: AIError,
+    ) -> None:
+        async with self._history_lock.hold(flight.run_id):
+            current = self._durability_flights.get(flight.run_id)
+            if current is not flight or current.token != flight.token:
+                raise AIError(ErrorCode.STORAGE_CONFLICT)
+            completion = flight.completion
+        if not completion.done():
+            completion.set_exception(error)
+
+            def consume(future: asyncio.Future[None]) -> None:
+                future.exception()
+
+            completion.add_done_callback(consume)
+        _logger.error(
+            "durability flight fenced: run=%s token=%s kind=%s code=%s",
+            flight.run_id,
+            flight.token,
+            flight.kind.value,
+            error.code.value,
+        )
+
     async def _settle_durability_flight(
         self,
         flight: _RunDurabilityFlight,
@@ -3530,18 +3619,24 @@ class RuntimeStepStore(StepStore):
                 raise result.error
             raise AIError(ErrorCode.STORAGE_CONFLICT)
         if result.state is DurableCommitState.PARTIAL_INTEGRITY_ERROR:
-            await self._abandon_durability_flight(flight)
-            raise AIError(
+            integrity = AIError(
                 ErrorCode.STORAGE_INTEGRITY_ERROR,
                 "durability flight left partial durable state",
-            ) from result.error
+            )
+            await self._fence_durability_flight(flight, integrity)
+            raise integrity from result.error
         _logger.error(
             "durability flight unresolved: run=%s token=%s kind=%s",
             flight.run_id,
             flight.token,
             flight.kind.value,
         )
-        raise AIError(ErrorCode.STORAGE_COMMIT_UNKNOWN) from result.error
+        unknown = AIError(
+            ErrorCode.STORAGE_COMMIT_UNKNOWN,
+            "durability flight commit outcome is unresolved",
+        )
+        await self._fence_durability_flight(flight, unknown)
+        raise unknown from result.error
 
     async def preflight_close(self) -> None:
         self._preflight = True
@@ -3645,21 +3740,7 @@ async def _materialize_snapshot(
 
 
 def _encode_step(value: object) -> dict[str, object]:
-    if isinstance(value, ContinuableSnapshot):
-        return encode_envelope(
-            {
-                "type": "continuable_snapshot",
-                "run_id": value.run_id,
-                "step_index": value.step_index,
-                "messages": base64.b64encode(ModelMessagesTypeAdapter.dump_json(value.messages)).decode("ascii"),
-                "conversation_id": value.conversation_id,
-                "parent_run_id": value.parent_run_id,
-                "agent_name": value.agent_name,
-                "timestamp": value.timestamp.isoformat(),
-                "state": value.state,
-            }
-        )
-    return encode_envelope({"type": wire_type_id(value), "payload": encode_domain(value)})
+    return _encode_step_envelope(value)
 
 
 def _step_subject(value: object) -> bytes | None:
@@ -3673,29 +3754,7 @@ def _step_event_kind(value: StepEvent) -> str:
 
 
 def _decode_step(value: Mapping[str, object]) -> object:
-    payload = decode_envelope(value)
-    kind = payload.get("type")
-    if kind == "continuable_snapshot":
-        messages = ModelMessagesTypeAdapter.validate_json(base64.b64decode(str(payload["messages"])))
-        return ContinuableSnapshot(
-            run_id=str(payload["run_id"]),
-            step_index=int(payload["step_index"]),
-            messages=messages,
-            conversation_id=payload.get("conversation_id"),
-            parent_run_id=payload.get("parent_run_id"),
-            agent_name=payload.get("agent_name"),
-            timestamp=datetime.fromisoformat(str(payload["timestamp"])),
-            state=str(payload["state"]),
-        )
-    target = {
-        "run_record": RunRecord,
-        "step_event": StepEvent,
-        "tool_effect": ToolEffectRecord,
-        "stored_step_snapshot": StoredStepSnapshot,
-    }.get(str(kind))
-    if target is None:
-        raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
-    return decode_domain(payload.get("payload"), target)
+    return _decode_step_envelope(value)
 
 
 __all__ = [

@@ -13,7 +13,7 @@ from linktools.core import environ
 
 from ...core import JsonValue
 from ...errors import AIError, ErrorCode
-from ._codec import decode_domain, decode_envelope
+from ._codec import _decode_enveloped_domain
 from ._contracts import ExecutionHistorySealRecord
 from ._store import (
     FactQuery,
@@ -321,10 +321,10 @@ class ExecutionReadModelRepository:
             if record.kind != "execution_history_seal":
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             try:
-                payload = decode_envelope(record.data).get("payload")
-                if payload is None:
-                    raise ValueError("history seal payload is missing")
-                value = decode_domain(payload, ExecutionHistorySealRecord)
+                value = _decode_enveloped_domain(
+                    record.data,
+                    ExecutionHistorySealRecord,
+                )
             except (TypeError, ValueError, KeyError, AIError) as error:
                 if isinstance(error, AIError):
                     raise

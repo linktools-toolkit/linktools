@@ -294,6 +294,38 @@ class StoredOperation:
 
 
 @dataclass(frozen=True, slots=True)
+class RecordScanCursor:
+    kind: str
+    key_digest: bytes
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.kind, str) or not self.kind:
+            raise ValueError("record scan cursor kind is required")
+        _require_digest(self.key_digest, "key_digest")
+
+
+@dataclass(frozen=True, slots=True)
+class FactScanCursor:
+    stream_digest: bytes
+    sequence: int
+
+    def __post_init__(self) -> None:
+        _require_digest(self.stream_digest, "stream_digest")
+        if isinstance(self.sequence, bool) or not isinstance(self.sequence, int):
+            raise TypeError("fact scan cursor sequence must be an integer")
+        if self.sequence < 1:
+            raise ValueError("fact scan cursor sequence must be positive")
+
+
+@dataclass(frozen=True, slots=True)
+class OperationScanCursor:
+    key_digest: bytes
+
+    def __post_init__(self) -> None:
+        _require_digest(self.key_digest, "key_digest")
+
+
+@dataclass(frozen=True, slots=True)
 class Observed(Generic[ValueT]):
     """A value paired with its physical CAS token."""
 
@@ -418,6 +450,12 @@ class StateTransaction(Protocol):
     async def delete_record(self, key: bytes, *, expected_storage_version: int | None = None) -> bool: ...
     async def list_records(self, query: RecordQuery) -> tuple[StoredRecord, ...]: ...
     async def scan_records(self) -> tuple[StoredRecord, ...]: ...
+    async def scan_records_page(
+        self,
+        *,
+        after: RecordScanCursor | None,
+        limit: int,
+    ) -> tuple[StoredRecord, ...]: ...
     async def resolve_alias(self, alias: bytes) -> bytes | None: ...
     async def resolve_aliases(self, aliases: Sequence[bytes]) -> Mapping[bytes, bytes]: ...
     async def insert_alias(self, alias: StoredAlias) -> None: ...
@@ -434,12 +472,24 @@ class StateTransaction(Protocol):
     async def insert_facts(self, facts: Sequence[StoredFact]) -> None: ...
     async def list_facts(self, query: FactQuery) -> tuple[StoredFact, ...]: ...
     async def scan_facts(self) -> tuple[StoredFact, ...]: ...
+    async def scan_facts_page(
+        self,
+        *,
+        after: FactScanCursor | None,
+        limit: int,
+    ) -> tuple[StoredFact, ...]: ...
     async def delete_fact_streams(self, owner_key: bytes) -> None: ...
     async def insert_operation(self, value: StoredOperation) -> None: ...
     async def get_operation(self, key: bytes) -> StoredOperation | None: ...
     async def replace_operation(self, value: StoredOperation, *, expected_state: str) -> bool: ...
     async def list_operations(self, query: OperationQuery) -> tuple[StoredOperation, ...]: ...
     async def scan_operations(self) -> tuple[StoredOperation, ...]: ...
+    async def scan_operations_page(
+        self,
+        *,
+        after: OperationScanCursor | None,
+        limit: int,
+    ) -> tuple[StoredOperation, ...]: ...
     async def delete_operations(self, query: OperationQuery) -> tuple[StoredOperation, ...]: ...
 
 
@@ -472,6 +522,14 @@ class _ReadOnlyStateTransaction(StateTransaction):
     async def scan_records(self) -> tuple[StoredRecord, ...]:
         return await self._transaction.scan_records()
 
+    async def scan_records_page(
+        self,
+        *,
+        after: RecordScanCursor | None,
+        limit: int,
+    ) -> tuple[StoredRecord, ...]:
+        return await self._transaction.scan_records_page(after=after, limit=limit)
+
     async def resolve_alias(self, alias: bytes) -> bytes | None:
         return await self._transaction.resolve_alias(alias)
 
@@ -490,6 +548,14 @@ class _ReadOnlyStateTransaction(StateTransaction):
     async def scan_facts(self) -> tuple[StoredFact, ...]:
         return await self._transaction.scan_facts()
 
+    async def scan_facts_page(
+        self,
+        *,
+        after: FactScanCursor | None,
+        limit: int,
+    ) -> tuple[StoredFact, ...]:
+        return await self._transaction.scan_facts_page(after=after, limit=limit)
+
     async def get_operation(self, key: bytes) -> StoredOperation | None:
         return await self._transaction.get_operation(key)
 
@@ -498,6 +564,17 @@ class _ReadOnlyStateTransaction(StateTransaction):
 
     async def scan_operations(self) -> tuple[StoredOperation, ...]:
         return await self._transaction.scan_operations()
+
+    async def scan_operations_page(
+        self,
+        *,
+        after: OperationScanCursor | None,
+        limit: int,
+    ) -> tuple[StoredOperation, ...]:
+        return await self._transaction.scan_operations_page(
+            after=after,
+            limit=limit,
+        )
 
     def _reject(self, operation: str) -> None:
         raise StateTransactionNestingError(
@@ -801,9 +878,12 @@ def _validate_limit(limit: int | None) -> None:
 
 __all__ = [
     "FactQuery",
+    "FactScanCursor",
     "Observed",
     "OperationQuery",
+    "OperationScanCursor",
     "RecordQuery",
+    "RecordScanCursor",
     "RecordReplacement",
     "StateGroupTransaction",
     "StateLockOrderError",

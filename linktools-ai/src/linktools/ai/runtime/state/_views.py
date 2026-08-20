@@ -58,18 +58,12 @@ def project_execution_transcript_message(message: ModelMessage) -> tuple[str, ..
                     if part.content:
                         values.append(part.content)
                 else:
-                    values.extend(
-                        item
-                        for item in part.content
-                        if (
-                            isinstance(item, str)
-                            and item
-                        )
-                        or (
-                            isinstance(item, TextContent)
-                            and item.content
-                        )
-                    )
+                    for item in part.content:
+                        if isinstance(item, str):
+                            if item:
+                                values.append(item)
+                        elif isinstance(item, TextContent) and item.content:
+                            values.append(item.content)
         return tuple(values)
     if isinstance(message, ModelResponse):
         return tuple(

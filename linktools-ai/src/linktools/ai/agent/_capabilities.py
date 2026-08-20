@@ -81,9 +81,9 @@ class ToolOperationBridge(Protocol):
 
     async def renew(self, decision: ToolOperationDecision) -> ToolOperationDecision: ...
 
-    async def complete(self, decision: ToolOperationDecision, result: Any) -> None: ...
+    async def complete(self, decision: ToolOperationDecision, result: Any) -> bool: ...
 
-    async def fail(self, decision: ToolOperationDecision, error: BaseException) -> None: ...
+    async def fail(self, decision: ToolOperationDecision, error: BaseException) -> bool: ...
 
     async def unknown(self, decision: ToolOperationDecision, error: BaseException) -> None: ...
 
@@ -103,11 +103,11 @@ class _MissingToolOperationBridge:
         del decision
         raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
 
-    async def complete(self, decision: ToolOperationDecision, result: Any) -> None:
+    async def complete(self, decision: ToolOperationDecision, result: Any) -> bool:
         del decision, result
         raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
 
-    async def fail(self, decision: ToolOperationDecision, error: BaseException) -> None:
+    async def fail(self, decision: ToolOperationDecision, error: BaseException) -> bool:
         del decision, error
         raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
 
@@ -209,16 +209,32 @@ class _RuntimeStepPersistence(StepPersistence[None]):
                     raise heartbeat_error
             result = await handler_task
             try:
-                await self._tool_operations.complete(state.decision, result)
+                cancelled = await self._tool_operations.complete(
+                    state.decision,
+                    result,
+                )
             except BaseException:
                 state.preserve_started = True
                 raise
             state.operation_terminalized = True
+            if cancelled:
+                state.preserve_started = False
+                keep_call_state = False
+                self._calls.pop(key, None)
+                raise asyncio.CancelledError
             return result
         except (ModelRetry, ToolRetryError) as error:
             if state.decision.replay_safe:
-                await self._tool_operations.fail(state.decision, error)
+                cancelled = await self._tool_operations.fail(
+                    state.decision,
+                    error,
+                )
                 state.operation_terminalized = True
+                if cancelled:
+                    state.preserve_started = False
+                    keep_call_state = False
+                    self._calls.pop(key, None)
+                    raise asyncio.CancelledError
                 _logger.debug(
                     "tool effect marked failed: run=%s tool=%s call=%s",
                     self.run_id or ctx.run_id,
@@ -242,6 +258,11 @@ class _RuntimeStepPersistence(StepPersistence[None]):
             await self._mark_unknown(state, error)
             raise AIError(ErrorCode.TOOL_EFFECT_UNKNOWN) from error
         except asyncio.CancelledError as error:
+            if state.operation_terminalized:
+                state.preserve_started = False
+                keep_call_state = False
+                self._calls.pop(key, None)
+                raise
             state.preserve_started = True
             if state.handler_entered and not state.decision.replay_safe:
                 await self._mark_unknown(state, error)
@@ -309,8 +330,11 @@ class _RuntimeStepPersistence(StepPersistence[None]):
             if not state.decision.replay_safe:
                 await self._mark_unknown(state, error)
                 raise AIError(ErrorCode.TOOL_EFFECT_UNKNOWN) from error
-            await self._tool_operations.fail(state.decision, error)
+            cancelled = await self._tool_operations.fail(state.decision, error)
             state.operation_terminalized = True
+            if cancelled:
+                self._calls.pop(key, None)
+                raise asyncio.CancelledError
             return await self._record_failed_effect(
                 ctx,
                 call=call,

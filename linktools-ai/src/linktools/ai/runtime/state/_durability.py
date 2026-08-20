@@ -59,8 +59,7 @@ async def run_durable_commit(
         cancellation_requested = True
         operation_error = error
         value, task_error = await _settle_task(task)
-        if task_error is not None:
-            operation_error = task_error
+        operation_error = task_error
     except BaseException as error:
         operation_error = error
 

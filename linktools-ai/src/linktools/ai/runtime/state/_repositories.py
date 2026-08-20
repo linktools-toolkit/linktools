@@ -47,8 +47,7 @@ from ...task import (
 )
 from .._tool import ToolOperationRecord
 from ._codec import (
-    decode_domain,
-    decode_envelope,
+    _decode_enveloped_domain,
     encode_domain,
     encode_envelope,
     wire_type_id,
@@ -241,8 +240,11 @@ class _RepositoryBase:
         await self._store.mutate(lambda transaction: transaction.insert_record(record))
 
     async def _decode(self, record: StoredRecord, target: type[ValueT]) -> ValueT:
-        payload = _restore_lease_fields(_domain_payload(record), target)
-        value = decode_domain(payload, target)
+        value = _decode_enveloped_domain(
+            record.data,
+            target,
+            payload_transform=lambda payload: _restore_lease_fields(payload, target),
+        )
         if isinstance(value, (TaskNodeView, ToolOperationRecord)):
             return replace(
                 value,
@@ -619,7 +621,10 @@ class ConversationHistoryRepositoryImpl(_RepositoryBase):
         )
         if record is None:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        node = decode_domain(_domain_payload(record), ConversationHistoryIndexNodeRecord)
+        node = _decode_enveloped_domain(
+            record.data,
+            ConversationHistoryIndexNodeRecord,
+        )
         if node.node_id != node_id:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         return node
@@ -773,7 +778,7 @@ class ConversationHistoryRepositoryImpl(_RepositoryBase):
         return await self._store.mutate(mutate)
 
     async def _decode_history(self, record: StoredRecord) -> ConversationHistoryRecord:
-        return decode_domain(_domain_payload(record), ConversationHistoryRecord)
+        return _decode_enveloped_domain(record.data, ConversationHistoryRecord)
 
 
 
@@ -1039,8 +1044,8 @@ class SessionRepositoryImpl(_ResourceRepository[SessionRecord]):
             )
             if source_head_stored is None:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            source_head = decode_domain(
-                _domain_payload(source_head_stored),
+            source_head = _decode_enveloped_domain(
+                source_head_stored.data,
                 TranscriptHeadRecord,
             )
             fork_result = SessionForkResultRecord(
@@ -1097,8 +1102,8 @@ class SessionRepositoryImpl(_ResourceRepository[SessionRecord]):
         )
         if result_stored is None:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        result = decode_domain(
-            _domain_payload(result_stored),
+        result = _decode_enveloped_domain(
+            result_stored.data,
             SessionForkResultRecord,
         )
         if (
@@ -1136,8 +1141,10 @@ class SessionRepositoryImpl(_ResourceRepository[SessionRecord]):
             or child.inherited_history_item_count != result.inherited_history_item_count
         ):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        head_payload = _domain_payload(head_stored)
-        head = decode_domain(head_payload, TranscriptHeadRecord)
+        head = _decode_enveloped_domain(
+            head_stored.data,
+            TranscriptHeadRecord,
+        )
         if (
             head.owner_domain is not TranscriptOwnerDomain.CONVERSATION
             or head.owner_id != result.target_history_id
@@ -1460,7 +1467,7 @@ class SessionRepositoryImpl(_ResourceRepository[SessionRecord]):
         return await self._decode(record, SessionRecord)
 
     async def _decode_history(self, record: StoredRecord) -> ConversationHistoryRecord:
-        return decode_domain(_domain_payload(record), ConversationHistoryRecord)
+        return _decode_enveloped_domain(record.data, ConversationHistoryRecord)
 
     async def advance_continuation_in_transaction(
         self,
@@ -2813,7 +2820,7 @@ class RecoveryCheckpointRepositoryImpl(_ResourceRepository[RecoveryCheckpoint]):
         *,
         tenant_id: str,
     ) -> RecoveryIntegrityReport:
-        """Maintenance-only full scan comparing active, admission, and state sets."""
+        """Validate the recovery indexes against one stable generation."""
         if tenant_id != self._tenant_id:
             return RecoveryIntegrityReport(0, 0, ())
         _logger.info(
@@ -2821,69 +2828,236 @@ class RecoveryCheckpointRepositoryImpl(_ResourceRepository[RecoveryCheckpoint]):
             self._tenant_id,
         )
 
-        async def scan(transaction: StateTransaction) -> RecoveryIntegrityReport:
-            active_ids: set[str] = set()
-            cursor: tuple[str, bytes] | None = None
-            while True:
-                records = await transaction.list_records(
+        g0 = await self._store.read(
+            lambda transaction: transaction.get_sequence(
+                self._integrity_generation_key()
+            )
+        )
+        active_ids: set[str] = set()
+        inconsistent: set[str] = set()
+        cursor: tuple[str, bytes] | None = None
+        while True:
+            page_cursor = cursor
+            records = await self._store.read(
+                lambda transaction, cursor_value=page_cursor: transaction.list_records(
                     RecordQuery(
                         partition_digest=self._partition("recovery_active"),
                         kind="recovery_active",
-                        after_sort_key=None if cursor is None else cursor[0],
-                        after_key_digest=None if cursor is None else cursor[1],
+                        after_sort_key=(
+                            None if cursor_value is None else cursor_value[0]
+                        ),
+                        after_key_digest=(
+                            None if cursor_value is None else cursor_value[1]
+                        ),
                         limit=_RECOVERY_PAGE_SIZE,
                     )
                 )
-                for record in records:
+            )
+            if not records:
+                break
+            for record in records:
+                try:
                     active = await self._decode(record, RecoveryActiveRecord)
-                    self._validate_active_record(record, active, active.execution_id)
-                    active_ids.add(active.execution_id)
-                if len(records) < _RECOVERY_PAGE_SIZE:
-                    break
-                last = records[-1]
-                cursor = (last.sort_key, last.key_digest)
-            expected_active: set[str] = set()
-            admission_ids: set[str] = set()
-            cursor = None
-            while True:
+                    self._validate_active_record(
+                        record,
+                        active,
+                        active.execution_id,
+                    )
+                except (KeyError, TypeError, ValueError):
+                    self._record_invalid_recovery_id(
+                        record,
+                        active_ids,
+                        inconsistent,
+                    )
+                    continue
+                except AIError as error:
+                    if error.code is not ErrorCode.STORAGE_INTEGRITY_ERROR:
+                        raise
+                    self._record_invalid_recovery_id(
+                        record,
+                        active_ids,
+                        inconsistent,
+                    )
+                    continue
+                active_ids.add(active.execution_id)
+            if len(records) < _RECOVERY_PAGE_SIZE:
+                break
+            last = records[-1]
+            cursor = (last.sort_key, last.key_digest)
+
+        expected_active: set[str] = set()
+        admission_ids: set[str] = set()
+        state_ids: set[str] = set()
+        cursor = None
+        while True:
+            page_cursor = cursor
+            async def read_page(
+                transaction: StateTransaction,
+                cursor_value: tuple[str, bytes] | None = page_cursor,
+            ) -> tuple[
+                tuple[tuple[StoredRecord, RecoveryAdmissionRecord], ...],
+                Mapping[bytes, StoredRecord],
+                tuple[str, ...],
+                tuple[str, bytes] | None,
+            ]:
                 admissions = await transaction.list_records(
                     RecordQuery(
                         partition_digest=self._partition("recovery_admission"),
                         kind="recovery_admission",
-                        after_sort_key=None if cursor is None else cursor[0],
-                        after_key_digest=None if cursor is None else cursor[1],
+                        after_sort_key=(
+                            None if cursor_value is None else cursor_value[0]
+                        ),
+                        after_key_digest=(
+                            None if cursor_value is None else cursor_value[1]
+                        ),
                         limit=_RECOVERY_PAGE_SIZE,
                     )
                 )
-                keys: list[bytes] = []
-                admission_records: list[StoredRecord] = []
+                decoded: list[tuple[StoredRecord, RecoveryAdmissionRecord]] = []
+                invalid_ids: list[str] = []
                 for record in admissions:
-                    admission = await self._decode(record, RecoveryAdmissionRecord)
-                    admission_ids.add(admission.execution_id)
-                    keys.append(self._state_key(admission.execution_id))
-                    admission_records.append(record)
-                if keys:
-                    states = await transaction.get_records(tuple(keys))
-                    for record in admission_records:
-                        admission = await self._decode(record, RecoveryAdmissionRecord)
-                        state = states.get(self._state_key(admission.execution_id))
-                        if state is None:
-                            continue
-                        checkpoint = await self._compose(record, state)
-                        if checkpoint.state is not RecoveryCheckpointState.COMPLETED:
-                            expected_active.add(admission.execution_id)
-                if len(admissions) < _RECOVERY_PAGE_SIZE:
-                    break
-                last = admissions[-1]
-                cursor = (last.sort_key, last.key_digest)
-            inconsistent = tuple(sorted(active_ids ^ expected_active))
-            return RecoveryIntegrityReport(
-                len(active_ids),
-                len(admission_ids),
-                inconsistent,
-            )
+                    try:
+                        admission = await self._decode(
+                            record,
+                            RecoveryAdmissionRecord,
+                        )
+                        self._validate_admission_record(
+                            record,
+                            admission,
+                            admission.execution_id,
+                        )
+                    except (KeyError, TypeError, ValueError):
+                        invalid_ids.append(record.sort_key)
+                        continue
+                    except AIError as error:
+                        if error.code is not ErrorCode.STORAGE_INTEGRITY_ERROR:
+                            raise
+                        invalid_ids.append(record.sort_key)
+                        continue
+                    decoded.append((record, admission))
+                states = await transaction.get_records(
+                    tuple(
+                        self._state_key(admission.execution_id)
+                        for _record, admission in decoded
+                    )
+                )
+                last_cursor = None
+                if admissions:
+                    last = admissions[-1]
+                    last_cursor = (last.sort_key, last.key_digest)
+                return tuple(decoded), states, tuple(invalid_ids), last_cursor
 
-        report = await self._store.read(scan)
+            (
+                decoded_admissions,
+                states,
+                invalid_ids,
+                last_cursor,
+            ) = await self._store.read(read_page)
+            admission_ids.update(invalid_ids)
+            inconsistent.update(invalid_ids)
+            if not decoded_admissions:
+                if len(invalid_ids) < _RECOVERY_PAGE_SIZE:
+                    break
+                cursor = last_cursor
+                continue
+            for record, admission in decoded_admissions:
+                admission_ids.add(admission.execution_id)
+                state = states.get(self._state_key(admission.execution_id))
+                if state is None:
+                    inconsistent.add(admission.execution_id)
+                    continue
+                try:
+                    state_value = await self._decode(state, RecoveryStateRecord)
+                    self._validate_state_record(
+                        state,
+                        state_value,
+                        admission.execution_id,
+                    )
+                except (KeyError, TypeError, ValueError):
+                    self._record_invalid_recovery_id(
+                        state,
+                        state_ids,
+                        inconsistent,
+                    )
+                    inconsistent.add(admission.execution_id)
+                    continue
+                except AIError as error:
+                    if error.code is not ErrorCode.STORAGE_INTEGRITY_ERROR:
+                        raise
+                    self._record_invalid_recovery_id(
+                        state,
+                        state_ids,
+                        inconsistent,
+                    )
+                    inconsistent.add(admission.execution_id)
+                    continue
+                state_ids.add(admission.execution_id)
+                checkpoint = await self._compose(record, state)
+                if checkpoint.state is not RecoveryCheckpointState.COMPLETED:
+                    expected_active.add(admission.execution_id)
+            page_size = len(decoded_admissions) + len(invalid_ids)
+            if page_size < _RECOVERY_PAGE_SIZE:
+                break
+            cursor = last_cursor
+
+        cursor = None
+        while True:
+            page_cursor = cursor
+            states = await self._store.read(
+                lambda transaction, cursor_value=page_cursor: self._read_recovery_state_page(
+                    transaction,
+                    cursor_value,
+                )
+            )
+            if not states:
+                break
+            for record in states:
+                try:
+                    state = await self._decode(record, RecoveryStateRecord)
+                    self._validate_state_record(
+                        record,
+                        state,
+                        state.execution_id,
+                    )
+                except (KeyError, TypeError, ValueError):
+                    self._record_invalid_recovery_id(
+                        record,
+                        state_ids,
+                        inconsistent,
+                    )
+                    continue
+                except AIError as error:
+                    if error.code is not ErrorCode.STORAGE_INTEGRITY_ERROR:
+                        raise
+                    self._record_invalid_recovery_id(
+                        record,
+                        state_ids,
+                        inconsistent,
+                    )
+                    continue
+                state_ids.add(state.execution_id)
+            if len(states) < _RECOVERY_PAGE_SIZE:
+                break
+            last = states[-1]
+            cursor = (last.sort_key, last.key_digest)
+
+        g1 = await self._store.read(
+            lambda transaction: transaction.get_sequence(
+                self._integrity_generation_key()
+            )
+        )
+        if g0 != g1:
+            raise AIError(
+                ErrorCode.STORAGE_CONFLICT,
+                "recovery integrity validation snapshot changed",
+            )
+        inconsistent.update(active_ids ^ expected_active)
+        inconsistent.update(admission_ids ^ state_ids)
+        report = RecoveryIntegrityReport(
+            len(active_ids),
+            len(admission_ids),
+            tuple(sorted(inconsistent)),
+        )
         if report.inconsistent_execution_ids:
             _logger.error(
                 "recovery active index validation failed: tenant=%s "
@@ -2903,16 +3077,18 @@ class RecoveryCheckpointRepositoryImpl(_ResourceRepository[RecoveryCheckpoint]):
         self,
         transaction: StateTransaction,
         checkpoint: RecoveryCheckpoint,
-    ) -> None:
+    ) -> bool:
         key = self._active_key(checkpoint.execution_id)
         current = await transaction.get_record(key)
         if checkpoint.state is RecoveryCheckpointState.COMPLETED:
-            if current is not None and not await transaction.delete_record(
+            if current is None:
+                return False
+            if not await transaction.delete_record(
                 key,
                 expected_storage_version=current.storage_version,
             ):
                 raise AIError(ErrorCode.STORAGE_CONFLICT)
-            return
+            return True
         if current is None:
             await transaction.insert_record(
                 self._stored(
@@ -2925,9 +3101,40 @@ class RecoveryCheckpointRepositoryImpl(_ResourceRepository[RecoveryCheckpoint]):
                     state=checkpoint.state.value,
                 )
             )
-            return
+            return True
         active = await self._decode(current, RecoveryActiveRecord)
         self._validate_active_record(current, active, checkpoint.execution_id)
+        return False
+
+    async def _read_recovery_state_page(
+        self,
+        transaction: StateTransaction,
+        cursor: tuple[str, bytes] | None,
+    ) -> tuple[StoredRecord, ...]:
+        return await transaction.list_records(
+            RecordQuery(
+                partition_digest=self._partition("recovery_state"),
+                kind="recovery_state",
+                after_sort_key=None if cursor is None else cursor[0],
+                after_key_digest=None if cursor is None else cursor[1],
+                limit=_RECOVERY_PAGE_SIZE,
+            )
+        )
+
+    async def _bump_integrity_generation_in_transaction(
+        self,
+        transaction: StateTransaction,
+    ) -> None:
+        await transaction.next_sequence(self._integrity_generation_key())
+
+    def _integrity_generation_key(self) -> bytes:
+        return sequence_key(
+            self._namespace,
+            self._tenant_id,
+            RuntimeDomain.RECOVERY.value,
+            "recovery_integrity_generation",
+            "global",
+        )
 
     def _validate_active_record(
         self,
@@ -2942,6 +3149,44 @@ class RecoveryCheckpointRepositoryImpl(_ResourceRepository[RecoveryCheckpoint]):
             or active.tenant_id != self._tenant_id
         ):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+
+    def _validate_admission_record(
+        self,
+        record: StoredRecord,
+        admission: RecoveryAdmissionRecord,
+        execution_id: str,
+    ) -> None:
+        if (
+            record.key_digest != self._admission_key(execution_id)
+            or record.kind != "recovery_admission"
+            or admission.execution_id != execution_id
+            or admission.tenant_id != self._tenant_id
+        ):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+
+    def _validate_state_record(
+        self,
+        record: StoredRecord,
+        state: RecoveryStateRecord,
+        execution_id: str,
+    ) -> None:
+        if (
+            record.key_digest != self._state_key(execution_id)
+            or record.kind != "recovery_state"
+            or state.execution_id != execution_id
+            or state.tenant_id != self._tenant_id
+        ):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+
+    def _record_invalid_recovery_id(
+        self,
+        record: StoredRecord,
+        ids: set[str],
+        inconsistent: set[str],
+    ) -> None:
+        if record.sort_key:
+            ids.add(record.sort_key)
+            inconsistent.add(record.sort_key)
 
     def _active_key(self, execution_id: str) -> bytes:
         return self._key("recovery_active", execution_id)
@@ -3020,7 +3265,8 @@ class RecoveryCheckpointRepositoryImpl(_ResourceRepository[RecoveryCheckpoint]):
             existing = await self._compose(current, records[keys[1]])
             if not _recovery_admission_matches(existing, record):
                 raise AIError(ErrorCode.IDEMPOTENCY_CONFLICT)
-            await self._ensure_active_in_transaction(transaction, existing)
+            if await self._ensure_active_in_transaction(transaction, existing):
+                await self._bump_integrity_generation_in_transaction(transaction)
             return existing
         admission = RecoveryAdmissionRecord(
             record.execution_id,
@@ -3036,6 +3282,7 @@ class RecoveryCheckpointRepositoryImpl(_ResourceRepository[RecoveryCheckpoint]):
             self._stored("recovery_state", record.execution_id, state)
         )
         await self._ensure_active_in_transaction(transaction, record)
+        await self._bump_integrity_generation_in_transaction(transaction)
         return record
 
     async def compare_and_swap_in_transaction(
@@ -3071,6 +3318,7 @@ class RecoveryCheckpointRepositoryImpl(_ResourceRepository[RecoveryCheckpoint]):
             state_record.storage_version,
         )
         await self._ensure_active_in_transaction(transaction, next_record)
+        await self._bump_integrity_generation_in_transaction(transaction)
         return next_record
 
     def _admission_key(self, execution_id: str) -> bytes:
@@ -4357,13 +4605,6 @@ def _domain_data(value: object) -> dict[str, object]:
     return encode_envelope({"type": wire_type_id(value), "payload": payload})
 
 
-def _domain_payload(record: StoredRecord) -> object:
-    payload = decode_envelope(record.data).get("payload")
-    if payload is None:
-        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-    return payload
-
-
 def _restore_lease_fields(payload: object, target: type[ValueT]) -> object:
     if target not in {TaskNodeView, ToolOperationRecord} or not isinstance(payload, Mapping):
         return payload
@@ -4502,10 +4743,7 @@ async def _append_operation(
 
 
 def _decode_operation(value: StoredOperation) -> OperationLedgerRecord:
-    payload = decode_envelope(value.data).get("payload")
-    if payload is None:
-        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-    candidate = decode_domain(payload, OperationLedgerInput)
+    candidate = _decode_enveloped_domain(value.data, OperationLedgerInput)
     return _operation_record(candidate, value.sequence)  # type: ignore[arg-type]
 
 

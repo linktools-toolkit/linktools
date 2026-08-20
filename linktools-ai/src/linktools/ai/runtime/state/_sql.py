@@ -20,8 +20,11 @@ from ._plan import RuntimeDomain
 from ._schema import build_runtime_sql_metadata
 from ._store import (
     FactQuery,
+    FactScanCursor,
     OperationQuery,
+    OperationScanCursor,
     RecordQuery,
+    RecordScanCursor,
     RecordReplacement,
     StateCallback,
     StateGroupCallback,
@@ -46,6 +49,7 @@ if TYPE_CHECKING:
 
 ValueT = TypeVar("ValueT")
 _logger = environ.get_logger("ai.runtime.state.sql")
+_MAINTENANCE_PAGE_SIZE = 128
 
 
 class _SqlGroupTransaction:
@@ -264,6 +268,19 @@ class SqlStateStore:
 
     async def validate_integrity(self) -> None:
         self._ensure_ready()
+        record_cursor: RecordScanCursor | None = None
+        while True:
+            records = await self.read(
+                lambda transaction, cursor=record_cursor: transaction.scan_records_page(
+                    after=cursor,
+                    limit=_MAINTENANCE_PAGE_SIZE,
+                )
+            )
+            if not records:
+                break
+            last = records[-1]
+            record_cursor = RecordScanCursor(last.kind, last.key_digest)
+
         async with self._storage_group._session() as session:
             transaction = _SqlTransaction(session, self._metadata, self.context)
             from sqlalchemy import select
@@ -272,41 +289,74 @@ class SqlStateStore:
             aliases = transaction._table("ai_state_aliases")
             facts = transaction._table("ai_state_facts")
             sequences = transaction._table("ai_state_sequences")
-            record_rows = (await session.execute(select(records))).mappings().all()
-            for row in record_rows:
-                _record_from_row(row)
-            sequence_rows = (await session.execute(select(sequences.c.value))).all()
-            if any(int(row[0]) < 0 for row in sequence_rows):
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            invalid_sequence = await session.scalar(
+                select(sequences.c.id)
+                .where(sequences.c.value < 0)
+                .limit(1)
+            )
             orphan_alias = await session.scalar(
                 select(aliases.c.id)
-                .select_from(aliases.outerjoin(records, aliases.c.record_key_digest == records.c.key_digest))
+                .select_from(
+                    aliases.outerjoin(
+                        records,
+                        aliases.c.record_key_digest == records.c.key_digest,
+                    )
+                )
                 .where(records.c.id.is_(None))
                 .limit(1)
             )
             orphan_fact = await session.scalar(
                 select(facts.c.id)
-                .select_from(facts.outerjoin(records, facts.c.owner_key_digest == records.c.key_digest))
+                .select_from(
+                    facts.outerjoin(
+                        records,
+                        facts.c.owner_key_digest == records.c.key_digest,
+                    )
+                )
                 .where(records.c.id.is_(None))
                 .limit(1)
             )
-            if orphan_alias is not None or orphan_fact is not None:
+            if (
+                invalid_sequence is not None
+                or orphan_alias is not None
+                or orphan_fact is not None
+            ):
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            fact_rows = (await session.execute(select(facts))).mappings().all()
-            for row in fact_rows:
-                _fact_from_row(row)
-            operation_table = transaction._table("ai_state_operations")
-            operation_rows = (await session.execute(select(operation_table))).mappings().all()
-            for row in operation_rows:
-                _operation_from_row(row)
-            table = transaction._table("ai_state_facts")
-            rows = (await session.execute(select(table.c.stream_digest, table.c.sequence))).all()
-            grouped: dict[str, list[int]] = {}
-            for stream, sequence in rows:
-                grouped.setdefault(str(stream), []).append(int(sequence))
-            for values in grouped.values():
-                if sorted(values) != list(range(1, max(values) + 1)):
+
+        fact_cursor: FactScanCursor | None = None
+        previous_stream: bytes | None = None
+        previous_sequence: int | None = None
+        while True:
+            values = await self.read(
+                lambda transaction, cursor=fact_cursor: transaction.scan_facts_page(
+                    after=cursor,
+                    limit=_MAINTENANCE_PAGE_SIZE,
+                )
+            )
+            if not values:
+                break
+            for value in values:
+                if value.stream_digest != previous_stream:
+                    if value.sequence != 1:
+                        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                elif previous_sequence is None or value.sequence != previous_sequence + 1:
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                previous_stream = value.stream_digest
+                previous_sequence = value.sequence
+            last = values[-1]
+            fact_cursor = FactScanCursor(last.stream_digest, last.sequence)
+
+        operation_cursor: OperationScanCursor | None = None
+        while True:
+            values = await self.read(
+                lambda transaction, cursor=operation_cursor: transaction.scan_operations_page(
+                    after=cursor,
+                    limit=_MAINTENANCE_PAGE_SIZE,
+                )
+            )
+            if not values:
+                break
+            operation_cursor = OperationScanCursor(values[-1].key_digest)
         _logger.info("SQL StateStore integrity validated: domain=%s", self._runtime_domain.value)
 
     def _ensure_ready(self) -> None:
@@ -617,6 +667,38 @@ class _SqlTransaction:
         rows = (await self._session.execute(select(table))).mappings().all()
         return tuple(_record_from_row(row) for row in rows)
 
+    async def scan_records_page(
+        self,
+        *,
+        after: RecordScanCursor | None,
+        limit: int,
+    ) -> tuple[StoredRecord, ...]:
+        _require_scan_limit(limit)
+        from sqlalchemy import and_, or_, select
+
+        table = self._table("ai_state_records")
+        conditions = []
+        if after is not None:
+            conditions.append(
+                or_(
+                    table.c.kind > after.kind,
+                    and_(
+                        table.c.kind == after.kind,
+                        table.c.key_digest > _hex(after.key_digest),
+                    ),
+                )
+            )
+        statement = (
+            select(table)
+            .where(*conditions)
+            .order_by(table.c.kind, table.c.key_digest)
+            .limit(limit)
+        )
+        rows = (await self._session.execute(statement)).mappings().all()
+        values = tuple(_record_from_row(row) for row in rows)
+        self._record_cache.update({value.key_digest: value for value in values})
+        return values
+
     async def resolve_alias(self, alias: bytes) -> bytes | None:
         return (await self.resolve_aliases((alias,))).get(alias)
 
@@ -852,6 +934,36 @@ class _SqlTransaction:
         rows = (await self._session.execute(select(table))).mappings().all()
         return tuple(_fact_from_row(row) for row in rows)
 
+    async def scan_facts_page(
+        self,
+        *,
+        after: FactScanCursor | None,
+        limit: int,
+    ) -> tuple[StoredFact, ...]:
+        _require_scan_limit(limit)
+        from sqlalchemy import and_, or_, select
+
+        table = self._table("ai_state_facts")
+        conditions = []
+        if after is not None:
+            conditions.append(
+                or_(
+                    table.c.stream_digest > _hex(after.stream_digest),
+                    and_(
+                        table.c.stream_digest == _hex(after.stream_digest),
+                        table.c.sequence > after.sequence,
+                    ),
+                )
+            )
+        statement = (
+            select(table)
+            .where(*conditions)
+            .order_by(table.c.stream_digest, table.c.sequence)
+            .limit(limit)
+        )
+        rows = (await self._session.execute(statement)).mappings().all()
+        return tuple(_fact_from_row(row) for row in rows)
+
     async def delete_fact_streams(self, owner_key: bytes) -> None:
         from sqlalchemy import delete
 
@@ -914,6 +1026,23 @@ class _SqlTransaction:
 
         table = self._table("ai_state_operations")
         rows = (await self._session.execute(select(table))).mappings().all()
+        return tuple(_operation_from_row(row) for row in rows)
+
+    async def scan_operations_page(
+        self,
+        *,
+        after: OperationScanCursor | None,
+        limit: int,
+    ) -> tuple[StoredOperation, ...]:
+        _require_scan_limit(limit)
+        from sqlalchemy import select
+
+        table = self._table("ai_state_operations")
+        statement = select(table)
+        if after is not None:
+            statement = statement.where(table.c.key_digest > _hex(after.key_digest))
+        statement = statement.order_by(table.c.key_digest).limit(limit)
+        rows = (await self._session.execute(statement)).mappings().all()
         return tuple(_operation_from_row(row) for row in rows)
 
     async def delete_operations(self, query: OperationQuery) -> tuple[StoredOperation, ...]:
@@ -1089,6 +1218,11 @@ def _datetime_or_none(value: object) -> datetime | None:
     if not isinstance(value, datetime):
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     return value if value.tzinfo is not None else value.replace(tzinfo=timezone.utc)
+
+
+def _require_scan_limit(limit: int) -> None:
+    if isinstance(limit, bool) or not isinstance(limit, int) or limit < 1:
+        raise ValueError("scan page limit must be positive")
 
 
 __all__ = ["SqlStateStorageGroup", "SqlStateStore"]

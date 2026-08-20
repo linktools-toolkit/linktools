@@ -10,9 +10,17 @@ from linktools.core import environ
 
 from ...errors import AIError, ErrorCode
 from ...storage import ObjectStoreInspection, ObjectStoreMaintenance
-from ._codec import iter_runtime_object_refs
+from ._codec import _iter_enveloped_runtime_object_refs
 from ._plan import RuntimeDomain
-from ._store import StateStore, StoredFact, StoredOperation, StoredRecord
+from ._store import (
+    FactScanCursor,
+    OperationScanCursor,
+    RecordScanCursor,
+    StateStore,
+    StoredFact,
+    StoredOperation,
+    StoredRecord,
+)
 
 _logger = environ.get_logger("ai.runtime.state.maintenance")
 _OBJECT_DOMAINS = frozenset(
@@ -24,6 +32,7 @@ _OBJECT_DOMAINS = frozenset(
         RuntimeDomain.RECOVERY,
     }
 )
+_MAINTENANCE_PAGE_SIZE = 128
 
 
 class ObjectRouter(Protocol):
@@ -55,14 +64,44 @@ class RuntimeStorageInspection:
         await self.validate_state_stores()
         for domain in self._durable_domains:
             store = self._stores[domain]
-            records, facts, operations = await store.read(_scan_state)
-            self._collect_references(
-                domain,
-                records,
-                facts,
-                operations,
-                references,
-            )
+            record_cursor: RecordScanCursor | None = None
+            while True:
+                records = await store.read(
+                    lambda transaction, cursor=record_cursor: transaction.scan_records_page(
+                        after=cursor,
+                        limit=_MAINTENANCE_PAGE_SIZE,
+                    )
+                )
+                if not records:
+                    break
+                self._collect_references(domain, records, (), (), references)
+                last = records[-1]
+                record_cursor = RecordScanCursor(last.kind, last.key_digest)
+            fact_cursor: FactScanCursor | None = None
+            while True:
+                facts = await store.read(
+                    lambda transaction, cursor=fact_cursor: transaction.scan_facts_page(
+                        after=cursor,
+                        limit=_MAINTENANCE_PAGE_SIZE,
+                    )
+                )
+                if not facts:
+                    break
+                self._collect_references(domain, (), facts, (), references)
+                last = facts[-1]
+                fact_cursor = FactScanCursor(last.stream_digest, last.sequence)
+            operation_cursor: OperationScanCursor | None = None
+            while True:
+                operations = await store.read(
+                    lambda transaction, cursor=operation_cursor: transaction.scan_operations_page(
+                        after=cursor,
+                        limit=_MAINTENANCE_PAGE_SIZE,
+                    )
+                )
+                if not operations:
+                    break
+                self._collect_references(domain, (), (), operations, references)
+                operation_cursor = OperationScanCursor(operations[-1].key_digest)
         return {key: frozenset(value) for key, value in references.items()}
 
     async def validate_state_stores(self) -> None:
@@ -152,7 +191,7 @@ class RuntimeStorageInspection:
             *(operation.data for operation in operations),
         )
         for value in values:
-            for source_domain, reference in iter_runtime_object_refs(
+            for source_domain, reference in _iter_enveloped_runtime_object_refs(
                 value,
                 default_domain=domain,
             ):
@@ -182,16 +221,6 @@ class OfflineRuntimeStorageMaintenance:
                         object_store.offline_exclusivity()
                     )
                 return await self._inspection._compact_objects()
-
-async def _scan_state(
-    transaction,
-) -> tuple[tuple[StoredRecord, ...], tuple[StoredFact, ...], tuple[StoredOperation, ...]]:
-    return (
-        await transaction.scan_records(),
-        await transaction.scan_facts(),
-        await transaction.scan_operations(),
-    )
-
 
 RuntimeStorageMaintenance = RuntimeStorageInspection
 

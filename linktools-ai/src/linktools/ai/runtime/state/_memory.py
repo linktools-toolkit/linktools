@@ -13,8 +13,11 @@ from linktools.core import environ
 from ...errors import AIError, ErrorCode
 from ._store import (
     FactQuery,
+    FactScanCursor,
     OperationQuery,
+    OperationScanCursor,
     RecordQuery,
+    RecordScanCursor,
     RecordReplacement,
     StateCallback,
     StateGroupCallback,
@@ -409,6 +412,26 @@ class _MemoryTransaction:
     async def scan_records(self) -> tuple[StoredRecord, ...]:
         return tuple(self.records.values())
 
+    async def scan_records_page(
+        self,
+        *,
+        after: RecordScanCursor | None,
+        limit: int,
+    ) -> tuple[StoredRecord, ...]:
+        _require_scan_limit(limit)
+        values = sorted(
+            self.records.values(),
+            key=lambda value: (value.kind, value.key_digest),
+        )
+        if after is not None:
+            values = [
+                value
+                for value in values
+                if (value.kind, value.key_digest)
+                > (after.kind, after.key_digest)
+            ]
+        return tuple(values[:limit])
+
     async def resolve_alias(self, alias: bytes) -> bytes | None:
         return (await self.resolve_aliases((alias,))).get(alias)
 
@@ -501,6 +524,26 @@ class _MemoryTransaction:
     async def scan_facts(self) -> tuple[StoredFact, ...]:
         return tuple(self.facts.values())
 
+    async def scan_facts_page(
+        self,
+        *,
+        after: FactScanCursor | None,
+        limit: int,
+    ) -> tuple[StoredFact, ...]:
+        _require_scan_limit(limit)
+        values = sorted(
+            self.facts.values(),
+            key=lambda value: (value.stream_digest, value.sequence),
+        )
+        if after is not None:
+            values = [
+                value
+                for value in values
+                if (value.stream_digest, value.sequence)
+                > (after.stream_digest, after.sequence)
+            ]
+        return tuple(values[:limit])
+
     async def delete_fact_streams(self, owner_key: bytes) -> None:
         for key, fact in tuple(self.facts.items()):
             if fact.owner_key_digest == owner_key:
@@ -542,6 +585,23 @@ class _MemoryTransaction:
     async def scan_operations(self) -> tuple[StoredOperation, ...]:
         return tuple(self.operations.values())
 
+    async def scan_operations_page(
+        self,
+        *,
+        after: OperationScanCursor | None,
+        limit: int,
+    ) -> tuple[StoredOperation, ...]:
+        _require_scan_limit(limit)
+        values = sorted(
+            self.operations.values(),
+            key=lambda value: value.key_digest,
+        )
+        if after is not None:
+            values = [
+                value for value in values if value.key_digest > after.key_digest
+            ]
+        return tuple(values[:limit])
+
     async def delete_operations(self, query: OperationQuery) -> tuple[StoredOperation, ...]:
         values = await self.list_operations(query)
         for value in values:
@@ -569,6 +629,11 @@ def _matches_record(record: StoredRecord, query: RecordQuery) -> bool:
     if query.kind is not None and record.kind != query.kind:
         return False
     return query.states is None or record.state in query.states
+
+
+def _require_scan_limit(limit: int) -> None:
+    if isinstance(limit, bool) or not isinstance(limit, int) or limit < 1:
+        raise ValueError("scan page limit must be positive")
 
 
 def _validate_transaction_integrity(transaction: _MemoryTransaction) -> None:

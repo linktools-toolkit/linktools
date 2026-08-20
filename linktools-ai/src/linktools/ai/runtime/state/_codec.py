@@ -4,13 +4,23 @@
 
 import base64
 import types
-from collections.abc import Iterator, Mapping
+from collections.abc import Callable, Iterator, Mapping
 from dataclasses import MISSING, dataclass, fields, is_dataclass
 from datetime import datetime
 from enum import Enum
 from operator import attrgetter
-from typing import Any, Literal, TypeVar, Union, get_args, get_origin, get_type_hints
+from types import MappingProxyType
+from typing import (
+    Any,
+    Literal,
+    TypeVar,
+    Union,
+    get_args,
+    get_origin,
+    get_type_hints,
+)
 
+from pydantic_ai import ModelMessagesTypeAdapter
 from pydantic_ai_harness.step_persistence import (
     ContinuableSnapshot,
     RunRecord,
@@ -124,7 +134,7 @@ from ._store import (
 CURRENT_DATA_VERSION = 2
 DomainT = TypeVar("DomainT")
 
-_WIRE_TYPES: tuple[tuple[str, type[object]], ...] = (
+_V2_WIRE_TYPES: tuple[tuple[str, type[object]], ...] = (
     ("approval_record", ApprovalRecord),
     ("agent_attempt_claim", AgentAttemptClaim),
     ("artifact_record", ArtifactRecord),
@@ -199,10 +209,14 @@ _WIRE_TYPES: tuple[tuple[str, type[object]], ...] = (
     ("step_event", StepEvent),
     ("tool_effect", ToolEffectRecord),
 )
-_WIRE_IDS = {target: wire_id for wire_id, target in _WIRE_TYPES}
-_DOMAIN_TYPES = {wire_id: target for wire_id, target in _WIRE_TYPES}
+_V2_WIRE_IDS = MappingProxyType(
+    {target: wire_id for wire_id, target in _V2_WIRE_TYPES}
+)
+_V2_DOMAIN_TYPES = MappingProxyType(
+    {wire_id: target for wire_id, target in _V2_WIRE_TYPES}
+)
 
-_ENUM_WIRE_TYPES: tuple[tuple[str, type[Enum]], ...] = (
+_V2_ENUM_WIRE_TYPES: tuple[tuple[str, type[Enum]], ...] = (
     ("approval_decision", ApprovalDecision),
     ("approval_status", ApprovalStatus),
     ("evaluation_status", EvaluationStatus),
@@ -227,8 +241,45 @@ _ENUM_WIRE_TYPES: tuple[tuple[str, type[Enum]], ...] = (
     ("transcript_owner_domain", TranscriptOwnerDomain),
     ("transcript_seek_dimension", TranscriptSeekDimension),
 )
-_ENUM_WIRE_IDS = {target: wire_id for wire_id, target in _ENUM_WIRE_TYPES}
-_ENUM_TYPES = {wire_id: target for wire_id, target in _ENUM_WIRE_TYPES}
+_V2_ENUM_WIRE_IDS = MappingProxyType(
+    {target: wire_id for wire_id, target in _V2_ENUM_WIRE_TYPES}
+)
+_V2_ENUM_TYPES = MappingProxyType(
+    {wire_id: target for wire_id, target in _V2_ENUM_WIRE_TYPES}
+)
+
+# Preserve the public v2 manifest names for callers.  Codec decisions below
+# use the version-owned mappings through _VersionCodec.
+_WIRE_TYPES = _V2_WIRE_TYPES
+_WIRE_IDS = _V2_WIRE_IDS
+_DOMAIN_TYPES = _V2_DOMAIN_TYPES
+_ENUM_WIRE_TYPES = _V2_ENUM_WIRE_TYPES
+_ENUM_WIRE_IDS = _V2_ENUM_WIRE_IDS
+_ENUM_TYPES = _V2_ENUM_TYPES
+
+
+@dataclass(frozen=True, slots=True)
+class _VersionCodec:
+    version: int
+    wire_ids: Mapping[type[object], str]
+    domain_types: Mapping[str, type[object]]
+    enum_wire_ids: Mapping[type[Enum], str]
+    enum_types: Mapping[str, type[Enum]]
+
+
+_V2_CODEC = _VersionCodec(
+    2,
+    _V2_WIRE_IDS,
+    _V2_DOMAIN_TYPES,
+    _V2_ENUM_WIRE_IDS,
+    _V2_ENUM_TYPES,
+)
+_VERSION_CODECS: Mapping[int, _VersionCodec] = MappingProxyType(
+    {
+        2: _V2_CODEC,
+    }
+)
+_CURRENT_CODEC = _VERSION_CODECS[CURRENT_DATA_VERSION]
 
 
 @dataclass(frozen=True, slots=True)
@@ -254,24 +305,20 @@ def parse_envelope(value: Mapping[str, JsonValue]) -> CanonicalEnvelope:
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR, "canonical data must be an object")
     version = value.get("v")
     payload = value.get("value")
-    if not isinstance(version, int) or version < 1:
+    if isinstance(version, bool) or not isinstance(version, int) or version < 1:
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR, "canonical data version is invalid")
     if not isinstance(payload, Mapping):
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR, "canonical data value is invalid")
     return CanonicalEnvelope(version, dict(payload))
 
 
-_VERSION_DECODERS: dict[int, object] = {
-    CURRENT_DATA_VERSION: lambda envelope: dict(envelope.value),
-}
-
-
-def decode_envelope(value: Mapping[str, JsonValue]) -> dict[str, JsonValue]:
+def decode_envelope(value: Mapping[str, JsonValue]) -> CanonicalEnvelope:
     envelope = parse_envelope(value)
-    decoder = _VERSION_DECODERS.get(envelope.version)
-    if decoder is None:
+    if envelope.version not in _VERSION_CODECS:
         raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
-    return decoder(envelope)  # type: ignore[no-any-return]
+    if _VERSION_CODECS[envelope.version].version != envelope.version:
+        raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
+    return envelope
 
 
 def encode_record(record: StoredRecord) -> dict[str, JsonValue]:
@@ -420,11 +467,29 @@ def wire_type_id(value: DomainT | type[DomainT]) -> str:
         return "continuable_snapshot"
     if isinstance(target, type) and issubclass(target, Enum):
         try:
-            return _ENUM_WIRE_IDS[target]
+            return _CURRENT_CODEC.enum_wire_ids[target]
         except KeyError as error:
             raise TypeError(f"unsupported enum type: {target.__name__}") from error
     try:
-        return _WIRE_IDS[target]
+        return _CURRENT_CODEC.wire_ids[target]
+    except KeyError as error:
+        raise TypeError(f"unsupported domain type: {target.__name__}") from error
+
+
+def _codec_wire_type_id(
+    value: DomainT | type[DomainT],
+    codec: _VersionCodec,
+) -> str:
+    target = value if isinstance(value, type) else type(value)
+    if target is ContinuableSnapshot:
+        return "continuable_snapshot"
+    if isinstance(target, type) and issubclass(target, Enum):
+        try:
+            return codec.enum_wire_ids[target]
+        except KeyError as error:
+            raise TypeError(f"unsupported enum type: {target.__name__}") from error
+    try:
+        return codec.wire_ids[target]
     except KeyError as error:
         raise TypeError(f"unsupported domain type: {target.__name__}") from error
 
@@ -435,7 +500,7 @@ def encode_domain(value: DomainT) -> JsonValue:
         return value
     if isinstance(value, TaskNode):
         return {
-            "$dataclass": _WIRE_IDS[TaskNode],
+            "$dataclass": _CURRENT_CODEC.wire_ids[TaskNode],
             "fields": {
                 "node_id": encode_domain(value.node_id),
                 "dependencies": encode_domain(value.dependencies),
@@ -444,7 +509,7 @@ def encode_domain(value: DomainT) -> JsonValue:
             },
         }
     if isinstance(value, Enum):
-        wire_id = _ENUM_WIRE_IDS.get(type(value))
+        wire_id = _CURRENT_CODEC.enum_wire_ids.get(type(value))
         if wire_id is None:
             raise TypeError(f"unsupported enum type: {type(value).__name__}")
         return {"$enum": wire_id, "value": value.value}
@@ -457,7 +522,7 @@ def encode_domain(value: DomainT) -> JsonValue:
     if is_dataclass(value):
         if any(field.name.startswith("_") for field in fields(value)):
             raise TypeError("private dataclass fields require an explicit codec")
-        wire_id = _WIRE_IDS.get(type(value))
+        wire_id = _CURRENT_CODEC.wire_ids.get(type(value))
         if wire_id is None:
             raise TypeError(f"unsupported dataclass type: {type(value).__name__}")
         return {
@@ -482,7 +547,28 @@ def encode_domain(value: DomainT) -> JsonValue:
 
 def decode_domain(value: JsonValue, target: type[DomainT]) -> DomainT:
     """Decode a canonical value using the declared domain type."""
-    return _decode_domain(value, target)  # type: ignore[return-value]
+    return _decode_domain(value, target, _CURRENT_CODEC)  # type: ignore[return-value]
+
+
+def _decode_enveloped_domain(
+    value: Mapping[str, JsonValue],
+    target: type[DomainT],
+    *,
+    payload_transform: Callable[[JsonValue], JsonValue] | None = None,
+) -> DomainT:
+    """Decode persisted domain data without losing its envelope version."""
+    envelope = decode_envelope(value)
+    codec = _VERSION_CODECS.get(envelope.version)
+    if codec is None:
+        raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
+    expected_type = _codec_wire_type_id(target, codec)
+    actual_type = envelope.value.get("type")
+    payload = envelope.value.get("payload")
+    if actual_type != expected_type or payload is None:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    if payload_transform is not None:
+        payload = payload_transform(payload)
+    return _decode_domain(payload, target, codec)
 
 
 def iter_runtime_object_refs(
@@ -491,12 +577,29 @@ def iter_runtime_object_refs(
     default_domain: RuntimeDomain,
 ) -> Iterator[tuple[RuntimeDomain, ObjectRef]]:
     """Yield object references without depending on a storage backend."""
-    yield from _iter_runtime_object_refs(value, default_domain)
+    yield from _iter_runtime_object_refs(value, default_domain, _CURRENT_CODEC)
+
+
+def _iter_enveloped_runtime_object_refs(
+    value: Mapping[str, JsonValue],
+    *,
+    default_domain: RuntimeDomain,
+) -> Iterator[tuple[RuntimeDomain, ObjectRef]]:
+    """Traverse object references using the envelope's own version codec."""
+    envelope = decode_envelope(value)
+    codec = _VERSION_CODECS.get(envelope.version)
+    if codec is None:
+        raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
+    payload = envelope.value.get("payload")
+    if payload is None:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    yield from _iter_runtime_object_refs(payload, default_domain, codec)
 
 
 def _iter_runtime_object_refs(
     value: object,
     domain: RuntimeDomain,
+    codec: _VersionCodec,
 ) -> Iterator[tuple[RuntimeDomain, ObjectRef]]:
     if isinstance(value, StoredPayload):
         if value.ref is not None:
@@ -507,38 +610,40 @@ def _iter_runtime_object_refs(
         return
     if isinstance(value, RuntimePayloadRef):
         source_domain = value.source_domain or domain
-        yield from _iter_runtime_object_refs(value.payload, source_domain)
+        yield from _iter_runtime_object_refs(value.payload, source_domain, codec)
         return
     if isinstance(value, Mapping):
         dataclass_name = value.get("$dataclass")
-        if dataclass_name == _WIRE_IDS[RuntimePayloadRef]:
-            decoded = decode_domain(value, RuntimePayloadRef)
-            yield from _iter_runtime_object_refs(decoded, domain)
+        if dataclass_name == codec.wire_ids[RuntimePayloadRef]:
+            decoded = _decode_domain(value, RuntimePayloadRef, codec)
+            yield from _iter_runtime_object_refs(decoded, domain, codec)
             return
-        if dataclass_name == _WIRE_IDS[StoredPayload]:
-            decoded = decode_domain(value, StoredPayload)
-            yield from _iter_runtime_object_refs(decoded, domain)
+        if dataclass_name == codec.wire_ids[StoredPayload]:
+            decoded = _decode_domain(value, StoredPayload, codec)
+            yield from _iter_runtime_object_refs(decoded, domain, codec)
             return
-        if dataclass_name == _WIRE_IDS[ObjectRef]:
-            decoded = decode_domain(value, ObjectRef)
+        if dataclass_name == codec.wire_ids[ObjectRef]:
+            decoded = _decode_domain(value, ObjectRef, codec)
             yield domain, decoded
             return
-        if dataclass_name == "recovery_terminal_outcome":
+        if dataclass_name == codec.wire_ids.get(RecoveryTerminalOutcome):
             fields_value = value.get("fields")
             if isinstance(fields_value, Mapping):
                 output = fields_value.get("output")
                 source_domain = _decode_runtime_domain(
                     fields_value.get("object_source_domain"),
                     domain,
+                    codec,
                 )
                 if output is not None:
                     yield from _iter_runtime_object_refs(
                         output,
                         source_domain,
+                        codec,
                     )
                 for key, item in fields_value.items():
                     if key not in {"output", "object_source_domain"}:
-                        yield from _iter_runtime_object_refs(item, domain)
+                        yield from _iter_runtime_object_refs(item, domain, codec)
                 return
         if {"kind", "digest", "size"}.issubset(value):
             try:
@@ -546,20 +651,27 @@ def _iter_runtime_object_refs(
             except (TypeError, ValueError):
                 decoded = None
             if decoded is not None:
-                yield from _iter_runtime_object_refs(decoded, domain)
+                yield from _iter_runtime_object_refs(decoded, domain, codec)
                 return
         for item in value.values():
-            yield from _iter_runtime_object_refs(item, domain)
+            yield from _iter_runtime_object_refs(item, domain, codec)
         return
     if isinstance(value, (list, tuple, frozenset)):
         for item in value:
-            yield from _iter_runtime_object_refs(item, domain)
+            yield from _iter_runtime_object_refs(item, domain, codec)
 
 
-def _decode_runtime_domain(value: object, default: RuntimeDomain) -> RuntimeDomain:
+def _decode_runtime_domain(
+    value: object,
+    default: RuntimeDomain,
+    codec: _VersionCodec,
+) -> RuntimeDomain:
     if value is None:
         return default
-    if isinstance(value, Mapping) and value.get("$enum") == _ENUM_WIRE_IDS[RuntimeDomain]:
+    if (
+        isinstance(value, Mapping)
+        and value.get("$enum") == codec.enum_wire_ids[RuntimeDomain]
+    ):
         enum_value = value.get("value")
         if isinstance(enum_value, str):
             try:
@@ -574,9 +686,13 @@ def _decode_runtime_domain(value: object, default: RuntimeDomain) -> RuntimeDoma
     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
 
 
-def _decode_domain(value: object, target: object) -> object:
+def _decode_domain(
+    value: object,
+    target: object,
+    codec: _VersionCodec,
+) -> object:
     if target is Any or target is object:
-        return _decode_any(value)
+        return _decode_any(value, codec)
     origin = get_origin(target)
     arguments = get_args(target)
     if origin is Literal:
@@ -590,7 +706,7 @@ def _decode_domain(value: object, target: object) -> object:
             if candidate is type(None):
                 continue
             try:
-                return _decode_domain(value, candidate)
+                return _decode_domain(value, candidate, codec)
             except (TypeError, ValueError, KeyError, AIError):
                 continue
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -600,17 +716,23 @@ def _decode_domain(value: object, target: object) -> object:
         item_type = arguments[0] if arguments else Any
         if not isinstance(value, list):
             raise TypeError("list value is invalid")
-        return [_decode_domain(item, item_type) for item in value]
+        return [_decode_domain(item, item_type, codec) for item in value]
     if origin in (tuple,):
         if arguments and arguments[-1] is Ellipsis:
-            return tuple(_decode_domain(item, arguments[0]) for item in _unwrap_sequence(value))
+            return tuple(
+                _decode_domain(item, arguments[0], codec)
+                for item in _unwrap_sequence(value)
+            )
         return tuple(
-            _decode_domain(item, item_type)
+            _decode_domain(item, item_type, codec)
             for item, item_type in zip(_unwrap_sequence(value), arguments)
         )
     if origin in (set, frozenset):
         item_type = arguments[0] if arguments else Any
-        result = {_decode_domain(item, item_type) for item in _unwrap_sequence(value)}
+        result = {
+            _decode_domain(item, item_type, codec)
+            for item in _unwrap_sequence(value)
+        }
         return frozenset(result) if origin is frozenset else result
     if isinstance(origin, type) and issubclass(origin, Mapping):
         key_type, item_type = arguments if len(arguments) == 2 else (Any, Any)
@@ -619,11 +741,19 @@ def _decode_domain(value: object, target: object) -> object:
             if not isinstance(value, Mapping):
                 raise TypeError("mapping value is invalid")
             return {
-                _decode_domain(key, key_type): _decode_domain(item, item_type)
+                _decode_domain(key, key_type, codec): _decode_domain(
+                    item,
+                    item_type,
+                    codec,
+                )
                 for key, item in value.items()
             }
         return {
-            _decode_domain(pair[0], key_type): _decode_domain(pair[1], item_type)
+            _decode_domain(pair[0], key_type, codec): _decode_domain(
+                pair[1],
+                item_type,
+                codec,
+            )
             for pair in pairs
         }
     if target is type(None):
@@ -643,16 +773,23 @@ def _decode_domain(value: object, target: object) -> object:
         raw = value.get("$bytes") if isinstance(value, Mapping) else value
         return base64.b64decode(str(raw), validate=True)
     if isinstance(target, type) and is_dataclass(target):
-        return _decode_dataclass(value, target)
+        return _decode_dataclass(value, target, codec)
     if target in (str, bool, int, float):
         if not isinstance(value, target) or target is int and isinstance(value, bool):
             raise TypeError("scalar value has the wrong type")
         return value
-    return _decode_any(value)
+    return _decode_any(value, codec)
 
 
-def _decode_dataclass(value: object, target: type) -> object:
-    if not isinstance(value, Mapping) or value.get("$dataclass") != _WIRE_IDS.get(target):
+def _decode_dataclass(
+    value: object,
+    target: type,
+    codec: _VersionCodec,
+) -> object:
+    if (
+        not isinstance(value, Mapping)
+        or value.get("$dataclass") != codec.wire_ids.get(target)
+    ):
         raise TypeError("dataclass envelope is invalid")
     raw_fields = value.get("fields")
     if not isinstance(raw_fields, Mapping):
@@ -660,10 +797,22 @@ def _decode_dataclass(value: object, target: type) -> object:
     hints = get_type_hints(target)
     if target is TaskNode:
         return target(
-            str(_decode_domain(raw_fields["node_id"], hints["node_id"])),
-            tuple(_decode_domain(raw_fields["dependencies"], hints["dependencies"])),
-            input=_decode_domain(raw_fields["input"], hints.get("input", Any)),
-            budget_cost=int(_decode_domain(raw_fields["budget_cost"], hints["budget_cost"])),
+            str(_decode_domain(raw_fields["node_id"], hints["node_id"], codec)),
+            tuple(
+                _decode_domain(
+                    raw_fields["dependencies"],
+                    hints["dependencies"],
+                    codec,
+                )
+            ),
+            input=_decode_domain(
+                raw_fields["input"],
+                hints.get("input", Any),
+                codec,
+            ),
+            budget_cost=int(
+                _decode_domain(raw_fields["budget_cost"], hints["budget_cost"], codec)
+            ),
         )
     kwargs = {}
     for field in fields(target):
@@ -677,43 +826,51 @@ def _decode_dataclass(value: object, target: type) -> object:
                 kwargs[field.name] = field.default_factory()
                 continue
             raise KeyError(field.name)
-        kwargs[field.name] = _decode_domain(raw_fields[field.name], hints.get(field.name, Any))
+        kwargs[field.name] = _decode_domain(
+            raw_fields[field.name],
+            hints.get(field.name, Any),
+            codec,
+        )
     return target(**kwargs)
 
 
-def _decode_any(value: object) -> object:
+def _decode_any(value: object, codec: _VersionCodec) -> object:
     if isinstance(value, Mapping):
         if "$datetime" in value:
-            return _decode_domain(value, datetime)
+            return _decode_domain(value, datetime, codec)
         if "$bytes" in value:
-            return _decode_domain(value, bytes)
+            return _decode_domain(value, bytes, codec)
         if "$enum" in value:
             name = value.get("$enum")
-            target = _enum_type(str(name))
+            target = _enum_type(str(name), codec)
             return target(value.get("value"))
         if "$dataclass" in value:
-            target = _DOMAIN_TYPES.get(str(value.get("$dataclass")))
+            target = codec.domain_types.get(str(value.get("$dataclass")))
             if target is None:
                 raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
-            return _decode_dataclass(value, target)
+            return _decode_dataclass(value, target, codec)
         if "$mapping" in value:
             return {
-                _decode_any(pair[0]): _decode_any(pair[1])
+                _decode_any(pair[0], codec): _decode_any(pair[1], codec)
                 for pair in value["$mapping"]
             }
         if "$tuple" in value:
-            return tuple(_decode_any(item) for item in value["$tuple"])
+            return tuple(_decode_any(item, codec) for item in value["$tuple"])
         if "$frozenset" in value:
-            return frozenset(_decode_any(item) for item in value["$frozenset"])
-        return {str(key): _decode_any(item) for key, item in value.items()}
+            return frozenset(
+                _decode_any(item, codec) for item in value["$frozenset"]
+            )
+        return {
+            str(key): _decode_any(item, codec) for key, item in value.items()
+        }
     if isinstance(value, list):
-        return [_decode_any(item) for item in value]
+        return [_decode_any(item, codec) for item in value]
     return value
 
 
-def _enum_type(wire_id: str) -> type[Enum]:
+def _enum_type(wire_id: str, codec: _VersionCodec) -> type[Enum]:
     try:
-        return _ENUM_TYPES[wire_id]
+        return codec.enum_types[wire_id]
     except KeyError as error:
         raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED) from error
 
@@ -777,11 +934,88 @@ def _optional_datetime(value: object) -> datetime | None:
     return result
 
 
+def _encode_step_envelope(value: object) -> dict[str, JsonValue]:
+    if isinstance(value, ContinuableSnapshot):
+        return encode_envelope(
+            {
+                "type": "continuable_snapshot",
+                "run_id": value.run_id,
+                "step_index": value.step_index,
+                "messages": base64.b64encode(
+                    ModelMessagesTypeAdapter.dump_json(value.messages)
+                ).decode("ascii"),
+                "conversation_id": value.conversation_id,
+                "parent_run_id": value.parent_run_id,
+                "agent_name": value.agent_name,
+                "timestamp": value.timestamp.isoformat(),
+                "state": value.state,
+            }
+        )
+    return encode_envelope(
+        {
+            "type": wire_type_id(value),
+            "payload": encode_domain(value),
+        }
+    )
+
+
+def _decode_step_envelope(value: Mapping[str, JsonValue]) -> object:
+    envelope = decode_envelope(value)
+    codec = _VERSION_CODECS.get(envelope.version)
+    if codec is None:
+        raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
+    kind = envelope.value.get("type")
+    if kind == "continuable_snapshot":
+        try:
+            encoded_messages = envelope.value["messages"]
+            if not isinstance(encoded_messages, str):
+                raise ValueError("step messages are invalid")
+            messages = ModelMessagesTypeAdapter.validate_json(
+                base64.b64decode(encoded_messages, validate=True)
+            )
+            timestamp = envelope.value["timestamp"]
+            state = envelope.value["state"]
+            if not isinstance(timestamp, str) or not isinstance(state, str):
+                raise ValueError("step metadata is invalid")
+            return ContinuableSnapshot(
+                run_id=str(envelope.value["run_id"]),
+                step_index=int(envelope.value["step_index"]),
+                messages=messages,
+                conversation_id=envelope.value.get("conversation_id"),
+                parent_run_id=envelope.value.get("parent_run_id"),
+                agent_name=envelope.value.get("agent_name"),
+                timestamp=datetime.fromisoformat(timestamp),
+                state=state,
+            )
+        except (TypeError, ValueError, KeyError) as error:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
+    if not isinstance(kind, str):
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    targets = {
+        "run_record": RunRecord,
+        "step_event": StepEvent,
+        "tool_effect": ToolEffectRecord,
+        "stored_step_snapshot": StoredStepSnapshot,
+    }
+    target = targets.get(kind)
+    if target is None:
+        raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
+    expected = _codec_wire_type_id(target, codec)
+    if kind != expected:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    payload = envelope.value.get("payload")
+    if payload is None:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    return _decode_domain(payload, target, codec)
+
+
 __all__ = [
     "CanonicalEnvelope",
     "CURRENT_DATA_VERSION",
     "canonical_digest",
     "decode_domain",
+    "_decode_enveloped_domain",
+    "_decode_step_envelope",
     "decode_alias",
     "decode_envelope",
     "decode_fact",

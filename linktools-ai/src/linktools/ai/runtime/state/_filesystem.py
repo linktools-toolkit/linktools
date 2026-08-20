@@ -38,8 +38,11 @@ from ._codec import (
 )
 from ._store import (
     FactQuery,
+    FactScanCursor,
     OperationQuery,
+    OperationScanCursor,
     RecordQuery,
+    RecordScanCursor,
     RecordReplacement,
     StateCallback,
     StateGroupCallback,
@@ -355,6 +358,49 @@ class _FilesystemCache:
             self._load_record_kind(kind)
         return tuple(value for value in self._records.values() if value is not None)
 
+    def scan_records_page(
+        self,
+        *,
+        after: RecordScanCursor | None,
+        limit: int,
+    ) -> tuple[StoredRecord, ...]:
+        _require_scan_limit(limit)
+        values: list[StoredRecord] = []
+        for kind in self._record_kind_names():
+            if after is not None and kind < after.kind:
+                continue
+            root = self._root / "records" / kind
+            if not root.is_dir():
+                continue
+            for shard in sorted(path for path in root.iterdir() if path.is_dir()):
+                for path in sorted(shard.glob("*.json")):
+                    key_hex = path.stem
+                    try:
+                        key = bytes.fromhex(key_hex)
+                    except ValueError as error:
+                        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
+                    if len(key) != 32:
+                        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                    if after is not None and (kind, key) <= (
+                        after.kind,
+                        after.key_digest,
+                    ):
+                        continue
+                    value = decode_record(_read_json(path))
+                    _require_layout_path(
+                        path,
+                        self._root,
+                        f"records/{kind}/{key_hex[:2]}/{key_hex}.json",
+                    )
+                    if value.kind != kind or value.key_digest != key:
+                        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                    self._records[key] = value
+                    self._business_files_read += 1
+                    values.append(value)
+                    if len(values) == limit:
+                        return tuple(values)
+        return tuple(values)
+
     def scan_facts(self) -> tuple[StoredFact, ...]:
         values: list[StoredFact] = []
         for info in self.list_fact_streams():
@@ -366,8 +412,80 @@ class _FilesystemCache:
             values.extend(loaded.values())
         return tuple(values)
 
+    def scan_facts_page(
+        self,
+        *,
+        after: FactScanCursor | None,
+        limit: int,
+    ) -> tuple[StoredFact, ...]:
+        _require_scan_limit(limit)
+        values: list[StoredFact] = []
+        for info in sorted(
+            (value for value in self.list_fact_streams() if value is not None),
+            key=lambda value: value.stream_digest,
+        ):
+            first = 1
+            if after is not None:
+                if info.stream_digest < after.stream_digest:
+                    continue
+                if info.stream_digest == after.stream_digest:
+                    first = after.sequence + 1
+            if first > info.last_sequence:
+                continue
+            sequences = tuple(
+                range(first, min(info.last_sequence + 1, first + limit - len(values)))
+            )
+            batch = _read_fact_batch(self._root, info.stream_digest, sequences)
+            for sequence in sequences:
+                try:
+                    value = batch[(info.stream_digest, sequence)]
+                except KeyError as error:
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
+                self._business_files_read += 1
+                values.append(value)
+                if len(values) == limit:
+                    return tuple(values)
+        return tuple(values)
+
     def scan_operations(self) -> tuple[StoredOperation, ...]:
         return self.list_operations()
+
+    def scan_operations_page(
+        self,
+        *,
+        after: OperationScanCursor | None,
+        limit: int,
+    ) -> tuple[StoredOperation, ...]:
+        _require_scan_limit(limit)
+        values: list[StoredOperation] = []
+        root = self._root / "operations" / "by-key"
+        if not root.is_dir():
+            return ()
+        for shard in sorted(path for path in root.iterdir() if path.is_dir()):
+            for path in sorted(shard.glob("*.json")):
+                key_hex = path.stem
+                try:
+                    key = bytes.fromhex(key_hex)
+                except ValueError as error:
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
+                if len(key) != 32:
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                if after is not None and key <= after.key_digest:
+                    continue
+                value = decode_operation(_read_json(path))
+                _require_layout_path(
+                    path,
+                    self._root,
+                    f"operations/by-key/{key_hex[:2]}/{key_hex}.json",
+                )
+                if value.key_digest != key:
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                self._operations[key] = value
+                self._business_files_read += 1
+                values.append(value)
+                if len(values) == limit:
+                    return tuple(values)
+        return tuple(values)
 
     def _record_kind_names(self) -> tuple[str, ...]:
         if self._record_kinds is None:
@@ -1689,6 +1807,68 @@ class _FilesystemTransaction:
             values.pop(key, None)
         return tuple(values.values())
 
+    async def scan_records_page(
+        self,
+        *,
+        after: RecordScanCursor | None,
+        limit: int,
+    ) -> tuple[StoredRecord, ...]:
+        _require_scan_limit(limit)
+        local = sorted(
+            (
+                value
+                for key, value in self.records.changes().items()
+                if key not in self.records.deleted()
+                and (after is None or (value.kind, key) > (after.kind, after.key_digest))
+            ),
+            key=lambda value: (value.kind, value.key_digest),
+        )
+        local_index = 0
+        base_page: tuple[StoredRecord, ...] = ()
+        base_index = 0
+        base_after = after
+        base_done = False
+        result: list[StoredRecord] = []
+        while len(result) < limit:
+            if base_index >= len(base_page) and not base_done:
+                base_page = await asyncio.to_thread(
+                    self._cache.scan_records_page,
+                    after=base_after,
+                    limit=limit,
+                )
+                base_index = 0
+                if not base_page:
+                    base_done = True
+                else:
+                    last = base_page[-1]
+                    base_after = RecordScanCursor(last.kind, last.key_digest)
+                    base_done = len(base_page) < limit
+            base_value = (
+                None if base_index >= len(base_page) else base_page[base_index]
+            )
+            local_value = None if local_index >= len(local) else local[local_index]
+            if base_value is None and local_value is None:
+                break
+            if local_value is None or (
+                base_value is not None
+                and (base_value.kind, base_value.key_digest)
+                < (local_value.kind, local_value.key_digest)
+            ):
+                value = base_value
+                base_index += 1
+            else:
+                value = local_value
+                local_index += 1
+                if (
+                    base_value is not None
+                    and (base_value.kind, base_value.key_digest)
+                    == (value.kind, value.key_digest)
+                ):
+                    base_index += 1
+            if value is not None and value.key_digest not in self.records.deleted():
+                result.append(value)
+        return tuple(result)
+
     async def resolve_alias(self, alias: bytes) -> bytes | None:
         return (await self.resolve_aliases((alias,))).get(alias)
 
@@ -1870,6 +2050,78 @@ class _FilesystemTransaction:
             values.pop(key, None)
         return tuple(values.values())
 
+    async def scan_facts_page(
+        self,
+        *,
+        after: FactScanCursor | None,
+        limit: int,
+    ) -> tuple[StoredFact, ...]:
+        _require_scan_limit(limit)
+        local = sorted(
+            (
+                value
+                for key, value in self._facts.items()
+                if key not in self._deleted_facts
+                and (
+                    after is None
+                    or (value.stream_digest, value.sequence)
+                    > (after.stream_digest, after.sequence)
+                )
+            ),
+            key=lambda value: (value.stream_digest, value.sequence),
+        )
+        local_index = 0
+        base_page: tuple[StoredFact, ...] = ()
+        base_index = 0
+        base_after = after
+        base_done = False
+        result: list[StoredFact] = []
+        while len(result) < limit:
+            if base_index >= len(base_page) and not base_done:
+                base_page = await asyncio.to_thread(
+                    self._cache.scan_facts_page,
+                    after=base_after,
+                    limit=limit,
+                )
+                base_index = 0
+                if not base_page:
+                    base_done = True
+                else:
+                    last = base_page[-1]
+                    base_after = FactScanCursor(
+                        last.stream_digest,
+                        last.sequence,
+                    )
+                    base_done = len(base_page) < limit
+            base_value = (
+                None if base_index >= len(base_page) else base_page[base_index]
+            )
+            local_value = None if local_index >= len(local) else local[local_index]
+            if base_value is None and local_value is None:
+                break
+            if local_value is None or (
+                base_value is not None
+                and (base_value.stream_digest, base_value.sequence)
+                < (local_value.stream_digest, local_value.sequence)
+            ):
+                value = base_value
+                base_index += 1
+            else:
+                value = local_value
+                local_index += 1
+                if (
+                    base_value is not None
+                    and (base_value.stream_digest, base_value.sequence)
+                    == (value.stream_digest, value.sequence)
+                ):
+                    base_index += 1
+            if value is not None and (
+                value.stream_digest,
+                value.sequence,
+            ) not in self._deleted_facts:
+                result.append(value)
+        return tuple(result)
+
     async def delete_fact_streams(self, owner_key: bytes) -> None:
         sources = {
             info.stream_digest: info
@@ -1970,6 +2222,66 @@ class _FilesystemTransaction:
         for key in self.operations.deleted():
             values.pop(key, None)
         return tuple(values.values())
+
+    async def scan_operations_page(
+        self,
+        *,
+        after: OperationScanCursor | None,
+        limit: int,
+    ) -> tuple[StoredOperation, ...]:
+        _require_scan_limit(limit)
+        local = sorted(
+            (
+                value
+                for key, value in self.operations.changes().items()
+                if key not in self.operations.deleted()
+                and (after is None or key > after.key_digest)
+            ),
+            key=lambda value: value.key_digest,
+        )
+        local_index = 0
+        base_page: tuple[StoredOperation, ...] = ()
+        base_index = 0
+        base_after = after
+        base_done = False
+        result: list[StoredOperation] = []
+        while len(result) < limit:
+            if base_index >= len(base_page) and not base_done:
+                base_page = await asyncio.to_thread(
+                    self._cache.scan_operations_page,
+                    after=base_after,
+                    limit=limit,
+                )
+                base_index = 0
+                if not base_page:
+                    base_done = True
+                else:
+                    last = base_page[-1]
+                    base_after = OperationScanCursor(last.key_digest)
+                    base_done = len(base_page) < limit
+            base_value = (
+                None if base_index >= len(base_page) else base_page[base_index]
+            )
+            local_value = None if local_index >= len(local) else local[local_index]
+            if base_value is None and local_value is None:
+                break
+            if local_value is None or (
+                base_value is not None
+                and base_value.key_digest < local_value.key_digest
+            ):
+                value = base_value
+                base_index += 1
+            else:
+                value = local_value
+                local_index += 1
+                if (
+                    base_value is not None
+                    and base_value.key_digest == value.key_digest
+                ):
+                    base_index += 1
+            if value is not None and value.key_digest not in self.operations.deleted():
+                result.append(value)
+        return tuple(result)
 
     async def delete_operations(self, query: OperationQuery) -> tuple[StoredOperation, ...]:
         values = await self.list_operations(query)
@@ -2144,6 +2456,11 @@ def _read_fact_batch(
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         values[(stream, sequence)] = fact
     return values
+
+
+def _require_scan_limit(limit: int) -> None:
+    if isinstance(limit, bool) or not isinstance(limit, int) or limit < 1:
+        raise ValueError("scan page limit must be positive")
 
 
 def _write_json(path: Path, value: Mapping[str, object]) -> None:

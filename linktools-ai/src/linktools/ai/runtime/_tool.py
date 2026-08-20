@@ -342,7 +342,7 @@ class RuntimeToolOperationBridge:
         self._update_admitted_operation(record)
         return _decision_type(decision, fence=record.fence)
 
-    async def complete(self, decision: Any, result: Any) -> None:
+    async def complete(self, decision: Any, result: Any) -> bool:
         payload = await self._result_payload(decision, result)
 
         async def finish() -> ToolOperationRecord:
@@ -368,14 +368,14 @@ class RuntimeToolOperationBridge:
                 result_payload=payload,
             )
 
-        await self._finish_with_readback(
+        return await self._finish_with_readback(
             finish,
             decision,
             expected_status=ToolOperationStatus.COMPLETED,
             expected_payload=payload,
         )
 
-    async def fail(self, decision: Any, error: BaseException) -> None:
+    async def fail(self, decision: Any, error: BaseException) -> bool:
         code, payload = await self._error_payload(error)
 
         async def finish() -> ToolOperationRecord:
@@ -404,7 +404,7 @@ class RuntimeToolOperationBridge:
                 error_payload=payload,
             )
 
-        await self._finish_with_readback(
+        return await self._finish_with_readback(
             finish,
             decision,
             expected_status=ToolOperationStatus.FAILED,
@@ -555,7 +555,7 @@ class RuntimeToolOperationBridge:
         expected_status: ToolOperationStatus,
         expected_payload: StoredPayload,
         expected_error: str | None = None,
-    ) -> None:
+    ) -> bool:
         async def readback() -> CommitObservation[ToolOperationRecord]:
             observed = await self._repository.get_operation(
                 decision.operation_id,
@@ -592,9 +592,7 @@ class RuntimeToolOperationBridge:
         if result.state is DurableCommitState.COMMITTED:
             if result.value is not None:
                 self._update_admitted_operation(result.value)
-            if result.cancelled:
-                raise asyncio.CancelledError
-            return
+            return result.cancelled
         if result.state is DurableCommitState.NOT_COMMITTED:
             if result.error is not None:
                 raise result.error
