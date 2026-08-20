@@ -77,7 +77,10 @@ class RuntimeRetentionController:
                 )
                 for sequence in range(1, execution.agent_run_sequence + 1)
             )
-            await self._steps.release_staging_many(candidate_step_run_ids=run_ids)
+            await self._steps.release_staging_many(
+                candidate_step_run_ids=run_ids,
+                execution_id=execution_id,
+            )
         for domain in self._transient_domains:
             await self._objects.release_object_scope(domain, owner_scope=f"execution:{execution_id}")
         if self._execution_runtime_release is not None:

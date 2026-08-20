@@ -29,6 +29,7 @@ from ._contracts import (
     ArtifactState,
     ConversationState,
     EvaluationState,
+    ExecutionRepository,
     ExecutionState,
     MemoryState,
     RecoveryState,
@@ -263,6 +264,7 @@ async def materialize_runtime_state(
             stores,
             objects,
             history_repository=bundles[RuntimeDomain.CONVERSATION]["histories"],
+            execution_repository=bundles[RuntimeDomain.EXECUTION]["executions"],
             namespace=namespace,
             tenant_id=tenant_id,
         )
@@ -395,6 +397,7 @@ def _build_steps(
     stores: Mapping[RuntimeDomain, object],
     objects: _RuntimeObjectRouter,
     history_repository: object,
+    execution_repository: ExecutionRepository,
     *,
     namespace: str,
     tenant_id: str,
@@ -421,6 +424,11 @@ def _build_steps(
                 history_repository=(
                     history_repository
                     if domain is RuntimeDomain.CONVERSATION
+                    else None
+                ),
+                execution_repository=(
+                    execution_repository
+                    if domain is RuntimeDomain.EXECUTION
                     else None
                 ),
             )

@@ -6,6 +6,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from collections.abc import Sequence
 from linktools.ai.asset import (
     AssetKey,
     AssetRoot,
@@ -16,8 +17,10 @@ from linktools.ai.asset import (
     StrictConfigReader,
     build_asset_sql_metadata,
 )
+from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.migrate import provision_asset_database
 from linktools.ai.storage import (
+    PayloadPolicy,
     MySQLDialect,
     PostgreSQLDialect,
     SqlErrorKind,
@@ -55,6 +58,12 @@ class _DialectResult:
 
 
 class _MappedPathAdapter:
+    def validate(self, kinds: "Sequence[str]") -> None:
+        del kinds
+
+    def root_path(self, kind: str) -> str:
+        return f"mapped/{kind}"
+
     def to_path(self, key: AssetKey) -> str:
         return f"mapped/{key.kind}/{key.id}.json"
 
@@ -231,8 +240,9 @@ async def test_sql_asset_namespace_matches_the_persisted_column_limit() -> None:
     from sqlalchemy.ext.asyncio import create_async_engine
 
     engine = create_async_engine("sqlite+aiosqlite:///:memory:")
-    with pytest.raises(ValueError, match="SQL asset namespace is invalid"):
+    with pytest.raises(AIError) as raised:
         SqlAssetBackend(engine, namespace="a" * 129)
+    assert raised.value.code is ErrorCode.REQUEST_FIELD_INVALID
     await engine.dispose()
 
 
@@ -284,7 +294,11 @@ async def test_sql_asset_backend_persists_history_outside_revision_row(tmp_path:
         build_asset_sql_metadata(metadata=metadata)
         build_object_sql_metadata(metadata=metadata)
         tables = metadata.tables
-        backend = SqlAssetBackend(engine, namespace="history")
+        backend = SqlAssetBackend(
+            engine,
+            namespace="history",
+            payload_policy=PayloadPolicy(inline_limit_bytes=1),
+        )
         await provision_asset_database(engine)
         await backend.initialize()
         key = AssetKey("mcp", "history.yaml")
@@ -313,7 +327,7 @@ async def test_sql_asset_backend_persists_history_outside_revision_row(tmp_path:
         assert all("ai_asset_" in statement for statement in selects)
         async with session_factory() as session:
             counts = []
-            for table in (tables["ai_asset_entries"], tables["ai_asset_changes"], tables["ai_storage_objects"], tables["ai_asset_heads"]):
+            for table in (tables["ai_asset_entries"], tables["ai_asset_changes"], tables["ai_objects"], tables["ai_asset_heads"]):
                 counts.append(await session.scalar(select(func.count()).select_from(table)))
         assert counts == [1, 4, 2, 1]
         assert not hasattr(tables["ai_asset_heads"].c, "payload")
@@ -431,7 +445,11 @@ async def test_sql_asset_backend_batches_large_file_sets(tmp_path: Path) -> None
         build_asset_sql_metadata(metadata=metadata)
         build_object_sql_metadata(metadata=metadata)
         tables = metadata.tables
-        backend = SqlAssetBackend(engine, namespace="batch")
+        backend = SqlAssetBackend(
+            engine,
+            namespace="batch",
+            payload_policy=PayloadPolicy(inline_limit_bytes=1),
+        )
         await provision_asset_database(engine)
         await backend.initialize()
         changes = tuple(
@@ -448,7 +466,7 @@ async def test_sql_asset_backend_batches_large_file_sets(tmp_path: Path) -> None
         assert await backend.get(AssetKey("skill", "skill-129/SKILL.md")) == b"skill-129"
         async with session_factory() as session:
             counts = []
-            for table in (tables["ai_asset_entries"], tables["ai_asset_changes"], tables["ai_storage_objects"]):
+            for table in (tables["ai_asset_entries"], tables["ai_asset_changes"], tables["ai_objects"]):
                 counts.append(await session.scalar(select(func.count()).select_from(table)))
         assert tuple(counts) == (130, 130, 130)
     finally:

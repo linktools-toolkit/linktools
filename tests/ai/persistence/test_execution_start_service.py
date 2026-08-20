@@ -7,6 +7,7 @@ import asyncio
 from types import SimpleNamespace
 
 import pytest
+from dataclasses import replace
 from linktools.ai.core import ExecutionStatus, Page, Principal, TenantAuthorizationPolicy
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.migrate import provision_database
@@ -25,12 +26,28 @@ class _History:
 
 
 class _Launcher:
-    def __init__(self) -> None:
+    def __init__(self, repository: object | None = None) -> None:
         self.calls = 0
         self._started: set[str] = set()
+        self._repository = repository
 
-    async def prepare_start(self, request: ExecutionRequest, execution: ExecutionRecord, identity: object) -> None:
-        del request, execution, identity
+    async def prepare_start(
+        self,
+        request: ExecutionRequest,
+        execution: ExecutionRecord,
+        identity: object,
+    ) -> ExecutionRecord:
+        del request, identity
+        started = replace(execution, status=ExecutionStatus.STARTED)
+        repository = self._repository
+        if repository is not None:
+            await repository.compare_and_swap(
+                execution.execution_id,
+                tenant_id=execution.tenant_id,
+                expected_revision=execution.revision,
+                next_record=started,
+            )
+        return started
 
     async def launch(self, request: ExecutionRequest, execution: ExecutionRecord) -> None:
         del request
@@ -53,7 +70,7 @@ class _Launcher:
 async def test_execution_start_claim_has_one_launcher_winner() -> None:
     state = RuntimeState.in_memory()
     await state.initialize(namespace="service-start", tenant_id="tenant")
-    launcher = _Launcher()
+    launcher = _Launcher(state.execution.executions)
     service = DefaultExecutionService(
         state.execution,
         state._object_store(RuntimeDomain.EXECUTION),
@@ -104,7 +121,7 @@ async def test_sql_execution_start_keeps_attempt_sequence_zero(tmp_path) -> None
             state._object_store(RuntimeDomain.EXECUTION),
             TenantAuthorizationPolicy(),
             sessions=state.conversation.sessions,
-            backend=_Launcher(),
+            backend=_Launcher(state.execution.executions),
             history_reader=_History(),
         )
         request = ExecutionRequest(
@@ -131,7 +148,7 @@ async def test_filesystem_execution_start_keeps_attempt_sequence_zero(tmp_path) 
             state._object_store(RuntimeDomain.EXECUTION),
             TenantAuthorizationPolicy(),
             sessions=state.conversation.sessions,
-            backend=_Launcher(),
+            backend=_Launcher(state.execution.executions),
             history_reader=_History(),
         )
         handle = await service.run(
@@ -192,7 +209,7 @@ async def test_launch_missing_record_is_storage_integrity_failure() -> None:
             state._object_store(RuntimeDomain.EXECUTION),
             TenantAuthorizationPolicy(),
             sessions=state.conversation.sessions,
-            backend=_Launcher(),
+            backend=_Launcher(state.execution.executions),
             history_reader=_History(),
         )
 
@@ -219,7 +236,7 @@ async def test_execution_memory_scope_can_be_disabled_but_not_blank() -> None:
             state._object_store(RuntimeDomain.EXECUTION),
             TenantAuthorizationPolicy(),
             sessions=state.conversation.sessions,
-            backend=_Launcher(),
+            backend=_Launcher(state.execution.executions),
             history_reader=_History(),
         )
         principal = Principal("owner", "tenant")

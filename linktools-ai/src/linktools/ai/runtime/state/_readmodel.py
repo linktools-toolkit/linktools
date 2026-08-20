@@ -197,7 +197,11 @@ class ExecutionReadModelRepository:
             return None
         self._validate_stored_record(record, execution_id)
         if self._stored_model_version(record) != _MODEL_VERSION:
-            return None
+            _logger.error(
+                "execution read model version rejected: execution=%s",
+                execution_id,
+            )
+            raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
         value = self._decode_record(record)
         self._validate_owner(value, execution_id)
         return value if value.status is ExecutionReadModelStatus.COMPLETE else None
@@ -226,7 +230,11 @@ class ExecutionReadModelRepository:
                 raise AIError(ErrorCode.EXECUTION_HISTORY_UNAVAILABLE)
             self._validate_stored_record(record, execution_id)
             if self._stored_model_version(record) != _MODEL_VERSION:
-                raise AIError(ErrorCode.EXECUTION_HISTORY_UNAVAILABLE)
+                _logger.error(
+                    "execution read model version rejected: execution=%s",
+                    execution_id,
+                )
+                raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
             value = self._decode_record(record)
             self._validate_owner(value, execution_id)
             if value.status is not ExecutionReadModelStatus.COMPLETE:
@@ -347,32 +355,11 @@ class ExecutionReadModelRepository:
             return owner, 1, None
         self._validate_stored_record(current, execution_id)
         if self._stored_model_version(current) != _MODEL_VERSION:
-            next_value = self._building_value(execution_id)
-            next_fence = current.lease_fence + 1
-            candidate = self._stored_record(
-                next_value,
-                storage_version=current.storage_version + 1,
-                lease_owner=owner,
-                lease_fence=next_fence,
-                expires=now,
-            )
-            if not await transaction.replace_record(
-                candidate,
-                expected_storage_version=current.storage_version,
-            ):
-                raise AIError(ErrorCode.STORAGE_CONFLICT)
-            await transaction.delete_fact_streams(key)
-            await transaction.delete_sequences(
-                tuple(
-                    self._sequence_key(execution_id, stream_name)
-                    for stream_name in ("trace", "history", "transcript")
-                )
-            )
-            _logger.info(
-                "execution read model v1 replaced: execution=%s",
+            _logger.error(
+                "execution read model version rejected: execution=%s",
                 execution_id,
             )
-            return owner, next_fence, None
+            raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
         value = self._decode_record(current)
         self._validate_owner(value, execution_id)
         if value.status is ExecutionReadModelStatus.COMPLETE:

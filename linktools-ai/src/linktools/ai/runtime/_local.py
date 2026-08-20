@@ -69,7 +69,6 @@ from .service_api import ExecutionRequest
 from .state import (
     ConversationState,
     ConversationStateCommands,
-    ExecutionProjectionCheckpoint,
     ExecutionRepositoryImpl,
     ExecutionState,
     ExecutionTerminalSealPlan,
@@ -137,11 +136,23 @@ class _WorkerFailure:
 
 class _StepLifecycle(Protocol):
     async def materialize_conversation(self, *, step_run_id: str) -> None: ...
-    async def materialize_from_recovery(self, *, target: RuntimeDomain, step_run_id: str) -> None: ...
+    async def materialize_from_recovery(
+        self,
+        *,
+        target: RuntimeDomain,
+        step_run_id: str,
+        execution_id: "str | None" = None,
+    ) -> None: ...
     async def materialize_recovery_snapshot(self, *, step_run_id: str, require_complete: bool) -> None: ...
     async def verify_terminal_attempts(self, *, candidate_step_run_ids: tuple[str, ...], required_step_run_id: str | None) -> None: ...
-    async def release_staging_many(self, *, candidate_step_run_ids: tuple[str, ...]) -> None: ...
-    async def flush_execution_projection(self, step_run_id: str) -> None: ...
+    async def release_staging_many(
+        self,
+        *,
+        candidate_step_run_ids: tuple[str, ...],
+        execution_id: "str | None" = None,
+    ) -> None: ...
+    async def flush_execution_projection(self, step_run_id: str, *, execution_id: str) -> None: ...
+    async def wait_projection_flight(self, step_run_id: str) -> None: ...
     async def prepare_execution_terminal_seal(
         self,
         *,
@@ -936,6 +947,7 @@ class LocalExecutionBackend:
                 await self._step_lifecycle.materialize_from_recovery(
                     target=RuntimeDomain.EXECUTION,
                     step_run_id=handoff.source_step_run_id,
+                    execution_id=checkpoint.execution_id,
                 )
                 snapshot = await self._step_reads[RuntimeDomain.EXECUTION].latest_snapshot(
                     run_id=handoff.source_step_run_id,
@@ -1070,7 +1082,7 @@ class LocalExecutionBackend:
             memory_scope=recovery_input.memory_scope,
             conversation_step_run_id=recovery_input.conversation_step_run_id,
         )
-        await self._execution.executions.create(execution)
+        await self._execution.executions.create_with_history_head(execution)
         return execution
 
     async def _ensure_recovery_idempotency(
@@ -2800,7 +2812,10 @@ class LocalExecutionBackend:
                 await self._step_lifecycle.discard_execution_terminal_seal(terminal_plan)
                 raise
         if run_id is not None:
-            await self._step_lifecycle.flush_execution_projection(run_id)
+            await self._step_lifecycle.flush_execution_projection(
+                run_id,
+                execution_id=current.execution_id,
+            )
         return await self._commit_execution_terminal_checkpoint_locked(
             current,
             commit,
@@ -2868,12 +2883,6 @@ class LocalExecutionBackend:
         )
         self._pending_audit_events.pop(current.execution_id, None)
         return committed
-
-    async def _acknowledge_projection_after_commit(
-        self,
-        checkpoint: ExecutionProjectionCheckpoint,
-    ) -> None:
-        await checkpoint.acknowledge()
 
     async def _release_session_admission_best_effort(
         self,

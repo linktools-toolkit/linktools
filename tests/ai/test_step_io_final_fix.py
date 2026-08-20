@@ -6,11 +6,16 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
-from linktools.ai.core import ExecutionDeltaType
+from linktools.ai.core import ExecutionDeltaType, ExecutionLineageKind, ExecutionStatus
 from linktools.ai.runtime import RuntimeDomain, RuntimeState
 from linktools.ai.runtime._event import ExecutionDelta, LiveExecutionEventBroker
 from linktools.ai.runtime.state._filesystem import FilesystemStateStore
 from linktools.ai.runtime.state._store import StateTransaction
+from linktools.ai.runtime.state import (
+    ExecutionHistoryHeadRecord,
+    ExecutionHistoryState,
+    ExecutionRecord,
+)
 from pydantic_ai.messages import ModelRequest, UserPromptPart
 from pydantic_ai_harness.step_persistence import (
     ContinuableSnapshot,
@@ -31,11 +36,47 @@ def _run() -> RunRecord:
     )
 
 
+def _execution() -> ExecutionRecord:
+    now = datetime.now(timezone.utc)
+    return ExecutionRecord(
+        execution_id="execution",
+        tenant_id="tenant",
+        session_id=None,
+        binding_digest="binding",
+        parent_execution_id=None,
+        root_execution_id="execution",
+        source_execution_id=None,
+        base_execution_id=None,
+        lineage_kind=ExecutionLineageKind.RUN,
+        status=ExecutionStatus.STARTED,
+        revision=0,
+        event_sequence=0,
+        agent_run_sequence=1,
+        error_code=None,
+        safe_error_details={},
+        created_at=now,
+        updated_at=now,
+    )
+
+
 @pytest.mark.asyncio
 async def test_step_events_wait_for_a_safe_snapshot(tmp_path: Path) -> None:
     state = RuntimeState.filesystem(tmp_path / "runtime")
     await state.initialize(namespace="step-io", tenant_id="tenant")
     try:
+        await state.execution.executions.create(_execution())
+        await state.execution.executions.state_store.mutate(
+            lambda transaction: state.execution.executions.insert_history_head_in_transaction(
+                transaction,
+                ExecutionHistoryHeadRecord(
+                    "execution",
+                    "tenant",
+                    ExecutionHistoryState.OPEN,
+                    0,
+                    None,
+                ),
+            )
+        )
         run = _run()
         await state.steps.register_run(run)
         now = datetime.now(timezone.utc)
@@ -74,7 +115,10 @@ async def test_step_events_wait_for_a_safe_snapshot(tmp_path: Path) -> None:
         )
         await state.steps.save_snapshot(snapshot)
         assert await execution.list_events(run_id=run.run_id) == []
-        await state.steps.flush_execution_projection(run.run_id)
+        await state.steps.flush_execution_projection(
+            run.run_id,
+            execution_id="execution",
+        )
         assert len(await execution.list_events(run_id=run.run_id)) == 3
         assert await execution.latest_snapshot(run_id=run.run_id) == snapshot
         assert await recovery.get_run(run_id=run.run_id) == run

@@ -7,6 +7,7 @@ from dataclasses import replace
 from datetime import datetime, timezone
 
 import pytest
+from types import SimpleNamespace
 from linktools.ai.core import (
     ExecutionStatus,
     Page,
@@ -205,8 +206,29 @@ class _History:
 
 
 class _RejectingBackend:
-    def __init__(self) -> None:
+    def __init__(self, repository: object | None = None) -> None:
         self.aborted: list[str] = []
+        self.committed: list[str] = []
+        self._repository = repository
+
+    async def commit_terminal_checkpoint(
+        self,
+        commit: object,
+        *,
+        session_id: "str | None",
+    ) -> object:
+        del session_id
+        execution = commit.execution
+        self.committed.append(execution.execution_id)
+        repository = self._repository
+        if repository is not None:
+            await repository.compare_and_swap(
+                execution.execution_id,
+                tenant_id=execution.tenant_id,
+                expected_revision=commit.expected_revision,
+                next_record=execution,
+            )
+        return SimpleNamespace(execution=execution, result=commit.result)
 
     async def prepare_start(self, request: object, execution: object, identity: object) -> None:
         del request, execution, identity
@@ -234,7 +256,7 @@ async def test_rejected_admission_terminalizes_pending_start() -> None:
     await state.initialize(namespace="session-admission-rejection", tenant_id="tenant")
     try:
         await state.conversation.sessions.create(_session())
-        backend = _RejectingBackend()
+        backend = _RejectingBackend(state.execution.executions)
         service = DefaultExecutionService(
             state.execution,
             state._object_store(RuntimeDomain.EXECUTION),
@@ -242,6 +264,37 @@ async def test_rejected_admission_terminalizes_pending_start() -> None:
             sessions=state.conversation.sessions,
             backend=backend,
             history_reader=_History(),
+        )
+        from linktools.ai.runtime.state import RuntimeStateCommands
+        from linktools.ai.runtime.state._repositories import (
+            ConversationHistoryRepositoryImpl,
+            EventRepositoryImpl,
+            OperationLedgerRepository,
+        )
+
+        service.bind_terminal_committer(
+            RuntimeStateCommands(
+                state.execution.executions,
+                namespace="session-admission-rejection",
+                events=EventRepositoryImpl(
+                    state.execution.events.state_store,
+                    namespace="session-admission-rejection",
+                    tenant_id="tenant",
+                ),
+                operations=OperationLedgerRepository(
+                    state.execution.operations.state_store,
+                    namespace="session-admission-rejection",
+                    tenant_id="tenant",
+                    domain=RuntimeDomain.EXECUTION,
+                ),
+                conversation=state.conversation.sessions,
+                recovery=state.recovery.checkpoints,
+                conversation_history=ConversationHistoryRepositoryImpl(
+                    state.conversation.histories.state_store,
+                    namespace="session-admission-rejection",
+                    tenant_id="tenant",
+                ),
+            )
         )
         with pytest.raises(AIError) as error:
             await service.run_for_session(

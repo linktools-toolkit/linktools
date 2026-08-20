@@ -51,7 +51,6 @@ from .service_api import (
 )
 from .state._contracts import (
     ConversationCursor,
-    ConversationHistoryParent,
     ConversationHistoryRecord,
     ConversationState,
     ExecutionRecord,
@@ -83,8 +82,6 @@ class _GatedExecutionService(Protocol):
 
 
 class _SessionTranscriptStore(Protocol):
-    async def has_canonical_transcript(self, *, run_id: str) -> bool: ...
-
     async def iter_messages(self, *, run_id: str) -> AsyncIterator[object]: ...
 
     async def iter_session_messages(
@@ -266,7 +263,6 @@ class DefaultSessionService:
                 principal,
                 AuthorizationAction.SESSION_READ,
             )
-            record = await self._ensure_legacy_history(record)
             continuation = None if record.continuation is None else record.continuation.step_run_id
             continuation_history_id = (
                 None
@@ -281,62 +277,6 @@ class DefaultSessionService:
                 cursor=cursor,
                 limit=limit,
             )
-
-    async def _ensure_legacy_history(self, record: SessionRecord) -> SessionRecord:
-        if (
-            record.history_id is not None
-            or record.continuation is None
-            or self._transcript_store is None
-        ):
-            return record
-        run_id = record.continuation.step_run_id
-        snapshot = await self._transcript_store.latest_snapshot(
-            run_id=run_id,
-            include_interrupted=True,
-        )
-        if snapshot is None or snapshot.state != "complete":
-            return record
-        messages = [
-            message
-            async for message in self._transcript_store.iter_messages(run_id=run_id)
-        ]
-        history_id = canonical_sha256(
-            {
-                "kind": "conversation_history",
-                "session_id": record.session_id,
-                "tenant_id": record.tenant_id,
-            }
-        )
-        history = ConversationHistoryRecord(
-            history_id=history_id,
-            session_id=record.session_id,
-            tenant_id=record.tenant_id,
-            parent=ConversationHistoryParent(
-                history_id=run_id,
-                through_message_count=len(messages),
-            ),
-            inherited_message_count=len(messages),
-            local_message_count=0,
-            history_quality=HistoryQuality.LEGACY_PARTIAL,
-            revision=0,
-        )
-        try:
-            return await self._conversation.sessions.ensure_history(
-                record.session_id,
-                tenant_id=record.tenant_id,
-                expected_revision=record.revision,
-                history=history,
-            )
-        except AIError as error:
-            if error.code is not ErrorCode.STORAGE_CONFLICT:
-                raise
-            current = await self._conversation.sessions.get(
-                record.session_id,
-                tenant_id=record.tenant_id,
-            )
-            if current is None or current.history_id != history_id:
-                raise
-            return current
 
     async def list(self, request: ListSessionRequest) -> Page[SessionView]:
         await self._authorization.authorize(
@@ -386,7 +326,6 @@ class DefaultSessionService:
     ) -> tuple[object, ...]:
         async with self._session_consumer(session_id, principal.tenant_id):
             record = await self._authorized(session_id, principal, AuthorizationAction.SESSION_READ)
-            record = await self._ensure_legacy_history(record)
             if self._transcript_store is None or record.continuation is None:
                 return ()
             if record.history_id is not None:
@@ -408,7 +347,6 @@ class DefaultSessionService:
     ) -> AsyncIterator[object]:
         async with self._session_consumer(session_id, principal.tenant_id):
             record = await self._authorized(session_id, principal, AuthorizationAction.SESSION_READ)
-            record = await self._ensure_legacy_history(record)
             if self._transcript_store is None or record.continuation is None:
                 return
             if record.history_id is not None:
@@ -454,7 +392,6 @@ class DefaultSessionService:
         async with self._session_consumer(session_id, request.principal.tenant_id):
             record = await self._authorized(session_id, request.principal, AuthorizationAction.SESSION_READ)
             record = await self._reconcile_terminal_admission(record)
-            record = await self._ensure_legacy_history(record)
             await self._authorization.authorize(
                 request.principal,
                 AuthorizationAction.EXECUTION_RUN,
@@ -492,7 +429,6 @@ class DefaultSessionService:
     async def fork(self, binding_digest: str, session_id: str, request: ForkSessionRequest) -> SessionView:
         async with self._session_consumer(session_id, request.principal.tenant_id):
             source = await self._authorized(session_id, request.principal, AuthorizationAction.SESSION_READ)
-            source = await self._ensure_legacy_history(source)
             await self._authorization.authorize(
                 request.principal,
                 AuthorizationAction.SESSION_CREATE,
@@ -941,17 +877,6 @@ class DefaultSessionService:
     async def _view(self, record: SessionRecord, principal: Principal) -> SessionView:
         active_execution = await self._active_admitted_execution(record)
         active = () if active_execution is None else (active_execution.execution_id,)
-        history_quality = record.history_quality
-        if (
-            history_quality == "complete"
-            and record.history_id is None
-            and record.continuation is not None
-            and self._transcript_store is not None
-            and not await self._transcript_store.has_canonical_transcript(
-                run_id=record.continuation.step_run_id,
-            )
-        ):
-            history_quality = "legacy_partial"
         return SessionView(
             record.session_id,
             record.binding_digest,
@@ -961,7 +886,7 @@ class DefaultSessionService:
             record.cwd,
             active,
             record.metadata,
-            history_quality,
+            record.history_quality,
         )
 
     async def _active_admitted_execution(

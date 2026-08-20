@@ -52,6 +52,9 @@ from ..runtime.state import (
     ExecutionReadModelRepository,
     ExecutionRecord,
     ExecutionRepository,
+    SESSION_HISTORY_VIEW_VERSION,
+    count_history_items,
+    project_history_message,
 )
 
 _logger = environ.get_logger("ai.adapter.history")
@@ -89,6 +92,14 @@ class _SessionHistoryStore(Protocol):
         *,
         tenant_id: str,
     ) -> AsyncIterator[object]: ...
+
+
+async def _canonical_transcript(
+    store: StepStore,
+    run_id: str,
+) -> tuple[object, ...]:
+    """Read one run's canonical raw transcript instead of the latest snapshot."""
+    return tuple([message async for message in store.iter_messages(run_id=run_id)])
 
 
 class StepExecutionHistoryReader:
@@ -225,21 +236,11 @@ class StepExecutionHistoryReader:
         for item, _depth in entries:
             for segment_sequence, _events in await self._segment_events(item, tenant_id):
                 run_id = step_run_id(namespace=self._namespace, tenant_id=tenant_id, execution_id=item.execution_id, segment_sequence=segment_sequence)
-                snapshot = await self._store.latest_snapshot(run_id=run_id)
-                if snapshot is None:
+                messages = await _canonical_transcript(self._store, run_id)
+                if not messages:
                     if item.status is ExecutionStatus.SUCCEEDED and segment_sequence == item.agent_run_sequence:
                         raise AIError(ErrorCode.EXECUTION_HISTORY_UNAVAILABLE)
                     continue
-                if (
-                    snapshot.run_id != run_id
-                    or snapshot.conversation_id
-                    != step_conversation_id(
-                        namespace=self._namespace,
-                        tenant_id=tenant_id,
-                        execution_id=item.execution_id,
-                    )
-                ):
-                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                 snapshot_items = [
                     ExecutionHistoryItem(
                         item.execution_id,
@@ -249,7 +250,7 @@ class StepExecutionHistoryReader:
                         projected.tool_name,
                         projected.tool_call_id,
                     )
-                    for message in snapshot.messages
+                    for message in messages
                     for projected in _project_message(message)
                 ]
                 values = _merge_history_occurrences(values, snapshot_items)
@@ -313,25 +314,15 @@ class StepExecutionHistoryReader:
             return Page((), None)
         await self._history_tree(record, tenant_id)
         final_run_id = step_run_id(namespace=self._namespace, tenant_id=tenant_id, execution_id=execution_id, segment_sequence=record.agent_run_sequence)
-        snapshot = await self._store.latest_snapshot(run_id=final_run_id)
-        if snapshot is None:
+        messages = await _canonical_transcript(self._store, final_run_id)
+        if not messages:
             if record.status is ExecutionStatus.SUCCEEDED:
                 raise AIError(ErrorCode.EXECUTION_HISTORY_UNAVAILABLE)
             return Page((), None)
-        if (
-            snapshot.run_id != final_run_id
-            or snapshot.conversation_id
-            != step_conversation_id(
-                namespace=self._namespace,
-                tenant_id=tenant_id,
-                execution_id=execution_id,
-            )
-        ):
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         conversation_id = step_conversation_id(namespace=self._namespace, tenant_id=tenant_id, execution_id=execution_id)
         values = [
             value
-            for message in snapshot.messages
+            for message in messages
             for value in _transcript_message_values(message, conversation_id)
         ]
         start = _cursor_offset(cursor, len(values))
@@ -385,18 +376,11 @@ class StepExecutionHistoryReader:
                     execution_id=item.execution_id,
                     segment_sequence=segment_sequence,
                 )
-                snapshot = await self._store.latest_snapshot(run_id=run_id)
-                if snapshot is None:
+                messages = await _canonical_transcript(self._store, run_id)
+                if not messages:
                     if item.status is ExecutionStatus.SUCCEEDED and segment_sequence == item.agent_run_sequence:
                         raise AIError(ErrorCode.EXECUTION_HISTORY_UNAVAILABLE)
                     continue
-                _validate_snapshot(
-                    snapshot,
-                    run_id,
-                    tenant_id,
-                    item.execution_id,
-                    self._namespace,
-                )
                 snapshot_items = [
                     (
                         ExecutionHistoryItem(
@@ -419,7 +403,7 @@ class StepExecutionHistoryReader:
                             "tool_call_id": projected.tool_call_id,
                         },
                     )
-                    for message_index, message in enumerate(snapshot.messages)
+                    for message_index, message in enumerate(messages)
                     for projected_offset, projected in enumerate(_project_message(message))
                 ]
                 history_values = _merge_history_refs(history_values, snapshot_items)
@@ -432,24 +416,17 @@ class StepExecutionHistoryReader:
                 execution_id=root.execution_id,
                 segment_sequence=root.agent_run_sequence,
             )
-            snapshot = await self._store.latest_snapshot(run_id=run_id)
-            if snapshot is None:
+            messages = await _canonical_transcript(self._store, run_id)
+            if not messages:
                 if root.status is ExecutionStatus.SUCCEEDED:
                     raise AIError(ErrorCode.EXECUTION_HISTORY_UNAVAILABLE)
             else:
-                _validate_snapshot(
-                    snapshot,
-                    run_id,
-                    tenant_id,
-                    root.execution_id,
-                    self._namespace,
-                )
                 conversation_id = step_conversation_id(
                     namespace=self._namespace,
                     tenant_id=tenant_id,
                     execution_id=root.execution_id,
                 )
-                for message_index, message in enumerate(snapshot.messages):
+                for message_index, message in enumerate(messages):
                     for projected_offset, _value in enumerate(
                         _transcript_message_values(message, conversation_id)
                     ):
@@ -630,6 +607,27 @@ class StepSessionHistoryReader:
                     tenant_id=tenant_id,
                 )
             )
+            snapshot_history_item_count = (
+                cursor_values[2]
+                if cursor_values is not None
+                else 0
+                if snapshot_message_count == 0
+                else None
+            )
+            if snapshot_history_item_count is None:
+                async for _message in history_store.iter_session_message_range(
+                    history_id,
+                    tenant_id=tenant_id,
+                    start=0,
+                    end=0,
+                ):
+                    break
+                snapshot_history_item_count = await _session_history_item_count(
+                    history_store,
+                    history_id,
+                    tenant_id=tenant_id,
+                    snapshot_message_count=snapshot_message_count,
+                )
         else:
             history_id = continuation_step_run_id
             run = await self._store.get_run(run_id=continuation_step_run_id)
@@ -650,120 +648,86 @@ class StepSessionHistoryReader:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             if snapshot.state != "complete":
                 raise AIError(ErrorCode.SESSION_HISTORY_UNAVAILABLE)
-            messages = tuple([
-                message
-                async for message in self._store.iter_messages(
-                    run_id=continuation_step_run_id,
-                )
-            ])
             snapshot_message_count = (
                 cursor_values[1]
                 if cursor_values is not None
-                else len(messages)
+                else len(snapshot.messages)
             )
-
+            snapshot_history_item_count = (
+                cursor_values[2]
+                if cursor_values is not None
+                else count_history_items(snapshot.messages)
+            )
         if cursor_values is None:
-            next_message_index = 0
-            next_projected_item_offset = 0
-            emitted_item_count = 0
+            next_history_item_offset = 0
         else:
-            (
-                next_message_index,
-                next_projected_item_offset,
-                emitted_item_count,
-            ) = cursor_values[2:]
-            if emitted_item_count is None:
-                if history_store is not None:
-                    prefix_iterator = history_store.iter_session_message_range(
-                        history_id,
-                        tenant_id=tenant_id,
-                        start=0,
-                        end=next_message_index,
-                    )
-                    emitted_item_count = 0
-                    async for prefix_message in prefix_iterator:
-                        emitted_item_count += len(_project_message(prefix_message))
-                else:
-                    emitted_item_count = sum(
-                        len(_project_message(message))
-                        for message in messages[:next_message_index]
-                    )
-                emitted_item_count += next_projected_item_offset
-        if next_message_index > snapshot_message_count:
-            raise AIError(ErrorCode.CURSOR_INVALID)
-        if (
-            next_message_index == snapshot_message_count
-            and next_projected_item_offset != 0
-        ):
+            next_history_item_offset = cursor_values[3]
+        if next_history_item_offset > snapshot_history_item_count:
             raise AIError(ErrorCode.CURSOR_INVALID)
 
         selected: list[SessionHistoryItem] = []
-        message_index = next_message_index
-        item_offset = next_projected_item_offset
-        if history_store is not None:
-            messages_iterator = history_store.iter_session_message_range(
+        item_offset = next_history_item_offset
+        remaining_items = snapshot_history_item_count - item_offset
+        if remaining_items > 0:
+            message_start = await _message_index_for_item_offset(
+                history_store,
                 history_id,
+                snapshot_message_count,
+                item_offset,
                 tenant_id=tenant_id,
-                start=next_message_index,
-                end=snapshot_message_count,
+                fallback_messages=None
+                if history_store is not None
+                else snapshot.messages,
             )
-        else:
-            messages_iterator = _iter_message_values(
-                messages,
-                start=next_message_index,
-                end=snapshot_message_count,
-            )
-        async for message in messages_iterator:
-            projected = _project_message(message)
-            offset = item_offset if message_index == next_message_index else 0
-            if offset > len(projected):
-                raise AIError(ErrorCode.CURSOR_INVALID)
-            remaining = projected[offset:]
-            available = limit - len(selected)
-            take = remaining[:available]
-            selected.extend(
-                SessionHistoryItem(
-                    emitted_item_count + len(selected) + 1,
-                    item.item_kind,
-                    item.content,
-                    item.tool_name,
-                    item.tool_call_id,
+            async for message in (
+                history_store.iter_session_message_range(
+                    history_id,
+                    tenant_id=tenant_id,
+                    start=message_start,
+                    end=snapshot_message_count,
                 )
-                for item in take
-            )
-            if len(take) < len(remaining):
-                next_message_index = message_index
-                next_projected_item_offset = offset + len(take)
-                break
-            message_index += 1
-            next_message_index = message_index
-            next_projected_item_offset = 0
-            if len(selected) == limit:
-                break
-        else:
-            next_message_index = message_index
-            next_projected_item_offset = 0
+                if history_store is not None
+                else _iter_message_values(
+                    snapshot.messages,
+                    start=message_start,
+                    end=snapshot_message_count,
+                )
+            ):
+                projected = project_history_message(message)
+                for item in projected:
+                    if len(selected) == limit:
+                        break
+                    selected.append(
+                        SessionHistoryItem(
+                            item_offset + len(selected) + 1,
+                            item.item_kind,
+                            item.content,
+                            item.tool_name,
+                            item.tool_call_id,
+                        )
+                    )
+                if len(selected) == limit:
+                    break
         next_cursor = (
             _session_history_cursor(
                 tenant_id,
                 session_id,
                 history_id,
                 snapshot_message_count,
-                next_message_index,
-                next_projected_item_offset,
-                emitted_item_count + len(selected),
+                snapshot_history_item_count,
+                next_history_item_offset + len(selected),
                 self._cursor_signer,
             )
-            if next_message_index < snapshot_message_count
+            if next_history_item_offset + len(selected) < snapshot_history_item_count
             else None
         )
         _logger.debug(
             "session history projected page: session=%s history=%s "
-            "message_start=%s message_snapshot=%s items=%s",
+            "item_start=%s item_snapshot=%s items=%s",
             session_id,
             history_id,
-            next_message_index,
-            snapshot_message_count,
+            next_history_item_offset,
+            snapshot_history_item_count,
             len(selected),
         )
         return Page(tuple(selected), next_cursor)
@@ -1057,35 +1021,32 @@ def _decode_session_history_cursor(
     tenant_id: str,
     session_id: str,
     signer: CursorSigner,
-) -> tuple[str, int, int, int, int | None]:
+) -> tuple[str, int, int, int]:
     try:
         payload = signer.decode(cursor)
     except AIError as error:
         raise AIError(ErrorCode.CURSOR_INVALID) from error
     if (
-        payload.cursor_version != 1
+        payload.cursor_version != 2
         or payload.tenant_id != tenant_id
         or payload.resource_kind != "session_history"
         or payload.filter_digest != canonical_sha256({"session_id": session_id})
         or payload.history_id is None
         or payload.snapshot_message_count is None
-        or payload.next_message_index is None
-        or payload.next_projected_item_offset is None
+        or payload.next_history_item_offset is None
+        or payload.history_view_version != SESSION_HISTORY_VIEW_VERSION
     ):
         raise AIError(ErrorCode.CURSOR_INVALID)
     if (
         payload.snapshot_message_count < 0
-        or payload.next_message_index < 0
-        or payload.next_projected_item_offset < 0
-        or payload.next_message_index > payload.snapshot_message_count
+        or payload.next_history_item_offset < 0
     ):
         raise AIError(ErrorCode.CURSOR_INVALID)
     return (
         payload.history_id,
         payload.snapshot_message_count,
-        payload.next_message_index,
-        payload.next_projected_item_offset,
-        payload.emitted_item_count,
+        payload.snapshot_history_item_count,
+        payload.next_history_item_offset,
     )
 
 
@@ -1094,14 +1055,13 @@ def _session_history_cursor(
     session_id: str,
     history_id: str,
     snapshot_message_count: int,
-    next_message_index: int,
-    next_projected_item_offset: int,
-    emitted_item_count: int,
+    snapshot_history_item_count: int,
+    next_history_item_offset: int,
     signer: CursorSigner,
 ) -> str:
     return signer.encode(
         CursorPayload(
-            1,
+            2,
             tenant_id,
             "session_history",
             canonical_sha256({"session_id": session_id}),
@@ -1110,11 +1070,71 @@ def _session_history_cursor(
             int(time.time()) + 3600,
             history_id=history_id,
             snapshot_message_count=snapshot_message_count,
-            next_message_index=next_message_index,
-            next_projected_item_offset=next_projected_item_offset,
-            emitted_item_count=emitted_item_count,
+            snapshot_history_item_count=snapshot_history_item_count,
+            next_history_item_offset=next_history_item_offset,
+            history_view_version=SESSION_HISTORY_VIEW_VERSION,
         )
     )
+
+
+async def _session_history_item_count(
+    store: _SessionHistoryStore,
+    history_id: str,
+    *,
+    tenant_id: str,
+    snapshot_message_count: int,
+) -> int:
+    """Count projected items for a committed history snapshot in one pass."""
+    count = 0
+    async for message in store.iter_session_message_range(
+        history_id,
+        tenant_id=tenant_id,
+        start=0,
+        end=snapshot_message_count,
+    ):
+        count += count_history_items((message,))
+    return count
+
+
+async def _message_index_for_item_offset(
+    store: "_SessionHistoryStore | None",
+    history_id: str,
+    snapshot_message_count: int,
+    item_offset: int,
+    *,
+    tenant_id: str,
+    fallback_messages: "Sequence[object] | None",
+) -> int:
+    """Locate the message index holding one history-item offset."""
+    if fallback_messages is not None:
+        seen = 0
+        for index, message in enumerate(fallback_messages):
+            items = count_history_items((message,))
+            if seen + items > item_offset:
+                return index
+            seen += items
+        return snapshot_message_count
+    seen = 0
+    async for message in store.iter_session_message_range(
+        history_id,
+        tenant_id=tenant_id,
+        start=0,
+        end=snapshot_message_count,
+    ):
+        items = count_history_items((message,))
+        if seen + items > item_offset:
+            return _message_index_seen(store, seen, item_offset)
+        seen += 1
+    return snapshot_message_count
+
+
+def _message_index_seen(
+    store: object,
+    seen: int,
+    item_offset: int,
+) -> int:
+    del store, item_offset
+    return seen
 
 
 async def _iter_message_values(

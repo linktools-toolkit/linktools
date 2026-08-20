@@ -40,11 +40,14 @@ from ._contracts import (
     ArtifactRecord,
     ContextProjection,
     ConversationCursor,
-    ConversationHistoryParent,
+    ConversationHistoryIndexNodeRecord,
     ConversationHistoryRecord,
+    ConversationHistorySegmentRef,
     EvaluationRecord,
     ExecutionEventRecord,
+    ExecutionHistoryHeadRecord,
     ExecutionHistorySealRecord,
+    ExecutionHistoryState,
     ExecutionRecord,
     ExecutionRunSealHead,
     ExternalCallRecord,
@@ -62,8 +65,11 @@ from ._contracts import (
     RuntimePayloadRef,
     SessionRecord,
     TranscriptChunk,
+    TranscriptHeadRecord,
     TranscriptMessageRef,
     TranscriptOrigin,
+    TranscriptSeekDimension,
+    TranscriptSeekRecord,
     TranscriptSpanRef,
 )
 from ._plan import RuntimeDomain
@@ -75,7 +81,7 @@ from ._store import (
     validate_record_identity,
 )
 
-CURRENT_DATA_VERSION = 1
+CURRENT_DATA_VERSION = 2
 DomainT = TypeVar("DomainT")
 
 _DOMAIN_TYPES = {
@@ -85,12 +91,15 @@ _DOMAIN_TYPES = {
         AgentAttemptClaim,
         ArtifactRecord,
         ConversationCursor,
-        ConversationHistoryParent,
+        ConversationHistoryIndexNodeRecord,
         ConversationHistoryRecord,
+        ConversationHistorySegmentRef,
         ContextProjection,
         EvaluationRecord,
         ExecutionEventRecord,
+        ExecutionHistoryHeadRecord,
         ExecutionHistorySealRecord,
+        ExecutionHistoryState,
         ExecutionRecord,
         ExecutionRunSealHead,
         ExternalCallRecord,
@@ -114,8 +123,11 @@ _DOMAIN_TYPES = {
         LoadedModelContext,
         RuntimePayloadRef,
         TranscriptChunk,
+        TranscriptHeadRecord,
         TranscriptMessageRef,
         TranscriptOrigin,
+        TranscriptSeekDimension,
+        TranscriptSeekRecord,
         TranscriptSpanRef,
         RuntimeDomain,
         TaskGraph,
@@ -147,7 +159,7 @@ def decode_envelope(value: Mapping[str, JsonValue]) -> dict[str, JsonValue]:
     payload = value.get("value")
     if not isinstance(version, int) or version < 1:
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR, "canonical data version is invalid")
-    if version > CURRENT_DATA_VERSION:
+    if version != CURRENT_DATA_VERSION:
         raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
     if not isinstance(payload, Mapping):
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR, "canonical data value is invalid")

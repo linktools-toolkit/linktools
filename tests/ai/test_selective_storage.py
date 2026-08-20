@@ -37,7 +37,7 @@ async def test_filesystem_state_writes_domain_manifest(tmp_path) -> None:
     try:
         manifests = list((root / "conversation").rglob("manifest.json"))
         assert len(manifests) == 1
-        assert json.loads(manifests[0].read_text(encoding="utf-8"))["format"] == "linktools-ai-runtime-state"
+        assert json.loads(manifests[0].read_text(encoding="utf-8"))["format"] == "linktools-ai-state"
     finally:
         await state.close()
 

@@ -32,6 +32,7 @@ from ._contracts import (
     ConversationHistoryRecord,
     ExecutionEventAppend,
     ExecutionHistorySealRecord,
+    ExecutionHistoryState,
     ExecutionRecord,
     ExecutionRunSealHead,
     ExecutionStartClaim,
@@ -113,45 +114,16 @@ class RuntimeStateCommands:
                 history_id=history_id,
                 session_id=session.session_id,
                 tenant_id=session.tenant_id,
-                parent=None,
+                parent_history_id=None,
+                prefix_index_head_id=None,
                 inherited_message_count=0,
-                local_message_count=0,
-                history_quality=HistoryQuality.LEGACY_PARTIAL,
-                revision=0,
+                inherited_history_item_count=0,
             )
-            await self._conversation_history.create_in_transaction(transaction, history)
-        end = max(
-            (
-                chunk.first_message_index + chunk.message_count
-                for chunk in prepared.chunks
-            ),
-            default=history.inherited_message_count + history.local_message_count,
-        )
-        next_local_count = max(
-            history.local_message_count,
-            end - history.inherited_message_count,
-        )
-        quality = history.history_quality
-        if prepared.history_quality is HistoryQuality.CONSERVATIVE:
-            quality = HistoryQuality.CONSERVATIVE
-        if (
-            next_local_count == history.local_message_count
-            and quality is history.history_quality
-        ):
-            return history
-        next_history = replace(
-            history,
-            local_message_count=next_local_count,
-            history_quality=quality,
-            revision=history.revision + 1,
-        )
-        return await self._conversation_history.compare_and_swap_in_transaction(
-            transaction,
-            history_id,
-            tenant_id=session.tenant_id,
-            expected_revision=history.revision,
-            next_record=next_history,
-        )
+            await self._conversation_history.create_in_transaction(
+                transaction,
+                history,
+            )
+        return history
 
     async def commit_start_checkpoint(
         self,
@@ -723,6 +695,10 @@ class RuntimeStateCommands:
         if _same_group(stores):
             async def callback(group: StateGroupTransaction) -> ExecutionTerminalCommitResult:
                 execution_transaction = group.transaction(self._execution.state_store)
+                head, head_record = await self._execution.require_open_history_head_in_transaction(
+                    execution_transaction,
+                    commit.execution.execution_id,
+                )
                 effective_commit = await self._effective_terminal_commit(
                     execution_transaction,
                     commit,
@@ -750,7 +726,7 @@ class RuntimeStateCommands:
                             session_id,
                             tenant_id=commit.execution.tenant_id,
                         )
-                        promoted_history = await self._promote_history_in_transaction(
+                        await self._promote_history_in_transaction(
                             conversation_transaction,
                             session,
                             prepared_conversation[0],
@@ -762,7 +738,7 @@ class RuntimeStateCommands:
                             execution_id=commit.execution.execution_id,
                             expected=expected_cursor,
                             next_cursor=next_cursor,
-                            history_quality=promoted_history.history_quality.value,
+                            history_quality="complete",
                         )
                 if recovery_checkpoint is not None:
                     if recovery_run is not None or recovery_snapshot is not None:
@@ -791,6 +767,8 @@ class RuntimeStateCommands:
                                 projection.run,
                                 events=projection.events,
                                 snapshots=projection.snapshots,
+                                execution_id=commit.execution.execution_id,
+                                history_head_guard=(head, head_record),
                             )
                     else:
                         await self._execution_steps.sync_projection_in_transaction(
@@ -805,10 +783,22 @@ class RuntimeStateCommands:
                                 )
                                 else ()
                             ),
+                            execution_id=commit.execution.execution_id,
+                            history_head_guard=(head, head_record),
                         )
                 await self._execution.put_history_seal_in_transaction(
                     execution_transaction,
                     seal,
+                )
+                await self._execution.replace_history_head_in_transaction(
+                    execution_transaction,
+                    head_record,
+                    replace(
+                        head,
+                        state=ExecutionHistoryState.SEALED,
+                        revision=head.revision + 1,
+                        seal_digest=seal.seal_digest,
+                    ),
                 )
                 return await self._execution.commit_terminal_in_transaction(
                     execution_transaction,
@@ -911,7 +901,7 @@ class RuntimeStateCommands:
                     session_id,
                     tenant_id=commit.execution.tenant_id,
                 )
-                promoted_history = await self._promote_history_in_transaction(
+                await self._promote_history_in_transaction(
                     conversation_transaction,
                     session,
                     prepared_conversation[0],
@@ -924,7 +914,7 @@ class RuntimeStateCommands:
                     expected=expected_cursor,
                     next_cursor=next_cursor,
                     release_execution=False,
-                    history_quality=promoted_history.history_quality.value,
+                    history_quality="complete",
                 )
 
             if _same_group(conversation_stores):
@@ -1008,6 +998,10 @@ class RuntimeStateCommands:
 
         async def commit_execution(group: StateGroupTransaction) -> ExecutionTerminalCommitResult:
             execution_transaction = group.transaction(self._execution.state_store)
+            head, head_record = await self._execution.require_open_history_head_in_transaction(
+                execution_transaction,
+                commit.execution.execution_id,
+            )
             effective_commit = await self._effective_terminal_commit(execution_transaction, commit)
             if execution_run is not None and execution_steps_in_transaction:
                 execution_transaction_for_steps = group.transaction(
@@ -1020,6 +1014,8 @@ class RuntimeStateCommands:
                             projection.run,
                             events=projection.events,
                             snapshots=projection.snapshots,
+                            execution_id=commit.execution.execution_id,
+                            history_head_guard=(head, head_record),
                         )
                 else:
                     await self._execution_steps.sync_projection_in_transaction(
@@ -1034,10 +1030,22 @@ class RuntimeStateCommands:
                             )
                             else ()
                         ),
+                        execution_id=commit.execution.execution_id,
+                        history_head_guard=(head, head_record),
                     )
             await self._execution.put_history_seal_in_transaction(
                 execution_transaction,
                 seal,
+            )
+            await self._execution.replace_history_head_in_transaction(
+                execution_transaction,
+                head_record,
+                replace(
+                    head,
+                    state=ExecutionHistoryState.SEALED,
+                    revision=head.revision + 1,
+                    seal_digest=seal.seal_digest,
+                ),
             )
             if recovery_state_merged:
                 if recovery_steps_merged:
@@ -1114,10 +1122,12 @@ class RuntimeStateCommands:
                         await self._sync_prepared_projection_with_reconciliation(
                             self._execution_steps,
                             projection,
+                            execution_id=commit.execution.execution_id,
                         )
                 elif execution_run is not None:
                     await self._sync_projection_with_reconciliation(
                         execution_run,
+                        execution_id=commit.execution.execution_id,
                         events=execution_events,
                         snapshots=execution_snapshots,
                         binding_digest=commit.execution.binding_digest,
@@ -1240,6 +1250,7 @@ class RuntimeStateCommands:
         snapshot: ContinuableSnapshot,
         *,
         binding_digest: str,
+        execution_id: str | None = None,
     ) -> None:
         if await self._step_snapshot_visible(
             archive,
@@ -1254,6 +1265,7 @@ class RuntimeStateCommands:
                     run,
                     snapshot,
                     binding_digest=binding_digest,
+                    execution_id=execution_id,
                 )
                 return
             except AIError as error:
@@ -1272,6 +1284,8 @@ class RuntimeStateCommands:
         archive: StateStepArchive,
         run: RunRecord,
         batch: PreparedStepSnapshotBatch,
+        *,
+        execution_id: str | None = None,
     ) -> None:
         if len(batch) != 1:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -1285,6 +1299,7 @@ class RuntimeStateCommands:
                 transaction,
                 run,
                 prepared,
+                execution_id=execution_id,
             )
 
         for attempt in range(2):
@@ -1303,6 +1318,8 @@ class RuntimeStateCommands:
         self,
         archive: StateStepArchive | None,
         projection: PreparedExecutionProjection,
+        *,
+        execution_id: str,
     ) -> None:
         if archive is None:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -1313,6 +1330,7 @@ class RuntimeStateCommands:
                 projection.run,
                 events=projection.events,
                 snapshots=projection.snapshots,
+                execution_id=execution_id,
             )
 
         for attempt in range(2):
@@ -1406,6 +1424,7 @@ class RuntimeStateCommands:
         self,
         run: RunRecord,
         *,
+        execution_id: str,
         events: Sequence[StepEvent],
         snapshots: Sequence[ContinuableSnapshot],
         binding_digest: str,
@@ -1419,6 +1438,7 @@ class RuntimeStateCommands:
                     events=events,
                     snapshots=snapshots,
                     binding_digest=binding_digest,
+                    execution_id=execution_id,
                 )
                 return
             except AIError as error:
@@ -1607,6 +1627,16 @@ class RuntimeStateCommands:
             tenant_id=commit.execution.tenant_id,
         )
         if history_seal is None:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        history_head = await self._execution.get_history_head(
+            commit.execution.execution_id,
+            tenant_id=commit.execution.tenant_id,
+        )
+        if (
+            history_head is None
+            or history_head.state is not ExecutionHistoryState.SEALED
+            or history_head.seal_digest != history_seal.seal_digest
+        ):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         if execution_projections or execution_run is None:
             expected_seal = _execution_history_seal(
@@ -1862,10 +1892,26 @@ class ExecutionStateCommands:
                 snapshots,
                 binding_digest=commit.execution.binding_digest,
             )
+        history_seal = _execution_history_seal(
+            commit,
+            audit_events=audit_events,
+            projections=(),
+            current_run=step_run,
+            current_events=step_events,
+            current_batch=(
+                prepared_snapshots
+                if isinstance(prepared_snapshots, PreparedStepSnapshotBatch)
+                else None
+            ),
+        )
 
         async def mutate(
             transaction: StateTransaction,
         ) -> ExecutionTerminalCommitResult:
+            head, head_record = await self._executions.require_open_history_head_in_transaction(
+                transaction,
+                commit.execution.execution_id,
+            )
             effective_commit = commit
             if effective_commit.idempotency is None:
                 idempotency = (
@@ -1892,7 +1938,23 @@ class ExecutionStateCommands:
                         else ()
                     ),
                     binding_digest=commit.execution.binding_digest,
+                    execution_id=commit.execution.execution_id,
+                    history_head_guard=(head, head_record),
                 )
+            await self._executions.put_history_seal_in_transaction(
+                transaction,
+                history_seal,
+            )
+            await self._executions.replace_history_head_in_transaction(
+                transaction,
+                head_record,
+                replace(
+                    head,
+                    state=ExecutionHistoryState.SEALED,
+                    revision=head.revision + 1,
+                    seal_digest=history_seal.seal_digest,
+                ),
+            )
             return await self._executions.commit_terminal_in_transaction(
                 transaction,
                 effective_commit,
@@ -1971,33 +2033,11 @@ class ConversationStateCommands:
             )
             if history is None:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            end = max(
-                (
-                    chunk.first_message_index + chunk.message_count
-                    for chunk in prepared[0].chunks
-                ),
-                default=history.inherited_message_count + history.local_message_count,
+            quality = (
+                "conservative"
+                if prepared[0].history_quality is HistoryQuality.CONSERVATIVE
+                else "complete"
             )
-            quality = history.history_quality
-            if prepared[0].history_quality is HistoryQuality.CONSERVATIVE:
-                quality = HistoryQuality.CONSERVATIVE
-            next_history = replace(
-                history,
-                local_message_count=max(
-                    history.local_message_count,
-                    end - history.inherited_message_count,
-                ),
-                history_quality=quality,
-                revision=history.revision + 1,
-            )
-            if next_history != history:
-                await self._histories.compare_and_swap_in_transaction(
-                    transaction,
-                    history_id,
-                    tenant_id=tenant_id,
-                    expected_revision=history.revision,
-                    next_record=next_history,
-                )
             return await self._sessions.advance_continuation_in_transaction(
                 transaction,
                 session_id,
@@ -2005,7 +2045,7 @@ class ConversationStateCommands:
                 execution_id=execution_id,
                 expected=expected,
                 next_cursor=next_cursor,
-                history_quality=next_history.history_quality.value,
+                history_quality=quality,
             )
 
         result = await self._state_store.mutate(mutate)

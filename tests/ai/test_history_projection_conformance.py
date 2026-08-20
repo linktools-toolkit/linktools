@@ -19,7 +19,9 @@ from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.runtime import RuntimeState
 from linktools.ai.runtime._local import LocalExecutionBackend
 from linktools.ai.runtime.state import (
+    ExecutionHistoryHeadRecord,
     ExecutionHistorySealRecord,
+    ExecutionHistoryState,
     ExecutionReadModelBuild,
     ExecutionReadModelRepository,
     ExecutionRecord,
@@ -52,16 +54,6 @@ from pydantic_ai_harness.step_persistence import (
 )
 
 
-class _LockedProjectionCheckpoint:
-    def __init__(self, history_lock: _RunHistoryLock) -> None:
-        self._history_lock = history_lock
-        self.acknowledged = False
-
-    async def acknowledge(self) -> None:
-        async with self._history_lock.hold("run"):
-            self.acknowledged = True
-
-
 def _record(status: ExecutionStatus, sequence: int) -> ExecutionRecord:
     now = datetime.now(timezone.utc)
     return ExecutionRecord(
@@ -86,18 +78,163 @@ def _record(status: ExecutionStatus, sequence: int) -> ExecutionRecord:
 
 
 @pytest.mark.asyncio
-async def test_terminal_projection_acknowledgement_reenters_current_history_lock() -> None:
-    history_lock = _RunHistoryLock()
-    checkpoint = _LockedProjectionCheckpoint(history_lock)
-    backend = object.__new__(LocalExecutionBackend)
+async def test_history_head_requires_open_for_mutations() -> None:
+    state = RuntimeState.in_memory()
+    await state.initialize(namespace="history-head", tenant_id="tenant")
+    repository = state.execution.executions
+    store = repository.state_store
+    try:
+        await repository.create_with_history_head(_record(ExecutionStatus.STARTED, 1))
+        head = await repository.get_history_head("execution", tenant_id="tenant")
+        assert head is not None
+        assert head.state is ExecutionHistoryState.OPEN
+        assert head.revision == 0
+        assert head.seal_digest is None
 
-    async with history_lock.hold("run"):
-        await asyncio.wait_for(
-            backend._acknowledge_projection_after_commit(checkpoint),
-            timeout=0.1,
+        async def require_open(transaction: object) -> None:
+            open_head, record = await repository.require_open_history_head_in_transaction(
+                transaction,
+                "execution",
+            )
+            sealed = ExecutionHistoryHeadRecord(
+                "execution",
+                "tenant",
+                ExecutionHistoryState.SEALED,
+                open_head.revision + 1,
+                "d" * 64,
+            )
+            await repository.replace_history_head_in_transaction(
+                transaction,
+                record,
+                sealed,
+            )
+
+        await store.mutate(require_open)
+        head = await repository.get_history_head("execution", tenant_id="tenant")
+        assert head is not None
+        assert head.state is ExecutionHistoryState.SEALED
+        assert head.seal_digest == "d" * 64
+
+        async def mutate_sealed(transaction: object) -> None:
+            await repository.require_open_history_head_in_transaction(
+                transaction,
+                "execution",
+            )
+
+        with pytest.raises(AIError) as raised:
+            await store.mutate(mutate_sealed)
+        assert raised.value.code is ErrorCode.STORAGE_CONFLICT
+    finally:
+        await state.close()
+
+
+@pytest.mark.asyncio
+async def test_execution_projection_paths_reject_a_sealed_history_head(
+    tmp_path: Path,
+) -> None:
+    state = RuntimeState.filesystem(tmp_path / "runtime")
+    await state.initialize(namespace="history-fence", tenant_id="tenant")
+    try:
+        await state.execution.executions.create(_record(ExecutionStatus.STARTED, 1))
+        await _materialize_attempt(state, 1, "before-seal")
+        repository = state.execution.executions
+        open_head = await repository.get_history_head("execution", tenant_id="tenant")
+        assert open_head is not None
+        assert open_head.state is ExecutionHistoryState.OPEN
+        assert open_head.revision == 1
+
+        async def seal(transaction: object) -> None:
+            head, record = await repository.require_open_history_head_in_transaction(
+                transaction,
+                "execution",
+            )
+            await repository.replace_history_head_in_transaction(
+                transaction,
+                record,
+                ExecutionHistoryHeadRecord(
+                    head.execution_id,
+                    head.tenant_id,
+                    ExecutionHistoryState.SEALED,
+                    head.revision + 1,
+                    "s" * 64,
+                ),
+            )
+
+        await repository.state_store.mutate(seal)
+        archive = state.steps.read_store(RuntimeDomain.EXECUTION)
+        assert isinstance(archive, StateStepArchive)
+        run_id = step_run_id(
+            namespace="history",
+            tenant_id="tenant",
+            execution_id="execution",
+            segment_sequence=1,
         )
+        run = await archive.get_run(run_id=run_id)
+        assert run is not None
+        before_events = await archive.list_events(run_id=run_id)
+        before_head = await repository.get_history_head("execution", tenant_id="tenant")
+        assert before_head is not None
+        now = datetime.now(timezone.utc)
 
-    assert checkpoint.acknowledged
+        with pytest.raises(AIError) as sync_error:
+            await archive.sync_projection(
+                run,
+                events=(
+                    StepEvent(
+                        run_id=run_id,
+                        kind="after-seal",
+                        step_index=3,
+                        timestamp=now,
+                        conversation_id=run.conversation_id,
+                        agent_name=run.agent_name,
+                    ),
+                ),
+                snapshots=(),
+                execution_id="execution",
+            )
+        assert sync_error.value.code is ErrorCode.STORAGE_CONFLICT
+
+        with pytest.raises(AIError) as empty_sync_error:
+            await archive.sync_projection(
+                run,
+                events=(),
+                snapshots=(),
+                execution_id="execution",
+            )
+        assert empty_sync_error.value.code is ErrorCode.STORAGE_CONFLICT
+
+        with pytest.raises(AIError) as snapshot_error:
+            await archive.materialize_snapshot(
+                run,
+                ContinuableSnapshot(
+                    run_id=run_id,
+                    step_index=4,
+                    messages=[ModelRequest(parts=[UserPromptPart(content="after-seal")])],
+                    conversation_id=run.conversation_id,
+                    parent_run_id=run.parent_run_id,
+                    agent_name=run.agent_name,
+                    timestamp=now,
+                ),
+                execution_id="execution",
+            )
+        assert snapshot_error.value.code is ErrorCode.STORAGE_CONFLICT
+        assert await archive.list_events(run_id=run_id) == before_events
+        assert await repository.get_history_head("execution", tenant_id="tenant") == before_head
+    finally:
+        await state.close()
+
+
+@pytest.mark.asyncio
+async def test_projection_flight_resolves_waiters_after_abandon() -> None:
+    steps = RuntimeState.in_memory()
+    await steps.initialize(namespace="flight-abandon", tenant_id="tenant")
+    try:
+        store = steps.steps
+        captured = await store.capture_execution_projection("missing-run")
+        assert captured is None
+        await store.wait_projection_flight("missing-run")
+    finally:
+        await steps.close()
 
 
 @pytest.mark.asyncio
@@ -211,7 +348,39 @@ def test_transcript_accumulator_plans_then_applies_idempotently() -> None:
     assert accumulator.messages == (message,)
 
 
+def test_transcript_accumulator_state_clone_is_isolated() -> None:
+    accumulator = _TranscriptAccumulator("run")
+    accumulator.seed((ModelRequest(parts=[UserPromptPart(content="seed")]),))
+    advance = accumulator.plan(
+        (ModelRequest(parts=[UserPromptPart(content="seed")]),)
+    )
+    accumulator.apply(advance)
+
+    working = _TranscriptAccumulator.from_state(accumulator.snapshot_state())
+    followup = working.plan((ModelResponse(parts=[TextPart(content="next")]),))
+    working.apply(followup)
+
+    assert len(working.messages) == 2
+    assert len(accumulator.messages) == 1
+    assert working.generation == accumulator.generation + 1
+    assert working.snapshot_state().messages != accumulator.snapshot_state().messages
+
+
 async def _materialize_attempt(state: RuntimeState, sequence: int, prompt: str) -> None:
+    repository = state.execution.executions
+    if await repository.get_history_head("execution", tenant_id="tenant") is None:
+        await repository.state_store.mutate(
+            lambda transaction: repository.insert_history_head_in_transaction(
+                transaction,
+                ExecutionHistoryHeadRecord(
+                    "execution",
+                    "tenant",
+                    ExecutionHistoryState.OPEN,
+                    0,
+                    None,
+                ),
+            )
+        )
     run_id = step_run_id(
         namespace="history",
         tenant_id="tenant",
@@ -280,7 +449,10 @@ async def _materialize_attempt(state: RuntimeState, sequence: int, prompt: str) 
             timestamp=now,
         )
     )
-    await state.steps.flush_execution_projection(run_id)
+    await state.steps.flush_execution_projection(
+        run_id,
+        execution_id="execution",
+    )
     seal = ExecutionHistorySealRecord(
         "execution",
         "tenant",
@@ -465,7 +637,7 @@ async def test_read_model_rejects_a_different_complete_source() -> None:
 
 
 @pytest.mark.asyncio
-async def test_read_model_rebuilds_a_v1_record() -> None:
+async def test_read_model_rejects_a_v1_record() -> None:
     state = RuntimeState.in_memory()
     await state.initialize(namespace="read-model-v1", tenant_id="tenant")
     try:
@@ -531,7 +703,9 @@ async def test_read_model_rebuilds_a_v1_record() -> None:
             tenant_id="tenant",
         )
 
-        assert await repository.get_complete("execution", tenant_id="tenant") is None
+        with pytest.raises(AIError) as raised:
+            await repository.get_complete("execution", tenant_id="tenant")
+        assert raised.value.code is ErrorCode.STORAGE_VERSION_UNSUPPORTED
 
         async def build() -> ExecutionReadModelBuild:
             return ExecutionReadModelBuild(
@@ -543,12 +717,13 @@ async def test_read_model_rebuilds_a_v1_record() -> None:
                 (),
             )
 
-        result = await repository.ensure(
-            "execution",
-            tenant_id="tenant",
-            builder=build,
-        )
-        assert result.model_version == 2
+        with pytest.raises(AIError) as raised:
+            await repository.ensure(
+                "execution",
+                tenant_id="tenant",
+                builder=build,
+            )
+        assert raised.value.code is ErrorCode.STORAGE_VERSION_UNSUPPORTED
     finally:
         await state.close()
 

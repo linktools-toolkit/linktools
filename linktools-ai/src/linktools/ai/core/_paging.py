@@ -38,6 +38,9 @@ class CursorPayload:
     next_message_index: "int | None" = None
     next_projected_item_offset: "int | None" = None
     emitted_item_count: "int | None" = None
+    snapshot_history_item_count: "int | None" = None
+    next_history_item_offset: "int | None" = None
+    history_view_version: "int | None" = None
 
     def as_json(self) -> dict[str, JsonValue]:
         value: dict[str, JsonValue] = {
@@ -60,6 +63,12 @@ class CursorPayload:
             value["next_projected_item_offset"] = self.next_projected_item_offset
         if self.emitted_item_count is not None:
             value["emitted_item_count"] = self.emitted_item_count
+        if self.snapshot_history_item_count is not None:
+            value["snapshot_history_item_count"] = self.snapshot_history_item_count
+        if self.next_history_item_offset is not None:
+            value["next_history_item_offset"] = self.next_history_item_offset
+        if self.history_view_version is not None:
+            value["history_view_version"] = self.history_view_version
         return value
 
 
@@ -113,6 +122,9 @@ class HmacCursorSigner:
                 _optional_nonnegative_int(value.get("next_message_index")),
                 _optional_nonnegative_int(value.get("next_projected_item_offset")),
                 _optional_nonnegative_int(value.get("emitted_item_count")),
+                _optional_nonnegative_int(value.get("snapshot_history_item_count")),
+                _optional_nonnegative_int(value.get("next_history_item_offset")),
+                _optional_nonnegative_int(value.get("history_view_version")),
             )
             if payload.expires_at < int(time.time()):
                 raise ValueError("expired")

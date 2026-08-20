@@ -46,7 +46,7 @@ from ._plan import RuntimeDomain
 
 if TYPE_CHECKING:
     from .._tool import ToolStateRepository
-    from ._store import StateStore, StateTransaction
+    from ._store import StateStore, StateTransaction, StoredRecord
 
 
 @dataclass(frozen=True, slots=True)
@@ -54,6 +54,24 @@ class ConversationCursor:
     step_run_id: str
     history_id: "str | None" = None
     message_count: "int | None" = None
+
+
+@dataclass(frozen=True, slots=True)
+class ConversationHistorySegmentRef:
+    """Freeze one source history's visible LOCAL prefix at fork time."""
+
+    owner_history_id: str
+    through_local_message_count: int
+    through_local_history_item_count: int
+
+    def __post_init__(self) -> None:
+        if (
+            self.through_local_message_count < 0
+            or self.through_local_history_item_count < 0
+        ):
+            raise ValueError("history segment counts cannot be negative")
+        if not self.owner_history_id:
+            raise ValueError("history segment owner cannot be empty")
 
 
 @dataclass(frozen=True, slots=True)
@@ -74,27 +92,65 @@ class HistoryQuality(StrEnum):
 
 @dataclass(frozen=True, slots=True)
 class ConversationHistoryRecord:
+    """Immutable branch descriptor; local counts live on the TranscriptHead."""
+
     history_id: str
     session_id: str
     tenant_id: str
-    parent: "ConversationHistoryParent | None"
+    parent_history_id: "str | None"
+    prefix_index_head_id: "str | None"
     inherited_message_count: int
-    local_message_count: int
-    history_quality: HistoryQuality
-    revision: int
+    inherited_history_item_count: int
 
     def __post_init__(self) -> None:
-        if self.inherited_message_count < 0 or self.local_message_count < 0:
-            raise ValueError("history message counts cannot be negative")
-        if self.revision < 0:
-            raise ValueError("history revision cannot be negative")
-        if self.parent is None and self.inherited_message_count != 0:
-            raise ValueError("root history cannot inherit messages")
-        if (
-            self.parent is not None
-            and self.inherited_message_count != self.parent.through_message_count
+        if self.inherited_message_count < 0 or self.inherited_history_item_count < 0:
+            raise ValueError("history inherited counts cannot be negative")
+        if not self.history_id or not self.session_id or not self.tenant_id:
+            raise ValueError("history descriptor identity cannot be empty")
+        if self.parent_history_id is None:
+            if (
+                self.prefix_index_head_id is not None
+                or self.inherited_message_count != 0
+                or self.inherited_history_item_count != 0
+            ):
+                raise ValueError("root history cannot inherit messages")
+        elif self.prefix_index_head_id is None and (
+            self.inherited_message_count != 0
+            or self.inherited_history_item_count != 0
         ):
-            raise ValueError("history inherited count must match parent reference")
+            raise ValueError("forked history with content requires a prefix head")
+
+
+@dataclass(frozen=True, slots=True)
+class ConversationHistoryIndexNodeRecord:
+    """Skew-heap tree node doubling as one forest cell.
+
+    ``tree_*`` counters aggregate the tree rooted here; ``next_forest_id``
+    links forest cells so a weighted resolver walks only touched segments.
+    """
+
+    node_id: str
+    segment: ConversationHistorySegmentRef
+    tree_segment_count: int
+    tree_message_count: int
+    tree_history_item_count: int
+    left_tree_id: "str | None"
+    right_tree_id: "str | None"
+    next_forest_id: "str | None"
+
+    def __post_init__(self) -> None:
+        if self.tree_segment_count < 1:
+            raise ValueError("index node must cover at least one segment")
+        if (
+            self.tree_message_count < self.segment.through_local_message_count
+            or self.tree_history_item_count
+            < self.segment.through_local_history_item_count
+        ):
+            raise ValueError("index node counters cannot undercut its segment")
+        if self.tree_segment_count == 1 and (
+            self.left_tree_id is not None or self.right_tree_id is not None
+        ):
+            raise ValueError("leaf index node cannot have children")
 
 
 class TranscriptOrigin(StrEnum):
@@ -118,6 +174,71 @@ class TranscriptChunk:
     raw_digest: str
     raw_size: int
     content: RuntimePayloadRef
+
+
+class TranscriptSeekDimension(StrEnum):
+    MESSAGE = "message"
+    HISTORY_ITEM = "history_item"
+
+
+@dataclass(frozen=True, slots=True)
+class TranscriptHeadRecord:
+    """Sole mutable head of one owner's raw transcript stream.
+
+    Chunk facts are immutable and content-addressed; counts on this head are
+    the only authoritative totals.
+    """
+
+    owner_domain: RuntimeDomain
+    owner_id: str
+    message_count: int
+    history_item_count: int
+    chunk_count: int
+    history_view_version: int
+    quality: HistoryQuality
+    revision: int
+
+    def __post_init__(self) -> None:
+        if any(
+            value < 0
+            for value in (
+                self.message_count,
+                self.history_item_count,
+                self.chunk_count,
+                self.revision,
+            )
+        ):
+            raise ValueError("transcript head counts cannot be negative")
+        if self.history_view_version < 1:
+            raise ValueError("transcript head history view version must be positive")
+        if not self.owner_id:
+            raise ValueError("transcript head owner cannot be empty")
+
+
+@dataclass(frozen=True, slots=True)
+class TranscriptSeekRecord:
+    """Boundary fact enabling O(1) positioning within one seek dimension."""
+
+    owner_id: str
+    dimension: TranscriptSeekDimension
+    block_start: int
+    fact_sequence: int
+    chunk_first_message_index: int
+    chunk_first_history_item_index: int
+    history_view_version: int
+
+    def __post_init__(self) -> None:
+        if self.block_start < 0 or self.fact_sequence < 1:
+            raise ValueError("transcript seek boundary values are invalid")
+        if (
+            self.chunk_first_message_index < 0
+            or self.chunk_first_history_item_index < 0
+        ):
+            raise ValueError("transcript seek chunk offsets cannot be negative")
+        if self.history_view_version < 1:
+            raise ValueError("transcript seek history view version must be positive")
+        if not self.owner_id:
+            raise ValueError("transcript seek owner cannot be empty")
 
 
 @dataclass(frozen=True, slots=True)
@@ -266,6 +387,36 @@ class ExecutionHistorySealRecord:
         run_ids = tuple(head.run_id for head in self.run_heads)
         if run_ids != tuple(sorted(run_ids)) or len(run_ids) != len(set(run_ids)):
             raise ValueError("execution history seal heads must be sorted and unique")
+
+
+class ExecutionHistoryState(StrEnum):
+    OPEN = "open"
+    SEALED = "sealed"
+
+
+@dataclass(frozen=True, slots=True)
+class ExecutionHistoryHeadRecord:
+    """Durable fencing head for one execution's mutable history.
+
+    ``seal_digest`` is set only by the terminal boundary that flips the state
+    to SEALED; every earlier mutation replaces the head with revision + 1.
+    """
+
+    execution_id: str
+    tenant_id: str
+    state: ExecutionHistoryState
+    revision: int
+    seal_digest: "str | None"
+
+    def __post_init__(self) -> None:
+        if self.revision < 0:
+            raise ValueError("execution history head revision cannot be negative")
+        if not self.execution_id or not self.tenant_id:
+            raise ValueError("execution history head identity cannot be empty")
+        if self.state is ExecutionHistoryState.SEALED and not self.seal_digest:
+            raise ValueError("sealed history head requires a seal digest")
+        if self.state is ExecutionHistoryState.OPEN and self.seal_digest is not None:
+            raise ValueError("open history head cannot carry a seal digest")
 
 
 @dataclass(frozen=True, slots=True)
@@ -561,6 +712,19 @@ class RecoveryActiveRecord:
 
 
 @dataclass(frozen=True, slots=True)
+class RecoveryIntegrityReport:
+    """Result of the explicit maintenance-only recovery index scan."""
+
+    active_count: int
+    admission_count: int
+    inconsistent_execution_ids: tuple[str, ...]
+
+    def __post_init__(self) -> None:
+        if self.active_count < 0 or self.admission_count < 0:
+            raise ValueError("recovery integrity counts cannot be negative")
+
+
+@dataclass(frozen=True, slots=True)
 class RecoveryStateRecord:
     execution_id: str
     tenant_id: str
@@ -825,6 +989,12 @@ class ConversationHistoryRepository(RuntimeRepository, Protocol):
 
 class ExecutionRepository(RuntimeRepository, Protocol):
     async def create(self, record: ExecutionRecord) -> ExecutionRecord: ...
+    async def create_with_history_head(self, record: ExecutionRecord) -> ExecutionRecord: ...
+    async def create_with_history_head_in_transaction(
+        self,
+        transaction: "StateTransaction",
+        record: ExecutionRecord,
+    ) -> ExecutionRecord: ...
     async def get_header(self, execution_id: str, *, tenant_id: str) -> ResourceRef | None: ...
     async def get(self, execution_id: str, *, tenant_id: str) -> ExecutionRecord | None: ...
     async def get_in_transaction(
@@ -874,6 +1044,30 @@ class ExecutionRepository(RuntimeRepository, Protocol):
         *,
         tenant_id: str,
     ) -> ExecutionHistorySealRecord | None: ...
+    async def get_history_head(
+        self,
+        execution_id: str,
+        *,
+        tenant_id: str,
+    ) -> ExecutionHistoryHeadRecord | None: ...
+    async def require_open_history_head_in_transaction(
+        self,
+        transaction: "StateTransaction",
+        execution_id: str,
+        *,
+        expected_revision: "int | None" = None,
+    ) -> "tuple[ExecutionHistoryHeadRecord, StoredRecord]": ...
+    async def replace_history_head_in_transaction(
+        self,
+        transaction: "StateTransaction",
+        current_record: "StoredRecord",
+        next_head: ExecutionHistoryHeadRecord,
+    ) -> ExecutionHistoryHeadRecord: ...
+    async def insert_history_head_in_transaction(
+        self,
+        transaction: "StateTransaction",
+        head: ExecutionHistoryHeadRecord,
+    ) -> ExecutionHistoryHeadRecord: ...
     async def put_history_seal_in_transaction(
         self,
         transaction: "StateTransaction",
@@ -1027,6 +1221,11 @@ class RecoveryCheckpointRepository(RuntimeRepository, Protocol):
         cursor: "str | None",
         limit: int,
     ) -> "Page[RecoveryCheckpoint]": ...
+    async def validate_recovery_active_index(
+        self,
+        *,
+        tenant_id: str,
+    ) -> RecoveryIntegrityReport: ...
     async def compare_and_swap(
         self, execution_id: str, *, tenant_id: str, expected_revision: int, next_record: RecoveryCheckpoint
     ) -> RecoveryCheckpoint: ...

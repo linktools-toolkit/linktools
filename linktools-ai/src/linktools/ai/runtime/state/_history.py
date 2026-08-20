@@ -5,7 +5,7 @@
 import hashlib
 import json
 import zlib
-from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
+from collections.abc import AsyncIterator, Mapping, Sequence
 from dataclasses import dataclass, replace
 
 from linktools.core import environ
@@ -16,6 +16,10 @@ from ...core import canonical_json_bytes
 from ...errors import AIError, ErrorCode
 from ...storage import ObjectRef, ObjectStore, StoredPayload, runtime_object_key
 from ._codec import decode_domain, encode_domain
+from ._history_index import (
+    HistoryIndexSnapshot,
+    resolve_history_range,
+)
 from ._contracts import (
     ContextProjection,
     ConversationHistoryRecord,
@@ -28,6 +32,8 @@ from ._contracts import (
     TranscriptChunk,
     TranscriptMessageRef,
     TranscriptOrigin,
+    TranscriptSeekDimension,
+    TranscriptSeekRecord,
     TranscriptSpanRef,
 )
 from ._plan import RuntimeDomain
@@ -41,6 +47,7 @@ from ._store import (
     record_key_digest,
     sequence_key,
     stream_digest,
+    subject_digest,
 )
 
 _logger = environ.get_logger("ai.runtime.state.history")
@@ -48,9 +55,13 @@ _CHUNK_TARGET = 256 * 1024
 _COMPRESS_MINIMUM = 16 * 1024
 _COMPRESS_RATIO = 0.9
 _TRANSCRIPT_PAGE_SIZE = 64
+_TRANSCRIPT_CHUNK_MAX_MESSAGES = 64
+_TRANSCRIPT_SEEK_BLOCK = 128
+SESSION_HISTORY_VIEW_VERSION = 1
 
 
-def _message_signature(message: ModelMessage) -> bytes:
+def _overlap_signature(message: ModelMessage) -> bytes:
+    """Timestamp-ignoring signature used only for overlap/dedup matching."""
     value = json.loads(
         ModelMessagesTypeAdapter.dump_json([message]).decode("utf-8")
     )
@@ -67,6 +78,13 @@ def _message_signature(message: ModelMessage) -> bytes:
         return candidate
 
     return canonical_json_bytes(remove_timestamps(value))
+
+
+def _exact_message_signature(message: ModelMessage) -> bytes:
+    """Full canonical serialization including timestamp, for exact-content proof."""
+    return canonical_json_bytes(
+        json.loads(ModelMessagesTypeAdapter.dump_json([message]).decode("utf-8"))
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -99,9 +117,18 @@ class _HistorySegment:
 @dataclass(frozen=True, slots=True)
 class _HistoryResolution:
     segments: tuple[_HistorySegment, ...]
-    legacy_source_id: str | None
-    legacy_message_limit: int
-    legacy_messages: tuple[ModelMessage, ...] | None
+
+
+@dataclass(frozen=True, slots=True)
+class _TranscriptAccumulatorState:
+    """Complete accumulator state; the only legal clone carrier."""
+
+    run_id: str
+    messages: tuple[ModelMessage, ...]
+    signatures: tuple[bytes, ...]
+    quality: HistoryQuality
+    generation: int
+    seeded: bool
 
 
 class _TranscriptAccumulator:
@@ -117,7 +144,6 @@ class _TranscriptAccumulator:
         self._quality = HistoryQuality.COMPLETE
         self._generation = 0
         self._seeded = False
-        self._signature_cache: dict[int, bytes] = {}
 
     @property
     def messages(self) -> tuple[ModelMessage, ...]:
@@ -131,6 +157,29 @@ class _TranscriptAccumulator:
     def generation(self) -> int:
         return self._generation
 
+    def snapshot_state(self) -> _TranscriptAccumulatorState:
+        return _TranscriptAccumulatorState(
+            self._run_id,
+            tuple(self._messages),
+            tuple(self._signatures),
+            self._quality,
+            self._generation,
+            self._seeded,
+        )
+
+    @classmethod
+    def from_state(
+        cls,
+        state: _TranscriptAccumulatorState,
+    ) -> "_TranscriptAccumulator":
+        accumulator = cls(state.run_id)
+        accumulator._messages = list(state.messages)
+        accumulator._signatures = list(state.signatures)
+        accumulator._quality = state.quality
+        accumulator._generation = state.generation
+        accumulator._seeded = state.seeded
+        return accumulator
+
     def seed(self, messages: Sequence[ModelMessage]) -> None:
         if self._seeded:
             raise RuntimeError("transcript accumulator is already seeded")
@@ -139,12 +188,7 @@ class _TranscriptAccumulator:
         self._seeded = True
 
     def signature(self, message: ModelMessage) -> bytes:
-        key = id(message)
-        value = self._signature_cache.get(key)
-        if value is None:
-            value = _message_signature(message)
-            self._signature_cache[key] = value
-        return value
+        return _overlap_signature(message)
 
     def plan(
         self,
@@ -366,7 +410,6 @@ class TranscriptRepository:
         runtime_domain: RuntimeDomain,
         context_sources: Mapping[RuntimeDomain, "TranscriptRepository"] | None = None,
         history_repository: "ConversationHistoryRepository | None" = None,
-        legacy_message_loader: Callable[[str], Awaitable[tuple[ModelMessage, ...]]] | None = None,
     ) -> None:
         self._store = store
         self._object_store = object_store
@@ -377,7 +420,6 @@ class TranscriptRepository:
         self._runtime_domain = runtime_domain
         self._context_sources = dict(context_sources or {})
         self._history_repository = history_repository
-        self._legacy_message_loader = legacy_message_loader
         self._projector = _ContextProjector(runtime_domain)
 
     @property
@@ -401,7 +443,14 @@ class TranscriptRepository:
             encoded = ModelMessagesTypeAdapter.dump_json([message])
             part = encoded[1:-1]
             candidate_size = current_size + len(part) + (1 if current else 0)
-            if current and candidate_size > _CHUNK_TARGET:
+            split = (
+                current
+                and (
+                    candidate_size > _CHUNK_TARGET
+                    or len(current) >= _TRANSCRIPT_CHUNK_MAX_MESSAGES
+                )
+            )
+            if split:
                 chunks.append(
                     await self._make_chunk(owner_id, current_start, current, origin)
                 )
@@ -478,6 +527,7 @@ class TranscriptRepository:
         transaction: StateTransaction,
         owner_id: str,
         chunks: Sequence[TranscriptChunk],
+        chunk_history_item_counts: Sequence[int] | None = None,
     ) -> None:
         if not chunks:
             return
@@ -506,15 +556,38 @@ class TranscriptRepository:
                 )
                 raise AIError(ErrorCode.STORAGE_CONFLICT)
             expected += chunk.message_count
+        added_items = (
+            0
+            if chunk_history_item_counts is None
+            else sum(chunk_history_item_counts)
+        )
+        prior_items = 0 if owner_record is None else owner_record.data.get(
+            "history_item_count",
+            0,
+        )
+        if isinstance(prior_items, bool) or not isinstance(prior_items, int):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         if owner_record is None:
             await transaction.insert_record(
-                self._new_owner_record(owner_id, owner, expected)
+                self._new_owner_record(
+                    owner_id,
+                    owner,
+                    expected,
+                    history_item_count=added_items,
+                    chunk_count=len(chunks),
+                )
             )
         else:
             upgraded = replace(
                 owner_record,
                 storage_version=owner_record.storage_version + 1,
-                data={**owner_record.data, "message_count": expected},
+                data={
+                    **owner_record.data,
+                    "message_count": expected,
+                    "history_item_count": prior_items + added_items,
+                    "chunk_count": owner_record.data.get("chunk_count", 0)
+                    + len(chunks),
+                },
             )
             if not await transaction.replace_record(
                 upgraded,
@@ -543,6 +616,13 @@ class TranscriptRepository:
                 for sequence, chunk in zip(sequences, chunks, strict=True)
             )
         )
+        await self._insert_seek_boundaries(
+            transaction,
+            owner_id,
+            chunks,
+            sequences,
+            chunk_history_item_counts,
+        )
         _logger.debug(
             "transcript chunks appended: domain=%s owner=%s "
             "first_index=%s message_count=%s chunks=%s",
@@ -553,40 +633,117 @@ class TranscriptRepository:
             len(chunks),
         )
 
-    async def _message_count_in_transaction(
+    async def _insert_seek_boundaries(
         self,
         transaction: StateTransaction,
         owner_id: str,
-    ) -> int:
-        values = await transaction.list_facts(
-            FactQuery(self._transcript_stream(owner_id))
+        chunks: Sequence[TranscriptChunk],
+        sequences: Sequence[int],
+        chunk_history_item_counts: Sequence[int] | None,
+    ) -> None:
+        """Insert seek facts for block boundaries crossed by this append."""
+        first = chunks[0].first_message_index
+        last = chunks[-1].first_message_index + chunks[-1].message_count
+        block = _TRANSCRIPT_SEEK_BLOCK
+        starts = range(
+            ((first + block - 1) // block) * block,
+            ((last + block - 1) // block) * block,
+            block,
         )
-        expected = 0
-        latest: TranscriptChunk | None = None
-        for fact in values:
-            try:
-                chunk = self.decode_chunk(fact)
-            except (TypeError, ValueError) as error:
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
-            if (
-                chunk.owner_id != owner_id
-                or chunk.message_count <= 0
-                or chunk.first_message_index != expected
-            ):
-                _logger.error(
-                    "transcript integrity failure: domain=%s owner=%s "
-                    "expected_index=%s actual_index=%s",
-                    self._runtime_domain.value,
-                    owner_id,
-                    expected,
-                    chunk.first_message_index,
+        if not starts:
+            return
+        head_record = await transaction.get_record(self._owner_key(owner_id))
+        if head_record is None:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        item_base_value = head_record.data.get("history_item_count", 0)
+        if isinstance(item_base_value, bool) or not isinstance(item_base_value, int):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        if chunk_history_item_counts is None:
+            return
+        boundaries: dict[int, tuple[int, int]] = {}
+        message_cursor = first
+        item_cursor = item_base_value
+        for chunk, sequence, item_count in zip(
+            chunks,
+            sequences,
+            chunk_history_item_counts,
+            strict=True,
+        ):
+            boundaries[message_cursor] = (sequence, item_cursor)
+            message_cursor += chunk.message_count
+            item_cursor += item_count
+        facts: list[StoredFact] = []
+        for block_start in starts:
+            boundary = boundaries.get(block_start)
+            if boundary is None:
+                continue
+            fact_sequence, item_index = boundary
+            for dimension in TranscriptSeekDimension:
+                facts.append(
+                    StoredFact(
+                        self._seek_stream(owner_id),
+                        0,
+                        self._owner_key(owner_id),
+                        "transcript_seek",
+                        subject_digest(dimension.value),
+                        dimension.value,
+                        {
+                            "type": "transcript_seek",
+                            "payload": encode_domain(
+                                TranscriptSeekRecord(
+                                    owner_id,
+                                    dimension,
+                                    block_start,
+                                    fact_sequence,
+                                    block_start,
+                                    item_index,
+                                    SESSION_HISTORY_VIEW_VERSION,
+                                )
+                            ),
+                        },
+                    )
                 )
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            expected += chunk.message_count
-            latest = chunk
-        if latest is None:
-            return 0
-        return latest.first_message_index + latest.message_count
+        if facts:
+            final = await transaction.reserve_sequence(
+                self._seek_sequence(owner_id),
+                len(facts),
+            )
+            ordered = tuple(
+                replace(
+                    fact,
+                    sequence=sequence,
+                )
+                for fact, sequence in zip(
+                    facts,
+                    range(final - len(facts) + 1, final + 1),
+                    strict=True,
+                )
+            )
+            await transaction.insert_facts(ordered)
+            _logger.debug(
+                "transcript seek boundaries inserted: domain=%s owner=%s count=%s",
+                self._runtime_domain.value,
+                owner_id,
+                len(ordered),
+            )
+
+    def _seek_stream(self, owner_id: str) -> bytes:
+        return stream_digest(
+            self._namespace,
+            self._tenant_id,
+            self._runtime_domain.value,
+            "transcript_seek",
+            owner_id,
+        )
+
+    def _seek_sequence(self, owner_id: str) -> bytes:
+        return sequence_key(
+            self._namespace,
+            self._tenant_id,
+            self._runtime_domain.value,
+            "transcript_seek",
+            owner_id,
+        )
 
     async def _owner_message_count(
         self,
@@ -597,24 +754,26 @@ class TranscriptRepository:
         if owner_record is None:
             return 0
         value = owner_record.data.get("message_count")
-        if value is not None:
-            if isinstance(value, bool) or not isinstance(value, int) or value < 0:
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            return value
-        count = await self._message_count_in_transaction(transaction, owner_id)
-        _logger.info(
-            "legacy transcript owner upgraded: domain=%s owner=%s message_count=%s",
-            self._runtime_domain.value,
-            owner_id,
-            count,
-        )
-        return count
+        if value is None:
+            values = await transaction.list_facts(
+                FactQuery(self._transcript_stream(owner_id), latest=True)
+            )
+            if not values:
+                return 0
+            chunk = self.decode_chunk(values[0])
+            return chunk.first_message_index + chunk.message_count
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        return value
 
     def _new_owner_record(
         self,
         owner_id: str,
         owner: bytes,
         message_count: int,
+        *,
+        history_item_count: int,
+        chunk_count: int,
     ) -> StoredRecord:
         return StoredRecord(
             owner,
@@ -632,6 +791,8 @@ class TranscriptRepository:
                 "type": "history_owner",
                 "owner_id": owner_id,
                 "message_count": message_count,
+                "history_item_count": history_item_count,
+                "chunk_count": chunk_count,
             },
         )
 
@@ -816,18 +977,19 @@ class TranscriptRepository:
             history_id,
             tenant_id=tenant_id,
         )
-        if record is not None:
-            if record.inherited_message_count < 0 or record.local_message_count < 0:
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            return record.inherited_message_count + record.local_message_count
-        resolution = await self._history_segments(
-            history_id,
-            tenant_id=tenant_id,
-            load_legacy=False,
+        if record is None:
+            raise AIError(ErrorCode.SESSION_HISTORY_UNAVAILABLE)
+        if record.inherited_message_count < 0:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        local_messages = await self._history_repository.state_store.read(
+            lambda transaction: (
+                self._history_repository.local_head_in_transaction(
+                    transaction,
+                    history_id,
+                )
+            )
         )
-        return resolution.legacy_message_limit + sum(
-            segment.end - segment.start for segment in resolution.segments
-        )
+        return record.inherited_message_count + local_messages[0]
 
     async def transcript_message_count(self, owner_id: str) -> int:
         async def read(transaction: StateTransaction) -> int:
@@ -850,7 +1012,6 @@ class TranscriptRepository:
             resolution = await self._history_segments(
                 history_id,
                 tenant_id=tenant_id,
-                load_legacy=False,
             )
             self._validate_session_projection_ranges(projection, resolution)
             return await self.load_model_context(
@@ -862,21 +1023,6 @@ class TranscriptRepository:
             tenant_id=tenant_id,
         )
         values: list[LoadedContextMessage] = []
-        if (
-            resolution.legacy_messages is not None
-            and resolution.legacy_source_id is not None
-        ):
-            values.extend(
-                LoadedContextMessage(
-                    message,
-                    TranscriptMessageRef(
-                        RuntimeDomain.CONVERSATION,
-                        resolution.legacy_source_id,
-                        index,
-                    ),
-                )
-                for index, message in enumerate(resolution.legacy_messages)
-            )
         for segment in resolution.segments:
             messages = await self.load_message_span(
                 segment.history_id,
@@ -908,14 +1054,12 @@ class TranscriptRepository:
             history_id,
             tenant_id=tenant_id,
         )
-        if resolution.legacy_messages is not None:
-            for message in resolution.legacy_messages:
-                yield message
         for segment in resolution.segments:
             async for message in self._iter_range(
                 self.history_stream(segment.history_id),
                 start=segment.start,
                 end=segment.end,
+                seek_owner_id=segment.history_id,
             ):
                 yield message
 
@@ -933,17 +1077,9 @@ class TranscriptRepository:
             history_id,
             tenant_id=tenant_id,
         )
-        if end > resolution.legacy_message_limit + sum(
-            segment.end - segment.start for segment in resolution.segments
-        ):
+        if end > sum(segment.end - segment.start for segment in resolution.segments):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         position = 0
-        if resolution.legacy_messages is not None:
-            legacy_end = min(end, resolution.legacy_message_limit)
-            if start < legacy_end:
-                for message in resolution.legacy_messages[start:legacy_end]:
-                    yield message
-            position = resolution.legacy_message_limit
         for segment in resolution.segments:
             segment_length = segment.end - segment.start
             window_start = max(start - position, 0)
@@ -953,6 +1089,7 @@ class TranscriptRepository:
                     self.history_stream(segment.history_id),
                     start=segment.start + window_start,
                     end=segment.start + window_end,
+                    seek_owner_id=segment.history_id,
                 ):
                     yield message
             position += segment_length
@@ -1105,31 +1242,10 @@ class TranscriptRepository:
     ) -> tuple[tuple[ModelMessage, ...], ...]:
         if not windows:
             return ()
-        if (
-            self._runtime_domain is RuntimeDomain.CONVERSATION
-            and self._history_repository is not None
-            and self._legacy_message_loader is not None
-            and await self._history_repository.get(
-                owner_id,
-                tenant_id=self._tenant_id,
-            )
-            is None
-        ):
-            legacy_messages = await self._legacy_message_loader(owner_id)
-            return self._validate_spans(
-                windows,
-                tuple(
-                    tuple(
-                        legacy_messages[
-                            max(start, 0) : min(end, len(legacy_messages))
-                        ]
-                    )
-                    for start, end in windows
-                ),
-            )
         values: list[list[ModelMessage]] = [[] for _ in windows]
         stop_at = max(end for _, end in windows)
-        after_sequence: int | None = None
+        read_from = min(start for start, _ in windows)
+        after_sequence = await self._seek_fact_sequence(owner_id, read_from)
         while True:
             facts = await self._store.read(
                 lambda transaction: transaction.list_facts(
@@ -1166,6 +1282,36 @@ class TranscriptRepository:
             tuple(tuple(value) for value in values),
         )
 
+    async def _seek_fact_sequence(self, owner_id: str, message_index: int) -> "int | None":
+        """Anchor a fact scan at the newest seek block at or before the index."""
+        if message_index < _TRANSCRIPT_SEEK_BLOCK:
+            return None
+        block = (message_index // _TRANSCRIPT_SEEK_BLOCK) * _TRANSCRIPT_SEEK_BLOCK
+        del block
+        facts = await self._store.read(
+            lambda transaction: transaction.list_facts(
+                FactQuery(
+                    self._seek_stream(owner_id),
+                    subject_digest=subject_digest(
+                        TranscriptSeekDimension.MESSAGE.value
+                    ),
+                    limit=64,
+                )
+            )
+        )
+        candidates = [
+            decode_domain(fact.data["payload"], TranscriptSeekRecord)
+            for fact in facts
+            if fact.data.get("payload") is not None
+        ]
+        below = [
+            record for record in candidates if record.block_start <= message_index
+        ]
+        if not below:
+            return None
+        best = max(below, key=lambda record: record.block_start)
+        return best.fact_sequence - 1 if best.fact_sequence > 0 else None
+
     def _validate_spans(
         self,
         windows: Sequence[tuple[int, int]],
@@ -1185,82 +1331,58 @@ class TranscriptRepository:
         history_id: str,
         *,
         tenant_id: str,
-        load_legacy: bool = True,
     ) -> _HistoryResolution:
+        """Resolve one branch's visible transcript into logical segments."""
         if self._history_repository is None:
             raise AIError(ErrorCode.STORAGE_DEPENDENCY_NOT_READY)
-        async def read_lineage(
+
+        async def read(
             transaction: StateTransaction,
-        ) -> tuple[tuple[ConversationHistoryRecord, ...], str | None]:
-            records: list[ConversationHistoryRecord] = []
-            current_id: str | None = history_id
-            visited: set[str] = set()
-            while current_id is not None:
-                if current_id in visited:
-                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                visited.add(current_id)
-                record = await self._history_repository.get_in_transaction(
+        ) -> _HistoryResolution:
+            record = await self._history_repository.get_in_transaction(
+                transaction,
+                history_id,
+                tenant_id=tenant_id,
+            )
+            if record is None:
+                raise AIError(ErrorCode.SESSION_HISTORY_UNAVAILABLE)
+            local_messages, _items = (
+                await self._history_repository.local_head_in_transaction(
                     transaction,
-                    current_id,
-                    tenant_id=tenant_id,
+                    history_id,
                 )
-                if record is None:
-                    return tuple(records), current_id
-                records.append(record)
-                current_id = None if record.parent is None else record.parent.history_id
-            return tuple(records), None
+            )
+            inherited = record.inherited_message_count
+            snapshot = (
+                HistoryIndexSnapshot({}, ())
+                if record.prefix_index_head_id is None
+                else await self._history_repository.index_snapshot_in_transaction(
+                    transaction,
+                    record.prefix_index_head_id,
+                )
+            )
+            resolved = resolve_history_range(
+                snapshot,
+                owner_history_id=history_id,
+                local_message_count=local_messages,
+                inherited_message_count=inherited,
+                range_start=0,
+                range_end=inherited + local_messages,
+            )
+            segments = tuple(
+                _HistorySegment(
+                    item.segment.owner_history_id,
+                    item.local_start,
+                    item.local_end,
+                )
+                for item in resolved
+            )
+            return _HistoryResolution(segments)
 
         try:
-            records, missing_id = await self._history_repository.state_store.read(
-                read_lineage
-            )
+            return await self._history_repository.state_store.read(read)
         except (TypeError, ValueError) as error:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
-        legacy_source_id: str | None = None
-        legacy_message_limit = 0
-        legacy_messages: tuple[ModelMessage, ...] | None = None
-        if missing_id is not None:
-            if not records or self._legacy_message_loader is None:
-                raise AIError(ErrorCode.SESSION_HISTORY_UNAVAILABLE)
-            legacy_source_id = missing_id
-            legacy_message_limit = (
-                records[-1].parent.through_message_count
-                if records[-1].parent is not None
-                else 0
-            )
-            if load_legacy:
-                recovered = await self._legacy_message_loader(missing_id)
-                legacy_messages = recovered[:legacy_message_limit]
-                if len(recovered) < legacy_message_limit:
-                    _logger.warning(
-                        "legacy transcript is partial: owner=%s "
-                        "frozen_count=%s recovered_count=%s",
-                        missing_id,
-                        legacy_message_limit,
-                        len(recovered),
-                    )
-        visible_total = (
-            records[0].inherited_message_count
-            + records[0].local_message_count
-        )
-        segments: list[_HistorySegment] = []
-        for record in records:
-            start = record.inherited_message_count
-            end = min(visible_total, start + record.local_message_count)
-            if end < start:
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            segments.append(_HistorySegment(record.history_id, start, end))
-            if record.parent is not None:
-                if record.parent.through_message_count != record.inherited_message_count:
-                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                visible_total = record.parent.through_message_count
-        segments.reverse()
-        return _HistoryResolution(
-            tuple(segments),
-            legacy_source_id,
-            legacy_message_limit,
-            legacy_messages,
-        )
 
     def _validate_session_projection_ranges(
         self,
@@ -1271,11 +1393,6 @@ class TranscriptRepository:
             segment.history_id: (segment.start, segment.end)
             for segment in resolution.segments
         }
-        if resolution.legacy_source_id is not None:
-            ranges[resolution.legacy_source_id] = (
-                0,
-                resolution.legacy_message_limit,
-            )
         for item in projection.items:
             if not isinstance(item, TranscriptSpanRef):
                 continue
@@ -1295,12 +1412,15 @@ class TranscriptRepository:
         *,
         start: int,
         end: int,
+        seek_owner_id: "str | None" = None,
     ) -> AsyncIterator[ModelMessage]:
         if end <= start:
             return
         expected = end - start
         emitted = 0
-        after_sequence: int | None = None
+        after_sequence: "int | None" = None
+        if seek_owner_id is not None:
+            after_sequence = await self._seek_fact_sequence(seek_owner_id, start)
         while True:
             facts = await self._store.read(
                 lambda transaction: transaction.list_facts(
