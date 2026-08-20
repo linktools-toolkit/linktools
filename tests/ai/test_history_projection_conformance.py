@@ -34,6 +34,7 @@ from linktools.ai.runtime.state import (
     StateStepArchive,
     StateTransactionNestingError,
     StoredRecord,
+    TranscriptMessageRef,
 )
 from linktools.ai.runtime.state._steps import LockOrderError, _RunHistoryLock
 from linktools.ai.runtime.state._store import (
@@ -41,7 +42,13 @@ from linktools.ai.runtime.state._store import (
     record_key_digest,
     sortable_identity,
 )
-from pydantic_ai.messages import ModelRequest, ModelResponse, TextPart, ThinkingPart, UserPromptPart
+from pydantic_ai.messages import (
+    ModelRequest,
+    ModelResponse,
+    TextPart,
+    ThinkingPart,
+    UserPromptPart,
+)
 from pydantic_ai_harness.step_persistence import (
     ContinuableSnapshot,
     RunRecord,
@@ -558,8 +565,35 @@ def _reader(state: RuntimeState) -> StepExecutionHistoryReader:
 
 
 @pytest.mark.asyncio
-async def test_terminal_reader_pages_from_execution_read_model() -> None:
+async def test_in_memory_raw_refs_fail_fast_even_when_snapshots_exist() -> None:
     state = RuntimeState.in_memory()
+    await state.initialize(namespace="history-in-memory-refs", tenant_id="tenant")
+    try:
+        await state.execution.executions.create(_record(ExecutionStatus.STARTED, 1))
+        await _materialize_attempt(state, 1, "in-memory-ref")
+        archive = state.steps.read_store(RuntimeDomain.EXECUTION)
+        run_id = step_run_id(
+            namespace="history",
+            tenant_id="tenant",
+            execution_id="execution",
+            segment_sequence=1,
+        )
+        refs = (
+            TranscriptMessageRef(RuntimeDomain.EXECUTION, run_id, 0),
+            TranscriptMessageRef(RuntimeDomain.EXECUTION, "missing-run", 0),
+            TranscriptMessageRef(RuntimeDomain.EXECUTION, run_id, 999),
+        )
+        for ref in refs:
+            with pytest.raises(AIError) as raised:
+                await archive.resolve_transcript_message_refs((ref,))
+            assert raised.value.code is ErrorCode.STORAGE_DEPENDENCY_NOT_READY
+    finally:
+        await state.close()
+
+
+@pytest.mark.asyncio
+async def test_terminal_reader_pages_from_execution_read_model(tmp_path: Path) -> None:
+    state = RuntimeState.filesystem(tmp_path / "runtime")
     await state.initialize(namespace="history", tenant_id="tenant")
     try:
         await state.execution.executions.create(_record(ExecutionStatus.SUCCEEDED, 1))

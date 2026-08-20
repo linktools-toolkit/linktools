@@ -668,20 +668,7 @@ class InMemoryStepArchive(StagingStepStore):
     ) -> tuple[LoadedContextMessage, ...]:
         if not refs:
             return ()
-        values: list[LoadedContextMessage] = []
-        for ref in refs:
-            if ref.source_domain is not self._runtime_domain:
-                raise AIError(ErrorCode.STORAGE_DEPENDENCY_NOT_READY)
-            snapshot = self.latest_snapshot_local(
-                ref.owner_id,
-                include_interrupted=True,
-            )
-            if snapshot is None or ref.message_index >= len(snapshot.messages):
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            values.append(
-                LoadedContextMessage(snapshot.messages[ref.message_index], ref)
-            )
-        return tuple(values)
+        raise AIError(ErrorCode.STORAGE_DEPENDENCY_NOT_READY)
 
     async def execution_transcript_item_count(self, run_id: str) -> int:
         snapshot = self.latest_snapshot_local(run_id, include_interrupted=True)
@@ -2030,7 +2017,7 @@ class StateStepArchive(StepStore):
             return False
         stored = _decode_step(values[0].data)
         if not isinstance(stored, StoredStepSnapshot):
-            return stored == snapshot
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         projection = await self._history.load_projection(run_id)
         if projection is None or projection.digest != stored.projection_digest:
             return False
@@ -2070,19 +2057,22 @@ class StateStepArchive(StepStore):
         if not values:
             return None
         latest = _decode_step(values[0].data)
-        if isinstance(latest, StoredStepSnapshot):
-            messages = (await self._history.load_model_context(run_id)).model_messages()
-            run = await self.get_run(run_id=run_id)
-            latest = ContinuableSnapshot(
-                run_id=latest.run_id,
-                step_index=latest.step_index,
-                messages=list(messages),
-                conversation_id=None if run is None else run.conversation_id,
-                parent_run_id=None if run is None else run.parent_run_id,
-                agent_name=None if run is None else run.agent_name,
-                timestamp=latest.timestamp,
-                state=latest.state,
-            )
+        if not isinstance(latest, StoredStepSnapshot):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        messages = (await self._history.load_model_context(run_id)).model_messages()
+        run = await self.get_run(run_id=run_id)
+        if run is None:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        latest = ContinuableSnapshot(
+            run_id=latest.run_id,
+            step_index=latest.step_index,
+            messages=list(messages),
+            conversation_id=run.conversation_id,
+            parent_run_id=run.parent_run_id,
+            agent_name=run.agent_name,
+            timestamp=latest.timestamp,
+            state=latest.state,
+        )
         return latest if include_interrupted or latest.state == "complete" else None
 
     async def record_tool_effect(

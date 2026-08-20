@@ -7,7 +7,7 @@ import hashlib
 import math
 import types
 from collections.abc import Callable, Iterator, Mapping
-from dataclasses import MISSING, dataclass, fields, is_dataclass
+from dataclasses import dataclass, fields, is_dataclass
 from datetime import datetime
 from enum import Enum
 from operator import attrgetter
@@ -18,6 +18,7 @@ from typing import (
     Literal,
     TypeVar,
     Union,
+    cast,
     get_args,
     get_origin,
     get_type_hints,
@@ -25,7 +26,6 @@ from typing import (
 
 from pydantic_ai.messages import ModelRequest, ModelResponse
 from pydantic_ai_harness.step_persistence import (
-    ContinuableSnapshot,
     RunRecord,
     StepEvent,
     ToolEffectRecord,
@@ -65,10 +65,6 @@ from ...task import (
     TaskNode,
     TaskNodeView,
     TaskTerminalRecord,
-)
-from .._message_codec import (
-    decode_v1_model_messages,
-    encode_v1_model_messages,
 )
 from .._tool import ToolOperationRecord
 from ._contracts import (
@@ -498,6 +494,17 @@ def _decode_v1_task_node(
     raw_fields: Mapping[str, object],
     codec: "_VersionCodec",
 ) -> TaskNode:
+    _require_exact_keys(
+        raw_fields,
+        frozenset(
+            {
+                "node_id",
+                "dependencies",
+                "input",
+                "budget_cost",
+            }
+        ),
+    )
     return TaskNode(
         str(_decode_domain(raw_fields["node_id"], str, codec)),
         tuple(
@@ -648,10 +655,6 @@ def _schema_type_descriptor(
                 _schema_type_descriptor(value, codec) for value in arguments
             ]
         }
-    if origin is set:
-        if len(arguments) != 1:
-            raise TypeError(f"schema set annotation is incomplete: {annotation!r}")
-        return {"set": _schema_type_descriptor(arguments[0], codec)}
     if origin is frozenset:
         if len(arguments) != 1:
             raise TypeError(
@@ -704,6 +707,27 @@ class CanonicalEnvelope:
     value: Mapping[str, JsonValue]
 
 
+def _require_exact_keys(
+    value: Mapping[str, object],
+    expected: frozenset[str],
+) -> None:
+    if set(value.keys()) != expected:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+
+
+def _unwrap_tagged_list(
+    value: object,
+    tag: str,
+) -> list[object]:
+    if not isinstance(value, Mapping):
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    _require_exact_keys(value, frozenset({tag}))
+    items = value[tag]
+    if not isinstance(items, list):
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    return items
+
+
 def encode_envelope(
     value: Mapping[str, JsonValue],
     *,
@@ -719,6 +743,7 @@ def encode_envelope(
 def parse_envelope(value: Mapping[str, JsonValue]) -> CanonicalEnvelope:
     if not isinstance(value, Mapping):
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR, "canonical data must be an object")
+    _require_exact_keys(value, frozenset({"v", "value"}))
     version = value.get("v")
     payload = value.get("value")
     if isinstance(version, bool) or not isinstance(version, int) or version < 1:
@@ -879,8 +904,6 @@ def canonical_digest(value: Mapping[str, JsonValue]) -> str:
 def wire_type_id(value: DomainT | type[DomainT]) -> str:
     """Return the explicit stable protocol id for one persisted type."""
     target = value if isinstance(value, type) else type(value)
-    if target is ContinuableSnapshot:
-        return "continuable_snapshot"
     if isinstance(target, type) and issubclass(target, Enum):
         try:
             return _CURRENT_CODEC.enum_wire_ids[target]
@@ -897,8 +920,6 @@ def _codec_wire_type_id(
     codec: _VersionCodec,
 ) -> str:
     target = value if isinstance(value, type) else type(value)
-    if target is ContinuableSnapshot:
-        return "continuable_snapshot"
     if isinstance(target, type) and issubclass(target, Enum):
         try:
             return codec.enum_wire_ids[target]
@@ -1031,6 +1052,7 @@ def _decode_enveloped_domain(
 ) -> DomainT:
     """Decode persisted domain data without losing its envelope version."""
     envelope = decode_envelope(value)
+    _require_exact_keys(envelope.value, frozenset({"type", "payload"}))
     codec = _VERSION_CODECS.get(envelope.version)
     if codec is None:
         raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
@@ -1060,6 +1082,7 @@ def _iter_enveloped_runtime_object_refs(
 ) -> Iterator[tuple[RuntimeDomain, ObjectRef]]:
     """Traverse object references using the envelope's own version codec."""
     envelope = decode_envelope(value)
+    _require_exact_keys(envelope.value, frozenset({"type", "payload"}))
     codec = _VERSION_CODECS.get(envelope.version)
     if codec is None:
         raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
@@ -1119,13 +1142,7 @@ def _iter_runtime_object_refs(
                         yield from _iter_runtime_object_refs(item, domain, codec)
                 return
         if {"kind", "digest", "size"}.issubset(value):
-            try:
-                decoded = StoredPayload.from_json(value)
-            except (TypeError, ValueError):
-                decoded = None
-            if decoded is not None:
-                yield from _iter_runtime_object_refs(decoded, domain, codec)
-                return
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         for item in value.values():
             yield from _iter_runtime_object_refs(item, domain, codec)
         return
@@ -1186,51 +1203,38 @@ def _decode_domain(
                 continue
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     if value is None:
-        return None
+        if target is type(None):
+            return None
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     if origin in (list,):
         item_type = arguments[0] if arguments else Any
         if not isinstance(value, list):
             raise TypeError("list value is invalid")
         return [_decode_domain(item, item_type, codec) for item in value]
-    if origin in (tuple,):
+    if origin is tuple:
+        items = _unwrap_tagged_list(value, "$tuple")
         if arguments and arguments[-1] is Ellipsis:
             return tuple(
                 _decode_domain(item, arguments[0], codec)
-                for item in _unwrap_sequence(value)
+                for item in items
             )
+        if len(items) != len(arguments):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         return tuple(
             _decode_domain(item, item_type, codec)
-            for item, item_type in zip(_unwrap_sequence(value), arguments)
+            for item, item_type in zip(items, arguments, strict=True)
         )
-    if origin in (set, frozenset):
+    if target is set or origin is set:
+        raise AIError(
+            ErrorCode.STORAGE_VERSION_UNSUPPORTED,
+            "GA v1 does not support set values",
+        )
+    if target is frozenset or origin is frozenset:
         item_type = arguments[0] if arguments else Any
-        result = {
-            _decode_domain(item, item_type, codec)
-            for item in _unwrap_sequence(value)
-        }
-        return frozenset(result) if origin is frozenset else result
+        return _decode_frozenset_items(value, item_type, codec)
     if isinstance(origin, type) and issubclass(origin, Mapping):
         key_type, item_type = arguments if len(arguments) == 2 else (Any, Any)
-        pairs = value.get("$mapping") if isinstance(value, Mapping) else None
-        if pairs is None:
-            if not isinstance(value, Mapping):
-                raise TypeError("mapping value is invalid")
-            return {
-                _decode_domain(key, key_type, codec): _decode_domain(
-                    item,
-                    item_type,
-                    codec,
-                )
-                for key, item in value.items()
-            }
-        return {
-            _decode_domain(pair[0], key_type, codec): _decode_domain(
-                pair[1],
-                item_type,
-                codec,
-            )
-            for pair in pairs
-        }
+        return _decode_mapping_items(value, key_type, item_type, codec)
     if target is type(None):
         if value is not None:
             raise TypeError("none value is not null")
@@ -1238,14 +1242,30 @@ def _decode_domain(
     if isinstance(target, type) and issubclass(target, Enum):
         return _decode_enum(value, target, codec)
     if target is datetime:
-        raw = value.get("$datetime") if isinstance(value, Mapping) else value
-        result = datetime.fromisoformat(str(raw))
+        if not isinstance(value, Mapping):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        _require_exact_keys(value, frozenset({"$datetime"}))
+        raw = value["$datetime"]
+        if not isinstance(raw, str):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        try:
+            result = datetime.fromisoformat(raw)
+        except (TypeError, ValueError) as error:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
         if result.tzinfo is None:
-            raise ValueError("domain timestamp must be timezone-aware")
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         return result
     if target is bytes:
-        raw = value.get("$bytes") if isinstance(value, Mapping) else value
-        return base64.b64decode(str(raw), validate=True)
+        if not isinstance(value, Mapping):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        _require_exact_keys(value, frozenset({"$bytes"}))
+        raw = value["$bytes"]
+        if not isinstance(raw, str):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        try:
+            return base64.b64decode(raw, validate=True)
+        except (TypeError, ValueError) as error:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
     if isinstance(target, type) and is_dataclass(target):
         return _decode_dataclass(value, target, codec)
     if target is float:
@@ -1276,15 +1296,13 @@ def _decode_enum(
     expected_wire_id = codec.enum_wire_ids.get(target)
     if expected_wire_id is None:
         raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
-    wire_id: str | None = None
-    raw = value.value if isinstance(value, Enum) else value
-    if isinstance(value, Mapping) and "$enum" in value:
-        wire_id = value.get("$enum")
-        if not isinstance(wire_id, str):
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        if wire_id != expected_wire_id:
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        raw = value.get("value")
+    if not isinstance(value, Mapping):
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    _require_exact_keys(value, frozenset({"$enum", "value"}))
+    wire_id = value["$enum"]
+    if not isinstance(wire_id, str) or wire_id != expected_wire_id:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    raw = value["value"]
     allowed = codec.enum_values.get(expected_wire_id)
     if allowed is None:
         raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
@@ -1307,6 +1325,7 @@ def _decode_dataclass(
 ) -> object:
     if not isinstance(value, Mapping):
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    _require_exact_keys(value, frozenset({"$dataclass", "fields"}))
     wire_id = value.get("$dataclass")
     if not isinstance(wire_id, str):
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -1331,55 +1350,70 @@ def _decode_dataclass(
     if actual_fingerprint != expected_fingerprint:
         raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
     hints = get_type_hints(target)
-    kwargs = {}
-    for field in fields(target):
-        if not field.init:
-            continue
-        if field.name not in raw_fields:
-            if field.default is not MISSING:
-                kwargs[field.name] = field.default
-                continue
-            if field.default_factory is not MISSING:
-                kwargs[field.name] = field.default_factory()
-                continue
-            raise KeyError(field.name)
-        kwargs[field.name] = _decode_domain(
+    declared_fields = tuple(fields(target))
+    if set(raw_fields.keys()) != {field.name for field in declared_fields}:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    decoded_fields: dict[str, object] = {}
+    for field in declared_fields:
+        decoded_fields[field.name] = _decode_domain(
             raw_fields[field.name],
             hints.get(field.name, Any),
             codec,
         )
-    return target(**kwargs)
+    kwargs: dict[str, object] = {}
+    post_init_fields: dict[str, object] = {}
+    for field in declared_fields:
+        if field.init:
+            kwargs[field.name] = decoded_fields[field.name]
+        else:
+            post_init_fields[field.name] = decoded_fields[field.name]
+    try:
+        result = target(**kwargs)
+    except (TypeError, ValueError) as error:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
+    for field_name, expected in post_init_fields.items():
+        try:
+            actual = attrgetter(field_name)(result)
+        except AttributeError as error:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
+        if actual != expected:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    return result
 
 
 def _decode_any(value: object, codec: _VersionCodec) -> object:
     if isinstance(value, Mapping):
-        if "$datetime" in value:
+        matched = set(value.keys()).intersection(_RESERVED_V1_TAGS)
+        if len(matched) > 1:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        if len(matched) == 0:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        tag = next(iter(matched))
+        if tag == "$datetime":
             return _decode_domain(value, datetime, codec)
-        if "$bytes" in value:
+        if tag == "$bytes":
             return _decode_domain(value, bytes, codec)
-        if "$enum" in value:
-            name = value.get("$enum")
-            target = _enum_type(str(name), codec)
-            return _decode_enum(value, target, codec)
-        if "$dataclass" in value:
-            target = codec.domain_types.get(str(value.get("$dataclass")))
+        if tag == "$enum":
+            name = value["$enum"]
+            if not isinstance(name, str):
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            return _decode_enum(value, _enum_type(name, codec), codec)
+        if tag == "$dataclass":
+            name = value["$dataclass"]
+            if not isinstance(name, str):
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            target = codec.domain_types.get(name)
             if target is None:
                 raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
             return _decode_dataclass(value, target, codec)
-        if "$mapping" in value:
-            return {
-                _decode_any(pair[0], codec): _decode_any(pair[1], codec)
-                for pair in value["$mapping"]
-            }
-        if "$tuple" in value:
-            return tuple(_decode_any(item, codec) for item in value["$tuple"])
-        if "$frozenset" in value:
-            return frozenset(
-                _decode_any(item, codec) for item in value["$frozenset"]
+        if tag == "$mapping":
+            return _decode_mapping_items(value, Any, Any, codec)
+        if tag == "$tuple":
+            return tuple(
+                _decode_any(item, codec)
+                for item in _unwrap_tagged_list(value, "$tuple")
             )
-        return {
-            str(key): _decode_any(item, codec) for key, item in value.items()
-        }
+        return _decode_frozenset_items(value, Any, codec)
     if isinstance(value, list):
         return [_decode_any(item, codec) for item in value]
     if isinstance(value, float):
@@ -1394,12 +1428,75 @@ def _enum_type(wire_id: str, codec: _VersionCodec) -> type[Enum]:
         raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED) from error
 
 
-def _unwrap_sequence(value: object) -> list[object]:
-    if isinstance(value, Mapping) and "$tuple" in value:
-        value = value["$tuple"]
-    if not isinstance(value, list):
-        raise TypeError("sequence value is invalid")
-    return value
+_RESERVED_V1_TAGS = frozenset(
+    {
+        "$datetime",
+        "$bytes",
+        "$enum",
+        "$dataclass",
+        "$mapping",
+        "$tuple",
+        "$frozenset",
+    }
+)
+
+
+def _canonical_wire_bytes(value: object) -> bytes:
+    try:
+        return canonical_json_bytes(cast(JsonValue, value))
+    except (TypeError, ValueError) as error:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
+
+
+def _decode_frozenset_items(
+    value: object,
+    item_type: object,
+    codec: _VersionCodec,
+) -> frozenset[object]:
+    items = _unwrap_tagged_list(value, "$frozenset")
+    decoded_items: list[object] = []
+    previous_wire: bytes | None = None
+    for item in items:
+        decoded_item = _decode_domain(item, item_type, codec)
+        item_wire = _canonical_wire_bytes(item)
+        if previous_wire is not None and previous_wire >= item_wire:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        previous_wire = item_wire
+        decoded_items.append(decoded_item)
+    try:
+        result = frozenset(decoded_items)
+    except TypeError as error:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
+    if len(result) != len(decoded_items):
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    return result
+
+
+def _decode_mapping_items(
+    value: object,
+    key_type: object,
+    item_type: object,
+    codec: _VersionCodec,
+) -> dict[object, object]:
+    pairs = _unwrap_tagged_list(value, "$mapping")
+    result: dict[object, object] = {}
+    previous_wire: bytes | None = None
+    for pair in pairs:
+        if not isinstance(pair, list) or len(pair) != 2:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        key_wire = _canonical_wire_bytes(pair[0])
+        if previous_wire is not None and previous_wire >= key_wire:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        previous_wire = key_wire
+        decoded_key = _decode_domain(pair[0], key_type, codec)
+        try:
+            hash(decoded_key)
+        except TypeError as error:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
+        if decoded_key in result:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        result[decoded_key] = _decode_domain(pair[1], item_type, codec)
+    return result
 
 
 def _string(value: Mapping[str, object], key: str) -> str:
@@ -1454,22 +1551,6 @@ def _optional_datetime(value: object) -> datetime | None:
 
 
 def _encode_step_envelope(value: object) -> dict[str, JsonValue]:
-    if isinstance(value, ContinuableSnapshot):
-        return encode_envelope(
-            {
-                "type": "continuable_snapshot",
-                "run_id": value.run_id,
-                "step_index": value.step_index,
-                "messages": base64.b64encode(
-                    encode_v1_model_messages(value.messages)
-                ).decode("ascii"),
-                "conversation_id": value.conversation_id,
-                "parent_run_id": value.parent_run_id,
-                "agent_name": value.agent_name,
-                "timestamp": value.timestamp.isoformat(),
-                "state": value.state,
-            }
-        )
     return encode_envelope(
         {
             "type": wire_type_id(value),
@@ -1480,34 +1561,11 @@ def _encode_step_envelope(value: object) -> dict[str, JsonValue]:
 
 def _decode_step_envelope(value: Mapping[str, JsonValue]) -> object:
     envelope = decode_envelope(value)
+    _require_exact_keys(envelope.value, frozenset({"type", "payload"}))
     codec = _VERSION_CODECS.get(envelope.version)
     if codec is None:
         raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
     kind = envelope.value.get("type")
-    if kind == "continuable_snapshot":
-        try:
-            encoded_messages = envelope.value["messages"]
-            if not isinstance(encoded_messages, str):
-                raise ValueError("step messages are invalid")
-            messages = decode_v1_model_messages(
-                base64.b64decode(encoded_messages, validate=True)
-            )
-            timestamp = envelope.value["timestamp"]
-            state = envelope.value["state"]
-            if not isinstance(timestamp, str) or not isinstance(state, str):
-                raise ValueError("step metadata is invalid")
-            return ContinuableSnapshot(
-                run_id=str(envelope.value["run_id"]),
-                step_index=int(envelope.value["step_index"]),
-                messages=messages,
-                conversation_id=envelope.value.get("conversation_id"),
-                parent_run_id=envelope.value.get("parent_run_id"),
-                agent_name=envelope.value.get("agent_name"),
-                timestamp=datetime.fromisoformat(timestamp),
-                state=state,
-            )
-        except (TypeError, ValueError, KeyError) as error:
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
     if not isinstance(kind, str):
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     targets = {
@@ -1522,7 +1580,7 @@ def _decode_step_envelope(value: Mapping[str, JsonValue]) -> object:
     expected = _codec_wire_type_id(target, codec)
     if kind != expected:
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-    payload = envelope.value.get("payload")
+    payload = envelope.value["payload"]
     if payload is None:
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     return _decode_domain(payload, target, codec)
@@ -1561,6 +1619,12 @@ def _validate_v1_codec_definition() -> None:
         raise RuntimeError("GA v1 dataclass decoder manifest contains an unknown type")
     if enum_value_ids != set(enum_wire_ids):
         raise RuntimeError("GA v1 enum value manifest is incomplete")
+    try:
+        _schema_type_descriptor(set[str], _V1_CODEC)
+    except TypeError:
+        pass
+    else:
+        raise RuntimeError("GA v1 schema descriptor unexpectedly supports set")
 
 
 _validate_v1_codec_definition()
