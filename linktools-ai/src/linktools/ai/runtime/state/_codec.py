@@ -5,20 +5,40 @@
 import base64
 import types
 from collections.abc import Iterator, Mapping
-from dataclasses import MISSING, fields, is_dataclass
+from dataclasses import MISSING, dataclass, fields, is_dataclass
 from datetime import datetime
 from enum import Enum
 from operator import attrgetter
 from typing import Any, Literal, TypeVar, Union, get_args, get_origin, get_type_hints
 
-from pydantic_ai_harness.step_persistence import RunRecord, StepEvent, ToolEffectRecord
+from pydantic_ai_harness.step_persistence import (
+    ContinuableSnapshot,
+    RunRecord,
+    StepEvent,
+    ToolEffectRecord,
+)
 
 from ...core import (
+    ApprovalDecision,
+    ApprovalStatus,
+    EvaluationStatus,
+    ExecutionEventType,
+    ExecutionLineageKind,
+    ExecutionStatus,
+    ExternalCallStatus,
+    IdempotencyStatus,
     JsonValue,
+    OperationKind,
     OperationLedgerInput,
     OperationLedgerRecord,
+    OperationStatus,
     Principal,
+    ResourceKind,
     ResourceRef,
+    SessionStatus,
+    StopReason,
+    TaskStatus,
+    ToolOperationStatus,
     UsageMetrics,
     canonical_json_bytes,
 )
@@ -50,6 +70,14 @@ from ._contracts import (
     ExecutionHistoryState,
     ExecutionRecord,
     ExecutionRunSealHead,
+    ExecutionStartClaim,
+    ExecutionStartUnknownCommit,
+    ExecutionCancelRequestCommit,
+    ExecutionStartReservation,
+    ExecutionStartReservationResult,
+    ExecutionTerminalCommit,
+    ExecutionTerminalCommitResult,
+    ExecutionEventAppend,
     ExternalCallRecord,
     HistoryQuality,
     IdempotencyRecord,
@@ -60,17 +88,29 @@ from ._contracts import (
     RecoveryActiveRecord,
     RecoveryAdmissionRecord,
     RecoveryCheckpoint,
+    RecoveryCheckpointState,
+    RecoveryHandoffPhase,
+    RecoveryConversationIntent,
+    RecoveryExecutionInput,
+    RecoveryIdempotencyInput,
+    RecoveryIntegrityReport,
     RecoveryStateRecord,
+    RecoveryTerminalHandoff,
+    RecoveryTerminalOutcome,
     ResultRecord,
     RuntimePayloadRef,
     SessionRecord,
+    SessionForkResultRecord,
+    StoredStepSnapshot,
     TranscriptChunk,
     TranscriptHeadRecord,
     TranscriptMessageRef,
     TranscriptOrigin,
+    TranscriptOwnerDomain,
     TranscriptSeekDimension,
     TranscriptSeekRecord,
     TranscriptSpanRef,
+    ToolOperationAdmission,
 )
 from ._plan import RuntimeDomain
 from ._store import (
@@ -84,86 +124,154 @@ from ._store import (
 CURRENT_DATA_VERSION = 2
 DomainT = TypeVar("DomainT")
 
-_DOMAIN_TYPES = {
-    value.__name__: value
-    for value in (
-        ApprovalRecord,
-        AgentAttemptClaim,
-        ArtifactRecord,
-        ConversationCursor,
-        ConversationHistoryIndexNodeRecord,
-        ConversationHistoryRecord,
-        ConversationHistorySegmentRef,
-        ContextProjection,
-        EvaluationRecord,
-        ExecutionEventRecord,
-        ExecutionHistoryHeadRecord,
-        ExecutionHistorySealRecord,
-        ExecutionHistoryState,
-        ExecutionRecord,
-        ExecutionRunSealHead,
-        ExternalCallRecord,
-        IdempotencyRecord,
-        MemoryRecord,
-        OperationLedgerInput,
-        OperationLedgerRecord,
-        Principal,
-        RecoveryCheckpoint,
-        RecoveryAdmissionRecord,
-        RecoveryActiveRecord,
-        RecoveryStateRecord,
-        ResourceRef,
-        ResultRecord,
-        SessionRecord,
-        ObjectRef,
-        StoredPayload,
-        InlineContextBlock,
-        HistoryQuality,
-        LoadedContextMessage,
-        LoadedModelContext,
-        RuntimePayloadRef,
-        TranscriptChunk,
-        TranscriptHeadRecord,
-        TranscriptMessageRef,
-        TranscriptOrigin,
-        TranscriptSeekDimension,
-        TranscriptSeekRecord,
-        TranscriptSpanRef,
-        RuntimeDomain,
-        TaskGraph,
-        TaskGraphLimits,
-        TaskGraphView,
-        TaskLease,
-        TaskNode,
-        TaskNodeView,
-        TaskTerminalRecord,
-        ToolOperationRecord,
-        UsageMetrics,
-        RunRecord,
-        StepEvent,
-        ToolEffectRecord,
-    )
-}
+_WIRE_TYPES: tuple[tuple[str, type[object]], ...] = (
+    ("approval_record", ApprovalRecord),
+    ("agent_attempt_claim", AgentAttemptClaim),
+    ("artifact_record", ArtifactRecord),
+    ("conversation_cursor", ConversationCursor),
+    ("conversation_history_index_node", ConversationHistoryIndexNodeRecord),
+    ("conversation_history", ConversationHistoryRecord),
+    ("conversation_history_segment", ConversationHistorySegmentRef),
+    ("context_projection", ContextProjection),
+    ("evaluation_record", EvaluationRecord),
+    ("execution_event", ExecutionEventRecord),
+    ("execution_history_head", ExecutionHistoryHeadRecord),
+    ("execution_history_seal", ExecutionHistorySealRecord),
+    ("execution_history_state", ExecutionHistoryState),
+    ("execution_record", ExecutionRecord),
+    ("execution_run_seal_head", ExecutionRunSealHead),
+    ("execution_start_claim", ExecutionStartClaim),
+    ("execution_start_unknown_commit", ExecutionStartUnknownCommit),
+    ("execution_cancel_request_commit", ExecutionCancelRequestCommit),
+    ("execution_start_reservation", ExecutionStartReservation),
+    ("execution_start_reservation_result", ExecutionStartReservationResult),
+    ("execution_terminal_commit", ExecutionTerminalCommit),
+    ("execution_terminal_commit_result", ExecutionTerminalCommitResult),
+    ("execution_event_append", ExecutionEventAppend),
+    ("external_call_record", ExternalCallRecord),
+    ("idempotency_record", IdempotencyRecord),
+    ("memory_record", MemoryRecord),
+    ("operation_ledger_input", OperationLedgerInput),
+    ("operation_ledger_record", OperationLedgerRecord),
+    ("principal", Principal),
+    ("recovery_checkpoint", RecoveryCheckpoint),
+    ("recovery_admission", RecoveryAdmissionRecord),
+    ("recovery_active", RecoveryActiveRecord),
+    ("recovery_conversation_intent", RecoveryConversationIntent),
+    ("recovery_execution_input", RecoveryExecutionInput),
+    ("recovery_idempotency_input", RecoveryIdempotencyInput),
+    ("recovery_integrity_report", RecoveryIntegrityReport),
+    ("recovery_state", RecoveryStateRecord),
+    ("recovery_terminal_handoff", RecoveryTerminalHandoff),
+    ("recovery_terminal_outcome", RecoveryTerminalOutcome),
+    ("resource_ref", ResourceRef),
+    ("result_record", ResultRecord),
+    ("session_record", SessionRecord),
+    ("session_fork_result", SessionForkResultRecord),
+    ("stored_step_snapshot", StoredStepSnapshot),
+    ("object_ref", ObjectRef),
+    ("stored_payload", StoredPayload),
+    ("history_quality", HistoryQuality),
+    ("inline_context_block", InlineContextBlock),
+    ("loaded_context_message", LoadedContextMessage),
+    ("loaded_model_context", LoadedModelContext),
+    ("runtime_payload_ref", RuntimePayloadRef),
+    ("transcript_chunk", TranscriptChunk),
+    ("transcript_head", TranscriptHeadRecord),
+    ("transcript_message_ref", TranscriptMessageRef),
+    ("transcript_origin", TranscriptOrigin),
+    ("transcript_owner_domain", TranscriptOwnerDomain),
+    ("transcript_seek_dimension", TranscriptSeekDimension),
+    ("transcript_seek", TranscriptSeekRecord),
+    ("transcript_span_ref", TranscriptSpanRef),
+    ("tool_operation_admission", ToolOperationAdmission),
+    ("runtime_domain", RuntimeDomain),
+    ("task_graph", TaskGraph),
+    ("task_graph_limits", TaskGraphLimits),
+    ("task_graph_view", TaskGraphView),
+    ("task_lease", TaskLease),
+    ("task_node", TaskNode),
+    ("task_node_view", TaskNodeView),
+    ("task_terminal", TaskTerminalRecord),
+    ("tool_operation", ToolOperationRecord),
+    ("usage_metrics", UsageMetrics),
+    ("run_record", RunRecord),
+    ("step_event", StepEvent),
+    ("tool_effect", ToolEffectRecord),
+)
+_WIRE_IDS = {target: wire_id for wire_id, target in _WIRE_TYPES}
+_DOMAIN_TYPES = {wire_id: target for wire_id, target in _WIRE_TYPES}
+
+_ENUM_WIRE_TYPES: tuple[tuple[str, type[Enum]], ...] = (
+    ("approval_decision", ApprovalDecision),
+    ("approval_status", ApprovalStatus),
+    ("evaluation_status", EvaluationStatus),
+    ("execution_event_type", ExecutionEventType),
+    ("execution_history_state", ExecutionHistoryState),
+    ("execution_lineage_kind", ExecutionLineageKind),
+    ("execution_status", ExecutionStatus),
+    ("external_call_status", ExternalCallStatus),
+    ("history_quality", HistoryQuality),
+    ("idempotency_status", IdempotencyStatus),
+    ("operation_kind", OperationKind),
+    ("operation_status", OperationStatus),
+    ("resource_kind", ResourceKind),
+    ("runtime_domain", RuntimeDomain),
+    ("recovery_checkpoint_state", RecoveryCheckpointState),
+    ("recovery_handoff_phase", RecoveryHandoffPhase),
+    ("session_status", SessionStatus),
+    ("stop_reason", StopReason),
+    ("task_status", TaskStatus),
+    ("tool_operation_status", ToolOperationStatus),
+    ("transcript_origin", TranscriptOrigin),
+    ("transcript_owner_domain", TranscriptOwnerDomain),
+    ("transcript_seek_dimension", TranscriptSeekDimension),
+)
+_ENUM_WIRE_IDS = {target: wire_id for wire_id, target in _ENUM_WIRE_TYPES}
+_ENUM_TYPES = {wire_id: target for wire_id, target in _ENUM_WIRE_TYPES}
 
 
-def encode_envelope(value: Mapping[str, JsonValue], *, version: int = CURRENT_DATA_VERSION) -> dict[str, JsonValue]:
-    if not isinstance(version, int) or version < 1:
-        raise ValueError("data version must be positive")
+@dataclass(frozen=True, slots=True)
+class CanonicalEnvelope:
+    version: int
+    value: Mapping[str, JsonValue]
+
+
+def encode_envelope(
+    value: Mapping[str, JsonValue],
+    *,
+    version: int = CURRENT_DATA_VERSION,
+) -> dict[str, JsonValue]:
+    if version != CURRENT_DATA_VERSION:
+        raise ValueError("only the frozen current data version may be written")
+    if not isinstance(value, Mapping):
+        raise TypeError("canonical data value must be a mapping")
     return {"v": version, "value": dict(value)}
 
 
-def decode_envelope(value: Mapping[str, JsonValue]) -> dict[str, JsonValue]:
+def parse_envelope(value: Mapping[str, JsonValue]) -> CanonicalEnvelope:
     if not isinstance(value, Mapping):
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR, "canonical data must be an object")
     version = value.get("v")
     payload = value.get("value")
     if not isinstance(version, int) or version < 1:
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR, "canonical data version is invalid")
-    if version != CURRENT_DATA_VERSION:
-        raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
     if not isinstance(payload, Mapping):
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR, "canonical data value is invalid")
-    return dict(payload)
+    return CanonicalEnvelope(version, dict(payload))
+
+
+_VERSION_DECODERS: dict[int, object] = {
+    CURRENT_DATA_VERSION: lambda envelope: dict(envelope.value),
+}
+
+
+def decode_envelope(value: Mapping[str, JsonValue]) -> dict[str, JsonValue]:
+    envelope = parse_envelope(value)
+    decoder = _VERSION_DECODERS.get(envelope.version)
+    if decoder is None:
+        raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
+    return decoder(envelope)  # type: ignore[no-any-return]
 
 
 def encode_record(record: StoredRecord) -> dict[str, JsonValue]:
@@ -305,13 +413,29 @@ def canonical_digest(value: Mapping[str, JsonValue]) -> str:
     return hashlib.sha256(canonical_json_bytes(dict(value))).hexdigest()
 
 
+def wire_type_id(value: DomainT | type[DomainT]) -> str:
+    """Return the explicit stable protocol id for one persisted type."""
+    target = value if isinstance(value, type) else type(value)
+    if target is ContinuableSnapshot:
+        return "continuable_snapshot"
+    if isinstance(target, type) and issubclass(target, Enum):
+        try:
+            return _ENUM_WIRE_IDS[target]
+        except KeyError as error:
+            raise TypeError(f"unsupported enum type: {target.__name__}") from error
+    try:
+        return _WIRE_IDS[target]
+    except KeyError as error:
+        raise TypeError(f"unsupported domain type: {target.__name__}") from error
+
+
 def encode_domain(value: DomainT) -> JsonValue:
     """Encode one domain value into the shared canonical JSON representation."""
     if value is None or isinstance(value, (str, bool, int, float)):
         return value
     if isinstance(value, TaskNode):
         return {
-            "$dataclass": "TaskNode",
+            "$dataclass": _WIRE_IDS[TaskNode],
             "fields": {
                 "node_id": encode_domain(value.node_id),
                 "dependencies": encode_domain(value.dependencies),
@@ -320,7 +444,10 @@ def encode_domain(value: DomainT) -> JsonValue:
             },
         }
     if isinstance(value, Enum):
-        return {"$enum": value.__class__.__name__, "value": value.value}
+        wire_id = _ENUM_WIRE_IDS.get(type(value))
+        if wire_id is None:
+            raise TypeError(f"unsupported enum type: {type(value).__name__}")
+        return {"$enum": wire_id, "value": value.value}
     if isinstance(value, datetime):
         if value.tzinfo is None:
             raise ValueError("domain timestamp must be timezone-aware")
@@ -330,8 +457,11 @@ def encode_domain(value: DomainT) -> JsonValue:
     if is_dataclass(value):
         if any(field.name.startswith("_") for field in fields(value)):
             raise TypeError("private dataclass fields require an explicit codec")
+        wire_id = _WIRE_IDS.get(type(value))
+        if wire_id is None:
+            raise TypeError(f"unsupported dataclass type: {type(value).__name__}")
         return {
-            "$dataclass": value.__class__.__name__,
+            "$dataclass": wire_id,
             "fields": {
                 field.name: encode_domain(attrgetter(field.name)(value))
                 for field in fields(value)
@@ -381,19 +511,19 @@ def _iter_runtime_object_refs(
         return
     if isinstance(value, Mapping):
         dataclass_name = value.get("$dataclass")
-        if dataclass_name == "RuntimePayloadRef":
+        if dataclass_name == _WIRE_IDS[RuntimePayloadRef]:
             decoded = decode_domain(value, RuntimePayloadRef)
             yield from _iter_runtime_object_refs(decoded, domain)
             return
-        if dataclass_name == "StoredPayload":
+        if dataclass_name == _WIRE_IDS[StoredPayload]:
             decoded = decode_domain(value, StoredPayload)
             yield from _iter_runtime_object_refs(decoded, domain)
             return
-        if dataclass_name == "ObjectRef":
+        if dataclass_name == _WIRE_IDS[ObjectRef]:
             decoded = decode_domain(value, ObjectRef)
             yield domain, decoded
             return
-        if dataclass_name == "RecoveryTerminalOutcome":
+        if dataclass_name == "recovery_terminal_outcome":
             fields_value = value.get("fields")
             if isinstance(fields_value, Mapping):
                 output = fields_value.get("output")
@@ -429,7 +559,7 @@ def _iter_runtime_object_refs(
 def _decode_runtime_domain(value: object, default: RuntimeDomain) -> RuntimeDomain:
     if value is None:
         return default
-    if isinstance(value, Mapping) and value.get("$enum") == "RuntimeDomain":
+    if isinstance(value, Mapping) and value.get("$enum") == _ENUM_WIRE_IDS[RuntimeDomain]:
         enum_value = value.get("value")
         if isinstance(enum_value, str):
             try:
@@ -522,7 +652,7 @@ def _decode_domain(value: object, target: object) -> object:
 
 
 def _decode_dataclass(value: object, target: type) -> object:
-    if not isinstance(value, Mapping) or value.get("$dataclass") != target.__name__:
+    if not isinstance(value, Mapping) or value.get("$dataclass") != _WIRE_IDS.get(target):
         raise TypeError("dataclass envelope is invalid")
     raw_fields = value.get("fields")
     if not isinstance(raw_fields, Mapping):
@@ -581,50 +711,11 @@ def _decode_any(value: object) -> object:
     return value
 
 
-def _enum_type(name: str) -> type[Enum]:
-    for target in _DOMAIN_TYPES.values():
-        if isinstance(target, type) and issubclass(target, Enum) and target.__name__ == name:
-            return target
-    from ...core import (
-        ApprovalDecision,
-        ApprovalStatus,
-        EvaluationStatus,
-        ExecutionEventType,
-        ExecutionLineageKind,
-        ExecutionStatus,
-        ExternalCallStatus,
-        IdempotencyStatus,
-        OperationKind,
-        OperationStatus,
-        ResourceKind,
-        SessionStatus,
-        StopReason,
-        TaskStatus,
-        ToolOperationStatus,
-    )
-
-    values = (
-        ApprovalDecision,
-        ApprovalStatus,
-        EvaluationStatus,
-        ExecutionEventType,
-        ExecutionLineageKind,
-        ExecutionStatus,
-        ExternalCallStatus,
-        HistoryQuality,
-        IdempotencyStatus,
-        OperationKind,
-        OperationStatus,
-        ResourceKind,
-        SessionStatus,
-        StopReason,
-        TaskStatus,
-        ToolOperationStatus,
-    )
-    for target in values:
-        if target.__name__ == name:
-            return target
-    raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
+def _enum_type(wire_id: str) -> type[Enum]:
+    try:
+        return _ENUM_TYPES[wire_id]
+    except KeyError as error:
+        raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED) from error
 
 
 def _unwrap_sequence(value: object) -> list[object]:
@@ -687,6 +778,7 @@ def _optional_datetime(value: object) -> datetime | None:
 
 
 __all__ = [
+    "CanonicalEnvelope",
     "CURRENT_DATA_VERSION",
     "canonical_digest",
     "decode_domain",
@@ -702,4 +794,6 @@ __all__ = [
     "encode_operation",
     "encode_record",
     "iter_runtime_object_refs",
+    "parse_envelope",
+    "wire_type_id",
 ]

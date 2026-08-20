@@ -10,18 +10,7 @@ from datetime import datetime, timezone
 from typing import Protocol, runtime_checkable
 
 from linktools.core import environ
-from pydantic_ai.messages import (
-    ModelRequest,
-    ModelResponse,
-    RetryPromptPart,
-    SystemPromptPart,
-    TextContent,
-    TextPart,
-    ThinkingPart,
-    ToolCallPart,
-    ToolReturnPart,
-    UserPromptPart,
-)
+from pydantic_ai.messages import ModelRequest, ModelResponse
 from pydantic_ai_harness.step_persistence import (
     ContinuableSnapshot,
     RunRecord,
@@ -52,9 +41,12 @@ from ..runtime.state import (
     ExecutionReadModelRepository,
     ExecutionRecord,
     ExecutionRepository,
-    SESSION_HISTORY_VIEW_VERSION,
-    count_history_items,
-    project_history_message,
+    LoadedContextMessage,
+    RuntimeDomain,
+    SESSION_HISTORY_VIEW_V1,
+    TranscriptMessageRef,
+    project_execution_transcript_message,
+    project_session_history_message,
 )
 
 _logger = environ.get_logger("ai.adapter.history")
@@ -77,6 +69,22 @@ class _SessionHistoryStore(Protocol):
         tenant_id: str,
     ) -> int: ...
 
+    async def session_history_item_count(
+        self,
+        history_id: str,
+        *,
+        tenant_id: str,
+    ) -> int: ...
+
+    def iter_session_history_item_range(
+        self,
+        history_id: str,
+        *,
+        tenant_id: str,
+        start: int,
+        end: int,
+    ) -> AsyncIterator[object]: ...
+
     def iter_session_message_range(
         self,
         history_id: str,
@@ -91,6 +99,27 @@ class _SessionHistoryStore(Protocol):
         history_id: str,
         *,
         tenant_id: str,
+    ) -> AsyncIterator[object]: ...
+
+
+@runtime_checkable
+class _CanonicalTranscriptStore(Protocol):
+    async def resolve_transcript_message_refs(
+        self,
+        refs: tuple[TranscriptMessageRef, ...],
+    ) -> tuple[LoadedContextMessage, ...]: ...
+
+
+@runtime_checkable
+class _ExecutionTranscriptStore(Protocol):
+    async def execution_transcript_item_count(self, run_id: str) -> int: ...
+
+    def iter_execution_transcript_item_range(
+        self,
+        run_id: str,
+        *,
+        start: int,
+        end: int,
     ) -> AsyncIterator[object]: ...
 
 
@@ -314,6 +343,29 @@ class StepExecutionHistoryReader:
             return Page((), None)
         await self._history_tree(record, tenant_id)
         final_run_id = step_run_id(namespace=self._namespace, tenant_id=tenant_id, execution_id=execution_id, segment_sequence=record.agent_run_sequence)
+        if isinstance(self._store, _ExecutionTranscriptStore):
+            total = await self._store.execution_transcript_item_count(final_run_id)
+            if total == 0:
+                if record.status is ExecutionStatus.SUCCEEDED:
+                    raise AIError(ErrorCode.EXECUTION_HISTORY_UNAVAILABLE)
+                return Page((), None)
+            start = _cursor_offset(cursor, total)
+            end = min(total, start + limit)
+            values: list[TranscriptItem] = []
+            async for text in self._store.iter_execution_transcript_item_range(
+                final_run_id,
+                start=start,
+                end=end,
+            ):
+                if not isinstance(text, str):
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                values.append(TranscriptItem(execution_id, start + len(values) + 1, text))
+            if len(values) != end - start:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            return Page(
+                tuple(values),
+                str(end) if end < total else None,
+            )
         messages = await _canonical_transcript(self._store, final_run_id)
         if not messages:
             if record.status is ExecutionStatus.SUCCEEDED:
@@ -610,24 +662,11 @@ class StepSessionHistoryReader:
             snapshot_history_item_count = (
                 cursor_values[2]
                 if cursor_values is not None
-                else 0
-                if snapshot_message_count == 0
-                else None
-            )
-            if snapshot_history_item_count is None:
-                async for _message in history_store.iter_session_message_range(
+                else await history_store.session_history_item_count(
                     history_id,
                     tenant_id=tenant_id,
-                    start=0,
-                    end=0,
-                ):
-                    break
-                snapshot_history_item_count = await _session_history_item_count(
-                    history_store,
-                    history_id,
-                    tenant_id=tenant_id,
-                    snapshot_message_count=snapshot_message_count,
                 )
+            )
         else:
             history_id = continuation_step_run_id
             run = await self._store.get_run(run_id=continuation_step_run_id)
@@ -656,7 +695,10 @@ class StepSessionHistoryReader:
             snapshot_history_item_count = (
                 cursor_values[2]
                 if cursor_values is not None
-                else count_history_items(snapshot.messages)
+                else sum(
+                    len(project_session_history_message(message))
+                    for message in snapshot.messages
+                )
             )
         if cursor_values is None:
             next_history_item_offset = 0
@@ -669,45 +711,47 @@ class StepSessionHistoryReader:
         item_offset = next_history_item_offset
         remaining_items = snapshot_history_item_count - item_offset
         if remaining_items > 0:
-            message_start = await _message_index_for_item_offset(
-                history_store,
-                history_id,
-                snapshot_message_count,
-                item_offset,
-                tenant_id=tenant_id,
-                fallback_messages=None
-                if history_store is not None
-                else snapshot.messages,
-            )
-            async for message in (
-                history_store.iter_session_message_range(
+            page_end = min(snapshot_history_item_count, item_offset + limit)
+            if history_store is not None:
+                async for projected in history_store.iter_session_history_item_range(
                     history_id,
                     tenant_id=tenant_id,
-                    start=message_start,
-                    end=snapshot_message_count,
-                )
-                if history_store is not None
-                else _iter_message_values(
-                    snapshot.messages,
-                    start=message_start,
-                    end=snapshot_message_count,
-                )
-            ):
-                projected = project_history_message(message)
-                for item in projected:
-                    if len(selected) == limit:
-                        break
+                    start=item_offset,
+                    end=page_end,
+                ):
+                    if not isinstance(projected, SessionHistoryItem):
+                        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                     selected.append(
                         SessionHistoryItem(
                             item_offset + len(selected) + 1,
-                            item.item_kind,
-                            item.content,
-                            item.tool_name,
-                            item.tool_call_id,
+                            projected.item_kind,
+                            projected.content,
+                            projected.tool_name,
+                            projected.tool_call_id,
                         )
                     )
-                if len(selected) == limit:
-                    break
+            else:
+                item_cursor = 0
+                for message in snapshot.messages:
+                    projected_items = project_session_history_message(message)
+                    for item in projected_items:
+                        if item_cursor < item_offset:
+                            item_cursor += 1
+                            continue
+                        if len(selected) == limit:
+                            break
+                        selected.append(
+                            SessionHistoryItem(
+                                item_offset + len(selected) + 1,
+                                item.item_kind,
+                                item.content,
+                                item.tool_name,
+                                item.tool_call_id,
+                            )
+                        )
+                        item_cursor += 1
+                    if len(selected) == limit:
+                        break
         next_cursor = (
             _session_history_cursor(
                 tenant_id,
@@ -755,37 +799,15 @@ def _trace_item(record: ExecutionRecord, segment_sequence: int, depth: int, ordi
     return ExecutionTraceItem(record.execution_id, ordinal, payload)
 
 
-def _validate_snapshot(
-    snapshot: ContinuableSnapshot,
-    run_id: str,
-    tenant_id: str,
-    execution_id: str,
-    namespace: str,
-) -> None:
-    if (
-        snapshot.run_id != run_id
-        or snapshot.conversation_id
-        != step_conversation_id(
-            namespace=namespace,
-            tenant_id=tenant_id,
-            execution_id=execution_id,
-        )
-    ):
-        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-
-
 def _merge_history_refs(
     accumulated: list[tuple[ExecutionHistoryItem, dict[str, JsonValue]]],
     snapshot: list[tuple[ExecutionHistoryItem, dict[str, JsonValue]]],
 ) -> list[tuple[ExecutionHistoryItem, dict[str, JsonValue]]]:
-    maximum = min(len(accumulated), len(snapshot))
-    for overlap in range(maximum, 0, -1):
-        if (
-            [item for item, _ref in accumulated[-overlap:]]
-            == [item for item, _ref in snapshot[:overlap]]
-        ):
-            return [*accumulated, *snapshot[overlap:]]
-    return [*accumulated, *snapshot]
+    overlap = _suffix_prefix_overlap(
+        [item for item, _ref in accumulated],
+        [item for item, _ref in snapshot],
+    )
+    return [*accumulated, *snapshot[overlap:]]
 
 
 async def _resolve_history_refs(
@@ -796,8 +818,10 @@ async def _resolve_history_refs(
     store: StepStore,
     sequence_start: int,
 ) -> tuple[ExecutionHistoryItem, ...]:
-    snapshots: dict[str, ContinuableSnapshot] = {}
-    values: list[ExecutionHistoryItem] = []
+    if not isinstance(store, _CanonicalTranscriptStore):
+        raise AIError(ErrorCode.STORAGE_DEPENDENCY_NOT_READY)
+    raw_refs: list[TranscriptMessageRef] = []
+    metadata: list[tuple[str, int, str, str | None, str | None]] = []
     for ref in refs:
         source_domain = _ref_string(ref, "source_domain")
         run_id = _ref_string(ref, "owner_id")
@@ -818,23 +842,35 @@ async def _resolve_history_refs(
             or projected_offset < 0
         ):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        snapshot = snapshots.get(run_id)
-        if snapshot is None:
-            snapshot = await store.latest_snapshot(run_id=run_id)
-            if snapshot is None:
-                raise AIError(ErrorCode.EXECUTION_HISTORY_UNAVAILABLE)
-            _validate_snapshot(snapshot, run_id, tenant_id, execution_id, namespace)
-            snapshots[run_id] = snapshot
-        if message_index >= len(snapshot.messages):
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        projected = _project_message(snapshot.messages[message_index])
+        raw_refs.append(
+            TranscriptMessageRef(RuntimeDomain.EXECUTION, run_id, message_index)
+        )
+        metadata.append(
+            (
+                execution_id,
+                projected_offset,
+                _ref_string(ref, "item_kind"),
+                _ref_optional_string(ref, "tool_name"),
+                _ref_optional_string(ref, "tool_call_id"),
+            )
+        )
+    loaded = await store.resolve_transcript_message_refs(tuple(raw_refs))
+    if len(loaded) != len(metadata):
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    values: list[ExecutionHistoryItem] = []
+    for loaded_message, (execution_id, projected_offset, item_kind, tool_name, tool_call_id) in zip(
+        loaded,
+        metadata,
+        strict=True,
+    ):
+        projected = _project_message(loaded_message.message)
         if projected_offset >= len(projected):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         item = projected[projected_offset]
         if (
-            item.item_kind != _ref_string(ref, "item_kind")
-            or item.tool_name != _ref_optional_string(ref, "tool_name")
-            or item.tool_call_id != _ref_optional_string(ref, "tool_call_id")
+            item.item_kind != item_kind
+            or item.tool_name != tool_name
+            or item.tool_call_id != tool_call_id
         ):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         values.append(
@@ -869,13 +905,10 @@ async def _resolve_transcript_refs(
     store: StepStore,
     sequence_start: int,
 ) -> tuple[TranscriptItem, ...]:
-    snapshots: dict[str, ContinuableSnapshot] = {}
-    values: list[str] = []
-    conversation_id = step_conversation_id(
-        namespace=namespace,
-        tenant_id=tenant_id,
-        execution_id=execution_id,
-    )
+    if not isinstance(store, _CanonicalTranscriptStore):
+        raise AIError(ErrorCode.STORAGE_DEPENDENCY_NOT_READY)
+    raw_refs: list[TranscriptMessageRef] = []
+    projected_offsets: list[int] = []
     for ref in refs:
         source_domain = _ref_string(ref, "source_domain")
         run_id = _ref_string(ref, "owner_id")
@@ -892,19 +925,16 @@ async def _resolve_transcript_refs(
         projected_offset = _ref_int(ref, "projected_item_offset")
         if message_index < 0 or projected_offset < 0:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        snapshot = snapshots.get(run_id)
-        if snapshot is None:
-            snapshot = await store.latest_snapshot(run_id=run_id)
-            if snapshot is None:
-                raise AIError(ErrorCode.EXECUTION_HISTORY_UNAVAILABLE)
-            _validate_snapshot(snapshot, run_id, tenant_id, execution_id, namespace)
-            snapshots[run_id] = snapshot
-        if message_index >= len(snapshot.messages):
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        projected = _transcript_message_values(
-            snapshot.messages[message_index],
-            conversation_id,
+        raw_refs.append(
+            TranscriptMessageRef(RuntimeDomain.EXECUTION, run_id, message_index)
         )
+        projected_offsets.append(projected_offset)
+    loaded = await store.resolve_transcript_message_refs(tuple(raw_refs))
+    if len(loaded) != len(projected_offsets):
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    values: list[str] = []
+    for loaded_message, projected_offset in zip(loaded, projected_offsets, strict=True):
+        projected = project_execution_transcript_message(loaded_message.message)
         if projected_offset >= len(projected):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         values.append(projected[projected_offset])
@@ -933,28 +963,6 @@ def _ref_int(ref: Mapping[str, JsonValue], name: str) -> int:
     if isinstance(value, bool) or not isinstance(value, int):
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     return value
-
-
-def _transcript_message_values(message: object, conversation_id: str) -> tuple[str, ...]:
-    if isinstance(message, (ModelRequest, ModelResponse)):
-        if message.conversation_id is None:
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        if message.conversation_id != conversation_id:
-            return ()
-    if isinstance(message, ModelRequest):
-        return tuple(
-            value
-            for part in message.parts
-            if isinstance(part, UserPromptPart)
-            for value in _user_text(part)
-        )
-    if isinstance(message, ModelResponse):
-        return tuple(
-            part.content
-            for part in message.parts
-            if isinstance(part, TextPart) and part.content
-        )
-    return ()
 
 
 def _validate_run(run: RunRecord, expected_id: str, conversation_id: str, sequence: int) -> None:
@@ -1033,8 +1041,9 @@ def _decode_session_history_cursor(
         or payload.filter_digest != canonical_sha256({"session_id": session_id})
         or payload.history_id is None
         or payload.snapshot_message_count is None
+        or payload.snapshot_history_item_count is None
         or payload.next_history_item_offset is None
-        or payload.history_view_version != SESSION_HISTORY_VIEW_VERSION
+        or payload.history_view_version != SESSION_HISTORY_VIEW_V1
     ):
         raise AIError(ErrorCode.CURSOR_INVALID)
     if (
@@ -1072,163 +1081,65 @@ def _session_history_cursor(
             snapshot_message_count=snapshot_message_count,
             snapshot_history_item_count=snapshot_history_item_count,
             next_history_item_offset=next_history_item_offset,
-            history_view_version=SESSION_HISTORY_VIEW_VERSION,
+            history_view_version=SESSION_HISTORY_VIEW_V1,
         )
     )
 
 
-async def _session_history_item_count(
-    store: _SessionHistoryStore,
-    history_id: str,
-    *,
-    tenant_id: str,
-    snapshot_message_count: int,
+def _merge_history_occurrences(
+    accumulated: list[ExecutionHistoryItem],
+    snapshot: list[ExecutionHistoryItem],
+) -> list[ExecutionHistoryItem]:
+    overlap = _suffix_prefix_overlap(accumulated, snapshot)
+    return [*accumulated, *snapshot[overlap:]]
+
+
+def _suffix_prefix_overlap(
+    stored: list[object],
+    incoming: list[object],
 ) -> int:
-    """Count projected items for a committed history snapshot in one pass."""
-    count = 0
-    async for message in store.iter_session_message_range(
-        history_id,
-        tenant_id=tenant_id,
-        start=0,
-        end=snapshot_message_count,
-    ):
-        count += count_history_items((message,))
-    return count
-
-
-async def _message_index_for_item_offset(
-    store: "_SessionHistoryStore | None",
-    history_id: str,
-    snapshot_message_count: int,
-    item_offset: int,
-    *,
-    tenant_id: str,
-    fallback_messages: "Sequence[object] | None",
-) -> int:
-    """Locate the message index holding one history-item offset."""
-    if fallback_messages is not None:
-        seen = 0
-        for index, message in enumerate(fallback_messages):
-            items = count_history_items((message,))
-            if seen + items > item_offset:
-                return index
-            seen += items
-        return snapshot_message_count
-    seen = 0
-    async for message in store.iter_session_message_range(
-        history_id,
-        tenant_id=tenant_id,
-        start=0,
-        end=snapshot_message_count,
-    ):
-        items = count_history_items((message,))
-        if seen + items > item_offset:
-            return _message_index_seen(store, seen, item_offset)
-        seen += 1
-    return snapshot_message_count
-
-
-def _message_index_seen(
-    store: object,
-    seen: int,
-    item_offset: int,
-) -> int:
-    del store, item_offset
-    return seen
-
-
-async def _iter_message_values(
-    values: tuple[object, ...],
-    *,
-    start: int,
-    end: int,
-) -> AsyncIterator[object]:
-    for value in values[start:end]:
-        yield value
-
-
-def _merge_history_occurrences(accumulated: list[ExecutionHistoryItem], snapshot: list[ExecutionHistoryItem]) -> list[ExecutionHistoryItem]:
-    maximum = min(len(accumulated), len(snapshot))
-    for overlap in range(maximum, 0, -1):
-        if accumulated[-overlap:] == snapshot[:overlap]:
-            return [*accumulated, *snapshot[overlap:]]
-    return [*accumulated, *snapshot]
+    if not stored or not incoming:
+        return 0
+    prefix = [0] * len(incoming)
+    matched = 0
+    for index in range(1, len(incoming)):
+        while matched and incoming[index] != incoming[matched]:
+            matched = prefix[matched - 1]
+        if incoming[index] == incoming[matched]:
+            matched += 1
+        prefix[index] = matched
+    matched = 0
+    for index, value in enumerate(stored):
+        while matched and value != incoming[matched]:
+            matched = prefix[matched - 1]
+        if value == incoming[matched]:
+            matched += 1
+        if matched == len(incoming):
+            if index == len(stored) - 1:
+                return matched
+            matched = prefix[matched - 1]
+    return matched
 
 
 def _project_message(message: object) -> tuple[_ProjectedHistoryItem, ...]:
-    if isinstance(message, ModelRequest):
-        values: list[_ProjectedHistoryItem] = []
-        for part in message.parts:
-            if isinstance(part, SystemPromptPart):
-                values.append(_ProjectedHistoryItem("system", _json_content(part.content)))
-            elif isinstance(part, UserPromptPart):
-                content = _user_content(part)
-                if content is not None:
-                    values.append(_ProjectedHistoryItem("user", content))
-            elif isinstance(part, ToolReturnPart):
-                values.append(
-                    _ProjectedHistoryItem(
-                        "tool_result",
-                        _json_content(part.content),
-                        part.tool_name,
-                        part.tool_call_id,
-                    )
-                )
-            elif isinstance(part, RetryPromptPart):
-                values.append(_ProjectedHistoryItem("retry", str(part.content)))
-        return tuple(values)
-    if isinstance(message, ModelResponse):
-        values = []
-        for part in message.parts:
-            if isinstance(part, TextPart):
-                values.append(_ProjectedHistoryItem("assistant", part.content))
-            elif isinstance(part, ThinkingPart):
-                values.append(_ProjectedHistoryItem("thinking", part.content))
-            elif isinstance(part, ToolCallPart):
-                values.append(
-                    _ProjectedHistoryItem(
-                        "tool_call",
-                        part.args_as_dict(),
-                        part.tool_name,
-                        part.tool_call_id,
-                    )
-                )
-        return tuple(values)
-    return ()
+    if not isinstance(message, (ModelRequest, ModelResponse)):
+        return ()
+    return tuple(
+        _ProjectedHistoryItem(
+            item.item_kind,
+            item.content,
+            item.tool_name,
+            item.tool_call_id,
+        )
+        for item in project_session_history_message(message)
+    )
 
 
-def _user_content(part: UserPromptPart) -> "str | list[str] | None":
-    if isinstance(part.content, str):
-        return part.content
-    values: list[str] = []
-    for item in part.content:
-        if isinstance(item, str):
-            values.append(item)
-        elif isinstance(item, TextContent):
-            values.append(item.content)
-    return values if values else None
-
-
-def _json_content(value: object) -> JsonValue:
-    if value is None or isinstance(value, (str, int, float, bool)):
-        return value
-    if isinstance(value, list):
-        return [_json_content(item) for item in value]
-    if isinstance(value, dict):
-        return {str(key): _json_content(item) for key, item in value.items()}
-    return str(value)
-
-
-def _user_text(part: UserPromptPart) -> list[str]:
-    if isinstance(part.content, str):
-        return [part.content] if part.content else []
-    values: list[str] = []
-    for item in part.content:
-        if isinstance(item, str) and item:
-            values.append(item)
-        elif isinstance(item, TextContent) and item.content:
-            values.append(item.content)
-    return values
+def _transcript_message_values(message: object, conversation_id: str) -> tuple[str, ...]:
+    del conversation_id
+    if not isinstance(message, (ModelRequest, ModelResponse)):
+        return ()
+    return project_execution_transcript_message(message)
 
 
 __all__ = ["StepExecutionHistoryReader", "StepSessionHistoryReader"]

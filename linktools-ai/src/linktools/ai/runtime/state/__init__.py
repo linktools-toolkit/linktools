@@ -3,6 +3,7 @@
 """Runtime state contracts and lifecycle owner."""
 
 from ._codec import (
+    CanonicalEnvelope,
     CURRENT_DATA_VERSION,
     decode_alias,
     decode_envelope,
@@ -15,11 +16,19 @@ from ._codec import (
     encode_operation,
     encode_record,
     iter_runtime_object_refs,
+    parse_envelope,
+    wire_type_id,
 )
 from ._commands import (
     ConversationStateCommands,
     ExecutionStateCommands,
     RuntimeStateCommands,
+)
+from ._durability import (
+    CommitObservation,
+    DurableCommitResult,
+    DurableCommitState,
+    run_durable_commit,
 )
 from ._contracts import (
     AgentAttemptClaim,
@@ -27,7 +36,6 @@ from ._contracts import (
     ArtifactState,
     ContextProjection,
     ConversationHistoryIndexNodeRecord,
-    ConversationHistoryParent,
     ConversationHistoryRecord,
     ConversationHistoryRepository,
     ConversationHistorySegmentRef,
@@ -57,6 +65,7 @@ from ._contracts import (
     RecoveryStateRecord,
     RuntimePayloadRef,
     SessionRecord,
+    SessionForkResultRecord,
     SessionRepository,
     StoredStepSnapshot,
     TaskState,
@@ -65,17 +74,21 @@ from ._contracts import (
     TranscriptHeadRecord,
     TranscriptMessageRef,
     TranscriptOrigin,
+    TranscriptOwnerDomain,
     TranscriptSeekDimension,
     TranscriptSeekRecord,
     TranscriptSpanRef,
 )
 from ._filesystem import FilesystemStateStorageGroup, FilesystemStateStore
-from ._history import (
-    SESSION_HISTORY_VIEW_VERSION,
-    TranscriptAccumulatorAdvance,
-    TranscriptRepository,
+from ._history import TranscriptRepository
+from ._views import (
+    EXECUTION_TRANSCRIPT_VIEW_V1,
+    SESSION_HISTORY_VIEW_V1,
+    count_execution_transcript_items,
+    count_session_history_items,
+    project_execution_transcript_message,
+    project_session_history_message,
 )
-from ._history_view import count_history_items, project_history_message
 from ._maintenance import (
     OfflineRuntimeStorageMaintenance,
     RuntimeStorageInspection,
@@ -143,12 +156,15 @@ from ._store import (
 
 __all__ = [
     "CURRENT_DATA_VERSION",
+    "CanonicalEnvelope",
+    "CommitObservation",
+    "DurableCommitResult",
+    "DurableCommitState",
     "AgentAttemptClaim",
     "ApprovalRepository",
     "ArtifactState",
     "ContextProjection",
     "ConversationState",
-    "ConversationHistoryParent",
     "ConversationHistoryRecord",
     "ConversationHistoryRepository",
     "ConversationHistoryRepositoryImpl",
@@ -211,6 +227,7 @@ __all__ = [
     "OfflineRuntimeStorageMaintenance",
     "RuntimePayloadRef",
     "SessionRecord",
+    "SessionForkResultRecord",
     "SessionRepository",
     "SessionRepositoryImpl",
     "StoredStepSnapshot",
@@ -230,15 +247,18 @@ __all__ = [
     "TaskState",
     "ToolOperationAdmission",
     "TranscriptChunk",
-    "TranscriptAccumulatorAdvance",
     "TranscriptHeadRecord",
     "TranscriptSeekDimension",
     "TranscriptSeekRecord",
-    "SESSION_HISTORY_VIEW_VERSION",
-    "count_history_items",
-    "project_history_message",
+    "EXECUTION_TRANSCRIPT_VIEW_V1",
+    "SESSION_HISTORY_VIEW_V1",
+    "count_execution_transcript_items",
+    "count_session_history_items",
+    "project_execution_transcript_message",
+    "project_session_history_message",
     "TranscriptMessageRef",
     "TranscriptOrigin",
+    "TranscriptOwnerDomain",
     "TranscriptRepository",
     "TranscriptSpanRef",
     "alias_digest",
@@ -254,6 +274,7 @@ __all__ = [
     "encode_operation",
     "encode_record",
     "iter_runtime_object_refs",
+    "parse_envelope",
     "operation_key",
     "parent_digest",
     "partition_digest",
@@ -264,4 +285,6 @@ __all__ = [
     "sortable_timestamp",
     "stream_digest",
     "subject_digest",
+    "run_durable_commit",
+    "wire_type_id",
 ]

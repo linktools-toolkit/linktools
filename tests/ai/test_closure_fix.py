@@ -111,7 +111,6 @@ class _OperationRepository:
             owner=request.owner,
             fence=1,
             lease_expires_at=now,
-            result_object_ref=None,
             error_code=None,
             created_at=now,
             updated_at=now,

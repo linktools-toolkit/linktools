@@ -40,6 +40,34 @@ _active_state_scope: ContextVar[_ActiveStateScope | None] = ContextVar(
     default=None,
 )
 
+_run_history_lock_stack: ContextVar[tuple[str, ...]] = ContextVar(
+    "linktools_ai_run_history_lock_stack",
+    default=(),
+)
+
+
+def enter_run_history_lock(run_id: str) -> Token[tuple[str, ...]]:
+    """Mark a local run-history lock as held for runtime I/O guards."""
+    if not run_id:
+        raise ValueError("run_id is required")
+    stack = _run_history_lock_stack.get()
+    if stack and stack[-1] != run_id:
+        raise StateLockOrderError("one task cannot hold multiple run history locks")
+    return _run_history_lock_stack.set(stack + (run_id,))
+
+
+def exit_run_history_lock(token: Token[tuple[str, ...]]) -> None:
+    """Restore the run-history lock marker after leaving a local lock."""
+    _run_history_lock_stack.reset(token)
+
+
+def require_no_run_history_lock(operation: str) -> None:
+    """Fail before durable I/O is attempted while a run lock is held."""
+    if _run_history_lock_stack.get():
+        raise StateLockOrderError(
+            f"{operation} cannot run while a RunHistoryLock is held"
+        )
+
 
 def active_state_transaction(
     store: "StateStore",
@@ -789,7 +817,9 @@ __all__ = [
     "StoredRecord",
     "alias_digest",
     "decode_sort_key",
+    "enter_run_history_lock",
     "encode_sort_key",
+    "exit_run_history_lock",
     "operation_key",
     "parent_digest",
     "partition_digest",
@@ -801,6 +831,7 @@ __all__ = [
     "sortable_timestamp",
     "stream_digest",
     "subject_digest",
+    "require_no_run_history_lock",
     "validate_operation_replacement",
     "validate_record_identity",
     "validate_record_replacement",

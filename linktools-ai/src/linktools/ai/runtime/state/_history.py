@@ -15,10 +15,10 @@ from pydantic_ai.messages import ModelMessage
 from ...core import canonical_json_bytes
 from ...errors import AIError, ErrorCode
 from ...storage import ObjectRef, ObjectStore, StoredPayload, runtime_object_key
-from ._codec import decode_domain, encode_domain
+from ._codec import decode_domain, decode_envelope, encode_domain, encode_envelope
 from ._history_index import (
-    HistoryIndexSnapshot,
-    resolve_history_range,
+    resolve_history_item_range_lazy,
+    resolve_history_range_lazy,
 )
 from ._contracts import (
     ContextProjection,
@@ -30,8 +30,10 @@ from ._contracts import (
     LoadedModelContext,
     RuntimePayloadRef,
     TranscriptChunk,
+    TranscriptHeadRecord,
     TranscriptMessageRef,
     TranscriptOrigin,
+    TranscriptOwnerDomain,
     TranscriptSeekDimension,
     TranscriptSeekRecord,
     TranscriptSpanRef,
@@ -39,6 +41,7 @@ from ._contracts import (
 from ._plan import RuntimeDomain
 from ._store import (
     FactQuery,
+    RecordQuery,
     StateStore,
     StateTransaction,
     StoredFact,
@@ -47,8 +50,17 @@ from ._store import (
     record_key_digest,
     sequence_key,
     stream_digest,
-    subject_digest,
+    require_no_run_history_lock,
 )
+from ._views import (
+    EXECUTION_TRANSCRIPT_VIEW_V1,
+    SESSION_HISTORY_VIEW_V1,
+    count_execution_transcript_items,
+    count_session_history_items,
+    project_execution_transcript_message,
+    project_session_history_message,
+)
+from ..service_api import SessionHistoryItem
 
 _logger = environ.get_logger("ai.runtime.state.history")
 _CHUNK_TARGET = 256 * 1024
@@ -57,7 +69,6 @@ _COMPRESS_RATIO = 0.9
 _TRANSCRIPT_PAGE_SIZE = 64
 _TRANSCRIPT_CHUNK_MAX_MESSAGES = 64
 _TRANSCRIPT_SEEK_BLOCK = 128
-SESSION_HISTORY_VIEW_VERSION = 1
 
 
 def _overlap_signature(message: ModelMessage) -> bytes:
@@ -87,24 +98,40 @@ def _exact_message_signature(message: ModelMessage) -> bytes:
     )
 
 
+def suffix_prefix_overlap(
+    stored: Sequence[bytes],
+    incoming: Sequence[bytes],
+) -> int:
+    """Return the longest suffix/prefix overlap using one linear pass."""
+    if not stored or not incoming:
+        return 0
+    prefix = [0] * len(incoming)
+    matched = 0
+    for index in range(1, len(incoming)):
+        while matched and incoming[index] != incoming[matched]:
+            matched = prefix[matched - 1]
+        if incoming[index] == incoming[matched]:
+            matched += 1
+        prefix[index] = matched
+    matched = 0
+    for index, value in enumerate(stored):
+        while matched and value != incoming[matched]:
+            matched = prefix[matched - 1]
+        if value == incoming[matched]:
+            matched += 1
+        if matched == len(incoming):
+            if index == len(stored) - 1:
+                return matched
+            matched = prefix[matched - 1]
+    return matched
+
+
 @dataclass(frozen=True, slots=True)
 class TranscriptCapture:
     first_message_index: int
     messages: tuple[ModelMessage, ...]
     origins: tuple[TranscriptOrigin, ...]
     quality: HistoryQuality
-
-
-@dataclass(frozen=True, slots=True)
-class TranscriptAccumulatorAdvance:
-    run_id: str
-    base_generation: int
-    target_generation: int
-    base_message_count: int
-    target_message_count: int
-    delta_messages: tuple[ModelMessage, ...]
-    delta_signatures: tuple[bytes, ...]
-    target_quality: HistoryQuality
 
 
 @dataclass(frozen=True, slots=True)
@@ -117,203 +144,6 @@ class _HistorySegment:
 @dataclass(frozen=True, slots=True)
 class _HistoryResolution:
     segments: tuple[_HistorySegment, ...]
-
-
-@dataclass(frozen=True, slots=True)
-class _TranscriptAccumulatorState:
-    """Complete accumulator state; the only legal clone carrier."""
-
-    run_id: str
-    messages: tuple[ModelMessage, ...]
-    signatures: tuple[bytes, ...]
-    quality: HistoryQuality
-    generation: int
-    seeded: bool
-
-
-class _TranscriptAccumulator:
-    """Capture only messages proven to belong to one Pydantic AI run."""
-
-    def __init__(
-        self,
-        run_id: str,
-    ) -> None:
-        self._run_id = run_id
-        self._messages: list[ModelMessage] = []
-        self._signatures: list[bytes] = []
-        self._quality = HistoryQuality.COMPLETE
-        self._generation = 0
-        self._seeded = False
-
-    @property
-    def messages(self) -> tuple[ModelMessage, ...]:
-        return tuple(self._messages)
-
-    @property
-    def quality(self) -> HistoryQuality:
-        return self._quality
-
-    @property
-    def generation(self) -> int:
-        return self._generation
-
-    def snapshot_state(self) -> _TranscriptAccumulatorState:
-        return _TranscriptAccumulatorState(
-            self._run_id,
-            tuple(self._messages),
-            tuple(self._signatures),
-            self._quality,
-            self._generation,
-            self._seeded,
-        )
-
-    @classmethod
-    def from_state(
-        cls,
-        state: _TranscriptAccumulatorState,
-    ) -> "_TranscriptAccumulator":
-        accumulator = cls(state.run_id)
-        accumulator._messages = list(state.messages)
-        accumulator._signatures = list(state.signatures)
-        accumulator._quality = state.quality
-        accumulator._generation = state.generation
-        accumulator._seeded = state.seeded
-        return accumulator
-
-    def seed(self, messages: Sequence[ModelMessage]) -> None:
-        if self._seeded:
-            raise RuntimeError("transcript accumulator is already seeded")
-        self._messages.extend(messages)
-        self._signatures.extend(self.signature(message) for message in messages)
-        self._seeded = True
-
-    def signature(self, message: ModelMessage) -> bytes:
-        return _overlap_signature(message)
-
-    def plan(
-        self,
-        messages: Sequence[ModelMessage],
-    ) -> TranscriptAccumulatorAdvance:
-        incoming = tuple(messages)
-        incoming_signatures = tuple(self.signature(message) for message in incoming)
-        known = tuple(
-            message
-            for message in incoming
-            if message.run_id == self._run_id
-        )
-        known_signatures = tuple(
-            signature
-            for message, signature in zip(
-                incoming,
-                incoming_signatures,
-                strict=True,
-            )
-            if message.run_id == self._run_id
-        )
-        stored_known = tuple(
-            message
-            for message, _signature in zip(
-                self._messages,
-                self._signatures,
-                strict=True,
-            )
-            if self._seeded or message.run_id == self._run_id
-        )
-        stored_known_signatures = tuple(
-            signature
-            for message, signature in zip(
-                self._messages,
-                self._signatures,
-                strict=True,
-            )
-            if self._seeded or message.run_id == self._run_id
-        )
-        quality = self._quality
-        if len(known) < len(stored_known):
-            quality = HistoryQuality.CONSERVATIVE
-        overlap = self._overlap(known_signatures, stored_known_signatures)
-        if known and stored_known and overlap == 0:
-            quality = HistoryQuality.CONSERVATIVE
-        delta = list(known[overlap:])
-        delta_signatures = list(known_signatures[overlap:])
-        known_signatures_set = set(self._signatures)
-        known_signatures_set.update(delta_signatures)
-        for message, signature in zip(incoming, incoming_signatures, strict=True):
-            if message.run_id is not None:
-                continue
-            if signature in known_signatures_set:
-                continue
-            delta.append(message)
-            delta_signatures.append(signature)
-            known_signatures_set.add(signature)
-            quality = HistoryQuality.CONSERVATIVE
-        base_count = len(self._messages)
-        return TranscriptAccumulatorAdvance(
-            self._run_id,
-            self._generation,
-            self._generation + 1,
-            base_count,
-            base_count + len(delta),
-            tuple(delta),
-            tuple(delta_signatures),
-            quality,
-        )
-
-    def apply(self, advance: TranscriptAccumulatorAdvance) -> None:
-        if advance.run_id != self._run_id:
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        if (
-            self._generation == advance.target_generation
-            and len(self._messages) == advance.target_message_count
-        ):
-            signatures = (
-                ()
-                if not advance.delta_signatures
-                else tuple(self._signatures[-len(advance.delta_signatures) :])
-            )
-            if (
-                signatures != advance.delta_signatures
-                or self._quality is not advance.target_quality
-            ):
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            return
-        if (
-            self._generation != advance.base_generation
-            or len(self._messages) != advance.base_message_count
-            or len(self._signatures) != advance.base_message_count
-        ):
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        self._messages.extend(advance.delta_messages)
-        self._signatures.extend(advance.delta_signatures)
-        self._quality = advance.target_quality
-        self._generation = advance.target_generation
-
-    def _overlap(
-        self,
-        incoming: tuple[bytes, ...],
-        stored: tuple[bytes, ...],
-    ) -> int:
-        if not incoming or not stored:
-            return 0
-        prefix = [0] * len(incoming)
-        matched = 0
-        for index in range(1, len(incoming)):
-            while matched and incoming[index] != incoming[matched]:
-                matched = prefix[matched - 1]
-            if incoming[index] == incoming[matched]:
-                matched += 1
-            prefix[index] = matched
-        matched = 0
-        for index, value in enumerate(stored):
-            while matched and value != incoming[matched]:
-                matched = prefix[matched - 1]
-            if value == incoming[matched]:
-                matched += 1
-            if matched == len(incoming):
-                if index == len(stored) - 1:
-                    return matched
-                matched = prefix[matched - 1]
-        return matched
 
 
 class _ContextProjector:
@@ -426,6 +256,102 @@ class TranscriptRepository:
     def runtime_domain(self) -> RuntimeDomain:
         return self._runtime_domain
 
+    @property
+    def _owner_domain(self) -> TranscriptOwnerDomain:
+        try:
+            return TranscriptOwnerDomain(self._runtime_domain.value)
+        except ValueError as error:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
+
+    async def get_head(self, owner_id: str) -> TranscriptHeadRecord | None:
+        """Read the typed transcript head without legacy fallback."""
+        require_no_run_history_lock("TranscriptRepository.get_head")
+        stored = await self._store.read(
+            lambda transaction: transaction.get_record(self._head_key(owner_id))
+        )
+        return None if stored is None else self._decode_head(stored)
+
+    async def create_head(self, owner_id: str) -> TranscriptHeadRecord:
+        """Create an empty transcript head as part of owner admission."""
+        require_no_run_history_lock("TranscriptRepository.create_head")
+        return await self._store.mutate(
+            lambda transaction: self.create_head_in_transaction(transaction, owner_id)
+        )
+
+    def empty_head(self, owner_id: str) -> TranscriptHeadRecord:
+        """Return the empty baseline used by a first-write prepare."""
+        return TranscriptHeadRecord(
+            self._owner_domain,
+            owner_id,
+            0,
+            0,
+            SESSION_HISTORY_VIEW_V1,
+            0,
+            EXECUTION_TRANSCRIPT_VIEW_V1,
+            0,
+            HistoryQuality.COMPLETE,
+            0,
+        )
+
+    async def create_head_in_transaction(
+        self,
+        transaction: StateTransaction,
+        owner_id: str,
+    ) -> TranscriptHeadRecord:
+        key = self._head_key(owner_id)
+        existing = await transaction.get_record(key)
+        if existing is not None:
+            return self._decode_head(existing)
+        head = self.empty_head(owner_id)
+        await transaction.insert_record(self._new_head_record(head))
+        return head
+
+    async def get_head_in_transaction(
+        self,
+        transaction: StateTransaction,
+        owner_id: str,
+    ) -> tuple[TranscriptHeadRecord, StoredRecord] | None:
+        stored = await transaction.get_record(self._head_key(owner_id))
+        return None if stored is None else (self._decode_head(stored), stored)
+
+    def _decode_head(self, record: StoredRecord) -> TranscriptHeadRecord:
+        if record.kind != "transcript_head":
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        envelope = decode_envelope(record.data)
+        payload = envelope.get("payload")
+        if not isinstance(payload, dict):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        try:
+            head = decode_domain(payload, TranscriptHeadRecord)
+        except (TypeError, ValueError, AIError) as error:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
+        if head.owner_domain is not self._owner_domain:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        return head
+
+    def decode_head(self, record: StoredRecord) -> TranscriptHeadRecord:
+        """Decode one stored typed head for batched metadata reads."""
+        return self._decode_head(record)
+
+    def _new_head_record(self, head: TranscriptHeadRecord) -> StoredRecord:
+        key = self._head_key(head.owner_id)
+        return StoredRecord(
+            key,
+            self._partition("transcript_head"),
+            None,
+            None,
+            "transcript_head",
+            head.owner_id,
+            None,
+            0,
+            None,
+            0,
+            None,
+            encode_envelope(
+                {"type": "transcript_head", "payload": encode_domain(head)}
+            ),
+        )
+
     async def prepare_chunks(
         self,
         owner_id: str,
@@ -434,6 +360,7 @@ class TranscriptRepository:
         first_message_index: int,
         origin: TranscriptOrigin = TranscriptOrigin.RAW,
     ) -> tuple[TranscriptChunk, ...]:
+        require_no_run_history_lock("TranscriptRepository.prepare_chunks")
         values = tuple(messages)
         chunks: list[TranscriptChunk] = []
         current: list[ModelMessage] = []
@@ -501,6 +428,7 @@ class TranscriptRepository:
         *,
         raw_size: int,
     ) -> StoredPayload:
+        require_no_run_history_lock("TranscriptRepository._store_payload")
         if self._object_store is None or raw_size < _COMPRESS_MINIMUM:
             return StoredPayload.inline_bytes(value)
         key = runtime_object_key(
@@ -527,18 +455,19 @@ class TranscriptRepository:
         transaction: StateTransaction,
         owner_id: str,
         chunks: Sequence[TranscriptChunk],
-        chunk_history_item_counts: Sequence[int] | None = None,
+        chunk_session_history_item_counts: Sequence[int] | None = None,
+        chunk_execution_transcript_item_counts: Sequence[int] | None = None,
+        quality: HistoryQuality | None = None,
     ) -> None:
         if not chunks:
             return
+        head_entry = await self.get_head_in_transaction(transaction, owner_id)
+        if head_entry is None:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        base_head, head_record = head_entry
         stream = self._transcript_stream(owner_id)
-        owner = self._owner_key(owner_id)
-        owner_record = await transaction.get_record(owner)
-        current_count = await self._owner_message_count(
-            transaction,
-            owner_id,
-            owner_record,
-        )
+        owner = self._head_key(owner_id)
+        current_count = base_head.message_count
         expected = current_count
         for chunk in chunks:
             if (
@@ -556,44 +485,54 @@ class TranscriptRepository:
                 )
                 raise AIError(ErrorCode.STORAGE_CONFLICT)
             expected += chunk.message_count
-        added_items = (
-            0
-            if chunk_history_item_counts is None
-            else sum(chunk_history_item_counts)
+        session_item_counts = (
+            tuple(chunk_session_history_item_counts)
+            if chunk_session_history_item_counts is not None
+            else tuple(0 for _ in chunks)
         )
-        prior_items = 0 if owner_record is None else owner_record.data.get(
-            "history_item_count",
-            0,
+        execution_item_counts = (
+            tuple(chunk_execution_transcript_item_counts)
+            if chunk_execution_transcript_item_counts is not None
+            else tuple(0 for _ in chunks)
         )
-        if isinstance(prior_items, bool) or not isinstance(prior_items, int):
+        if len(session_item_counts) != len(chunks) or len(
+            execution_item_counts
+        ) != len(chunks) or any(
+            isinstance(value, bool) or not isinstance(value, int) or value < 0
+            for value in session_item_counts + execution_item_counts
+        ):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        if owner_record is None:
-            await transaction.insert_record(
-                self._new_owner_record(
-                    owner_id,
-                    owner,
-                    expected,
-                    history_item_count=added_items,
-                    chunk_count=len(chunks),
-                )
-            )
-        else:
-            upgraded = replace(
-                owner_record,
-                storage_version=owner_record.storage_version + 1,
-                data={
-                    **owner_record.data,
-                    "message_count": expected,
-                    "history_item_count": prior_items + added_items,
-                    "chunk_count": owner_record.data.get("chunk_count", 0)
-                    + len(chunks),
-                },
-            )
-            if not await transaction.replace_record(
-                upgraded,
-                expected_storage_version=owner_record.storage_version,
-            ):
-                raise AIError(ErrorCode.STORAGE_CONFLICT)
+        session_delta = sum(session_item_counts)
+        execution_delta = sum(execution_item_counts)
+        next_head = replace(
+            base_head,
+            message_count=expected,
+            session_history_item_count=(
+                base_head.session_history_item_count + session_delta
+            ),
+            execution_transcript_item_count=(
+                base_head.execution_transcript_item_count + execution_delta
+            ),
+            chunk_count=base_head.chunk_count + len(chunks),
+            quality=(
+                base_head.quality
+                if quality is None
+                else quality
+            ),
+            revision=base_head.revision + 1,
+        )
+        upgraded = replace(
+            head_record,
+            data=encode_envelope(
+                {"type": "transcript_head", "payload": encode_domain(next_head)}
+            ),
+            storage_version=head_record.storage_version + 1,
+        )
+        if not await transaction.replace_record(
+            upgraded,
+            expected_storage_version=head_record.storage_version,
+        ):
+            raise AIError(ErrorCode.STORAGE_CONFLICT)
         final = await transaction.reserve_sequence(
             self._transcript_sequence(owner_id),
             len(chunks),
@@ -608,10 +547,12 @@ class TranscriptRepository:
                     "transcript_chunk",
                     None,
                     chunk.origin.value,
-                    {
-                        "type": "transcript_chunk",
-                        "payload": encode_domain(chunk),
-                    },
+                    encode_envelope(
+                        {
+                            "type": "transcript_chunk",
+                            "payload": encode_domain(chunk),
+                        }
+                    ),
                 )
                 for sequence, chunk in zip(sequences, chunks, strict=True)
             )
@@ -621,7 +562,9 @@ class TranscriptRepository:
             owner_id,
             chunks,
             sequences,
-            chunk_history_item_counts,
+            session_item_counts,
+            execution_item_counts,
+            base_head,
         )
         _logger.debug(
             "transcript chunks appended: domain=%s owner=%s "
@@ -639,168 +582,127 @@ class TranscriptRepository:
         owner_id: str,
         chunks: Sequence[TranscriptChunk],
         sequences: Sequence[int],
-        chunk_history_item_counts: Sequence[int] | None,
+        chunk_session_history_item_counts: Sequence[int],
+        chunk_execution_transcript_item_counts: Sequence[int],
+        base_head: TranscriptHeadRecord,
     ) -> None:
-        """Insert seek facts for block boundaries crossed by this append."""
-        first = chunks[0].first_message_index
-        last = chunks[-1].first_message_index + chunks[-1].message_count
-        block = _TRANSCRIPT_SEEK_BLOCK
-        starts = range(
-            ((first + block - 1) // block) * block,
-            ((last + block - 1) // block) * block,
-            block,
+        """Insert point-addressable records for every crossed seek boundary."""
+        dimensions = (
+            (
+                TranscriptSeekDimension.MESSAGE,
+                base_head.message_count,
+                SESSION_HISTORY_VIEW_V1,
+            ),
+            (
+                TranscriptSeekDimension.SESSION_HISTORY_ITEM,
+                base_head.session_history_item_count,
+                base_head.session_history_view_version,
+            ),
+            (
+                TranscriptSeekDimension.EXECUTION_TRANSCRIPT_ITEM,
+                base_head.execution_transcript_item_count,
+                base_head.execution_transcript_view_version,
+            ),
         )
-        if not starts:
-            return
-        head_record = await transaction.get_record(self._owner_key(owner_id))
-        if head_record is None:
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        item_base_value = head_record.data.get("history_item_count", 0)
-        if isinstance(item_base_value, bool) or not isinstance(item_base_value, int):
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        if chunk_history_item_counts is None:
-            return
-        boundaries: dict[int, tuple[int, int]] = {}
-        message_cursor = first
-        item_cursor = item_base_value
-        for chunk, sequence, item_count in zip(
+        cursors = {
+            dimension: base
+            for dimension, base, _version in dimensions
+        }
+        records: list[StoredRecord] = []
+        message_cursor = base_head.message_count
+        for chunk, sequence, session_item_count, execution_item_count in zip(
             chunks,
             sequences,
-            chunk_history_item_counts,
+            chunk_session_history_item_counts,
+            chunk_execution_transcript_item_counts,
             strict=True,
         ):
-            boundaries[message_cursor] = (sequence, item_cursor)
-            message_cursor += chunk.message_count
-            item_cursor += item_count
-        facts: list[StoredFact] = []
-        for block_start in starts:
-            boundary = boundaries.get(block_start)
-            if boundary is None:
-                continue
-            fact_sequence, item_index = boundary
-            for dimension in TranscriptSeekDimension:
-                facts.append(
-                    StoredFact(
-                        self._seek_stream(owner_id),
-                        0,
-                        self._owner_key(owner_id),
-                        "transcript_seek",
-                        subject_digest(dimension.value),
-                        dimension.value,
-                        {
-                            "type": "transcript_seek",
-                            "payload": encode_domain(
-                                TranscriptSeekRecord(
-                                    owner_id,
-                                    dimension,
-                                    block_start,
-                                    fact_sequence,
-                                    block_start,
-                                    item_index,
-                                    SESSION_HISTORY_VIEW_VERSION,
-                                )
-                            ),
-                        },
+            message_start = message_cursor
+            message_end = message_start + chunk.message_count
+            view_ranges = {
+                TranscriptSeekDimension.MESSAGE: (message_start, message_end),
+                TranscriptSeekDimension.SESSION_HISTORY_ITEM: (
+                    cursors[TranscriptSeekDimension.SESSION_HISTORY_ITEM],
+                    cursors[TranscriptSeekDimension.SESSION_HISTORY_ITEM]
+                    + session_item_count,
+                ),
+                TranscriptSeekDimension.EXECUTION_TRANSCRIPT_ITEM: (
+                    cursors[TranscriptSeekDimension.EXECUTION_TRANSCRIPT_ITEM],
+                    cursors[TranscriptSeekDimension.EXECUTION_TRANSCRIPT_ITEM]
+                    + execution_item_count,
+                ),
+            }
+            for dimension, _base, version in dimensions:
+                start, end = view_ranges[dimension]
+                first_boundary = (
+                    (start + _TRANSCRIPT_SEEK_BLOCK - 1)
+                    // _TRANSCRIPT_SEEK_BLOCK
+                ) * _TRANSCRIPT_SEEK_BLOCK
+                for block_start in range(first_boundary, end, _TRANSCRIPT_SEEK_BLOCK):
+                    seek = TranscriptSeekRecord(
+                        owner_id,
+                        dimension,
+                        block_start,
+                        sequence,
+                        message_start,
+                        cursors[dimension],
+                        version,
                     )
-                )
-        if facts:
-            final = await transaction.reserve_sequence(
-                self._seek_sequence(owner_id),
-                len(facts),
-            )
-            ordered = tuple(
-                replace(
-                    fact,
-                    sequence=sequence,
-                )
-                for fact, sequence in zip(
-                    facts,
-                    range(final - len(facts) + 1, final + 1),
-                    strict=True,
-                )
-            )
-            await transaction.insert_facts(ordered)
+                    key = self._seek_key(owner_id, dimension, version, block_start)
+                    existing = await transaction.get_record(key)
+                    if existing is None:
+                        records.append(
+                            StoredRecord(
+                                key,
+                                self._partition("transcript_seek"),
+                                None,
+                                self._head_key(owner_id),
+                                "transcript_seek",
+                                f"b:{block_start:020d}",
+                                None,
+                                0,
+                                None,
+                                0,
+                                None,
+                                encode_envelope(
+                                    {
+                                        "type": "transcript_seek",
+                                        "payload": encode_domain(seek),
+                                    }
+                                ),
+                            )
+                        )
+                    elif self._decode_seek(existing) != seek:
+                        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            message_cursor = message_end
+            for dimension, _base, _version in dimensions:
+                cursors[dimension] = view_ranges[dimension][1]
+        if records:
+            await transaction.insert_records(tuple(records))
             _logger.debug(
                 "transcript seek boundaries inserted: domain=%s owner=%s count=%s",
                 self._runtime_domain.value,
                 owner_id,
-                len(ordered),
+                len(records),
             )
 
-    def _seek_stream(self, owner_id: str) -> bytes:
-        return stream_digest(
-            self._namespace,
-            self._tenant_id,
-            self._runtime_domain.value,
-            "transcript_seek",
-            owner_id,
-        )
-
-    def _seek_sequence(self, owner_id: str) -> bytes:
-        return sequence_key(
-            self._namespace,
-            self._tenant_id,
-            self._runtime_domain.value,
-            "transcript_seek",
-            owner_id,
-        )
-
-    async def _owner_message_count(
-        self,
-        transaction: StateTransaction,
-        owner_id: str,
-        owner_record: StoredRecord | None,
-    ) -> int:
-        if owner_record is None:
-            return 0
-        value = owner_record.data.get("message_count")
-        if value is None:
-            values = await transaction.list_facts(
-                FactQuery(self._transcript_stream(owner_id), latest=True)
-            )
-            if not values:
-                return 0
-            chunk = self.decode_chunk(values[0])
-            return chunk.first_message_index + chunk.message_count
-        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+    def _decode_seek(self, record: StoredRecord) -> TranscriptSeekRecord:
+        if record.kind != "transcript_seek":
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        return value
-
-    def _new_owner_record(
-        self,
-        owner_id: str,
-        owner: bytes,
-        message_count: int,
-        *,
-        history_item_count: int,
-        chunk_count: int,
-    ) -> StoredRecord:
-        return StoredRecord(
-            owner,
-            self._partition("history_owner"),
-            None,
-            owner,
-            "history_owner",
-            owner_id,
-            None,
-            0,
-            None,
-            0,
-            None,
-            {
-                "type": "history_owner",
-                "owner_id": owner_id,
-                "message_count": message_count,
-                "history_item_count": history_item_count,
-                "chunk_count": chunk_count,
-            },
-        )
+        payload = decode_envelope(record.data).get("payload")
+        if not isinstance(payload, dict):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        try:
+            return decode_domain(payload, TranscriptSeekRecord)
+        except (TypeError, ValueError, AIError) as error:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
 
     async def prepare_projection(
         self,
         run_id: str,
         projection: ContextProjection,
     ) -> ContextProjection:
+        require_no_run_history_lock("TranscriptRepository.prepare_projection")
         items: list[TranscriptSpanRef | InlineContextBlock] = []
         changed = False
         for item in projection.items:
@@ -869,6 +771,7 @@ class TranscriptRepository:
         return self.run_stream(run_id)
 
     async def latest_chunk(self, owner_id: str) -> TranscriptChunk | None:
+        require_no_run_history_lock("TranscriptRepository.latest_chunk")
         values = await self._store.read(
             lambda transaction: transaction.list_facts(
                 FactQuery(self._transcript_stream(owner_id), latest=True)
@@ -879,6 +782,7 @@ class TranscriptRepository:
         return self.decode_chunk(values[0])
 
     async def iter_messages(self, owner_id: str) -> AsyncIterator[ModelMessage]:
+        require_no_run_history_lock("TranscriptRepository.iter_messages")
         stream = self._transcript_stream(owner_id)
         after_sequence: int | None = None
         while True:
@@ -909,68 +813,92 @@ class TranscriptRepository:
         return tuple(ModelMessagesTypeAdapter.validate_json(raw))
 
     async def load_messages(self, owner_id: str) -> tuple[ModelMessage, ...]:
+        require_no_run_history_lock("TranscriptRepository.load_messages")
         return tuple([message async for message in self.iter_messages(owner_id)])
 
     async def validate_integrity(self) -> None:
-        async def read(transaction: StateTransaction) -> None:
-            records = await transaction.scan_records()
-            facts = await transaction.scan_facts()
-            owners = {
-                record.key_digest: record
-                for record in records
-                if record.kind in {"history_owner", "step_run"}
-            }
-            facts_by_owner: dict[bytes, list[StoredFact]] = {}
-            for fact in facts:
-                if fact.kind != "transcript_chunk":
-                    continue
-                try:
-                    chunk = self.decode_chunk(fact)
-                except (TypeError, ValueError) as error:
-                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
-                if (
-                    fact.owner_key_digest != self._owner_key(chunk.owner_id)
-                    or fact.stream_digest != self._transcript_stream(chunk.owner_id)
-                ):
-                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                if fact.owner_key_digest not in owners:
-                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                facts_by_owner.setdefault(fact.owner_key_digest, []).append(fact)
-            for owner_key, record in owners.items():
-                value = record.data.get("message_count")
-                if value is None:
-                    continue
-                if isinstance(value, bool) or not isinstance(value, int) or value < 0:
-                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                expected = 0
-                for fact in sorted(
-                    facts_by_owner.get(owner_key, ()),
-                    key=lambda item: item.sequence,
-                ):
-                    try:
-                        chunk = self.decode_chunk(fact)
-                    except (TypeError, ValueError) as error:
-                        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
-                    if (
-                        chunk.message_count <= 0
-                        or chunk.first_message_index != expected
-                    ):
-                        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                    expected += chunk.message_count
-                if expected != value:
-                    _logger.error(
-                        "history owner count mismatch: domain=%s owner=%s "
-                        "record_count=%s fact_count=%s",
-                        self._runtime_domain.value,
-                        record.data.get("owner_id"),
-                        value,
-                        expected,
+        require_no_run_history_lock("TranscriptRepository.validate_integrity")
+        after_sort: str | None = None
+        after_key: bytes | None = None
+        while True:
+            page = await self._store.read(
+                lambda transaction: transaction.list_records(
+                    RecordQuery(
+                        partition_digest=self._partition("transcript_head"),
+                        kind="transcript_head",
+                        after_sort_key=after_sort,
+                        after_key_digest=after_key,
+                        limit=_TRANSCRIPT_PAGE_SIZE,
                     )
-                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                )
+            )
+            if not page:
+                return
+            for record in page:
+                await self._validate_head_record(record)
+            last = page[-1]
+            after_sort = last.sort_key
+            after_key = last.key_digest
 
-        await self._store.read(read)
+    async def _validate_head_record(self, record: StoredRecord) -> None:
+        head = self._decode_head(record)
+        expected_message_index = 0
+        expected_session_items = 0
+        expected_execution_items = 0
+        expected_chunks = 0
+        after_sequence: int | None = None
+        while True:
+            facts = await self._store.read(
+                lambda transaction: transaction.list_facts(
+                    FactQuery(
+                        self._transcript_stream(head.owner_id),
+                        after_sequence=after_sequence,
+                        limit=_TRANSCRIPT_PAGE_SIZE,
+                    )
+                )
+            )
+            if not facts:
+                break
+            after_sequence = facts[-1].sequence
+            for fact in facts:
+                if (
+                    fact.kind != "transcript_chunk"
+                    or fact.owner_key_digest != record.key_digest
+                ):
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                chunk = self.decode_chunk(fact)
+                if (
+                    chunk.owner_id != head.owner_id
+                    or chunk.first_message_index != expected_message_index
+                    or chunk.message_count <= 0
+                ):
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                messages = await self._decode_chunk_messages(chunk)
+                if len(messages) != chunk.message_count:
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                expected_message_index += chunk.message_count
+                expected_chunks += 1
+                if self._runtime_domain is RuntimeDomain.CONVERSATION:
+                    expected_session_items += count_session_history_items(messages)
+                else:
+                    expected_execution_items += count_execution_transcript_items(
+                        messages
+                    )
+        if (
+            expected_message_index != head.message_count
+            or expected_session_items != head.session_history_item_count
+            or expected_execution_items != head.execution_transcript_item_count
+            or expected_chunks != head.chunk_count
+        ):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        current = await self._store.read(
+            lambda transaction: transaction.get_record(record.key_digest)
+        )
+        if current is None or current.storage_version != record.storage_version:
+            raise AIError(ErrorCode.STORAGE_CONFLICT)
 
     async def history_message_count(self, history_id: str, *, tenant_id: str) -> int:
+        require_no_run_history_lock("TranscriptRepository.history_message_count")
         if self._history_repository is None:
             return 0
         record = await self._history_repository.get(
@@ -981,22 +909,17 @@ class TranscriptRepository:
             raise AIError(ErrorCode.SESSION_HISTORY_UNAVAILABLE)
         if record.inherited_message_count < 0:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        local_messages = await self._history_repository.state_store.read(
-            lambda transaction: (
-                self._history_repository.local_head_in_transaction(
-                    transaction,
-                    history_id,
-                )
-            )
-        )
-        return record.inherited_message_count + local_messages[0]
+        head = await self.get_head(history_id)
+        if head is None:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        return record.inherited_message_count + head.message_count
 
     async def transcript_message_count(self, owner_id: str) -> int:
-        async def read(transaction: StateTransaction) -> int:
-            owner = await transaction.get_record(self._owner_key(owner_id))
-            return await self._owner_message_count(transaction, owner_id, owner)
-
-        return await self._store.read(read)
+        require_no_run_history_lock("TranscriptRepository.transcript_message_count")
+        head = await self.get_head(owner_id)
+        if head is None:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        return head.message_count
 
     async def load_session_model_context(
         self,
@@ -1005,6 +928,7 @@ class TranscriptRepository:
         tenant_id: str,
         binding_digest: str | None = None,
     ) -> LoadedModelContext:
+        require_no_run_history_lock("TranscriptRepository.load_session_model_context")
         projection = await self.load_projection(history_id)
         if projection is not None:
             if binding_digest is not None and projection.binding_digest != binding_digest:
@@ -1018,29 +942,22 @@ class TranscriptRepository:
                 history_id,
                 binding_digest=binding_digest,
             )
-        resolution = await self._history_segments(
-            history_id,
-            tenant_id=tenant_id,
+        head = await self.get_head(history_id)
+        if head is None:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        history = (
+            None
+            if self._history_repository is None
+            else await self._history_repository.get(
+                history_id,
+                tenant_id=tenant_id,
+            )
         )
-        values: list[LoadedContextMessage] = []
-        for segment in resolution.segments:
-            messages = await self.load_message_span(
-                segment.history_id,
-                segment.start,
-                segment.end,
-            )
-            values.extend(
-                LoadedContextMessage(
-                    message,
-                    TranscriptMessageRef(
-                        RuntimeDomain.CONVERSATION,
-                        segment.history_id,
-                        segment.start + index,
-                    ),
-                )
-                for index, message in enumerate(messages)
-            )
-        return LoadedModelContext(tuple(values))
+        if history is None:
+            raise AIError(ErrorCode.SESSION_HISTORY_UNAVAILABLE)
+        if head.message_count or history.inherited_message_count:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        return LoadedModelContext(())
 
     async def iter_session_messages(
         self,
@@ -1048,6 +965,7 @@ class TranscriptRepository:
         *,
         tenant_id: str,
     ) -> AsyncIterator[ModelMessage]:
+        require_no_run_history_lock("TranscriptRepository.iter_session_messages")
         if self._runtime_domain is not RuntimeDomain.CONVERSATION:
             raise ValueError("session messages require the conversation archive")
         resolution = await self._history_segments(
@@ -1071,13 +989,17 @@ class TranscriptRepository:
         start: int,
         end: int,
     ) -> AsyncIterator[ModelMessage]:
+        require_no_run_history_lock(
+            "TranscriptRepository.iter_session_message_range"
+        )
         if start < 0 or end < start:
             raise AIError(ErrorCode.STORAGE_CONFLICT)
         resolution = await self._history_segments(
             history_id,
             tenant_id=tenant_id,
         )
-        if end > sum(segment.end - segment.start for segment in resolution.segments):
+        total = sum(segment.end - segment.start for segment in resolution.segments)
+        if end > total:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         position = 0
         for segment in resolution.segments:
@@ -1113,40 +1035,99 @@ class TranscriptRepository:
             None,
             0,
             None,
-            {"type": "context_projection", "payload": encode_domain(projection)},
+            encode_envelope(
+                {
+                    "type": "context_projection",
+                    "payload": encode_domain(projection),
+                }
+            ),
         )
         current = await transaction.get_record(key)
         if current is None:
             await transaction.insert_record(value)
             return
-        await transaction.replace_record(
-            StoredRecord(
-                key,
-                current.partition_digest,
-                current.scope_digest,
-                current.parent_digest,
-                current.kind,
-                current.sort_key,
-                current.state,
-                current.storage_version + 1,
-                current.lease_owner,
-                current.lease_fence,
-                current.lease_expires_at,
-                value.data,
+        if not await transaction.replace_record(
+            replace(
+                value,
+                partition_digest=current.partition_digest,
+                scope_digest=current.scope_digest,
+                parent_digest=current.parent_digest,
+                storage_version=current.storage_version + 1,
             ),
             expected_storage_version=current.storage_version,
-        )
+        ):
+            raise AIError(ErrorCode.STORAGE_CONFLICT)
 
     async def load_projection(self, owner_id: str) -> ContextProjection | None:
+        require_no_run_history_lock("TranscriptRepository.load_projection")
         value = await self._store.read(
             lambda transaction: transaction.get_record(self._projection_key(owner_id))
         )
         if value is None:
             return None
-        payload = value.data.get("payload")
+        payload = decode_envelope(value.data).get("payload")
         if not isinstance(payload, dict):
-            raise ValueError("context projection payload is invalid")
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         return decode_domain(payload, ContextProjection)
+
+    async def resolve_transcript_message_refs(
+        self,
+        refs: Sequence[TranscriptMessageRef],
+    ) -> tuple[LoadedContextMessage, ...]:
+        """Resolve canonical raw transcript references in caller order."""
+        require_no_run_history_lock(
+            "TranscriptRepository.resolve_transcript_message_refs"
+        )
+        if not refs:
+            return ()
+        grouped: dict[
+            tuple[TranscriptRepository, str],
+            list[int],
+        ] = {}
+        ordered_sources: list[tuple[TranscriptRepository, TranscriptMessageRef]] = []
+        for ref in refs:
+            source = self if ref.source_domain is self._runtime_domain else (
+                self._context_sources.get(ref.source_domain)
+            )
+            if source is None:
+                raise AIError(ErrorCode.STORAGE_DEPENDENCY_NOT_READY)
+            ordered_sources.append((source, ref))
+            grouped.setdefault((source, ref.owner_id), []).append(ref.message_index)
+        resolved: dict[tuple[TranscriptRepository, str], dict[int, ModelMessage]] = {}
+        for (source, owner_id), indexes in grouped.items():
+            head = await source.get_head(owner_id)
+            if head is None or any(index >= head.message_count for index in indexes):
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            unique = sorted(set(indexes))
+            windows: list[tuple[int, int]] = []
+            window_start = unique[0]
+            window_end = window_start + 1
+            for index in unique[1:]:
+                if index == window_end:
+                    window_end += 1
+                else:
+                    windows.append((window_start, window_end))
+                    window_start = index
+                    window_end = index + 1
+            windows.append((window_start, window_end))
+            loaded = await source.load_message_spans(owner_id, windows)
+            mapping: dict[int, ModelMessage] = {}
+            for (start, end), messages in zip(windows, loaded, strict=True):
+                if len(messages) != end - start:
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                mapping.update(
+                    (start + offset, message)
+                    for offset, message in enumerate(messages)
+                )
+            resolved[(source, owner_id)] = mapping
+        result: list[LoadedContextMessage] = []
+        for source, ref in ordered_sources:
+            try:
+                message = resolved[(source, ref.owner_id)][ref.message_index]
+            except KeyError as error:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
+            result.append(LoadedContextMessage(message, ref))
+        return tuple(result)
 
     async def load_model_context(
         self,
@@ -1154,19 +1135,15 @@ class TranscriptRepository:
         *,
         binding_digest: str | None = None,
     ) -> LoadedModelContext:
+        require_no_run_history_lock("TranscriptRepository.load_model_context")
         projection = await self.load_projection(owner_id)
         if projection is None:
-            values = await self.load_messages(owner_id)
-            source_domain = self._runtime_domain
-            return LoadedModelContext(
-                tuple(
-                    LoadedContextMessage(
-                        message,
-                        TranscriptMessageRef(source_domain, owner_id, index),
-                    )
-                    for index, message in enumerate(values)
-                )
-            )
+            head = await self.get_head(owner_id)
+            if head is None:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            if head.message_count:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            return LoadedModelContext(())
         if binding_digest is not None and projection.binding_digest != binding_digest:
             _logger.info(
                 "context projection binding mismatch: domain=%s owner=%s",
@@ -1174,57 +1151,37 @@ class TranscriptRepository:
                 owner_id,
             )
             raise AIError(ErrorCode.SESSION_BINDING_MISMATCH)
-        span_groups: dict[
-            tuple[TranscriptRepository, RuntimeDomain, str],
-            list[tuple[int, int]],
-        ] = {}
+        span_refs: list[tuple[TranscriptSpanRef, tuple[TranscriptMessageRef, ...]]] = []
+        refs: list[TranscriptMessageRef] = []
         for item in projection.items:
-            if isinstance(item, TranscriptSpanRef):
-                source = self
-                if item.source_domain is not self._runtime_domain:
-                    source = self._context_sources.get(item.source_domain)
-                    if source is None:
-                        raise ValueError("transcript context source is unavailable")
-                span_groups.setdefault((source, item.source_domain, item.owner_id), []).append(
-                    (item.start, item.end)
+            if not isinstance(item, TranscriptSpanRef):
+                span_refs.append((item, ()))  # type: ignore[arg-type]
+                continue
+            item_refs = tuple(
+                TranscriptMessageRef(
+                    item.source_domain,
+                    item.owner_id,
+                    index,
                 )
-        span_values: dict[
-            tuple[TranscriptRepository, RuntimeDomain, str],
-            tuple[tuple[ModelMessage, ...], ...],
-        ] = {}
-        for key, windows in span_groups.items():
-            source, _source_domain, span_owner_id = key
-            span_values[key] = await source.load_message_spans(span_owner_id, windows)
-        span_offsets: dict[tuple[TranscriptRepository, RuntimeDomain, str], int] = {}
+                for index in range(item.start, item.end)
+            )
+            refs.extend(item_refs)
+            span_refs.append((item, item_refs))
+        resolved = await self.resolve_transcript_message_refs(tuple(refs))
+        resolved_index = 0
         values: list[LoadedContextMessage] = []
-        for item in projection.items:
+        for item, item_refs in span_refs:
             if isinstance(item, TranscriptSpanRef):
-                source = self
-                if item.source_domain is not self._runtime_domain:
-                    source = self._context_sources.get(item.source_domain)
-                    if source is None:
-                        raise ValueError("transcript context source is unavailable")
-                key = (source, item.source_domain, item.owner_id)
-                offset = span_offsets.get(key, 0)
-                messages = span_values[key][offset]
                 values.extend(
-                    LoadedContextMessage(
-                        message,
-                        TranscriptMessageRef(
-                            item.source_domain,
-                            item.owner_id,
-                            item.start + index,
-                        ),
-                    )
-                    for index, message in enumerate(messages)
+                    resolved[resolved_index : resolved_index + len(item_refs)]
                 )
-                span_offsets[key] = offset + 1
-            else:
-                raw = await self._read_payload(item.content.payload)
-                values.extend(
-                    LoadedContextMessage(message, None)
-                    for message in ModelMessagesTypeAdapter.validate_json(raw)
-                )
+                resolved_index += len(item_refs)
+                continue
+            raw = await self._read_payload(item.content.payload)  # type: ignore[union-attr]
+            values.extend(
+                LoadedContextMessage(message, None)
+                for message in ModelMessagesTypeAdapter.validate_json(raw)
+            )
         return LoadedModelContext(tuple(values))
 
     async def load_message_span(
@@ -1240,8 +1197,18 @@ class TranscriptRepository:
         owner_id: str,
         windows: Sequence[tuple[int, int]],
     ) -> tuple[tuple[ModelMessage, ...], ...]:
+        require_no_run_history_lock("TranscriptRepository.load_message_spans")
         if not windows:
             return ()
+        if any(start < 0 or end < start for start, end in windows):
+            raise AIError(ErrorCode.STORAGE_CONFLICT)
+        head = await self.get_head(owner_id)
+        if head is None:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        if any(end > head.message_count for _start, end in windows):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        if all(start == end for start, end in windows):
+            return tuple(() for _window in windows)
         values: list[list[ModelMessage]] = [[] for _ in windows]
         stop_at = max(end for _, end in windows)
         read_from = min(start for start, _ in windows)
@@ -1268,7 +1235,10 @@ class TranscriptRepository:
                         windows,
                         tuple(tuple(value) for value in values),
                     )
-                if all(chunk_end <= start or chunk_start >= end for start, end in windows):
+                if all(
+                    chunk_end <= start or chunk_start >= end
+                    for start, end in windows
+                ):
                     continue
                 messages = await self._decode_chunk_messages(chunk)
                 for index, (start, end) in enumerate(windows):
@@ -1282,35 +1252,37 @@ class TranscriptRepository:
             tuple(tuple(value) for value in values),
         )
 
-    async def _seek_fact_sequence(self, owner_id: str, message_index: int) -> "int | None":
-        """Anchor a fact scan at the newest seek block at or before the index."""
-        if message_index < _TRANSCRIPT_SEEK_BLOCK:
-            return None
-        block = (message_index // _TRANSCRIPT_SEEK_BLOCK) * _TRANSCRIPT_SEEK_BLOCK
-        del block
-        facts = await self._store.read(
-            lambda transaction: transaction.list_facts(
-                FactQuery(
-                    self._seek_stream(owner_id),
-                    subject_digest=subject_digest(
-                        TranscriptSeekDimension.MESSAGE.value
-                    ),
-                    limit=64,
-                )
+    async def _seek_fact_sequence(
+        self,
+        owner_id: str,
+        view_index: int,
+        *,
+        dimension: TranscriptSeekDimension = TranscriptSeekDimension.MESSAGE,
+    ) -> int | None:
+        if view_index < 0:
+            raise AIError(ErrorCode.STORAGE_CONFLICT)
+        head = await self.get_head(owner_id)
+        if head is None:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        version = {
+            TranscriptSeekDimension.MESSAGE: 1,
+            TranscriptSeekDimension.SESSION_HISTORY_ITEM: head.session_history_view_version,
+            TranscriptSeekDimension.EXECUTION_TRANSCRIPT_ITEM: (
+                head.execution_transcript_view_version
+            ),
+        }[dimension]
+        block = (view_index // _TRANSCRIPT_SEEK_BLOCK) * _TRANSCRIPT_SEEK_BLOCK
+        record = await self._store.read(
+            lambda transaction: transaction.get_record(
+                self._seek_key(owner_id, dimension, version, block)
             )
         )
-        candidates = [
-            decode_domain(fact.data["payload"], TranscriptSeekRecord)
-            for fact in facts
-            if fact.data.get("payload") is not None
-        ]
-        below = [
-            record for record in candidates if record.block_start <= message_index
-        ]
-        if not below:
-            return None
-        best = max(below, key=lambda record: record.block_start)
-        return best.fact_sequence - 1 if best.fact_sequence > 0 else None
+        if record is None:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        seek = self._decode_seek(record)
+        if seek.block_start != block or seek.dimension is not dimension:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        return seek.fact_sequence - 1 if seek.fact_sequence > 0 else None
 
     def _validate_spans(
         self,
@@ -1326,6 +1298,253 @@ class TranscriptRepository:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         return values
 
+    async def session_history_item_total_count(
+        self,
+        history_id: str,
+        *,
+        tenant_id: str,
+    ) -> int:
+        require_no_run_history_lock(
+            "TranscriptRepository.session_history_item_total_count"
+        )
+        if self._history_repository is None:
+            raise AIError(ErrorCode.STORAGE_DEPENDENCY_NOT_READY)
+        record = await self._history_repository.get(
+            history_id,
+            tenant_id=tenant_id,
+        )
+        if record is None:
+            raise AIError(ErrorCode.SESSION_HISTORY_UNAVAILABLE)
+        head = await self.get_head(history_id)
+        if head is None:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        return record.inherited_history_item_count + head.session_history_item_count
+
+    async def _history_item_segments(
+        self,
+        history_id: str,
+        *,
+        tenant_id: str,
+        start: int,
+        end: int,
+    ) -> tuple[_HistorySegment, ...]:
+        require_no_run_history_lock("TranscriptRepository._history_item_segments")
+        if self._history_repository is None:
+            raise AIError(ErrorCode.STORAGE_DEPENDENCY_NOT_READY)
+
+        async def read(
+            transaction: StateTransaction,
+        ) -> tuple[_HistorySegment, ...]:
+            record = await self._history_repository.get_in_transaction(
+                transaction,
+                history_id,
+                tenant_id=tenant_id,
+            )
+            if record is None:
+                raise AIError(ErrorCode.SESSION_HISTORY_UNAVAILABLE)
+            local_messages, local_items = (
+                await self._history_repository.local_head_in_transaction(
+                    transaction,
+                    history_id,
+                )
+            )
+            roots = await self._history_repository.get_forest_roots_in_transaction(
+                transaction,
+                record.prefix_index_head_id,
+                max_roots=64,
+            )
+            resolved = await resolve_history_item_range_lazy(
+                roots,
+                lambda node_id: self._history_repository.get_index_node_in_transaction(
+                    transaction,
+                    node_id,
+                ),
+                owner_history_id=history_id,
+                local_history_item_count=local_items,
+                inherited_history_item_count=record.inherited_history_item_count,
+                range_start=start,
+                range_end=end,
+            )
+            del local_messages
+            return tuple(
+                _HistorySegment(
+                    item.segment.owner_history_id,
+                    item.local_start,
+                    item.local_end,
+                )
+                for item in resolved
+            )
+
+        try:
+            return await self._history_repository.state_store.read(read)
+        except (TypeError, ValueError) as error:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
+
+    async def iter_session_history_item_range(
+        self,
+        history_id: str,
+        *,
+        tenant_id: str,
+        start: int,
+        end: int,
+    ) -> AsyncIterator[SessionHistoryItem]:
+        require_no_run_history_lock(
+            "TranscriptRepository.iter_session_history_item_range"
+        )
+        if self._runtime_domain is not RuntimeDomain.CONVERSATION:
+            raise ValueError("session history items require the conversation archive")
+        if start < 0 or end < start:
+            raise AIError(ErrorCode.STORAGE_CONFLICT)
+        total = await self.session_history_item_total_count(
+            history_id,
+            tenant_id=tenant_id,
+        )
+        if end > total:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        output_sequence = start + 1
+        segments = await self._history_item_segments(
+            history_id,
+            tenant_id=tenant_id,
+            start=start,
+            end=end,
+        )
+        for segment in segments:
+            async for item in self._iter_view_item_range(
+                segment.history_id,
+                start=segment.start,
+                end=segment.end,
+                dimension=TranscriptSeekDimension.SESSION_HISTORY_ITEM,
+            ):
+                if not isinstance(item, SessionHistoryItem):
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                yield SessionHistoryItem(
+                    output_sequence,
+                    item.item_kind,
+                    item.content,
+                    item.tool_name,
+                    item.tool_call_id,
+                )
+                output_sequence += 1
+
+    async def iter_execution_transcript_item_range(
+        self,
+        run_id: str,
+        *,
+        start: int,
+        end: int,
+    ) -> AsyncIterator[str]:
+        require_no_run_history_lock(
+            "TranscriptRepository.iter_execution_transcript_item_range"
+        )
+        if self._runtime_domain is not RuntimeDomain.EXECUTION:
+            raise ValueError("execution transcript items require the execution archive")
+        async for item in self._iter_view_item_range(
+            run_id,
+            start=start,
+            end=end,
+            dimension=TranscriptSeekDimension.EXECUTION_TRANSCRIPT_ITEM,
+        ):
+            if not isinstance(item, str):
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            yield item
+
+    async def _iter_view_item_range(
+        self,
+        owner_id: str,
+        *,
+        start: int,
+        end: int,
+        dimension: TranscriptSeekDimension,
+    ) -> AsyncIterator[object]:
+        if start < 0 or end < start:
+            raise AIError(ErrorCode.STORAGE_CONFLICT)
+        if end == start:
+            return
+        head = await self.get_head(owner_id)
+        if head is None:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        total = {
+            TranscriptSeekDimension.SESSION_HISTORY_ITEM: head.session_history_item_count,
+            TranscriptSeekDimension.EXECUTION_TRANSCRIPT_ITEM: head.execution_transcript_item_count,
+        }.get(dimension)
+        if total is None or end > total:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        after_sequence = await self._seek_fact_sequence(
+            owner_id,
+            start,
+            dimension=dimension,
+        )
+        expected_item_index = (
+            await self._seek_item_start(owner_id, start, dimension=dimension)
+        )
+        emitted = 0
+        while True:
+            facts = await self._store.read(
+                lambda transaction: transaction.list_facts(
+                    FactQuery(
+                        self._transcript_stream(owner_id),
+                        after_sequence=after_sequence,
+                        limit=_TRANSCRIPT_PAGE_SIZE,
+                    )
+                )
+            )
+            if not facts:
+                break
+            after_sequence = facts[-1].sequence
+            for fact in facts:
+                chunk = self.decode_chunk(fact)
+                messages = await self._decode_chunk_messages(chunk)
+                values: list[object] = []
+                for message in messages:
+                    if dimension is TranscriptSeekDimension.SESSION_HISTORY_ITEM:
+                        values.extend(project_session_history_message(message))
+                    else:
+                        values.extend(project_execution_transcript_message(message))
+                for value_index, value in enumerate(values):
+                    item_index = expected_item_index + value_index
+                    if item_index < start:
+                        continue
+                    if item_index >= end:
+                        if emitted != end - start:
+                            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                        return
+                    emitted += 1
+                    yield value
+                expected_item_index += len(values)
+            if emitted == end - start:
+                return
+        if emitted != end - start:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+
+    async def _seek_item_start(
+        self,
+        owner_id: str,
+        view_index: int,
+        *,
+        dimension: TranscriptSeekDimension,
+    ) -> int:
+        block = (view_index // _TRANSCRIPT_SEEK_BLOCK) * _TRANSCRIPT_SEEK_BLOCK
+        head = await self.get_head(owner_id)
+        if head is None:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        version = {
+            TranscriptSeekDimension.SESSION_HISTORY_ITEM: head.session_history_view_version,
+            TranscriptSeekDimension.EXECUTION_TRANSCRIPT_ITEM: (
+                head.execution_transcript_view_version
+            ),
+        }[dimension]
+        record = await self._store.read(
+            lambda transaction: transaction.get_record(
+                self._seek_key(owner_id, dimension, version, block)
+            )
+        )
+        if record is None:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        seek = self._decode_seek(record)
+        if seek.dimension is not dimension or seek.block_start != block:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        return seek.chunk_first_view_item_index
+
     async def _history_segments(
         self,
         history_id: str,
@@ -1333,6 +1552,7 @@ class TranscriptRepository:
         tenant_id: str,
     ) -> _HistoryResolution:
         """Resolve one branch's visible transcript into logical segments."""
+        require_no_run_history_lock("TranscriptRepository._history_segments")
         if self._history_repository is None:
             raise AIError(ErrorCode.STORAGE_DEPENDENCY_NOT_READY)
 
@@ -1353,16 +1573,17 @@ class TranscriptRepository:
                 )
             )
             inherited = record.inherited_message_count
-            snapshot = (
-                HistoryIndexSnapshot({}, ())
-                if record.prefix_index_head_id is None
-                else await self._history_repository.index_snapshot_in_transaction(
-                    transaction,
-                    record.prefix_index_head_id,
-                )
+            roots = await self._history_repository.get_forest_roots_in_transaction(
+                transaction,
+                record.prefix_index_head_id,
+                max_roots=64,
             )
-            resolved = resolve_history_range(
-                snapshot,
+            resolved = await resolve_history_range_lazy(
+                roots,
+                lambda node_id: self._history_repository.get_index_node_in_transaction(
+                    transaction,
+                    node_id,
+                ),
                 owner_history_id=history_id,
                 local_message_count=local_messages,
                 inherited_message_count=inherited,
@@ -1471,6 +1692,7 @@ class TranscriptRepository:
         )
 
     async def _read_payload(self, payload: StoredPayload) -> bytes:
+        require_no_run_history_lock("TranscriptRepository._read_payload")
         if payload.kind == "inline":
             value = payload.decode()
             if not isinstance(value, bytes):
@@ -1486,18 +1708,40 @@ class TranscriptRepository:
         return bytes(data)
 
     def decode_chunk(self, fact: StoredFact) -> TranscriptChunk:
-        payload = fact.data.get("payload")
+        payload = decode_envelope(fact.data).get("payload")
         if not isinstance(payload, dict):
             raise ValueError("transcript chunk payload is invalid")
         return decode_domain(payload, TranscriptChunk)
 
     def _owner_key(self, owner_id: str) -> bytes:
+        return self._head_key(owner_id)
+
+    def _head_key(self, owner_id: str) -> bytes:
         return record_key_digest(
             self._namespace,
             self._tenant_id,
             self._runtime_domain.value,
-            "history_owner" if self._runtime_domain is RuntimeDomain.CONVERSATION else "step_run",
+            "transcript_head",
             owner_id,
+        )
+
+    def head_key(self, owner_id: str) -> bytes:
+        """Return the physical key for one typed transcript head."""
+        return self._head_key(owner_id)
+
+    def _seek_key(
+        self,
+        owner_id: str,
+        dimension: TranscriptSeekDimension,
+        view_version: int,
+        block_start: int,
+    ) -> bytes:
+        return record_key_digest(
+            self._namespace,
+            self._tenant_id,
+            self._runtime_domain.value,
+            "transcript_seek",
+            [owner_id, dimension.value, view_version, block_start],
         )
 
     def _transcript_stream(self, owner_id: str) -> bytes:
@@ -1527,6 +1771,10 @@ class TranscriptRepository:
             run_id,
         )
 
+    def projection_key(self, run_id: str) -> bytes:
+        """Return the physical key for one context projection."""
+        return self._projection_key(run_id)
+
     def _partition(self, kind: str) -> bytes:
         return partition_digest(
             self._namespace,
@@ -1540,4 +1788,4 @@ async def _one_chunk(value: bytes) -> AsyncIterator[bytes]:
     yield value
 
 
-__all__ = ["TranscriptAccumulatorAdvance", "TranscriptRepository"]
+__all__ = ["TranscriptRepository"]

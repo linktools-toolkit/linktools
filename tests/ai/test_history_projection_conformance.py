@@ -16,9 +16,11 @@ from linktools.ai.core import (
     step_run_id,
 )
 from linktools.ai.errors import AIError, ErrorCode
+from linktools.ai.migrate import provision_database
 from linktools.ai.runtime import RuntimeState
 from linktools.ai.runtime._local import LocalExecutionBackend
 from linktools.ai.runtime.state import (
+    ConversationHistoryRecord,
     ExecutionHistoryHeadRecord,
     ExecutionHistorySealRecord,
     ExecutionHistoryState,
@@ -33,25 +35,19 @@ from linktools.ai.runtime.state import (
     StateTransactionNestingError,
     StoredRecord,
 )
-from linktools.ai.runtime.state._history import _TranscriptAccumulator
 from linktools.ai.runtime.state._steps import LockOrderError, _RunHistoryLock
 from linktools.ai.runtime.state._store import (
     partition_digest,
     record_key_digest,
     sortable_identity,
 )
-from pydantic_ai.messages import (
-    ModelRequest,
-    ModelResponse,
-    TextPart,
-    ThinkingPart,
-    UserPromptPart,
-)
+from pydantic_ai.messages import ModelRequest, ModelResponse, TextPart, ThinkingPart, UserPromptPart
 from pydantic_ai_harness.step_persistence import (
     ContinuableSnapshot,
     RunRecord,
     StepEvent,
 )
+from sqlalchemy.ext.asyncio import create_async_engine
 
 
 def _record(status: ExecutionStatus, sequence: int) -> ExecutionRecord:
@@ -225,6 +221,111 @@ async def test_execution_projection_paths_reject_a_sealed_history_head(
 
 
 @pytest.mark.asyncio
+async def test_terminal_prepare_accepts_an_unprojected_execution_run(
+    tmp_path: Path,
+) -> None:
+    state = RuntimeState.filesystem(tmp_path / "runtime")
+    await state.initialize(namespace="history-unprojected", tenant_id="tenant")
+    terminal_plan = None
+    try:
+        await state.execution.executions.create(_record(ExecutionStatus.STARTED, 1))
+        run_id = step_run_id(
+            namespace="history-unprojected",
+            tenant_id="tenant",
+            execution_id="execution",
+            segment_sequence=1,
+        )
+        now = datetime.now(timezone.utc)
+        await state.steps.register_run(
+            RunRecord(
+                run_id=run_id,
+                conversation_id=step_conversation_id(
+                    namespace="history-unprojected",
+                    tenant_id="tenant",
+                    execution_id="execution",
+                ),
+                parent_run_id=None,
+                agent_name="default",
+                metadata={"segment_sequence": "1"},
+                started_at=now,
+            )
+        )
+
+        archive = state.steps.read_store(RuntimeDomain.EXECUTION)
+        assert isinstance(archive, StateStepArchive)
+        assert await archive.get_run(run_id=run_id) is None
+        terminal_plan = await state.steps.prepare_execution_terminal_seal(
+            execution_id="execution",
+            run_ids=(run_id,),
+            binding_digest="binding",
+        )
+
+        projection = terminal_plan.projections[0]
+        assert projection.events == ()
+        assert projection.snapshots == ()
+        assert projection.target_event_offset == 0
+        assert projection.target_snapshot_offset == 0
+        assert projection.target_transcript_message_count == 0
+        assert projection.projection_digest == "empty"
+    finally:
+        if terminal_plan is not None:
+            await state.steps.discard_execution_terminal_seal(terminal_plan)
+        await state.close()
+
+
+@pytest.mark.asyncio
+async def test_conversation_head_replacement_preserves_physical_identity(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "runtime.db"
+    provisioning_engine = create_async_engine(f"sqlite+aiosqlite:///{path}")
+    await provision_database(provisioning_engine)
+    await provisioning_engine.dispose()
+    state = RuntimeState.sqlite(path)
+    await state.initialize(namespace="conversation-head", tenant_id="tenant")
+    try:
+        await state.conversation.histories.create(
+            ConversationHistoryRecord(
+                history_id="history",
+                session_id="session",
+                tenant_id="tenant",
+                parent_history_id=None,
+                prefix_index_head_id=None,
+                inherited_message_count=0,
+                inherited_history_item_count=0,
+            )
+        )
+        now = datetime.now(timezone.utc)
+        run = RunRecord(
+            run_id="run",
+            conversation_id="conversation",
+            parent_run_id=None,
+            agent_name="default",
+            metadata={"history_id": "history"},
+            started_at=now,
+        )
+        await state.steps.read_store(RuntimeDomain.CONVERSATION).materialize_snapshot(
+            run,
+            ContinuableSnapshot(
+                run_id="run",
+                step_index=1,
+                messages=[ModelRequest(parts=[UserPromptPart(content="hello")])],
+                conversation_id="conversation",
+                parent_run_id=None,
+                agent_name="default",
+                timestamp=now,
+            ),
+        )
+        head = await state.steps.read_store(
+            RuntimeDomain.CONVERSATION
+        ).transcript_repository.get_head("history")
+        assert head is not None
+        assert head.message_count == 1
+    finally:
+        await state.close()
+
+
+@pytest.mark.asyncio
 async def test_projection_flight_resolves_waiters_after_abandon() -> None:
     steps = RuntimeState.in_memory()
     await steps.initialize(namespace="flight-abandon", tenant_id="tenant")
@@ -334,36 +435,6 @@ async def test_read_only_state_callback_rejects_record_guard() -> None:
             await state.execution.executions.state_store.read(callback)
     finally:
         await state.close()
-
-
-def test_transcript_accumulator_plans_then_applies_idempotently() -> None:
-    accumulator = _TranscriptAccumulator("run")
-    message = ModelRequest(parts=[UserPromptPart(content="hello")])
-
-    advance = accumulator.plan((message,))
-
-    assert accumulator.messages == ()
-    accumulator.apply(advance)
-    accumulator.apply(advance)
-    assert accumulator.messages == (message,)
-
-
-def test_transcript_accumulator_state_clone_is_isolated() -> None:
-    accumulator = _TranscriptAccumulator("run")
-    accumulator.seed((ModelRequest(parts=[UserPromptPart(content="seed")]),))
-    advance = accumulator.plan(
-        (ModelRequest(parts=[UserPromptPart(content="seed")]),)
-    )
-    accumulator.apply(advance)
-
-    working = _TranscriptAccumulator.from_state(accumulator.snapshot_state())
-    followup = working.plan((ModelResponse(parts=[TextPart(content="next")]),))
-    working.apply(followup)
-
-    assert len(working.messages) == 2
-    assert len(accumulator.messages) == 1
-    assert working.generation == accumulator.generation + 1
-    assert working.snapshot_state().messages != accumulator.snapshot_state().messages
 
 
 async def _materialize_attempt(state: RuntimeState, sequence: int, prompt: str) -> None:

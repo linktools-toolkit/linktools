@@ -1,0 +1,185 @@
+{
+  "version": 2,
+  "wire_type_ids": [
+    "approval_record",
+    "agent_attempt_claim",
+    "artifact_record",
+    "conversation_cursor",
+    "conversation_history_index_node",
+    "conversation_history",
+    "conversation_history_segment",
+    "context_projection",
+    "evaluation_record",
+    "execution_event",
+    "execution_history_head",
+    "execution_history_seal",
+    "execution_history_state",
+    "execution_record",
+    "execution_run_seal_head",
+    "execution_start_claim",
+    "execution_start_unknown_commit",
+    "execution_cancel_request_commit",
+    "execution_start_reservation",
+    "execution_start_reservation_result",
+    "execution_terminal_commit",
+    "execution_terminal_commit_result",
+    "execution_event_append",
+    "external_call_record",
+    "idempotency_record",
+    "memory_record",
+    "operation_ledger_input",
+    "operation_ledger_record",
+    "principal",
+    "recovery_checkpoint",
+    "recovery_admission",
+    "recovery_active",
+    "recovery_conversation_intent",
+    "recovery_execution_input",
+    "recovery_idempotency_input",
+    "recovery_integrity_report",
+    "recovery_state",
+    "recovery_terminal_handoff",
+    "recovery_terminal_outcome",
+    "resource_ref",
+    "result_record",
+    "session_record",
+    "session_fork_result",
+    "stored_step_snapshot",
+    "object_ref",
+    "stored_payload",
+    "history_quality",
+    "inline_context_block",
+    "loaded_context_message",
+    "loaded_model_context",
+    "runtime_payload_ref",
+    "transcript_chunk",
+    "transcript_head",
+    "transcript_message_ref",
+    "transcript_origin",
+    "transcript_owner_domain",
+    "transcript_seek_dimension",
+    "transcript_seek",
+    "transcript_span_ref",
+    "tool_operation_admission",
+    "runtime_domain",
+    "task_graph",
+    "task_graph_limits",
+    "task_graph_view",
+    "task_lease",
+    "task_node",
+    "task_node_view",
+    "task_terminal",
+    "tool_operation",
+    "usage_metrics",
+    "run_record",
+    "step_event",
+    "tool_effect"
+  ],
+  "enum_wire_type_ids": [
+    "approval_decision",
+    "approval_status",
+    "evaluation_status",
+    "execution_event_type",
+    "execution_history_state",
+    "execution_lineage_kind",
+    "execution_status",
+    "external_call_status",
+    "history_quality",
+    "idempotency_status",
+    "operation_kind",
+    "operation_status",
+    "resource_kind",
+    "runtime_domain",
+    "recovery_checkpoint_state",
+    "recovery_handoff_phase",
+    "session_status",
+    "stop_reason",
+    "task_status",
+    "tool_operation_status",
+    "transcript_origin",
+    "transcript_owner_domain",
+    "transcript_seek_dimension"
+  ],
+  "envelopes": [
+    {
+      "v": 2,
+      "value": {
+        "type": "conversation_cursor",
+        "payload": {
+          "$dataclass": "conversation_cursor",
+          "fields": {
+            "step_run_id": "run",
+            "history_id": null,
+            "message_count": 0
+          }
+        }
+      }
+    },
+    {
+      "v": 2,
+      "value": {
+        "type": "execution_history_state",
+        "payload": {
+          "$enum": "execution_history_state",
+          "value": "open"
+        }
+      }
+    },
+    {
+      "v": 2,
+      "value": {
+        "type": "transcript_message_ref",
+        "payload": {
+          "$dataclass": "transcript_message_ref",
+          "fields": {
+            "source_domain": {
+              "$enum": "runtime_domain",
+              "value": "execution"
+            },
+            "owner_id": "run",
+            "message_index": 0
+          }
+        }
+      }
+    }
+  ],
+  "stored_primitives": {
+    "record": {
+      "key": "0000000000000000000000000000000000000000000000000000000000000000",
+      "partition": "1111111111111111111111111111111111111111111111111111111111111111",
+      "scope": null,
+      "parent": null,
+      "kind": "golden",
+      "sort": "golden",
+      "state": null,
+      "storage_version": 0,
+      "lease": {
+        "owner": null,
+        "fence": 0,
+        "expires_at": null
+      },
+      "data": {}
+    },
+    "fact": {
+      "stream": "2222222222222222222222222222222222222222222222222222222222222222",
+      "sequence": 1,
+      "owner": "3333333333333333333333333333333333333333333333333333333333333333",
+      "kind": "golden",
+      "subject": null,
+      "state": "golden",
+      "data": {}
+    },
+    "operation": {
+      "key": "4444444444444444444444444444444444444444444444444444444444444444",
+      "stream": "5555555555555555555555555555555555555555555555555555555555555555",
+      "sequence": 1,
+      "state": "golden",
+      "compactable": false,
+      "data": {}
+    },
+    "alias": {
+      "alias": "6666666666666666666666666666666666666666666666666666666666666666",
+      "record": "7777777777777777777777777777777777777777777777777777777777777777"
+    }
+  }
+}

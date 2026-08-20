@@ -74,20 +74,9 @@ class ConversationHistorySegmentRef:
             raise ValueError("history segment owner cannot be empty")
 
 
-@dataclass(frozen=True, slots=True)
-class ConversationHistoryParent:
-    history_id: str
-    through_message_count: int
-
-    def __post_init__(self) -> None:
-        if self.through_message_count < 0:
-            raise ValueError("history parent message count cannot be negative")
-
-
 class HistoryQuality(StrEnum):
     COMPLETE = "complete"
     CONSERVATIVE = "conservative"
-    LEGACY_PARTIAL = "legacy_partial"
 
 
 @dataclass(frozen=True, slots=True)
@@ -158,6 +147,12 @@ class TranscriptOrigin(StrEnum):
     UNKNOWN = "unknown"
 
 
+class TranscriptOwnerDomain(StrEnum):
+    CONVERSATION = "conversation"
+    EXECUTION = "execution"
+    RECOVERY = "recovery"
+
+
 @dataclass(frozen=True, slots=True)
 class RuntimePayloadRef:
     payload: StoredPayload
@@ -178,7 +173,8 @@ class TranscriptChunk:
 
 class TranscriptSeekDimension(StrEnum):
     MESSAGE = "message"
-    HISTORY_ITEM = "history_item"
+    SESSION_HISTORY_ITEM = "session_history_item"
+    EXECUTION_TRANSCRIPT_ITEM = "execution_transcript_item"
 
 
 @dataclass(frozen=True, slots=True)
@@ -189,12 +185,14 @@ class TranscriptHeadRecord:
     the only authoritative totals.
     """
 
-    owner_domain: RuntimeDomain
+    owner_domain: TranscriptOwnerDomain
     owner_id: str
     message_count: int
-    history_item_count: int
+    session_history_item_count: int
+    session_history_view_version: int
+    execution_transcript_item_count: int
+    execution_transcript_view_version: int
     chunk_count: int
-    history_view_version: int
     quality: HistoryQuality
     revision: int
 
@@ -203,17 +201,20 @@ class TranscriptHeadRecord:
             value < 0
             for value in (
                 self.message_count,
-                self.history_item_count,
+                self.session_history_item_count,
+                self.execution_transcript_item_count,
                 self.chunk_count,
                 self.revision,
             )
         ):
             raise ValueError("transcript head counts cannot be negative")
-        if self.history_view_version < 1:
-            raise ValueError("transcript head history view version must be positive")
+        if (
+            self.session_history_view_version < 1
+            or self.execution_transcript_view_version < 1
+        ):
+            raise ValueError("transcript head view versions must be positive")
         if not self.owner_id:
             raise ValueError("transcript head owner cannot be empty")
-
 
 @dataclass(frozen=True, slots=True)
 class TranscriptSeekRecord:
@@ -224,22 +225,21 @@ class TranscriptSeekRecord:
     block_start: int
     fact_sequence: int
     chunk_first_message_index: int
-    chunk_first_history_item_index: int
-    history_view_version: int
+    chunk_first_view_item_index: int
+    view_version: int
 
     def __post_init__(self) -> None:
         if self.block_start < 0 or self.fact_sequence < 1:
             raise ValueError("transcript seek boundary values are invalid")
         if (
             self.chunk_first_message_index < 0
-            or self.chunk_first_history_item_index < 0
+            or self.chunk_first_view_item_index < 0
         ):
             raise ValueError("transcript seek chunk offsets cannot be negative")
-        if self.history_view_version < 1:
-            raise ValueError("transcript seek history view version must be positive")
+        if self.view_version < 1:
+            raise ValueError("transcript seek view version must be positive")
         if not self.owner_id:
             raise ValueError("transcript seek owner cannot be empty")
-
 
 @dataclass(frozen=True, slots=True)
 class TranscriptSpanRef:
@@ -322,6 +322,54 @@ class SessionRecord:
             raise ValueError("active execution identifier cannot be empty")
         if self.status is SessionStatus.CLOSED and self.active_execution_id is not None:
             raise ValueError("closed session cannot have an active execution")
+        if self.history_quality not in {"complete", "conservative"}:
+            raise ValueError("session history quality summary is invalid")
+
+
+@dataclass(frozen=True, slots=True)
+class SessionForkResultRecord:
+    operation_id: str
+    source_session_id: str
+    source_history_id: str
+    source_session_revision: int
+    source_transcript_revision: int
+    source_local_message_count: int
+    source_local_history_item_count: int
+    source_prefix_index_head_id: "str | None"
+    inherited_message_count: int
+    inherited_history_item_count: int
+    target_session_id: str
+    target_history_id: str
+    target_prefix_index_head_id: "str | None"
+    request_digest: str
+    result_digest: str
+
+    def __post_init__(self) -> None:
+        if any(
+            value < 0
+            for value in (
+                self.source_session_revision,
+                self.source_transcript_revision,
+                self.source_local_message_count,
+                self.source_local_history_item_count,
+                self.inherited_message_count,
+                self.inherited_history_item_count,
+            )
+        ):
+            raise ValueError("session fork result counts cannot be negative")
+        if not all(
+            value
+            for value in (
+                self.operation_id,
+                self.source_session_id,
+                self.source_history_id,
+                self.target_session_id,
+                self.target_history_id,
+                self.request_digest,
+                self.result_digest,
+            )
+        ):
+            raise ValueError("session fork result identity cannot be empty")
 
 
 @dataclass(frozen=True, slots=True)
@@ -911,14 +959,6 @@ class SessionRepository(RuntimeRepository, Protocol):
         *,
         tenant_id: str,
     ) -> SessionRecord: ...
-    async def ensure_history(
-        self,
-        session_id: str,
-        *,
-        tenant_id: str,
-        expected_revision: int,
-        history: ConversationHistoryRecord,
-    ) -> SessionRecord: ...
     async def release_execution(
         self,
         session_id: str,
@@ -985,6 +1025,31 @@ class ConversationHistoryRepository(RuntimeRepository, Protocol):
         session_id: str,
         tenant_id: str,
     ) -> ConversationHistoryRecord: ...
+    async def get_index_node(
+        self,
+        node_id: str,
+        *,
+        tenant_id: str,
+    ) -> ConversationHistoryIndexNodeRecord: ...
+    async def get_forest_roots(
+        self,
+        head_id: str | None,
+        *,
+        tenant_id: str,
+        max_roots: int,
+    ) -> tuple[ConversationHistoryIndexNodeRecord, ...]: ...
+    async def get_index_node_in_transaction(
+        self,
+        transaction: "StateTransaction",
+        node_id: str,
+    ) -> ConversationHistoryIndexNodeRecord: ...
+    async def get_forest_roots_in_transaction(
+        self,
+        transaction: "StateTransaction",
+        head_id: str | None,
+        *,
+        max_roots: int,
+    ) -> tuple[ConversationHistoryIndexNodeRecord, ...]: ...
 
 
 class ExecutionRepository(RuntimeRepository, Protocol):
@@ -1369,7 +1434,6 @@ __all__ = [
     "ArtifactRepository",
     "ArtifactState",
     "ConversationCursor",
-    "ConversationHistoryParent",
     "ConversationHistoryRecord",
     "ConversationHistoryRepository",
     "ContextProjection",
@@ -1424,7 +1488,11 @@ __all__ = [
     "RuntimePayloadRef",
     "StoredStepSnapshot",
     "TranscriptChunk",
+    "TranscriptHeadRecord",
     "TranscriptOrigin",
+    "TranscriptOwnerDomain",
+    "TranscriptSeekDimension",
+    "TranscriptSeekRecord",
     "TranscriptSpanRef",
     "RuntimeRepository",
     "SessionRecord",

@@ -46,7 +46,13 @@ from ...task import (
     TaskTerminalRecord,
 )
 from .._tool import ToolOperationRecord
-from ._codec import decode_domain, decode_envelope, encode_domain, encode_envelope
+from ._codec import (
+    decode_domain,
+    decode_envelope,
+    encode_domain,
+    encode_envelope,
+    wire_type_id,
+)
 from ._contracts import (
     ApprovalRecord,
     ArtifactRecord,
@@ -68,6 +74,7 @@ from ._contracts import (
     ExecutionTerminalCommit,
     ExecutionTerminalCommitResult,
     ExternalCallRecord,
+    HistoryQuality,
     IdempotencyRecord,
     IdempotencyTerminalUpdate,
     MemoryRecord,
@@ -79,9 +86,14 @@ from ._contracts import (
     RecoveryStateRecord,
     ResultRecord,
     SessionRecord,
+    SessionForkResultRecord,
     ToolOperationAdmission,
+    TranscriptHeadRecord,
+    TranscriptOwnerDomain,
 )
-from ._history_index import HistoryIndexSnapshot, build_fork_index_node
+from ._history_index import (
+    build_fork_index_node_from_roots,
+)
 from ._plan import RuntimeDomain
 from ._store import (
     FactQuery,
@@ -532,9 +544,31 @@ class ConversationHistoryRepositoryImpl(_RepositoryBase):
             existing = await self._decode_history(current)
             if existing != record:
                 raise AIError(ErrorCode.IDEMPOTENCY_CONFLICT)
+            if await transaction.get_record(
+                self._key("transcript_head", record.history_id)
+            ) is None:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             return existing
         await transaction.insert_record(
             self._stored("conversation_history", record.history_id, record)
+        )
+        await transaction.insert_record(
+            self._stored(
+                "transcript_head",
+                record.history_id,
+                TranscriptHeadRecord(
+                    TranscriptOwnerDomain.CONVERSATION,
+                    record.history_id,
+                    0,
+                    0,
+                    1,
+                    0,
+                    1,
+                    0,
+                    HistoryQuality.COMPLETE,
+                    0,
+                ),
+            )
         )
         return record
 
@@ -567,72 +601,81 @@ class ConversationHistoryRepositoryImpl(_RepositoryBase):
     ) -> tuple[int, int]:
         """Read one branch's local message and history-item counts."""
         record = await transaction.get_record(
-            record_key_digest(
-                self._namespace,
-                self._tenant_id,
-                RuntimeDomain.CONVERSATION.value,
-                "history_owner",
-                history_id,
-            )
+            self._key("transcript_head", history_id)
         )
         if record is None:
-            return 0, 0
-        messages = record.data.get("message_count", 0)
-        items = record.data.get("history_item_count", 0)
-        if (
-            isinstance(messages, bool)
-            or not isinstance(messages, int)
-            or isinstance(items, bool)
-            or not isinstance(items, int)
-            or messages < 0
-            or items < 0
-        ):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        return messages, items
+        head = await self._decode(record, TranscriptHeadRecord)
+        return head.message_count, head.session_history_item_count
 
-    async def index_snapshot_in_transaction(
+    async def get_index_node_in_transaction(
         self,
         transaction: StateTransaction,
-        prefix_index_head_id: str,
-    ) -> HistoryIndexSnapshot:
-        """Load the forest roots addressed by one prefix head, with their trees."""
-        nodes: dict[str, ConversationHistoryIndexNodeRecord] = {}
-        root_ids: list[str] = []
-        cursor: str | None = prefix_index_head_id
-        visited: set[str] = set()
-        while cursor is not None:
-            if cursor in visited:
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            visited.add(cursor)
-            node = await self._get_index_node_in_transaction(transaction, nodes, cursor)
-            root_ids.append(node.node_id)
-            cursor = node.next_forest_id
-            if len(root_ids) > _INDEX_ROOT_READ_LIMIT:
-                break
-        return HistoryIndexSnapshot(nodes, tuple(root_ids))
-
-    async def _get_index_node_in_transaction(
-        self,
-        transaction: StateTransaction,
-        nodes: dict[str, ConversationHistoryIndexNodeRecord],
         node_id: str,
     ) -> ConversationHistoryIndexNodeRecord:
-        """Load one node and its subtree (left/right children) into ``nodes``."""
-        cached = nodes.get(node_id)
-        if cached is not None:
-            return cached
+        """Read exactly one skew index node without traversing its children."""
         record = await transaction.get_record(
             self._key("conversation_index_node", node_id)
         )
         if record is None:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         node = decode_domain(_domain_payload(record), ConversationHistoryIndexNodeRecord)
-        nodes[node.node_id] = node
-        if node.left_tree_id is not None:
-            await self._get_index_node_in_transaction(transaction, nodes, node.left_tree_id)
-        if node.right_tree_id is not None:
-            await self._get_index_node_in_transaction(transaction, nodes, node.right_tree_id)
+        if node.node_id != node_id:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         return node
+
+    async def get_index_node(
+        self,
+        node_id: str,
+        *,
+        tenant_id: str,
+    ) -> ConversationHistoryIndexNodeRecord:
+        _require_repository_tenant(tenant_id, self._tenant_id)
+        return await self._store.read(
+            lambda transaction: self.get_index_node_in_transaction(
+                transaction,
+                node_id,
+            )
+        )
+
+    async def get_forest_roots_in_transaction(
+        self,
+        transaction: StateTransaction,
+        head_id: str | None,
+        *,
+        max_roots: int,
+    ) -> tuple[ConversationHistoryIndexNodeRecord, ...]:
+        if max_roots < 1:
+            raise ValueError("max_roots must be positive")
+        roots: list[ConversationHistoryIndexNodeRecord] = []
+        cursor = head_id
+        visited: set[str] = set()
+        while cursor is not None and len(roots) < max_roots:
+            if cursor in visited:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            visited.add(cursor)
+            node = await self.get_index_node_in_transaction(transaction, cursor)
+            roots.append(node)
+            cursor = node.next_forest_id
+        if cursor is not None and max_roots > 2:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        return tuple(roots)
+
+    async def get_forest_roots(
+        self,
+        head_id: str | None,
+        *,
+        tenant_id: str,
+        max_roots: int,
+    ) -> tuple[ConversationHistoryIndexNodeRecord, ...]:
+        _require_repository_tenant(tenant_id, self._tenant_id)
+        return await self._store.read(
+            lambda transaction: self.get_forest_roots_in_transaction(
+                transaction,
+                head_id,
+                max_roots=max_roots,
+            )
+        )
 
     async def insert_index_node_in_transaction(
         self,
@@ -670,16 +713,13 @@ class ConversationHistoryRepositoryImpl(_RepositoryBase):
             )
             prefix_head = source.prefix_index_head_id
             if local_messages > 0 or local_items > 0:
-                snapshot = (
-                    HistoryIndexSnapshot({}, ())
-                    if prefix_head is None
-                    else await self.index_snapshot_in_transaction(
-                        transaction,
-                        prefix_head,
-                    )
+                roots = await self.get_forest_roots_in_transaction(
+                    transaction,
+                    prefix_head,
+                    max_roots=2,
                 )
-                node = build_fork_index_node(
-                    snapshot,
+                node = build_fork_index_node_from_roots(
+                    roots,
                     source_history_id=source_history_id,
                     source_local_message_count=local_messages,
                     source_local_history_item_count=local_items,
@@ -784,6 +824,13 @@ class SessionRepositoryImpl(_ResourceRepository[SessionRecord]):
                     _new_session_history(value),
                 )
             )
+            await transaction.insert_record(
+                self._stored(
+                    "transcript_head",
+                    value.history_id,
+                    _empty_conversation_transcript_head(value.history_id),
+                )
+            )
             await self._bump_list_generation(transaction, value.owner_principal_id)
             return value
 
@@ -819,6 +866,13 @@ class SessionRepositoryImpl(_ResourceRepository[SessionRecord]):
                     _new_session_history(record),
                 )
             )
+            await transaction.insert_record(
+                self._stored(
+                    "transcript_head",
+                    record.history_id,
+                    _empty_conversation_transcript_head(record.history_id),
+                )
+            )
             await self._bump_list_generation(transaction, record.owner_principal_id)
             return record, False
 
@@ -845,7 +899,19 @@ class SessionRepositoryImpl(_ResourceRepository[SessionRecord]):
         target = _ensure_session_history(replace(target, history_id=None))
 
         async def mutate(transaction: StateTransaction) -> tuple[SessionRecord, bool]:
-            _, replayed = await _append_operation(transaction, self, operation)
+            operation_record, replayed = await _append_operation(
+                transaction,
+                self,
+                operation,
+            )
+            if replayed:
+                return await self._replay_fork_in_transaction(
+                    transaction,
+                    source_session_id=source_session_id,
+                    target=target,
+                    operation=operation,
+                    operation_record=operation_record,
+                )
             source_stored = await transaction.get_record(
                 self._key("session", source_session_id)
             )
@@ -854,11 +920,11 @@ class SessionRepositoryImpl(_ResourceRepository[SessionRecord]):
             source = await self._decode(source_stored, SessionRecord)
             if source.tenant_id != self._tenant_id:
                 raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
-            if not replayed and source.revision != expected_source_revision:
+            if source.revision != expected_source_revision:
                 raise AIError(ErrorCode.STORAGE_CONFLICT)
             if source.history_id is None:
                 raise AIError(ErrorCode.SESSION_HISTORY_UNAVAILABLE)
-            if not replayed and await transaction.guard_record(
+            if await transaction.guard_record(
                 self._key("session", source_session_id),
                 expected_storage_version=source_stored.storage_version,
             ) is None:
@@ -883,31 +949,6 @@ class SessionRepositoryImpl(_ResourceRepository[SessionRecord]):
             child_stored = await transaction.get_record(
                 self._key("conversation_history", child_history_id)
             )
-            if replayed:
-                if target_stored is None:
-                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                existing_target = await self._decode(target_stored, SessionRecord)
-                existing_child = (
-                    None
-                    if child_stored is None
-                    else await self._decode_history(child_stored)
-                )
-                repaired = await self._validate_fork_replay(
-                    transaction,
-                    existing_target,
-                    target_stored,
-                    existing_child,
-                    source.history_id,
-                    child_history_id,
-                    target,
-                )
-                _logger.info(
-                    "session fork replayed: source=%s target=%s repaired=%s",
-                    source_session_id,
-                    existing_target.session_id,
-                    repaired != existing_target,
-                )
-                return repaired, True
             histories = ConversationHistoryRepositoryImpl(
                 self._store,
                 namespace=self._namespace,
@@ -919,16 +960,13 @@ class SessionRepositoryImpl(_ResourceRepository[SessionRecord]):
             )
             prefix_head = source_history.prefix_index_head_id
             if local_messages > 0 or local_items > 0:
-                snapshot = (
-                    HistoryIndexSnapshot({}, ())
-                    if prefix_head is None
-                    else await histories.index_snapshot_in_transaction(
-                        transaction,
-                        prefix_head,
-                    )
+                roots = await histories.get_forest_roots_in_transaction(
+                    transaction,
+                    prefix_head,
+                    max_roots=2,
                 )
-                node = build_fork_index_node(
-                    snapshot,
+                node = build_fork_index_node_from_roots(
+                    roots,
                     source_history_id=source.history_id,
                     source_local_message_count=local_messages,
                     source_local_history_item_count=local_items,
@@ -989,6 +1027,48 @@ class SessionRepositoryImpl(_ResourceRepository[SessionRecord]):
                     child,
                 )
             )
+            await transaction.insert_record(
+                self._stored(
+                    "transcript_head",
+                    child.history_id,
+                    _empty_conversation_transcript_head(child.history_id),
+                )
+            )
+            source_head_stored = await transaction.get_record(
+                self._key("transcript_head", source.history_id)
+            )
+            if source_head_stored is None:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            source_head = decode_domain(
+                _domain_payload(source_head_stored),
+                TranscriptHeadRecord,
+            )
+            fork_result = SessionForkResultRecord(
+                operation.operation_id,
+                source.session_id,
+                source.history_id,
+                source.revision,
+                source_head.revision,
+                local_messages,
+                local_items,
+                source_history.prefix_index_head_id,
+                inherited,
+                inherited_items,
+                expected_target.session_id,
+                child.history_id,
+                child.prefix_index_head_id,
+                operation.request_digest,
+                operation.result_digest or "",
+            )
+            if not fork_result.result_digest:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            await transaction.insert_record(
+                self._stored(
+                    "session_fork_result",
+                    operation.operation_id,
+                    fork_result,
+                )
+            )
             await self._bump_list_generation(
                 transaction,
                 expected_target.owner_principal_id,
@@ -1003,81 +1083,72 @@ class SessionRepositoryImpl(_ResourceRepository[SessionRecord]):
 
         return await self._store.mutate(mutate)
 
-    async def _validate_fork_replay(
+    async def _replay_fork_in_transaction(
         self,
         transaction: StateTransaction,
+        *,
+        source_session_id: str,
         target: SessionRecord,
-        target_stored: StoredRecord,
-        child: ConversationHistoryRecord | None,
-        source_history_id: str,
-        child_history_id: str,
-        expected_target: SessionRecord,
-    ) -> SessionRecord:
+        operation: OperationLedgerInput,
+        operation_record: OperationLedgerRecord,
+    ) -> tuple[SessionRecord, bool]:
+        result_stored = await transaction.get_record(
+            self._key("session_fork_result", operation.operation_id)
+        )
+        if result_stored is None:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        result = decode_domain(
+            _domain_payload(result_stored),
+            SessionForkResultRecord,
+        )
         if (
-            target.history_id != child_history_id
-            or target.session_id != expected_target.session_id
-            or target.tenant_id != expected_target.tenant_id
-            or target.owner_principal_id != expected_target.owner_principal_id
-            or target.binding_digest != expected_target.binding_digest
+            result.operation_id != operation.operation_id
+            or result.request_digest != operation.request_digest
+            or result.result_digest != operation_record.result_digest
+            or result.source_session_id != source_session_id
+            or operation.result_digest != result.result_digest
         ):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        if child is None:
-            if (
-                target.continuation is not None
-                and target.continuation.history_id == source_history_id
-            ):
-                raise AIError(ErrorCode.SESSION_HISTORY_UNAVAILABLE)
+        target_stored = await transaction.get_record(
+            self._key("session", result.target_session_id)
+        )
+        child_stored = await transaction.get_record(
+            self._key("conversation_history", result.target_history_id)
+        )
+        head_stored = await transaction.get_record(
+            self._key("transcript_head", result.target_history_id)
+        )
+        if target_stored is None or child_stored is None or head_stored is None:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        existing_target = await self._decode(target_stored, SessionRecord)
+        child = await self._decode_history(child_stored)
         if (
-            child.parent_history_id is None
-            and child.inherited_message_count == 0
-            and child.inherited_history_item_count == 0
-            and target.continuation is not None
-            and target.continuation.history_id == source_history_id
-        ):
-            raise AIError(ErrorCode.SESSION_HISTORY_UNAVAILABLE)
-        if (
-            child.session_id != target.session_id
+            existing_target.session_id != result.target_session_id
+            or existing_target.history_id != result.target_history_id
+            or existing_target.tenant_id != self._tenant_id
+            or existing_target.owner_principal_id != target.owner_principal_id
+            or existing_target.binding_digest != target.binding_digest
+            or child.session_id != result.target_session_id
             or child.tenant_id != self._tenant_id
-            or child.parent_history_id != source_history_id
+            or child.parent_history_id != result.source_history_id
+            or child.prefix_index_head_id != result.target_prefix_index_head_id
+            or child.inherited_message_count != result.inherited_message_count
+            or child.inherited_history_item_count != result.inherited_history_item_count
         ):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        if target.tenant_id != self._tenant_id:
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        if target.continuation is not None and target.continuation.history_id == child_history_id:
-            return target
+        head_payload = _domain_payload(head_stored)
+        head = decode_domain(head_payload, TranscriptHeadRecord)
         if (
-            target.continuation is not None
-            and target.continuation.history_id == source_history_id
+            head.owner_domain is not TranscriptOwnerDomain.CONVERSATION
+            or head.owner_id != result.target_history_id
         ):
-            now = await transaction.now()
-            repaired = replace(
-                target,
-                history_id=child_history_id,
-                revision=target.revision + 1,
-                resource_generation=target.resource_generation + 1,
-                continuation=replace(
-                    target.continuation,
-                    history_id=child_history_id,
-                ),
-                updated_at=now,
-            )
-            await _replace_checked(
-                transaction,
-                _projected_record(self, target_stored, repaired),
-                target_stored.storage_version,
-            )
-            await self._bump_list_generation(
-                transaction,
-                repaired.owner_principal_id,
-            )
-            _logger.warning(
-                "session fork continuation repaired: target=%s history=%s",
-                repaired.session_id,
-                repaired.history_id,
-            )
-            return repaired
-        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        _logger.info(
+            "session fork replayed from first result: source=%s target=%s",
+            source_session_id,
+            existing_target.session_id,
+        )
+        return existing_target, True
 
     async def _visible_history_count_in_transaction(
         self,
@@ -1387,55 +1458,6 @@ class SessionRepositoryImpl(_ResourceRepository[SessionRecord]):
         if record is None:
             raise AIError(ErrorCode.STORAGE_NOT_FOUND)
         return await self._decode(record, SessionRecord)
-
-    async def ensure_history(
-        self,
-        session_id: str,
-        *,
-        tenant_id: str,
-        expected_revision: int,
-        history: ConversationHistoryRecord,
-    ) -> SessionRecord:
-        _require_repository_tenant(tenant_id, self._tenant_id)
-        _require_tenant(history, self._tenant_id)
-        if history.session_id != session_id:
-            raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
-
-        async def mutate(transaction: StateTransaction) -> SessionRecord:
-            record = await transaction.get_record(self._key("session", session_id))
-            if record is None:
-                raise AIError(ErrorCode.STORAGE_NOT_FOUND)
-            current = await self._decode(record, SessionRecord)
-            if current.history_id == history.history_id:
-                return current
-            if current.history_id is not None or current.revision != expected_revision:
-                raise AIError(ErrorCode.STORAGE_CONFLICT)
-            history_key = self._key("conversation_history", history.history_id)
-            stored_history = await transaction.get_record(history_key)
-            if stored_history is None:
-                await transaction.insert_record(
-                    self._stored("conversation_history", history.history_id, history)
-                )
-            elif await self._decode_history(stored_history) != history:
-                raise AIError(ErrorCode.IDEMPOTENCY_CONFLICT)
-            now = await transaction.now()
-            updated = replace(
-                current,
-                history_id=history.history_id,
-                history_quality=history.history_quality.value,
-                revision=current.revision + 1,
-                resource_generation=current.resource_generation + 1,
-                updated_at=now,
-            )
-            await _replace_checked(
-                transaction,
-                self._projected_record(record, updated),
-                record.storage_version,
-            )
-            await self._bump_list_generation(transaction, current.owner_principal_id)
-            return updated
-
-        return await self._store.mutate(mutate)
 
     async def _decode_history(self, record: StoredRecord) -> ConversationHistoryRecord:
         return decode_domain(_domain_payload(record), ConversationHistoryRecord)
@@ -3738,7 +3760,6 @@ class ToolRepositoryImpl(_RepositoryBase):
                     owner=request.owner,
                     fence=1,
                     lease_expires_at=now + timedelta(seconds=request.lease_seconds),
-                    result_object_ref=None,
                     error_code=None,
                     created_at=now,
                     updated_at=now,
@@ -3972,26 +3993,6 @@ class ToolRepositoryImpl(_RepositoryBase):
 
         return await self._store.mutate(mutate)
 
-    async def complete(
-        self, tool_operation_id: str, *, tenant_id: str, owner: str, fence: int, result_object_ref: ObjectRef | None
-    ) -> ToolOperationRecord:
-        return await self._finish_tool(
-            tool_operation_id,
-            tenant_id=tenant_id,
-            owner=owner,
-            fence=fence,
-            terminal_status=ToolOperationStatus.COMPLETED,
-            requested_result=result_object_ref,
-            value=lambda current, now: replace(
-                current,
-                status=ToolOperationStatus.COMPLETED,
-                result_object_ref=result_object_ref,
-                result_payload=None,
-                lease_expires_at=None,
-                updated_at=now,
-            ),
-        )
-
     async def complete_payload(
         self,
         tool_operation_id: str,
@@ -4011,7 +4012,6 @@ class ToolRepositoryImpl(_RepositoryBase):
             value=lambda current, now: replace(
                 current,
                 status=ToolOperationStatus.COMPLETED,
-                result_object_ref=result_payload.ref if result_payload.kind == "object" else None,
                 result_payload=result_payload,
                 lease_expires_at=None,
                 updated_at=now,
@@ -4112,7 +4112,6 @@ class ToolRepositoryImpl(_RepositoryBase):
         owner: str,
         fence: int,
         terminal_status: ToolOperationStatus,
-        requested_result: ObjectRef | None = None,
         requested_result_payload: StoredPayload | None = None,
         requested_error: str | None = None,
         requested_error_payload: StoredPayload | None = None,
@@ -4134,7 +4133,6 @@ class ToolRepositoryImpl(_RepositoryBase):
                     terminal_status is ToolOperationStatus.COMPLETED
                     and current.owner == owner
                     and current.fence == fence
-                    and current.result_object_ref == requested_result
                     and current.result_payload == requested_result_payload
                 ):
                     return current
@@ -4185,7 +4183,6 @@ class ToolRepositoryImpl(_RepositoryBase):
             value=lambda current, now: replace(
                 current,
                 status=ToolOperationStatus.COMPLETED,
-                result_object_ref=result_payload.ref if result_payload.kind == "object" else None,
                 result_payload=result_payload,
                 lease_expires_at=None,
                 updated_at=now,
@@ -4331,6 +4328,23 @@ def _new_session_history(value: SessionRecord) -> ConversationHistoryRecord:
     )
 
 
+def _empty_conversation_transcript_head(
+    history_id: str,
+) -> TranscriptHeadRecord:
+    return TranscriptHeadRecord(
+        TranscriptOwnerDomain.CONVERSATION,
+        history_id,
+        0,
+        0,
+        1,
+        0,
+        1,
+        0,
+        HistoryQuality.COMPLETE,
+        0,
+    )
+
+
 def _domain_data(value: object) -> dict[str, object]:
     payload = encode_domain(value)
     if isinstance(value, (TaskNodeView, ToolOperationRecord)) and isinstance(payload, Mapping):
@@ -4340,7 +4354,7 @@ def _domain_data(value: object) -> dict[str, object]:
             payload["fields"] = {
                 key: item for key, item in fields.items() if key not in {"owner", "fence", "lease_expires_at"}
             }
-    return encode_envelope({"type": value.__class__.__name__, "payload": payload})
+    return encode_envelope({"type": wire_type_id(value), "payload": payload})
 
 
 def _domain_payload(record: StoredRecord) -> object:

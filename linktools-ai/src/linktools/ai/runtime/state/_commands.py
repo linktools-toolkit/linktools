@@ -2,8 +2,9 @@
 # -*- coding: utf-8 -*-
 """Named state commands for multi-record Runtime checkpoints."""
 
+import asyncio
 import hashlib
-from collections.abc import Sequence
+from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import replace
 
 from linktools.core import environ
@@ -44,6 +45,11 @@ from ._contracts import (
     RecoveryHandoffPhase,
     SessionRecord,
     ToolOperationAdmission,
+)
+from ._durability import (
+    CommitObservation,
+    DurableCommitState,
+    run_durable_commit,
 )
 from ._repositories import (
     ConversationHistoryRepositoryImpl,
@@ -94,6 +100,27 @@ class RuntimeStateCommands:
         self._conversation_steps = conversation_steps
         self._execution_steps = execution_steps
         self._recovery_steps = recovery_steps
+
+    async def _commit_or_raise(
+        self,
+        operation: Callable[[], Awaitable[object]],
+        readback: Callable[[], Awaitable[CommitObservation[object]]],
+    ) -> None:
+        result = await run_durable_commit(operation, readback)
+        if result.state is DurableCommitState.COMMITTED:
+            if result.cancelled:
+                raise asyncio.CancelledError
+            return
+        if result.state is DurableCommitState.NOT_COMMITTED:
+            if result.error is not None:
+                raise result.error
+            raise AIError(ErrorCode.STORAGE_CONFLICT)
+        if result.state is DurableCommitState.PARTIAL_INTEGRITY_ERROR:
+            raise AIError(
+                ErrorCode.STORAGE_INTEGRITY_ERROR,
+                "durable command left partial state",
+            ) from result.error
+        raise AIError(ErrorCode.STORAGE_COMMIT_UNKNOWN) from result.error
 
     async def _promote_history_in_transaction(
         self,
@@ -422,20 +449,32 @@ class RuntimeStateCommands:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             stores.append(self._recovery_steps.state_store)
         if not _same_group(stores):
+            terminal_error_code = error_code or ErrorCode.EXECUTION_FAILED.value
             if effect is not None:
-                for attempt in range(2):
+                async def materialize_effect() -> None:
+                    await self._recovery_steps.materialize_effect(run, effect)
+
+                async def effect_readback() -> CommitObservation[None]:
                     try:
-                        await self._recovery_steps.materialize_effect(run, effect)
-                        break
-                    except AIError as error:
-                        if error.code is not ErrorCode.STORAGE_COMMIT_UNKNOWN or attempt == 1:
-                            raise
                         archived = await self._recovery_steps.get_tool_effect(
                             run_id=run.run_id,
                             tool_call_id=effect.tool_call_id,
                         )
-                        if archived == effect:
-                            break
+                    except AIError as error:
+                        return CommitObservation(
+                            DurableCommitState.UNRESOLVED,
+                            error=error,
+                        )
+                    if archived == effect:
+                        return CommitObservation(DurableCommitState.COMMITTED)
+                    if archived is None:
+                        return CommitObservation(DurableCommitState.NOT_COMMITTED)
+                    return CommitObservation(
+                        DurableCommitState.PARTIAL_INTEGRITY_ERROR,
+                        error=AIError(ErrorCode.STORAGE_INTEGRITY_ERROR),
+                    )
+
+                await self._commit_or_raise(materialize_effect, effect_readback)
 
             async def finish() -> ToolOperationRecord:
                 if result_payload is not None:
@@ -451,44 +490,86 @@ class RuntimeStateCommands:
                     tenant_id=tenant_id,
                     owner=owner,
                     fence=fence,
-                    error_code=error_code or ErrorCode.EXECUTION_FAILED.value,
+                    error_code=terminal_error_code,
                     error_payload=error_payload,
                 )
 
-            try:
-                return await finish()
-            except AIError as error:
-                if error.code is not ErrorCode.STORAGE_COMMIT_UNKNOWN:
-                    raise
-                observed = await self._tools.get_operation(
-                    tool_operation_id,
-                    tenant_id=tenant_id,
-                )
-                expected_status = (
-                    ToolOperationStatus.COMPLETED
-                    if result_payload is not None
-                    else ToolOperationStatus.FAILED
-                )
-                payload_matches = (
-                    observed is not None
-                    and observed.status is expected_status
-                    and (
+            expected_status = (
+                ToolOperationStatus.COMPLETED
+                if result_payload is not None
+                else ToolOperationStatus.FAILED
+            )
+
+            async def terminal_readback() -> CommitObservation[ToolOperationRecord]:
+                try:
+                    observed = await self._tools.get_operation(
+                        tool_operation_id,
+                        tenant_id=tenant_id,
+                    )
+                except AIError as error:
+                    return CommitObservation(
+                        DurableCommitState.UNRESOLVED,
+                        error=error,
+                    )
+                if observed is None:
+                    return CommitObservation(DurableCommitState.NOT_COMMITTED)
+                if observed.status is expected_status:
+                    payload_matches = (
                         observed.result_payload == result_payload
                         if result_payload is not None
-                        else observed.error_code == error_code
+                        else observed.error_code == terminal_error_code
                         and observed.error_payload == error_payload
                     )
-                )
-                if payload_matches and (
-                    effect is None
-                    or await self._recovery_steps.get_tool_effect(
-                        run_id=run.run_id,
-                        tool_call_id=effect.tool_call_id,
+                    if not payload_matches:
+                        return CommitObservation(
+                            DurableCommitState.PARTIAL_INTEGRITY_ERROR,
+                            error=AIError(ErrorCode.TOOL_RESULT_CONFLICT),
+                        )
+                    if effect is not None:
+                        try:
+                            archived = await self._recovery_steps.get_tool_effect(
+                                run_id=run.run_id,
+                                tool_call_id=effect.tool_call_id,
+                            )
+                        except AIError as error:
+                            return CommitObservation(
+                                DurableCommitState.UNRESOLVED,
+                                error=error,
+                            )
+                        if archived != effect:
+                            return CommitObservation(
+                                DurableCommitState.PARTIAL_INTEGRITY_ERROR,
+                                error=AIError(ErrorCode.STORAGE_INTEGRITY_ERROR),
+                            )
+                    return CommitObservation(
+                        DurableCommitState.COMMITTED,
+                        value=observed,
                     )
-                    == effect
+                if (
+                    observed.status is ToolOperationStatus.CLAIMED
+                    and observed.owner == owner
+                    and observed.fence == fence
                 ):
-                    return observed
-                return await finish()
+                    return CommitObservation(DurableCommitState.NOT_COMMITTED)
+                return CommitObservation(DurableCommitState.UNRESOLVED)
+
+            result = await run_durable_commit(finish, terminal_readback)
+            if result.state is DurableCommitState.COMMITTED:
+                if result.value is None:
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                if result.cancelled:
+                    raise asyncio.CancelledError
+                return result.value
+            if result.state is DurableCommitState.NOT_COMMITTED:
+                if result.error is not None:
+                    raise result.error
+                raise AIError(ErrorCode.STORAGE_CONFLICT)
+            if result.state is DurableCommitState.PARTIAL_INTEGRITY_ERROR:
+                raise AIError(
+                    ErrorCode.STORAGE_INTEGRITY_ERROR,
+                    "tool terminal commit left partial durable state",
+                ) from result.error
+            raise AIError(ErrorCode.STORAGE_COMMIT_UNKNOWN) from result.error
 
         async def callback(group: StateGroupTransaction) -> ToolOperationRecord:
             transaction = group.transaction(self._tools.state_store)
@@ -517,39 +598,85 @@ class RuntimeStateCommands:
                 error_payload=error_payload,
             )
 
-        try:
-            return await stores[0].storage_group.mutate(stores, callback)
-        except AIError as error:
-            if error.code is not ErrorCode.STORAGE_COMMIT_UNKNOWN:
-                raise
-            observed = await self._tools.get_operation(
-                tool_operation_id,
-                tenant_id=tenant_id,
-            )
-            expected_status = (
-                ToolOperationStatus.COMPLETED
-                if result_payload is not None
-                else ToolOperationStatus.FAILED
-            )
-            payload_matches = (
-                observed is not None
-                and observed.status is expected_status
-                and (
+        expected_status = (
+            ToolOperationStatus.COMPLETED
+            if result_payload is not None
+            else ToolOperationStatus.FAILED
+        )
+        terminal_error_code = error_code or ErrorCode.EXECUTION_FAILED.value
+
+        async def readback() -> CommitObservation[ToolOperationRecord]:
+            try:
+                observed = await self._tools.get_operation(
+                    tool_operation_id,
+                    tenant_id=tenant_id,
+                )
+                if observed is None:
+                    return CommitObservation(DurableCommitState.NOT_COMMITTED)
+                payload_matches = (
                     observed.result_payload == result_payload
                     if result_payload is not None
-                    else observed.error_code == error_code
+                    else observed.error_code == terminal_error_code
                     and observed.error_payload == error_payload
                 )
-            )
-            if effect is not None:
-                archived = await self._recovery_steps.get_tool_effect(
-                    run_id=run.run_id,
-                    tool_call_id=effect.tool_call_id,
+                if observed.status is expected_status:
+                    if not payload_matches:
+                        return CommitObservation(
+                            DurableCommitState.PARTIAL_INTEGRITY_ERROR,
+                            error=AIError(ErrorCode.TOOL_RESULT_CONFLICT),
+                        )
+                    if effect is not None:
+                        archived = await self._recovery_steps.get_tool_effect(
+                            run_id=run.run_id,
+                            tool_call_id=effect.tool_call_id,
+                        )
+                        if archived != effect:
+                            return CommitObservation(
+                                DurableCommitState.PARTIAL_INTEGRITY_ERROR,
+                                error=AIError(ErrorCode.STORAGE_INTEGRITY_ERROR),
+                            )
+                    return CommitObservation(
+                        DurableCommitState.COMMITTED,
+                        value=observed,
+                    )
+                if (
+                    observed.status is ToolOperationStatus.CLAIMED
+                    and observed.owner == owner
+                    and observed.fence == fence
+                ):
+                    return CommitObservation(DurableCommitState.NOT_COMMITTED)
+                return CommitObservation(DurableCommitState.UNRESOLVED)
+            except AIError as error:
+                if error.code is ErrorCode.STORAGE_INTEGRITY_ERROR:
+                    return CommitObservation(
+                        DurableCommitState.PARTIAL_INTEGRITY_ERROR,
+                        error=error,
+                    )
+                return CommitObservation(
+                    DurableCommitState.UNRESOLVED,
+                    error=error,
                 )
-                payload_matches = payload_matches and archived == effect
-            if payload_matches:
-                return observed
-            return await stores[0].storage_group.mutate(stores, callback)
+
+        result = await run_durable_commit(
+            lambda: stores[0].storage_group.mutate(stores, callback),
+            readback,
+        )
+        if result.state is DurableCommitState.COMMITTED:
+            if result.value is None:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            if result.cancelled:
+                raise asyncio.CancelledError
+            return result.value
+        if result.state is DurableCommitState.NOT_COMMITTED:
+            if result.error is not None:
+                raise result.error
+            raise AIError(ErrorCode.STORAGE_CONFLICT)
+        if result.state is DurableCommitState.PARTIAL_INTEGRITY_ERROR:
+            raise AIError(
+                ErrorCode.STORAGE_INTEGRITY_ERROR,
+                "tool terminal commit left partial durable state",
+            ) from result.error
+        raise AIError(ErrorCode.STORAGE_COMMIT_UNKNOWN) from result.error
 
     async def commit_tool_admission(
         self,
@@ -806,42 +933,73 @@ class RuntimeStateCommands:
                     pending_events=audit_events,
                 )
 
-            try:
-                result = await stores[0].storage_group.mutate(stores, callback)
-                if isinstance(prepared_conversation, PreparedStepSnapshotBatch):
-                    self._conversation_steps.apply_prepared_batch(
-                        prepared_conversation
+            async def readback() -> CommitObservation[ExecutionTerminalCommitResult]:
+                try:
+                    visible = await self._terminal_targets_visible(
+                        commit,
+                        pending_event_count=len(audit_events),
+                        session_id=session_id,
+                        next_cursor=next_cursor,
+                        conversation_run=conversation_run,
+                        conversation_snapshot=conversation_snapshot,
+                        recovery_checkpoint=recovery_checkpoint,
+                        recovery_run=recovery_run,
+                        recovery_snapshot=recovery_snapshot,
+                        execution_run=execution_run,
+                        execution_events=execution_events,
+                        execution_snapshots=execution_snapshots,
+                        execution_projections=execution_projections,
+                        audit_events=audit_events,
                     )
-                if isinstance(prepared_recovery, PreparedStepSnapshotBatch):
-                    self._recovery_steps.apply_prepared_batch(prepared_recovery)
-                return result
-            except AIError as error:
-                if error.code is not ErrorCode.STORAGE_COMMIT_UNKNOWN:
-                    raise
-                if await self._terminal_targets_visible(
-                    commit,
-                    pending_event_count=len(audit_events),
-                    session_id=session_id,
-                    next_cursor=next_cursor,
-                    conversation_run=conversation_run,
-                    conversation_snapshot=conversation_snapshot,
-                    recovery_checkpoint=recovery_checkpoint,
-                    recovery_run=recovery_run,
-                    recovery_snapshot=recovery_snapshot,
-                    execution_run=execution_run,
-                    execution_events=execution_events,
-                    execution_snapshots=execution_snapshots,
-                    execution_projections=execution_projections,
-                    audit_events=audit_events,
-                ):
+                    if not visible:
+                        return CommitObservation(DurableCommitState.NOT_COMMITTED)
                     execution = await self._execution.get(
                         commit.execution.execution_id,
                         tenant_id=commit.execution.tenant_id,
                     )
                     if execution is None:
-                        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                    return ExecutionTerminalCommitResult(execution, commit.result)
-                return await stores[0].storage_group.mutate(stores, callback)
+                        return CommitObservation(
+                            DurableCommitState.PARTIAL_INTEGRITY_ERROR,
+                            error=AIError(ErrorCode.STORAGE_INTEGRITY_ERROR),
+                        )
+                    return CommitObservation(
+                        DurableCommitState.COMMITTED,
+                        value=ExecutionTerminalCommitResult(
+                            execution,
+                            commit.result,
+                        ),
+                    )
+                except AIError as error:
+                    if error.code is ErrorCode.STORAGE_INTEGRITY_ERROR:
+                        return CommitObservation(
+                            DurableCommitState.PARTIAL_INTEGRITY_ERROR,
+                            error=error,
+                        )
+                    return CommitObservation(
+                        DurableCommitState.UNRESOLVED,
+                        error=error,
+                    )
+
+            result = await run_durable_commit(
+                lambda: stores[0].storage_group.mutate(stores, callback),
+                readback,
+            )
+            if result.state is DurableCommitState.COMMITTED:
+                if result.value is None:
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                if result.cancelled:
+                    raise asyncio.CancelledError
+                return result.value
+            if result.state is DurableCommitState.NOT_COMMITTED:
+                if result.error is not None:
+                    raise result.error
+                raise AIError(ErrorCode.STORAGE_CONFLICT)
+            if result.state is DurableCommitState.PARTIAL_INTEGRITY_ERROR:
+                raise AIError(
+                    ErrorCode.STORAGE_INTEGRITY_ERROR,
+                    "terminal checkpoint left partial durable state",
+                ) from result.error
+            raise AIError(ErrorCode.STORAGE_COMMIT_UNKNOWN) from result.error
         recovery_pending = False
         if recovery_checkpoint is not None:
             actual_recovery = await self._recovery.get(
@@ -1087,6 +1245,66 @@ class RuntimeStateCommands:
                 require_recovery=False,
             )
 
+        async def commit_execution_with_reconciliation(
+            stores: Sequence[StateStore],
+        ) -> ExecutionTerminalCommitResult:
+            async def readback() -> CommitObservation[ExecutionTerminalCommitResult]:
+                try:
+                    if not await execution_target_visible():
+                        return CommitObservation(
+                            DurableCommitState.NOT_COMMITTED
+                        )
+                    execution = await self._execution.get(
+                        commit.execution.execution_id,
+                        tenant_id=commit.execution.tenant_id,
+                    )
+                    if execution is None:
+                        return CommitObservation(
+                            DurableCommitState.PARTIAL_INTEGRITY_ERROR,
+                            error=AIError(ErrorCode.STORAGE_INTEGRITY_ERROR),
+                        )
+                    return CommitObservation(
+                        DurableCommitState.COMMITTED,
+                        value=ExecutionTerminalCommitResult(
+                            execution,
+                            commit.result,
+                        ),
+                    )
+                except AIError as error:
+                    if error.code is ErrorCode.STORAGE_INTEGRITY_ERROR:
+                        return CommitObservation(
+                            DurableCommitState.PARTIAL_INTEGRITY_ERROR,
+                            error=error,
+                        )
+                    return CommitObservation(
+                        DurableCommitState.UNRESOLVED,
+                        error=error,
+                    )
+
+            outcome = await run_durable_commit(
+                lambda: self._execution.state_store.storage_group.mutate(
+                    stores,
+                    commit_execution,
+                ),
+                readback,
+            )
+            if outcome.state is DurableCommitState.COMMITTED:
+                if outcome.value is None:
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                if outcome.cancelled:
+                    raise asyncio.CancelledError
+                return outcome.value
+            if outcome.state is DurableCommitState.NOT_COMMITTED:
+                if outcome.error is not None:
+                    raise outcome.error
+                raise AIError(ErrorCode.STORAGE_CONFLICT)
+            if outcome.state is DurableCommitState.PARTIAL_INTEGRITY_ERROR:
+                raise AIError(
+                    ErrorCode.STORAGE_INTEGRITY_ERROR,
+                    "terminal checkpoint left partial durable state",
+                ) from outcome.error
+            raise AIError(ErrorCode.STORAGE_COMMIT_UNKNOWN) from outcome.error
+
         if await execution_target_visible():
             execution = await self._execution.get(
                 commit.execution.execution_id,
@@ -1097,63 +1315,29 @@ class RuntimeStateCommands:
             result = ExecutionTerminalCommitResult(execution, commit.result)
         elif _same_group(execution_stores):
             execution_steps_in_transaction = execution_run is not None
-            try:
-                result = await self._execution.state_store.storage_group.mutate(
-                    execution_stores,
-                    commit_execution,
-                )
-            except AIError as error:
-                if error.code not in {
-                    ErrorCode.STORAGE_COMMIT_UNKNOWN,
-                    ErrorCode.EXECUTION_RESULT_CONFLICT,
-                } or not await execution_target_visible():
-                    raise
-                execution = await self._execution.get(
-                    commit.execution.execution_id,
-                    tenant_id=commit.execution.tenant_id,
-                )
-                if execution is None:
-                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                result = ExecutionTerminalCommitResult(execution, commit.result)
+            result = await commit_execution_with_reconciliation(execution_stores)
         else:
-            try:
-                if execution_projections:
-                    for projection in execution_projections:
-                        await self._sync_prepared_projection_with_reconciliation(
-                            self._execution_steps,
-                            projection,
-                            execution_id=commit.execution.execution_id,
-                        )
-                elif execution_run is not None:
-                    await self._sync_projection_with_reconciliation(
-                        execution_run,
+            if execution_projections:
+                for projection in execution_projections:
+                    await self._sync_prepared_projection_with_reconciliation(
+                        self._execution_steps,
+                        projection,
                         execution_id=commit.execution.execution_id,
-                        events=execution_events,
-                        snapshots=execution_snapshots,
-                        binding_digest=commit.execution.binding_digest,
                     )
-                terminal_stores = [self._execution.state_store]
-                if recovery_state_merged:
-                    terminal_stores.append(self._recovery.state_store)
-                    if recovery_steps_merged:
-                        terminal_stores.append(self._recovery_steps.state_store)
-                result = await self._execution.state_store.storage_group.mutate(
-                    terminal_stores,
-                    commit_execution,
+            elif execution_run is not None:
+                await self._sync_projection_with_reconciliation(
+                    execution_run,
+                    execution_id=commit.execution.execution_id,
+                    events=execution_events,
+                    snapshots=execution_snapshots,
+                    binding_digest=commit.execution.binding_digest,
                 )
-            except AIError as error:
-                if error.code not in {
-                    ErrorCode.STORAGE_COMMIT_UNKNOWN,
-                    ErrorCode.EXECUTION_RESULT_CONFLICT,
-                } or not await execution_target_visible():
-                    raise
-                execution = await self._execution.get(
-                    commit.execution.execution_id,
-                    tenant_id=commit.execution.tenant_id,
-                )
-                if execution is None:
-                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                result = ExecutionTerminalCommitResult(execution, commit.result)
+            terminal_stores = [self._execution.state_store]
+            if recovery_state_merged:
+                terminal_stores.append(self._recovery.state_store)
+                if recovery_steps_merged:
+                    terminal_stores.append(self._recovery_steps.state_store)
+            result = await commit_execution_with_reconciliation(terminal_stores)
         if recovery_state_merged and recovery_checkpoint is not None:
             actual_recovery = await self._recovery.get(
                 recovery_checkpoint.execution_id,
@@ -1221,20 +1405,34 @@ class RuntimeStateCommands:
             )
 
         if _same_group(stores):
-            for attempt in range(2):
+            async def readback() -> CommitObservation[None]:
                 try:
-                    await stores[0].storage_group.mutate(stores, materialize)
-                    break
-                except AIError as error:
-                    if error.code is not ErrorCode.STORAGE_COMMIT_UNKNOWN or attempt == 1:
-                        raise
-                    if await self._step_snapshot_visible(
+                    visible = await self._step_snapshot_visible(
                         self._recovery_steps,
                         run,
                         snapshot,
                         binding_digest=binding_digest,
-                    ):
-                        break
+                    )
+                except AIError as error:
+                    if error.code is ErrorCode.STORAGE_INTEGRITY_ERROR:
+                        return CommitObservation(
+                            DurableCommitState.PARTIAL_INTEGRITY_ERROR,
+                            error=error,
+                        )
+                    return CommitObservation(
+                        DurableCommitState.UNRESOLVED,
+                        error=error,
+                    )
+                return CommitObservation(
+                    DurableCommitState.COMMITTED
+                    if visible
+                    else DurableCommitState.NOT_COMMITTED
+                )
+
+            await self._commit_or_raise(
+                lambda: stores[0].storage_group.mutate(stores, materialize),
+                readback,
+            )
         else:
             await self._materialize_snapshot_with_reconciliation(
                 self._recovery_steps,
@@ -1259,25 +1457,36 @@ class RuntimeStateCommands:
             binding_digest=binding_digest,
         ):
             return
-        for attempt in range(2):
+        async def operation() -> None:
+            await archive.materialize_snapshot(
+                run,
+                snapshot,
+                binding_digest=binding_digest,
+                execution_id=execution_id,
+            )
+
+        async def readback() -> CommitObservation[None]:
             try:
-                await archive.materialize_snapshot(
-                    run,
-                    snapshot,
-                    binding_digest=binding_digest,
-                    execution_id=execution_id,
-                )
-                return
-            except AIError as error:
-                if error.code is not ErrorCode.STORAGE_COMMIT_UNKNOWN or attempt == 1:
-                    raise
-                if await self._step_snapshot_visible(
+                visible = await self._step_snapshot_visible(
                     archive,
                     run,
                     snapshot,
                     binding_digest=binding_digest,
-                ):
-                    return
+                )
+            except AIError as error:
+                if error.code is ErrorCode.STORAGE_INTEGRITY_ERROR:
+                    return CommitObservation(
+                        DurableCommitState.PARTIAL_INTEGRITY_ERROR,
+                        error=error,
+                    )
+                return CommitObservation(DurableCommitState.UNRESOLVED, error=error)
+            return CommitObservation(
+                DurableCommitState.COMMITTED
+                if visible
+                else DurableCommitState.NOT_COMMITTED
+            )
+
+        await self._commit_or_raise(operation, readback)
 
     async def _materialize_prepared_snapshot_with_reconciliation(
         self,
@@ -1291,7 +1500,6 @@ class RuntimeStateCommands:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         prepared = batch[0]
         if await self._prepared_snapshot_visible(archive, run, prepared):
-            archive.apply_prepared_batch(batch)
             return
 
         async def materialize(transaction: StateTransaction) -> None:
@@ -1302,17 +1510,23 @@ class RuntimeStateCommands:
                 execution_id=execution_id,
             )
 
-        for attempt in range(2):
+        async def readback() -> CommitObservation[None]:
             try:
-                await archive.state_store.mutate(materialize)
-                archive.apply_prepared_batch(batch)
-                return
+                visible = await self._prepared_snapshot_visible(archive, run, prepared)
             except AIError as error:
-                if error.code is not ErrorCode.STORAGE_COMMIT_UNKNOWN or attempt == 1:
-                    raise
-                if await self._prepared_snapshot_visible(archive, run, prepared):
-                    archive.apply_prepared_batch(batch)
-                    return
+                if error.code is ErrorCode.STORAGE_INTEGRITY_ERROR:
+                    return CommitObservation(
+                        DurableCommitState.PARTIAL_INTEGRITY_ERROR,
+                        error=error,
+                    )
+                return CommitObservation(DurableCommitState.UNRESOLVED, error=error)
+            return CommitObservation(
+                DurableCommitState.COMMITTED
+                if visible
+                else DurableCommitState.NOT_COMMITTED
+            )
+
+        await self._commit_or_raise(materialize, readback)
 
     async def _sync_prepared_projection_with_reconciliation(
         self,
@@ -1333,25 +1547,23 @@ class RuntimeStateCommands:
                 execution_id=execution_id,
             )
 
-        for attempt in range(2):
+        async def readback() -> CommitObservation[None]:
             try:
-                await archive.state_store.mutate(sync)
-                if projection.accumulator_advance is not None:
-                    archive.apply_accumulator_advance(
-                        projection.run.run_id,
-                        projection.accumulator_advance,
-                    )
-                return
+                visible = await archive.verify_execution_projection_head(projection)
             except AIError as error:
-                if error.code is not ErrorCode.STORAGE_COMMIT_UNKNOWN or attempt == 1:
-                    raise
-                if await archive.verify_execution_projection_head(projection):
-                    if projection.accumulator_advance is not None:
-                        archive.apply_accumulator_advance(
-                            projection.run.run_id,
-                            projection.accumulator_advance,
-                        )
-                    return
+                if error.code is ErrorCode.STORAGE_INTEGRITY_ERROR:
+                    return CommitObservation(
+                        DurableCommitState.PARTIAL_INTEGRITY_ERROR,
+                        error=error,
+                    )
+                return CommitObservation(DurableCommitState.UNRESOLVED, error=error)
+            return CommitObservation(
+                DurableCommitState.COMMITTED
+                if visible
+                else DurableCommitState.NOT_COMMITTED
+            )
+
+        await self._commit_or_raise(sync, readback)
 
     async def _prepared_snapshot_visible(
         self,
@@ -1431,34 +1643,69 @@ class RuntimeStateCommands:
     ) -> None:
         if self._execution_steps is None:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        for attempt in range(2):
+        async def operation() -> None:
+            await self._execution_steps.sync_projection(
+                run,
+                events=events,
+                snapshots=snapshots,
+                binding_digest=binding_digest,
+                execution_id=execution_id,
+            )
+
+        async def readback() -> CommitObservation[None]:
             try:
-                await self._execution_steps.sync_projection(
-                    run,
-                    events=events,
-                    snapshots=snapshots,
-                    binding_digest=binding_digest,
-                    execution_id=execution_id,
-                )
-                return
-            except AIError as error:
-                if error.code is not ErrorCode.STORAGE_COMMIT_UNKNOWN or attempt == 1:
-                    raise
                 stored_run = await self._execution_steps.get_run(run_id=run.run_id)
-                stored_events = await self._execution_steps.list_events(run_id=run.run_id)
+                stored_events = await self._execution_steps.list_events(
+                    run_id=run.run_id
+                )
                 stored_snapshot = await self._execution_steps.latest_snapshot(
                     run_id=run.run_id,
                     include_interrupted=True,
                 )
-                if (
-                    stored_run == run
-                    and (not events or tuple(stored_events[-len(events) :]) == tuple(events))
-                    and (
-                        not snapshots
-                        or stored_snapshot == snapshots[-1]
+            except AIError as error:
+                if error.code is ErrorCode.STORAGE_INTEGRITY_ERROR:
+                    return CommitObservation(
+                        DurableCommitState.PARTIAL_INTEGRITY_ERROR,
+                        error=error,
                     )
-                ):
-                    return
+                return CommitObservation(
+                    DurableCommitState.UNRESOLVED,
+                    error=error,
+                )
+            if stored_run is not None and stored_run != run:
+                return CommitObservation(
+                    DurableCommitState.PARTIAL_INTEGRITY_ERROR,
+                    error=AIError(ErrorCode.STORAGE_INTEGRITY_ERROR),
+                )
+            visible = (
+                stored_run == run
+                and (
+                    not events
+                    or tuple(stored_events[-len(events) :]) == tuple(events)
+                )
+                and (not snapshots or stored_snapshot == snapshots[-1])
+            )
+            return CommitObservation(
+                DurableCommitState.COMMITTED
+                if visible
+                else DurableCommitState.NOT_COMMITTED
+            )
+
+        result = await run_durable_commit(operation, readback)
+        if result.state is DurableCommitState.COMMITTED:
+            if result.cancelled:
+                raise asyncio.CancelledError
+            return
+        if result.state is DurableCommitState.NOT_COMMITTED:
+            if result.error is not None:
+                raise result.error
+            raise AIError(ErrorCode.STORAGE_CONFLICT)
+        if result.state is DurableCommitState.PARTIAL_INTEGRITY_ERROR:
+            raise AIError(
+                ErrorCode.STORAGE_INTEGRITY_ERROR,
+                "execution projection left partial durable state",
+            ) from result.error
+        raise AIError(ErrorCode.STORAGE_COMMIT_UNKNOWN) from result.error
 
     async def _complete_recovery_checkpoint(self, target: RecoveryCheckpoint) -> None:
         current = await self._recovery.get(target.execution_id, tenant_id=target.tenant_id)
@@ -1961,14 +2208,81 @@ class ExecutionStateCommands:
                 pending_events=audit_events,
             )
 
-        result = await self._state_store.mutate(mutate)
-        if (
-            self._steps is not None
-            and step_run is not None
-            and isinstance(prepared_snapshots, PreparedStepSnapshotBatch)
-        ):
-            self._steps.apply_prepared_batch(prepared_snapshots)
-        return result
+        async def readback() -> CommitObservation[ExecutionTerminalCommitResult]:
+            try:
+                execution = await self._executions.get(
+                    commit.execution.execution_id,
+                    tenant_id=commit.execution.tenant_id,
+                )
+                head = await self._executions.get_history_head(
+                    commit.execution.execution_id,
+                    tenant_id=commit.execution.tenant_id,
+                )
+                seal = await self._executions.get_history_seal(
+                    commit.execution.execution_id,
+                    tenant_id=commit.execution.tenant_id,
+                )
+            except AIError as error:
+                if error.code is ErrorCode.STORAGE_INTEGRITY_ERROR:
+                    return CommitObservation(
+                        DurableCommitState.PARTIAL_INTEGRITY_ERROR,
+                        error=error,
+                    )
+                return CommitObservation(
+                    DurableCommitState.UNRESOLVED,
+                    error=error,
+                )
+            if execution is None or head is None or seal is None:
+                return CommitObservation(DurableCommitState.NOT_COMMITTED)
+            expected_revision = (
+                commit.expected_revision + len(audit_events) + 1
+            )
+            expected_event_sequence = (
+                commit.expected_event_sequence + len(audit_events) + 1
+            )
+            if (
+                head.state is ExecutionHistoryState.SEALED
+                and seal == history_seal
+                and execution.status is commit.execution.status
+                and execution.result == commit.result
+                and execution.error_code == commit.execution.error_code
+                and execution.revision == expected_revision
+                and execution.event_sequence == expected_event_sequence
+            ):
+                return CommitObservation(
+                    DurableCommitState.COMMITTED,
+                    value=ExecutionTerminalCommitResult(
+                        execution,
+                        commit.result,
+                    ),
+                )
+            if head.state is ExecutionHistoryState.SEALED:
+                return CommitObservation(
+                    DurableCommitState.PARTIAL_INTEGRITY_ERROR,
+                    error=AIError(ErrorCode.STORAGE_INTEGRITY_ERROR),
+                )
+            return CommitObservation(DurableCommitState.NOT_COMMITTED)
+
+        outcome = await run_durable_commit(
+            lambda: self._state_store.mutate(mutate),
+            readback,
+        )
+        if outcome.state is DurableCommitState.COMMITTED:
+            if outcome.value is None:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            if outcome.cancelled:
+                raise asyncio.CancelledError
+            return outcome.value
+        if outcome.state is DurableCommitState.NOT_COMMITTED:
+            if outcome.error is not None:
+                raise outcome.error
+            raise AIError(ErrorCode.STORAGE_CONFLICT)
+        if outcome.state is DurableCommitState.PARTIAL_INTEGRITY_ERROR:
+            raise AIError(
+                ErrorCode.STORAGE_INTEGRITY_ERROR,
+                "terminal checkpoint left partial durable state",
+            ) from outcome.error
+        raise AIError(ErrorCode.STORAGE_COMMIT_UNKNOWN) from outcome.error
 
 
 class ConversationStateCommands:
@@ -2049,7 +2363,6 @@ class ConversationStateCommands:
             )
 
         result = await self._state_store.mutate(mutate)
-        self._steps.apply_prepared_batch(prepared)
         return result
 
 

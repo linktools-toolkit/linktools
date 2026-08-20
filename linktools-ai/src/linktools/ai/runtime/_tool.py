@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 """Runtime-owned tool authorization and durable operation contracts."""
 
+import asyncio
 import hashlib
 import json
 from dataclasses import dataclass
@@ -31,7 +32,6 @@ from ..core import (
 )
 from ..errors import AIError, ErrorCode
 from ..storage import (
-    ObjectRef,
     ObjectStore,
     PayloadPolicy,
     StoredPayload,
@@ -39,6 +39,11 @@ from ..storage import (
 )
 from ._object import RuntimeObjectKeyFactory, put_runtime_object, read_runtime_object
 from .state._contracts import ToolOperationAdmission
+from .state._durability import (
+    CommitObservation,
+    DurableCommitState,
+    run_durable_commit,
+)
 from .state._plan import RuntimeDomain
 
 _logger = environ.get_logger("ai.runtime.tool")
@@ -59,7 +64,6 @@ class ToolOperationRecord:
     owner: "str | None"
     fence: int
     lease_expires_at: "datetime | None"
-    result_object_ref: "ObjectRef | None"
     error_code: "str | None"
     created_at: datetime
     updated_at: datetime
@@ -81,7 +85,6 @@ class ToolStateRepository(Protocol):
     async def get_operation(self, tool_operation_id: str, *, tenant_id: str) -> "ToolOperationRecord | None": ...
     async def claim(self, tool_operation_id: str, *, tenant_id: str, owner: str, lease_seconds: int) -> ToolOperationRecord: ...
     async def renew(self, tool_operation_id: str, *, tenant_id: str, owner: str, fence: int, lease_seconds: int) -> ToolOperationRecord: ...
-    async def complete(self, tool_operation_id: str, *, tenant_id: str, owner: str, fence: int, result_object_ref: "ObjectRef | None") -> ToolOperationRecord: ...
     async def fail(self, tool_operation_id: str, *, tenant_id: str, owner: str, fence: int, error_code: str) -> ToolOperationRecord: ...
 
 
@@ -490,7 +493,9 @@ class RuntimeToolOperationBridge:
         return await self._payload(data)
 
     async def _decode_result(self, record: ToolOperationRecord) -> Any:
-        payload = await self._record_payload(record.result_payload, record.result_object_ref)
+        payload = record.result_payload
+        if payload is None:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         messages = ModelMessagesTypeAdapter.validate_json(await self._payload_bytes(payload))
         if len(messages) != 1 or not isinstance(messages[0], ModelRequest) or len(messages[0].parts) != 1:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -506,7 +511,9 @@ class RuntimeToolOperationBridge:
             except ValueError:
                 code = ErrorCode.EXECUTION_FAILED
             return AIError(code)
-        payload = await self._record_payload(record.error_payload, None)
+        payload = record.error_payload
+        if payload is None:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         value = await self._payload_json(payload)
         if not isinstance(value, dict):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -549,48 +556,55 @@ class RuntimeToolOperationBridge:
         expected_payload: StoredPayload,
         expected_error: str | None = None,
     ) -> None:
-        try:
-            await operation()
-        except AIError as error:
-            if error.code is not ErrorCode.STORAGE_COMMIT_UNKNOWN:
-                raise
+        async def readback() -> CommitObservation[ToolOperationRecord]:
             observed = await self._repository.get_operation(
                 decision.operation_id,
                 tenant_id=self._tenant_id,
             )
-            if observed is not None and observed.status is expected_status:
-                self._verify_terminal_payload(
-                    observed,
-                    expected_status=expected_status,
-                    expected_payload=expected_payload,
-                    expected_error=expected_error,
+            if observed is None:
+                return CommitObservation(DurableCommitState.NOT_COMMITTED)
+            if observed.status is expected_status:
+                try:
+                    self._verify_terminal_payload(
+                        observed,
+                        expected_status=expected_status,
+                        expected_payload=expected_payload,
+                        expected_error=expected_error,
+                    )
+                except AIError as error:
+                    return CommitObservation(
+                        DurableCommitState.PARTIAL_INTEGRITY_ERROR,
+                        error=error,
+                    )
+                return CommitObservation(
+                    DurableCommitState.COMMITTED,
+                    value=observed,
                 )
-                return
             if (
-                observed is None
-                or observed.status is not ToolOperationStatus.CLAIMED
-                or observed.owner != decision.owner
-                or observed.fence != decision.fence
+                observed.status is ToolOperationStatus.CLAIMED
+                and observed.owner == decision.owner
+                and observed.fence == decision.fence
             ):
-                raise
-            try:
-                await operation()
-                return
-            except AIError as retry_error:
-                if retry_error.code is not ErrorCode.STORAGE_COMMIT_UNKNOWN:
-                    raise
-                observed = await self._repository.get_operation(
-                    decision.operation_id,
-                    tenant_id=self._tenant_id,
-                )
-                if observed is None or observed.status is not expected_status:
-                    raise
-            self._verify_terminal_payload(
-                observed,
-                expected_status=expected_status,
-                expected_payload=expected_payload,
-                expected_error=expected_error,
-            )
+                return CommitObservation(DurableCommitState.NOT_COMMITTED)
+            return CommitObservation(DurableCommitState.UNRESOLVED)
+
+        result = await run_durable_commit(operation, readback)
+        if result.state is DurableCommitState.COMMITTED:
+            if result.value is not None:
+                self._update_admitted_operation(result.value)
+            if result.cancelled:
+                raise asyncio.CancelledError
+            return
+        if result.state is DurableCommitState.NOT_COMMITTED:
+            if result.error is not None:
+                raise result.error
+            raise AIError(ErrorCode.STORAGE_CONFLICT)
+        if result.state is DurableCommitState.PARTIAL_INTEGRITY_ERROR:
+            raise AIError(
+                ErrorCode.STORAGE_INTEGRITY_ERROR,
+                "tool terminal commit left partial durable state",
+            ) from result.error
+        raise AIError(ErrorCode.STORAGE_COMMIT_UNKNOWN) from result.error
 
     @staticmethod
     def _verify_terminal_payload(
@@ -639,17 +653,6 @@ class RuntimeToolOperationBridge:
             return json.loads((await self._payload_bytes(payload)).decode("utf-8"))
         except (UnicodeDecodeError, json.JSONDecodeError) as error:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
-
-    async def _record_payload(
-        self,
-        payload: StoredPayload | None,
-        legacy_ref: ObjectRef | None,
-    ) -> StoredPayload:
-        if payload is not None:
-            return payload
-        if legacy_ref is not None:
-            return StoredPayload.object(legacy_ref)
-        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
 
     def _run_id(self, ctx: RunContext[None]) -> str:
         del ctx

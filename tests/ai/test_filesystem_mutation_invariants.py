@@ -25,7 +25,7 @@ def _tool_record() -> ToolOperationRecord:
     now = datetime.now(timezone.utc)
     return ToolOperationRecord(
         "operation", "tenant", "run", "call", "a" * 64, "tool", "arguments", "binding", False,
-        ToolOperationStatus.PENDING, None, 0, None, None, None, now, now,
+        ToolOperationStatus.PENDING, None, 0, None, None, now, now,
     )
 
 
