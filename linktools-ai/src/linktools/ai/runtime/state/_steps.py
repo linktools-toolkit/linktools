@@ -3,8 +3,6 @@
 """PydanticAI StepStore adapter backed by Runtime StateStore facts."""
 
 import asyncio
-import hashlib
-import zlib
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
 from contextlib import asynccontextmanager
 from contextvars import ContextVar, Token
@@ -15,7 +13,6 @@ from typing import Protocol, runtime_checkable
 from uuid import uuid4
 
 from linktools.core import environ
-from pydantic_ai import ModelMessagesTypeAdapter
 from pydantic_ai.messages import ModelMessage
 from pydantic_ai_harness.step_persistence import (
     ContinuableSnapshot,
@@ -26,16 +23,11 @@ from pydantic_ai_harness.step_persistence import (
 )
 
 from ...errors import AIError, ErrorCode
-from ...storage import ObjectStore, StoredPayload
+from ...storage import ObjectStore
 from ._codec import (
     _decode_enveloped_domain,
     _decode_step_envelope,
     _encode_step_envelope,
-)
-from ._durability import (
-    CommitObservation,
-    DurableCommitState,
-    run_durable_commit,
 )
 from ._contracts import (
     ContextProjection,
@@ -47,12 +39,16 @@ from ._contracts import (
     HistoryQuality,
     LoadedContextMessage,
     LoadedModelContext,
-    RuntimePayloadRef,
     StoredStepSnapshot,
     TranscriptChunk,
     TranscriptMessageRef,
     TranscriptOrigin,
     TranscriptSpanRef,
+)
+from ._durability import (
+    CommitObservation,
+    DurableCommitState,
+    run_durable_commit,
 )
 from ._history import (
     TranscriptCapture,
@@ -60,11 +56,6 @@ from ._history import (
     _exact_message_signature,
     _overlap_signature,
     suffix_prefix_overlap,
-)
-from ._views import (
-    count_execution_transcript_items,
-    count_session_history_items,
-    project_execution_transcript_message,
 )
 from ._plan import RuntimeDomain, RuntimeRetentionMode
 from ._store import (
@@ -81,12 +72,17 @@ from ._store import (
     parent_digest,
     partition_digest,
     record_key_digest,
+    require_no_run_history_lock,
     scope_digest,
     sequence_key,
     sortable_timestamp,
     stream_digest,
     subject_digest,
-    require_no_run_history_lock,
+)
+from ._views import (
+    count_execution_transcript_items,
+    count_session_history_items,
+    project_execution_transcript_message,
 )
 
 _logger = environ.get_logger("ai.runtime.state.steps")
@@ -672,7 +668,20 @@ class InMemoryStepArchive(StagingStepStore):
     ) -> tuple[LoadedContextMessage, ...]:
         if not refs:
             return ()
-        raise AIError(ErrorCode.STORAGE_DEPENDENCY_NOT_READY)
+        values: list[LoadedContextMessage] = []
+        for ref in refs:
+            if ref.source_domain is not self._runtime_domain:
+                raise AIError(ErrorCode.STORAGE_DEPENDENCY_NOT_READY)
+            snapshot = self.latest_snapshot_local(
+                ref.owner_id,
+                include_interrupted=True,
+            )
+            if snapshot is None or ref.message_index >= len(snapshot.messages):
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            values.append(
+                LoadedContextMessage(snapshot.messages[ref.message_index], ref)
+            )
+        return tuple(values)
 
     async def execution_transcript_item_count(self, run_id: str) -> int:
         snapshot = self.latest_snapshot_local(run_id, include_interrupted=True)
@@ -1381,41 +1390,6 @@ class StateStepArchive(StepStore):
             transaction,
             record,
             replace(head, revision=head.revision + 1),
-        )
-
-    def _inline_chunks(
-        self,
-        run_id: str,
-        messages: Sequence[object],
-        *,
-        first_message_index: int,
-        origin: TranscriptOrigin = TranscriptOrigin.RAW,
-    ) -> tuple[TranscriptChunk, ...]:
-        if not messages:
-            return ()
-        raw = ModelMessagesTypeAdapter.dump_json(list(messages))
-        raw_digest = hashlib.sha256(raw).hexdigest()
-        content = raw
-        codec = "raw"
-        if len(raw) >= 16 * 1024:
-            compressed = zlib.compress(raw)
-            if len(compressed) <= len(raw) * 0.9:
-                content = compressed
-                codec = "zlib"
-        return (
-            TranscriptChunk(
-                run_id,
-                first_message_index,
-                len(messages),
-                origin,
-                codec,
-                raw_digest,
-                len(raw),
-                RuntimePayloadRef(
-                    StoredPayload.inline_bytes(content),
-                    self._runtime_domain,
-                ),
-            ),
         )
 
     async def sync_projection(

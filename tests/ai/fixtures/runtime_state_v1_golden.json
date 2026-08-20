@@ -1,5 +1,5 @@
 {
-  "version": 2,
+  "version": 1,
   "wire_type_ids": [
     "approval_record",
     "agent_attempt_claim",
@@ -102,7 +102,7 @@
   ],
   "envelopes": [
     {
-      "v": 2,
+      "v": 1,
       "value": {
         "type": "conversation_cursor",
         "payload": {
@@ -116,7 +116,7 @@
       }
     },
     {
-      "v": 2,
+      "v": 1,
       "value": {
         "type": "execution_history_state",
         "payload": {
@@ -126,7 +126,7 @@
       }
     },
     {
-      "v": 2,
+      "v": 1,
       "value": {
         "type": "transcript_message_ref",
         "payload": {

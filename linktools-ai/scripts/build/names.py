@@ -77,7 +77,14 @@ def check_names(source_root: "str | Path") -> "tuple[str, ...]":
         if not re.fullmatch(r"_?[a-z][a-z0-9]*(?:_[a-z][a-z0-9]*)*", node.path.stem):
             errors.append(str(node.path))
     for node in packages:
-        if not re.fullmatch(r"[a-z][a-z0-9]*", node.path.name):
+        is_private_message_codec = (
+            node.path.name == "_message_codec"
+            and node.parent_namespace == ("runtime",)
+        )
+        if not is_private_message_codec and not re.fullmatch(
+            r"[a-z][a-z0-9]*",
+            node.path.name,
+        ):
             errors.append(str(node.path))
     errors.extend(_collision_errors(tuple(sorted((*modules, *packages), key=lambda node: str(node.path)))))
     return tuple(errors)

@@ -4,6 +4,7 @@
 
 import base64
 import hashlib
+import math
 import types
 from collections.abc import Callable, Iterator, Mapping
 from dataclasses import MISSING, dataclass, fields, is_dataclass
@@ -22,7 +23,6 @@ from typing import (
     get_type_hints,
 )
 
-from pydantic_ai import ModelMessagesTypeAdapter
 from pydantic_ai.messages import ModelRequest, ModelResponse
 from pydantic_ai_harness.step_persistence import (
     ContinuableSnapshot,
@@ -66,6 +66,10 @@ from ...task import (
     TaskNodeView,
     TaskTerminalRecord,
 )
+from .._message_codec import (
+    decode_v1_model_messages,
+    encode_v1_model_messages,
+)
 from .._tool import ToolOperationRecord
 from ._contracts import (
     AgentAttemptClaim,
@@ -77,6 +81,8 @@ from ._contracts import (
     ConversationHistoryRecord,
     ConversationHistorySegmentRef,
     EvaluationRecord,
+    ExecutionCancelRequestCommit,
+    ExecutionEventAppend,
     ExecutionEventRecord,
     ExecutionHistoryHeadRecord,
     ExecutionHistorySealRecord,
@@ -84,17 +90,15 @@ from ._contracts import (
     ExecutionRecord,
     ExecutionRunSealHead,
     ExecutionStartClaim,
-    ExecutionStartUnknownCommit,
-    ExecutionCancelRequestCommit,
     ExecutionStartReservation,
     ExecutionStartReservationResult,
+    ExecutionStartUnknownCommit,
     ExecutionTerminalCommit,
     ExecutionTerminalCommitResult,
-    ExecutionEventAppend,
     ExternalCallRecord,
     HistoryQuality,
-    IdempotencyTerminalUpdate,
     IdempotencyRecord,
+    IdempotencyTerminalUpdate,
     InlineContextBlock,
     LoadedContextMessage,
     LoadedModelContext,
@@ -104,9 +108,9 @@ from ._contracts import (
     RecoveryAdmissionRecord,
     RecoveryCheckpoint,
     RecoveryCheckpointState,
-    RecoveryHandoffPhase,
     RecoveryConversationIntent,
     RecoveryExecutionInput,
+    RecoveryHandoffPhase,
     RecoveryIdempotencyInput,
     RecoveryIntegrityReport,
     RecoveryStateRecord,
@@ -114,9 +118,10 @@ from ._contracts import (
     RecoveryTerminalOutcome,
     ResultRecord,
     RuntimePayloadRef,
-    SessionRecord,
     SessionForkResultRecord,
+    SessionRecord,
     StoredStepSnapshot,
+    ToolOperationAdmission,
     TranscriptChunk,
     TranscriptHeadRecord,
     TranscriptMessageRef,
@@ -125,7 +130,6 @@ from ._contracts import (
     TranscriptSeekDimension,
     TranscriptSeekRecord,
     TranscriptSpanRef,
-    ToolOperationAdmission,
 )
 from ._plan import RuntimeDomain
 from ._store import (
@@ -136,10 +140,10 @@ from ._store import (
     validate_record_identity,
 )
 
-CURRENT_DATA_VERSION = 2
+CURRENT_DATA_VERSION = 1
 DomainT = TypeVar("DomainT")
 
-_V2_WIRE_TYPES: tuple[tuple[str, type[object]], ...] = (
+_V1_WIRE_TYPES: tuple[tuple[str, type[object]], ...] = (
     ("approval_record", ApprovalRecord),
     ("agent_attempt_claim", AgentAttemptClaim),
     ("artifact_record", ArtifactRecord),
@@ -214,14 +218,14 @@ _V2_WIRE_TYPES: tuple[tuple[str, type[object]], ...] = (
     ("step_event", StepEvent),
     ("tool_effect", ToolEffectRecord),
 )
-_V2_WIRE_IDS = MappingProxyType(
-    {target: wire_id for wire_id, target in _V2_WIRE_TYPES}
+_V1_WIRE_IDS = MappingProxyType(
+    {target: wire_id for wire_id, target in _V1_WIRE_TYPES}
 )
-_V2_DOMAIN_TYPES = MappingProxyType(
-    {wire_id: target for wire_id, target in _V2_WIRE_TYPES}
+_V1_DOMAIN_TYPES = MappingProxyType(
+    {wire_id: target for wire_id, target in _V1_WIRE_TYPES}
 )
 
-_V2_ENUM_WIRE_TYPES: tuple[tuple[str, type[Enum]], ...] = (
+_V1_ENUM_WIRE_TYPES: tuple[tuple[str, type[Enum]], ...] = (
     ("approval_decision", ApprovalDecision),
     ("approval_status", ApprovalStatus),
     ("evaluation_status", EvaluationStatus),
@@ -246,14 +250,14 @@ _V2_ENUM_WIRE_TYPES: tuple[tuple[str, type[Enum]], ...] = (
     ("transcript_owner_domain", TranscriptOwnerDomain),
     ("transcript_seek_dimension", TranscriptSeekDimension),
 )
-_V2_ENUM_WIRE_IDS = MappingProxyType(
-    {target: wire_id for wire_id, target in _V2_ENUM_WIRE_TYPES}
+_V1_ENUM_WIRE_IDS = MappingProxyType(
+    {target: wire_id for wire_id, target in _V1_ENUM_WIRE_TYPES}
 )
-_V2_ENUM_TYPES = MappingProxyType(
-    {wire_id: target for wire_id, target in _V2_ENUM_WIRE_TYPES}
+_V1_ENUM_TYPES = MappingProxyType(
+    {wire_id: target for wire_id, target in _V1_ENUM_WIRE_TYPES}
 )
 
-_V2_ENUM_VALUES: Mapping[str, frozenset[JsonValue]] = MappingProxyType(
+_V1_ENUM_VALUES: Mapping[str, frozenset[JsonValue]] = MappingProxyType(
     {
         "approval_decision": frozenset(("APPROVE", "DENY")),
         "approval_status": frozenset(
@@ -379,16 +383,7 @@ _V2_ENUM_VALUES: Mapping[str, frozenset[JsonValue]] = MappingProxyType(
     }
 )
 
-# Preserve the public v2 manifest names for callers.  Codec decisions below
-# use the version-owned mappings through _VersionCodec.
-_WIRE_TYPES = _V2_WIRE_TYPES
-_WIRE_IDS = _V2_WIRE_IDS
-_DOMAIN_TYPES = _V2_DOMAIN_TYPES
-_ENUM_WIRE_TYPES = _V2_ENUM_WIRE_TYPES
-_ENUM_WIRE_IDS = _V2_ENUM_WIRE_IDS
-_ENUM_TYPES = _V2_ENUM_TYPES
-
-_V2_SCHEMA_FINGERPRINTS: Mapping[str, str] = MappingProxyType(
+_V1_SCHEMA_FINGERPRINTS: Mapping[str, str] = MappingProxyType(
     {
         "agent_attempt_claim": "6c70466a08d20f57baf058d8da2a7d2ab3cd738494e45d82111e791fc8beaac2",
         "approval_record": "14d31c99c7e60edebe193b1349c54e5c9a342829c4a8538651d7e9b1249a158d",
@@ -461,7 +456,14 @@ _V2_SCHEMA_FINGERPRINTS: Mapping[str, str] = MappingProxyType(
 )
 
 
-V2DataclassAdapter = Callable[[Mapping[str, object], "_VersionCodec"], object]
+DataclassEncoder = Callable[
+    [object, "_VersionCodec"],
+    Mapping[str, JsonValue],
+]
+DataclassDecoder = Callable[
+    [Mapping[str, object], "_VersionCodec"],
+    object,
+]
 
 
 @dataclass(frozen=True, slots=True)
@@ -472,11 +474,27 @@ class _VersionCodec:
     enum_wire_ids: Mapping[type[Enum], str]
     enum_types: Mapping[str, type[Enum]]
     schema_fingerprints: Mapping[str, str]
-    dataclass_adapters: Mapping[str, V2DataclassAdapter]
+    dataclass_encoders: Mapping[str, DataclassEncoder]
+    dataclass_decoders: Mapping[str, DataclassDecoder]
     enum_values: Mapping[str, frozenset[JsonValue]]
+    external_schema_types: Mapping[type[object], JsonValue]
 
 
-def _decode_v2_task_node(
+def _encode_v1_task_node(
+    value: object,
+    codec: "_VersionCodec",
+) -> Mapping[str, JsonValue]:
+    if not isinstance(value, TaskNode):
+        raise TypeError("V1 task_node encoder received the wrong type")
+    return {
+        "node_id": _encode_domain(value.node_id, codec),
+        "dependencies": _encode_domain(value.dependencies, codec),
+        "input": _encode_domain(value.input, codec),
+        "budget_cost": _encode_domain(value.budget_cost, codec),
+    }
+
+
+def _decode_v1_task_node(
     raw_fields: Mapping[str, object],
     codec: "_VersionCodec",
 ) -> TaskNode:
@@ -500,29 +518,15 @@ def _decode_v2_task_node(
     )
 
 
-_V2_DATACLASS_ADAPTERS: Mapping[str, V2DataclassAdapter] = MappingProxyType(
-    {"task_node": _decode_v2_task_node}
+_V1_DATACLASS_ENCODERS: Mapping[str, DataclassEncoder] = MappingProxyType(
+    {"task_node": _encode_v1_task_node}
+)
+_V1_DATACLASS_DECODERS: Mapping[str, DataclassDecoder] = MappingProxyType(
+    {"task_node": _decode_v1_task_node}
 )
 
 
-_V2_CODEC = _VersionCodec(
-    version=2,
-    wire_ids=_V2_WIRE_IDS,
-    domain_types=_V2_DOMAIN_TYPES,
-    enum_wire_ids=_V2_ENUM_WIRE_IDS,
-    enum_types=_V2_ENUM_TYPES,
-    schema_fingerprints=_V2_SCHEMA_FINGERPRINTS,
-    dataclass_adapters=_V2_DATACLASS_ADAPTERS,
-    enum_values=_V2_ENUM_VALUES,
-)
-_VERSION_CODECS: Mapping[int, _VersionCodec] = MappingProxyType(
-    {
-        2: _V2_CODEC,
-    }
-)
-_CURRENT_CODEC = _VERSION_CODECS[CURRENT_DATA_VERSION]
-
-_V2_EXTERNAL_SCHEMA_TYPES: Mapping[type[object], str] = MappingProxyType(
+_V1_EXTERNAL_SCHEMA_TYPES: Mapping[type[object], JsonValue] = MappingProxyType(
     {
         IdempotencyTerminalUpdate: (
             "linktools.ai.runtime.state.IdempotencyTerminalUpdate"
@@ -536,6 +540,26 @@ _V2_EXTERNAL_SCHEMA_TYPES: Mapping[type[object], str] = MappingProxyType(
 )
 
 
+_V1_CODEC = _VersionCodec(
+    version=1,
+    wire_ids=_V1_WIRE_IDS,
+    domain_types=_V1_DOMAIN_TYPES,
+    enum_wire_ids=_V1_ENUM_WIRE_IDS,
+    enum_types=_V1_ENUM_TYPES,
+    schema_fingerprints=_V1_SCHEMA_FINGERPRINTS,
+    dataclass_encoders=_V1_DATACLASS_ENCODERS,
+    dataclass_decoders=_V1_DATACLASS_DECODERS,
+    enum_values=_V1_ENUM_VALUES,
+    external_schema_types=_V1_EXTERNAL_SCHEMA_TYPES,
+)
+_VERSION_CODECS: Mapping[int, _VersionCodec] = MappingProxyType(
+    {
+        1: _V1_CODEC,
+    }
+)
+_CURRENT_CODEC = _VERSION_CODECS[CURRENT_DATA_VERSION]
+
+
 def _dataclass_schema_descriptor(
     target: type[object],
     codec: _VersionCodec,
@@ -543,7 +567,7 @@ def _dataclass_schema_descriptor(
     if not is_dataclass(target):
         raise TypeError(f"schema target is not a dataclass: {target!r}")
     if target not in codec.wire_ids:
-        raise TypeError(f"schema target is not a V2 dataclass: {target!r}")
+        raise TypeError(f"schema target is not a V1 dataclass: {target!r}")
     try:
         hints = get_type_hints(target)
     except (NameError, TypeError) as error:
@@ -585,19 +609,19 @@ def _schema_type_descriptor(
     }
     if annotation in primitive_names:
         return primitive_names[annotation]
-    external_name = _V2_EXTERNAL_SCHEMA_TYPES.get(annotation)
-    if external_name is not None:
-        return {"external": external_name}
+    external_descriptor = codec.external_schema_types.get(annotation)
+    if external_descriptor is not None:
+        return {"external": external_descriptor}
     if isinstance(annotation, type) and issubclass(annotation, Enum):
         wire_id = codec.enum_wire_ids.get(annotation)
         if wire_id is None:
-            raise TypeError(f"schema enum is not in the V2 codec: {annotation!r}")
+            raise TypeError(f"schema enum is not in the V1 codec: {annotation!r}")
         return {"enum": wire_id}
     if isinstance(annotation, type) and is_dataclass(annotation):
         wire_id = codec.wire_ids.get(annotation)
         if wire_id is not None:
             return {"dataclass": wire_id}
-        raise TypeError(f"schema dataclass is not in the V2 codec: {annotation!r}")
+        raise TypeError(f"schema dataclass is not in the V1 codec: {annotation!r}")
 
     origin = get_origin(annotation)
     arguments = get_args(annotation)
@@ -652,9 +676,11 @@ def _schema_literal(value: object, codec: _VersionCodec) -> JsonValue:
     if isinstance(value, Enum):
         wire_id = codec.enum_wire_ids.get(type(value))
         if wire_id is None:
-            raise TypeError(f"schema literal enum is not in V2: {value!r}")
+            raise TypeError(f"schema literal enum is not in V1: {value!r}")
         return {"$enum": wire_id, "value": value.value}
     if value is None or isinstance(value, (str, bool, int, float)):
+        if isinstance(value, float) and not math.isfinite(value):
+            raise TypeError("GA v1 schema literal requires finite floats")
         return value
     if isinstance(value, datetime):
         return {"$datetime": value.isoformat()}
@@ -884,25 +910,34 @@ def _codec_wire_type_id(
         raise TypeError(f"unsupported domain type: {target.__name__}") from error
 
 
-def encode_domain(value: DomainT) -> JsonValue:
-    """Encode one domain value into the shared canonical JSON representation."""
-    if value is None or isinstance(value, (str, bool, int, float)):
-        return value
-    if isinstance(value, TaskNode):
-        return {
-            "$dataclass": _CURRENT_CODEC.wire_ids[TaskNode],
-            "fields": {
-                "node_id": encode_domain(value.node_id),
-                "dependencies": encode_domain(value.dependencies),
-                "input": encode_domain(value.input),
-                "budget_cost": encode_domain(value.budget_cost),
-            },
-        }
+def _encode_domain(value: object, codec: _VersionCodec) -> JsonValue:
     if isinstance(value, Enum):
-        wire_id = _CURRENT_CODEC.enum_wire_ids.get(type(value))
+        wire_id = codec.enum_wire_ids.get(type(value))
         if wire_id is None:
             raise TypeError(f"unsupported enum type: {type(value).__name__}")
+        allowed = codec.enum_values.get(wire_id)
+        if allowed is None:
+            raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
+        try:
+            frozen = value.value in allowed
+        except TypeError:
+            frozen = False
+        if not frozen:
+            raise AIError(
+                ErrorCode.STORAGE_VERSION_UNSUPPORTED,
+                "current enum cannot be written as GA v1",
+            )
         return {"$enum": wire_id, "value": value.value}
+    if value is None or isinstance(value, str):
+        return value
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        if not math.isfinite(value):
+            raise ValueError("GA v1 wire requires finite floats")
+        return value
     if isinstance(value, datetime):
         if value.tzinfo is None:
             raise ValueError("domain timestamp must be timezone-aware")
@@ -910,29 +945,77 @@ def encode_domain(value: DomainT) -> JsonValue:
     if isinstance(value, bytes):
         return {"$bytes": base64.b64encode(value).decode("ascii")}
     if is_dataclass(value):
-        if any(field.name.startswith("_") for field in fields(value)):
-            raise TypeError("private dataclass fields require an explicit codec")
-        wire_id = _CURRENT_CODEC.wire_ids.get(type(value))
+        wire_id = codec.wire_ids.get(type(value))
         if wire_id is None:
             raise TypeError(f"unsupported dataclass type: {type(value).__name__}")
-        return {
-            "$dataclass": wire_id,
-            "fields": {
-                field.name: encode_domain(attrgetter(field.name)(value))
+        encoder = codec.dataclass_encoders.get(wire_id)
+        if encoder is not None:
+            encoded_fields = encoder(value, codec)
+        else:
+            expected_fingerprint = codec.schema_fingerprints.get(wire_id)
+            if expected_fingerprint is None:
+                raise AIError(
+                    ErrorCode.STORAGE_VERSION_UNSUPPORTED,
+                    "current dataclass schema cannot be written as GA v1",
+                )
+            try:
+                actual_fingerprint = _dataclass_schema_fingerprint(type(value), codec)
+            except (TypeError, ValueError) as error:
+                raise AIError(
+                    ErrorCode.STORAGE_VERSION_UNSUPPORTED,
+                    "current dataclass schema cannot be written as GA v1",
+                ) from error
+            if actual_fingerprint != expected_fingerprint:
+                raise AIError(
+                    ErrorCode.STORAGE_VERSION_UNSUPPORTED,
+                    "current dataclass schema cannot be written as GA v1",
+                )
+            if any(field.name.startswith("_") for field in fields(value)):
+                raise TypeError("private dataclass fields require an explicit codec")
+            encoded_fields = {
+                field.name: _encode_domain(attrgetter(field.name)(value), codec)
                 for field in fields(value)
-            },
-        }
+            }
+        return {"$dataclass": wire_id, "fields": dict(encoded_fields)}
     if isinstance(value, Mapping):
+        encoded_pairs: list[tuple[bytes, JsonValue, JsonValue]] = []
+        for key, item in value.items():
+            encoded_key = _encode_domain(key, codec)
+            encoded_item = _encode_domain(item, codec)
+            encoded_pairs.append(
+                (canonical_json_bytes(encoded_key), encoded_key, encoded_item)
+            )
+        key_bytes = [item[0] for item in encoded_pairs]
+        if len(key_bytes) != len(set(key_bytes)):
+            raise ValueError("canonical mapping keys collide")
+        encoded_pairs.sort(key=lambda item: item[0])
         return {
-            "$mapping": [[encode_domain(key), encode_domain(item)] for key, item in value.items()]
+            "$mapping": [
+                [encoded_key, encoded_item]
+                for _key_bytes, encoded_key, encoded_item in encoded_pairs
+            ]
         }
     if isinstance(value, tuple):
-        return {"$tuple": [encode_domain(item) for item in value]}
+        return {"$tuple": [_encode_domain(item, codec) for item in value]}
     if isinstance(value, list):
-        return [encode_domain(item) for item in value]
+        return [_encode_domain(item, codec) for item in value]
     if isinstance(value, frozenset):
-        return {"$frozenset": [encode_domain(item) for item in value]}
+        encoded_items = [
+            (canonical_json_bytes(encoded_item), encoded_item)
+            for item in value
+            for encoded_item in (_encode_domain(item, codec),)
+        ]
+        item_bytes = [item[0] for item in encoded_items]
+        if len(item_bytes) != len(set(item_bytes)):
+            raise ValueError("canonical frozenset items collide")
+        encoded_items.sort(key=lambda item: item[0])
+        return {"$frozenset": [item[1] for item in encoded_items]}
     raise TypeError(f"unsupported domain value: {type(value).__name__}")
+
+
+def encode_domain(value: DomainT) -> JsonValue:
+    """Encode one domain value into the shared canonical JSON representation."""
+    return _encode_domain(value, _CURRENT_CODEC)
 
 
 def decode_domain(value: JsonValue, target: type[DomainT]) -> DomainT:
@@ -1079,6 +1162,11 @@ def _decode_domain(
     origin = get_origin(target)
     arguments = get_args(target)
     if origin is Literal:
+        for literal in arguments:
+            if isinstance(literal, float) and not math.isfinite(literal):
+                raise TypeError("GA v1 schema literal requires finite floats")
+        if isinstance(value, float):
+            _require_finite_wire_float(value)
         if value not in arguments:
             raise ValueError("literal value is invalid")
         return value
@@ -1160,11 +1248,24 @@ def _decode_domain(
         return base64.b64decode(str(raw), validate=True)
     if isinstance(target, type) and is_dataclass(target):
         return _decode_dataclass(value, target, codec)
-    if target in (str, bool, int, float):
+    if target is float:
+        if not isinstance(value, float):
+            raise TypeError("scalar value has the wrong type")
+        return _require_finite_wire_float(value)
+    if target in (str, bool, int):
         if not isinstance(value, target) or target is int and isinstance(value, bool):
             raise TypeError("scalar value has the wrong type")
         return value
     return _decode_any(value, codec)
+
+
+def _require_finite_wire_float(value: float) -> float:
+    if not math.isfinite(value):
+        raise AIError(
+            ErrorCode.STORAGE_INTEGRITY_ERROR,
+            "GA v1 wire contains a non-finite float",
+        )
+    return value
 
 
 def _decode_enum(
@@ -1217,9 +1318,9 @@ def _decode_dataclass(
     raw_fields = value.get("fields")
     if not isinstance(raw_fields, Mapping):
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-    adapter = codec.dataclass_adapters.get(wire_id)
-    if adapter is not None:
-        return adapter(raw_fields, codec)
+    decoder = codec.dataclass_decoders.get(wire_id)
+    if decoder is not None:
+        return decoder(raw_fields, codec)
     expected_fingerprint = codec.schema_fingerprints.get(wire_id)
     if expected_fingerprint is None:
         raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
@@ -1281,6 +1382,8 @@ def _decode_any(value: object, codec: _VersionCodec) -> object:
         }
     if isinstance(value, list):
         return [_decode_any(item, codec) for item in value]
+    if isinstance(value, float):
+        return _require_finite_wire_float(value)
     return value
 
 
@@ -1358,7 +1461,7 @@ def _encode_step_envelope(value: object) -> dict[str, JsonValue]:
                 "run_id": value.run_id,
                 "step_index": value.step_index,
                 "messages": base64.b64encode(
-                    ModelMessagesTypeAdapter.dump_json(value.messages)
+                    encode_v1_model_messages(value.messages)
                 ).decode("ascii"),
                 "conversation_id": value.conversation_id,
                 "parent_run_id": value.parent_run_id,
@@ -1386,7 +1489,7 @@ def _decode_step_envelope(value: Mapping[str, JsonValue]) -> object:
             encoded_messages = envelope.value["messages"]
             if not isinstance(encoded_messages, str):
                 raise ValueError("step messages are invalid")
-            messages = ModelMessagesTypeAdapter.validate_json(
+            messages = decode_v1_model_messages(
                 base64.b64decode(encoded_messages, validate=True)
             )
             timestamp = envelope.value["timestamp"]
@@ -1425,30 +1528,42 @@ def _decode_step_envelope(value: Mapping[str, JsonValue]) -> object:
     return _decode_domain(payload, target, codec)
 
 
-def _validate_v2_codec_definition() -> None:
-    wire_ids = tuple(wire_id for wire_id, _target in _V2_WIRE_TYPES)
-    enum_wire_ids = tuple(wire_id for wire_id, _target in _V2_ENUM_WIRE_TYPES)
+def _validate_v1_codec_definition() -> None:
+    if CURRENT_DATA_VERSION != 1 or set(_VERSION_CODECS) != {1}:
+        raise RuntimeError("GA v1 codec registry is invalid")
+    if _CURRENT_CODEC is not _VERSION_CODECS[1]:
+        raise RuntimeError("GA v1 current codec is invalid")
+    wire_ids = tuple(wire_id for wire_id, _target in _V1_WIRE_TYPES)
+    enum_wire_ids = tuple(wire_id for wire_id, _target in _V1_ENUM_WIRE_TYPES)
     dataclass_wire_ids = {
         wire_id
-        for wire_id, target in _V2_WIRE_TYPES
+        for wire_id, target in _V1_WIRE_TYPES
         if is_dataclass(target)
     }
-    enum_value_ids = set(_V2_ENUM_VALUES)
+    enum_value_ids = set(_V1_ENUM_VALUES)
     if len(wire_ids) != len(set(wire_ids)):
-        raise RuntimeError("V2 wire ids are not unique")
+        raise RuntimeError("GA v1 wire ids are not unique")
     if len(enum_wire_ids) != len(set(enum_wire_ids)):
-        raise RuntimeError("V2 enum wire ids are not unique")
-    if set(_V2_SCHEMA_FINGERPRINTS) != dataclass_wire_ids:
-        raise RuntimeError("V2 schema fingerprint manifest does not match domain types")
-    if set(_V2_ENUM_VALUES) != set(enum_wire_ids):
-        raise RuntimeError("V2 enum value manifest does not match enum types")
-    if not set(_V2_DATACLASS_ADAPTERS).issubset(dataclass_wire_ids):
-        raise RuntimeError("V2 dataclass adapter manifest contains an unknown type")
+        raise RuntimeError("GA v1 enum wire ids are not unique")
+    if set(_V1_SCHEMA_FINGERPRINTS) != dataclass_wire_ids:
+        raise RuntimeError(
+            "GA v1 schema fingerprint manifest does not match domain types"
+        )
+    if set(_V1_ENUM_VALUES) != set(enum_wire_ids):
+        raise RuntimeError("GA v1 enum value manifest does not match enum types")
+    if set(_V1_DATACLASS_ENCODERS) != {"task_node"}:
+        raise RuntimeError("GA v1 dataclass encoder manifest is invalid")
+    if set(_V1_DATACLASS_DECODERS) != {"task_node"}:
+        raise RuntimeError("GA v1 dataclass decoder manifest is invalid")
+    if not set(_V1_DATACLASS_ENCODERS).issubset(dataclass_wire_ids):
+        raise RuntimeError("GA v1 dataclass encoder manifest contains an unknown type")
+    if not set(_V1_DATACLASS_DECODERS).issubset(dataclass_wire_ids):
+        raise RuntimeError("GA v1 dataclass decoder manifest contains an unknown type")
     if enum_value_ids != set(enum_wire_ids):
-        raise RuntimeError("V2 enum value manifest is incomplete")
+        raise RuntimeError("GA v1 enum value manifest is incomplete")
 
 
-_validate_v2_codec_definition()
+_validate_v1_codec_definition()
 
 
 __all__ = [

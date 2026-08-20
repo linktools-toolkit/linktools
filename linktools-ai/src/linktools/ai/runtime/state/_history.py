@@ -9,24 +9,23 @@ from collections.abc import AsyncIterator, Mapping, Sequence
 from dataclasses import dataclass, replace
 
 from linktools.core import environ
-from pydantic_ai import ModelMessagesTypeAdapter
 from pydantic_ai.messages import ModelMessage
 
 from ...core import canonical_json_bytes
 from ...errors import AIError, ErrorCode
 from ...storage import ObjectRef, ObjectStore, StoredPayload, runtime_object_key
+from .._message_codec import (
+    decode_v1_model_messages,
+    encode_v1_model_messages,
+)
+from ..service_api import SessionHistoryItem
 from ._codec import (
     _decode_enveloped_domain,
     encode_domain,
     encode_envelope,
 )
-from ._history_index import (
-    resolve_history_item_range_lazy,
-    resolve_history_range_lazy,
-)
 from ._contracts import (
     ContextProjection,
-    ConversationHistoryRecord,
     ConversationHistoryRepository,
     HistoryQuality,
     InlineContextBlock,
@@ -42,6 +41,10 @@ from ._contracts import (
     TranscriptSeekRecord,
     TranscriptSpanRef,
 )
+from ._history_index import (
+    resolve_history_item_range_lazy,
+    resolve_history_range_lazy,
+)
 from ._plan import RuntimeDomain
 from ._store import (
     FactQuery,
@@ -52,9 +55,9 @@ from ._store import (
     StoredRecord,
     partition_digest,
     record_key_digest,
+    require_no_run_history_lock,
     sequence_key,
     stream_digest,
-    require_no_run_history_lock,
 )
 from ._views import (
     EXECUTION_TRANSCRIPT_VIEW_V1,
@@ -64,7 +67,6 @@ from ._views import (
     project_execution_transcript_message,
     project_session_history_message,
 )
-from ..service_api import SessionHistoryItem
 
 _logger = environ.get_logger("ai.runtime.state.history")
 _CHUNK_TARGET = 256 * 1024
@@ -78,7 +80,7 @@ _TRANSCRIPT_SEEK_BLOCK = 128
 def _overlap_signature(message: ModelMessage) -> bytes:
     """Timestamp-ignoring signature used only for overlap/dedup matching."""
     value = json.loads(
-        ModelMessagesTypeAdapter.dump_json([message]).decode("utf-8")
+        encode_v1_model_messages((message,)).decode("utf-8")
     )
 
     def remove_timestamps(candidate: object) -> object:
@@ -97,9 +99,7 @@ def _overlap_signature(message: ModelMessage) -> bytes:
 
 def _exact_message_signature(message: ModelMessage) -> bytes:
     """Full canonical serialization including timestamp, for exact-content proof."""
-    return canonical_json_bytes(
-        json.loads(ModelMessagesTypeAdapter.dump_json([message]).decode("utf-8"))
-    )
+    return encode_v1_model_messages((message,))
 
 
 def suffix_prefix_overlap(
@@ -203,7 +203,7 @@ class _ContextProjector:
                     )
                 )
             else:
-                raw = ModelMessagesTypeAdapter.dump_json(list(values[index:end]))
+                raw = encode_v1_model_messages(values[index:end])
                 items.append(
                     InlineContextBlock(
                         RuntimePayloadRef(
@@ -367,7 +367,7 @@ class TranscriptRepository:
         current_start = first_message_index
         current_size = 2
         for message in values:
-            encoded = ModelMessagesTypeAdapter.dump_json([message])
+            encoded = encode_v1_model_messages((message,))
             part = encoded[1:-1]
             candidate_size = current_size + len(part) + (1 if current else 0)
             split = (
@@ -398,7 +398,7 @@ class TranscriptRepository:
         messages: Sequence[ModelMessage],
         origin: TranscriptOrigin,
     ) -> TranscriptChunk:
-        raw = ModelMessagesTypeAdapter.dump_json(list(messages))
+        raw = encode_v1_model_messages(messages)
         raw_digest = hashlib.sha256(raw).hexdigest()
         content = raw
         codec = "raw"
@@ -807,7 +807,7 @@ class TranscriptRepository:
             raw = zlib.decompress(raw)
         if hashlib.sha256(raw).hexdigest() != chunk.raw_digest or len(raw) != chunk.raw_size:
             raise ValueError("transcript chunk integrity check failed")
-        return tuple(ModelMessagesTypeAdapter.validate_json(raw))
+        return decode_v1_model_messages(raw)
 
     async def load_messages(self, owner_id: str) -> tuple[ModelMessage, ...]:
         require_no_run_history_lock("TranscriptRepository.load_messages")
@@ -1166,7 +1166,7 @@ class TranscriptRepository:
             raw = await self._read_payload(item.content.payload)  # type: ignore[union-attr]
             values.extend(
                 LoadedContextMessage(message, None)
-                for message in ModelMessagesTypeAdapter.validate_json(raw)
+                for message in decode_v1_model_messages(raw)
             )
         return LoadedModelContext(tuple(values))
 

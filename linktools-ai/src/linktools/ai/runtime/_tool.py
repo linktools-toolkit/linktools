@@ -2,7 +2,6 @@
 # -*- coding: utf-8 -*-
 """Runtime-owned tool authorization and durable operation contracts."""
 
-import asyncio
 import hashlib
 import json
 from collections.abc import Awaitable, Callable
@@ -14,14 +13,13 @@ from typing import TYPE_CHECKING, Any, Protocol
 from linktools.core import environ
 from pydantic_ai.exceptions import ModelRetry, ToolRetryError
 from pydantic_ai.messages import (
-    ModelMessagesTypeAdapter,
     ModelRequest,
     RetryPromptPart,
     ToolCallPart,
     ToolReturnPart,
 )
-from pydantic_ai_harness.step_persistence import RunRecord, StepStore, ToolEffectRecord
 from pydantic_ai.tools import RunContext, ToolDefinition
+from pydantic_ai_harness.step_persistence import RunRecord, StepStore, ToolEffectRecord
 
 from ..core import (
     Principal,
@@ -38,6 +36,7 @@ from ..storage import (
     StoredPayload,
     payload_fits_inline,
 )
+from ._message_codec import decode_v1_model_messages, encode_v1_model_messages
 from ._object import RuntimeObjectKeyFactory, put_runtime_object, read_runtime_object
 from .state._contracts import ToolOperationAdmission
 from .state._durability import (
@@ -516,18 +515,21 @@ class RuntimeToolOperationBridge:
         message = ModelRequest(
             parts=[ToolReturnPart("runtime", result, tool_call_id=decision.operation_id)],
         )
-        data = ModelMessagesTypeAdapter.dump_json([message])
+        data = encode_v1_model_messages((message,))
         return await self._payload(data)
 
     async def _decode_result(self, record: ToolOperationRecord) -> Any:
         payload = record.result_payload
         if payload is None:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        messages = ModelMessagesTypeAdapter.validate_json(await self._payload_bytes(payload))
+        messages = decode_v1_model_messages(await self._payload_bytes(payload))
         if len(messages) != 1 or not isinstance(messages[0], ModelRequest) or len(messages[0].parts) != 1:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         part = messages[0].parts[0]
-        if not isinstance(part, ToolReturnPart):
+        if (
+            not isinstance(part, ToolReturnPart)
+            or part.tool_call_id != record.tool_operation_id
+        ):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         return part.content
 
