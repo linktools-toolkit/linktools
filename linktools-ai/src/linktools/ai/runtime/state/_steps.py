@@ -1052,7 +1052,6 @@ class StateStepArchive(StepStore):
         owner_id = run.run_id
         if self._runtime_domain is RuntimeDomain.CONVERSATION:
             owner_id = self._history_id(run)
-        baseline = self._context_baselines.get(run.run_id)
         head = await self._history.get_head(owner_id)
         if head is None:
             if await self.get_run(run_id=run.run_id) is not None:
@@ -1111,10 +1110,8 @@ class StateStepArchive(StepStore):
                 )
             )
             sources = self._message_sources(
-                run.run_id,
                 owner_id,
                 incoming,
-                baseline,
                 tuple(working_messages) + tuple(delta),
                 captured_indices=(
                     tuple(
@@ -1266,17 +1263,14 @@ class StateStepArchive(StepStore):
 
     def _message_sources(
         self,
-        run_id: str,
         owner_id: str,
         messages: Sequence[ModelMessage],
-        baseline: LoadedModelContext | None,
         captured_messages: Sequence[ModelMessage],
         captured_indices: Sequence[int] | None = None,
         *,
         overlap: int,
         stored_message_count: int,
     ) -> tuple[TranscriptMessageRef | None, ...]:
-        baseline_values = () if baseline is None else baseline.messages
         sources: list[TranscriptMessageRef | None] = []
         actual_indices = (
             tuple(range(len(captured_messages)))
@@ -1297,12 +1291,6 @@ class StateStepArchive(StepStore):
         exact_captured = tuple(
             _exact_message_signature(value) for value in captured_messages
         )
-        baseline_positions: dict[bytes, list[int]] = {}
-        for index, value in enumerate(baseline_values):
-            baseline_positions.setdefault(
-                _exact_message_signature(value.message),
-                [],
-            ).append(index)
         for index, message in enumerate(messages):
             if index < overlap:
                 captured_position = stored_message_count - overlap + index
@@ -1318,15 +1306,6 @@ class StateStepArchive(StepStore):
                     )
                 )
                 continue
-            baseline_matches = baseline_positions.get(
-                _exact_message_signature(message),
-                [],
-            )
-            if len(baseline_matches) == 1:
-                source = baseline_values[baseline_matches[0]].source
-                if source is not None:
-                    sources.append(source)
-                    continue
             sources.append(None)
         return tuple(sources)
 

@@ -419,32 +419,57 @@ class _FilesystemCache:
         limit: int,
     ) -> tuple[StoredFact, ...]:
         _require_scan_limit(limit)
+        facts_root = self._root / "facts"
+        if not facts_root.is_dir():
+            return ()
         values: list[StoredFact] = []
-        for info in sorted(
-            (value for value in self.list_fact_streams() if value is not None),
-            key=lambda value: value.stream_digest,
-        ):
-            first = 1
-            if after is not None:
-                if info.stream_digest < after.stream_digest:
-                    continue
-                if info.stream_digest == after.stream_digest:
-                    first = after.sequence + 1
-            if first > info.last_sequence:
-                continue
-            sequences = tuple(
-                range(first, min(info.last_sequence + 1, first + limit - len(values)))
-            )
-            batch = _read_fact_batch(self._root, info.stream_digest, sequences)
-            for sequence in sequences:
+        for shard in sorted(path for path in facts_root.iterdir() if path.is_dir()):
+            for stream_dir in sorted(
+                path for path in shard.iterdir() if path.is_dir()
+            ):
                 try:
-                    value = batch[(info.stream_digest, sequence)]
-                except KeyError as error:
+                    stream = bytes.fromhex(stream_dir.name)
+                except ValueError as error:
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
-                self._business_files_read += 1
-                values.append(value)
-                if len(values) == limit:
-                    return tuple(values)
+                if len(stream) != 32:
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                if after is not None and stream < after.stream_digest:
+                    continue
+                meta_path = stream_dir / "meta.json"
+                if not meta_path.is_file():
+                    continue
+                _require_layout_path(
+                    meta_path,
+                    self._root,
+                    _fact_meta_path(self._root, stream),
+                )
+                info = self.get_fact_stream(stream)
+                if info is None:
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                first = 1
+                if after is not None and stream == after.stream_digest:
+                    first = after.sequence + 1
+                if first > info.last_sequence:
+                    continue
+                sequences = tuple(
+                    range(
+                        first,
+                        min(
+                            info.last_sequence + 1,
+                            first + limit - len(values),
+                        ),
+                    )
+                )
+                batch = _read_fact_batch(self._root, info.stream_digest, sequences)
+                for sequence in sequences:
+                    try:
+                        value = batch[(info.stream_digest, sequence)]
+                    except KeyError as error:
+                        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
+                    self._business_files_read += 1
+                    values.append(value)
+                    if len(values) == limit:
+                        return tuple(values)
         return tuple(values)
 
     def scan_operations(self) -> tuple[StoredOperation, ...]:
@@ -2451,7 +2476,10 @@ def _read_fact_batch(
 ) -> dict[tuple[bytes, int], StoredFact]:
     values: dict[tuple[bytes, int], StoredFact] = {}
     for sequence in sequences:
-        fact = decode_fact(_read_json(_fact_item_path(root, stream, sequence)))
+        try:
+            fact = decode_fact(_read_json(_fact_item_path(root, stream, sequence)))
+        except FileNotFoundError as error:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
         if fact.stream_digest != stream or fact.sequence != sequence:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         values[(stream, sequence)] = fact

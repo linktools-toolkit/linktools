@@ -3,6 +3,7 @@
 """Canonical versioned codecs for Runtime persistence values."""
 
 import base64
+import hashlib
 import types
 from collections.abc import Callable, Iterator, Mapping
 from dataclasses import MISSING, dataclass, fields, is_dataclass
@@ -12,6 +13,7 @@ from operator import attrgetter
 from types import MappingProxyType
 from typing import (
     Any,
+    ForwardRef,
     Literal,
     TypeVar,
     Union,
@@ -21,6 +23,7 @@ from typing import (
 )
 
 from pydantic_ai import ModelMessagesTypeAdapter
+from pydantic_ai.messages import ModelRequest, ModelResponse
 from pydantic_ai_harness.step_persistence import (
     ContinuableSnapshot,
     RunRecord,
@@ -90,11 +93,13 @@ from ._contracts import (
     ExecutionEventAppend,
     ExternalCallRecord,
     HistoryQuality,
+    IdempotencyTerminalUpdate,
     IdempotencyRecord,
     InlineContextBlock,
     LoadedContextMessage,
     LoadedModelContext,
     MemoryRecord,
+    OperationTerminalUpdate,
     RecoveryActiveRecord,
     RecoveryAdmissionRecord,
     RecoveryCheckpoint,
@@ -248,6 +253,132 @@ _V2_ENUM_TYPES = MappingProxyType(
     {wire_id: target for wire_id, target in _V2_ENUM_WIRE_TYPES}
 )
 
+_V2_ENUM_VALUES: Mapping[str, frozenset[JsonValue]] = MappingProxyType(
+    {
+        "approval_decision": frozenset(("APPROVE", "DENY")),
+        "approval_status": frozenset(
+            ("PENDING", "APPROVED", "DENIED", "CANCELLED", "EXPIRED")
+        ),
+        "evaluation_status": frozenset(
+            ("PENDING", "RUNNING", "SUCCEEDED", "FAILED", "CANCELLED")
+        ),
+        "execution_event_type": frozenset(
+            (
+                "EXECUTION_CREATED",
+                "EXECUTION_STARTED",
+                "EXECUTION_START_UNKNOWN",
+                "APPROVAL_REQUESTED",
+                "APPROVAL_DECIDED",
+                "EXTERNAL_REQUESTED",
+                "EXTERNAL_SUPPLIED",
+                "CANCEL_REQUESTED",
+                "EXECUTION_SUCCEEDED",
+                "EXECUTION_FAILED",
+                "EXECUTION_CANCELLED",
+                "ASSISTANT_PART_COMPLETED",
+                "TOOL_CALL_STARTED",
+                "TOOL_CALL_FINISHED",
+            )
+        ),
+        "execution_history_state": frozenset(("open", "sealed")),
+        "execution_lineage_kind": frozenset(
+            ("RUN", "SESSION_RESUME", "RETRY", "FORK", "SUBAGENT")
+        ),
+        "execution_status": frozenset(
+            (
+                "PENDING_START",
+                "STARTED",
+                "FINALIZING",
+                "START_UNKNOWN",
+                "WAITING_APPROVAL",
+                "WAITING_EXTERNAL",
+                "CANCELLING",
+                "SUCCEEDED",
+                "FAILED",
+                "CANCELLED",
+            )
+        ),
+        "external_call_status": frozenset(
+            ("PENDING", "SUPPLIED", "CANCELLED", "EXPIRED")
+        ),
+        "history_quality": frozenset(("complete", "conservative")),
+        "idempotency_status": frozenset(
+            ("RESERVED", "STARTED", "START_UNKNOWN", "COMPLETED", "FAILED", "CANCELLED")
+        ),
+        "operation_kind": frozenset(
+            (
+                "EXECUTION_START",
+                "MODEL",
+                "TOOL",
+                "APPROVAL",
+                "EXTERNAL",
+                "BUDGET",
+                "RESULT",
+                "EVENT",
+                "EXECUTION_CANCEL",
+                "TASK_CANCEL",
+                "SESSION_CREATE",
+                "SESSION_FORK",
+                "SESSION_UPDATE",
+                "SESSION_CLOSE",
+                "MEMORY_WRITE",
+                "MEMORY_DELETE",
+                "TASK_NODE",
+                "DOWNLOAD_GRANT",
+            )
+        ),
+        "operation_status": frozenset(
+            (
+                "PENDING",
+                "RUNNING",
+                "SUCCEEDED",
+                "FAILED",
+                "CANCELLED",
+                "EFFECT_UNKNOWN",
+                "COMPACTED",
+            )
+        ),
+        "resource_kind": frozenset(
+            (
+                "SESSION",
+                "EXECUTION",
+                "TASK_GRAPH",
+                "EVALUATION",
+                "APPROVAL",
+                "EXTERNAL_CALL",
+                "ARTIFACT",
+                "MEMORY",
+                "TOOL_OPERATION",
+                "DOWNLOAD_GRANT",
+            )
+        ),
+        "runtime_domain": frozenset(
+            ("conversation", "execution", "memory", "artifact", "task", "evaluation", "recovery")
+        ),
+        "recovery_checkpoint_state": frozenset(
+            ("admitted", "active", "waiting", "handoff", "completed")
+        ),
+        "recovery_handoff_phase": frozenset(
+            ("none", "prepared", "conversation_resolved", "execution_committed", "completed")
+        ),
+        "session_status": frozenset(("OPEN", "CLOSING", "CLOSED", "CLEANUP_REQUIRED")),
+        "stop_reason": frozenset(
+            ("END_TURN", "REFUSAL", "TURN_LIMIT", "OUTPUT_VALIDATION_FAILED", "CANCELLED", "ERROR")
+        ),
+        "task_status": frozenset(
+            ("PENDING", "READY", "RUNNING", "SUCCEEDED", "FAILED", "CANCELLED", "BLOCKED")
+        ),
+        "tool_operation_status": frozenset(
+            ("PENDING", "CLAIMED", "COMPLETED", "FAILED", "CANCELLED", "EFFECT_UNKNOWN")
+        ),
+        "transcript_origin": frozenset(("raw", "unknown")),
+        "transcript_owner_domain": frozenset(("conversation", "execution", "recovery")),
+        "transcript_seek_dimension": frozenset(
+            ("message", "session_history_item", "execution_transcript_item")
+        ),
+    }
+)
+
 # Preserve the public v2 manifest names for callers.  Codec decisions below
 # use the version-owned mappings through _VersionCodec.
 _WIRE_TYPES = _V2_WIRE_TYPES
@@ -257,6 +388,81 @@ _ENUM_WIRE_TYPES = _V2_ENUM_WIRE_TYPES
 _ENUM_WIRE_IDS = _V2_ENUM_WIRE_IDS
 _ENUM_TYPES = _V2_ENUM_TYPES
 
+_V2_SCHEMA_FINGERPRINTS: Mapping[str, str] = MappingProxyType(
+    {
+        "agent_attempt_claim": "6c70466a08d20f57baf058d8da2a7d2ab3cd738494e45d82111e791fc8beaac2",
+        "approval_record": "14d31c99c7e60edebe193b1349c54e5c9a342829c4a8538651d7e9b1249a158d",
+        "artifact_record": "9e8c5e9b10ebe4d75605a7dafcb11c7b442694485c5aae21138cb81339992a93",
+        "context_projection": "8f77d052bed206e72f13faab7fcb3471cf11358c3b8ac65ffd96d5c13e229bc2",
+        "conversation_cursor": "85bc775ad1c18bebf3a9b54ca634d874350f906c36f61c0f1254bff1b3b18888",
+        "conversation_history": "e02add0b6455024f22d2599fa4479a5f4ee89fb4af399e70e9e6dfee119eae76",
+        "conversation_history_index_node": "0db81616aa96a4e8a78f818334ddbd1b42f3023acb4e1209de8057f76a729729",
+        "conversation_history_segment": "62cc29ba7ddb357641b4de91f9168a70ce4f518043444482ee16fefe57a336a5",
+        "evaluation_record": "67ac6e9191111abc33d611d2bfd628a4190fa6794c28b8f15f8b878ba46ad345",
+        "execution_cancel_request_commit": "1a5f2667e2909eb1a94b0446483ea19cc105131a67d606854bb6e3d11541fa7a",
+        "execution_event": "c7d10fa9a15092e7e29c503b938f12358b836ee0d578bd5faff0f0951d3bedf8",
+        "execution_event_append": "2db5fe9712b5b6b99fbdf014e3d34f9d20bdcaf419c1f1c616547962d0de5d8d",
+        "execution_history_head": "403fad67908ca97614648aa16b681fcecaa205f9ba0847f77ce5dbf666a86b68",
+        "execution_history_seal": "dc5a7181d8ee8e23b75390bae449da48eca31f1286159212bb1960d5aad5a0bd",
+        "execution_record": "c8fbccbc839df165ee7e8e24c7930c078aeda8029f505c55065041b43e9ac681",
+        "execution_run_seal_head": "458b4c2b6722e27546f0948ff87888a07740355c65809c2aff716a7215bcdb0c",
+        "execution_start_claim": "a615f3846374e9f5a3e0391188af3644af2d68da55d73980a9f0208fab9f1746",
+        "execution_start_reservation": "4c4f6f6bfd6d2d18761bfc14e41facdbdbab354bb006df5a908c00b0be0dbf3e",
+        "execution_start_reservation_result": "58e496a28617436532bf22056a34259134d724d9b8c56748e55b7091f8504c7f",
+        "execution_start_unknown_commit": "e1e7da1699fdfe2f637225b40a25133205e46c454a56933a68080fc70edfedbf",
+        "execution_terminal_commit": "9c9412849f0762ea748066b50f0cfd0d31f2a47dd3155ade8b39dfbca126db51",
+        "execution_terminal_commit_result": "4f76947b8c1255a05d0328a7dc9282755a8a7b06ef7f9e5b5cf00e556fd60b1a",
+        "external_call_record": "5ebc4362a741d84203885179353de1947ac443212af17f8858008207776fcf1b",
+        "idempotency_record": "86071c1bbbd2ed8496e981471f27c4cb3ac68afbdb3d39c645d975403ead58fa",
+        "inline_context_block": "e473a751b3324cc5408e9264a1e55de9600bb0a312f0f3b7b7f8fc47afd593a6",
+        "loaded_context_message": "14215094b9ec79d9c889e336cf558661635f53590fd60a245de8d34f90007272",
+        "loaded_model_context": "676b20054fe7f2e9912d9e7f746e58c65ea9baa4c17d26d269f79862667ec8ec",
+        "memory_record": "75b1e858f839ea2cf2fe861c1754cfbc123171a0a1b3a85dd00bc127b8766a58",
+        "object_ref": "802ac36862e30f34a601e1db02eaeba787489f66fcce226ee3b81c4ffff55e25",
+        "operation_ledger_input": "3f6ebe50100e1235cb5715e45ef05f7e4bdaa79a3ffe5bcc7e79f23eeefdd757",
+        "operation_ledger_record": "dd220a701845fc3c1af57f1465733f4caad444dacdad198fc86dc0fdccb926c1",
+        "principal": "8ec0c3ae89b05258a228bd01e7941a0d43d35d001f874bf2f8ddd366ef0de78f",
+        "recovery_active": "28b8227b09c406d537425b6928b1bbf33008d8c1ef046d3e14c5055ecb3ed664",
+        "recovery_admission": "8b1607f342e2d64aeff7947c66514a9c9d5ec8a7609c59c3e4fb0c5c5429b813",
+        "recovery_checkpoint": "5e1fb5347b99bfd3fef6dd14e20ec17c65f4ba9dc0ced5cfc2853e3b228b1abc",
+        "recovery_conversation_intent": "92dc7357513f07e4724dfe5a6229d4bcbfe34efb984f002538b486d2b0cb4605",
+        "recovery_execution_input": "eb0303dd4cdc6295ab841b881073985a9413bb3983e2bd87c7e14dd8a5089c63",
+        "recovery_idempotency_input": "74aba8491b8849d02b3930b7745ddb03914df19ee75ceee466c1fcc53965089b",
+        "recovery_integrity_report": "287e89f61adc722da8d2365c7ddd8ae7fa96eac37c58bd530c8f860cd48d750d",
+        "recovery_state": "533697b347535207c474066973e2cd32da55ae8259c5e5610c80a74657ddaa7e",
+        "recovery_terminal_handoff": "dc9cc606232780c624a2b3026e1a2f42e9290dc842749e3fa17e5fdbfb2b8a04",
+        "recovery_terminal_outcome": "70249559979a766098cb25acd5977b40665f56dd563b02d4a1892694978fe9ba",
+        "resource_ref": "bb37a07e4b78ebe2552774733eb90fc5aa488fd1e262604c578ca87347aaec0d",
+        "result_record": "88ba85b7804e77022de1c625ecba090bbeaee815ec355f4dc8787cef95992afe",
+        "run_record": "07005d406627ef2a843fc41601c6149336d52d4a5a3b81635fdd1ba58f5c1e9f",
+        "runtime_payload_ref": "e681eb4a80417ccdae9ece1f4679dd0601a02dfc5cb89989e2c021c70f63a20e",
+        "session_fork_result": "b3a7401efb44d7d9671cc1505dc52d7cb2e04edf2e05d19da2a7f371e201e91b",
+        "session_record": "d29d8d76c025ee18d7e93f2315e699618470e096b728e23673f28cad61961ca2",
+        "step_event": "c970e92b12e5b3f0fa72afac8e955061c98927dec5805e2acce6e39fc82828e5",
+        "stored_payload": "f893cfe67f1722ed1605f28758a868307ef6c253e610a9d2d1853ba422aba7f7",
+        "stored_step_snapshot": "b054107b4077a2cf9e948aadb63dae4ae50b8bc73fe72c5908610c332ee70886",
+        "task_graph": "6f40954f940848ff244e524865e1a99641a0e9e753f9c0717802bba685595496",
+        "task_graph_limits": "2fb7edd03491fffa44c89ea2d13dec396cb0ce345d98832184ac4b720a654585",
+        "task_graph_view": "319d351683d8358140409c091ed104559fdf87be156e64e1a5c8ba21d4165fce",
+        "task_lease": "b82387e9b2458764179dce21711ccbb184fd5476b3c56de8ae18c8a510657ce1",
+        "task_node": "ef43d8cf7d1481b5b50543619d19bf0992bc2ccb2cb8f655c0dffa93e51303a1",
+        "task_node_view": "b50443b36f48b177407471ae984f36be27ed944d852647ba2408a954a0e3750b",
+        "task_terminal": "fd0d78bd5136f775f0787310fceb2f9ab145423af6071da76ab5effb1b27b211",
+        "tool_effect": "2cc6f38e2379596e811db4d877b69bf99bbb83bc0291879116174d8e81683b5f",
+        "tool_operation": "7e3639943ad64c296f47b97fe79b3c699d7e1da9487eec4083411d3cd7c7eba7",
+        "tool_operation_admission": "86aae6aa8d2bdca393eac38824a00f40e401a1cec8da5bed6d27f4ba254e2642",
+        "transcript_chunk": "40b078307e74dc2e3cc0f166aec7c0235fc1354714b3bc05e3458a9b835de1f4",
+        "transcript_head": "d8a905a8ed9b406a85b5248d27c96ae325264e80b70f397fbf7c56967b2cdddc",
+        "transcript_message_ref": "b7c6c85b153a6da85e5e93d99a20eee1482bd705506aa512e4a41625056fff28",
+        "transcript_seek": "faa2c40bb57e757a9291b3d1c124c5a30989fc4fa90e43bbadad25d740c5cbe8",
+        "transcript_span_ref": "163f19705426e2c34f8a4e00ed80340a9dd737b450e17b47b4624356fd25e9ff",
+        "usage_metrics": "6b537d6b25be39549ab8e1440d13b431c28f734f3f857fabebe67075a9134b00",
+    }
+)
+
+
+V2DataclassAdapter = Callable[[Mapping[str, object], "_VersionCodec"], object]
+
 
 @dataclass(frozen=True, slots=True)
 class _VersionCodec:
@@ -265,14 +471,49 @@ class _VersionCodec:
     domain_types: Mapping[str, type[object]]
     enum_wire_ids: Mapping[type[Enum], str]
     enum_types: Mapping[str, type[Enum]]
+    schema_fingerprints: Mapping[str, str]
+    dataclass_adapters: Mapping[str, V2DataclassAdapter]
+    enum_values: Mapping[str, frozenset[JsonValue]]
+
+
+def _decode_v2_task_node(
+    raw_fields: Mapping[str, object],
+    codec: "_VersionCodec",
+) -> TaskNode:
+    return TaskNode(
+        str(_decode_domain(raw_fields["node_id"], str, codec)),
+        tuple(
+            _decode_domain(
+                raw_fields["dependencies"],
+                tuple[str, ...],
+                codec,
+            )
+        ),
+        input=_decode_domain(
+            raw_fields["input"],
+            Any,
+            codec,
+        ),
+        budget_cost=int(
+            _decode_domain(raw_fields["budget_cost"], int, codec)
+        ),
+    )
+
+
+_V2_DATACLASS_ADAPTERS: Mapping[str, V2DataclassAdapter] = MappingProxyType(
+    {"task_node": _decode_v2_task_node}
+)
 
 
 _V2_CODEC = _VersionCodec(
-    2,
-    _V2_WIRE_IDS,
-    _V2_DOMAIN_TYPES,
-    _V2_ENUM_WIRE_IDS,
-    _V2_ENUM_TYPES,
+    version=2,
+    wire_ids=_V2_WIRE_IDS,
+    domain_types=_V2_DOMAIN_TYPES,
+    enum_wire_ids=_V2_ENUM_WIRE_IDS,
+    enum_types=_V2_ENUM_TYPES,
+    schema_fingerprints=_V2_SCHEMA_FINGERPRINTS,
+    dataclass_adapters=_V2_DATACLASS_ADAPTERS,
+    enum_values=_V2_ENUM_VALUES,
 )
 _VERSION_CODECS: Mapping[int, _VersionCodec] = MappingProxyType(
     {
@@ -280,6 +521,155 @@ _VERSION_CODECS: Mapping[int, _VersionCodec] = MappingProxyType(
     }
 )
 _CURRENT_CODEC = _VERSION_CODECS[CURRENT_DATA_VERSION]
+
+_V2_EXTERNAL_SCHEMA_TYPES: Mapping[type[object], str] = MappingProxyType(
+    {
+        IdempotencyTerminalUpdate: (
+            "linktools.ai.runtime.state.IdempotencyTerminalUpdate"
+        ),
+        OperationTerminalUpdate: (
+            "linktools.ai.runtime.state.OperationTerminalUpdate"
+        ),
+        ModelRequest: "pydantic_ai.messages.ModelRequest",
+        ModelResponse: "pydantic_ai.messages.ModelResponse",
+    }
+)
+
+
+def _dataclass_schema_descriptor(
+    target: type[object],
+    codec: _VersionCodec,
+) -> JsonValue:
+    if not is_dataclass(target):
+        raise TypeError(f"schema target is not a dataclass: {target!r}")
+    if target not in codec.wire_ids:
+        raise TypeError(f"schema target is not a V2 dataclass: {target!r}")
+    try:
+        hints = get_type_hints(target)
+    except (NameError, TypeError) as error:
+        raise TypeError(f"schema annotations are unresolved: {target!r}") from error
+    descriptors: list[JsonValue] = []
+    for field in fields(target):
+        annotation = hints.get(field.name)
+        if annotation is None:
+            raise TypeError(f"schema annotation is missing: {target!r}.{field.name}")
+        descriptors.append(
+            {
+                "name": field.name,
+                "init": field.init,
+                "type": _schema_type_descriptor(annotation, codec),
+            }
+        )
+    return {"fields": descriptors}
+
+
+def _schema_type_descriptor(
+    annotation: object,
+    codec: _VersionCodec,
+) -> JsonValue:
+    if isinstance(annotation, ForwardRef):
+        if annotation.__forward_arg__ == "JsonValue":
+            return "json_value"
+        raise TypeError(f"schema annotation is unresolved: {annotation!r}")
+    if annotation is Any or annotation is object:
+        return "any"
+    if annotation is None or annotation is type(None):
+        return "none"
+    primitive_names = {
+        str: "str",
+        bool: "bool",
+        int: "int",
+        float: "float",
+        bytes: "bytes",
+        datetime: "datetime",
+    }
+    if annotation in primitive_names:
+        return primitive_names[annotation]
+    external_name = _V2_EXTERNAL_SCHEMA_TYPES.get(annotation)
+    if external_name is not None:
+        return {"external": external_name}
+    if isinstance(annotation, type) and issubclass(annotation, Enum):
+        wire_id = codec.enum_wire_ids.get(annotation)
+        if wire_id is None:
+            raise TypeError(f"schema enum is not in the V2 codec: {annotation!r}")
+        return {"enum": wire_id}
+    if isinstance(annotation, type) and is_dataclass(annotation):
+        wire_id = codec.wire_ids.get(annotation)
+        if wire_id is not None:
+            return {"dataclass": wire_id}
+        raise TypeError(f"schema dataclass is not in the V2 codec: {annotation!r}")
+
+    origin = get_origin(annotation)
+    arguments = get_args(annotation)
+    if origin is Literal:
+        return {
+            "literal": [_schema_literal(value, codec) for value in arguments]
+        }
+    if origin in (Union, types.UnionType):
+        values = [_schema_type_descriptor(value, codec) for value in arguments]
+        return {"union": sorted(values, key=canonical_json_bytes)}
+    if origin is list:
+        if len(arguments) != 1:
+            raise TypeError(f"schema list annotation is incomplete: {annotation!r}")
+        return {"list": _schema_type_descriptor(arguments[0], codec)}
+    if origin is tuple:
+        if not arguments:
+            raise TypeError(f"schema tuple annotation is incomplete: {annotation!r}")
+        if arguments[-1] is Ellipsis:
+            if len(arguments) != 2:
+                raise TypeError(f"schema tuple annotation is invalid: {annotation!r}")
+            return {"tuple_var": _schema_type_descriptor(arguments[0], codec)}
+        return {
+            "tuple": [
+                _schema_type_descriptor(value, codec) for value in arguments
+            ]
+        }
+    if origin is set:
+        if len(arguments) != 1:
+            raise TypeError(f"schema set annotation is incomplete: {annotation!r}")
+        return {"set": _schema_type_descriptor(arguments[0], codec)}
+    if origin is frozenset:
+        if len(arguments) != 1:
+            raise TypeError(
+                f"schema frozenset annotation is incomplete: {annotation!r}"
+            )
+        return {"frozenset": _schema_type_descriptor(arguments[0], codec)}
+    if origin is dict or origin is Mapping:
+        if len(arguments) != 2:
+            raise TypeError(
+                f"schema mapping annotation is incomplete: {annotation!r}"
+            )
+        return {
+            "mapping": [
+                _schema_type_descriptor(arguments[0], codec),
+                _schema_type_descriptor(arguments[1], codec),
+            ]
+        }
+    raise TypeError(f"schema annotation is not representable: {annotation!r}")
+
+
+def _schema_literal(value: object, codec: _VersionCodec) -> JsonValue:
+    if isinstance(value, Enum):
+        wire_id = codec.enum_wire_ids.get(type(value))
+        if wire_id is None:
+            raise TypeError(f"schema literal enum is not in V2: {value!r}")
+        return {"$enum": wire_id, "value": value.value}
+    if value is None or isinstance(value, (str, bool, int, float)):
+        return value
+    if isinstance(value, datetime):
+        return {"$datetime": value.isoformat()}
+    if isinstance(value, bytes):
+        return {"$bytes": base64.b64encode(value).decode("ascii")}
+    raise TypeError(f"schema literal is not canonical: {value!r}")
+
+
+def _dataclass_schema_fingerprint(
+    target: type[object],
+    codec: _VersionCodec,
+) -> str:
+    return hashlib.sha256(
+        canonical_json_bytes(_dataclass_schema_descriptor(target, codec))
+    ).hexdigest()
 
 
 @dataclass(frozen=True, slots=True)
@@ -668,22 +1058,15 @@ def _decode_runtime_domain(
 ) -> RuntimeDomain:
     if value is None:
         return default
-    if (
-        isinstance(value, Mapping)
-        and value.get("$enum") == codec.enum_wire_ids[RuntimeDomain]
-    ):
-        enum_value = value.get("value")
-        if isinstance(enum_value, str):
-            try:
-                return RuntimeDomain(enum_value)
-            except ValueError as error:
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
-    if isinstance(value, str):
-        try:
-            return RuntimeDomain(value)
-        except ValueError as error:
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
-    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    try:
+        result = _decode_domain(value, RuntimeDomain, codec)
+    except AIError:
+        raise
+    except (TypeError, ValueError) as error:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
+    if not isinstance(result, RuntimeDomain):
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    return result
 
 
 def _decode_domain(
@@ -707,7 +1090,11 @@ def _decode_domain(
                 continue
             try:
                 return _decode_domain(value, candidate, codec)
-            except (TypeError, ValueError, KeyError, AIError):
+            except (TypeError, ValueError, KeyError):
+                continue
+            except AIError as error:
+                if error.code is ErrorCode.STORAGE_VERSION_UNSUPPORTED:
+                    raise
                 continue
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     if value is None:
@@ -761,8 +1148,7 @@ def _decode_domain(
             raise TypeError("none value is not null")
         return None
     if isinstance(target, type) and issubclass(target, Enum):
-        raw = value.get("value") if isinstance(value, Mapping) and "$enum" in value else value
-        return target(raw)
+        return _decode_enum(value, target, codec)
     if target is datetime:
         raw = value.get("$datetime") if isinstance(value, Mapping) else value
         result = datetime.fromisoformat(str(raw))
@@ -781,39 +1167,69 @@ def _decode_domain(
     return _decode_any(value, codec)
 
 
+def _decode_enum(
+    value: object,
+    target: type[Enum],
+    codec: _VersionCodec,
+) -> Enum:
+    expected_wire_id = codec.enum_wire_ids.get(target)
+    if expected_wire_id is None:
+        raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
+    wire_id: str | None = None
+    raw = value.value if isinstance(value, Enum) else value
+    if isinstance(value, Mapping) and "$enum" in value:
+        wire_id = value.get("$enum")
+        if not isinstance(wire_id, str):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        if wire_id != expected_wire_id:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        raw = value.get("value")
+    allowed = codec.enum_values.get(expected_wire_id)
+    if allowed is None:
+        raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
+    try:
+        valid = raw in allowed
+    except TypeError:
+        valid = False
+    if not valid:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    try:
+        return target(raw)
+    except (TypeError, ValueError) as error:
+        raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED) from error
+
+
 def _decode_dataclass(
     value: object,
     target: type,
     codec: _VersionCodec,
 ) -> object:
-    if (
-        not isinstance(value, Mapping)
-        or value.get("$dataclass") != codec.wire_ids.get(target)
-    ):
-        raise TypeError("dataclass envelope is invalid")
+    if not isinstance(value, Mapping):
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    wire_id = value.get("$dataclass")
+    if not isinstance(wire_id, str):
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    expected_target = codec.domain_types.get(wire_id)
+    if expected_target is None:
+        raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
+    if expected_target is not target:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     raw_fields = value.get("fields")
     if not isinstance(raw_fields, Mapping):
-        raise TypeError("dataclass fields are invalid")
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    adapter = codec.dataclass_adapters.get(wire_id)
+    if adapter is not None:
+        return adapter(raw_fields, codec)
+    expected_fingerprint = codec.schema_fingerprints.get(wire_id)
+    if expected_fingerprint is None:
+        raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
+    try:
+        actual_fingerprint = _dataclass_schema_fingerprint(target, codec)
+    except TypeError as error:
+        raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED) from error
+    if actual_fingerprint != expected_fingerprint:
+        raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
     hints = get_type_hints(target)
-    if target is TaskNode:
-        return target(
-            str(_decode_domain(raw_fields["node_id"], hints["node_id"], codec)),
-            tuple(
-                _decode_domain(
-                    raw_fields["dependencies"],
-                    hints["dependencies"],
-                    codec,
-                )
-            ),
-            input=_decode_domain(
-                raw_fields["input"],
-                hints.get("input", Any),
-                codec,
-            ),
-            budget_cost=int(
-                _decode_domain(raw_fields["budget_cost"], hints["budget_cost"], codec)
-            ),
-        )
     kwargs = {}
     for field in fields(target):
         if not field.init:
@@ -843,7 +1259,7 @@ def _decode_any(value: object, codec: _VersionCodec) -> object:
         if "$enum" in value:
             name = value.get("$enum")
             target = _enum_type(str(name), codec)
-            return target(value.get("value"))
+            return _decode_enum(value, target, codec)
         if "$dataclass" in value:
             target = codec.domain_types.get(str(value.get("$dataclass")))
             if target is None:
@@ -1007,6 +1423,32 @@ def _decode_step_envelope(value: Mapping[str, JsonValue]) -> object:
     if payload is None:
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     return _decode_domain(payload, target, codec)
+
+
+def _validate_v2_codec_definition() -> None:
+    wire_ids = tuple(wire_id for wire_id, _target in _V2_WIRE_TYPES)
+    enum_wire_ids = tuple(wire_id for wire_id, _target in _V2_ENUM_WIRE_TYPES)
+    dataclass_wire_ids = {
+        wire_id
+        for wire_id, target in _V2_WIRE_TYPES
+        if is_dataclass(target)
+    }
+    enum_value_ids = set(_V2_ENUM_VALUES)
+    if len(wire_ids) != len(set(wire_ids)):
+        raise RuntimeError("V2 wire ids are not unique")
+    if len(enum_wire_ids) != len(set(enum_wire_ids)):
+        raise RuntimeError("V2 enum wire ids are not unique")
+    if set(_V2_SCHEMA_FINGERPRINTS) != dataclass_wire_ids:
+        raise RuntimeError("V2 schema fingerprint manifest does not match domain types")
+    if set(_V2_ENUM_VALUES) != set(enum_wire_ids):
+        raise RuntimeError("V2 enum value manifest does not match enum types")
+    if not set(_V2_DATACLASS_ADAPTERS).issubset(dataclass_wire_ids):
+        raise RuntimeError("V2 dataclass adapter manifest contains an unknown type")
+    if enum_value_ids != set(enum_wire_ids):
+        raise RuntimeError("V2 enum value manifest is incomplete")
+
+
+_validate_v2_codec_definition()
 
 
 __all__ = [

@@ -991,20 +991,19 @@ class TranscriptRepository:
             start=start,
             end=end,
         )
-        position = 0
+        expected = end - start
+        emitted = 0
         for segment in resolution.segments:
-            segment_length = segment.end - segment.start
-            window_start = max(start - position, 0)
-            window_end = min(end - position, segment_length)
-            if window_start < window_end:
-                async for message in self._iter_range(
-                    self.history_stream(segment.history_id),
-                    start=segment.start + window_start,
-                    end=segment.start + window_end,
-                    seek_owner_id=segment.history_id,
-                ):
-                    yield message
-            position += segment_length
+            async for message in self._iter_range(
+                self.history_stream(segment.history_id),
+                start=segment.start,
+                end=segment.end,
+                seek_owner_id=segment.history_id,
+            ):
+                emitted += 1
+                yield message
+        if emitted != expected:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
 
     async def store_projection(
         self,
@@ -1578,10 +1577,12 @@ class TranscriptRepository:
             total = inherited + transcript_head.message_count
             if end > total:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            if start == end:
+                return _HistoryResolution(())
             roots = await self._history_repository.get_forest_roots_in_transaction(
                 transaction,
                 record.prefix_index_head_id,
-                max_roots=2,
+                max_roots=64,
             )
             resolved = await resolve_history_range_lazy(
                 roots,

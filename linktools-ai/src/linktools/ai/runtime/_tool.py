@@ -5,10 +5,11 @@
 import asyncio
 import hashlib
 import json
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from enum import StrEnum
-from typing import Any, Protocol
+from typing import TYPE_CHECKING, Any, Protocol
 
 from linktools.core import environ
 from pydantic_ai.exceptions import ModelRetry, ToolRetryError
@@ -45,6 +46,9 @@ from .state._durability import (
     run_durable_commit,
 )
 from .state._plan import RuntimeDomain
+
+if TYPE_CHECKING:
+    from ..agent import ToolOperationDecision
 
 _logger = environ.get_logger("ai.runtime.tool")
 
@@ -234,7 +238,7 @@ class RuntimeToolOperationBridge:
         self._recovery_step_run_id = recovery_step_run_id
         self._terminal_commands = terminal_commands
         self._step_store = step_store
-        self._decisions: dict[tuple[str, str], Any] = {}
+        self._decisions: dict[tuple[str, str], "ToolOperationDecision"] = {}
         self._admitted_operations: dict[str, ToolOperationRecord] = {}
         self._lease_seconds = 60
 
@@ -244,7 +248,7 @@ class RuntimeToolOperationBridge:
         call: ToolCallPart,
         tool_def: ToolDefinition,
         args: dict[str, Any],
-    ) -> Any:
+    ) -> "ToolOperationDecision":
         replay_safe = _replay_safe(tool_def)
         key = (self._run_id(ctx), call.tool_call_id)
         prior = self._decisions.get(key)
@@ -296,7 +300,11 @@ class RuntimeToolOperationBridge:
         )
         return decision
 
-    async def _decision_from_record(self, existing: ToolOperationRecord, replay_safe: bool) -> Any:
+    async def _decision_from_record(
+        self,
+        existing: ToolOperationRecord,
+        replay_safe: bool,
+    ) -> "ToolOperationDecision":
         from ..agent import ToolOperationDecision
 
         if existing.status is ToolOperationStatus.COMPLETED:
@@ -322,7 +330,10 @@ class RuntimeToolOperationBridge:
             raise AIError(ErrorCode.TOOL_OPERATION_CONFLICT)
         return ToolOperationDecision(existing.tool_operation_id, self._owner, existing.fence, replay_safe)
 
-    async def renew(self, decision: Any) -> Any:
+    async def renew(
+        self,
+        decision: "ToolOperationDecision",
+    ) -> "ToolOperationDecision":
         try:
             record = await self._repository.renew(
                 decision.operation_id,
@@ -342,7 +353,11 @@ class RuntimeToolOperationBridge:
         self._update_admitted_operation(record)
         return _decision_type(decision, fence=record.fence)
 
-    async def complete(self, decision: Any, result: Any) -> bool:
+    async def complete(
+        self,
+        decision: "ToolOperationDecision",
+        result: Any,
+    ) -> bool:
         payload = await self._result_payload(decision, result)
 
         async def finish() -> ToolOperationRecord:
@@ -375,7 +390,11 @@ class RuntimeToolOperationBridge:
             expected_payload=payload,
         )
 
-    async def fail(self, decision: Any, error: BaseException) -> bool:
+    async def fail(
+        self,
+        decision: "ToolOperationDecision",
+        error: BaseException,
+    ) -> bool:
         code, payload = await self._error_payload(error)
 
         async def finish() -> ToolOperationRecord:
@@ -414,7 +433,7 @@ class RuntimeToolOperationBridge:
 
     async def _terminal_effect(
         self,
-        decision: Any,
+        decision: "ToolOperationDecision",
         *,
         status: str,
         effect_summary: str | None = None,
@@ -459,7 +478,11 @@ class RuntimeToolOperationBridge:
         if current is not None:
             self._admitted_operations[record.tool_operation_id] = record
 
-    async def unknown(self, decision: Any, error: BaseException) -> None:
+    async def unknown(
+        self,
+        decision: "ToolOperationDecision",
+        error: BaseException,
+    ) -> None:
         code = ErrorCode.TOOL_EFFECT_UNKNOWN.value
         try:
             await self._repository.mark_effect_unknown(
@@ -485,7 +508,11 @@ class RuntimeToolOperationBridge:
             type(error).__name__,
         )
 
-    async def _result_payload(self, decision: Any, result: Any) -> StoredPayload:
+    async def _result_payload(
+        self,
+        decision: "ToolOperationDecision",
+        result: Any,
+    ) -> StoredPayload:
         message = ModelRequest(
             parts=[ToolReturnPart("runtime", result, tool_call_id=decision.operation_id)],
         )
@@ -549,8 +576,8 @@ class RuntimeToolOperationBridge:
 
     async def _finish_with_readback(
         self,
-        operation: Any,
-        decision: Any,
+        operation: Callable[[], Awaitable[ToolOperationRecord]],
+        decision: "ToolOperationDecision",
         *,
         expected_status: ToolOperationStatus,
         expected_payload: StoredPayload,
@@ -665,7 +692,11 @@ def _replay_safe(tool_def: ToolDefinition) -> bool:
     return value
 
 
-def _decision_type(decision: Any, *, fence: int) -> Any:
+def _decision_type(
+    decision: "ToolOperationDecision",
+    *,
+    fence: int,
+) -> "ToolOperationDecision":
     from ..agent import ToolOperationDecision
 
     return ToolOperationDecision(
