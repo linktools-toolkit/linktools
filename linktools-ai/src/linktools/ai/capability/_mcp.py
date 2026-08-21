@@ -88,6 +88,7 @@ class MCPServerCapabilityBinding:
 class MCPCapabilityProvider:
     provider = "mcp"
     value_type = MCPServerSpec
+    revision = 1
 
     def __init__(self, runtime: MCPRuntime) -> None:
         self._runtime = runtime
@@ -105,19 +106,6 @@ class MCPCapabilityProvider:
                 raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
             values.append(resolved.spec)
         return bind_mcp_capability(refs, values, self._runtime)
-
-    def select(
-        self,
-        binding: CapabilityBinding,
-        refs: "tuple[AssetRef, ...]",
-    ) -> CapabilityBinding:
-        if not isinstance(binding, MCPServerCapabilityBinding) or binding.runtime is not self._runtime or not refs:
-            raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
-        values = {resolution.ref: server for resolution, server in zip(binding.resolutions, binding.servers)}
-        ordered = tuple(sorted(refs, key=lambda ref: (ref.kind, ref.id)))
-        if len(ordered) != len(set(ordered)) or any(ref not in values for ref in ordered):
-            raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
-        return bind_mcp_capability(ordered, tuple(values[ref] for ref in ordered), self._runtime)
 
 
 def bind_mcp_capability(
