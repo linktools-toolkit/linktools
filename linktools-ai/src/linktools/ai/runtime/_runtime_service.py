@@ -10,9 +10,9 @@ from typing import Protocol
 from linktools.core import environ
 from pydantic import BaseModel
 
-from ..agent import AgentCompiler, AgentDefinition, AgentDefinitionCatalog
-from ..asset import AssetRef, AssetRepository
-from ..capability import CapabilityRef, RuntimeCapability
+from ..agent import AgentBindingSnapshot, AgentCompiler, AgentDefinition, AgentDefinitionCatalog
+from ..asset import AssetRepository
+from ..capability import RuntimeCapability
 from ..core import (
     JsonValue,
     Principal,
@@ -54,7 +54,16 @@ from .service_api import (
 _logger = environ.get_logger("ai.runtime")
 _AGENT_TASK_V1_FIELDS = frozenset({"type", "version", "agent_id", "user_prompt"})
 _AGENT_TASK_V2_FIELDS = frozenset(
-    {"type", "version", "agent_id", "binding_digest", "user_prompt", "planning", "thinking"}
+    {
+        "type",
+        "version",
+        "agent_id",
+        "binding_digest",
+        "binding",
+        "user_prompt",
+        "planning",
+        "thinking",
+    }
 )
 
 
@@ -151,7 +160,7 @@ class Runtime:
         self,
         agent: "str | AgentSpec" = "default",
         *,
-        capabilities: "Sequence[CapabilityRef | AssetRef | RuntimeCapability]" = (),
+        capabilities: "Sequence[RuntimeCapability]" = (),
         output: "type[BaseModel] | None" = None,
         planning: bool = False,
         thinking: bool = False,
@@ -159,6 +168,8 @@ class Runtime:
         self._ensure_open()
         if not isinstance(planning, bool) or not isinstance(thinking, bool):
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+        if any(not isinstance(capability, RuntimeCapability) for capability in capabilities):
+            raise TypeError("capabilities must contain RuntimeCapability values")
         if isinstance(agent, str):
             validate_agent_id(agent)
             base = self._catalog.root_definition(agent)
@@ -190,6 +201,20 @@ class Runtime:
     def _definition(self, binding_digest: str) -> AgentDefinition:
         self._ensure_open()
         return self._catalog.definition(binding_digest)
+
+    def _restore_definition(self, snapshot: AgentBindingSnapshot) -> AgentDefinition:
+        self._ensure_open()
+        try:
+            current = self._catalog.definition(snapshot.binding_digest)
+        except AIError as error:
+            if error.code is not ErrorCode.AGENT_DEFINITION_UNAVAILABLE:
+                raise
+        else:
+            if current.binding_snapshot != snapshot:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            return current
+        restored = self._compiler.restore(snapshot)
+        return self._catalog.register(restored)
 
     async def _compile_agent(self, agent_id: str) -> AgentDefinition:
         self._ensure_open()
@@ -581,6 +606,7 @@ class Runtime:
                     raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
                 agent_id = payload.get("agent_id")
                 binding_digest = payload.get("binding_digest")
+                binding = payload.get("binding")
                 user_prompt = payload.get("user_prompt")
                 planning = payload.get("planning")
                 thinking = payload.get("thinking")
@@ -592,9 +618,13 @@ class Runtime:
                     or not isinstance(thinking, bool)
                 ):
                     raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
-                definition = self._catalog.definition(binding_digest)
-                if definition.spec.id != agent_id:
-                    raise AIError(ErrorCode.RUNTIME_SERVICE_MISMATCH)
+                try:
+                    snapshot = AgentBindingSnapshot.from_payload(binding)
+                except AIError as error:
+                    raise AIError(ErrorCode.REQUEST_FIELD_INVALID) from error
+                if snapshot.binding_digest != binding_digest or snapshot.agent_spec.id != agent_id:
+                    raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+                definition = self._restore_definition(snapshot)
             else:
                 raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
             validate_agent_id(agent_id)
@@ -609,6 +639,7 @@ class Runtime:
                         "version": 2,
                         "agent_id": agent_id,
                         "binding_digest": definition.digest,
+                        "binding": definition.binding_snapshot.to_payload(),
                         "user_prompt": user_prompt,
                         "planning": planning,
                         "thinking": thinking,
@@ -651,7 +682,7 @@ class Runtime:
         if session.status is not SessionStatus.OPEN:
             raise AIError(ErrorCode.SESSION_CONFLICT)
         if session.binding_digest != definition.digest:
-            raise AIError(ErrorCode.SESSION_BINDING_MISMATCH)
+            raise AIError(ErrorCode.SESSION_CONFLICT)
 
     async def _session_definition(
         self,
@@ -666,10 +697,9 @@ class Runtime:
             if error.code not in {ErrorCode.SESSION_NOT_FOUND, ErrorCode.AUTHORIZATION_DENIED}:
                 raise
             return preferred
-        definition = self._catalog.definition(session.binding_digest)
-        if definition.digest != preferred.digest:
-            raise AIError(ErrorCode.SESSION_BINDING_MISMATCH)
-        return definition
+        if session.binding_digest != preferred.digest:
+            raise AIError(ErrorCode.SESSION_CONFLICT)
+        return self._catalog.definition(session.binding_digest)
 
     def _ensure_open(self) -> None:
         if self._closed:
