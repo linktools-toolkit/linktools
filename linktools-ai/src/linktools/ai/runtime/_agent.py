@@ -138,6 +138,9 @@ class AgentHandle:
         from ..task import TaskNode
 
         validate_user_prompt(user_prompt)
+        definition = self._runtime._definition(self.binding_digest)
+        if definition.spec.id != self.agent_id:
+            raise RuntimeError("agent handle binding is inconsistent")
         return TaskNode(
             node_id,
             dependencies,
@@ -146,6 +149,7 @@ class AgentHandle:
                 "version": 2,
                 "agent_id": self.agent_id,
                 "binding_digest": self.binding_digest,
+                "binding": definition.binding_snapshot.to_payload(),
                 "user_prompt": user_prompt,
                 "planning": self.planning,
                 "thinking": self.thinking,
