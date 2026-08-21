@@ -180,10 +180,11 @@ class SkillCapability(AbstractCapability[None]):
 
 
 class SkillCapabilityProvider:
-    """Bind registered SkillSpec Asset kinds into the Runtime-default Skill capability."""
+    """Bind every registered SkillSpec Asset kind into one Runtime-global capability."""
 
     provider = "skill"
     value_type = SkillSpec
+    revision = 1
 
     async def bind(
         self,
@@ -198,22 +199,6 @@ class SkillCapabilityProvider:
                 raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
             values.append(resolved.spec)
         return bind_skill_capability(refs, values)
-
-    def select(
-        self,
-        binding: CapabilityBinding,
-        refs: "tuple[AssetRef, ...]",
-    ) -> CapabilityBinding:
-        if not isinstance(binding, SkillCapabilityBinding) or not refs:
-            raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
-        values = {
-            resolution.ref: specification
-            for resolution, specification in zip(binding.resolutions, binding.catalog.specifications)
-        }
-        ordered = tuple(sorted(refs, key=lambda ref: (ref.kind, ref.id)))
-        if len(ordered) != len(set(ordered)) or any(ref not in values for ref in ordered):
-            raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
-        return bind_skill_capability(ordered, tuple(values[ref] for ref in ordered))
 
 
 async def merge_skill_catalogs(catalogs: "tuple[SkillCatalogView, ...]") -> SkillCatalogSnapshot:
