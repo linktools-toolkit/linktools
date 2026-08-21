@@ -11,7 +11,7 @@ from linktools.ai.agent import AgentBindingSnapshot
 from linktools.ai.capability import RuntimeCapability
 from linktools.ai.core import SessionStatus
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.runtime import Runtime, SessionView
+from linktools.ai.runtime import AgentHandle, Runtime, SessionView
 from linktools.ai.spec import AgentSpec
 from linktools.ai.workspace import trusted_workspace_principal
 
@@ -41,6 +41,10 @@ def test_runtime_capability_from_spec_requires_exact_importable_type() -> None:
         RuntimeCapability.from_spec("local", shadow_type, config={})
 
     assert error.value.code is ErrorCode.CAPABILITY_RESOLUTION_INVALID
+
+
+def test_agent_handle_does_not_expose_internal_definition() -> None:
+    assert "compile" not in AgentHandle.__dict__
 
 
 def test_agent_binding_snapshot_is_deeply_immutable() -> None:
