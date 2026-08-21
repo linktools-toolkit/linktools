@@ -18,7 +18,7 @@ class AgentDefinitionCatalog:
         for definition in roots.values():
             existing = by_digest.get(definition.digest)
             if existing is not None and existing != definition:
-                raise AIError(ErrorCode.CAPABILITY_CONFLICT)
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             by_digest[definition.digest] = definition
         self._roots = MappingProxyType(dict(roots))
         self._definitions = by_digest
