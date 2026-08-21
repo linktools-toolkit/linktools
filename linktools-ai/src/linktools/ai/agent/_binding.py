@@ -2,7 +2,8 @@
 # -*- coding: utf-8 -*-
 """Durable data contract for one effective Agent definition."""
 
-from collections.abc import Mapping
+import json
+from collections.abc import Iterator, Mapping
 from dataclasses import dataclass
 from typing import cast
 
@@ -25,6 +26,33 @@ _FIELDS = frozenset(
 )
 
 
+class _ImmutableJsonMapping(Mapping[str, JsonValue]):
+    """Keep one JSON object immutable while exposing Mapping semantics."""
+
+    __slots__ = ("_payload",)
+
+    def __init__(self, value: Mapping[str, JsonValue]) -> None:
+        self._payload = canonical_json_bytes(_normalize_mapping(value))
+
+    def __getitem__(self, key: str) -> JsonValue:
+        return self._decode()[key]
+
+    def __iter__(self) -> Iterator[str]:
+        return iter(self._decode())
+
+    def __len__(self) -> int:
+        return len(self._decode())
+
+    def __eq__(self, other: object) -> bool:
+        return isinstance(other, Mapping) and self._decode() == dict(other)
+
+    def _decode(self) -> "dict[str, JsonValue]":
+        value = json.loads(self._payload.decode("utf-8"))
+        if not isinstance(value, dict):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        return cast("dict[str, JsonValue]", value)
+
+
 @dataclass(frozen=True, slots=True)
 class AgentBindingSnapshot:
     """Persist the local parts required to reconstruct an effective definition."""
@@ -42,6 +70,8 @@ class AgentBindingSnapshot:
     def __post_init__(self) -> None:
         if self.version != 1 or isinstance(self.version, bool):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        if not isinstance(self.agent_spec, AgentSpec):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         for value in (
             self.output_type_module,
             self.output_type_qualname,
@@ -58,16 +88,15 @@ class AgentBindingSnapshot:
         ):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         descriptors = tuple(
-            _normalize_mapping(value)
+            _ImmutableJsonMapping(value)
             for value in self.local_runtime_capability_descriptors
         )
         object.__setattr__(self, "local_runtime_capability_descriptors", descriptors)
 
     def to_payload(self) -> "dict[str, JsonValue]":
-        agent_spec = _agent_spec_payload(self.agent_spec)
         return {
             "version": 1,
-            "agent_spec": agent_spec,
+            "agent_spec": _agent_spec_payload(self.agent_spec),
             "output_type_module": self.output_type_module,
             "output_type_qualname": self.output_type_qualname,
             "output_schema_id": self.output_schema_id,
@@ -115,8 +144,6 @@ class AgentBindingSnapshot:
 
 
 def _agent_spec_payload(spec: AgentSpec) -> "dict[str, JsonValue]":
-    import json
-
     value = json.loads(AgentSpecCodec().encode(spec).decode("utf-8"))
     if not isinstance(value, dict):
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -126,8 +153,6 @@ def _agent_spec_payload(spec: AgentSpec) -> "dict[str, JsonValue]":
 def _normalize_mapping(value: object) -> "dict[str, JsonValue]":
     if not isinstance(value, Mapping):
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-    import json
-
     try:
         normalized = json.loads(canonical_json_bytes(dict(value)).decode("utf-8"))
     except (TypeError, ValueError) as error:
