@@ -3,15 +3,14 @@
 """Runtime-internal service graph construction."""
 
 import asyncio
-from collections.abc import Awaitable, Callable, Mapping, Sequence
+from collections.abc import Awaitable, Callable
 from pathlib import Path
 
 from linktools.core import environ
 from pydantic_ai_harness.memory import SearchableMemoryStore
 
 from ..agent import AgentCompiler, AgentDefinitionCatalog, AgentExecutor
-from ..asset import AssetRepository, AssetTypeRegistrySnapshot
-from ..capability import CapabilityBinding, CapabilityProvider
+from ..asset import AssetRepository
 from ..core import AuthorizationPolicy, HmacCursorSigner
 from ..errors import AIError, ErrorCode
 from ..storage import ObjectStore
@@ -39,9 +38,6 @@ async def build_local_runtime(
     catalog: AgentDefinitionCatalog,
     compiler: AgentCompiler,
     assets: AssetRepository,
-    asset_registry: AssetTypeRegistrySnapshot,
-    capability_providers: Sequence[CapabilityProvider],
-    capability_bindings: Mapping[str, CapabilityBinding],
     authorization: AuthorizationPolicy,
     tenant_id: str,
     namespace: str,
@@ -51,7 +47,6 @@ async def build_local_runtime(
     memory_store_factory: "Callable[[str, str, str, ObjectStore, bool], SearchableMemoryStore] | None",
     grant_key: bytes,
 ) -> Runtime:
-    del asset_registry, capability_providers, capability_bindings
     if not state.ready or not assets.ready:
         raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
     execution = DefaultExecutionService(
@@ -59,6 +54,8 @@ async def build_local_runtime(
         state.object_store(RuntimeDomain.EXECUTION),
         authorization,
         sessions=state.conversation.sessions,
+        catalog=catalog,
+        compiler=compiler,
         history_reader=history_reader,
         release_terminal=state.retention.release_execution_handoff,
     )
@@ -129,7 +126,7 @@ async def build_local_runtime(
             release_terminal=state.retention.release_session,
             gated_execution=execution,
         )
-        task_runner = RuntimeTaskNodeRunner(execution, catalog)
+        task_runner = RuntimeTaskNodeRunner(execution, catalog, compiler)
         task_launcher = LocalTaskGraphLauncher(
             state.task.tasks,
             task_runner,
@@ -183,7 +180,7 @@ async def build_local_runtime(
             close_callback=coordinator.close,
             local_coordinator=local_coordinator,
         )
-        await _validate_recovery_definitions(catalog, state, tenant_id=tenant_id)
+        await _restore_recovery_definitions(catalog, compiler, state, tenant_id=tenant_id)
         if RuntimeDomain.RECOVERY in state.plan.durable_domains:
             await backend.reconcile()
     except BaseException:
@@ -201,8 +198,9 @@ async def build_local_runtime(
     return runtime
 
 
-async def _validate_recovery_definitions(
+async def _restore_recovery_definitions(
     catalog: AgentDefinitionCatalog,
+    compiler: AgentCompiler,
     state: RuntimeState,
     *,
     tenant_id: str,
@@ -217,14 +215,38 @@ async def _validate_recovery_definitions(
         for checkpoint in page.items:
             if checkpoint.state is RecoveryCheckpointState.COMPLETED:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            try:
-                definition = catalog.definition(checkpoint.input.binding_digest)
-            except AIError as error:
-                raise AIError(
-                    ErrorCode.AGENT_DEFINITION_UNAVAILABLE,
-                    safe_details={"execution_id": checkpoint.execution_id, "agent_id": checkpoint.input.agent_id},
-                ) from error
-            if definition.spec.id != checkpoint.input.agent_id:
+            recovery_input = checkpoint.input
+            snapshot = recovery_input.binding
+            if snapshot is not None:
+                if (
+                    snapshot.binding_digest != recovery_input.binding_digest
+                    or snapshot.agent_spec.id != recovery_input.agent_id
+                ):
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                try:
+                    definition = catalog.register(compiler.restore(snapshot))
+                except AIError as error:
+                    if error.code is ErrorCode.STORAGE_INTEGRITY_ERROR:
+                        raise
+                    raise AIError(
+                        ErrorCode.AGENT_DEFINITION_UNAVAILABLE,
+                        safe_details={
+                            "execution_id": checkpoint.execution_id,
+                            "agent_id": recovery_input.agent_id,
+                        },
+                    ) from error
+            else:
+                try:
+                    definition = catalog.definition(recovery_input.binding_digest)
+                except AIError as error:
+                    raise AIError(
+                        ErrorCode.AGENT_DEFINITION_UNAVAILABLE,
+                        safe_details={
+                            "execution_id": checkpoint.execution_id,
+                            "agent_id": recovery_input.agent_id,
+                        },
+                    ) from error
+            if definition.spec.id != recovery_input.agent_id:
                 raise AIError(
                     ErrorCode.AGENT_DEFINITION_UNAVAILABLE,
                     safe_details={"execution_id": checkpoint.execution_id},
