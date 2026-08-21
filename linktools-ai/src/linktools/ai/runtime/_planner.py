@@ -124,7 +124,7 @@ class RuntimeTaskNodeRunner:
         validate_user_prompt(effective_user_prompt)
         idempotency_key = canonical_sha256(
             {
-                "version": 4,
+                "version": 3,
                 "graph_id": graph_id,
                 "node_id": node.node_id,
                 "agent_id": agent_id,
