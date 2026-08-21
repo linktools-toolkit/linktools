@@ -49,6 +49,8 @@ class Command(BaseCommand):
         parser.add_argument("--base-url", action=ConfigAction, config=OPENAI_BASE_URL)
         parser.add_argument("--model", action=ConfigAction, config=OPENAI_MODEL)
         parser.add_argument("--api-key", action=ConfigAction, config=OPENAI_API_KEY)
+        parser.add_argument("--planning", action="store_true", help="enable planning for this execution")
+        parser.add_argument("--thinking", action="store_true", help="enable model thinking for this execution")
         parser.add_argument("--json", action="store_true", help="emit one final JSON result")
 
     def run(self, args: Namespace) -> int:
@@ -81,6 +83,8 @@ class Command(BaseCommand):
                     session_id,
                     memory_scope,
                     args.json,
+                    args.planning,
+                    args.thinking,
                 )
 
         try:
@@ -116,9 +120,12 @@ async def _emit_result(
     session_id: str,
     memory_scope: str,
     as_json: bool,
+    planning: bool,
+    thinking: bool,
 ) -> int:
+    agent = runtime.agent(planning=planning, thinking=thinking)
     if as_json:
-        result = await runtime.run(prompt, session_id=session_id, memory_scope=memory_scope)
+        result = await agent.run(prompt, session_id=session_id, memory_scope=memory_scope)
         payload = _result_payload(result)
         if result.status is not ExecutionStatus.SUCCEEDED:
             error_code, safe_details = await _terminal_failure_details(runtime, result.execution_id)
@@ -139,7 +146,7 @@ async def _emit_result(
     terminal_status = "UNKNOWN"
     terminal_error_code: object = None
     terminal_safe_details: object = {}
-    async for event in runtime.stream(prompt, session_id=session_id, memory_scope=memory_scope):
+    async for event in agent.stream(prompt, session_id=session_id, memory_scope=memory_scope):
         execution_id = event.execution_id
         if event.event_type is ExecutionDeltaType.ASSISTANT_TEXT_DELTA:
             text = event.payload.get("text") if isinstance(event.payload, dict) else None
