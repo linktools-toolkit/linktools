@@ -6,7 +6,6 @@ from ._builder import build_pydantic_agent
 from ._capabilities import (
     MEMORY_TOOL_NAMES,
     PLANNING_TOOL_NAMES,
-    SKILL_TOOL_NAMES,
     SUBAGENT_TOOL_NAMES,
     WORKSPACE_FILESYSTEM_TOOL_NAMES,
     WORKSPACE_SHELL_TOOL_NAMES,
@@ -31,9 +30,8 @@ from ._output import (
     ASSISTANT_TEXT_OUTPUT_SCHEMA_ID,
     ASSISTANT_TEXT_OUTPUT_SCHEMA_REVISION,
     AssistantTextOutput,
-    OutputSchemaManifest,
-    OutputSchemaManifestEntry,
-    OutputTypeRegistry,
+    OutputBinding,
+    bind_output,
 )
 
 __all__ = [
@@ -50,12 +48,10 @@ __all__ = [
     "EventSink",
     "LiveDelta",
     "UsageSink",
-    "OutputSchemaManifest",
-    "OutputSchemaManifestEntry",
-    "OutputTypeRegistry",
+    "OutputBinding",
+    "bind_output",
     "MEMORY_TOOL_NAMES",
     "PLANNING_TOOL_NAMES",
-    "SKILL_TOOL_NAMES",
     "SUBAGENT_TOOL_NAMES",
     "SubagentDelegate",
     "ToolOperationBridge",
