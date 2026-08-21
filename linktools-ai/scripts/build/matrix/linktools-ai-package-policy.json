@@ -159,6 +159,7 @@
       "core"
     ],
     "runtime._execution": [
+      "agent",
       "core",
       "storage"
     ]
