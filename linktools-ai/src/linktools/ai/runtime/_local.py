@@ -2458,12 +2458,17 @@ class LocalExecutionBackend:
             return
         now = datetime.now(timezone.utc)
         captured_usage = usage or self._captured_usage.get(execution.execution_id, UsageMetrics())
-        if definition is None:
-            schema_id, schema_revision, schema_fingerprint = "none", 1, "none"
-        else:
+        schema_id: str | None = None
+        schema_revision: int | None = None
+        schema_fingerprint: str | None = None
+        if status is ExecutionStatus.SUCCEEDED:
+            if definition is None or output is None:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             schema_id = definition.output_binding.schema_id
             schema_revision = definition.output_binding.schema_revision
             schema_fingerprint = definition.output_schema_fingerprint
+        elif output is not None:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         if self._recovery_enabled:
             recovery_checkpoint = await self._recovery.checkpoints.get(
                 current.execution_id,
@@ -2717,9 +2722,17 @@ class LocalExecutionBackend:
             run_id if status is ExecutionStatus.SUCCEEDED else None,
         )
         now = datetime.now(timezone.utc)
-        schema_id = "none" if definition is None else definition.output_binding.schema_id
-        schema_revision = 1 if definition is None else definition.output_binding.schema_revision
-        schema_fingerprint = "none" if definition is None else definition.output_schema_fingerprint
+        schema_id: str | None = None
+        schema_revision: int | None = None
+        schema_fingerprint: str | None = None
+        if status is ExecutionStatus.SUCCEEDED:
+            if definition is None or output is None:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            schema_id = definition.output_binding.schema_id
+            schema_revision = definition.output_binding.schema_revision
+            schema_fingerprint = definition.output_schema_fingerprint
+        elif output is not None:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         terminal = _terminal_record(
             current,
             status,
