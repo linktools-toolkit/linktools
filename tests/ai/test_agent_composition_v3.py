@@ -54,7 +54,7 @@ class _SessionService:
 
 
 @pytest.mark.asyncio
-async def test_runtime_session_definition_reports_binding_mismatch() -> None:
+async def test_runtime_session_definition_reports_definition_conflict() -> None:
     runtime = object.__new__(Runtime)
     runtime.session = _SessionService("b" * 64)
     runtime._catalog = SimpleNamespace(definition=lambda digest: digest)
@@ -67,11 +67,11 @@ async def test_runtime_session_definition_reports_binding_mismatch() -> None:
             preferred=preferred,
         )
 
-    assert error.value.code is ErrorCode.SESSION_BINDING_MISMATCH
+    assert error.value.code is ErrorCode.SESSION_CONFLICT
 
 
 @pytest.mark.asyncio
-async def test_runtime_existing_session_reports_binding_mismatch() -> None:
+async def test_runtime_existing_session_reports_definition_conflict() -> None:
     runtime = object.__new__(Runtime)
     runtime.session = _SessionService("b" * 64)
     definition = SimpleNamespace(
@@ -86,4 +86,4 @@ async def test_runtime_existing_session_reports_binding_mismatch() -> None:
             trusted_workspace_principal("tenant"),
         )
 
-    assert error.value.code is ErrorCode.SESSION_BINDING_MISMATCH
+    assert error.value.code is ErrorCode.SESSION_CONFLICT

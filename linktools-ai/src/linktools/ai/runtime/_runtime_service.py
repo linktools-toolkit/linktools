@@ -682,7 +682,7 @@ class Runtime:
         if session.status is not SessionStatus.OPEN:
             raise AIError(ErrorCode.SESSION_CONFLICT)
         if session.binding_digest != definition.digest:
-            raise AIError(ErrorCode.SESSION_BINDING_MISMATCH)
+            raise AIError(ErrorCode.SESSION_CONFLICT)
 
     async def _session_definition(
         self,
@@ -698,7 +698,7 @@ class Runtime:
                 raise
             return preferred
         if session.binding_digest != preferred.digest:
-            raise AIError(ErrorCode.SESSION_BINDING_MISMATCH)
+            raise AIError(ErrorCode.SESSION_CONFLICT)
         return self._catalog.definition(session.binding_digest)
 
     def _ensure_open(self) -> None:
