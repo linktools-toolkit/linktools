@@ -1,0 +1,234 @@
+name: AI Refactor Repair
+
+on:
+  push:
+    branches:
+      - refactor/ai-runtime-agent-composition
+
+permissions:
+  contents: write
+
+jobs:
+  repair:
+    if: github.event.head_commit.message == 'chore(ai): run refactor repair'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: refactor/ai-runtime-agent-composition
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Apply asserted repair
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          def replace_once(path: str, old: str, new: str) -> None:
+              target = Path(path)
+              text = target.read_text(encoding='utf-8')
+              count = text.count(old)
+              if count != 1:
+                  raise SystemExit(f'{path}: expected one match, found {count}: {old[:100]!r}')
+              target.write_text(text.replace(old, new, 1), encoding='utf-8')
+
+          # Durable execution modes are part of execution identity and survive retry/fork.
+          path = 'linktools-ai/src/linktools/ai/runtime/_execution.py'
+          replace_once(
+              path,
+              '            memory_scope=request.memory_scope,\n            conversation_step_run_id=conversation_run_id,\n        )',
+              '            memory_scope=request.memory_scope,\n            conversation_step_run_id=conversation_run_id,\n            planning=request.planning,\n            thinking=request.thinking,\n        )',
+          )
+          replace_once(
+              path,
+              '            memory_scope=previous.memory_scope,\n        )\n        return await self._start(\n            binding_digest,\n            retry_request,',
+              '            memory_scope=previous.memory_scope,\n            planning=previous.planning,\n            thinking=previous.thinking,\n        )\n        return await self._start(\n            binding_digest,\n            retry_request,',
+          )
+          replace_once(
+              path,
+              '            memory_scope=previous.memory_scope,\n        )\n        return await self._start(\n            binding_digest,\n            fork_request,',
+              '            memory_scope=previous.memory_scope,\n            planning=previous.planning,\n            thinking=previous.thinking,\n        )\n        return await self._start(\n            binding_digest,\n            fork_request,',
+          )
+          replace_once(
+              path,
+              '            "memory_scope_digest": None if request.memory_scope is None else canonical_sha256(request.memory_scope),\n',
+              '            "memory_scope_digest": None if request.memory_scope is None else canonical_sha256(request.memory_scope),\n            "planning": request.planning,\n            "thinking": request.thinking,\n',
+          )
+
+          # Platform control tools are feature-owned; allow_tools remains a business-tool bound.
+          path = 'linktools-ai/src/linktools/ai/agent/_capabilities.py'
+          replace_once(
+              path,
+              'def select_platform_tool_names(\n    *,\n    allow_tools: "tuple[str, ...]",\n    memory_scope: "str | None",\n    subagent_available: bool = False,\n) -> "tuple[str, ...]":\n    candidates = list(PLANNING_TOOL_NAMES)\n    if memory_scope is not None:\n        candidates.extend(MEMORY_TOOL_NAMES)\n    if subagent_available:\n        candidates.extend(SUBAGENT_TOOL_NAMES)\n    return tuple(sorted(name for name in candidates if tool_name_allowed(name, allow_tools)))\n',
+              'def select_platform_tool_names(\n    *,\n    allow_tools: "tuple[str, ...]",\n    memory_scope: "str | None",\n    planning: bool = False,\n    subagent_available: bool = False,\n) -> "tuple[str, ...]":\n    if not isinstance(planning, bool) or not isinstance(subagent_available, bool):\n        raise AIError(ErrorCode.REQUEST_FIELD_INVALID)\n    selected = [\n        name\n        for name in MEMORY_TOOL_NAMES\n        if memory_scope is not None and tool_name_allowed(name, allow_tools)\n    ]\n    if planning:\n        selected.extend(PLANNING_TOOL_NAMES)\n    if subagent_available:\n        selected.extend(SUBAGENT_TOOL_NAMES)\n    return tuple(sorted(selected))\n',
+          )
+
+          # Local execution stores/reloads modes and derives subagent control from the effective binding.
+          path = 'linktools-ai/src/linktools/ai/runtime/_local.py'
+          replace_once(
+              path,
+              'from ..capability import CapabilityMaterializationContext\n',
+              'from ..capability import CapabilityMaterializationContext, SubagentCapabilityBinding\n',
+          )
+          replace_once(
+              path,
+              '        memory_scope: "str | None",\n        principal: Principal,\n    ) -> SubagentDelegate: ...\n',
+              '        memory_scope: "str | None",\n        principal: Principal,\n        allowed_agent_ids: "tuple[str, ...]",\n        planning: bool,\n        thinking: bool,\n    ) -> SubagentDelegate: ...\n',
+          )
+          replace_once(
+              path,
+              '        self._catalog.definition(execution.binding_digest)\n',
+              '        self._catalog.definition(execution.binding_digest)\n        if request.planning != execution.planning or request.thinking != execution.thinking:\n            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)\n',
+          )
+          replace_once(
+              path,
+              '            idempotency=RecoveryIdempotencyInput(\n                scope=identity.scope,\n                idempotency_key_digest=identity.idempotency_key_digest,\n                request_digest=identity.request_digest,\n            ),\n        )',
+              '            idempotency=RecoveryIdempotencyInput(\n                scope=identity.scope,\n                idempotency_key_digest=identity.idempotency_key_digest,\n                request_digest=identity.request_digest,\n            ),\n            planning=execution.planning,\n            thinking=execution.thinking,\n        )',
+          )
+          replace_once(
+              path,
+              '                or execution.lineage_kind.value != recovery_input.lineage_kind\n            ):',
+              '                or execution.lineage_kind.value != recovery_input.lineage_kind\n                or execution.planning != recovery_input.planning\n                or execution.thinking != recovery_input.thinking\n            ):',
+          )
+          replace_once(
+              path,
+              '            memory_scope=recovery_input.memory_scope,\n        )\n        await self.launch(request, execution)',
+              '            memory_scope=recovery_input.memory_scope,\n            planning=recovery_input.planning,\n            thinking=recovery_input.thinking,\n        )\n        await self.launch(request, execution)',
+          )
+          replace_once(
+              path,
+              '            memory_scope=recovery_input.memory_scope,\n            conversation_step_run_id=recovery_input.conversation_step_run_id,\n        )',
+              '            memory_scope=recovery_input.memory_scope,\n            conversation_step_run_id=recovery_input.conversation_step_run_id,\n            planning=recovery_input.planning,\n            thinking=recovery_input.thinking,\n        )',
+          )
+          replace_once(
+              path,
+              '            memory = None\n            platform_tool_names = select_platform_tool_names(\n                allow_tools=definition.spec.allow_tools,\n                memory_scope=current.memory_scope,\n                subagent_available=current.parent_execution_id is None and self._subagent_dispatcher is not None,\n            )',
+              '            memory = None\n            subagent_bindings = tuple(\n                binding\n                for binding in definition.effective_capabilities\n                if isinstance(binding, SubagentCapabilityBinding)\n            )\n            if len(subagent_bindings) > 1:\n                raise AIError(ErrorCode.CAPABILITY_CONFLICT)\n            subagent_binding = subagent_bindings[0] if subagent_bindings else None\n            subagent_available = (\n                current.parent_execution_id is None\n                and self._subagent_dispatcher is not None\n                and subagent_binding is not None\n            )\n            platform_tool_names = select_platform_tool_names(\n                allow_tools=definition.spec.allow_tools,\n                memory_scope=current.memory_scope,\n                planning=current.planning,\n                subagent_available=subagent_available,\n            )',
+          )
+          replace_once(
+              path,
+              '                        self._execution_root,\n                        definition.spec.allow_tools,\n                        definition.spec.allow_skills,\n                    ),',
+              '                        self._execution_root,\n                        definition.spec.allow_tools,\n                    ),',
+          )
+          replace_once(
+              path,
+              '                    platform_tool_names=platform_tool_names,\n                    subagent_delegate=(\n                        None\n                        if current.parent_execution_id is not None\n                        or self._subagent_dispatcher is None\n                        else self._subagent_dispatcher.delegate_for(\n                            parent_execution_id=current.execution_id,\n                            root_execution_id=current.root_execution_id,\n                            memory_scope=current.memory_scope,\n                            principal=request.principal,\n                        )\n                    ),',
+              '                    platform_tool_names=platform_tool_names,\n                    thinking=current.thinking,\n                    subagent_delegate=(\n                        None\n                        if not subagent_available or subagent_binding is None\n                        else self._subagent_dispatcher.delegate_for(\n                            parent_execution_id=current.execution_id,\n                            root_execution_id=current.root_execution_id,\n                            memory_scope=current.memory_scope,\n                            principal=request.principal,\n                            allowed_agent_ids=subagent_binding.agent_ids,\n                            planning=current.planning,\n                            thinking=current.thinking,\n                        )\n                    ),',
+          )
+
+          # Thinking is a per-execution model setting; active control tools bypass the business allowlist only when enabled.
+          path = 'linktools-ai/src/linktools/ai/agent/_executor.py'
+          replace_once(
+              path,
+              'from pydantic_ai.messages import (\n',
+              'from pydantic_ai.settings import ModelSettings\nfrom pydantic_ai.messages import (\n',
+          )
+          replace_once(
+              path,
+              '    AgentRunScope,\n    SubagentDelegate,\n    ToolOperationBridge,\n    compose_platform_capabilities,\n    tool_name_allowed,\n)',
+              '    AgentRunScope,\n    PLANNING_TOOL_NAMES,\n    SKILL_TOOL_NAMES,\n    SUBAGENT_TOOL_NAMES,\n    SubagentDelegate,\n    ToolOperationBridge,\n    compose_platform_capabilities,\n    tool_name_allowed,\n)',
+          )
+          replace_once(
+              path,
+              '        platform_tool_names: "tuple[str, ...]" = (),\n        parent_step_run_id: "str | None" = None,',
+              '        platform_tool_names: "tuple[str, ...]" = (),\n        thinking: bool = False,\n        parent_step_run_id: "str | None" = None,',
+          )
+          replace_once(
+              path,
+              '                platform_tool_names=platform_tool_names,\n                parent_step_run_id=parent_step_run_id,',
+              '                platform_tool_names=platform_tool_names,\n                thinking=thinking,\n                parent_step_run_id=parent_step_run_id,',
+          )
+          replace_once(
+              path,
+              '        platform_tool_names: "tuple[str, ...]",\n        parent_step_run_id: "str | None",',
+              '        platform_tool_names: "tuple[str, ...]",\n        thinking: bool,\n        parent_step_run_id: "str | None",',
+          )
+          replace_once(
+              path,
+              '        capabilities = tuple(materialized) + platform\n        capabilities = (*capabilities, _AllowlistPresentation(definition.spec.allow_tools))\n',
+              '        capabilities = tuple(materialized) + platform\n        control_tool_names: set[str] = set()\n        if any(binding.provider == "skill" for binding in definition.effective_capabilities):\n            control_tool_names.update(SKILL_TOOL_NAMES)\n        if any(name in platform_tool_names for name in PLANNING_TOOL_NAMES):\n            control_tool_names.update(PLANNING_TOOL_NAMES)\n        if any(name in platform_tool_names for name in SUBAGENT_TOOL_NAMES):\n            control_tool_names.update(SUBAGENT_TOOL_NAMES)\n        capabilities = (\n            *capabilities,\n            _AllowlistPresentation(definition.spec.allow_tools, frozenset(control_tool_names)),\n        )\n',
+          )
+          replace_once(
+              path,
+              '            usage=run_usage,\n            capabilities=capabilities,\n',
+              '            usage=run_usage,\n            model_settings=ModelSettings(thinking=thinking),\n            capabilities=capabilities,\n',
+          )
+          replace_once(
+              path,
+              'class _AllowlistPresentation(AbstractCapability[None]):\n    def __init__(self, allow_tools: "tuple[str, ...]") -> None:\n        self._allow_tools = allow_tools\n\n    async def prepare_tools(self, _ctx: RunContext[None], tool_defs: "list[ToolDefinition]") -> "list[ToolDefinition]":\n        selected = [tool for tool in tool_defs if _function_tool_allowed(tool.name, self._allow_tools)]',
+              'class _AllowlistPresentation(AbstractCapability[None]):\n    def __init__(self, allow_tools: "tuple[str, ...]", control_tool_names: "frozenset[str]") -> None:\n        self._allow_tools = allow_tools\n        self._control_tool_names = control_tool_names\n\n    async def prepare_tools(self, _ctx: RunContext[None], tool_defs: "list[ToolDefinition]") -> "list[ToolDefinition]":\n        selected = [\n            tool\n            for tool in tool_defs\n            if tool.name in self._control_tool_names\n            or _function_tool_allowed(tool.name, self._allow_tools)\n        ]',
+          )
+
+          # Temporal writes V2 but reads the frozen V1 transport with modes defaulted off.
+          path = 'linktools-ai/src/linktools/ai/temporal/_request.py'
+          replace_once(
+              path,
+              '_EXECUTION_FIELDS = frozenset(\n    {"version", "user_prompt", "principal", "idempotency_key", "memory_scope"}\n)\n',
+              '_EXECUTION_V1_FIELDS = frozenset(\n    {"version", "user_prompt", "principal", "idempotency_key", "memory_scope"}\n)\n_EXECUTION_V2_FIELDS = frozenset(\n    {"version", "user_prompt", "principal", "idempotency_key", "memory_scope", "planning", "thinking"}\n)\n',
+          )
+          replace_once(
+              path,
+              '        "version": 1,\n        "user_prompt": request.user_prompt,\n        "principal": _principal_payload(request.principal),\n        "idempotency_key": request.idempotency_key,\n        "memory_scope": request.memory_scope,\n',
+              '        "version": 2,\n        "user_prompt": request.user_prompt,\n        "principal": _principal_payload(request.principal),\n        "idempotency_key": request.idempotency_key,\n        "memory_scope": request.memory_scope,\n        "planning": request.planning,\n        "thinking": request.thinking,\n',
+          )
+          replace_once(
+              path,
+              'def _execution_request_from_payload(value: Mapping[str, object]) -> ExecutionRequest:\n    payload = _mapping(value, _EXECUTION_FIELDS)\n    _require_version(payload["version"])\n    memory_scope = payload["memory_scope"]\n    if memory_scope is not None and not isinstance(memory_scope, str):\n        raise ValueError("execution memory scope is invalid")\n    return ExecutionRequest(\n        _require_string(payload["user_prompt"]),\n        _principal_from_payload(payload["principal"]),\n        _require_string(payload["idempotency_key"]),\n        memory_scope,\n    )\n',
+              'def _execution_request_from_payload(value: Mapping[str, object]) -> ExecutionRequest:\n    version = value.get("version")\n    if version == 1:\n        payload = _mapping(value, _EXECUTION_V1_FIELDS)\n        planning = False\n        thinking = False\n    elif version == 2:\n        payload = _mapping(value, _EXECUTION_V2_FIELDS)\n        planning = payload["planning"]\n        thinking = payload["thinking"]\n        if not isinstance(planning, bool) or not isinstance(thinking, bool):\n            raise ValueError("execution mode fields are invalid")\n    else:\n        raise ValueError("request version is invalid")\n    memory_scope = payload["memory_scope"]\n    if memory_scope is not None and not isinstance(memory_scope, str):\n        raise ValueError("execution memory scope is invalid")\n    return ExecutionRequest(\n        _require_string(payload["user_prompt"]),\n        _principal_from_payload(payload["principal"]),\n        _require_string(payload["idempotency_key"]),\n        memory_scope,\n        planning,\n        thinking,\n    )\n',
+          )
+
+          # V1 state gets explicit compatible codecs for the two records extended with mode booleans.
+          path = 'linktools-ai/src/linktools/ai/runtime/state/_codec.py'
+          insertion = '''\n\ndef _encode_v1_extended_dataclass(\n    value: object,\n    target: type[object],\n    codec: "_VersionCodec",\n) -> Mapping[str, JsonValue]:\n    if not isinstance(value, target):\n        raise TypeError(f"V1 {target.__name__} encoder received the wrong type")\n    return {\n        field.name: _encode_domain(attrgetter(field.name)(value), codec)\n        for field in fields(value)\n    }\n\n\ndef _decode_v1_extended_dataclass(\n    raw_fields: Mapping[str, object],\n    target: type[object],\n    codec: "_VersionCodec",\n) -> object:\n    declared_fields = tuple(fields(target))\n    field_names = {field.name for field in declared_fields}\n    mode_fields = {"planning", "thinking"}\n    raw_names = set(raw_fields)\n    if raw_names == field_names:\n        defaults: dict[str, object] = {}\n    elif raw_names == field_names - mode_fields:\n        defaults = {"planning": False, "thinking": False}\n    else:\n        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)\n    hints = get_type_hints(target)\n    decoded: dict[str, object] = dict(defaults)\n    for field in declared_fields:\n        if field.name in defaults:\n            continue\n        annotation = hints.get(field.name)\n        if annotation is None:\n            raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)\n        decoded[field.name] = _decode_domain(raw_fields[field.name], annotation, codec)\n    try:\n        return target(**decoded)\n    except (TypeError, ValueError) as error:\n        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error\n\n\ndef _encode_v1_execution_record(value: object, codec: "_VersionCodec") -> Mapping[str, JsonValue]:\n    return _encode_v1_extended_dataclass(value, ExecutionRecord, codec)\n\n\ndef _decode_v1_execution_record(raw_fields: Mapping[str, object], codec: "_VersionCodec") -> ExecutionRecord:\n    return cast(ExecutionRecord, _decode_v1_extended_dataclass(raw_fields, ExecutionRecord, codec))\n\n\ndef _encode_v1_recovery_execution_input(value: object, codec: "_VersionCodec") -> Mapping[str, JsonValue]:\n    return _encode_v1_extended_dataclass(value, RecoveryExecutionInput, codec)\n\n\ndef _decode_v1_recovery_execution_input(raw_fields: Mapping[str, object], codec: "_VersionCodec") -> RecoveryExecutionInput:\n    return cast(RecoveryExecutionInput, _decode_v1_extended_dataclass(raw_fields, RecoveryExecutionInput, codec))\n'''
+          replace_once(
+              path,
+              '\n\n_V1_DATACLASS_ENCODERS: Mapping[str, DataclassEncoder] = MappingProxyType(\n    {"task_node": _encode_v1_task_node}\n)\n_V1_DATACLASS_DECODERS: Mapping[str, DataclassDecoder] = MappingProxyType(\n    {"task_node": _decode_v1_task_node}\n)\n',
+              insertion + '\n\n_V1_DATACLASS_ENCODERS: Mapping[str, DataclassEncoder] = MappingProxyType(\n    {\n        "task_node": _encode_v1_task_node,\n        "execution_record": _encode_v1_execution_record,\n        "recovery_execution_input": _encode_v1_recovery_execution_input,\n    }\n)\n_V1_DATACLASS_DECODERS: Mapping[str, DataclassDecoder] = MappingProxyType(\n    {\n        "task_node": _decode_v1_task_node,\n        "execution_record": _decode_v1_execution_record,\n        "recovery_execution_input": _decode_v1_recovery_execution_input,\n    }\n)\n',
+          )
+          replace_once(
+              path,
+              '    if set(_V1_DATACLASS_ENCODERS) != {"task_node"}:\n        raise RuntimeError("GA v1 dataclass encoder manifest is invalid")\n    if set(_V1_DATACLASS_DECODERS) != {"task_node"}:\n        raise RuntimeError("GA v1 dataclass decoder manifest is invalid")\n',
+              '    expected_custom_codecs = {"task_node", "execution_record", "recovery_execution_input"}\n    if set(_V1_DATACLASS_ENCODERS) != expected_custom_codecs:\n        raise RuntimeError("GA v1 dataclass encoder manifest is invalid")\n    if set(_V1_DATACLASS_DECODERS) != expected_custom_codecs:\n        raise RuntimeError("GA v1 dataclass decoder manifest is invalid")\n',
+          )
+
+          # CLI selects execution modes on the handle, never by mutating AgentSpec/allow_tools.
+          path = 'linktools-ai/src/linktools/commands/ai/run.py'
+          replace_once(
+              path,
+              '        parser.add_argument("--json", action="store_true", help="emit one final JSON result")\n',
+              '        parser.add_argument("--planning", action="store_true", help="enable planning for this execution")\n        parser.add_argument("--thinking", action="store_true", help="enable model thinking for this execution")\n        parser.add_argument("--json", action="store_true", help="emit one final JSON result")\n',
+          )
+          replace_once(
+              path,
+              '                    memory_scope,\n                    args.json,\n                )',
+              '                    memory_scope,\n                    args.json,\n                    args.planning,\n                    args.thinking,\n                )',
+          )
+          replace_once(
+              path,
+              '    as_json: bool,\n) -> int:\n    if as_json:\n        result = await runtime.run(prompt, session_id=session_id, memory_scope=memory_scope)',
+              '    as_json: bool,\n    planning: bool,\n    thinking: bool,\n) -> int:\n    agent = runtime.agent(planning=planning, thinking=thinking)\n    if as_json:\n        result = await agent.run(prompt, session_id=session_id, memory_scope=memory_scope)',
+          )
+          replace_once(
+              path,
+              '    async for event in runtime.stream(prompt, session_id=session_id, memory_scope=memory_scope):\n',
+              '    async for event in agent.stream(prompt, session_id=session_id, memory_scope=memory_scope):\n',
+          )
+          PY
+          git diff --check
+          python -m compileall -q linktools-ai/src/linktools/ai linktools-ai/src/linktools/commands/ai
+      - name: Commit repair
+        shell: bash
+        run: |
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add linktools-ai/src/linktools/ai/runtime/_execution.py \
+                  linktools-ai/src/linktools/ai/runtime/_local.py \
+                  linktools-ai/src/linktools/ai/runtime/state/_codec.py \
+                  linktools-ai/src/linktools/ai/agent/_capabilities.py \
+                  linktools-ai/src/linktools/ai/agent/_executor.py \
+                  linktools-ai/src/linktools/ai/temporal/_request.py \
+                  linktools-ai/src/linktools/commands/ai/run.py
+          git commit -m 'fix(ai): close durable execution mode propagation'
+          git push origin HEAD:refactor/ai-runtime-agent-composition
