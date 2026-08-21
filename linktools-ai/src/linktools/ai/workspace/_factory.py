@@ -217,6 +217,9 @@ async def open_workspace_runtime(
         capabilities=default_capabilities,
         models=selected_models,
         workspace=workspace,
+        asset_registry=snapshot,
+        capability_providers=providers,
+        capability_bindings=family_bindings,
     )
     catalog = await _build_catalog(selected_assets, snapshot=snapshot, compiler=compiler)
     if await selected_assets.current_revision() != initial_revision:
@@ -326,6 +329,9 @@ def _build_compiler(
     capabilities: Sequence[CapabilityBinding],
     models: ModelRegistry,
     workspace: Workspace,
+    asset_registry: AssetTypeRegistrySnapshot,
+    capability_providers: Sequence[CapabilityProvider],
+    capability_bindings: Mapping[str, CapabilityBinding],
 ) -> AgentCompiler:
     profile = canonical_sha256(
         {
@@ -343,12 +349,19 @@ def _build_compiler(
                 {"provider": capability.provider, "id": capability.id, "fingerprint": capability.fingerprint}
                 for capability in sorted(capabilities, key=lambda value: (value.provider, value.id))
             ],
+            "asset_capability_families": [
+                {"provider": name, "fingerprint": binding.fingerprint}
+                for name, binding in sorted(capability_bindings.items())
+            ],
         }
     )
     return AgentCompiler(
         model_resolver=models.snapshot(),
         capabilities=capabilities,
         execution_profile_fingerprint=profile,
+        asset_registry=asset_registry,
+        capability_providers=capability_providers,
+        capability_bindings=capability_bindings,
     )
 
 
