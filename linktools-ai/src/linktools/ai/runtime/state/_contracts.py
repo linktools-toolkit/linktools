@@ -394,6 +394,8 @@ class ExecutionRecord:
     memory_scope: "str | None" = None
     conversation_step_run_id: "str | None" = None
     result: "ResultRecord | None" = None
+    planning: bool = False
+    thinking: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -819,6 +821,8 @@ class RecoveryExecutionInput:
     base_execution_id: "str | None"
     conversation_step_run_id: "str | None"
     idempotency: "RecoveryIdempotencyInput"
+    planning: bool = False
+    thinking: bool = False
 
     def __post_init__(self) -> None:
         prompt = self.user_prompt
@@ -826,6 +830,8 @@ class RecoveryExecutionInput:
             object.__setattr__(self, "user_prompt", StoredPayload.inline_text(prompt))
         elif not isinstance(prompt, StoredPayload):
             raise ValueError("recovery prompt payload is invalid")
+        if not isinstance(self.planning, bool) or not isinstance(self.thinking, bool):
+            raise ValueError("recovery execution modes must be boolean")
 
     def prompt_text(self) -> str:
         value = self.user_prompt.decode()
