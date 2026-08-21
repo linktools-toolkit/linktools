@@ -3,17 +3,17 @@
 """Public boundaries for the LinkTools AI runtime."""
 
 from .asset import AssetRef
-from .capability import CapabilityRef, RuntimeCapability
+from .capability import RuntimeCapability
 from .errors import AIError, ErrorCode, SafeError
-from .runtime import Runtime
+from .runtime import AgentHandle, Runtime
 from .spec import AgentSpec
 from .workspace import Workspace, open_workspace_runtime
 
 __all__ = [
     "AIError",
+    "AgentHandle",
     "AgentSpec",
     "AssetRef",
-    "CapabilityRef",
     "ErrorCode",
     "Runtime",
     "RuntimeCapability",
