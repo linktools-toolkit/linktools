@@ -31,6 +31,7 @@ class AgentSpecCodec:
                 "system_prompt": value.system_prompt,
                 "instructions": list(value.instructions),
                 "allow_tools": list(value.allow_tools),
+                "allow_skills": list(value.allow_skills),
                 "metadata": dict(value.metadata),
                 "usage_limits": None
                 if value.usage_limits is None
@@ -60,6 +61,7 @@ class AgentSpecCodec:
             system_prompt,
             tuple(instructions),
             _strict_allowlist(raw, "allow_tools", ("*",)),
+            _strict_allowlist(raw, "allow_skills", ("*",)),
             cast("dict[str, object]", raw.get("metadata", {})),
             usage_limits,
         )
