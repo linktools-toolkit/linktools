@@ -33,6 +33,7 @@ from ..errors import AIError, ErrorCode
 _logger = environ.get_logger("ai.agent.capabilities")
 
 MEMORY_TOOL_NAMES = ("delete_memory", "read_memory", "search_memory", "write_memory")
+MEMORY_READ_TOOL_NAMES = ("read_memory", "search_memory")
 PLANNING_TOOL_NAMES = ("write_plan",)
 SUBAGENT_TOOL_NAMES = ("delegate_task",)
 WORKSPACE_FILESYSTEM_TOOL_NAMES = (
@@ -45,7 +46,15 @@ WORKSPACE_FILESYSTEM_TOOL_NAMES = (
     "search_files",
     "write_file",
 )
+WORKSPACE_FILESYSTEM_READ_TOOL_NAMES = (
+    "file_info",
+    "find_files",
+    "list_directory",
+    "read_file",
+    "search_files",
+)
 WORKSPACE_SHELL_TOOL_NAMES = ("check_command", "run_command", "start_command", "stop_command")
+PLAN_SAFE_METADATA_KEY = "linktools.ai.plan_safe"
 
 
 @dataclass(frozen=True, slots=True)
@@ -117,9 +126,22 @@ class _MissingToolOperationBridge:
 
 
 class _RuntimeStepPersistence(StepPersistence[None]):
-    def __init__(self, *, tool_operations: ToolOperationBridge, **kwargs: Any) -> None:
+    def __init__(
+        self,
+        *,
+        tool_operations: ToolOperationBridge,
+        planning: bool = False,
+        control_tool_names: "frozenset[str]" = frozenset(),
+        plan_safe_tool_names: "frozenset[str]" = frozenset(),
+        **kwargs: Any,
+    ) -> None:
+        if not isinstance(planning, bool):
+            raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
         super().__init__(**kwargs)
         self._tool_operations = tool_operations
+        self._planning = planning
+        self._control_tool_names = control_tool_names
+        self._plan_safe_tool_names = plan_safe_tool_names
         self._calls: dict[tuple[str, str], _ToolCallState] = {}
 
     async def before_tool_execute(
@@ -130,6 +152,15 @@ class _RuntimeStepPersistence(StepPersistence[None]):
         tool_def: ToolDefinition,
         args: dict[str, Any],
     ) -> dict[str, Any]:
+        if self._planning and not tool_allowed_in_planning(
+            tool_def,
+            control_tool_names=self._control_tool_names,
+            plan_safe_tool_names=self._plan_safe_tool_names,
+        ):
+            raise AIError(
+                ErrorCode.CAPABILITY_POLICY_CONFLICT,
+                safe_details={"tool_name": tool_def.name, "planning": True},
+            )
         decision = await self._tool_operations.begin(ctx, call, tool_def, args)
         key = self._decision_key(ctx, call)
         state = _ToolCallState(
@@ -274,7 +305,6 @@ class _RuntimeStepPersistence(StepPersistence[None]):
                 await self._mark_unknown(state, error)
             elif not state.handler_entered:
                 state.preserve_started = True
-            # Generic replay-safe failures are terminalized by the error hook.
             raise
         finally:
             await self._stop_heartbeat(state)
@@ -407,6 +437,9 @@ class AgentRunScope:
     memory_store: "SearchableMemoryStore | None"
     history_id: "str | None" = None
     platform_tool_names: "tuple[str, ...]" = ()
+    planning: bool = False
+    control_tool_names: "frozenset[str]" = frozenset()
+    plan_safe_tool_names: "frozenset[str]" = frozenset()
     context_target_tokens: "int | None" = None
     parent_step_run_id: "str | None" = None
     subagent_delegate: "SubagentDelegate | None" = None
@@ -428,6 +461,9 @@ async def compose_platform_capabilities(
     capabilities: list[PydanticAgentCapability[None]] = [
         _RuntimeStepPersistence(
             tool_operations=scope.tool_operations or _MissingToolOperationBridge(),
+            planning=scope.planning,
+            control_tool_names=scope.control_tool_names,
+            plan_safe_tool_names=scope.plan_safe_tool_names,
             store=scope.step_store,
             agent_name=scope.agent_name,
             run_id=scope.step_run_id,
@@ -488,18 +524,42 @@ def tool_name_allowed(name: str, allow_tools: "tuple[str, ...]") -> bool:
     return "*" in allow_tools or name in allow_tools
 
 
+def tool_allowed_in_planning(
+    tool_def: ToolDefinition,
+    *,
+    control_tool_names: "frozenset[str]",
+    plan_safe_tool_names: "frozenset[str]",
+) -> bool:
+    if tool_def.name in control_tool_names or tool_def.name in plan_safe_tool_names:
+        return True
+    metadata = tool_def.metadata or {}
+    value = metadata.get(PLAN_SAFE_METADATA_KEY)
+    if value is None:
+        return False
+    if not isinstance(value, bool):
+        raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+    return value
+
+
 def select_platform_tool_names(
     *,
     allow_tools: "tuple[str, ...]",
     memory_scope: "str | None",
+    planning: bool = False,
     subagent_available: bool = False,
 ) -> "tuple[str, ...]":
-    candidates = list(PLANNING_TOOL_NAMES)
-    if memory_scope is not None:
-        candidates.extend(MEMORY_TOOL_NAMES)
+    if not isinstance(planning, bool) or not isinstance(subagent_available, bool):
+        raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+    selected = [
+        name
+        for name in MEMORY_TOOL_NAMES
+        if memory_scope is not None and tool_name_allowed(name, allow_tools)
+    ]
+    if planning:
+        selected.extend(PLANNING_TOOL_NAMES)
     if subagent_available:
-        candidates.extend(SUBAGENT_TOOL_NAMES)
-    return tuple(sorted(name for name in candidates if tool_name_allowed(name, allow_tools)))
+        selected.extend(SUBAGENT_TOOL_NAMES)
+    return tuple(sorted(selected))
 
 
 class _SubagentCapability(AbstractCapability[None]):
@@ -564,10 +624,13 @@ def _workspace_file_key(part: ToolCallPart) -> "str | None":
 
 
 __all__ = [
+    "MEMORY_READ_TOOL_NAMES",
     "MEMORY_TOOL_NAMES",
+    "PLAN_SAFE_METADATA_KEY",
     "PLANNING_TOOL_NAMES",
     "SKILL_TOOL_NAMES",
     "SUBAGENT_TOOL_NAMES",
+    "WORKSPACE_FILESYSTEM_READ_TOOL_NAMES",
     "WORKSPACE_FILESYSTEM_TOOL_NAMES",
     "WORKSPACE_SHELL_TOOL_NAMES",
     "AgentRunScope",
@@ -576,5 +639,6 @@ __all__ = [
     "ToolOperationDecision",
     "compose_platform_capabilities",
     "select_platform_tool_names",
+    "tool_allowed_in_planning",
     "tool_name_allowed",
 ]
