@@ -1,14 +1,5 @@
 {
   "types": {
-    "CapabilityRef": {
-      "module": "linktools.ai.spec._contract",
-      "fields": [
-        {"name": "provider", "type": "str"},
-        {"name": "id", "type": "str | None", "default": null},
-        {"name": "revision", "type": "int | None", "default": null},
-        {"name": "required", "type": "bool", "default": true}
-      ]
-    },
     "AgentSpec": {
       "module": "linktools.ai.spec._contract",
       "fields": [
@@ -18,10 +9,8 @@
         {"name": "system_prompt", "type": "str", "default": ""},
         {"name": "instructions", "type": "tuple[str, ...]", "default": []},
         {"name": "allow_tools", "type": "tuple[str, ...]", "default": ["*"]},
-        {"name": "allow_skills", "type": "tuple[str, ...]", "default": ["*"]},
         {"name": "metadata", "type": "Mapping[str, JsonValue]", "default": "empty mapping"},
-        {"name": "usage_limits", "type": "AgentUsageLimits | None", "default": null},
-        {"name": "capabilities", "type": "tuple[CapabilityRef, ...]", "default": []}
+        {"name": "usage_limits", "type": "AgentUsageLimits | None", "default": null}
       ]
     },
     "SkillSpec": {
