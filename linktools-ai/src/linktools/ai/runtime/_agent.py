@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from ..core import JsonValue, Principal
+from ..errors import AIError, ErrorCode
 from .service_api import (
     EvaluationHandle,
     ExecutionHandle,
@@ -136,7 +137,7 @@ class AgentHandle:
         validate_user_prompt(user_prompt)
         definition = self._runtime._definition(self.binding_digest)
         if definition.spec.id != self.agent_id:
-            raise RuntimeError("agent handle binding is inconsistent")
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         return TaskNode(
             node_id,
             dependencies,
