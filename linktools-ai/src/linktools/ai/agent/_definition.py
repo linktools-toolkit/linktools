@@ -4,6 +4,8 @@
 
 from dataclasses import dataclass
 
+from pydantic import BaseModel
+
 from ..capability import CapabilityBinding, validate_fingerprint
 from ..errors import AIError, ErrorCode
 from ..model import ModelBinding
@@ -35,7 +37,7 @@ class AgentDefinition:
             raise AIError(ErrorCode.CAPABILITY_CONFLICT)
 
     @property
-    def output_type(self):
+    def output_type(self) -> type[BaseModel]:
         return self.output_binding.value_type
 
     @property
