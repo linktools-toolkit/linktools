@@ -31,7 +31,11 @@ async def test_disabled_sandbox_is_fail_closed_without_side_effects(tmp_path: Pa
     sandbox = DisabledSandbox()
     target = tmp_path / "should-not-exist"
     command = f'{sys.executable} -c "from pathlib import Path; Path({str(target)!r}).write_text(\'created\')"'
-    for operation in (sandbox.read_file(str(target)), sandbox.write_file(str(target), "content"), sandbox.run(command)):
+    for operation in (
+        sandbox.read_file(str(target)),
+        sandbox.write_file(str(target), "content"),
+        sandbox.run(command),
+    ):
         with pytest.raises(AIError) as error:
             await operation
         assert error.value.code is ErrorCode.SANDBOX_UNAVAILABLE
@@ -42,8 +46,20 @@ async def test_disabled_sandbox_is_fail_closed_without_side_effects(tmp_path: Pa
 async def test_allow_all_policy_is_explicit_and_deterministic() -> None:
     policy = AllowAllToolPolicy()
     principal = service_principal("tenant-a", "worker-a")
-    execution = ResourceRef(ResourceKind.EXECUTION, "execution-a", "tenant-a")
-    assert await policy.authorize_tool(principal, execution, ToolDescriptor("tool", replay_safe=True), "digest") is ToolAuthorization.ALLOW
+    execution = ResourceRef(
+        ResourceKind.EXECUTION,
+        "execution-a",
+        "tenant-a",
+    )
+    assert (
+        await policy.authorize_tool(
+            principal,
+            execution,
+            ToolDescriptor("tool", replay_safe=True),
+            "digest",
+        )
+        is ToolAuthorization.ALLOW
+    )
     assert policy.fingerprint == AllowAllToolPolicy().fingerprint
 
 
@@ -51,8 +67,17 @@ async def test_allow_all_policy_is_explicit_and_deterministic() -> None:
 async def test_service_principal_keeps_tenant_authorization() -> None:
     principal = service_principal("tenant-a", "worker-a")
     assert principal.kind == PrincipalKind.SERVICE.value
-    owned = ResourceRef(ResourceKind.EXECUTION, "execution-a", "tenant-a", owner_principal_id="worker-a")
-    await TenantAuthorizationPolicy().authorize(principal, AuthorizationAction.EXECUTION_RUN, owned)
+    owned = ResourceRef(
+        ResourceKind.EXECUTION,
+        "execution-a",
+        "tenant-a",
+        owner_principal_id="worker-a",
+    )
+    await TenantAuthorizationPolicy().authorize(
+        principal,
+        AuthorizationAction.EXECUTION_RUN,
+        owned,
+    )
     with pytest.raises(AIError) as error:
         await TenantAuthorizationPolicy().authorize(
             principal,
@@ -63,7 +88,13 @@ async def test_service_principal_keeps_tenant_authorization() -> None:
 
 
 def test_agent_spec_codec_preserves_system_prompt_and_instructions() -> None:
-    spec = AgentSpec("agent", 1, "model", (), "text", 1, "system", ("instruction",))
+    spec = AgentSpec(
+        "agent",
+        1,
+        "model",
+        system_prompt="system",
+        instructions=("instruction",),
+    )
     payload = json.loads(AgentSpecCodec().encode(spec))
     assert payload["system_prompt"] == "system"
     assert payload["instructions"] == ["instruction"]
