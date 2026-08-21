@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Immutable declaration contracts for Agents and capabilities."""
+"""Immutable declaration contracts for Agent and Asset specifications."""
 
 import json
 import math
@@ -8,13 +8,7 @@ from collections.abc import Iterator, Mapping
 from dataclasses import dataclass, field
 from typing import cast
 
-from ..core import (
-    JsonValue,
-    canonical_json_bytes,
-    canonical_string_tuple,
-    validate_capability_provider,
-)
-from ..errors import AIError, ErrorCode
+from ..core import JsonValue, canonical_json_bytes, canonical_string_tuple
 
 
 @dataclass(frozen=True, slots=True)
@@ -91,60 +85,33 @@ def _normalize_value(value: object) -> JsonValue:
 
 
 @dataclass(frozen=True, slots=True)
-class AgentCapabilityRef:
-    provider: str
-    id: str
-    revision: "int | None" = None
-    required: bool = True
-    config: "Mapping[str, JsonValue]" = field(default_factory=dict)
-
-    def __post_init__(self) -> None:
-        try:
-            validate_capability_provider(self.provider)
-        except AIError as error:
-            raise ValueError("agent capability reference is invalid") from error
-        if not self.id.strip() or not isinstance(self.required, bool) or (self.revision is not None and self.revision < 1):
-            raise ValueError("agent capability reference is invalid")
-        object.__setattr__(self, "config", _ImmutableJsonMapping(self.config))
-
-
-@dataclass(frozen=True, slots=True)
 class AgentSpec:
+    """Durable, runtime-independent declaration of one Agent."""
+
     id: str
     revision: int
     model: str
-    capabilities: "tuple[AgentCapabilityRef, ...]"
-    output_schema: str
-    output_schema_revision: int
     system_prompt: str = ""
     instructions: "tuple[str, ...]" = ()
     allow_tools: "tuple[str, ...]" = ("*",)
-    allow_skills: "tuple[str, ...]" = ("*",)
     metadata: "Mapping[str, JsonValue]" = field(default_factory=dict)
     usage_limits: "AgentUsageLimits | None" = None
 
     def __post_init__(self) -> None:
-        if not self.id.strip() or self.revision < 1 or not self.model.strip() or not self.output_schema.strip() or self.output_schema_revision < 1:
-            raise ValueError("agent spec is incomplete")
+        if not isinstance(self.id, str) or not self.id.strip():
+            raise ValueError("agent id must be a non-empty string")
+        if not isinstance(self.revision, int) or isinstance(self.revision, bool) or self.revision < 1:
+            raise ValueError("agent revision must be a positive integer")
+        if not isinstance(self.model, str) or not self.model.strip():
+            raise ValueError("agent model must be a non-empty string")
         if not isinstance(self.system_prompt, str):
             raise ValueError("agent system prompt must be a string")
         instructions = tuple(self.instructions)
         if any(not isinstance(item, str) for item in instructions):
             raise ValueError("agent instructions must be strings")
-        object.__setattr__(self, "capabilities", tuple(self.capabilities))
-        object.__setattr__(self, "allow_tools", canonical_string_tuple(self.allow_tools, field="allow_tools"))
-        object.__setattr__(self, "allow_skills", canonical_string_tuple(self.allow_skills, field="allow_skills"))
         object.__setattr__(self, "instructions", instructions)
+        object.__setattr__(self, "allow_tools", canonical_string_tuple(self.allow_tools, field="allow_tools"))
         object.__setattr__(self, "metadata", _ImmutableJsonMapping(self.metadata))
-        unique: dict[tuple[str, str], AgentCapabilityRef] = {}
-        for capability in self.capabilities:
-            key = capability.provider, capability.id
-            previous = unique.get(key)
-            if previous is not None:
-                del previous
-                raise AIError(ErrorCode.CAPABILITY_CONFLICT)
-            unique[key] = capability
-        object.__setattr__(self, "capabilities", tuple(unique.values()))
 
 
 @dataclass(frozen=True, slots=True)
@@ -171,4 +138,4 @@ class MCPServerSpec:
         object.__setattr__(self, "args", tuple(self.args))
 
 
-__all__ = ["AgentCapabilityRef", "AgentSpec", "AgentUsageLimits", "MCPServerSpec", "SkillSpec"]
+__all__ = ["AgentSpec", "AgentUsageLimits", "MCPServerSpec", "SkillSpec"]
