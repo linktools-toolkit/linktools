@@ -209,11 +209,8 @@ class _FilesystemCache:
         value = 0
         path = self._root / _sequence_path(self._root, key)
         if path.is_file():
-            raw = _read_json(path)
-            if raw.get("key") != key.hex():
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            value = int(raw["value"])
-            if value < 0:
+            stored_key, value = _read_sequence_metadata(path)
+            if stored_key != key:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             self._business_files_read += 1
         self._sequences[key] = value
@@ -228,19 +225,10 @@ class _FilesystemCache:
         if not path.is_file():
             self._fact_streams[stream] = None
             return None
-        try:
-            raw = _read_json(path)
-            _require_layout_path(path, self._root, _fact_meta_path(self._root, stream))
-            if raw.get("stream") != stream.hex():
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            owner = bytes.fromhex(str(raw["owner_key"]))
-            last_sequence = int(raw["last_sequence"])
-            if len(owner) != 32 or last_sequence < 1:
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        except AIError:
-            raise
-        except (KeyError, TypeError, ValueError) as error:
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
+        _require_layout_path(path, self._root, _fact_meta_path(self._root, stream))
+        stored_stream, owner, last_sequence = _read_fact_metadata(path)
+        if stored_stream != stream:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         value = _FactStreamInfo(stream, owner, last_sequence, {}, False)
         self._fact_streams[stream] = value
         self._business_files_read += 1
@@ -252,17 +240,14 @@ class _FilesystemCache:
         subjects: dict[bytes, int] = {}
         root = self._root / _fact_directory(info.stream_digest) / "subjects"
         for ref in root.glob("*.ref"):
-            try:
-                subject = bytes.fromhex(ref.stem)
-                _require_layout_path(
-                    ref,
-                    self._root,
-                    _fact_subject_path(self._root, info.stream_digest, subject),
-                )
-                sequence = int(_read_json(ref)["sequence"])
-            except (KeyError, TypeError, ValueError) as error:
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
-            if len(subject) != 32 or not 1 <= sequence <= info.last_sequence:
+            subject = _layout_digest(ref.stem)
+            _require_layout_path(
+                ref,
+                self._root,
+                _fact_subject_path(self._root, info.stream_digest, subject),
+            )
+            sequence = _read_subject_sequence(ref)
+            if not 1 <= sequence <= info.last_sequence:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             subjects[subject] = sequence
         info.subjects.update(subjects)
@@ -274,7 +259,7 @@ class _FilesystemCache:
             return tuple(value for value in self._fact_streams.values() if value is not None)
         values: list[_FactStreamInfo] = []
         for path in (self._root / "facts").glob("*/*/meta.json"):
-            stream = bytes.fromhex(str(_read_json(path)["stream"]))
+            stream, _owner, _last_sequence = _read_fact_metadata(path)
             info = self.get_fact_stream(stream)
             if info is not None:
                 values.append(info)
@@ -324,9 +309,9 @@ class _FilesystemCache:
                 self._root,
                 f"operations/streams/{stream[:2]}/{stream}/{sequence:020d}.ref",
             )
-            key = bytes.fromhex(str(_read_json(path)["key"]))
-        except (KeyError, TypeError, ValueError) as error:
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
+            key = _read_operation_ref(path)
+        except AIError:
+            raise
         operation = self.get_operation(key)
         if (
             operation is None
@@ -343,10 +328,7 @@ class _FilesystemCache:
         if not root.is_dir():
             return ()
         for path in sorted(root.glob("*.ref")):
-            try:
-                sequence = int(path.stem)
-            except ValueError as error:
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
+            sequence = _layout_sequence_name(path.stem)
             value = self.get_operation_by_stream_sequence(stream_digest, sequence)
             if value is None:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -375,12 +357,7 @@ class _FilesystemCache:
             for shard in sorted(path for path in root.iterdir() if path.is_dir()):
                 for path in sorted(shard.glob("*.json")):
                     key_hex = path.stem
-                    try:
-                        key = bytes.fromhex(key_hex)
-                    except ValueError as error:
-                        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
-                    if len(key) != 32:
-                        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                    key = _layout_digest(key_hex)
                     if after is not None and (kind, key) <= (
                         after.kind,
                         after.key_digest,
@@ -427,12 +404,7 @@ class _FilesystemCache:
             for stream_dir in sorted(
                 path for path in shard.iterdir() if path.is_dir()
             ):
-                try:
-                    stream = bytes.fromhex(stream_dir.name)
-                except ValueError as error:
-                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
-                if len(stream) != 32:
-                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                stream = _layout_digest(stream_dir.name)
                 if after is not None and stream < after.stream_digest:
                     continue
                 meta_path = stream_dir / "meta.json"
@@ -489,12 +461,7 @@ class _FilesystemCache:
         for shard in sorted(path for path in root.iterdir() if path.is_dir()):
             for path in sorted(shard.glob("*.json")):
                 key_hex = path.stem
-                try:
-                    key = bytes.fromhex(key_hex)
-                except ValueError as error:
-                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
-                if len(key) != 32:
-                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                key = _layout_digest(key_hex)
                 if after is not None and key <= after.key_digest:
                     continue
                 value = decode_operation(_read_json(path))
@@ -921,10 +888,7 @@ class FilesystemStateStorageGroup:
 
     @staticmethod
     def _manifest_matches(actual: Mapping[str, object], expected: Mapping[str, object]) -> bool:
-        if not isinstance(actual, Mapping):
-            return False
-        fields = ("format", "version", "namespace_digest", "tenant_digest", "members")
-        return all(actual.get(field) == expected.get(field) for field in fields)
+        return isinstance(actual, Mapping) and actual == expected
 
     def _check_foreign_group_journals_sync(self) -> None:
         if self._standalone:
@@ -998,10 +962,7 @@ class FilesystemStateStorageGroup:
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
 
     def _read_generation(self) -> int:
-        try:
-            return int(self._generation_path.read_text(encoding="utf-8"))
-        except (OSError, ValueError) as error:
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
+        return _read_generation_value(self._generation_path)
 
     def _write_generation(self, value: int) -> None:
         _write_text(self._generation_path, str(value))
@@ -1234,15 +1195,12 @@ class FilesystemStateStore:
             return 0
         if self._root.is_dir() and all(path.name == "state.lock" for path in self._root.iterdir()):
             return 0
-        try:
-            return int((self._root / "generation").read_text(encoding="utf-8"))
-        except (OSError, ValueError) as error:
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
+        return _read_generation_value(self._root / "generation")
 
     def _expected_manifest(self) -> dict[str, str | int]:
         return {
             "format": "linktools-ai-state",
-            "layout_version": 3,
+            "layout_version": 1,
             "namespace_digest": _digest(self._namespace),
             "tenant_digest": _digest(self._tenant_id),
             "runtime_domain": self._runtime_domain,
@@ -1307,11 +1265,9 @@ class FilesystemStateStore:
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                 aliases[value.alias_digest] = value.record_key_digest
             for path in (self._root / "sequences").glob("*/*.json"):
-                raw = _read_json(path)
-                key = bytes.fromhex(str(raw["key"]))
+                key, value = _read_sequence_metadata(path)
                 _require_layout_path(path, self._root, f"sequences/{key.hex()[:2]}/{key.hex()}.json")
-                value = int(raw["value"])
-                if len(key) != 32 or value < 0 or key in sequences:
+                if key in sequences:
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                 sequences[key] = value
             for path in (self._root / "operations/by-key").glob("*/*.json"):
@@ -1324,30 +1280,24 @@ class FilesystemStateStore:
             streams: dict[bytes, _FactStreamInfo] = {}
             facts_root = self._root / "facts"
             for path in facts_root.glob("*/*/meta.json"):
-                raw = _read_json(path)
-                stream = bytes.fromhex(str(raw["stream"]))
-                owner = bytes.fromhex(str(raw["owner_key"]))
+                stream, owner, last_sequence = _read_fact_metadata(path)
                 _require_layout_path(path, self._root, f"facts/{stream.hex()[:2]}/{stream.hex()}/meta.json")
-                if len(stream) != 32 or len(owner) != 32 or stream in streams:
-                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                last_sequence = int(raw["last_sequence"])
-                if last_sequence < 1:
+                if stream in streams:
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                 subjects: dict[bytes, int] = {}
                 for ref in path.parent.joinpath("subjects").glob("*.ref"):
-                    if ref.stem == "none":
-                        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                    subject = bytes.fromhex(ref.stem)
-                    sequence = int(_read_json(ref)["sequence"])
-                    if len(subject) != 32 or subject in subjects or not 1 <= sequence <= last_sequence:
+                    subject = _layout_digest(ref.stem)
+                    sequence = _read_subject_sequence(ref)
+                    _require_layout_path(ref, self._root, _fact_subject_path(self._root, stream, subject))
+                    if subject in subjects or not 1 <= sequence <= last_sequence:
                         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                     subjects[subject] = sequence
                 streams[stream] = _FactStreamInfo(stream, owner, last_sequence, subjects)
             references: dict[tuple[bytes, int], bytes] = {}
             for path in (self._root / "operations/streams").glob("*/*/*.ref"):
-                stream = bytes.fromhex(path.parent.name)
-                sequence = int(path.stem)
-                key = bytes.fromhex(str(_read_json(path)["key"]))
+                stream = _layout_digest(path.parent.name)
+                sequence = _layout_sequence_name(path.stem)
+                key = _read_operation_ref(path)
                 _require_layout_path(
                     path,
                     self._root,
@@ -1677,6 +1627,12 @@ class _FilesystemTransaction:
             self._write(_record_path(record), encode_record(record))
 
     async def guard_record(self, key: bytes, *, expected_storage_version: int) -> StoredRecord | None:
+        if (
+            isinstance(expected_storage_version, bool)
+            or not isinstance(expected_storage_version, int)
+            or expected_storage_version < 0
+        ):
+            raise ValueError("expected_storage_version must be a non-negative integer")
         current = await self.get_record(key)
         if key in self.guarded_record_keys:
             return current
@@ -1742,10 +1698,19 @@ class _FilesystemTransaction:
         lease_fence: int,
         lease_expires_at: datetime | None,
     ) -> bool:
+        if (
+            isinstance(expected_storage_version, bool)
+            or not isinstance(expected_storage_version, int)
+            or expected_storage_version < 0
+            or isinstance(lease_fence, bool)
+            or not isinstance(lease_fence, int)
+            or lease_fence < 0
+        ):
+            raise ValueError("record lease integer fields are invalid")
         current = await self.get_record(key)
         if current is None or current.storage_version != expected_storage_version:
             return False
-        if lease_fence < 0 or lease_expires_at is not None and lease_expires_at.tzinfo is None:
+        if lease_expires_at is not None and lease_expires_at.tzinfo is None:
             raise ValueError("record lease is invalid")
         updated = StoredRecord(
             current.key_digest,
@@ -1767,6 +1732,12 @@ class _FilesystemTransaction:
         return True
 
     async def delete_record(self, key: bytes, *, expected_storage_version: int | None = None) -> bool:
+        if expected_storage_version is not None and (
+            isinstance(expected_storage_version, bool)
+            or not isinstance(expected_storage_version, int)
+            or expected_storage_version < 0
+        ):
+            raise ValueError("expected_storage_version must be a non-negative integer or None")
         current = await self.get_record(key)
         if current is None:
             return False
@@ -1963,8 +1934,11 @@ class _FilesystemTransaction:
         return (await self.reserve_sequences({key: count}))[key]
 
     async def reserve_sequences(self, requests: Mapping[bytes, int]) -> Mapping[bytes, int]:
-        if any(count < 1 for count in requests.values()):
-            raise ValueError("sequence reservation count must be positive")
+        if any(
+            isinstance(count, bool) or not isinstance(count, int) or count < 1
+            for count in requests.values()
+        ):
+            raise ValueError("sequence reservation count must be a positive integer")
         current = await self.get_sequences(tuple(requests))
         values = {key: current[key] + requests[key] for key in sorted(requests)}
         for key, value in values.items():
@@ -1973,6 +1947,8 @@ class _FilesystemTransaction:
         return values
 
     async def advance_sequence(self, key: bytes, expected: int) -> int:
+        if isinstance(expected, bool) or not isinstance(expected, int) or expected < 0:
+            raise ValueError("expected sequence must be a non-negative integer")
         if await self.get_sequence(key) != expected:
             raise AIError(ErrorCode.STORAGE_CONFLICT)
         return await self.next_sequence(key)
@@ -2466,6 +2442,98 @@ def _read_json(path: Path) -> Mapping[str, object]:
     value = json.loads(path.read_text(encoding="utf-8"))
     if not isinstance(value, Mapping):
         raise ValueError("JSON root must be an object")
+    return value
+
+
+def _require_layout_keys(value: Mapping[str, object], expected: frozenset[str]) -> None:
+    if set(value.keys()) != expected:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+
+
+def _layout_digest(value: object) -> bytes:
+    if not isinstance(value, str):
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    try:
+        result = bytes.fromhex(value)
+    except ValueError as error:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
+    if len(result) != 32 or result.hex() != value:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    return result
+
+
+def _layout_nonnegative_int(value: object) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    return value
+
+
+def _layout_positive_int(value: object) -> int:
+    result = _layout_nonnegative_int(value)
+    if result < 1:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    return result
+
+
+def _layout_sequence_name(value: str) -> int:
+    if len(value) != 20 or not value.isascii() or not value.isdigit():
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    sequence = int(value)
+    if sequence < 1 or f"{sequence:020d}" != value:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    return sequence
+
+
+def _read_sequence_metadata(path: Path) -> tuple[bytes, int]:
+    try:
+        raw = _read_json(path)
+    except (OSError, TypeError, ValueError) as error:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
+    _require_layout_keys(raw, frozenset({"key", "value"}))
+    return _layout_digest(raw["key"]), _layout_nonnegative_int(raw["value"])
+
+
+def _read_fact_metadata(path: Path) -> tuple[bytes, bytes, int]:
+    try:
+        raw = _read_json(path)
+    except (OSError, TypeError, ValueError) as error:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
+    _require_layout_keys(raw, frozenset({"stream", "owner_key", "last_sequence"}))
+    return (
+        _layout_digest(raw["stream"]),
+        _layout_digest(raw["owner_key"]),
+        _layout_positive_int(raw["last_sequence"]),
+    )
+
+
+def _read_subject_sequence(path: Path) -> int:
+    try:
+        raw = _read_json(path)
+    except (OSError, TypeError, ValueError) as error:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
+    _require_layout_keys(raw, frozenset({"sequence"}))
+    return _layout_positive_int(raw["sequence"])
+
+
+def _read_operation_ref(path: Path) -> bytes:
+    try:
+        raw = _read_json(path)
+    except (OSError, TypeError, ValueError) as error:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
+    _require_layout_keys(raw, frozenset({"key"}))
+    return _layout_digest(raw["key"])
+
+
+def _read_generation_value(path: Path) -> int:
+    try:
+        raw = path.read_text(encoding="utf-8")
+    except OSError as error:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
+    if not raw.isascii() or not raw.isdigit():
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    value = int(raw)
+    if value < 0 or str(value) != raw:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     return value
 
 
