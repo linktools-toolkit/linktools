@@ -27,8 +27,11 @@ _GRAPH_FIELDS = frozenset({"graph_id", "nodes"})
 _NODE_FIELDS = frozenset({"node_id", "dependencies", "input", "budget_cost"})
 _PRINCIPAL_FIELDS = frozenset({"principal_id", "tenant_id", "kind"})
 _LIMIT_FIELDS = frozenset({"max_concurrency", "max_depth", "max_nodes", "max_budget"})
-_EXECUTION_FIELDS = frozenset(
+_EXECUTION_V1_FIELDS = frozenset(
     {"version", "user_prompt", "principal", "idempotency_key", "memory_scope"}
+)
+_EXECUTION_V2_FIELDS = frozenset(
+    {"version", "user_prompt", "principal", "idempotency_key", "memory_scope", "planning", "thinking"}
 )
 _logger = environ.get_logger("ai.temporal.request")
 
@@ -98,11 +101,13 @@ async def put_execution_request(
     request: ExecutionRequest,
 ) -> str:
     payload: dict[str, JsonValue] = {
-        "version": 1,
+        "version": 2,
         "user_prompt": request.user_prompt,
         "principal": _principal_payload(request.principal),
         "idempotency_key": request.idempotency_key,
         "memory_scope": request.memory_scope,
+        "planning": request.planning,
+        "thinking": request.thinking,
     }
     reference = await put_runtime_object(
         store,
@@ -263,8 +268,19 @@ def _task_node_from_payload(value: object) -> TaskNode:
 
 
 def _execution_request_from_payload(value: Mapping[str, object]) -> ExecutionRequest:
-    payload = _mapping(value, _EXECUTION_FIELDS)
-    _require_version(payload["version"])
+    version = value.get("version")
+    if version == 1:
+        payload = _mapping(value, _EXECUTION_V1_FIELDS)
+        planning = False
+        thinking = False
+    elif version == 2:
+        payload = _mapping(value, _EXECUTION_V2_FIELDS)
+        planning = payload["planning"]
+        thinking = payload["thinking"]
+        if not isinstance(planning, bool) or not isinstance(thinking, bool):
+            raise ValueError("execution mode fields are invalid")
+    else:
+        raise ValueError("request version is invalid")
     memory_scope = payload["memory_scope"]
     if memory_scope is not None and not isinstance(memory_scope, str):
         raise ValueError("execution memory scope is invalid")
@@ -273,6 +289,8 @@ def _execution_request_from_payload(value: Mapping[str, object]) -> ExecutionReq
         _principal_from_payload(payload["principal"]),
         _require_string(payload["idempotency_key"]),
         memory_scope,
+        planning,
+        thinking,
     )
 
 
