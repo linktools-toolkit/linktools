@@ -41,7 +41,7 @@ class AgentCompiler:
         self,
         spec: AgentSpec,
         *,
-        capabilities: "Sequence[RuntimeCapability]" = (),
+        capabilities: "Sequence[CapabilityBinding]" = (),
         output: "type[BaseModel] | None" = None,
     ) -> AgentDefinition:
         validate_agent_id(spec.id)
@@ -70,7 +70,7 @@ class AgentCompiler:
             "agent definition compiled: agent=%s digest=%s capabilities=%s",
             spec.id,
             digest,
-            tuple(capability.id for capability in effective),
+            tuple((capability.provider, capability.id) for capability in effective),
         )
         return definition
 
