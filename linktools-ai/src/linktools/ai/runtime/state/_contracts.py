@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
+from __future__ import annotations
+
 """Runtime persistence contracts and immutable records.
 
 This module contains no backend, filesystem, database, or workflow code.  It
@@ -53,8 +55,8 @@ if TYPE_CHECKING:
 @dataclass(frozen=True, slots=True)
 class ConversationCursor:
     step_run_id: str
-    history_id: "str | None" = None
-    message_count: "int | None" = None
+    history_id: str | None = None
+    message_count: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -88,9 +90,9 @@ class ConversationHistoryIndexNodeRecord:
     tree_segment_count: int
     tree_message_count: int
     tree_history_item_count: int
-    left_tree_id: "str | None"
-    right_tree_id: "str | None"
-    next_forest_id: "str | None"
+    left_tree_id: str | None
+    right_tree_id: str | None
+    next_forest_id: str | None
 
     def __post_init__(self) -> None:
         if self.tree_segment_count < 1:
@@ -121,7 +123,7 @@ class TranscriptOwnerDomain(StrEnum):
 @dataclass(frozen=True, slots=True)
 class RuntimePayloadRef:
     payload: StoredPayload
-    source_domain: "RuntimeDomain | None"
+    source_domain: RuntimeDomain | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -230,7 +232,7 @@ class TranscriptMessageRef:
 @dataclass(frozen=True, slots=True)
 class LoadedContextMessage:
     message: ModelMessage
-    source: "TranscriptMessageRef | None"
+    source: TranscriptMessageRef | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -277,8 +279,8 @@ class ConversationHistoryRecord:
     history_id: str
     session_id: str
     tenant_id: str
-    parent_history_id: "str | None"
-    prefix_index_head_id: "str | None"
+    parent_history_id: str | None
+    prefix_index_head_id: str | None
     inherited_message_count: int
     inherited_history_item_count: int
 
@@ -310,15 +312,15 @@ class SessionRecord:
     status: SessionStatus
     revision: int
     resource_generation: int
-    cwd: "str | None"
+    cwd: str | None
     metadata: Mapping[str, JsonValue]
     created_at: datetime
     updated_at: datetime
-    closed_at: "datetime | None"
-    active_execution_id: "str | None"
-    continuation: "ConversationCursor | None" = None
+    closed_at: datetime | None
+    active_execution_id: str | None
+    continuation: ConversationCursor | None = None
     history_quality: str = "complete"
-    history_id: "str | None" = None
+    history_id: str | None = None
 
     def __post_init__(self) -> None:
         if self.active_execution_id is not None and not self.active_execution_id.strip():
@@ -338,12 +340,12 @@ class SessionForkResultRecord:
     source_transcript_revision: int
     source_local_message_count: int
     source_local_history_item_count: int
-    source_prefix_index_head_id: "str | None"
+    source_prefix_index_head_id: str | None
     inherited_message_count: int
     inherited_history_item_count: int
     target_session_id: str
     target_history_id: str
-    target_prefix_index_head_id: "str | None"
+    target_prefix_index_head_id: str | None
     request_digest: str
     result_digest: str
 
@@ -379,27 +381,27 @@ class SessionForkResultRecord:
 class ExecutionRecord:
     execution_id: str
     tenant_id: str
-    session_id: "str | None"
+    session_id: str | None
     binding_digest: str
-    parent_execution_id: "str | None"
+    parent_execution_id: str | None
     root_execution_id: str
-    source_execution_id: "str | None"
-    base_execution_id: "str | None"
+    source_execution_id: str | None
+    base_execution_id: str | None
     lineage_kind: ExecutionLineageKind
     status: ExecutionStatus
     revision: int
     event_sequence: int
     agent_run_sequence: int
-    error_code: "str | None"
+    error_code: str | None
     safe_error_details: Mapping[str, JsonValue]
     created_at: datetime
     updated_at: datetime
-    memory_scope: "str | None" = None
-    conversation_step_run_id: "str | None" = None
-    result: "ResultRecord | None" = None
+    memory_scope: str | None = None
+    conversation_step_run_id: str | None = None
+    result: ResultRecord | None = None
     planning: bool = False
     thinking: bool = False
-    binding: "AgentBindingSnapshot | None" = None
+    binding: AgentBindingSnapshot | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.planning, bool) or not isinstance(self.thinking, bool):
@@ -466,7 +468,7 @@ class ExecutionHistoryHeadRecord:
     tenant_id: str
     state: ExecutionHistoryState
     revision: int
-    seal_digest: "str | None"
+    seal_digest: str | None
 
     def __post_init__(self) -> None:
         if self.revision < 0:
@@ -516,13 +518,13 @@ class ExecutionCancelRequestCommit:
 @dataclass(frozen=True, slots=True)
 class ExecutionStartReservation:
     execution: ExecutionRecord
-    idempotency: "IdempotencyRecord"
+    idempotency: IdempotencyRecord
 
 
 @dataclass(frozen=True, slots=True)
 class ExecutionStartReservationResult:
     execution: ExecutionRecord
-    idempotency: "IdempotencyRecord"
+    idempotency: IdempotencyRecord
     created: bool
 
 
@@ -533,7 +535,7 @@ class AgentAttemptClaim:
     expected_execution_revision: int
     expected_agent_run_sequence: int
     expected_recovery_revision: int
-    expected_recovery_state: "RecoveryCheckpointState"
+    expected_recovery_state: RecoveryCheckpointState
 
 
 @dataclass(frozen=True, slots=True)
@@ -546,8 +548,8 @@ class IdempotencyRecord:
     resource_kind: ResourceKind
     resource_id: str
     status: IdempotencyStatus
-    result_digest: "str | None"
-    error_code: "str | None"
+    result_digest: str | None
+    error_code: str | None
     created_at: datetime
     updated_at: datetime
 
@@ -566,10 +568,10 @@ class IdempotencyRecord:
 class ResultRecord:
     execution_id: str
     tenant_id: str
-    output_schema_id: "str | None"
-    output_schema_revision: "int | None"
-    output_schema_fingerprint: "str | None"
-    output: "StoredPayload | None"
+    output_schema_id: str | None
+    output_schema_revision: int | None
+    output_schema_fingerprint: str | None
+    output: StoredPayload | None
     stop_reason: StopReason
     usage: UsageMetrics
     created_at: datetime
@@ -609,7 +611,7 @@ class EvaluationRecord:
     evaluator_revision: int
     binding_digest: str
     output_schema_fingerprint: str
-    artifact_digest: "str | None"
+    artifact_digest: str | None
     status: EvaluationStatus
     revision: int
     metrics: Mapping[str, float | int]
@@ -638,8 +640,8 @@ class ExecutionTerminalCommit:
     result: ResultRecord
     terminal_event_type: ExecutionEventType
     terminal_event_payload: Mapping[str, JsonValue]
-    idempotency: "IdempotencyTerminalUpdate | None" = None
-    operation: "OperationTerminalUpdate | None" = None
+    idempotency: IdempotencyTerminalUpdate | None = None
+    operation: OperationTerminalUpdate | None = None
 
     def __post_init__(self) -> None:
         status = self.execution.status
@@ -667,8 +669,8 @@ class IdempotencyTerminalUpdate:
     expected_status: IdempotencyStatus
     next_status: IdempotencyStatus
     request_digest: str
-    result_digest: "str | None"
-    error_code: "str | None"
+    result_digest: str | None
+    error_code: str | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -676,9 +678,9 @@ class OperationTerminalUpdate:
     operation_id: str
     expected_status: OperationStatus
     next_status: OperationStatus
-    result_ref: "str | None"
-    result_digest: "str | None"
-    error_code: "str | None"
+    result_ref: str | None
+    result_digest: str | None
+    error_code: str | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -694,12 +696,12 @@ class ApprovalRecord:
     tenant_id: str
     operation_id: str
     status: ApprovalStatus
-    idempotency_key_digest: "str | None"
-    decision: "ApprovalDecision | None"
-    decided_by: "str | None"
-    decision_digest: "str | None"
+    idempotency_key_digest: str | None
+    decision: ApprovalDecision | None
+    decided_by: str | None
+    decision_digest: str | None
     created_at: datetime
-    decided_at: "datetime | None"
+    decided_at: datetime | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -709,25 +711,25 @@ class ExternalCallRecord:
     tenant_id: str
     operation_id: str
     status: ExternalCallStatus
-    idempotency_key_digest: "str | None"
-    object_ref: "ObjectRef | None"
-    payload_digest: "str | None"
+    idempotency_key_digest: str | None
+    object_ref: ObjectRef | None
+    payload_digest: str | None
     created_at: datetime
-    supplied_at: "datetime | None"
+    supplied_at: datetime | None
 
 
 @dataclass(frozen=True, slots=True)
 class RecoveryCheckpoint:
     execution_id: str
     tenant_id: str
-    input: "RecoveryExecutionInput"
-    step_run_id: "str | None"
+    input: RecoveryExecutionInput
+    step_run_id: str | None
     agent_run_sequence: int
-    state: "RecoveryCheckpointState"
-    handoff_phase: "RecoveryHandoffPhase"
-    terminal_handoff: "RecoveryTerminalHandoff | None"
-    handoff_contract_digest: "str | None"
-    pending_operation_id: "str | None"
+    state: RecoveryCheckpointState
+    handoff_phase: RecoveryHandoffPhase
+    terminal_handoff: RecoveryTerminalHandoff | None
+    handoff_contract_digest: str | None
+    pending_operation_id: str | None
     revision: int
     created_at: datetime
     updated_at: datetime
@@ -761,7 +763,7 @@ class RecoveryCheckpoint:
 class RecoveryAdmissionRecord:
     execution_id: str
     tenant_id: str
-    input: "RecoveryExecutionInput"
+    input: RecoveryExecutionInput
     created_at: datetime
 
 
@@ -788,13 +790,13 @@ class RecoveryIntegrityReport:
 class RecoveryStateRecord:
     execution_id: str
     tenant_id: str
-    step_run_id: "str | None"
+    step_run_id: str | None
     agent_run_sequence: int
-    state: "RecoveryCheckpointState"
-    handoff_phase: "RecoveryHandoffPhase"
-    terminal_handoff: "RecoveryTerminalHandoff | None"
-    handoff_contract_digest: "str | None"
-    pending_operation_id: "str | None"
+    state: RecoveryCheckpointState
+    handoff_phase: RecoveryHandoffPhase
+    terminal_handoff: RecoveryTerminalHandoff | None
+    handoff_contract_digest: str | None
+    pending_operation_id: str | None
     revision: int
     updated_at: datetime
 
@@ -820,20 +822,20 @@ class RecoveryExecutionInput:
     user_prompt: StoredPayload | str
     principal_id: str
     principal_kind: str
-    session_id: "str | None"
-    memory_scope: "str | None"
+    session_id: str | None
+    memory_scope: str | None
     agent_id: str
     binding_digest: str
     lineage_kind: str
-    parent_execution_id: "str | None"
+    parent_execution_id: str | None
     root_execution_id: str
-    source_execution_id: "str | None"
-    base_execution_id: "str | None"
-    conversation_step_run_id: "str | None"
-    idempotency: "RecoveryIdempotencyInput"
+    source_execution_id: str | None
+    base_execution_id: str | None
+    conversation_step_run_id: str | None
+    idempotency: RecoveryIdempotencyInput
     planning: bool = False
     thinking: bool = False
-    binding: "AgentBindingSnapshot | None" = None
+    binding: AgentBindingSnapshot | None = None
 
     def __post_init__(self) -> None:
         prompt = self.user_prompt
@@ -866,14 +868,14 @@ class RecoveryIdempotencyInput:
 @dataclass(frozen=True, slots=True)
 class RecoveryTerminalOutcome:
     terminal_status: ExecutionStatus
-    error_code: "str | None"
+    error_code: str | None
     safe_error_details: Mapping[str, JsonValue]
     stop_reason: StopReason
-    output_schema_id: "str | None"
-    output_schema_revision: "int | None"
-    output_schema_fingerprint: "str | None"
-    output: "StoredPayload | None"
-    object_source_domain: "RuntimeDomain | None"
+    output_schema_id: str | None
+    output_schema_revision: int | None
+    output_schema_fingerprint: str | None
+    output: StoredPayload | None
+    object_source_domain: RuntimeDomain | None
     usage: UsageMetrics
     terminal_event_type: ExecutionEventType
     terminal_event_payload: Mapping[str, JsonValue]
@@ -886,7 +888,7 @@ class RecoveryTerminalOutcome:
         if self.terminal_status is ExecutionStatus.SUCCEEDED and not has_output:
             raise ValueError("successful recovery outcome requires output")
         if self.terminal_status is not ExecutionStatus.SUCCEEDED and partial_output:
-            raise ValueError("failed recovery outcome cannot contain output")
+            raise ValueError("failed terminal result cannot contain output")
         if self.output is None and self.object_source_domain is not None:
             raise ValueError("recovery object source requires output")
         if self.output is not None and self.output.kind == "inline" and self.object_source_domain is not None:
@@ -909,7 +911,7 @@ class RecoveryConversationIntent:
 @dataclass(frozen=True, slots=True)
 class RecoveryTerminalHandoff:
     outcome: RecoveryTerminalOutcome
-    source_step_run_id: "str | None"
+    source_step_run_id: str | None
     conversation: RecoveryConversationIntent | None
 
     def __post_init__(self) -> None:
@@ -923,7 +925,7 @@ class RuntimeRepository(Protocol):
     async def initialize(self) -> None: ...
     async def close(self) -> None: ...
     @property
-    def state_store(self) -> "StateStore": ...
+    def state_store(self) -> StateStore: ...
 
 
 class SessionRepository(RuntimeRepository, Protocol):
@@ -933,7 +935,7 @@ class SessionRepository(RuntimeRepository, Protocol):
         record: SessionRecord,
         *,
         operation: OperationLedgerInput,
-    ) -> "tuple[SessionRecord, bool]": ...
+    ) -> tuple[SessionRecord, bool]: ...
     async def create_fork_with_operation(
         self,
         source_session_id: str,
@@ -941,17 +943,17 @@ class SessionRepository(RuntimeRepository, Protocol):
         *,
         expected_source_revision: int,
         operation: OperationLedgerInput,
-    ) -> "tuple[SessionRecord, bool]": ...
+    ) -> tuple[SessionRecord, bool]: ...
     async def list(self, *, tenant_id: str, owner_principal_id: str | None = None) -> tuple[SessionRecord, ...]: ...
     async def list_page(
         self,
         *,
         tenant_id: str,
         owner_principal_id: str | None,
-        cursor: "str | None",
+        cursor: str | None,
         limit: int,
         snapshot: int | None = None,
-    ) -> "tuple[int, Page[SessionRecord]]": ...
+    ) -> tuple[int, Page[SessionRecord]]: ...
     async def get_header(self, session_id: str, *, tenant_id: str) -> ResourceRef | None: ...
     async def get(self, session_id: str, *, tenant_id: str) -> SessionRecord | None: ...
     async def compare_and_swap(
@@ -965,18 +967,18 @@ class SessionRepository(RuntimeRepository, Protocol):
         expected_revision: int,
         next_record: SessionRecord,
         operation: OperationLedgerInput,
-    ) -> "tuple[SessionRecord, bool]": ...
+    ) -> tuple[SessionRecord, bool]: ...
     async def admit_execution(
         self,
         session_id: str,
         *,
         tenant_id: str,
         execution_id: str,
-        expected: "ConversationCursor | None",
+        expected: ConversationCursor | None,
     ) -> SessionRecord: ...
     async def get_in_transaction(
         self,
-        transaction: "StateTransaction",
+        transaction: StateTransaction,
         session_id: str,
         *,
         tenant_id: str,
@@ -995,7 +997,7 @@ class SessionRepository(RuntimeRepository, Protocol):
         tenant_id: str,
         expected: frozenset[SessionStatus],
         next_status: SessionStatus,
-        closed_at: "datetime | None" = None,
+        closed_at: datetime | None = None,
         require_no_active: bool = False,
     ) -> SessionRecord: ...
     async def advance_continuation(
@@ -1004,9 +1006,9 @@ class SessionRepository(RuntimeRepository, Protocol):
         *,
         tenant_id: str,
         execution_id: str,
-        expected: "ConversationCursor | None",
+        expected: ConversationCursor | None,
         next_cursor: ConversationCursor,
-        history_quality: "str | None" = None,
+        history_quality: str | None = None,
     ) -> SessionRecord: ...
 
 
@@ -1014,7 +1016,7 @@ class ConversationHistoryRepository(RuntimeRepository, Protocol):
     async def create(self, record: ConversationHistoryRecord) -> ConversationHistoryRecord: ...
     async def create_in_transaction(
         self,
-        transaction: "StateTransaction",
+        transaction: StateTransaction,
         record: ConversationHistoryRecord,
     ) -> ConversationHistoryRecord: ...
     async def get(
@@ -1022,17 +1024,17 @@ class ConversationHistoryRepository(RuntimeRepository, Protocol):
         history_id: str,
         *,
         tenant_id: str,
-    ) -> "ConversationHistoryRecord | None": ...
+    ) -> ConversationHistoryRecord | None: ...
     async def get_in_transaction(
         self,
-        transaction: "StateTransaction",
+        transaction: StateTransaction,
         history_id: str,
         *,
         tenant_id: str,
-    ) -> "ConversationHistoryRecord | None": ...
+    ) -> ConversationHistoryRecord | None: ...
     async def compare_and_swap_in_transaction(
         self,
-        transaction: "StateTransaction",
+        transaction: StateTransaction,
         history_id: str,
         *,
         tenant_id: str,
@@ -1062,12 +1064,12 @@ class ConversationHistoryRepository(RuntimeRepository, Protocol):
     ) -> tuple[ConversationHistoryIndexNodeRecord, ...]: ...
     async def get_index_node_in_transaction(
         self,
-        transaction: "StateTransaction",
+        transaction: StateTransaction,
         node_id: str,
     ) -> ConversationHistoryIndexNodeRecord: ...
     async def get_forest_roots_in_transaction(
         self,
-        transaction: "StateTransaction",
+        transaction: StateTransaction,
         head_id: str | None,
         *,
         max_roots: int,
@@ -1079,19 +1081,19 @@ class ExecutionRepository(RuntimeRepository, Protocol):
     async def create_with_history_head(self, record: ExecutionRecord) -> ExecutionRecord: ...
     async def create_with_history_head_in_transaction(
         self,
-        transaction: "StateTransaction",
+        transaction: StateTransaction,
         record: ExecutionRecord,
     ) -> ExecutionRecord: ...
     async def get_header(self, execution_id: str, *, tenant_id: str) -> ResourceRef | None: ...
     async def get(self, execution_id: str, *, tenant_id: str) -> ExecutionRecord | None: ...
     async def get_in_transaction(
         self,
-        transaction: "StateTransaction",
+        transaction: StateTransaction,
         execution_id: str,
         *,
         tenant_id: str,
     ) -> ExecutionRecord | None: ...
-    async def get_start_idempotency(self, claim: ExecutionStartClaim) -> "IdempotencyRecord | None": ...
+    async def get_start_idempotency(self, claim: ExecutionStartClaim) -> IdempotencyRecord | None: ...
     async def compare_and_swap(
         self, execution_id: str, *, tenant_id: str, expected_revision: int, next_record: ExecutionRecord
     ) -> ExecutionRecord: ...
@@ -1106,7 +1108,7 @@ class ExecutionRepository(RuntimeRepository, Protocol):
     ) -> ExecutionRecord: ...
     async def claim_next_agent_run_in_transaction(
         self,
-        transaction: "StateTransaction",
+        transaction: StateTransaction,
         execution_id: str,
         *,
         tenant_id: str,
@@ -1122,7 +1124,7 @@ class ExecutionRepository(RuntimeRepository, Protocol):
         self,
         commit: ExecutionTerminalCommit,
         *,
-        pending_events: Sequence["ExecutionEventAppend"] = (),
+        pending_events: Sequence[ExecutionEventAppend] = (),
     ) -> ExecutionTerminalCommitResult: ...
     async def get_result(self, execution_id: str, *, tenant_id: str) -> ResultRecord | None: ...
     async def get_history_seal(
@@ -1139,25 +1141,25 @@ class ExecutionRepository(RuntimeRepository, Protocol):
     ) -> ExecutionHistoryHeadRecord | None: ...
     async def require_open_history_head_in_transaction(
         self,
-        transaction: "StateTransaction",
+        transaction: StateTransaction,
         execution_id: str,
         *,
-        expected_revision: "int | None" = None,
-    ) -> "tuple[ExecutionHistoryHeadRecord, StoredRecord]": ...
+        expected_revision: int | None = None,
+    ) -> tuple[ExecutionHistoryHeadRecord, StoredRecord]: ...
     async def replace_history_head_in_transaction(
         self,
-        transaction: "StateTransaction",
-        current_record: "StoredRecord",
+        transaction: StateTransaction,
+        current_record: StoredRecord,
         next_head: ExecutionHistoryHeadRecord,
     ) -> ExecutionHistoryHeadRecord: ...
     async def insert_history_head_in_transaction(
         self,
-        transaction: "StateTransaction",
+        transaction: StateTransaction,
         head: ExecutionHistoryHeadRecord,
     ) -> ExecutionHistoryHeadRecord: ...
     async def put_history_seal_in_transaction(
         self,
-        transaction: "StateTransaction",
+        transaction: StateTransaction,
         seal: ExecutionHistorySealRecord,
     ) -> ExecutionHistorySealRecord: ...
 
@@ -1185,9 +1187,9 @@ class EventRepository(RuntimeRepository, Protocol):
         execution_id: str,
         *,
         tenant_id: str,
-        events: Sequence["ExecutionEventAppend"],
+        events: Sequence[ExecutionEventAppend],
         expected_sequence: int | None = None,
-    ) -> tuple["ExecutionEventRecord", ...]: ...
+    ) -> tuple[ExecutionEventRecord, ...]: ...
 
     async def append_next(
         self,
@@ -1196,7 +1198,7 @@ class EventRepository(RuntimeRepository, Protocol):
         tenant_id: str,
         event_type: ExecutionEventType,
         payload: JsonValue,
-    ) -> "ExecutionEventRecord": ...
+    ) -> ExecutionEventRecord: ...
 
     async def append_expected(
         self,
@@ -1206,7 +1208,7 @@ class EventRepository(RuntimeRepository, Protocol):
         expected_sequence: int,
         event_type: ExecutionEventType,
         payload: JsonValue,
-    ) -> "ExecutionEventRecord": ...
+    ) -> ExecutionEventRecord: ...
 
     async def append(
         self,
@@ -1216,10 +1218,10 @@ class EventRepository(RuntimeRepository, Protocol):
         expected_sequence: int,
         event_type: ExecutionEventType,
         payload: JsonValue,
-    ) -> "ExecutionEventRecord": ...
+    ) -> ExecutionEventRecord: ...
     async def list(
         self, execution_id: str, *, tenant_id: str, after_sequence: int, limit: int
-    ) -> Page["ExecutionEventRecord"]: ...
+    ) -> Page[ExecutionEventRecord]: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -1233,7 +1235,7 @@ class ToolOperationAdmission:
     tenant_id: str
     tool_operation_id: str
     step_run_id: str
-    recovery_step_run_id: "str | None"
+    recovery_step_run_id: str | None
     tool_call_id: str
     idempotency_key_digest: str
     tool_name: str
@@ -1295,19 +1297,19 @@ class RecoveryCheckpointRepository(RuntimeRepository, Protocol):
     async def get(self, execution_id: str, *, tenant_id: str) -> RecoveryCheckpoint | None: ...
     async def get_in_transaction(
         self,
-        transaction: "StateTransaction",
+        transaction: StateTransaction,
         execution_id: str,
         *,
         tenant_id: str,
-    ) -> "RecoveryCheckpoint | None": ...
+    ) -> RecoveryCheckpoint | None: ...
     async def list(self, *, tenant_id: str) -> tuple[RecoveryCheckpoint, ...]: ...
     async def list_recoverable_page(
         self,
         *,
         tenant_id: str,
-        cursor: "str | None",
+        cursor: str | None,
         limit: int,
-    ) -> "Page[RecoveryCheckpoint]": ...
+    ) -> Page[RecoveryCheckpoint]: ...
     async def validate_recovery_active_index(
         self,
         *,
@@ -1318,7 +1320,7 @@ class RecoveryCheckpointRepository(RuntimeRepository, Protocol):
     ) -> RecoveryCheckpoint: ...
     async def compare_and_swap_in_transaction(
         self,
-        transaction: "StateTransaction",
+        transaction: StateTransaction,
         execution_id: str,
         *,
         tenant_id: str,
@@ -1343,20 +1345,20 @@ class OperationLedgerRepository(RuntimeRepository, Protocol):
 
 class TaskRepository(RuntimeRepository, Protocol):
     async def get_header(self, graph_id: str, *, tenant_id: str) -> ResourceRef | None: ...
-    async def create_graph(self, graph: TaskGraph, *, tenant_id: str) -> "TaskGraphView": ...
-    async def get_graph(self, graph_id: str, *, tenant_id: str) -> "TaskGraphView | None": ...
+    async def create_graph(self, graph: TaskGraph, *, tenant_id: str) -> TaskGraphView: ...
+    async def get_graph(self, graph_id: str, *, tenant_id: str) -> TaskGraphView | None: ...
     async def reconcile_graph(self, graph_id: str, *, tenant_id: str) -> TaskGraphView: ...
-    async def cancel_graph(self, graph_id: str, *, tenant_id: str) -> "TaskGraphView": ...
+    async def cancel_graph(self, graph_id: str, *, tenant_id: str) -> TaskGraphView: ...
     async def claim(
         self, graph_id: str, node_id: str, *, tenant_id: str, owner: str, lease_seconds: int
     ) -> TaskLease: ...
     async def renew(self, lease: TaskLease, *, tenant_id: str, lease_seconds: int) -> TaskLease: ...
     async def complete(
-        self, lease: TaskLease, *, tenant_id: str, execution_id: "str | None", result_digest: str
-    ) -> "TaskTerminalRecord": ...
+        self, lease: TaskLease, *, tenant_id: str, execution_id: str | None, result_digest: str
+    ) -> TaskTerminalRecord: ...
     async def fail(
         self, lease: TaskLease, *, tenant_id: str, error_code: str, error_digest: str
-    ) -> "TaskTerminalRecord": ...
+    ) -> TaskTerminalRecord: ...
     async def list_nodes(self, graph_id: str, *, tenant_id: str) -> tuple[TaskNodeView, ...]: ...
 
 
@@ -1375,20 +1377,20 @@ class MemoryRepository(RuntimeRepository, Protocol):
     async def put(self, record: MemoryRecord, *, expected_revision: int | None) -> MemoryRecord: ...
     async def put_with_operation(
         self, record: MemoryRecord, *, expected_revision: int | None, operation: OperationLedgerInput | None
-    ) -> "tuple[MemoryRecord | None, bool]": ...
+    ) -> tuple[MemoryRecord | None, bool]: ...
     async def get(self, memory_id: str, *, tenant_id: str) -> MemoryRecord | None: ...
     async def list(
         self,
         *,
         tenant_id: str,
         memory_scope_digest: str,
-        cursor: "str | None",
+        cursor: str | None,
         limit: int,
-    ) -> "Page[MemoryRecord]": ...
+    ) -> Page[MemoryRecord]: ...
     async def delete(self, memory_id: str, *, tenant_id: str, expected_revision: int) -> None: ...
     async def delete_with_operation(
         self, memory_id: str, *, tenant_id: str, expected_revision: int | None, operation: OperationLedgerInput | None
-    ) -> "tuple[bool, bool]": ...
+    ) -> tuple[bool, bool]: ...
 
 
 class ArtifactRepository(RuntimeRepository, Protocol):
@@ -1402,51 +1404,51 @@ class ArtifactRepository(RuntimeRepository, Protocol):
 
 @dataclass(frozen=True, slots=True)
 class ConversationState:
-    sessions: "SessionRepository"
-    histories: "ConversationHistoryRepository"
-    operations: "OperationLedgerRepository"
+    sessions: SessionRepository
+    histories: ConversationHistoryRepository
+    operations: OperationLedgerRepository
 
 
 @dataclass(frozen=True, slots=True)
 class ExecutionState:
-    executions: "ExecutionRepository"
-    events: "EventRepository"
-    idempotency: "IdempotencyRepository"
-    operations: "OperationLedgerRepository"
+    executions: ExecutionRepository
+    events: EventRepository
+    idempotency: IdempotencyRepository
+    operations: OperationLedgerRepository
 
 
 @dataclass(frozen=True, slots=True)
 class MemoryState:
-    records: "MemoryRepository"
-    operations: "OperationLedgerRepository"
+    records: MemoryRepository
+    operations: OperationLedgerRepository
 
 
 @dataclass(frozen=True, slots=True)
 class ArtifactState:
-    records: "ArtifactRepository"
-    operations: "OperationLedgerRepository"
+    records: ArtifactRepository
+    operations: OperationLedgerRepository
 
 
 @dataclass(frozen=True, slots=True)
 class TaskState:
-    tasks: "TaskRepository"
-    operations: "OperationLedgerRepository"
+    tasks: TaskRepository
+    operations: OperationLedgerRepository
 
 
 @dataclass(frozen=True, slots=True)
 class EvaluationState:
-    records: "EvaluationRepository"
-    idempotency: "IdempotencyRepository"
-    operations: "OperationLedgerRepository"
+    records: EvaluationRepository
+    idempotency: IdempotencyRepository
+    operations: OperationLedgerRepository
 
 
 @dataclass(frozen=True, slots=True)
 class RecoveryState:
-    approvals: "ApprovalRepository"
-    external_calls: "ExternalCallRepository"
-    checkpoints: "RecoveryCheckpointRepository"
-    operations: "OperationLedgerRepository"
-    tools: "ToolStateRepository"
+    approvals: ApprovalRepository
+    external_calls: ExternalCallRepository
+    checkpoints: RecoveryCheckpointRepository
+    operations: OperationLedgerRepository
+    tools: ToolStateRepository
 
 
 __all__ = [
