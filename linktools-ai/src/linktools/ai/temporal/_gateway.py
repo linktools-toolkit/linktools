@@ -19,8 +19,8 @@ from ..runtime import (
 )
 from ..storage import ObjectStore
 from ..task import TaskGraphHandle, TaskGraphRequest, TaskGraphView
-from ._request import put_task_request
-from .workflow import TaskWorkflowInput
+from ._request import put_execution_request, put_task_request
+from .workflow import ExecutionWorkflowInput, TaskWorkflowInput
 
 _logger = environ.get_logger("ai.temporal.gateway")
 QUERY_NAMES = frozenset({"inspect", "pending_approvals", "pending_external_calls"})
@@ -31,7 +31,7 @@ class TemporalClient(Protocol):
     async def start_workflow(
         self,
         workflow: str,
-        request: ExecutionRequest,
+        request: ExecutionWorkflowInput,
         *,
         workflow_id: str,
     ) -> ExecutionHandle: ...
@@ -88,15 +88,39 @@ class WorkflowGateway:
         self._request_keys = RuntimeObjectKeyFactory(namespace)
 
     async def start_execution(
-        self, workflow_id: str, request: ExecutionRequest
+        self,
+        workflow_id: str,
+        request: ExecutionRequest,
+        *,
+        binding_digest: str,
+        binding: Mapping[str, JsonValue],
     ) -> ExecutionHandle:
         if not workflow_id.strip():
             raise ValueError("workflow id is required")
+        request_ref = await put_execution_request(
+            self._request_store,
+            self._request_keys,
+            request,
+            binding_digest=binding_digest,
+            binding=binding,
+        )
+        workflow_request = ExecutionWorkflowInput(
+            execution_id=workflow_id,
+            tenant_id=request.principal.tenant_id,
+            binding_digest=binding_digest,
+            bundle_digest=binding_digest,
+            request_ref=request_ref,
+            worker_build=self._worker_build,
+        )
         _logger.debug(
-            "starting durable execution workflow: workflow_id=%s", workflow_id
+            "starting durable execution workflow: workflow_id=%s binding=%s",
+            workflow_id,
+            binding_digest,
         )
         return await self._client.start_workflow(
-            "execution", request, workflow_id=workflow_id
+            "execution",
+            workflow_request,
+            workflow_id=workflow_id,
         )
 
     async def update_execution(
