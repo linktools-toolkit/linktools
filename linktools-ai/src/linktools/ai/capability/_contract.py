@@ -11,7 +11,6 @@ from pydantic_ai.capabilities import AgentCapability as PydanticAgentCapability
 from ..asset import AssetRef, AssetRepository
 from ..core import Principal, ResourceRef, canonical_sha256, canonical_string_tuple
 from ..errors import AIError, ErrorCode
-from ..spec import CapabilityRef
 
 
 @dataclass(frozen=True, slots=True)
@@ -61,7 +60,7 @@ class CapabilityBinding(Protocol):
 
 
 class CapabilityProvider(Protocol):
-    """Bind and select Assets belonging to one logical capability family."""
+    """Bind one Asset value type into one frozen Runtime capability."""
 
     @property
     def provider(self) -> str: ...
@@ -74,12 +73,6 @@ class CapabilityProvider(Protocol):
         refs: "tuple[AssetRef, ...]",
         *,
         assets: AssetRepository,
-    ) -> CapabilityBinding: ...
-
-    def select(
-        self,
-        binding: CapabilityBinding,
-        refs: "tuple[AssetRef, ...]",
     ) -> CapabilityBinding: ...
 
 
@@ -148,7 +141,6 @@ __all__ = [
     "CapabilityBinding",
     "CapabilityMaterializationContext",
     "CapabilityProvider",
-    "CapabilityRef",
     "CapabilityRefResolution",
     "RuntimeCapability",
     "validate_fingerprint",
