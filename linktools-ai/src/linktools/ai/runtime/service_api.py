@@ -103,9 +103,9 @@ class ExecutionResult:
     execution_id: str
     status: ExecutionStatus
     output: JsonValue | None
-    output_schema_id: str
-    output_schema_revision: int
-    output_schema_fingerprint: str
+    output_schema_id: str | None
+    output_schema_revision: int | None
+    output_schema_fingerprint: str | None
     usage: UsageMetrics
 
 
