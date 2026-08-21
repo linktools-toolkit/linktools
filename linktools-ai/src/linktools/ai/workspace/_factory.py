@@ -188,7 +188,14 @@ async def _discover_agent_specs(
     return specs
 
 
-def _provider_registry_fingerprint(providers: Sequence[CapabilityProvider]) -> str:
+def _active_provider_fingerprint(
+    providers: Sequence[CapabilityProvider],
+    bindings: Sequence[CapabilityBinding],
+) -> str:
+    active = {binding.provider for binding in bindings}
+    selected = tuple(provider for provider in providers if provider.provider in active)
+    if active != {provider.provider for provider in selected}:
+        raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
     return canonical_sha256(
         {
             "version": 1,
@@ -198,7 +205,7 @@ def _provider_registry_fingerprint(providers: Sequence[CapabilityProvider]) -> s
                     "value_type": f"{provider.value_type.__module__}.{provider.value_type.__qualname__}",
                     "revision": provider.revision,
                 }
-                for provider in providers
+                for provider in selected
             ],
         }
     )
@@ -243,38 +250,35 @@ def _agent_spec_payload(spec: AgentSpec) -> "dict[str, object]":
     }
 
 
+def _platform_policy_fingerprint() -> str:
+    return canonical_sha256(
+        {
+            "version": 1,
+            "control_tool_contract": 1,
+            "filesystem": 1,
+            "shell": 1,
+            "memory_platform_contract": 1,
+            "skill_control_tools": 1,
+            "subagent_nesting_policy": {"version": 2, "nested": False},
+            "planning_policy": {"version": 2, "hard_gate": True},
+            "thinking": 1,
+            "tool_operation_admission_contract": 1,
+        }
+    )
+
+
 def _runtime_fingerprint(
-    workspace: Workspace,
     *,
-    providers: Sequence[CapabilityProvider],
+    active_provider_fingerprint: str,
     agent_catalog_source_fingerprint: str,
-    capabilities: Sequence[CapabilityBinding],
+    platform_policy_fingerprint: str,
 ) -> str:
     return canonical_sha256(
         {
-            "version": 8,
-            "workspace_id": workspace.workspace_id,
-            "provider_registry_fingerprint": _provider_registry_fingerprint(providers),
+            "version": 1,
+            "active_provider_fingerprint": active_provider_fingerprint,
             "agent_catalog_source_fingerprint": agent_catalog_source_fingerprint,
-            "platform_policy": {
-                "version": 2,
-                "filesystem": 1,
-                "shell": 1,
-                "memory": 1,
-                "skill_control_tools": 1,
-                "subagent": {"version": 2, "nested": False},
-                "planning": {"version": 2, "hard_gate": True},
-                "thinking": 1,
-                "tool_operation_admission": 1,
-            },
-            "global_capabilities": [
-                {
-                    "provider": capability.provider,
-                    "id": capability.id,
-                    "fingerprint": capability.fingerprint,
-                }
-                for capability in capabilities
-            ],
+            "platform_policy_fingerprint": platform_policy_fingerprint,
         }
     )
 
@@ -305,12 +309,12 @@ async def open_workspace_runtime(
     *,
     tenant_id: str | None = None,
     asset: "AssetStore | None" = None,
-    asset_bindings: "Sequence[AssetTypeBinding[object]]" = (),
-    asset_path_adapter: "AssetPathAdapter | None" = None,
     state: "RuntimeState | None" = None,
     models: "ModelRegistry | None" = None,
+    asset_bindings: "Sequence[AssetTypeBinding[object]]" = (),
     capability_providers: "Sequence[CapabilityProvider]" = (),
     capabilities: "Sequence[RuntimeCapability]" = (),
+    asset_path_adapter: "AssetPathAdapter | None" = None,
 ) -> AsyncIterator[Runtime]:
     if not isinstance(workspace, Workspace):
         raise TypeError("workspace is required")
@@ -329,25 +333,25 @@ async def open_workspace_runtime(
     providers = _build_providers(capability_providers)
     initial_revision = await selected_assets.current_revision()
     asset_capabilities = await _bind_asset_capabilities(selected_assets, snapshot, providers)
-    runtime_capabilities: tuple[RuntimeCapability, ...] = (
-        *build_workspace_capabilities(workspace.root),
-        *tuple(capabilities),
-    )
+    runtime_capabilities = tuple(capabilities)
+    platform_capabilities = build_workspace_capabilities(workspace.root)
     global_capabilities: tuple[CapabilityBinding, ...] = (
         *asset_capabilities,
         *runtime_capabilities,
     )
     specs = await _discover_agent_specs(selected_assets, snapshot)
     catalog_fingerprint = _agent_catalog_source_fingerprint(specs, model_resolver)
+    active_provider_fingerprint = _active_provider_fingerprint(providers, asset_capabilities)
+    platform_policy_fingerprint = _platform_policy_fingerprint()
     runtime_fingerprint = _runtime_fingerprint(
-        workspace,
-        providers=providers,
+        active_provider_fingerprint=active_provider_fingerprint,
         agent_catalog_source_fingerprint=catalog_fingerprint,
-        capabilities=global_capabilities,
+        platform_policy_fingerprint=platform_policy_fingerprint,
     )
     compiler = AgentCompiler(
         model_resolver=model_resolver,
         capabilities=global_capabilities,
+        platform_capabilities=platform_capabilities,
         runtime_fingerprint=runtime_fingerprint,
     )
     catalog = _build_catalog(specs, compiler)
@@ -368,11 +372,14 @@ async def open_workspace_runtime(
         await selected_runtime.close()
         raise
     _logger.info(
-        "workspace Runtime opened: workspace=%s tenant=%s providers=%s capabilities=%s agents=%s",
+        "workspace Runtime opened: workspace=%s tenant=%s active_providers=%s capabilities=%s agents=%s",
         workspace.workspace_id,
         effective_tenant_id,
-        tuple(provider.provider for provider in providers),
-        tuple((capability.provider, capability.id) for capability in global_capabilities),
+        tuple(binding.provider for binding in asset_capabilities),
+        tuple(
+            (capability.provider, capability.id)
+            for capability in (*global_capabilities, *platform_capabilities)
+        ),
         catalog.root_ids,
     )
     try:
