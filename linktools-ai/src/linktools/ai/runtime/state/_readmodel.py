@@ -31,7 +31,7 @@ from ._store import (
 _logger = environ.get_logger("ai.runtime.state.readmodel")
 _CHUNK_SIZE = 128
 _LEASE_SECONDS = 30
-_MODEL_VERSION = 2
+_MODEL_VERSION = 1
 
 
 class ExecutionReadModelStatus(StrEnum):
@@ -52,6 +52,15 @@ class ExecutionReadModelRecord:
     revision: int
 
     def __post_init__(self) -> None:
+        values = (
+            self.model_version,
+            self.trace_count,
+            self.history_count,
+            self.transcript_count,
+            self.revision,
+        )
+        if any(isinstance(value, bool) or not isinstance(value, int) for value in values):
+            raise TypeError("execution read model counters must be integers")
         if self.model_version != _MODEL_VERSION:
             raise ValueError("unsupported execution read model version")
         if self.revision < 0 or any(
@@ -217,7 +226,14 @@ class ExecutionReadModelRepository:
     ) -> tuple[ExecutionReadModelRecord, tuple[Mapping[str, JsonValue], ...]]:
         if tenant_id != self._tenant_id:
             raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
-        if offset < 0 or limit < 1:
+        if (
+            isinstance(offset, bool)
+            or not isinstance(offset, int)
+            or isinstance(limit, bool)
+            or not isinstance(limit, int)
+            or offset < 0
+            or limit < 1
+        ):
             raise AIError(ErrorCode.PAGE_LIMIT_INVALID)
         if await self._load_history_seal(execution_id) is None:
             raise AIError(ErrorCode.EXECUTION_HISTORY_UNAVAILABLE)
@@ -595,18 +611,52 @@ class ExecutionReadModelRepository:
         )
 
     def _decode_record(self, record: StoredRecord) -> ExecutionReadModelRecord:
+        data = record.data
+        expected = {
+            "execution_id",
+            "tenant_id",
+            "source_digest",
+            "model_version",
+            "status",
+            "trace_count",
+            "history_count",
+            "transcript_count",
+            "revision",
+        }
+        if set(data) != expected:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         try:
-            data = record.data
+            execution_id = data["execution_id"]
+            tenant_id = data["tenant_id"]
+            source_digest = data["source_digest"]
+            status = data["status"]
+            if not all(
+                isinstance(value, str)
+                for value in (execution_id, tenant_id, source_digest, status)
+            ):
+                raise TypeError("read model string field has the wrong type")
+            counters = (
+                data["model_version"],
+                data["trace_count"],
+                data["history_count"],
+                data["transcript_count"],
+                data["revision"],
+            )
+            if any(
+                isinstance(value, bool) or not isinstance(value, int)
+                for value in counters
+            ):
+                raise TypeError("read model counter has the wrong type")
             return ExecutionReadModelRecord(
-                str(data["execution_id"]),
-                str(data["tenant_id"]),
-                str(data["source_digest"]),
-                int(data["model_version"]),
-                ExecutionReadModelStatus(str(data["status"])),
-                int(data["trace_count"]),
-                int(data["history_count"]),
-                int(data["transcript_count"]),
-                int(data["revision"]),
+                execution_id,
+                tenant_id,
+                source_digest,
+                counters[0],
+                ExecutionReadModelStatus(status),
+                counters[1],
+                counters[2],
+                counters[3],
+                counters[4],
             )
         except (KeyError, TypeError, ValueError) as error:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error

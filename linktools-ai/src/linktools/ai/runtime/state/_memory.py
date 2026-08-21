@@ -316,6 +316,12 @@ class _MemoryTransaction:
         *,
         expected_storage_version: int,
     ) -> StoredRecord | None:
+        if (
+            isinstance(expected_storage_version, bool)
+            or not isinstance(expected_storage_version, int)
+            or expected_storage_version < 0
+        ):
+            raise ValueError("expected_storage_version must be a non-negative integer")
         current = self.records.get(key)
         if current is None or current.storage_version != expected_storage_version:
             if key in self.guarded_record_keys and current is not None:
@@ -363,10 +369,19 @@ class _MemoryTransaction:
         lease_fence: int,
         lease_expires_at: datetime | None,
     ) -> bool:
+        if (
+            isinstance(expected_storage_version, bool)
+            or not isinstance(expected_storage_version, int)
+            or expected_storage_version < 0
+            or isinstance(lease_fence, bool)
+            or not isinstance(lease_fence, int)
+            or lease_fence < 0
+        ):
+            raise ValueError("record lease integer fields are invalid")
         current = self.records.get(key)
         if current is None or current.storage_version != expected_storage_version:
             return False
-        if lease_fence < 0 or lease_expires_at is not None and lease_expires_at.tzinfo is None:
+        if lease_expires_at is not None and lease_expires_at.tzinfo is None:
             raise ValueError("record lease is invalid")
         self.records[key] = replace(
             current,
@@ -379,6 +394,12 @@ class _MemoryTransaction:
         return True
 
     async def delete_record(self, key: bytes, *, expected_storage_version: int | None = None) -> bool:
+        if expected_storage_version is not None and (
+            isinstance(expected_storage_version, bool)
+            or not isinstance(expected_storage_version, int)
+            or expected_storage_version < 0
+        ):
+            raise ValueError("expected_storage_version must be a non-negative integer or None")
         current = self.records.get(key)
         if current is None:
             return False
@@ -469,8 +490,11 @@ class _MemoryTransaction:
         return (await self.reserve_sequences({key: count}))[key]
 
     async def reserve_sequences(self, requests: Mapping[bytes, int]) -> Mapping[bytes, int]:
-        if any(count < 1 for count in requests.values()):
-            raise ValueError("sequence reservation count must be positive")
+        if any(
+            isinstance(count, bool) or not isinstance(count, int) or count < 1
+            for count in requests.values()
+        ):
+            raise ValueError("sequence reservation count must be a positive integer")
         values = {
             key: self.sequences.get(key, 0) + requests[key]
             for key in sorted(requests)
@@ -479,6 +503,8 @@ class _MemoryTransaction:
         return values
 
     async def advance_sequence(self, key: bytes, expected: int) -> int:
+        if isinstance(expected, bool) or not isinstance(expected, int) or expected < 0:
+            raise ValueError("expected sequence must be a non-negative integer")
         current = self.sequences.get(key, 0)
         if current != expected:
             raise AIError(ErrorCode.STORAGE_CONFLICT)
