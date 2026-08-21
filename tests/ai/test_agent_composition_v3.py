@@ -7,6 +7,7 @@ from types import SimpleNamespace
 import pytest
 from pydantic_ai.capabilities import AbstractCapability
 
+import linktools.ai as ai
 from linktools.ai.agent import AgentBindingSnapshot
 from linktools.ai.capability import RuntimeCapability
 from linktools.ai.core import SessionStatus
@@ -25,6 +26,16 @@ class _DurableCapability(AbstractCapability[None]):
     def from_spec(cls, **kwargs: object) -> "_DurableCapability":
         del kwargs
         return cls()
+
+
+def test_top_level_public_surface_is_exact() -> None:
+    assert ai.__all__ == [
+        "AgentHandle",
+        "AgentSpec",
+        "AssetRef",
+        "Runtime",
+        "RuntimeCapability",
+    ]
 
 
 def test_runtime_capability_from_spec_requires_exact_importable_type() -> None:
@@ -87,7 +98,7 @@ class _SessionService:
 
 
 @pytest.mark.asyncio
-async def test_runtime_session_definition_reports_definition_conflict() -> None:
+async def test_runtime_session_definition_reports_binding_mismatch() -> None:
     runtime = object.__new__(Runtime)
     runtime.session = _SessionService("b" * 64)
     runtime._catalog = SimpleNamespace(definition=lambda digest: digest)
@@ -100,11 +111,11 @@ async def test_runtime_session_definition_reports_definition_conflict() -> None:
             preferred=preferred,
         )
 
-    assert error.value.code is ErrorCode.SESSION_CONFLICT
+    assert error.value.code is ErrorCode.SESSION_BINDING_MISMATCH
 
 
 @pytest.mark.asyncio
-async def test_runtime_existing_session_reports_definition_conflict() -> None:
+async def test_runtime_existing_session_reports_binding_mismatch() -> None:
     runtime = object.__new__(Runtime)
     runtime.session = _SessionService("b" * 64)
     definition = SimpleNamespace(
@@ -119,4 +130,4 @@ async def test_runtime_existing_session_reports_definition_conflict() -> None:
             trusted_workspace_principal("tenant"),
         )
 
-    assert error.value.code is ErrorCode.SESSION_CONFLICT
+    assert error.value.code is ErrorCode.SESSION_BINDING_MISMATCH
