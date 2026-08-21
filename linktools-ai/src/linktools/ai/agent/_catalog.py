@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Immutable Agent definition lookup for Runtime services."""
+"""Agent definition lookup for Runtime services."""
 
 from collections.abc import Mapping
 from types import MappingProxyType
@@ -11,7 +11,7 @@ from ._definition import AgentDefinition
 
 
 class AgentDefinitionCatalog:
-    """Expose only frozen root, subagent, and digest lookups after composition."""
+    """Keep immutable named roots plus Runtime-local effective definitions by digest."""
 
     def __init__(
         self,
@@ -27,7 +27,7 @@ class AgentDefinitionCatalog:
             by_digest[definition.digest] = definition
         self._roots = MappingProxyType(dict(roots))
         self._subagents = MappingProxyType(dict(subagents))
-        self._definitions = MappingProxyType(by_digest)
+        self._definitions = by_digest
 
     def root_definition(self, agent_id: str) -> AgentDefinition:
         validate_agent_id(agent_id)
@@ -48,6 +48,16 @@ class AgentDefinitionCatalog:
                 ErrorCode.AGENT_DEFINITION_UNAVAILABLE,
                 safe_details={"agent_id": agent_id},
             ) from error
+
+    def register(self, definition: AgentDefinition) -> AgentDefinition:
+        """Register one effective definition without changing named Agent lookup."""
+        existing = self._definitions.get(definition.digest)
+        if existing is not None:
+            if existing != definition:
+                raise AIError(ErrorCode.CAPABILITY_CONFLICT)
+            return existing
+        self._definitions[definition.digest] = definition
+        return definition
 
     def definition(self, digest: str) -> AgentDefinition:
         try:
