@@ -8,6 +8,8 @@ from dataclasses import fields
 from datetime import datetime, timezone
 
 import pytest
+
+from linktools.ai.agent import AgentBindingSnapshot, bind_output
 from linktools.ai.asset import AssetRef
 from linktools.ai.core import (
     OperationLedgerRecord,
@@ -28,9 +30,7 @@ from linktools.ai.observe import (
 )
 from linktools.ai.runtime import ExecutionRequest
 from linktools.ai.runtime._tool import ToolOperationRecord
-from linktools.ai.runtime.state import (
-    RuntimeStatePlan,
-)
+from linktools.ai.runtime.state import RuntimeStatePlan
 from linktools.ai.runtime.state._contracts import (
     RecoveryCheckpoint,
     RecoveryCheckpointState,
@@ -39,7 +39,7 @@ from linktools.ai.runtime.state._contracts import (
     RecoveryIdempotencyInput,
 )
 from linktools.ai.runtime.state._codec import decode_domain, encode_domain
-from linktools.ai.spec import AgentCapabilityRef, AgentSpec
+from linktools.ai.spec import AgentSpec
 from linktools.ai.storage import InMemoryObjectStore, StoredPayload
 from linktools.ai.task import TaskGraph, TaskGraphLimits, TaskLease, TaskNode
 from linktools.ai.temporal import (
@@ -66,23 +66,47 @@ from linktools.ai.temporal.workflow import (
     TaskWorkflowInput,
 )
 from linktools.ai.workspace import trusted_workspace_principal
-from scripts.build.agent_bundle import build_bundle
 
 
-def test_task_graph_rejects_cycles_and_agent_bundle_is_deterministic() -> None:
+def _binding_snapshot(
+    *,
+    agent_id: str = "default",
+    digest: str = "a" * 64,
+) -> AgentBindingSnapshot:
+    spec = AgentSpec(agent_id, 1, "route")
+    output = bind_output()
+    return AgentBindingSnapshot(
+        version=1,
+        agent_spec=spec,
+        output_type_module=output.value_type.__module__,
+        output_type_qualname=output.value_type.__qualname__,
+        output_schema_id=output.schema_id,
+        output_schema_revision=output.schema_revision,
+        output_schema_fingerprint=output.schema_fingerprint,
+        local_runtime_capability_descriptors=(),
+        binding_digest=digest,
+    )
+
+
+def test_task_graph_rejects_cycles_and_agent_spec_is_stable() -> None:
     with pytest.raises(ValueError):
         TaskGraph("cycle", (TaskNode("a", ("b",)), TaskNode("b", ("a",))))
     spec = AgentSpec(
         "agent",
         1,
         "route",
-        (AgentCapabilityRef("tool", "bash"),),
-        "text",
-        1,
-        "system",
-        ("answer",),
+        system_prompt="system",
+        instructions=("answer",),
+        allow_tools=("bash",),
     )
-    assert build_bundle(spec, "capabilities").digest == build_bundle(spec, "capabilities").digest
+    assert spec == AgentSpec(
+        "agent",
+        1,
+        "route",
+        system_prompt="system",
+        instructions=("answer",),
+        allow_tools=("bash",),
+    )
 
 
 def test_model_registry_snapshot_is_instance_owned() -> None:
@@ -93,12 +117,15 @@ def test_model_registry_snapshot_is_instance_owned() -> None:
     assert snapshot.resolve("route").route_id == "route"
 
 
-@pytest.mark.parametrize("value", ["", " spaced", "spaced ", "line\nbreak", "control\u0085value", "界" * 129])
-def test_classification_fields_reject_noncanonical_values(value: str) -> None:
+@pytest.mark.parametrize(
+    "value",
+    ["", " spaced", "spaced ", "line\nbreak", "control\u0085value", "界" * 129],
+)
+def test_asset_classification_fields_reject_noncanonical_values(value: str) -> None:
     with pytest.raises(ValueError):
         AssetRef(value, "asset")
-    with pytest.raises(ValueError):
-        AgentCapabilityRef(value, "capability")
+
+
 def test_runtime_state_plan_rejects_an_invalid_domain() -> None:
     with pytest.raises(ValueError):
         RuntimeStatePlan(conversation="invalid")
@@ -156,7 +183,6 @@ def test_recovery_checkpoint_enforces_attempt_sequence_invariants() -> None:
 
 def test_domain_codec_preserves_mapping_payloads_in_nullable_json_values() -> None:
     payload = StoredPayload.inline_json({"text": "你好！"})
-
     assert decode_domain(encode_domain(payload), StoredPayload) == payload
 
 
@@ -169,19 +195,28 @@ def test_subagent_tool_schema_accepts_json_payload() -> None:
     from linktools.ai.agent._capabilities import _SubagentCapability
 
     async def delegate(**_kwargs: str) -> dict[str, object]:
-        return {"execution_id": "child", "status": "SUCCEEDED", "output": {"value": True}}
+        return {
+            "execution_id": "child",
+            "status": "SUCCEEDED",
+            "output": {"value": True},
+        }
 
     with warnings.catch_warnings(record=True) as captured:
         warnings.simplefilter("always")
         _SubagentCapability(delegate).get_toolset()
 
-    assert not any("Could not generate return schema" in str(item.message) for item in captured)
+    assert not any(
+        "Could not generate return schema" in str(item.message) for item in captured
+    )
 
 
 def test_authorization_kinds_are_canonical() -> None:
     assert Principal("principal", "tenant", "service").kind == PrincipalKind.SERVICE.value
     assert Principal("principal", "tenant", "custom").kind == "custom"
-    assert ResourceRef(ResourceKind.EXECUTION.value, "execution", "tenant").kind is ResourceKind.EXECUTION
+    assert (
+        ResourceRef(ResourceKind.EXECUTION.value, "execution", "tenant").kind
+        is ResourceKind.EXECUTION
+    )
     with pytest.raises(ValueError, match="principal identity is invalid"):
         Principal("principal", "tenant", " custom")
     with pytest.raises(ValueError, match="resource reference is incomplete"):
@@ -200,7 +235,12 @@ def test_contextual_classification_fields_stay_concise() -> None:
 @pytest.mark.parametrize("value", [" memory", "memory ", "memory\nvalue", "界" * 129])
 def test_memory_scope_rejects_noncanonical_values(value: str) -> None:
     with pytest.raises(AIError) as error:
-        ExecutionRequest("prompt", trusted_workspace_principal("workspace"), "request", value)
+        ExecutionRequest(
+            "prompt",
+            trusted_workspace_principal("workspace"),
+            "request",
+            value,
+        )
     assert error.value.code is ErrorCode.REQUEST_FIELD_INVALID
 
 
@@ -254,7 +294,14 @@ async def test_middleware_order_and_failure_classification() -> None:
         async def after_run(self, context: RunContext) -> None:
             events.append("after")
 
-    context = RunContext("tenant", "principal", "execution", "session", "run", "agent")
+    context = RunContext(
+        "tenant",
+        "principal",
+        "execution",
+        "session",
+        "run",
+        "agent",
+    )
     pipeline = MiddlewarePipeline((Observer(),))
     await pipeline.before_run(context)
     await pipeline.after_run(context)
@@ -277,7 +324,13 @@ async def test_middleware_order_and_failure_classification() -> None:
 @pytest.mark.asyncio
 async def test_trace_is_monotonic_and_snapshot_digest_is_verified() -> None:
     recorder = InMemoryTraceRecorder()
-    item = RecordedTraceItem("execution", 1, "completed", datetime.now(timezone.utc), "done")
+    item = RecordedTraceItem(
+        "execution",
+        1,
+        "completed",
+        datetime.now(timezone.utc),
+        "done",
+    )
     assert await recorder.append(item) == item
     assert await recorder.append(item) == item
     values = {
@@ -293,12 +346,20 @@ async def test_trace_is_monotonic_and_snapshot_digest_is_verified() -> None:
 
 def test_temporal_registration_has_one_explicit_worker_surface() -> None:
     class ExecutionOperation:
-        async def execute(self, request: ExecutionWorkflowInput) -> ExecutionWorkflowResult:
+        async def execute(
+            self, request: ExecutionWorkflowInput
+        ) -> ExecutionWorkflowResult:
             return ExecutionWorkflowResult(request.execution_id, "SUCCEEDED", None, 0)
 
     class SessionOperation:
-        async def execute(self, request: SessionWorkflowInput) -> SessionWorkflowResult:
-            return SessionWorkflowResult(request.session_id, request.mutation_id, "SUCCEEDED")
+        async def execute(
+            self, request: SessionWorkflowInput
+        ) -> SessionWorkflowResult:
+            return SessionWorkflowResult(
+                request.session_id,
+                request.mutation_id,
+                "SUCCEEDED",
+            )
 
     class TaskOperation:
         async def prepare(self, request, node_id, dependency_results):
@@ -311,8 +372,14 @@ def test_temporal_registration_has_one_explicit_worker_surface() -> None:
             raise AssertionError("not called")
 
     class EvaluationOperation:
-        async def execute(self, request: EvaluationWorkflowInput) -> EvaluationWorkflowResult:
-            return EvaluationWorkflowResult(request.evaluation_id, "SUCCEEDED", request.case_ids)
+        async def execute(
+            self, request: EvaluationWorkflowInput
+        ) -> EvaluationWorkflowResult:
+            return EvaluationWorkflowResult(
+                request.evaluation_id,
+                "SUCCEEDED",
+                request.case_ids,
+            )
 
     activities = WorkerActivities(
         execution=ExecuteActivity(ExecutionOperation()),
@@ -323,9 +390,18 @@ def test_temporal_registration_has_one_explicit_worker_surface() -> None:
     registration = production_registration(activities, build_id="test-build")
     assert isinstance(registration, WorkerRegistration)
     assert len(registration.workflows) == len(registration.activities) == 4
-    assert tuple(item.__name__ for item in registration.workflows) == ("ExecutionWorkflow", "SessionWorkflow", "TaskWorkflow", "EvaluationWorkflow")
-
-    assert tuple(type(item).__name__ for item in registration.activities) == ("ExecuteActivity", "SessionActivity", "TaskActivity", "EvaluationActivity")
+    assert tuple(item.__name__ for item in registration.workflows) == (
+        "ExecutionWorkflow",
+        "SessionWorkflow",
+        "TaskWorkflow",
+        "EvaluationWorkflow",
+    )
+    assert tuple(type(item).__name__ for item in registration.activities) == (
+        "ExecuteActivity",
+        "SessionActivity",
+        "TaskActivity",
+        "EvaluationActivity",
+    )
     assert ExecuteActivity.run.__name__ == "run"
     assert ExecuteActivity.load_input.__name__ == "load_input"
     assert ExecuteActivity.fix_bundle_route.__name__ == "fix_bundle_route"
@@ -351,7 +427,13 @@ def test_temporal_registration_has_one_explicit_worker_surface() -> None:
             build_id: str,
             task_queue: str,
         ) -> None:
-            self.configuration = (data_converter, payload_codec, interceptor, build_id, task_queue)
+            self.configuration = (
+                data_converter,
+                payload_codec,
+                interceptor,
+                build_id,
+                task_queue,
+            )
 
         def register_workflows(self, workflows: tuple[WorkflowType, ...]) -> None:
             self.workflows = workflows
@@ -361,28 +443,59 @@ def test_temporal_registration_has_one_explicit_worker_surface() -> None:
 
     worker = Worker()
     registration.register(worker)
-    assert worker.configuration == ("json", "asset", "linktools-ai", "test-build", "linktools-ai-production")
+    assert worker.configuration == (
+        "json",
+        "asset",
+        "linktools-ai",
+        "test-build",
+        "linktools-ai-production",
+    )
     assert len(worker.workflows) == 4
 
 
 @pytest.mark.asyncio
 async def test_temporal_workflow_inputs_apply_canonical_tenant_validation() -> None:
     with pytest.raises(ValueError, match="task workflow graph is invalid"):
-        TaskWorkflowInput("graph", " tenant", (), TaskGraphLimits(), "request", "worker")
+        TaskWorkflowInput(
+            "graph",
+            " tenant",
+            (),
+            TaskGraphLimits(),
+            "request",
+            "worker",
+        )
 
     with pytest.raises(ValueError, match="execution workflow tenant is invalid"):
         await ExecutionWorkflow().run(
-            ExecutionWorkflowInput("execution", "tenant ", "binding", "bundle", "request", "worker")
+            ExecutionWorkflowInput(
+                "execution",
+                "tenant ",
+                "binding",
+                "bundle",
+                "request",
+                "worker",
+            )
         )
 
     with pytest.raises(ValueError, match="session workflow tenant is invalid"):
-        await SessionWorkflow().run(SessionWorkflowInput("session", "tenant\n", 0, "operation", "create"))
+        await SessionWorkflow().run(
+            SessionWorkflowInput("session", "tenant\n", 0, "operation", "create")
+        )
 
 
 @pytest.mark.asyncio
-async def test_workflow_gateway_validates_contract_and_unknown_operations() -> None:
+async def test_workflow_gateway_persists_v2_execution_request() -> None:
+    started: list[tuple[str, ExecutionWorkflowInput, str]] = []
+
     class Client:
-        async def start_workflow(self, workflow: str, request, *, workflow_id: str):
+        async def start_workflow(
+            self,
+            workflow: str,
+            request: ExecutionWorkflowInput,
+            *,
+            workflow_id: str,
+        ):
+            started.append((workflow, request, workflow_id))
             return None
 
         async def start_task_graph(self, request, *, workflow_id: str):
@@ -397,13 +510,35 @@ async def test_workflow_gateway_validates_contract_and_unknown_operations() -> N
         async def cancel_workflow(self, workflow_id: str):
             return None
 
+        async def cancel_task_graph(self, workflow_id: str, idempotency_key: str):
+            return None
+
     gateway = WorkflowGateway(
         Client(),
         worker_build="test-build",
         request_store=InMemoryObjectStore("test-requests"),
         namespace="test-namespace",
     )
-    local = ExecutionRequest("prompt", trusted_workspace_principal("workspace"), idempotency_key="contract-key", memory_scope="test")
-    await gateway.start_execution("execution", local)
+    snapshot = _binding_snapshot()
+    local = ExecutionRequest(
+        "prompt",
+        trusted_workspace_principal("workspace"),
+        idempotency_key="contract-key",
+        memory_scope="test",
+        planning=True,
+        thinking=True,
+    )
+    await gateway.start_execution(
+        "execution",
+        local,
+        binding_digest=snapshot.binding_digest,
+        binding=snapshot.to_payload(),
+    )
+    assert len(started) == 1
+    workflow, request, workflow_id = started[0]
+    assert workflow == "execution"
+    assert workflow_id == "execution"
+    assert request.execution_id == "execution"
+    assert request.binding_digest == snapshot.binding_digest
     with pytest.raises(ValueError):
         await gateway.query_execution("execution", "unknown")
