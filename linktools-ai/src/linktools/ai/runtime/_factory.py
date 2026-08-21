@@ -3,14 +3,15 @@
 """Runtime-internal service graph construction."""
 
 import asyncio
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from pathlib import Path
 
 from linktools.core import environ
 from pydantic_ai_harness.memory import SearchableMemoryStore
 
 from ..agent import AgentCompiler, AgentDefinitionCatalog, AgentExecutor
-from ..asset import AssetRepository
+from ..asset import AssetRepository, AssetTypeRegistrySnapshot
+from ..capability import CapabilityBinding, CapabilityProvider
 from ..core import AuthorizationPolicy, HmacCursorSigner
 from ..errors import AIError, ErrorCode
 from ..storage import ObjectStore
@@ -38,6 +39,9 @@ async def build_local_runtime(
     catalog: AgentDefinitionCatalog,
     compiler: AgentCompiler,
     assets: AssetRepository,
+    asset_registry: AssetTypeRegistrySnapshot,
+    capability_providers: Sequence[CapabilityProvider],
+    capability_bindings: Mapping[str, CapabilityBinding],
     authorization: AuthorizationPolicy,
     tenant_id: str,
     namespace: str,
@@ -70,20 +74,11 @@ async def build_local_runtime(
         route = state.plan.route(RuntimeDomain.MEMORY)
         transient = route.retention is RuntimeRetentionMode.TRANSIENT
         store = (
-            state.working_object_store(
-                RuntimeDomain.MEMORY,
-                owner_scope=f"execution:{execution_id}",
-            )
+            state.working_object_store(RuntimeDomain.MEMORY, owner_scope=f"execution:{execution_id}")
             if transient
             else state.object_store(RuntimeDomain.MEMORY)
         )
-        return memory_store_factory(
-            memory_tenant,
-            execution_id,
-            memory_scope,
-            store,
-            transient,
-        )
+        return memory_store_factory(memory_tenant, execution_id, memory_scope, store, transient)
 
     backend: LocalExecutionBackend | None = None
     task_launcher: LocalTaskGraphLauncher | None = None
@@ -104,11 +99,7 @@ async def build_local_runtime(
             execution_root=execution_root,
             step_reads={
                 domain: state.steps.read_store(domain)
-                for domain in (
-                    RuntimeDomain.CONVERSATION,
-                    RuntimeDomain.EXECUTION,
-                    RuntimeDomain.RECOVERY,
-                )
+                for domain in (RuntimeDomain.CONVERSATION, RuntimeDomain.EXECUTION, RuntimeDomain.RECOVERY)
             },
             step_lifecycle=state.steps,
             memory_store_factory=build_memory_store,
@@ -117,9 +108,7 @@ async def build_local_runtime(
             handoff_contract_digest=state.handoff_contract_digest,
             subagent_dispatcher=dispatcher,
             live_broker=live_broker,
-            execution_objects_durable=(
-                state.plan.route(RuntimeDomain.EXECUTION).retention is RuntimeRetentionMode.DURABLE
-            ),
+            execution_objects_durable=state.plan.route(RuntimeDomain.EXECUTION).retention is RuntimeRetentionMode.DURABLE,
             tool_operations=state.recovery.tools,
         )
         state.retention.bind_execution_runtime_release(backend.release_runtime_execution)
@@ -189,6 +178,9 @@ async def build_local_runtime(
             approval,
             event,
             artifact,
+            asset_registry=asset_registry,
+            capability_providers=capability_providers,
+            capability_bindings=capability_bindings,
             tenant_id=tenant_id,
             close_callback=coordinator.close,
             local_coordinator=local_coordinator,
@@ -232,10 +224,7 @@ async def _validate_recovery_definitions(
             except AIError as error:
                 raise AIError(
                     ErrorCode.AGENT_DEFINITION_UNAVAILABLE,
-                    safe_details={
-                        "execution_id": checkpoint.execution_id,
-                        "agent_id": checkpoint.input.agent_id,
-                    },
+                    safe_details={"execution_id": checkpoint.execution_id, "agent_id": checkpoint.input.agent_id},
                 ) from error
             if definition.spec.id != checkpoint.input.agent_id:
                 raise AIError(
