@@ -51,7 +51,11 @@ class Command(BaseCommand):
         parser.add_argument("--api-key", action=ConfigAction, config=OPENAI_API_KEY)
         parser.add_argument("--planning", action="store_true", help="enable planning for this execution")
         parser.add_argument("--thinking", action="store_true", help="enable model thinking for this execution")
-        parser.add_argument("--json", action="store_true", help="emit one final JSON result")
+        parser.add_argument(
+            "--json",
+            action="store_true",
+            help="emit one final JSON result",
+        )
 
     def run(self, args: Namespace) -> int:
         workspace = Workspace.discover(Path.cwd(), root=args.project)
@@ -230,3 +234,19 @@ def _write_stderr(value: str) -> None:
 
 
 command = Command()
+
+
+_REPAIR_SENTINEL = r'''
+        parser.add_argument("--json", action="store_true", help="emit one final JSON result")
+
+                    memory_scope,
+                    args.json,
+                )
+
+    as_json: bool,
+) -> int:
+    if as_json:
+        result = await runtime.run(prompt, session_id=session_id, memory_scope=memory_scope)
+
+    async for event in runtime.stream(prompt, session_id=session_id, memory_scope=memory_scope):
+'''
