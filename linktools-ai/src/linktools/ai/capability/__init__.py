@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 """Capability binding and materialization contracts."""
 
+from ._agent import SubagentCapabilityBinding, SubagentCapabilityProvider
 from ._contract import (
     CapabilityBinding,
     CapabilityMaterializationContext,
@@ -26,5 +27,7 @@ __all__ = [
     "MCPCapabilityProvider",
     "MCPRuntime",
     "SkillCapabilityProvider",
+    "SubagentCapabilityBinding",
+    "SubagentCapabilityProvider",
     "validate_fingerprint",
 ]
