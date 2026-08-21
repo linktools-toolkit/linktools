@@ -19,7 +19,7 @@ from ..model import ModelResolver
 from ..spec import AgentSpec
 from ._binding import AgentBindingSnapshot
 from ._definition import AgentDefinition
-from ._output import OutputBinding, bind_output, restore_output
+from ._output import bind_output, restore_output
 
 _logger = environ.get_logger("ai.agent.compiler")
 
@@ -32,15 +32,18 @@ class AgentCompiler:
         *,
         model_resolver: ModelResolver,
         capabilities: "Sequence[CapabilityBinding]" = (),
+        platform_capabilities: "Sequence[CapabilityBinding]" = (),
         runtime_fingerprint: str,
     ) -> None:
         if model_resolver is None:
             raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
         validate_fingerprint(runtime_fingerprint)
         global_capabilities = tuple(capabilities)
-        _validate_bindings(global_capabilities)
+        platform = tuple(platform_capabilities)
+        _validate_bindings((*global_capabilities, *platform))
         self._model_resolver = model_resolver
         self._capabilities = global_capabilities
+        self._platform_capabilities = platform
         self._runtime_fingerprint = runtime_fingerprint
 
     def compile(
@@ -62,7 +65,11 @@ class AgentCompiler:
             if descriptor is None:
                 raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
             local_descriptors.append(descriptor)
-        effective: tuple[CapabilityBinding, ...] = (*self._capabilities, *local_capabilities)
+        effective: tuple[CapabilityBinding, ...] = (
+            *self._capabilities,
+            *local_capabilities,
+            *self._platform_capabilities,
+        )
         _validate_bindings(effective)
         model = self._model_resolver.resolve(spec.model)
         output_binding = bind_output(output)
