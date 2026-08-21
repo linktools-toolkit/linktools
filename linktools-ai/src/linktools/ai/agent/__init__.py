@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 """Agent definition compilation and execution."""
 
+from ._binding import AgentBindingSnapshot
 from ._builder import build_pydantic_agent
 from ._capabilities import (
     MEMORY_TOOL_NAMES,
@@ -37,6 +38,7 @@ from ._output import (
 __all__ = [
     "ASSISTANT_TEXT_OUTPUT_SCHEMA_ID",
     "ASSISTANT_TEXT_OUTPUT_SCHEMA_REVISION",
+    "AgentBindingSnapshot",
     "AgentCompiler",
     "AgentDefinitionCatalog",
     "build_pydantic_agent",
