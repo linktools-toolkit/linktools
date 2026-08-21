@@ -51,6 +51,7 @@ async def build_local_runtime(
     memory_store_factory: "Callable[[str, str, str, ObjectStore, bool], SearchableMemoryStore] | None",
     grant_key: bytes,
 ) -> Runtime:
+    del asset_registry, capability_providers, capability_bindings
     if not state.ready or not assets.ready:
         raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
     execution = DefaultExecutionService(
@@ -178,9 +179,6 @@ async def build_local_runtime(
             approval,
             event,
             artifact,
-            asset_registry=asset_registry,
-            capability_providers=capability_providers,
-            capability_bindings=capability_bindings,
             tenant_id=tenant_id,
             close_callback=coordinator.close,
             local_coordinator=local_coordinator,
