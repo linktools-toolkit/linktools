@@ -18,7 +18,7 @@ from ...ai.core import ExecutionDeltaType, ExecutionEventType, ExecutionStatus
 from ...ai.errors import AIError
 from ...ai.migrate import provision_runtime_database
 from ...ai.model import ModelRegistry
-from ...ai.runtime import Runtime, RuntimeState
+from ...ai.runtime import ExecutionResult, Runtime, RuntimeState
 from ...ai.workspace import Workspace, open_workspace_runtime
 
 if TYPE_CHECKING:
@@ -207,7 +207,7 @@ async def _terminal_failure_details(
     return None, {}
 
 
-def _result_payload(result: object) -> dict[str, object]:
+def _result_payload(result: ExecutionResult) -> dict[str, object]:
     return {
         "execution_id": result.execution_id,
         "status": result.status.value,
@@ -234,19 +234,3 @@ def _write_stderr(value: str) -> None:
 
 
 command = Command()
-
-
-_REPAIR_SENTINEL = r'''
-        parser.add_argument("--json", action="store_true", help="emit one final JSON result")
-
-                    memory_scope,
-                    args.json,
-                )
-
-    as_json: bool,
-) -> int:
-    if as_json:
-        result = await runtime.run(prompt, session_id=session_id, memory_scope=memory_scope)
-
-    async for event in runtime.stream(prompt, session_id=session_id, memory_scope=memory_scope):
-'''
