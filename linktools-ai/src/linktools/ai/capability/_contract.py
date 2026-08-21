@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Capability selection, binding, and runtime materialization contracts."""
+"""Capability binding and runtime materialization contracts."""
 
 from dataclasses import dataclass
 from pathlib import Path
@@ -9,33 +9,9 @@ from typing import Protocol
 from pydantic_ai.capabilities import AgentCapability as PydanticAgentCapability
 
 from ..asset import AssetRef, AssetRepository
-from ..core import Principal, ResourceRef, canonical_sha256, canonical_string_tuple, validate_capability_provider
+from ..core import Principal, ResourceRef, canonical_sha256, canonical_string_tuple
 from ..errors import AIError, ErrorCode
-
-
-@dataclass(frozen=True, slots=True)
-class CapabilityRef:
-    """Select one logical capability family or a resource within that family."""
-
-    provider: str
-    id: "str | None" = None
-    revision: "int | None" = None
-    required: bool = True
-
-    def __post_init__(self) -> None:
-        validate_capability_provider(self.provider)
-        if self.id is not None and (not isinstance(self.id, str) or not self.id.strip()):
-            raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
-        if self.revision is not None and (
-            not isinstance(self.revision, int)
-            or isinstance(self.revision, bool)
-            or self.revision < 1
-        ):
-            raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
-        if self.id is None and self.revision is not None:
-            raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
-        if not isinstance(self.required, bool):
-            raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
+from ..spec import CapabilityRef
 
 
 @dataclass(frozen=True, slots=True)
