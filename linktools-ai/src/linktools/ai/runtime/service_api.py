@@ -486,7 +486,15 @@ class BudgetSettlementRequest:
 
 
 class WorkflowGateway(Protocol):
-    async def start_execution(self, workflow_id: str, request: ExecutionRequest) -> ExecutionHandle: ...
+    async def start_execution(
+        self,
+        workflow_id: str,
+        request: ExecutionRequest,
+        *,
+        binding_digest: str,
+        binding: Mapping[str, JsonValue],
+    ) -> ExecutionHandle: ...
+
     async def update_execution(self, workflow_id: str, operation: str, payload: 'Mapping[str, JsonValue]') -> WorkflowUpdateResult: ...
     async def query_execution(self, workflow_id: str, query: str) -> WorkflowQueryResult: ...
     async def cancel_execution(self, workflow_id: str) -> CancelExecutionResult: ...
