@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING, Protocol
 
 from pydantic_ai.messages import ModelMessage
 
+from ...agent import AgentBindingSnapshot
 from ...core import (
     ApprovalDecision,
     ApprovalStatus,
@@ -72,42 +73,6 @@ class ConversationHistorySegmentRef:
             raise ValueError("history segment counts cannot be negative")
         if not self.owner_history_id:
             raise ValueError("history segment owner cannot be empty")
-
-
-class HistoryQuality(StrEnum):
-    COMPLETE = "complete"
-    CONSERVATIVE = "conservative"
-
-
-@dataclass(frozen=True, slots=True)
-class ConversationHistoryRecord:
-    """Immutable branch descriptor; local counts live on the TranscriptHead."""
-
-    history_id: str
-    session_id: str
-    tenant_id: str
-    parent_history_id: "str | None"
-    prefix_index_head_id: "str | None"
-    inherited_message_count: int
-    inherited_history_item_count: int
-
-    def __post_init__(self) -> None:
-        if self.inherited_message_count < 0 or self.inherited_history_item_count < 0:
-            raise ValueError("history inherited counts cannot be negative")
-        if not self.history_id or not self.session_id or not self.tenant_id:
-            raise ValueError("history descriptor identity cannot be empty")
-        if self.parent_history_id is None:
-            if (
-                self.prefix_index_head_id is not None
-                or self.inherited_message_count != 0
-                or self.inherited_history_item_count != 0
-            ):
-                raise ValueError("root history cannot inherit messages")
-        elif self.prefix_index_head_id is None and (
-            self.inherited_message_count != 0
-            or self.inherited_history_item_count != 0
-        ):
-            raise ValueError("forked history with content requires a prefix head")
 
 
 @dataclass(frozen=True, slots=True)
@@ -216,6 +181,7 @@ class TranscriptHeadRecord:
         if not self.owner_id:
             raise ValueError("transcript head owner cannot be empty")
 
+
 @dataclass(frozen=True, slots=True)
 class TranscriptSeekRecord:
     """Boundary fact enabling O(1) positioning within one seek dimension."""
@@ -240,6 +206,7 @@ class TranscriptSeekRecord:
             raise ValueError("transcript seek view version must be positive")
         if not self.owner_id:
             raise ValueError("transcript seek owner cannot be empty")
+
 
 @dataclass(frozen=True, slots=True)
 class TranscriptSpanRef:
@@ -296,6 +263,42 @@ class StoredStepSnapshot:
     timestamp: datetime
     state: str
     projection_digest: str
+
+
+class HistoryQuality(StrEnum):
+    COMPLETE = "complete"
+    CONSERVATIVE = "conservative"
+
+
+@dataclass(frozen=True, slots=True)
+class ConversationHistoryRecord:
+    """Immutable branch descriptor; local counts live on the TranscriptHead."""
+
+    history_id: str
+    session_id: str
+    tenant_id: str
+    parent_history_id: "str | None"
+    prefix_index_head_id: "str | None"
+    inherited_message_count: int
+    inherited_history_item_count: int
+
+    def __post_init__(self) -> None:
+        if self.inherited_message_count < 0 or self.inherited_history_item_count < 0:
+            raise ValueError("history inherited counts cannot be negative")
+        if not self.history_id or not self.session_id or not self.tenant_id:
+            raise ValueError("history descriptor identity cannot be empty")
+        if self.parent_history_id is None:
+            if (
+                self.prefix_index_head_id is not None
+                or self.inherited_message_count != 0
+                or self.inherited_history_item_count != 0
+            ):
+                raise ValueError("root history cannot inherit messages")
+        elif self.prefix_index_head_id is None and (
+            self.inherited_message_count != 0
+            or self.inherited_history_item_count != 0
+        ):
+            raise ValueError("forked history with content requires a prefix head")
 
 
 @dataclass(frozen=True, slots=True)
@@ -396,6 +399,13 @@ class ExecutionRecord:
     result: "ResultRecord | None" = None
     planning: bool = False
     thinking: bool = False
+    binding: "AgentBindingSnapshot | None" = None
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.planning, bool) or not isinstance(self.thinking, bool):
+            raise ValueError("execution modes must be boolean")
+        if self.binding is not None and self.binding.binding_digest != self.binding_digest:
+            raise ValueError("execution binding snapshot does not match binding digest")
 
 
 @dataclass(frozen=True, slots=True)
@@ -823,6 +833,7 @@ class RecoveryExecutionInput:
     idempotency: "RecoveryIdempotencyInput"
     planning: bool = False
     thinking: bool = False
+    binding: "AgentBindingSnapshot | None" = None
 
     def __post_init__(self) -> None:
         prompt = self.user_prompt
@@ -832,6 +843,11 @@ class RecoveryExecutionInput:
             raise ValueError("recovery prompt payload is invalid")
         if not isinstance(self.planning, bool) or not isinstance(self.thinking, bool):
             raise ValueError("recovery execution modes must be boolean")
+        if self.binding is not None and (
+            self.binding.binding_digest != self.binding_digest
+            or self.binding.agent_spec.id != self.agent_id
+        ):
+            raise ValueError("recovery binding snapshot does not match execution identity")
 
     def prompt_text(self) -> str:
         value = self.user_prompt.decode()
