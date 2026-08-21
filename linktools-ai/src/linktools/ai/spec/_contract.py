@@ -94,6 +94,7 @@ class AgentSpec:
     system_prompt: str = ""
     instructions: "tuple[str, ...]" = ()
     allow_tools: "tuple[str, ...]" = ("*",)
+    allow_skills: "tuple[str, ...]" = ("*",)
     metadata: "Mapping[str, JsonValue]" = field(default_factory=dict)
     usage_limits: "AgentUsageLimits | None" = None
 
@@ -111,6 +112,7 @@ class AgentSpec:
             raise ValueError("agent instructions must be strings")
         object.__setattr__(self, "instructions", instructions)
         object.__setattr__(self, "allow_tools", canonical_string_tuple(self.allow_tools, field="allow_tools"))
+        object.__setattr__(self, "allow_skills", canonical_string_tuple(self.allow_skills, field="allow_skills"))
         object.__setattr__(self, "metadata", _ImmutableJsonMapping(self.metadata))
 
 
