@@ -6,6 +6,8 @@ from collections.abc import Sequence
 
 from linktools.core import environ
 from pydantic import BaseModel
+from pydantic_ai.capabilities import Thinking
+from pydantic_ai_harness.planning import Planning
 
 from ..capability import CapabilityBinding, CapabilityRefResolution, RuntimeCapability, validate_fingerprint
 from ..core import canonical_sha256, validate_agent_id, validate_capability_provider
@@ -43,9 +45,16 @@ class AgentCompiler:
         *,
         capabilities: "Sequence[RuntimeCapability]" = (),
         output: "type[BaseModel] | None" = None,
+        planning: bool = False,
+        thinking: bool = False,
     ) -> AgentDefinition:
         validate_agent_id(spec.id)
-        local_capabilities = tuple(capabilities)
+        if not isinstance(planning, bool) or not isinstance(thinking, bool):
+            raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+        local_capabilities = tuple(capabilities) + _mode_capabilities(
+            planning=planning,
+            thinking=thinking,
+        )
         _validate_bindings(local_capabilities)
         effective = self._capabilities + local_capabilities
         _validate_bindings(effective)
@@ -67,10 +76,12 @@ class AgentCompiler:
             effective,
         )
         _logger.debug(
-            "agent definition compiled: agent=%s digest=%s capabilities=%s",
+            "agent definition compiled: agent=%s digest=%s capabilities=%s planning=%s thinking=%s",
             spec.id,
             digest,
             tuple(capability.id for capability in effective),
+            planning,
+            thinking,
         )
         return definition
 
@@ -98,6 +109,15 @@ class AgentCompiler:
             definition.output_schema_fingerprint,
             effective,
         )
+
+
+def _mode_capabilities(*, planning: bool, thinking: bool) -> "tuple[RuntimeCapability, ...]":
+    values: list[RuntimeCapability] = []
+    if planning:
+        values.append(RuntimeCapability("planning", Planning(), revision=1))
+    if thinking:
+        values.append(RuntimeCapability("thinking", Thinking(), revision=1))
+    return tuple(values)
 
 
 def _validate_bindings(bindings: "Sequence[CapabilityBinding]") -> None:
