@@ -183,7 +183,7 @@ async def load_execution_request(
     *,
     namespace: str,
     state: ExecutionWorkflowState,
-) -> ExecutionRequest:
+) -> tuple[ExecutionRequest, AgentBindingSnapshot | None]:
     if not isinstance(namespace, str) or not namespace.strip():
         raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
     request, binding_digest, binding = await _read_execution_transport(
@@ -208,7 +208,7 @@ async def load_execution_request(
         state.execution_id,
         state.request_ref,
     )
-    return request
+    return request, binding
 
 
 async def _read_execution_transport(
