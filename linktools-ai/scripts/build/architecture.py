@@ -14,6 +14,13 @@ from linktools.ai.core import JsonValue
 from .cohesion import check_files
 from .names import check_names
 
+_DURABLE_TYPE_RESTORE_MODULES = frozenset(
+    {
+        "linktools.ai.agent._output",
+        "linktools.ai.capability._contract",
+    }
+)
+
 
 def module_name(path: Path, source_root: Path) -> str:
     """Return the import name represented by a source file."""
@@ -133,6 +140,32 @@ def _is_dynamic_import_call(
     )
 
 
+def _is_durable_type_restore_call(module: str, node: ast.Call) -> bool:
+    if module not in _DURABLE_TYPE_RESTORE_MODULES:
+        return False
+    if (
+        isinstance(node.func, ast.Attribute)
+        and node.func.attr == "import_module"
+        and isinstance(node.func.value, ast.Name)
+        and node.func.value.id == "importlib"
+        and len(node.args) == 1
+        and isinstance(node.args[0], ast.Name)
+        and node.args[0].id == "module_name"
+        and not node.keywords
+    ):
+        return True
+    return (
+        isinstance(node.func, ast.Name)
+        and node.func.id == "getattr"
+        and len(node.args) == 2
+        and isinstance(node.args[0], ast.Name)
+        and node.args[0].id == "target"
+        and isinstance(node.args[1], ast.Name)
+        and node.args[1].id == "part"
+        and not node.keywords
+    )
+
+
 def _is_type_checking_import(node: ast.AST, checking_lines: 'set[int]') -> bool:
     return node.lineno in checking_lines
 
@@ -198,13 +231,19 @@ def build_report(source_root: "str | Path") -> "dict[str, JsonValue]":
                 importlib_module_aliases,
                 import_module_aliases,
             ):
-                function_name = (
-                    node.func.id
-                    if isinstance(node.func, ast.Name)
-                    else f"{ast.unparse(node.func.value)}.{node.func.attr}"
-                )
-                dynamic_imports.append(f"{path}:{node.lineno}:{function_name}")
-            elif isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id in forbidden_calls:
+                if not _is_durable_type_restore_call(name, node):
+                    function_name = (
+                        node.func.id
+                        if isinstance(node.func, ast.Name)
+                        else f"{ast.unparse(node.func.value)}.{node.func.attr}"
+                    )
+                    dynamic_imports.append(f"{path}:{node.lineno}:{function_name}")
+            elif (
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Name)
+                and node.func.id in forbidden_calls
+                and not _is_durable_type_restore_call(name, node)
+            ):
                 dynamic_imports.append(f"{path}:{node.lineno}:{node.func.id}")
             if isinstance(node, ast.Attribute) and node.attr in {"__dict__", "__getattr__"}:
                 dynamic_imports.append(f"{path}:{node.lineno}:{node.attr}")
