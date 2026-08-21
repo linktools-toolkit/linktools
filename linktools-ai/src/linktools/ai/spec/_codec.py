@@ -11,9 +11,21 @@ import yaml
 
 from ..core import canonical_string_tuple
 from ..errors import AIError, ErrorCode
-from ._contract import AgentSpec, AgentUsageLimits, CapabilityRef, MCPServerSpec, SkillSpec
+from ._contract import AgentSpec, AgentUsageLimits, MCPServerSpec, SkillSpec
 
 SpecT = TypeVar("SpecT")
+_AGENT_FIELDS = frozenset(
+    {
+        "id",
+        "revision",
+        "model",
+        "system_prompt",
+        "instructions",
+        "allow_tools",
+        "metadata",
+        "usage_limits",
+    }
+)
 
 
 class SpecCodec(Protocol[SpecT]):
@@ -31,7 +43,6 @@ class AgentSpecCodec:
                 "system_prompt": value.system_prompt,
                 "instructions": list(value.instructions),
                 "allow_tools": list(value.allow_tools),
-                "allow_skills": list(value.allow_skills),
                 "metadata": dict(value.metadata),
                 "usage_limits": None
                 if value.usage_limits is None
@@ -42,38 +53,38 @@ class AgentSpecCodec:
                     "output_tokens": value.usage_limits.output_tokens,
                     "total_tokens": value.usage_limits.total_tokens,
                 },
-                "capabilities": [
-                    {
-                        "provider": item.provider,
-                        "id": item.id,
-                        "revision": item.revision,
-                        "required": item.required,
-                    }
-                    for item in value.capabilities
-                ],
             }
         )
 
     def decode(self, data: bytes) -> AgentSpec:
         raw = _decode(data)
+        if set(raw) - _AGENT_FIELDS:
+            raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID, "agent spec fields are invalid")
+        for required in ("id", "revision", "model"):
+            if required not in raw:
+                raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID, f"agent spec requires {required}")
         system_prompt = raw.get("system_prompt", "")
         if not isinstance(system_prompt, str):
             raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID, "system_prompt must be a string")
         instructions = raw.get("instructions", [])
         if not isinstance(instructions, list) or any(not isinstance(item, str) for item in instructions):
             raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID, "instructions must be a string array")
-        return AgentSpec(
-            id=str(raw["id"]),
-            revision=int(raw["revision"]),
-            model=str(raw["model"]),
-            system_prompt=system_prompt,
-            instructions=tuple(instructions),
-            allow_tools=_strict_allowlist(raw, "allow_tools", ("*",)),
-            allow_skills=_strict_allowlist(raw, "allow_skills", ("*",)),
-            metadata=cast("dict[str, object]", raw.get("metadata", {})),
-            usage_limits=_decode_usage_limits(raw.get("usage_limits")),
-            capabilities=_decode_capability_refs(raw.get("capabilities", [])),
-        )
+        metadata = raw.get("metadata", {})
+        if not isinstance(metadata, Mapping):
+            raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID, "metadata must be an object")
+        try:
+            return AgentSpec(
+                id=str(raw["id"]),
+                revision=int(raw["revision"]),
+                model=str(raw["model"]),
+                system_prompt=system_prompt,
+                instructions=tuple(instructions),
+                allow_tools=_strict_allowlist(raw, "allow_tools", ("*",)),
+                metadata=cast("Mapping[str, object]", metadata),
+                usage_limits=_decode_usage_limits(raw.get("usage_limits")),
+            )
+        except (TypeError, ValueError) as error:
+            raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID, "agent spec is invalid") from error
 
 
 class SkillSpecCodec:
@@ -185,34 +196,6 @@ def _strict_allowlist(raw: Mapping[str, object], name: str, default: "tuple[str,
     if not isinstance(value, list):
         raise AIError(ErrorCode.REQUEST_FIELD_INVALID, f"{name} must be a JSON array")
     return canonical_string_tuple(value, field=name)
-
-
-def _decode_capability_refs(value: object) -> "tuple[CapabilityRef, ...]":
-    if not isinstance(value, list):
-        raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID, "capabilities must be an array")
-    result: list[CapabilityRef] = []
-    for item in value:
-        if not isinstance(item, Mapping):
-            raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID, "capability reference must be an object")
-        if set(item) != {"provider", "id", "revision", "required"}:
-            raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID, "capability reference fields are invalid")
-        provider = item.get("provider")
-        identity = item.get("id")
-        revision = item.get("revision")
-        required = item.get("required")
-        if not isinstance(provider, str):
-            raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID, "capability provider must be a string")
-        if identity is not None and not isinstance(identity, str):
-            raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID, "capability id must be a string or null")
-        if revision is not None and (not isinstance(revision, int) or isinstance(revision, bool)):
-            raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID, "capability revision must be an integer or null")
-        if not isinstance(required, bool):
-            raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID, "capability required must be a boolean")
-        try:
-            result.append(CapabilityRef(provider, identity, revision, required))
-        except (AIError, TypeError, ValueError) as error:
-            raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID, "capability reference is invalid") from error
-    return tuple(result)
 
 
 def _decode_usage_limits(value: object) -> "AgentUsageLimits | None":
