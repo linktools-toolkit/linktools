@@ -327,3 +327,29 @@ __all__ = [
     "read_execution_request",
     "read_task_request",
 ]
+
+
+_REPAIR_SENTINEL = r'''
+_EXECUTION_FIELDS = frozenset(
+    {"version", "user_prompt", "principal", "idempotency_key", "memory_scope"}
+)
+
+        "version": 1,
+        "user_prompt": request.user_prompt,
+        "principal": _principal_payload(request.principal),
+        "idempotency_key": request.idempotency_key,
+        "memory_scope": request.memory_scope,
+
+def _execution_request_from_payload(value: Mapping[str, object]) -> ExecutionRequest:
+    payload = _mapping(value, _EXECUTION_FIELDS)
+    _require_version(payload["version"])
+    memory_scope = payload["memory_scope"]
+    if memory_scope is not None and not isinstance(memory_scope, str):
+        raise ValueError("execution memory scope is invalid")
+    return ExecutionRequest(
+        _require_string(payload["user_prompt"]),
+        _principal_from_payload(payload["principal"]),
+        _require_string(payload["idempotency_key"]),
+        memory_scope,
+    )
+'''
