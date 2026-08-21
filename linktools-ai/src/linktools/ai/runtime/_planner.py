@@ -28,13 +28,7 @@ from ..task import (
     TaskNode,
     TaskNodeRunResult,
 )
-from .service_api import (
-    CancelExecutionRequest,
-    ExecutionRequest,
-    ExecutionResult,
-    ExecutionService,
-    WorkflowGateway,
-)
+from .service_api import CancelExecutionRequest, ExecutionRequest, ExecutionResult, ExecutionService, WorkflowGateway
 
 _logger = environ.get_logger("ai.runtime.planner")
 _AGENT_TASK_FIELDS = frozenset(
@@ -45,11 +39,7 @@ _AGENT_TASK_FIELDS = frozenset(
 class RuntimeTaskNodeRunner:
     """Prepare and execute an admitted Agent-backed TaskNode."""
 
-    def __init__(
-        self,
-        execution: ExecutionService,
-        catalog: AgentDefinitionCatalog,
-    ) -> None:
+    def __init__(self, execution: ExecutionService, catalog: AgentDefinitionCatalog) -> None:
         self._execution = execution
         self._catalog = catalog
 
@@ -131,12 +121,7 @@ class RuntimeTaskNodeRunner:
         )
         return binding_digest, request
 
-    async def result(
-        self,
-        execution_id: str,
-        *,
-        principal: Principal,
-    ) -> TaskNodeRunResult:
+    async def result(self, execution_id: str, *, principal: Principal) -> TaskNodeRunResult:
         result = await self._execution.result(execution_id, principal=principal)
         if result.status is not ExecutionStatus.SUCCEEDED:
             raise AIError(ErrorCode.EXECUTION_FAILED)
@@ -186,47 +171,38 @@ class RuntimeTaskNodeRunner:
         return await self.result(handle.execution_id, principal=principal)
 
 
-class RuntimeWorkflowGateway(WorkflowGateway):
-    def __init__(self, execution: ExecutionService, task: DefaultTaskService) -> None:
-        self._execution = execution
-        self._task = task
+class WorkflowTaskGraphLauncher:
+    def __init__(self, gateway: WorkflowGateway) -> None:
+        self._gateway = gateway
 
-    async def start_execution(self, workflow_id: str, request: ExecutionRequest) -> TaskGraphHandle:
-        del workflow_id, request
-        raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
-
-    async def update_execution(self, workflow_id: str, operation: str, payload: 'Mapping[str, object]'):
-        del workflow_id, operation, payload
-        raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
-
-    async def query_execution(self, workflow_id: str, query: str):
-        del workflow_id, query
-        raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
-
-    async def cancel_execution(self, workflow_id: str):
-        del workflow_id
-        raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
-
-    async def start_task_graph(self, workflow_id: str, request: TaskGraphRequest) -> TaskGraphHandle:
-        del workflow_id
-        return await self._task.start_graph(request)
-
-    async def cancel_task_graph(self, workflow_id: str, idempotency_key: str) -> TaskGraphView:
-        return await self._task.cancel_graph(
-            workflow_id,
-            CancelGraphRequest(idempotency_key=idempotency_key),
+    async def start(self, request: TaskGraphRequest) -> TaskGraphHandle:
+        workflow_id = "task-" + canonical_sha256(
+            {
+                "tenant_id": request.principal.tenant_id,
+                "graph_id": request.graph.graph_id,
+            }
         )
+        return await self._gateway.start_task_graph(workflow_id, request)
+
+    async def cancel(self, graph_id: str, request: CancelGraphRequest) -> TaskGraphView:
+        workflow_id = "task-" + canonical_sha256(
+            {
+                "tenant_id": request.principal.tenant_id,
+                "graph_id": graph_id,
+            }
+        )
+        return await self._gateway.cancel_task_graph(workflow_id, request.idempotency_key)
+
+
+def _validate_dependency_result(result: ExecutionResult, expected_digest: str) -> None:
+    if result.status is not ExecutionStatus.SUCCEEDED or result.output is None:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    if canonical_sha256(result.output) != expected_digest:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
 
 
 def _canonical_json(value: object) -> str:
-    return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
-
-
-def _validate_dependency_result(result: ExecutionResult, expected_digest: str | None) -> None:
-    if result.status is not ExecutionStatus.SUCCEEDED or result.output is None:
-        raise AIError(ErrorCode.TASK_DEPENDENCY_FAILED)
-    if expected_digest is not None and canonical_sha256(result.output) != expected_digest:
-        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False)
 
 
 async def _cancel_execution(
@@ -236,26 +212,20 @@ async def _cancel_execution(
     graph_id: str,
     node_id: str,
 ) -> None:
+    request = CancelExecutionRequest(
+        principal,
+        canonical_sha256({"task_graph": graph_id, "node_id": node_id, "execution_id": execution_id}),
+    )
+    cleanup = asyncio.create_task(execution.cancel(execution_id, request))
     try:
-        await execution.cancel(
-            execution_id,
-            CancelExecutionRequest(
-                principal=principal,
-                idempotency_key=canonical_sha256(
-                    {"version": 1, "graph_id": graph_id, "node_id": node_id, "execution_id": execution_id}
-                ),
-                force=True,
-            ),
-        )
+        await asyncio.shield(cleanup)
     except BaseException:
-        _logger.error(
-            "task execution cancellation failed: graph=%s task=%s execution=%s",
+        _logger.warning(
+            "task execution cancellation cleanup failed: graph=%s task=%s execution=%s",
             graph_id,
             node_id,
             execution_id,
-            exc_info=True,
         )
-        raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
 
 
-__all__ = ["DefaultTaskService", "RuntimeTaskNodeRunner", "RuntimeWorkflowGateway"]
+__all__ = ["DefaultTaskService", "RuntimeTaskNodeRunner", "WorkflowTaskGraphLauncher"]
