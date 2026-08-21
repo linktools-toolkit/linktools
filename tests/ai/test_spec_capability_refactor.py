@@ -2,6 +2,8 @@
 # -*- coding: utf-8 -*-
 """Capability selection and immutable skill catalog contracts."""
 
+import json
+
 import pytest
 
 from linktools.ai.agent import select_platform_tool_names
@@ -12,7 +14,7 @@ from linktools.ai.capability._skill import (
     bind_skill_capability,
 )
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.spec import SkillSpec
+from linktools.ai.spec import AgentSpecCodec, SkillSpec
 
 
 def test_platform_tool_selection_keeps_planning_outside_allow_tools() -> None:
@@ -33,6 +35,21 @@ def test_platform_tool_selection_keeps_planning_outside_allow_tools() -> None:
         memory_scope=None,
         subagent_available=True,
     ) == ("delegate_task",)
+
+
+@pytest.mark.parametrize(
+    "payload",
+    (
+        {"id": 1, "revision": 1, "model": "default"},
+        {"id": "agent", "revision": True, "model": "default"},
+        {"id": "agent", "revision": "1", "model": "default"},
+        {"id": "agent", "revision": 1, "model": 1},
+    ),
+)
+def test_agent_spec_codec_rejects_type_coercion(payload: dict[str, object]) -> None:
+    with pytest.raises(AIError) as error:
+        AgentSpecCodec().decode(json.dumps(payload).encode("utf-8"))
+    assert error.value.code is ErrorCode.OUTPUT_CONTRACT_INVALID
 
 
 def test_skill_catalog_snapshot_is_sorted_and_immutable() -> None:
