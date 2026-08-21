@@ -11,13 +11,12 @@ from ._codec import (
     SkillSpecCodec,
     SpecCodec,
 )
-from ._contract import AgentSpec, AgentUsageLimits, CapabilityRef, MCPServerSpec, SkillSpec
+from ._contract import AgentSpec, AgentUsageLimits, MCPServerSpec, SkillSpec
 
 __all__ = [
     "AgentSpec",
     "AgentSpecCodec",
     "AgentUsageLimits",
-    "CapabilityRef",
     "MCPServerSpec",
     "MCPServerSpecCodec",
     "SkillMarkdownSpecAdapter",
