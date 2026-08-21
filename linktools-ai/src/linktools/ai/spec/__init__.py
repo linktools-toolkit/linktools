@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Spec DTOs, codecs and output schemas; no storage owner."""
+"""Spec DTOs and codecs; no runtime composition owner."""
 
 from ._assets import builtin_asset_bindings
 from ._codec import (
@@ -11,16 +11,18 @@ from ._codec import (
     SkillSpecCodec,
     SpecCodec,
 )
-from ._contract import (
-    AgentCapabilityRef,
-    AgentSpec,
-    AgentUsageLimits,
-    MCPServerSpec,
-    SkillSpec,
-)
+from ._contract import AgentSpec, AgentUsageLimits, MCPServerSpec, SkillSpec
 
 __all__ = [
-    "AgentCapabilityRef", "AgentSpec", "AgentSpecCodec", "MCPServerSpec", "MCPServerSpecCodec",
-    "SkillMarkdownSpecAdapter", "SkillMarkdownSpecCodec",
-    "SkillSpec", "SkillSpecCodec", "SpecCodec", "AgentUsageLimits", "builtin_asset_bindings",
+    "AgentSpec",
+    "AgentSpecCodec",
+    "AgentUsageLimits",
+    "MCPServerSpec",
+    "MCPServerSpecCodec",
+    "SkillMarkdownSpecAdapter",
+    "SkillMarkdownSpecCodec",
+    "SkillSpec",
+    "SkillSpecCodec",
+    "SpecCodec",
+    "builtin_asset_bindings",
 ]
