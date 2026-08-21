@@ -13,7 +13,7 @@ from pydantic_ai.toolsets import AbstractToolset
 from ..asset import AssetRef, AssetRepository
 from ..core import Principal, ResourceRef, canonical_sha256
 from ..errors import AIError, ErrorCode
-from ..spec import AgentCapabilityRef, MCPServerSpec
+from ..spec import MCPServerSpec
 from ._contract import CapabilityBinding, CapabilityMaterializationContext, CapabilityRefResolution, validate_fingerprint
 
 
@@ -72,38 +72,44 @@ class MCPServerCapabilityBinding:
             selected,
             principal=context.principal,
             execution=context.execution,
-            execution_root=context.execution_root,
+            execution_root=str(context.execution_root),
         )
         if len(toolsets) != len(selected) or len({toolset.id for toolset in toolsets}) != len(toolsets):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        return tuple(MCP(local=toolset.prefixed(f"mcp__{mcp_server_namespace(server.id)}_"), id=toolset.id) for server, toolset in zip(selected, toolsets))
+        return tuple(
+            MCP(
+                local=toolset.prefixed(f"mcp__{mcp_server_namespace(server.id)}__"),
+                id=toolset.id,
+            )
+            for server, toolset in zip(selected, toolsets)
+        )
 
 
 class MCPCapabilityProvider:
     provider = "mcp"
+    value_type = MCPServerSpec
 
     def __init__(self, runtime: MCPRuntime) -> None:
         self._runtime = runtime
 
-    async def bind(self, refs: "tuple[AgentCapabilityRef, ...]", *, assets: AssetRepository) -> CapabilityBinding:
-        values: list[MCPServerSpec | None] = []
+    async def bind(
+        self,
+        refs: "tuple[AssetRef, ...]",
+        *,
+        assets: AssetRepository,
+    ) -> CapabilityBinding:
+        values: list[MCPServerSpec] = []
         for ref in refs:
-            try:
-                resolved = await assets.resolve(AssetRef("mcp", ref.id))
-            except AIError as error:
-                if error.code is ErrorCode.STORAGE_NOT_FOUND and not ref.required:
-                    values.append(None)
-                    continue
-                raise
-            if not isinstance(resolved.spec, MCPServerSpec):
+            resolved = await assets.resolve(ref)
+            if type(resolved.spec) is not MCPServerSpec:
                 raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
             values.append(resolved.spec)
         return bind_mcp_capability(refs, values, self._runtime)
 
 
 def bind_mcp_capability(
-    refs: Sequence[AgentCapabilityRef],
-    servers: Sequence[MCPServerSpec | None],
+    refs: Sequence[AssetRef],
+    servers: Sequence[MCPServerSpec],
     runtime: MCPRuntime,
 ) -> MCPServerCapabilityBinding:
     if len(refs) != len(servers):
@@ -112,35 +118,71 @@ def bind_mcp_capability(
     resolutions: list[CapabilityRefResolution] = []
     resolved: list[MCPServerSpec] = []
     namespaces: set[str] = set()
+    ids: set[str] = set()
     for ref, server in zip(refs, servers):
-        if server is None:
-            if ref.required:
-                raise AIError(ErrorCode.CAPABILITY_REQUIRED_MISSING)
-            resolutions.append(CapabilityRefResolution(ref.id, ref.revision, None, False, "unresolved", None))
-            continue
-        if server.id != ref.id or ref.revision is not None and server.revision != ref.revision:
+        if server.id != ref.id:
             raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
+        if server.id in ids:
+            raise AIError(ErrorCode.CAPABILITY_CONFLICT)
+        ids.add(server.id)
         namespace = mcp_server_namespace(server.id)
         if namespace in namespaces:
             raise AIError(ErrorCode.CAPABILITY_CONFLICT)
         namespaces.add(namespace)
         resolved.append(server)
-        resolutions.append(CapabilityRefResolution(ref.id, ref.revision, server.revision, ref.required, "resolved", canonical_sha256({"id": server.id, "revision": server.revision, "command": server.command, "args": list(server.args)})))
+        resolutions.append(
+            CapabilityRefResolution(
+                ref,
+                server.revision,
+                canonical_sha256(
+                    {
+                        "id": server.id,
+                        "revision": server.revision,
+                        "command": server.command,
+                        "args": list(server.args),
+                    }
+                ),
+            )
+        )
     return MCPServerCapabilityBinding(
         tuple(resolutions),
         tuple(resolved),
         runtime,
-        canonical_sha256({"provider": "mcp", "runtime_fingerprint": runtime.fingerprint, "resolutions": [_resolution_payload(item) for item in resolutions]}),
+        canonical_sha256(
+            {
+                "provider": "mcp",
+                "runtime_fingerprint": runtime.fingerprint,
+                "resolutions": [_resolution_payload(item) for item in resolutions],
+            }
+        ),
     )
 
 
 def _server_selected(server_id: str, allow_tools: "tuple[str, ...]") -> bool:
     selector = mcp_server_selector(server_id)
-    return "*" in allow_tools or selector in allow_tools or f"{selector}__*" in allow_tools or any(item.startswith(selector + "__") for item in allow_tools)
+    return (
+        "*" in allow_tools
+        or selector in allow_tools
+        or f"{selector}__*" in allow_tools
+        or any(item.startswith(selector + "__") for item in allow_tools)
+    )
 
 
 def _resolution_payload(resolution: CapabilityRefResolution) -> dict[str, object]:
-    return {"id": resolution.id, "requested_revision": resolution.requested_revision, "resolved_revision": resolution.resolved_revision, "required": resolution.required, "status": resolution.status, "fingerprint": resolution.fingerprint}
+    return {
+        "kind": resolution.ref.kind,
+        "id": resolution.ref.id,
+        "resolved_revision": resolution.resolved_revision,
+        "fingerprint": resolution.fingerprint,
+    }
 
 
-__all__ = ["MCPRuntime", "MCPCapabilityProvider", "MCPServerCapabilityBinding", "bind_mcp_capability", "mcp_server_namespace", "mcp_server_selector", "mcp_tool_name"]
+__all__ = [
+    "MCPRuntime",
+    "MCPCapabilityProvider",
+    "MCPServerCapabilityBinding",
+    "bind_mcp_capability",
+    "mcp_server_namespace",
+    "mcp_server_selector",
+    "mcp_tool_name",
+]
