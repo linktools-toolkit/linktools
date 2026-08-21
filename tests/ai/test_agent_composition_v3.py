@@ -5,13 +5,42 @@
 from types import SimpleNamespace
 
 import pytest
+from pydantic_ai.capabilities import AbstractCapability
 
 from linktools.ai.agent import AgentBindingSnapshot
+from linktools.ai.capability import RuntimeCapability
 from linktools.ai.core import SessionStatus
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.runtime import Runtime, SessionView
 from linktools.ai.spec import AgentSpec
 from linktools.ai.workspace import trusted_workspace_principal
+
+
+class _DurableCapability(AbstractCapability[None]):
+    @classmethod
+    def get_serialization_name(cls) -> "str | None":
+        return "test-durable-capability"
+
+    @classmethod
+    def from_spec(cls, **kwargs: object) -> "_DurableCapability":
+        del kwargs
+        return cls()
+
+
+def test_runtime_capability_from_spec_requires_exact_importable_type() -> None:
+    shadow_type = type(
+        "_DurableCapability",
+        (_DurableCapability,),
+        {
+            "__module__": __name__,
+            "__qualname__": "_DurableCapability",
+        },
+    )
+
+    with pytest.raises(AIError) as error:
+        RuntimeCapability.from_spec("local", shadow_type, config={})
+
+    assert error.value.code is ErrorCode.CAPABILITY_RESOLUTION_INVALID
 
 
 def test_agent_binding_snapshot_is_deeply_immutable() -> None:
