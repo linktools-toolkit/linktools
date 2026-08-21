@@ -57,12 +57,24 @@ class AgentSpecCodec:
         )
 
     def decode(self, data: bytes) -> AgentSpec:
-        raw = _decode(data)
+        try:
+            raw = _decode(data)
+        except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as error:
+            raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID, "agent spec is invalid") from error
         if set(raw) - _AGENT_FIELDS:
             raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID, "agent spec fields are invalid")
         for required in ("id", "revision", "model"):
             if required not in raw:
                 raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID, f"agent spec requires {required}")
+        identity = raw["id"]
+        revision = raw["revision"]
+        model = raw["model"]
+        if not isinstance(identity, str) or not identity.strip():
+            raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID, "agent id must be a non-empty string")
+        if not isinstance(revision, int) or isinstance(revision, bool) or revision < 1:
+            raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID, "agent revision must be a positive integer")
+        if not isinstance(model, str) or not model.strip():
+            raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID, "agent model must be a non-empty string")
         system_prompt = raw.get("system_prompt", "")
         if not isinstance(system_prompt, str):
             raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID, "system_prompt must be a string")
@@ -74,15 +86,17 @@ class AgentSpecCodec:
             raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID, "metadata must be an object")
         try:
             return AgentSpec(
-                id=str(raw["id"]),
-                revision=int(raw["revision"]),
-                model=str(raw["model"]),
+                id=identity,
+                revision=revision,
+                model=model,
                 system_prompt=system_prompt,
                 instructions=tuple(instructions),
                 allow_tools=_strict_allowlist(raw, "allow_tools", ("*",)),
                 metadata=cast("Mapping[str, object]", metadata),
                 usage_limits=_decode_usage_limits(raw.get("usage_limits")),
             )
+        except AIError:
+            raise
         except (TypeError, ValueError) as error:
             raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID, "agent spec is invalid") from error
 
