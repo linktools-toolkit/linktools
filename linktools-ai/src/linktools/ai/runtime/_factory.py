@@ -9,7 +9,8 @@ from pathlib import Path
 from linktools.core import environ
 from pydantic_ai_harness.memory import SearchableMemoryStore
 
-from ..agent import AgentDefinitionCatalog, AgentExecutor
+from ..agent import AgentCompiler, AgentDefinitionCatalog, AgentExecutor
+from ..asset import AssetRepository
 from ..core import AuthorizationPolicy, HmacCursorSigner
 from ..errors import AIError, ErrorCode
 from ..storage import ObjectStore
@@ -26,12 +27,7 @@ from ._runtime_service import Runtime
 from ._session import DefaultSessionService
 from ._subagent import SubagentDispatcher
 from .service_api import ExecutionHistoryReader, SessionHistoryReader
-from .state import (
-    RecoveryCheckpointState,
-    RuntimeDomain,
-    RuntimeRetentionMode,
-    RuntimeState,
-)
+from .state import RecoveryCheckpointState, RuntimeDomain, RuntimeRetentionMode, RuntimeState
 
 _logger = environ.get_logger("ai.runtime.factory")
 
@@ -40,6 +36,8 @@ async def build_local_runtime(
     *,
     state: RuntimeState,
     catalog: AgentDefinitionCatalog,
+    compiler: AgentCompiler,
+    assets: AssetRepository,
     authorization: AuthorizationPolicy,
     tenant_id: str,
     namespace: str,
@@ -49,7 +47,7 @@ async def build_local_runtime(
     memory_store_factory: "Callable[[str, str, str, ObjectStore, bool], SearchableMemoryStore] | None",
     grant_key: bytes,
 ) -> Runtime:
-    if not state.ready:
+    if not state.ready or not assets.ready:
         raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
     execution = DefaultExecutionService(
         state.execution,
@@ -120,8 +118,7 @@ async def build_local_runtime(
             subagent_dispatcher=dispatcher,
             live_broker=live_broker,
             execution_objects_durable=(
-                state.plan.route(RuntimeDomain.EXECUTION).retention
-                is RuntimeRetentionMode.DURABLE
+                state.plan.route(RuntimeDomain.EXECUTION).retention is RuntimeRetentionMode.DURABLE
             ),
             tool_operations=state.recovery.tools,
         )
@@ -180,11 +177,11 @@ async def build_local_runtime(
             cursor_signer=_cursor_signer("artifact", grant_key),
         )
         local_coordinator = _LocalRuntimeCoordinator(execution, session, event, backend)
-        coordinator = _RuntimeCloseCoordinator(
-            (task_launcher.shutdown, backend.close, state.close)
-        )
+        coordinator = _RuntimeCloseCoordinator((task_launcher.shutdown, backend.close, state.close))
         runtime = Runtime(
             catalog,
+            compiler,
+            assets,
             execution,
             session,
             task,
@@ -231,11 +228,7 @@ async def _validate_recovery_definitions(
             if checkpoint.state is RecoveryCheckpointState.COMPLETED:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             try:
-                definition = (
-                    catalog.subagent_definition(checkpoint.input.agent_id)
-                    if checkpoint.input.parent_execution_id is not None
-                    else catalog.root_definition(checkpoint.input.agent_id)
-                )
+                definition = catalog.definition(checkpoint.input.binding_digest)
             except AIError as error:
                 raise AIError(
                     ErrorCode.AGENT_DEFINITION_UNAVAILABLE,
@@ -245,11 +238,6 @@ async def _validate_recovery_definitions(
                     },
                 ) from error
             if definition.spec.id != checkpoint.input.agent_id:
-                raise AIError(
-                    ErrorCode.AGENT_DEFINITION_UNAVAILABLE,
-                    safe_details={"execution_id": checkpoint.execution_id},
-                )
-            if definition.digest != checkpoint.input.binding_digest:
                 raise AIError(
                     ErrorCode.AGENT_DEFINITION_UNAVAILABLE,
                     safe_details={"execution_id": checkpoint.execution_id},
