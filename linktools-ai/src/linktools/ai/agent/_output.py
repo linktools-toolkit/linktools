@@ -58,7 +58,15 @@ class OutputBinding:
 
     @property
     def fingerprint(self) -> str:
-        return self.schema_fingerprint
+        return canonical_sha256(
+            {
+                "schema_id": self.schema_id,
+                "schema_revision": self.schema_revision,
+                "schema_fingerprint": self.schema_fingerprint,
+                "module": self.value_type.__module__,
+                "qualname": self.value_type.__qualname__,
+            }
+        )
 
     @property
     def descriptor(self) -> "dict[str, JsonValue]":
@@ -106,6 +114,8 @@ def restore_output(descriptor: Mapping[str, JsonValue]) -> OutputBinding:
     module_name = descriptor.get("module")
     qualname = descriptor.get("qualname")
     if not isinstance(module_name, str) or not isinstance(qualname, str):
+        raise AIError(ErrorCode.AGENT_DEFINITION_UNAVAILABLE)
+    if module_name == "__main__" or "<locals>" in qualname:
         raise AIError(ErrorCode.AGENT_DEFINITION_UNAVAILABLE)
     try:
         target: object = importlib.import_module(module_name)
