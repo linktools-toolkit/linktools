@@ -34,6 +34,7 @@ from ..capability import (
     MCPCapabilityProvider,
     RuntimeCapability,
     SkillCapabilityProvider,
+    SubagentCapabilityProvider,
     validate_fingerprint,
 )
 from ..core import HmacCursorSigner, TenantAuthorizationPolicy, canonical_sha256, validate_tenant_id
@@ -110,6 +111,7 @@ def _build_providers(
     providers: Sequence[CapabilityProvider],
 ) -> "tuple[CapabilityProvider, ...]":
     selected: dict[str, CapabilityProvider] = {
+        "agent": SubagentCapabilityProvider(),
         "skill": SkillCapabilityProvider(),
         "mcp": MCPCapabilityProvider(PydanticMCPRuntime()),
     }
@@ -118,7 +120,7 @@ def _build_providers(
         name = provider.provider
         if not isinstance(name, str) or not name.strip() or name == "runtime" or name in custom_names:
             raise AIError(ErrorCode.CAPABILITY_CONFLICT)
-        if not isinstance(provider.value_type, type) or provider.value_type is AgentSpec:
+        if not isinstance(provider.value_type, type):
             raise AIError(ErrorCode.CAPABILITY_CONFLICT)
         custom_names.add(name)
         previous = selected.get(name)
