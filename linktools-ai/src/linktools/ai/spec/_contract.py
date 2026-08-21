@@ -8,7 +8,13 @@ from collections.abc import Iterator, Mapping
 from dataclasses import dataclass, field
 from typing import cast
 
-from ..core import JsonValue, canonical_json_bytes, canonical_string_tuple
+from ..core import (
+    JsonValue,
+    canonical_json_bytes,
+    canonical_string_tuple,
+    validate_capability_provider,
+)
+from ..errors import AIError, ErrorCode
 
 
 @dataclass(frozen=True, slots=True)
@@ -85,6 +91,31 @@ def _normalize_value(value: object) -> JsonValue:
 
 
 @dataclass(frozen=True, slots=True)
+class CapabilityRef:
+    """Select a logical capability family or one resource within that family."""
+
+    provider: str
+    id: "str | None" = None
+    revision: "int | None" = None
+    required: bool = True
+
+    def __post_init__(self) -> None:
+        validate_capability_provider(self.provider)
+        if self.id is not None and (not isinstance(self.id, str) or not self.id.strip()):
+            raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
+        if self.revision is not None and (
+            not isinstance(self.revision, int)
+            or isinstance(self.revision, bool)
+            or self.revision < 1
+        ):
+            raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
+        if self.id is None and self.revision is not None:
+            raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
+        if not isinstance(self.required, bool):
+            raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
+
+
+@dataclass(frozen=True, slots=True)
 class AgentSpec:
     """Durable, runtime-independent declaration of one Agent."""
 
@@ -97,6 +128,7 @@ class AgentSpec:
     allow_skills: "tuple[str, ...]" = ("*",)
     metadata: "Mapping[str, JsonValue]" = field(default_factory=dict)
     usage_limits: "AgentUsageLimits | None" = None
+    capabilities: "tuple[CapabilityRef, ...]" = ()
 
     def __post_init__(self) -> None:
         if not isinstance(self.id, str) or not self.id.strip():
@@ -110,10 +142,29 @@ class AgentSpec:
         instructions = tuple(self.instructions)
         if any(not isinstance(item, str) for item in instructions):
             raise ValueError("agent instructions must be strings")
+        capabilities = tuple(self.capabilities)
+        if any(not isinstance(item, CapabilityRef) for item in capabilities):
+            raise TypeError("agent capabilities must contain CapabilityRef values")
+        seen: set[tuple[str, str | None]] = set()
+        providers: set[str] = set()
+        aggregate: set[str] = set()
+        for capability in capabilities:
+            key = capability.provider, capability.id
+            if key in seen:
+                raise AIError(ErrorCode.CAPABILITY_CONFLICT)
+            if capability.id is None:
+                if capability.provider in providers:
+                    raise AIError(ErrorCode.CAPABILITY_CONFLICT)
+                aggregate.add(capability.provider)
+            elif capability.provider in aggregate:
+                raise AIError(ErrorCode.CAPABILITY_CONFLICT)
+            seen.add(key)
+            providers.add(capability.provider)
         object.__setattr__(self, "instructions", instructions)
         object.__setattr__(self, "allow_tools", canonical_string_tuple(self.allow_tools, field="allow_tools"))
         object.__setattr__(self, "allow_skills", canonical_string_tuple(self.allow_skills, field="allow_skills"))
         object.__setattr__(self, "metadata", _ImmutableJsonMapping(self.metadata))
+        object.__setattr__(self, "capabilities", capabilities)
 
 
 @dataclass(frozen=True, slots=True)
@@ -140,4 +191,4 @@ class MCPServerSpec:
         object.__setattr__(self, "args", tuple(self.args))
 
 
-__all__ = ["AgentSpec", "AgentUsageLimits", "MCPServerSpec", "SkillSpec"]
+__all__ = ["AgentSpec", "AgentUsageLimits", "CapabilityRef", "MCPServerSpec", "SkillSpec"]
