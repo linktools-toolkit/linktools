@@ -55,6 +55,19 @@ WORKSPACE_FILESYSTEM_READ_TOOL_NAMES = (
 )
 WORKSPACE_SHELL_TOOL_NAMES = ("check_command", "run_command", "start_command", "stop_command")
 PLAN_SAFE_METADATA_KEY = "linktools.ai.plan_safe"
+_FILESYSTEM_MUTATION_TOOL_NAMES = frozenset(
+    {
+        "create_directory",
+        "edit_file",
+        "write_file",
+        "delete_file",
+        "delete_directory",
+        "move_file",
+        "move_directory",
+        "rename_file",
+        "rename_directory",
+    }
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -132,7 +145,6 @@ class _RuntimeStepPersistence(StepPersistence[None]):
         tool_operations: ToolOperationBridge,
         planning: bool = False,
         control_tool_names: "frozenset[str]" = frozenset(),
-        plan_safe_tool_names: "frozenset[str]" = frozenset(),
         **kwargs: Any,
     ) -> None:
         if not isinstance(planning, bool):
@@ -141,7 +153,6 @@ class _RuntimeStepPersistence(StepPersistence[None]):
         self._tool_operations = tool_operations
         self._planning = planning
         self._control_tool_names = control_tool_names
-        self._plan_safe_tool_names = plan_safe_tool_names
         self._calls: dict[tuple[str, str], _ToolCallState] = {}
 
     async def before_tool_execute(
@@ -155,7 +166,6 @@ class _RuntimeStepPersistence(StepPersistence[None]):
         if self._planning and not tool_allowed_in_planning(
             tool_def,
             control_tool_names=self._control_tool_names,
-            plan_safe_tool_names=self._plan_safe_tool_names,
         ):
             raise AIError(
                 ErrorCode.CAPABILITY_POLICY_CONFLICT,
@@ -439,7 +449,6 @@ class AgentRunScope:
     platform_tool_names: "tuple[str, ...]" = ()
     planning: bool = False
     control_tool_names: "frozenset[str]" = frozenset()
-    plan_safe_tool_names: "frozenset[str]" = frozenset()
     context_target_tokens: "int | None" = None
     parent_step_run_id: "str | None" = None
     subagent_delegate: "SubagentDelegate | None" = None
@@ -463,7 +472,6 @@ async def compose_platform_capabilities(
             tool_operations=scope.tool_operations or _MissingToolOperationBridge(),
             planning=scope.planning,
             control_tool_names=scope.control_tool_names,
-            plan_safe_tool_names=scope.plan_safe_tool_names,
             store=scope.step_store,
             agent_name=scope.agent_name,
             run_id=scope.step_run_id,
@@ -528,10 +536,18 @@ def tool_allowed_in_planning(
     tool_def: ToolDefinition,
     *,
     control_tool_names: "frozenset[str]",
-    plan_safe_tool_names: "frozenset[str]",
 ) -> bool:
-    if tool_def.name in control_tool_names or tool_def.name in plan_safe_tool_names:
+    name = tool_def.name
+    if name in control_tool_names:
         return True
+    if name.startswith("mcp__") or name in WORKSPACE_SHELL_TOOL_NAMES:
+        return False
+    if name in _FILESYSTEM_MUTATION_TOOL_NAMES:
+        return False
+    if name in WORKSPACE_FILESYSTEM_READ_TOOL_NAMES:
+        return True
+    if name in MEMORY_TOOL_NAMES:
+        return name in MEMORY_READ_TOOL_NAMES
     metadata = tool_def.metadata or {}
     value = metadata.get(PLAN_SAFE_METADATA_KEY)
     if value is None:
