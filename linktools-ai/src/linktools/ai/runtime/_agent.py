@@ -18,7 +18,6 @@ from .service_api import (
 )
 
 if TYPE_CHECKING:
-    from ..agent import AgentDefinition
     from ..task import TaskNode
     from ._runtime_service import Runtime
 
@@ -30,9 +29,6 @@ class AgentHandle:
     binding_digest: str
     planning: bool = False
     thinking: bool = False
-
-    async def compile(self) -> "AgentDefinition":
-        return self._runtime._definition(self.binding_digest)
 
     async def start(
         self,
