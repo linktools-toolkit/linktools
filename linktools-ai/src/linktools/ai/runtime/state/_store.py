@@ -8,6 +8,7 @@ small physical contract shared by memory, filesystem, and SQL stores.
 
 import asyncio
 import hashlib
+import math
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from contextvars import ContextVar, Token
 from dataclasses import dataclass
@@ -200,6 +201,76 @@ def _require_digest(value: bytes, name: str) -> bytes:
     return value
 
 
+def _require_nonnegative_int(value: object, name: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise TypeError(f"{name} must be an integer")
+    if value < 0:
+        raise ValueError(f"{name} must be non-negative")
+    return value
+
+
+def _require_optional_string(value: object, name: str) -> str | None:
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise TypeError(f"{name} must be a string or None")
+    return value
+
+
+def _require_state(value: object, name: str, *, optional: bool) -> str | None:
+    if value is None:
+        if optional:
+            return None
+        raise TypeError(f"{name} must be a string")
+    if not isinstance(value, str):
+        raise TypeError(f"{name} must be a string")
+    if not optional and not value:
+        raise ValueError(f"{name} is required")
+    if len(value) > 64:
+        raise ValueError(f"{name} must contain at most 64 characters")
+    return value
+
+
+def _require_optional_aware_datetime(value: object, name: str) -> datetime | None:
+    if value is None:
+        return None
+    if not isinstance(value, datetime):
+        raise TypeError(f"{name} must be a datetime or None")
+    if value.tzinfo is None:
+        raise ValueError(f"{name} must be timezone-aware")
+    return value
+
+
+def _require_json_value(value: object, name: str) -> None:
+    if value is None or isinstance(value, (str, bool, int)):
+        return
+    if isinstance(value, float):
+        if not math.isfinite(value):
+            raise ValueError(f"{name} contains a non-finite float")
+        return
+    if isinstance(value, list):
+        for index, item in enumerate(value):
+            _require_json_value(item, f"{name}[{index}]")
+        return
+    if isinstance(value, dict):
+        for key, item in value.items():
+            if not isinstance(key, str):
+                raise TypeError(f"{name} contains a non-string object key")
+            _require_json_value(item, f"{name}.{key}")
+        return
+    raise TypeError(f"{name} contains a non-JSON value")
+
+
+def _require_data_mapping(value: object, name: str) -> Mapping[str, JsonValue]:
+    if not isinstance(value, Mapping):
+        raise TypeError(f"{name} must be a mapping")
+    for key, item in value.items():
+        if not isinstance(key, str):
+            raise TypeError(f"{name} contains a non-string object key")
+        _require_json_value(item, f"{name}.{key}")
+    return value
+
+
 @dataclass(frozen=True, slots=True)
 class StoredRecord:
     """Current mutable state of one logical resource."""
@@ -234,14 +305,12 @@ class StoredRecord:
             or self.sort_key.isascii() is False
         ):
             raise ValueError("record sort_key must contain 1..128 ASCII characters")
-        if not isinstance(self.storage_version, int) or self.storage_version < 0:
-            raise ValueError("storage_version must be non-negative")
-        if not isinstance(self.lease_fence, int) or self.lease_fence < 0:
-            raise ValueError("lease_fence must be non-negative")
-        if self.lease_expires_at is not None and self.lease_expires_at.tzinfo is None:
-            raise ValueError("lease_expires_at must be timezone-aware")
-        if not isinstance(self.data, Mapping):
-            raise TypeError("record data must be a mapping")
+        _require_state(self.state, "record state", optional=True)
+        _require_nonnegative_int(self.storage_version, "storage_version")
+        _require_optional_string(self.lease_owner, "lease_owner")
+        _require_nonnegative_int(self.lease_fence, "lease_fence")
+        _require_optional_aware_datetime(self.lease_expires_at, "lease_expires_at")
+        _require_data_mapping(self.data, "record data")
 
 
 @dataclass(frozen=True, slots=True)
@@ -269,10 +338,11 @@ class StoredFact:
         _require_digest(self.owner_key_digest, "owner_key_digest")
         if self.subject_digest is not None:
             _require_digest(self.subject_digest, "subject_digest")
-        if not isinstance(self.sequence, int) or self.sequence < 0:
-            raise ValueError("fact sequence must be non-negative")
+        _require_nonnegative_int(self.sequence, "fact sequence")
         if not isinstance(self.kind, str) or not 0 < len(self.kind) <= 32:
             raise ValueError("fact kind must contain at most 32 characters")
+        _require_state(self.state, "fact state", optional=True)
+        _require_data_mapping(self.data, "fact data")
 
 
 @dataclass(frozen=True, slots=True)
@@ -287,10 +357,11 @@ class StoredOperation:
     def __post_init__(self) -> None:
         _require_digest(self.key_digest, "key_digest")
         _require_digest(self.stream_digest, "stream_digest")
-        if not isinstance(self.sequence, int) or self.sequence < 0:
-            raise ValueError("operation sequence must be non-negative")
-        if not isinstance(self.state, str) or not self.state:
-            raise ValueError("operation state is required")
+        _require_nonnegative_int(self.sequence, "operation sequence")
+        _require_state(self.state, "operation state", optional=False)
+        if not isinstance(self.compactable, bool):
+            raise TypeError("operation compactable must be a bool")
+        _require_data_mapping(self.data, "operation data")
 
 
 @dataclass(frozen=True, slots=True)
@@ -333,8 +404,7 @@ class Observed(Generic[ValueT]):
     storage_version: int
 
     def __post_init__(self) -> None:
-        if not isinstance(self.storage_version, int) or self.storage_version < 0:
-            raise ValueError("storage_version must be non-negative")
+        _require_nonnegative_int(self.storage_version, "storage_version")
 
 
 @dataclass(frozen=True, slots=True)
@@ -343,8 +413,7 @@ class RecordReplacement:
     expected_storage_version: int
 
     def __post_init__(self) -> None:
-        if self.expected_storage_version < 0:
-            raise ValueError("expected_storage_version must be non-negative")
+        _require_nonnegative_int(self.expected_storage_version, "expected_storage_version")
 
 
 @dataclass(frozen=True, slots=True)
@@ -376,8 +445,10 @@ class RecordQuery:
                 or any(character in self.kind for character in "/\\")
             ):
                 raise ValueError("record kind contains a path separator")
-        if self.after_sort_key is not None and self.after_key_digest is None:
-            raise ValueError("after_key_digest is required with after_sort_key")
+        if (self.after_sort_key is None) != (self.after_key_digest is None):
+            raise ValueError("record cursor requires both sort key and key digest")
+        if self.after_sort_key is not None:
+            encode_sort_key(self.after_sort_key)
         if self.after_key_digest is not None:
             _require_digest(self.after_key_digest, "after_key_digest")
         _validate_limit(self.limit)
@@ -394,10 +465,12 @@ class FactQuery:
 
     def __post_init__(self) -> None:
         _require_digest(self.stream_digest, "stream_digest")
-        if self.after_sequence is not None and self.after_sequence < 0:
-            raise ValueError("after_sequence must be non-negative")
+        if self.after_sequence is not None:
+            _require_nonnegative_int(self.after_sequence, "after_sequence")
         if self.subject_digest is not None:
             _require_digest(self.subject_digest, "subject_digest")
+        if not isinstance(self.latest, bool) or not isinstance(self.latest_per_subject, bool):
+            raise TypeError("latest flags must be bool values")
         if self.latest and self.latest_per_subject:
             raise ValueError("latest and latest_per_subject cannot both be true")
         if self.latest_per_subject and self.subject_digest is not None:
@@ -416,8 +489,8 @@ class OperationQuery:
     def __post_init__(self) -> None:
         if self.stream_digest is not None:
             _require_digest(self.stream_digest, "stream_digest")
-        if self.through_sequence is not None and self.through_sequence < 0:
-            raise ValueError("through_sequence must be non-negative")
+        if self.through_sequence is not None:
+            _require_nonnegative_int(self.through_sequence, "through_sequence")
         if self.compactable is not None and not isinstance(self.compactable, bool):
             raise TypeError("compactable must be a bool or None")
         _validate_limit(self.limit)
@@ -872,7 +945,9 @@ def validate_operation_replacement(
 
 
 def _validate_limit(limit: int | None) -> None:
-    if limit is not None and (not isinstance(limit, int) or not 0 < limit <= 1000):
+    if limit is None:
+        return
+    if isinstance(limit, bool) or not isinstance(limit, int) or not 0 < limit <= 1000:
         raise ValueError("limit must be between 1 and 1000")
 
 

@@ -289,11 +289,18 @@ class SqlStateStore:
             aliases = transaction._table("ai_state_aliases")
             facts = transaction._table("ai_state_facts")
             sequences = transaction._table("ai_state_sequences")
-            invalid_sequence = await session.scalar(
-                select(sequences.c.id)
-                .where(sequences.c.value < 0)
-                .limit(1)
-            )
+            sequence_rows = (
+                await session.execute(select(sequences.c.key_digest, sequences.c.value))
+            ).mappings().all()
+            for row in sequence_rows:
+                _row_digest(row["key_digest"])
+                _row_nonnegative_int(row["value"])
+            alias_rows = (
+                await session.execute(select(aliases.c.alias_digest, aliases.c.record_key_digest))
+            ).mappings().all()
+            for row in alias_rows:
+                _row_digest(row["alias_digest"])
+                _row_digest(row["record_key_digest"])
             orphan_alias = await session.scalar(
                 select(aliases.c.id)
                 .select_from(
@@ -317,8 +324,7 @@ class SqlStateStore:
                 .limit(1)
             )
             if (
-                invalid_sequence is not None
-                or orphan_alias is not None
+                orphan_alias is not None
                 or orphan_fact is not None
             ):
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -463,6 +469,12 @@ class _SqlTransaction:
         *,
         expected_storage_version: int,
     ) -> StoredRecord | None:
+        if (
+            isinstance(expected_storage_version, bool)
+            or not isinstance(expected_storage_version, int)
+            or expected_storage_version < 0
+        ):
+            raise ValueError("expected_storage_version must be a non-negative integer")
         if key in self._guarded_record_keys:
             return await self.get_record(key)
         current = await self.get_record(key)
@@ -556,7 +568,16 @@ class _SqlTransaction:
     ) -> bool:
         from sqlalchemy import func, update
 
-        if lease_fence < 0 or lease_expires_at is not None and lease_expires_at.tzinfo is None:
+        if (
+            isinstance(expected_storage_version, bool)
+            or not isinstance(expected_storage_version, int)
+            or expected_storage_version < 0
+            or isinstance(lease_fence, bool)
+            or not isinstance(lease_fence, int)
+            or lease_fence < 0
+        ):
+            raise ValueError("record lease integer fields are invalid")
+        if lease_expires_at is not None and lease_expires_at.tzinfo is None:
             raise ValueError("record lease is invalid")
         table = self._table("ai_state_records")
         result = await self._session.execute(
@@ -587,6 +608,12 @@ class _SqlTransaction:
         return result.rowcount == 1
 
     async def delete_record(self, key: bytes, *, expected_storage_version: int | None = None) -> bool:
+        if expected_storage_version is not None and (
+            isinstance(expected_storage_version, bool)
+            or not isinstance(expected_storage_version, int)
+            or expected_storage_version < 0
+        ):
+            raise ValueError("expected_storage_version must be a non-negative integer or None")
         from sqlalchemy import delete
 
         current = await self.get_record(key)
@@ -729,7 +756,7 @@ class _SqlTransaction:
             if any(row["id"] is None for row in rows):
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             values = {
-                bytes.fromhex(str(row["alias_digest"])): _hex_or_none(row["record_key_digest"])
+                _row_digest(row["alias_digest"]): _row_digest(row["record_key_digest"])
                 for row in rows
             }
             self._alias_cache.update(values)
@@ -804,7 +831,10 @@ class _SqlTransaction:
                 .all()
             )
             self._sequence_cache.update(
-                {bytes.fromhex(str(row["key_digest"])): int(row["value"]) for row in rows}
+                {
+                    _row_digest(row["key_digest"]): _row_nonnegative_int(row["value"])
+                    for row in rows
+                }
             )
             for key in missing:
                 self._sequence_cache.setdefault(key, 0)
@@ -817,8 +847,11 @@ class _SqlTransaction:
         return (await self.reserve_sequences({key: count}))[key]
 
     async def reserve_sequences(self, requests: Mapping[bytes, int]) -> Mapping[bytes, int]:
-        if any(count < 1 for count in requests.values()):
-            raise ValueError("sequence reservation count must be positive")
+        if any(
+            isinstance(count, bool) or not isinstance(count, int) or count < 1
+            for count in requests.values()
+        ):
+            raise ValueError("sequence reservation count must be a positive integer")
         if not requests:
             return {}
         table = self._table("ai_state_sequences")
@@ -833,11 +866,16 @@ class _SqlTransaction:
             column="value",
             index_elements=("key_digest",),
         )
-        result = {bytes.fromhex(key): int(value) for key, value in values.items()}
+        result = {
+            _row_digest(key): _row_nonnegative_int(value)
+            for key, value in values.items()
+        }
         self._sequence_cache.update(result)
         return {key: result[key] for key in requests}
 
     async def advance_sequence(self, key: bytes, expected: int) -> int:
+        if isinstance(expected, bool) or not isinstance(expected, int) or expected < 0:
+            raise ValueError("expected sequence must be a non-negative integer")
         from sqlalchemy import func, update
 
         table = self._table("ai_state_sequences")
@@ -1121,26 +1159,27 @@ def _record_replacement_values(replacement: RecordReplacement) -> dict[str, obje
 
 
 def _record_from_row(row: Mapping[str, object]) -> StoredRecord:
-    record = StoredRecord(
-        bytes.fromhex(str(row["key_digest"])),
-        bytes.fromhex(str(row["partition_digest"])),
-        _hex_or_none(row["scope_digest"]),
-        _hex_or_none(row["parent_digest"]),
-        str(row["kind"]),
-        str(row["sort_key"]),
-        None if row["state"] is None else str(row["state"]),
-        int(row["storage_version"]),
-        None if row["lease_owner"] is None else str(row["lease_owner"]),
-        int(row["lease_fence"]),
-        _datetime_or_none(row["lease_expires_at"]),
-        dict(row["payload_json"]),
-    )
     try:
+        record = StoredRecord(
+            _row_digest(row["key_digest"]),
+            _row_digest(row["partition_digest"]),
+            _row_digest_or_none(row["scope_digest"]),
+            _row_digest_or_none(row["parent_digest"]),
+            _row_string(row["kind"]),
+            _row_string(row["sort_key"]),
+            _row_optional_string(row["state"]),
+            _row_nonnegative_int(row["storage_version"]),
+            _row_optional_string(row["lease_owner"]),
+            _row_nonnegative_int(row["lease_fence"]),
+            _datetime_or_none(row["lease_expires_at"]),
+            _row_mapping(row["payload_json"]),
+        )
         validate_record_identity(record)
-    except ValueError as error:
+    except AIError:
+        raise
+    except (TypeError, ValueError, KeyError) as error:
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
     return record
-
 
 def _fact_values(fact: StoredFact) -> dict[str, object]:
     return {
@@ -1155,15 +1194,20 @@ def _fact_values(fact: StoredFact) -> dict[str, object]:
 
 
 def _fact_from_row(row: Mapping[str, object]) -> StoredFact:
-    return StoredFact(
-        bytes.fromhex(str(row["stream_digest"])),
-        int(row["sequence"]),
-        bytes.fromhex(str(row["owner_key_digest"])),
-        str(row["kind"]),
-        _hex_or_none(row["subject_digest"]),
-        None if row["state"] is None else str(row["state"]),
-        dict(row["payload_json"]),
-    )
+    try:
+        return StoredFact(
+            _row_digest(row["stream_digest"]),
+            _row_nonnegative_int(row["sequence"]),
+            _row_digest(row["owner_key_digest"]),
+            _row_string(row["kind"]),
+            _row_digest_or_none(row["subject_digest"]),
+            _row_optional_string(row["state"]),
+            _row_mapping(row["payload_json"]),
+        )
+    except AIError:
+        raise
+    except (TypeError, ValueError, KeyError) as error:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
 
 
 def _operation_values(value: StoredOperation, *, updating: bool = False) -> dict[str, object]:
@@ -1183,14 +1227,19 @@ def _operation_values(value: StoredOperation, *, updating: bool = False) -> dict
 
 
 def _operation_from_row(row: Mapping[str, object]) -> StoredOperation:
-    return StoredOperation(
-        bytes.fromhex(str(row["key_digest"])),
-        bytes.fromhex(str(row["stream_digest"])),
-        int(row["sequence"]),
-        str(row["state"]),
-        bool(row["compactable"]),
-        dict(row["payload_json"]),
-    )
+    try:
+        return StoredOperation(
+            _row_digest(row["key_digest"]),
+            _row_digest(row["stream_digest"]),
+            _row_nonnegative_int(row["sequence"]),
+            _row_string(row["state"]),
+            _row_bool(row["compactable"]),
+            _row_mapping(row["payload_json"]),
+        )
+    except AIError:
+        raise
+    except (TypeError, ValueError, KeyError) as error:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
 
 
 def _hex(value: bytes) -> str:
@@ -1199,22 +1248,58 @@ def _hex(value: bytes) -> str:
     return value.hex()
 
 
-def _hex_or_none(value: object) -> bytes | None:
-    if value is None:
-        return None
-    if not isinstance(value, str) or len(value) != 64:
+def _row_digest(value: object) -> bytes:
+    if not isinstance(value, str):
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     try:
-        return bytes.fromhex(value)
+        result = bytes.fromhex(value)
     except ValueError as error:
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
+    if len(result) != 32 or result.hex() != value:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    return result
+
+
+def _row_digest_or_none(value: object) -> bytes | None:
+    return None if value is None else _row_digest(value)
+
+
+def _row_nonnegative_int(value: object) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    return value
+
+
+def _row_string(value: object) -> str:
+    if not isinstance(value, str):
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    return value
+
+
+def _row_optional_string(value: object) -> str | None:
+    return None if value is None else _row_string(value)
+
+
+def _row_bool(value: object) -> bool:
+    if not isinstance(value, bool):
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    return value
+
+
+def _row_mapping(value: object) -> dict[str, object]:
+    if not isinstance(value, Mapping):
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    return dict(value)
 
 
 def _datetime_or_none(value: object) -> datetime | None:
     if value is None:
         return None
     if isinstance(value, str):
-        value = datetime.fromisoformat(value)
+        try:
+            value = datetime.fromisoformat(value)
+        except ValueError as error:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
     if not isinstance(value, datetime):
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     return value if value.tzinfo is not None else value.replace(tzinfo=timezone.utc)
