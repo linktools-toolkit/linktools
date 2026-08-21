@@ -84,10 +84,15 @@ class _RuntimeTaskOperation:
             if error.retryable:
                 raise
             return await self._fail_prepare(request, node, lease, error)
+        binding = node.input.get("binding")
+        if not isinstance(binding, Mapping):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         request_ref = await put_execution_request(
             self._request_store,
             self._request_keys,
             execution_request,
+            binding_digest=binding_digest,
+            binding=binding,
         )
         operation_id = canonical_sha256(
             {
@@ -198,7 +203,9 @@ class _RuntimeTaskOperation:
                     lease,
                     tenant_id=request.tenant_id,
                     error_code=ErrorCode.EXECUTION_FAILED.value,
-                    error_digest=canonical_sha256({"type": "ExecutionResult", "code": result.status}),
+                    error_digest=canonical_sha256(
+                        {"type": "ExecutionResult", "code": result.status}
+                    ),
                 )
             except AIError as error:
                 if error.code is not ErrorCode.TASK_FENCE_STALE:
@@ -216,7 +223,11 @@ class _RuntimeTaskOperation:
             tenant_id=request.tenant_id,
         )
         updated = await self._read_node(request, node, reconcile=False)
-        expected_status = TaskStatus.SUCCEEDED if result.status == "SUCCEEDED" else TaskStatus.FAILED
+        expected_status = (
+            TaskStatus.SUCCEEDED
+            if result.status == "SUCCEEDED"
+            else TaskStatus.FAILED
+        )
         if updated.status is not expected_status:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         return updated
@@ -288,7 +299,9 @@ class _RuntimeTaskOperation:
         lease: TaskLease,
         error: AIError,
     ) -> TaskNodeView:
-        error_digest = canonical_sha256({"type": type(error).__name__, "code": error.code.value})
+        error_digest = canonical_sha256(
+            {"type": type(error).__name__, "code": error.code.value}
+        )
         await self._repository.fail(
             lease,
             tenant_id=request.tenant_id,
@@ -341,10 +354,13 @@ class _RuntimeTaskOperation:
             current.execution_id,
             principal=principal,
         )
-        if node_result.execution_id != current.execution_id or node_result.result_digest != current.result_digest:
+        if (
+            node_result.execution_id != current.execution_id
+            or node_result.result_digest != current.result_digest
+        ):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
 
-    async def _load_request(self, request: TaskWorkflowInput):
+    async def _load_request(self, request: TaskWorkflowInput) -> object:
         stored = await read_task_request(
             self._request_store,
             self._request_keys,
@@ -379,7 +395,8 @@ class _RuntimeTaskOperation:
                 lease_seconds=_LEASE_SECONDS,
             )
         if current.status is TaskStatus.RUNNING and (
-            current.lease_expires_at is not None and current.lease_expires_at <= now
+            current.lease_expires_at is not None
+            and current.lease_expires_at <= now
         ):
             return await self._repository.claim(
                 request.graph_id,
@@ -412,7 +429,9 @@ def _find_node(nodes: tuple[TaskNode, ...], node_id: str) -> TaskNode:
     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
 
 
-def _find_node_view(nodes: tuple[TaskNodeView, ...], node_id: str) -> TaskNodeView:
+def _find_node_view(
+    nodes: tuple[TaskNodeView, ...], node_id: str
+) -> TaskNodeView:
     for node in nodes:
         if node.node_id == node_id:
             return node
@@ -424,7 +443,11 @@ def _validate_node_view(
     node: TaskNode,
     graph_id: str,
 ) -> None:
-    if current.graph_id != graph_id or current.node_id != node.node_id or current.dependencies != node.dependencies:
+    if (
+        current.graph_id != graph_id
+        or current.node_id != node.node_id
+        or current.dependencies != node.dependencies
+    ):
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     _validate_node_view_shape(current)
 
@@ -505,11 +528,17 @@ def _validate_node_view_shape(current: TaskNodeView) -> None:
 
 
 def _is_digest(value: "str | None") -> bool:
-    return value is not None and re.fullmatch(r"[0-9a-f]{64}", value) is not None
+    return (
+        value is not None
+        and re.fullmatch(r"[0-9a-f]{64}", value) is not None
+    )
 
 
 def _lease_is_active(current: TaskNodeView) -> bool:
-    return current.lease_expires_at is not None and current.lease_expires_at > datetime.now(timezone.utc)
+    return (
+        current.lease_expires_at is not None
+        and current.lease_expires_at > datetime.now(timezone.utc)
+    )
 
 
 def _task_owner(
