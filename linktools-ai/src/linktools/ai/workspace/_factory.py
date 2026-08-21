@@ -4,7 +4,7 @@
 
 import hashlib
 import os
-from collections.abc import AsyncIterator, Sequence
+from collections.abc import AsyncIterator, Mapping, Sequence
 from contextlib import asynccontextmanager
 
 from linktools.core import environ
@@ -18,6 +18,7 @@ from ..adapter import (
 from ..agent import AgentCompiler, AgentDefinition, AgentDefinitionCatalog
 from ..asset import (
     AssetDiscoveryStatus,
+    AssetPathAdapter,
     AssetRepository,
     AssetStore,
     AssetTypeBinding,
@@ -39,12 +40,7 @@ from ..core import HmacCursorSigner, TenantAuthorizationPolicy, canonical_sha256
 from ..errors import AIError, ErrorCode
 from ..model import ModelRegistry
 from ..runtime import Runtime, RuntimeState, build_local_runtime
-from ..runtime.state import (
-    ExecutionReadModelRepository,
-    RuntimeDomain,
-    RuntimeStatePlan,
-    RuntimeStateRoute,
-)
+from ..runtime.state import ExecutionReadModelRepository, RuntimeDomain, RuntimeStatePlan, RuntimeStateRoute
 from ..spec import AgentSpec, builtin_asset_bindings
 from ..storage import ObjectStore, StorageLayer, StorageOverlay
 from ._root import Workspace
@@ -77,18 +73,16 @@ async def _build_asset_repository(
     *,
     asset: AssetStore | None,
     snapshot: AssetTypeRegistrySnapshot,
+    path_adapter: "AssetPathAdapter | None",
 ) -> AssetRepository:
     if asset is None:
-        prefixes = {
-            "agent": "agents",
-            "skill": "skills",
-            **{
-                kind: kind
-                for kind in snapshot.kinds
-                if kind not in {"agent", "skill"}
-            },
-        }
-        path_adapter = PrefixAssetPathAdapter(prefixes)
+        if path_adapter is None:
+            prefixes = {
+                "agent": "agents",
+                "skill": "skills",
+                **{kind: kind for kind in snapshot.kinds if kind not in {"agent", "skill"}},
+            }
+            path_adapter = PrefixAssetPathAdapter(prefixes)
         path_adapter.validate(snapshot.kinds)
         source = DirectoryAssetBackend(
             str(workspace.storage_root),
@@ -104,8 +98,11 @@ async def _build_asset_repository(
             )
         )
         await asset.initialize()
-    elif not asset.ready:
-        raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+    else:
+        if path_adapter is not None:
+            raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+        if not asset.ready:
+            raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
     return AssetRepository(asset, snapshot)
 
 
@@ -141,8 +138,8 @@ async def _bind_asset_capabilities(
     assets: AssetRepository,
     snapshot: AssetTypeRegistrySnapshot,
     providers: Sequence[CapabilityProvider],
-) -> "tuple[CapabilityBinding, ...]":
-    bindings: list[CapabilityBinding] = []
+) -> "dict[str, CapabilityBinding]":
+    bindings: dict[str, CapabilityBinding] = {}
     for provider in providers:
         refs = []
         for kind in sorted(snapshot.kinds):
@@ -160,20 +157,13 @@ async def _bind_asset_capabilities(
         if capability.provider != provider.provider:
             raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
         validate_fingerprint(capability.fingerprint)
-        bindings.append(capability)
-    identities = tuple((binding.provider, binding.id) for binding in bindings)
-    if len(identities) != len(set(identities)):
-        raise AIError(ErrorCode.CAPABILITY_CONFLICT)
-    return tuple(bindings)
+        bindings[provider.provider] = capability
+    return bindings
 
 
 def _build_default_models(workspace: Workspace) -> ModelRegistry:
     configured = workspace.config.get("model")
-    model = (
-        configured.strip()
-        if isinstance(configured, str) and configured.strip()
-        else os.getenv("OPENAI_MODEL", "").strip()
-    )
+    model = configured.strip() if isinstance(configured, str) and configured.strip() else os.getenv("OPENAI_MODEL", "").strip()
     if not model:
         raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY, "model is required")
     base_url = os.getenv("OPENAI_BASE_URL", "").strip() or None
@@ -184,18 +174,9 @@ def _build_default_models(workspace: Workspace) -> ModelRegistry:
 def _default_runtime_state(workspace: Workspace) -> RuntimeState:
     runtime_root = workspace.storage_root / "runtime"
     plan = RuntimeStatePlan(
-        conversation=RuntimeStateRoute.filesystem(
-            runtime_root / "conversation",
-            transaction_root=runtime_root,
-        ),
-        execution=RuntimeStateRoute.filesystem(
-            runtime_root / "execution",
-            transaction_root=runtime_root,
-        ),
-        recovery=RuntimeStateRoute.filesystem(
-            runtime_root / "recovery",
-            transaction_root=runtime_root,
-        ),
+        conversation=RuntimeStateRoute.filesystem(runtime_root / "conversation", transaction_root=runtime_root),
+        execution=RuntimeStateRoute.filesystem(runtime_root / "execution", transaction_root=runtime_root),
+        recovery=RuntimeStateRoute.filesystem(runtime_root / "recovery", transaction_root=runtime_root),
     )
     return RuntimeState.from_plan(plan)
 
@@ -206,9 +187,10 @@ async def open_workspace_runtime(
     *,
     tenant_id: str | None = None,
     asset: "AssetStore | None" = None,
+    asset_bindings: "Sequence[AssetTypeBinding[object]]" = (),
+    asset_path_adapter: "AssetPathAdapter | None" = None,
     state: "RuntimeState | None" = None,
     models: "ModelRegistry | None" = None,
-    asset_bindings: "Sequence[AssetTypeBinding[object]]" = (),
     capability_providers: "Sequence[CapabilityProvider]" = (),
     capabilities: "Sequence[RuntimeCapability]" = (),
 ) -> AsyncIterator[Runtime]:
@@ -220,42 +202,36 @@ async def open_workspace_runtime(
         workspace,
         asset=asset,
         snapshot=snapshot,
+        path_adapter=asset_path_adapter,
     )
     selected_models = models or _build_default_models(workspace)
     providers = _build_providers(capability_providers)
     initial_revision = await selected_assets.current_revision()
-    asset_capabilities = await _bind_asset_capabilities(selected_assets, snapshot, providers)
-    runtime_capabilities = (
-        *build_workspace_capabilities(workspace.root),
-        *tuple(capabilities),
-    )
-    effective_capabilities: tuple[CapabilityBinding, ...] = (
-        *asset_capabilities,
+    family_bindings = await _bind_asset_capabilities(selected_assets, snapshot, providers)
+    runtime_capabilities = (*build_workspace_capabilities(workspace.root), *tuple(capabilities))
+    default_capabilities: tuple[CapabilityBinding, ...] = (
+        *((family_bindings["skill"],) if "skill" in family_bindings else ()),
         *runtime_capabilities,
     )
     compiler = _build_compiler(
-        capabilities=effective_capabilities,
+        capabilities=default_capabilities,
         models=selected_models,
         workspace=workspace,
     )
-    catalog = await _build_catalog(
-        selected_assets,
-        snapshot=snapshot,
-        compiler=compiler,
-    )
+    catalog = await _build_catalog(selected_assets, snapshot=snapshot, compiler=compiler)
     if await selected_assets.current_revision() != initial_revision:
         raise AIError(ErrorCode.STORAGE_CONFLICT)
     selected_runtime = state or _default_runtime_state(workspace)
     try:
-        await selected_runtime.initialize(
-            namespace=workspace.workspace_id,
-            tenant_id=effective_tenant_id,
-        )
+        await selected_runtime.initialize(namespace=workspace.workspace_id, tenant_id=effective_tenant_id)
         runtime_value = await _compose_runtime(
             workspace,
             catalog,
             compiler=compiler,
             assets=selected_assets,
+            asset_registry=snapshot,
+            capability_providers=providers,
+            capability_bindings=family_bindings,
             tenant_id=effective_tenant_id,
             state=selected_runtime,
         )
@@ -263,10 +239,11 @@ async def open_workspace_runtime(
         await selected_runtime.close()
         raise
     _logger.info(
-        "workspace Runtime opened: workspace=%s tenant=%s asset_capabilities=%s",
+        "workspace Runtime opened: workspace=%s tenant=%s available_capabilities=%s default_asset_capabilities=%s",
         workspace.workspace_id,
         effective_tenant_id,
-        tuple(binding.id for binding in asset_capabilities),
+        tuple(sorted(family_bindings)),
+        ("skill",) if "skill" in family_bindings else (),
     )
     try:
         yield runtime_value
@@ -286,6 +263,9 @@ async def _compose_runtime(
     *,
     compiler: AgentCompiler,
     assets: AssetRepository,
+    asset_registry: AssetTypeRegistrySnapshot,
+    capability_providers: Sequence[CapabilityProvider],
+    capability_bindings: Mapping[str, CapabilityBinding],
     tenant_id: str,
     state: RuntimeState,
 ) -> Runtime:
@@ -327,6 +307,9 @@ async def _compose_runtime(
         catalog=catalog,
         compiler=compiler,
         assets=assets,
+        asset_registry=asset_registry,
+        capability_providers=capability_providers,
+        capability_bindings=capability_bindings,
         authorization=TenantAuthorizationPolicy(tenant_id),
         tenant_id=tenant_id,
         namespace=workspace.workspace_id,
@@ -346,20 +329,18 @@ def _build_compiler(
 ) -> AgentCompiler:
     profile = canonical_sha256(
         {
-            "version": 6,
+            "version": 7,
             "workspace_id": workspace.workspace_id,
             "platform_capabilities": {
                 "filesystem": {"version": 1},
                 "shell": {"version": 1},
                 "memory": {"version": 1},
                 "subagent": {"version": 1, "tool": "delegate_task", "nested": False},
+                "planning": {"version": 1},
+                "thinking": {"version": 1},
             },
             "global_capabilities": [
-                {
-                    "provider": capability.provider,
-                    "id": capability.id,
-                    "fingerprint": capability.fingerprint,
-                }
+                {"provider": capability.provider, "id": capability.id, "fingerprint": capability.fingerprint}
                 for capability in sorted(capabilities, key=lambda value: (value.provider, value.id))
             ],
         }
@@ -401,10 +382,7 @@ async def _build_catalog(
         agent_id: compiler.derive_subagent(definition)
         for agent_id, definition in roots.items()
     }
-    _logger.info(
-        "workspace Agent catalog frozen: agents=%s",
-        tuple(sorted(roots)),
-    )
+    _logger.info("workspace Agent catalog frozen: agents=%s", tuple(sorted(roots)))
     return AgentDefinitionCatalog(roots, subagents)
 
 
