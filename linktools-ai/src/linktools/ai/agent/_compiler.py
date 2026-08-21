@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """Compile declarations into immutable executable Agent definitions."""
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 
 from linktools.core import environ
 from pydantic import BaseModel
@@ -13,12 +13,13 @@ from ..capability import (
     RuntimeCapability,
     validate_fingerprint,
 )
-from ..core import canonical_sha256, validate_agent_id, validate_capability_provider
+from ..core import JsonValue, canonical_sha256, validate_agent_id, validate_capability_provider
 from ..errors import AIError, ErrorCode
 from ..model import ModelResolver
 from ..spec import AgentSpec
+from ._binding import AgentBindingSnapshot
 from ._definition import AgentDefinition
-from ._output import bind_output
+from ._output import OutputBinding, bind_output, restore_output
 
 _logger = environ.get_logger("ai.agent.compiler")
 
@@ -55,6 +56,12 @@ class AgentCompiler:
             raise TypeError("agent-local capabilities must contain RuntimeCapability values")
         if any(not capability.durable for capability in local_capabilities):
             raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
+        local_descriptors: list[Mapping[str, JsonValue]] = []
+        for capability in local_capabilities:
+            descriptor = capability.descriptor
+            if descriptor is None:
+                raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
+            local_descriptors.append(descriptor)
         effective: tuple[CapabilityBinding, ...] = (*self._capabilities, *local_capabilities)
         _validate_bindings(effective)
         model = self._model_resolver.resolve(spec.model)
@@ -62,9 +69,20 @@ class AgentCompiler:
         digest = _definition_digest(
             spec,
             model.fingerprint,
-            output_binding.schema_fingerprint,
+            output_binding.fingerprint,
             effective,
             self._runtime_fingerprint,
+        )
+        snapshot = AgentBindingSnapshot(
+            version=1,
+            agent_spec=spec,
+            output_type_module=output_binding.value_type.__module__,
+            output_type_qualname=output_binding.value_type.__qualname__,
+            output_schema_id=output_binding.schema_id,
+            output_schema_revision=output_binding.schema_revision,
+            output_schema_fingerprint=output_binding.schema_fingerprint,
+            local_runtime_capability_descriptors=tuple(local_descriptors),
+            binding_digest=digest,
         )
         definition = AgentDefinition(
             digest,
@@ -72,6 +90,7 @@ class AgentCompiler:
             model,
             output_binding,
             effective,
+            snapshot,
         )
         _logger.debug(
             "agent definition compiled: agent=%s digest=%s capabilities=%s",
@@ -79,6 +98,37 @@ class AgentCompiler:
             digest,
             tuple((capability.provider, capability.id) for capability in effective),
         )
+        return definition
+
+    def restore(self, snapshot: AgentBindingSnapshot) -> AgentDefinition:
+        if not isinstance(snapshot, AgentBindingSnapshot):
+            raise TypeError("snapshot must be AgentBindingSnapshot")
+        try:
+            local_capabilities = tuple(
+                RuntimeCapability.restore(descriptor)
+                for descriptor in snapshot.local_runtime_capability_descriptors
+            )
+            output_binding = restore_output(
+                {
+                    "version": 1,
+                    "schema_id": snapshot.output_schema_id,
+                    "schema_revision": snapshot.output_schema_revision,
+                    "schema_fingerprint": snapshot.output_schema_fingerprint,
+                    "module": snapshot.output_type_module,
+                    "qualname": snapshot.output_type_qualname,
+                }
+            )
+            definition = self.compile(
+                snapshot.agent_spec,
+                capabilities=local_capabilities,
+                output=output_binding.value_type,
+            )
+        except AIError as error:
+            if error.code is ErrorCode.AGENT_DEFINITION_UNAVAILABLE:
+                raise
+            raise AIError(ErrorCode.AGENT_DEFINITION_UNAVAILABLE) from error
+        if definition.digest != snapshot.binding_digest or definition.binding_snapshot != snapshot:
+            raise AIError(ErrorCode.AGENT_DEFINITION_UNAVAILABLE)
         return definition
 
 
@@ -119,7 +169,7 @@ def _definition_digest(
 ) -> str:
     return canonical_sha256(
         {
-            "version": 7,
+            "version": 8,
             "agent": {
                 "id": spec.id,
                 "revision": spec.revision,
@@ -139,7 +189,7 @@ def _definition_digest(
                 },
             },
             "model_fingerprint": model_fingerprint,
-            "output_schema_fingerprint": output_fingerprint,
+            "output_binding_fingerprint": output_fingerprint,
             "capabilities": [_binding_payload(binding) for binding in capabilities],
             "runtime_fingerprint": runtime_fingerprint,
         }
