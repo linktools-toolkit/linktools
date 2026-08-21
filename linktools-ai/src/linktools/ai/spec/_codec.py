@@ -208,8 +208,11 @@ def _decode(data: bytes) -> "dict[str, object]":
 def _strict_allowlist(raw: Mapping[str, object], name: str, default: "tuple[str, ...]") -> "tuple[str, ...]":
     value = raw.get(name, list(default))
     if not isinstance(value, list):
-        raise AIError(ErrorCode.REQUEST_FIELD_INVALID, f"{name} must be a JSON array")
-    return canonical_string_tuple(value, field=name)
+        raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID, f"{name} must be a JSON array")
+    try:
+        return canonical_string_tuple(value, field=name)
+    except AIError as error:
+        raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID, f"{name} is invalid") from error
 
 
 def _decode_usage_limits(value: object) -> "AgentUsageLimits | None":
