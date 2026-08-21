@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Capability binding, runtime capability, and provider contracts."""
+"""Capability selection, binding, and runtime materialization contracts."""
 
 from dataclasses import dataclass
 from pathlib import Path
@@ -9,8 +9,33 @@ from typing import Protocol
 from pydantic_ai.capabilities import AgentCapability as PydanticAgentCapability
 
 from ..asset import AssetRef, AssetRepository
-from ..core import Principal, ResourceRef, canonical_sha256, canonical_string_tuple
+from ..core import Principal, ResourceRef, canonical_sha256, canonical_string_tuple, validate_capability_provider
 from ..errors import AIError, ErrorCode
+
+
+@dataclass(frozen=True, slots=True)
+class CapabilityRef:
+    """Select one logical capability family or a resource within that family."""
+
+    provider: str
+    id: "str | None" = None
+    revision: "int | None" = None
+    required: bool = True
+
+    def __post_init__(self) -> None:
+        validate_capability_provider(self.provider)
+        if self.id is not None and (not isinstance(self.id, str) or not self.id.strip()):
+            raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
+        if self.revision is not None and (
+            not isinstance(self.revision, int)
+            or isinstance(self.revision, bool)
+            or self.revision < 1
+        ):
+            raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
+        if self.id is None and self.revision is not None:
+            raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
+        if not isinstance(self.required, bool):
+            raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
 
 
 @dataclass(frozen=True, slots=True)
@@ -60,7 +85,7 @@ class CapabilityBinding(Protocol):
 
 
 class CapabilityProvider(Protocol):
-    """Convert every Asset of one exact value type into one frozen capability binding."""
+    """Bind and select Assets belonging to one logical capability family."""
 
     @property
     def provider(self) -> str: ...
@@ -75,10 +100,16 @@ class CapabilityProvider(Protocol):
         assets: AssetRepository,
     ) -> CapabilityBinding: ...
 
+    def select(
+        self,
+        binding: CapabilityBinding,
+        refs: "tuple[AssetRef, ...]",
+    ) -> CapabilityBinding: ...
+
 
 @dataclass(frozen=True, slots=True)
 class RuntimeCapability:
-    """Stable Python capability binding supplied by the Runtime composition root."""
+    """Stable Python capability binding supplied by Runtime composition."""
 
     id: str
     capability: "PydanticAgentCapability[None]"
@@ -141,6 +172,7 @@ __all__ = [
     "CapabilityBinding",
     "CapabilityMaterializationContext",
     "CapabilityProvider",
+    "CapabilityRef",
     "CapabilityRefResolution",
     "RuntimeCapability",
     "validate_fingerprint",
