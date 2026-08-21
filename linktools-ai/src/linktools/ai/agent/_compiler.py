@@ -78,8 +78,9 @@ class AgentCompiler:
         output: "type[BaseModel] | None" = None,
     ) -> AgentDefinition:
         validate_agent_id(spec.id)
-        local_capabilities = self._select_capabilities(tuple(capabilities))
-        effective = self._capabilities + local_capabilities
+        defaults = self._default_capabilities(spec)
+        local_capabilities = self._select_capabilities((*spec.capabilities, *tuple(capabilities)))
+        effective = defaults + local_capabilities
         _validate_bindings(effective)
         model = self._model_resolver.resolve(spec.model)
         output_binding = bind_output(output)
@@ -110,8 +111,11 @@ class AgentCompiler:
         effective = tuple(
             capability
             for capability in definition.effective_capabilities
-            if not isinstance(capability, RuntimeCapability)
-            or capability.inherit_to_subagents
+            if capability.provider != "agent"
+            and (
+                not isinstance(capability, RuntimeCapability)
+                or capability.inherit_to_subagents
+            )
         )
         if effective == definition.effective_capabilities:
             return definition
@@ -130,6 +134,39 @@ class AgentCompiler:
             definition.output_schema_fingerprint,
             effective,
         )
+
+    def _default_capabilities(self, spec: AgentSpec) -> "tuple[CapabilityBinding, ...]":
+        selected: list[CapabilityBinding] = []
+        for binding in self._capabilities:
+            if binding.provider != "skill":
+                selected.append(binding)
+                continue
+            skill = self._select_skill_binding(binding, spec.allow_skills)
+            if skill is not None:
+                selected.append(skill)
+        return tuple(selected)
+
+    def _select_skill_binding(
+        self,
+        binding: CapabilityBinding,
+        allow_skills: "tuple[str, ...]",
+    ) -> "CapabilityBinding | None":
+        if not allow_skills:
+            return None
+        if "*" in allow_skills:
+            return binding
+        allowed = frozenset(allow_skills)
+        refs = tuple(
+            resolution.ref
+            for resolution in binding.resolutions
+            if resolution.ref.id in allowed
+        )
+        if not refs:
+            return None
+        provider = self._providers_by_name.get("skill")
+        if provider is None or provider.value_type is not SkillSpec:
+            raise AIError(ErrorCode.CAPABILITY_PROVIDER_UNKNOWN)
+        return provider.select(binding, refs)
 
     def _select_capabilities(
         self,
@@ -272,7 +309,7 @@ def _definition_digest(
 ) -> str:
     return canonical_sha256(
         {
-            "version": 5,
+            "version": 6,
             "agent": {
                 "id": spec.id,
                 "revision": spec.revision,
@@ -280,6 +317,16 @@ def _definition_digest(
                 "system_prompt": spec.system_prompt,
                 "instructions": list(spec.instructions),
                 "allow_tools": list(spec.allow_tools),
+                "allow_skills": list(spec.allow_skills),
+                "capabilities": [
+                    {
+                        "provider": item.provider,
+                        "id": item.id,
+                        "revision": item.revision,
+                        "required": item.required,
+                    }
+                    for item in spec.capabilities
+                ],
                 "metadata": dict(spec.metadata),
                 "usage_limits": None
                 if spec.usage_limits is None
