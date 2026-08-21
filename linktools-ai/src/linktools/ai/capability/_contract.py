@@ -159,8 +159,7 @@ class RuntimeCapability:
     ) -> "RuntimeCapability":
         if not isinstance(capability_type, type) or not issubclass(capability_type, AbstractCapability):
             raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
-        if capability_type.__module__ == "__main__" or "<locals>" in capability_type.__qualname__:
-            raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
+        _validate_importable_capability_type(capability_type)
         serialization_name = capability_type.get_serialization_name()
         if not isinstance(serialization_name, str) or not serialization_name.strip():
             raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
@@ -206,16 +205,10 @@ class RuntimeCapability:
         type_value = cast("dict[str, JsonValue]", value["capability_type"])
         module_name = cast(str, type_value["module"])
         qualname = cast(str, type_value["qualname"])
-        if module_name == "__main__" or "<locals>" in qualname:
-            raise AIError(ErrorCode.AGENT_DEFINITION_UNAVAILABLE)
         try:
-            target: object = importlib.import_module(module_name)
-            for part in qualname.split("."):
-                target = getattr(target, part)
-        except (AttributeError, ImportError, ModuleNotFoundError) as error:
+            target = _resolve_capability_type(module_name, qualname)
+        except AIError as error:
             raise AIError(ErrorCode.AGENT_DEFINITION_UNAVAILABLE) from error
-        if not isinstance(target, type) or not issubclass(target, AbstractCapability):
-            raise AIError(ErrorCode.AGENT_DEFINITION_UNAVAILABLE)
         serialization_name = target.get_serialization_name()
         if serialization_name != value["serialization_name"]:
             raise AIError(ErrorCode.AGENT_DEFINITION_UNAVAILABLE)
@@ -257,6 +250,37 @@ class RuntimeCapability:
 def validate_fingerprint(value: str) -> None:
     if not _is_fingerprint(value):
         raise AIError(ErrorCode.CAPABILITY_FINGERPRINT_INVALID)
+
+
+def _validate_importable_capability_type(
+    capability_type: "type[AbstractCapability[None]]",
+) -> None:
+    try:
+        resolved = _resolve_capability_type(
+            capability_type.__module__,
+            capability_type.__qualname__,
+        )
+    except AIError as error:
+        raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID) from error
+    if resolved is not capability_type:
+        raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
+
+
+def _resolve_capability_type(
+    module_name: str,
+    qualname: str,
+) -> "type[AbstractCapability[None]]":
+    if module_name == "__main__" or "<locals>" in qualname:
+        raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
+    try:
+        target: object = importlib.import_module(module_name)
+        for part in qualname.split("."):
+            target = getattr(target, part)
+    except (AttributeError, ImportError, ModuleNotFoundError) as error:
+        raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID) from error
+    if not isinstance(target, type) or not issubclass(target, AbstractCapability):
+        raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
+    return target
 
 
 def _runtime_descriptor_fingerprint(
