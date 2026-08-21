@@ -121,11 +121,19 @@ async def put_execution_request(
     request: ExecutionRequest,
     *,
     binding_digest: str,
-    binding: AgentBindingSnapshot,
+    binding: Mapping[str, JsonValue] | AgentBindingSnapshot,
 ) -> str:
     if _DIGEST.fullmatch(binding_digest) is None:
         raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
-    if not isinstance(binding, AgentBindingSnapshot) or binding.binding_digest != binding_digest:
+    try:
+        snapshot = (
+            binding
+            if isinstance(binding, AgentBindingSnapshot)
+            else AgentBindingSnapshot.from_payload(binding)
+        )
+    except AIError as error:
+        raise AIError(ErrorCode.REQUEST_FIELD_INVALID) from error
+    if snapshot.binding_digest != binding_digest:
         raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
     payload: dict[str, JsonValue] = {
         "version": 2,
@@ -136,7 +144,7 @@ async def put_execution_request(
         "planning": request.planning,
         "thinking": request.thinking,
         "binding_digest": binding_digest,
-        "binding": binding.to_payload(),
+        "binding": snapshot.to_payload(),
     }
     reference = await put_runtime_object(
         store,
@@ -186,32 +194,15 @@ async def load_execution_request(
     )
     if request.principal.tenant_id != state.tenant_id:
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-    state_binding = getattr(state, "binding", None)
-    state_planning = getattr(state, "planning", False)
-    state_thinking = getattr(state, "thinking", False)
     if binding is None:
         if (
             binding_digest is not None
-            or state_binding is not None
-            or state_planning is not False
-            or state_thinking is not False
             or request.planning is not False
             or request.thinking is not False
         ):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-    else:
-        if binding_digest != state.binding_digest:
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        try:
-            expected = AgentBindingSnapshot.from_payload(state_binding)
-        except AIError as error:
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
-        if (
-            expected != binding
-            or request.planning != state_planning
-            or request.thinking != state_thinking
-        ):
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    elif binding_digest != state.binding_digest:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     _logger.debug(
         "execution request loaded: execution=%s request_ref=%s",
         state.execution_id,
