@@ -72,7 +72,12 @@ from linktools.ai.capability import RuntimeCapability
 class ReviewResult(BaseModel):
     summary: str
 
-local_capability = RuntimeCapability.from_spec(MyCapability, mode="strict")
+local_capability = RuntimeCapability.from_spec(
+    "review-context",
+    MyCapability,
+    config={"mode": "strict"},
+    revision=1,
+)
 agent = runtime.agent(
     "audit",
     capabilities=(local_capability,),
@@ -247,8 +252,7 @@ Retry and fork restore the source definition and inherit source planning/thinkin
 agent_id
 binding_digest
 binding snapshot
-prompt
-memory_scope
+user_prompt
 planning
 thinking
 ```
