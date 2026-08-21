@@ -11,8 +11,8 @@ from linktools.core import environ
 from pydantic import BaseModel
 
 from ..agent import AgentCompiler, AgentDefinition, AgentDefinitionCatalog
-from ..asset import AssetRepository
-from ..capability import RuntimeCapability
+from ..asset import AssetRef, AssetRepository
+from ..capability import CapabilityRef, RuntimeCapability
 from ..core import (
     JsonValue,
     Principal,
@@ -151,7 +151,7 @@ class Runtime:
         self,
         agent: "str | AgentSpec" = "default",
         *,
-        capabilities: "Sequence[RuntimeCapability]" = (),
+        capabilities: "Sequence[CapabilityRef | AssetRef | RuntimeCapability]" = (),
         output: "type[BaseModel] | None" = None,
         planning: bool = False,
         thinking: bool = False,
