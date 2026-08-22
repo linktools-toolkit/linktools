@@ -83,8 +83,6 @@ class ApprovalReplay:
     approval_id: str
     idempotency_key: str
     decision: ApprovalDecision
-    principal_id: str
-    decision_digest: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -234,14 +232,14 @@ class ExecutionWorkflow:
         decision_digest: str,
     ) -> ExecutionWorkflowState:
         state = self._require_state()
-        replay = ApprovalReplay(
+        _validate_approval_update(
             approval_id,
             idempotency_key,
             decision,
             principal_id,
             decision_digest,
         )
-        _validate_approval_replay(replay)
+        replay = ApprovalReplay(approval_id, idempotency_key, decision)
         existing = next(
             (item for item in state.approval_replays if item.approval_id == approval_id),
             None,
@@ -395,26 +393,34 @@ class ExecutionWorkflow:
         return self._state
 
 
-def _validate_approval_replay(replay: ApprovalReplay) -> None:
-    if not all(
-        isinstance(value, str) and value.strip()
-        for value in (
-            replay.approval_id,
-            replay.idempotency_key,
-            replay.principal_id,
-            replay.decision_digest,
-        )
+def _validate_approval_update(
+    approval_id: str,
+    idempotency_key: str,
+    decision: ApprovalDecision,
+    principal_id: str,
+    decision_digest: str,
+) -> None:
+    if (
+        not isinstance(approval_id, str)
+        or not approval_id.strip()
+        or not isinstance(idempotency_key, str)
+        or not idempotency_key.strip()
+        or not isinstance(decision, ApprovalDecision)
+        or not isinstance(principal_id, str)
+        or not principal_id.strip()
+        or not isinstance(decision_digest, str)
+        or not decision_digest.strip()
     ):
-        raise ValueError("approval replay identity is incomplete")
+        raise ValueError("approval update is incomplete")
     expected = canonical_sha256(
         {
-            "approval_id": replay.approval_id,
-            "idempotency_key": replay.idempotency_key,
-            "decision": replay.decision.value,
-            "principal_id": replay.principal_id,
+            "approval_id": approval_id,
+            "idempotency_key": idempotency_key,
+            "decision": decision.value,
+            "principal_id": principal_id,
         }
     )
-    if replay.decision_digest != expected:
+    if decision_digest != expected:
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
 
 
