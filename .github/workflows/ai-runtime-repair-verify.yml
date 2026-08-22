@@ -35,7 +35,7 @@ jobs:
             pytest pytest-asyncio \
             'sqlalchemy[asyncio]==2.0.51' 'aiosqlite==0.22.1' \
             ruff
-          python -m pip install --no-deps -e ./linktools -e ./linktools-ai
+          python -m pip install --no-deps -e ./linktools
 
       - name: Compile
         env:
