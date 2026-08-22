@@ -4,7 +4,6 @@
 
 import hashlib
 from datetime import datetime, timezone
-from typing import Protocol
 
 from linktools.core import environ
 
@@ -14,8 +13,6 @@ from ..core import (
     AuthorizationAction,
     AuthorizationPolicy,
     Principal,
-    ResourceKind,
-    ResourceRef,
 )
 from ..errors import AIError, ErrorCode
 from .service_api import (
@@ -24,26 +21,9 @@ from .service_api import (
     ApprovalView,
     WorkflowGateway,
 )
-from .state._contracts import ApprovalRecord, ApprovalRepository
+from .state._contracts import ApprovalRecord, ApprovalRepository, ExecutionRepository
 
 _logger = environ.get_logger("ai.runtime.approval")
-
-
-class ApprovalQueryApi(Protocol):
-    async def list(
-        self,
-        execution_id: str,
-        *,
-        principal: Principal,
-    ) -> "tuple[ApprovalView, ...]": ...
-
-
-class ApprovalApi(ApprovalQueryApi, Protocol):
-    async def decide(
-        self,
-        execution_id: str,
-        request: ApprovalDecisionRequest,
-    ) -> ApprovalDecisionResult: ...
 
 
 class DefaultApprovalService:
@@ -52,10 +32,12 @@ class DefaultApprovalService:
     def __init__(
         self,
         approvals: ApprovalRepository,
+        executions: ExecutionRepository,
         authorization: AuthorizationPolicy,
         workflow_gateway: "WorkflowGateway | None" = None,
     ) -> None:
         self._approvals = approvals
+        self._executions = executions
         self._authorization = authorization
         self._workflow_gateway = workflow_gateway
 
@@ -65,10 +47,16 @@ class DefaultApprovalService:
         *,
         principal: Principal,
     ) -> tuple[ApprovalView, ...]:
+        header = await self._executions.get_header(
+            execution_id,
+            tenant_id=principal.tenant_id,
+        )
+        if header is None:
+            raise AIError(ErrorCode.AUTHORIZATION_DENIED)
         await self._authorization.authorize(
             principal,
             AuthorizationAction.APPROVAL_READ,
-            ResourceRef(ResourceKind.APPROVAL, execution_id, principal.tenant_id),
+            header,
         )
         records = await self._approvals.list_pending(
             execution_id,
@@ -136,6 +124,7 @@ class DefaultApprovalService:
                 execution_id,
                 "approve",
                 {
+                    "operation_id": updated.operation_id,
                     "approval_id": updated.approval_id,
                     "idempotency_key": request.idempotency_key,
                     "decision": updated.decision.value,
@@ -193,4 +182,4 @@ def _decision_digest(request: ApprovalDecisionRequest) -> str:
     )
 
 
-__all__ = ["ApprovalApi", "ApprovalQueryApi", "DefaultApprovalService"]
+__all__ = ["DefaultApprovalService"]
