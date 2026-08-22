@@ -197,7 +197,7 @@ page = await runtime.session.history(
 )
 ```
 
-A Session is pinned to one compiled Agent definition. Reusing a Session with a different effective definition is rejected with `SESSION_CONFLICT`.
+A Session is pinned to one compiled Agent definition. Reusing a Session with a different effective definition is rejected with `SESSION_BINDING_MISMATCH`.
 
 Session history is the committed conversation projection. Active, failed, and cancelled turns are not committed as successful conversation history. Execution trace/transcript remain separate audit views.
 
