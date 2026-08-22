@@ -26,6 +26,8 @@ _AGENT_FIELDS = frozenset(
         "usage_limits",
     }
 )
+_SKILL_FIELDS = frozenset({"id", "revision", "content"})
+_MCP_FIELDS = frozenset({"id", "revision", "command", "args"})
 
 
 class SpecCodec(Protocol[SpecT]):
@@ -106,8 +108,24 @@ class SkillSpecCodec:
         return _encode({"id": value.id, "revision": value.revision, "content": value.content})
 
     def decode(self, data: bytes) -> SkillSpec:
-        raw = _decode(data)
-        return SkillSpec(str(raw["id"]), int(raw["revision"]), str(raw["content"]))
+        try:
+            raw = _decode(data)
+            if set(raw) != _SKILL_FIELDS:
+                raise ValueError("skill spec fields are invalid")
+            identity = raw["id"]
+            revision = raw["revision"]
+            content = raw["content"]
+            if not isinstance(identity, str):
+                raise ValueError("skill id must be a string")
+            if not isinstance(revision, int) or isinstance(revision, bool):
+                raise ValueError("skill revision must be an integer")
+            if not isinstance(content, str):
+                raise ValueError("skill content must be a string")
+            return SkillSpec(identity, revision, content)
+        except AIError:
+            raise
+        except (KeyError, TypeError, UnicodeDecodeError, json.JSONDecodeError, ValueError) as error:
+            raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID, "skill spec is invalid") from error
 
 
 class SkillMarkdownSpecCodec:
@@ -138,7 +156,7 @@ class SkillMarkdownSpecCodec:
         try:
             content = data.decode("utf-8")
             frontmatter, revision = _parse_skill_markdown(content)
-            return SkillSpec(str(frontmatter["name"]), revision, content)
+            return SkillSpec(cast(str, frontmatter["name"]), revision, content)
         except AIError:
             raise
         except Exception as error:
@@ -185,13 +203,27 @@ class MCPServerSpecCodec:
         return _encode({"id": value.id, "revision": value.revision, "command": value.command, "args": list(value.args)})
 
     def decode(self, data: bytes) -> MCPServerSpec:
-        raw = _decode(data)
-        return MCPServerSpec(
-            str(raw["id"]),
-            int(raw["revision"]),
-            str(raw["command"]),
-            tuple(str(item) for item in cast("list[object]", raw.get("args", []))),
-        )
+        try:
+            raw = _decode(data)
+            if set(raw) - _MCP_FIELDS or any(name not in raw for name in ("id", "revision", "command")):
+                raise ValueError("MCP server spec fields are invalid")
+            identity = raw["id"]
+            revision = raw["revision"]
+            command = raw["command"]
+            args = raw.get("args", [])
+            if not isinstance(identity, str):
+                raise ValueError("MCP server id must be a string")
+            if not isinstance(revision, int) or isinstance(revision, bool):
+                raise ValueError("MCP server revision must be an integer")
+            if not isinstance(command, str):
+                raise ValueError("MCP server command must be a string")
+            if not isinstance(args, list) or any(not isinstance(item, str) for item in args):
+                raise ValueError("MCP server args must be a string array")
+            return MCPServerSpec(identity, revision, command, tuple(args))
+        except AIError:
+            raise
+        except (KeyError, TypeError, UnicodeDecodeError, json.JSONDecodeError, ValueError) as error:
+            raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID, "MCP server spec is invalid") from error
 
 
 def _encode(value: "dict[str, object]") -> bytes:
