@@ -23,7 +23,7 @@ from linktools.ai.runtime.state._contracts import (
     IdempotencyTerminalUpdate,
     ResultRecord,
 )
-from linktools.ai.storage import ObjectRef
+from linktools.ai.storage import ObjectRef, StoredPayload
 
 
 @pytest.mark.asyncio
@@ -82,7 +82,7 @@ async def test_in_memory_terminal_commit_validates_success_result() -> None:
             "schema",
             1,
             "fingerprint",
-            result_ref,
+            StoredPayload.object(result_ref),
             StopReason.END_TURN,
             UsageMetrics(),
             now,

@@ -181,6 +181,7 @@ async def test_filesystem_speculative_callback_runs_once(tmp_path: Path) -> None
 async def test_prepared_local_stream_survives_fast_completion() -> None:
     broker = LiveExecutionEventBroker()
     broker.prepare_local_producer("execution")
+    broker.register_local_producer("execution", 0)
     broker.publish(
         ExecutionDelta(
             "execution",

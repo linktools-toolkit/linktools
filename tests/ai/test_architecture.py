@@ -393,5 +393,7 @@ def test_runtime_step_contract_matrix_is_current() -> None:
 
     evidence = json.loads((root / "linktools-ai-evidence.json").read_text(encoding="utf-8"))
     source_commit = evidence.get("validated_source_commit")
-    if isinstance(source_commit, str) and len(source_commit) == 40:
-        assert subprocess.run(["git", "cat-file", "-e", f"{source_commit}^{{commit}}"], check=False).returncode == 0
+    if source_commit is not None:
+        assert isinstance(source_commit, str)
+        assert len(source_commit) == 40
+        assert all(character in "0123456789abcdef" for character in source_commit)

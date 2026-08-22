@@ -9,12 +9,34 @@ from types import SimpleNamespace
 import pytest
 from dataclasses import replace
 from linktools.ai.core import ExecutionStatus, Page, Principal, TenantAuthorizationPolicy
+from linktools.ai.agent import AgentBindingSnapshot
+from linktools.ai.spec import AgentSpec
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.migrate import provision_database
 from linktools.ai.runtime import ExecutionRequest, RuntimeDomain, RuntimeState
 from linktools.ai.runtime.state import ExecutionRecord
 from linktools.ai.runtime._execution import CancelEffectOutcome, DefaultExecutionService
 from sqlalchemy.ext.asyncio import create_async_engine
+
+
+def _binding(digest: str) -> AgentBindingSnapshot:
+    return AgentBindingSnapshot(
+        version=1,
+        agent_spec=AgentSpec("agent", 1, "model"),
+        output_type_module="builtins",
+        output_type_qualname="str",
+        output_schema_id="test-output",
+        output_schema_revision=1,
+        output_schema_fingerprint="c" * 64,
+        local_runtime_capability_descriptors=(),
+        binding_digest=digest,
+    )
+
+
+class _DefinitionCatalog:
+    def definition(self, digest: str) -> object:
+        return SimpleNamespace(digest=digest, binding_snapshot=_binding(digest))
+
 
 
 class _History:
@@ -76,6 +98,8 @@ async def test_execution_start_claim_has_one_launcher_winner() -> None:
         state._object_store(RuntimeDomain.EXECUTION),
         TenantAuthorizationPolicy(),
         sessions=state.conversation.sessions,
+        catalog=_DefinitionCatalog(),
+        compiler=object(),
         backend=launcher,
         operation_ids=iter(("execution-a", "execution-b")).__next__,
         history_reader=_History(),
@@ -121,6 +145,8 @@ async def test_sql_execution_start_keeps_attempt_sequence_zero(tmp_path) -> None
             state._object_store(RuntimeDomain.EXECUTION),
             TenantAuthorizationPolicy(),
             sessions=state.conversation.sessions,
+        catalog=_DefinitionCatalog(),
+        compiler=object(),
             backend=_Launcher(state.execution.executions),
             history_reader=_History(),
         )
@@ -148,6 +174,8 @@ async def test_filesystem_execution_start_keeps_attempt_sequence_zero(tmp_path) 
             state._object_store(RuntimeDomain.EXECUTION),
             TenantAuthorizationPolicy(),
             sessions=state.conversation.sessions,
+        catalog=_DefinitionCatalog(),
+        compiler=object(),
             backend=_Launcher(state.execution.executions),
             history_reader=_History(),
         )
@@ -179,6 +207,8 @@ async def test_terminal_verifier_can_be_bound_once() -> None:
             state._object_store(RuntimeDomain.EXECUTION),
             TenantAuthorizationPolicy(),
             sessions=state.conversation.sessions,
+        catalog=_DefinitionCatalog(),
+        compiler=object(),
             history_reader=_History(),
         )
 
@@ -209,6 +239,8 @@ async def test_launch_missing_record_is_storage_integrity_failure() -> None:
             state._object_store(RuntimeDomain.EXECUTION),
             TenantAuthorizationPolicy(),
             sessions=state.conversation.sessions,
+        catalog=_DefinitionCatalog(),
+        compiler=object(),
             backend=_Launcher(state.execution.executions),
             history_reader=_History(),
         )
@@ -236,6 +268,8 @@ async def test_execution_memory_scope_can_be_disabled_but_not_blank() -> None:
             state._object_store(RuntimeDomain.EXECUTION),
             TenantAuthorizationPolicy(),
             sessions=state.conversation.sessions,
+        catalog=_DefinitionCatalog(),
+        compiler=object(),
             backend=_Launcher(state.execution.executions),
             history_reader=_History(),
         )

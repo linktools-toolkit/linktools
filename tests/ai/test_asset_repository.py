@@ -419,9 +419,8 @@ def test_skill_markdown_codec_and_adapter_contract() -> None:
     with pytest.raises(AIError) as error:
         codec.encode(SkillSpec("bar", 1, content))
     assert error.value.code is ErrorCode.ASSET_CONTENT_MISMATCH
-    with pytest.raises(AIError) as error:
-        codec.encode(SkillSpec("foo", True, content))
-    assert error.value.code is ErrorCode.ASSET_CONTENT_MISMATCH
+    with pytest.raises(ValueError):
+        SkillSpec("foo", True, content)
 
 
 @pytest.mark.asyncio

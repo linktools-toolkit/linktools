@@ -16,6 +16,7 @@ from ..core import (
     ExecutionDeltaType,
     ExecutionEventType,
     ExecutionStatus,
+    JsonValue,
     Page,
     Principal,
 )
@@ -26,6 +27,11 @@ from .state._contracts import EventRepository, ExecutionRepository
 _logger = environ.get_logger("ai.runtime.event")
 _DEFAULT_BUFFER_BYTES = 1024 * 1024
 _QUEUE_LIMIT = 256
+_TERMINAL_EVENT_TYPES = frozenset({
+    ExecutionEventType.EXECUTION_SUCCEEDED,
+    ExecutionEventType.EXECUTION_FAILED,
+    ExecutionEventType.EXECUTION_CANCELLED,
+})
 
 
 @dataclass(frozen=True, slots=True)
@@ -36,10 +42,15 @@ class ExecutionDelta:
     stream_truncated: bool = False
 
 
-@dataclass(frozen=True, slots=True)
-class _DurableMarker:
+
+
+@dataclass(slots=True)
+class _LiveEvent:
     execution_id: str
-    sequence: int
+    event_type: ExecutionEventType
+    payload: JsonValue
+    durable_sequence: int | None = None
+
 
 
 @dataclass(slots=True)
@@ -47,9 +58,11 @@ class _PreparedStreamLease:
     execution_id: str
     state: str = "PREPARED"
     subscription: "_LiveSubscription | None" = None
+    base_sequence: int | None = None
 
 
-_OrderedItem = ExecutionDelta | _DurableMarker
+_OrderedItem = ExecutionDelta | _LiveEvent
+
 
 
 class _LiveSubscription:
@@ -93,7 +106,7 @@ class _LiveSubscription:
             self._closed = True
             self._broker._remove_subscription(self._execution_id, self)
 
-    def put_nowait(self, value: ExecutionDelta) -> bool:
+    def put_delta(self, value: ExecutionDelta) -> bool:
         if self._closed:
             return False
         value = _bounded_delta(value, self._max_bytes)
@@ -113,7 +126,7 @@ class _LiveSubscription:
         self._wakeup.set()
         return True
 
-    def put_marker(self, value: _DurableMarker) -> None:
+    def put_event(self, value: _LiveEvent) -> None:
         if self._closed:
             return
         self._queue.append(value)
@@ -124,12 +137,6 @@ class _LiveSubscription:
             return
         self._completed = True
         self._wakeup.set()
-
-    def first_marker_sequence(self, *, after_sequence: int) -> int | None:
-        for value in self._queue:
-            if isinstance(value, _DurableMarker) and value.sequence > after_sequence:
-                return value.sequence
-        return None
 
     def _drop_oldest_delta(self) -> bool:
         for index, value in enumerate(self._queue):
@@ -144,9 +151,9 @@ class _LiveSubscription:
         return False
 
 
-class LiveExecutionEventBroker:
-    """Deliver ephemeral deltas without making them part of persistence."""
 
+
+class LiveExecutionEventBroker:
     def __init__(self, *, max_bytes: int = _DEFAULT_BUFFER_BYTES) -> None:
         if max_bytes < 1:
             raise ValueError("live broker buffer must be positive")
@@ -158,9 +165,30 @@ class LiveExecutionEventBroker:
         self._subscriptions: dict[str, set[_LiveSubscription]] = {}
         self._activity: dict[str, asyncio.Event] = {}
         self._completed: set[str] = set()
-        self._durable_sequences: dict[str, int] = {}
+        self._base_sequences: dict[str, int] = {}
         self._prepared: dict[str, _PreparedStreamLease] = {}
-        self._local_producers: dict[str, str] = {}
+
+    def register_local_producer(self, execution_id: str, base_sequence: int) -> None:
+        if base_sequence < 0:
+            raise ValueError("local stream base sequence cannot be negative")
+        previous = self._base_sequences.get(execution_id)
+        if previous is not None:
+            if previous != base_sequence:
+                raise RuntimeError("local stream base sequence changed")
+            return
+        self._base_sequences[execution_id] = base_sequence
+        lease = self._prepared.get(execution_id)
+        if lease is not None:
+            lease.base_sequence = base_sequence
+        _logger.debug(
+            "local event producer registered: execution=%s base_sequence=%s",
+            execution_id,
+            base_sequence,
+        )
+        self._signal(execution_id)
+
+    def base_sequence(self, execution_id: str) -> int | None:
+        return self._base_sequences.get(execution_id)
 
     def publish(self, delta: ExecutionDelta) -> None:
         if not delta.content:
@@ -182,13 +210,16 @@ class LiveExecutionEventBroker:
                     execution_id,
                     delta.delta_type,
                     previous.content + delta.content,
-                    previous.stream_truncated or delta.stream_truncated or execution_id in self._truncated,
+                    previous.stream_truncated
+                    or delta.stream_truncated
+                    or execution_id in self._truncated,
                 ),
                 self._max_bytes,
             )
             buffer.append(merged)
-            self._buffer_bytes[execution_id] += len(merged.content.encode("utf-8")) - len(
-                previous.content.encode("utf-8")
+            self._buffer_bytes[execution_id] += (
+                len(merged.content.encode("utf-8"))
+                - len(previous.content.encode("utf-8"))
             )
         else:
             buffer.append(
@@ -205,50 +236,62 @@ class LiveExecutionEventBroker:
             if not self._drop_oldest_delta(buffer, execution_id):
                 break
         published = ExecutionDelta(
-            delta.execution_id,
+            execution_id,
             delta.delta_type,
             delta.content,
             delta.stream_truncated or execution_id in self._truncated,
         )
         for subscription in tuple(self._subscriptions.get(execution_id, ())):
-            subscription.put_nowait(published)
+            subscription.put_delta(published)
         self._signal(execution_id)
 
-    def publish_durable(self, execution_id: str, sequence: int) -> None:
-        if sequence < 1:
-            raise ValueError("durable marker sequence must be positive")
-        previous = self._durable_sequences.get(execution_id, 0)
-        if sequence <= previous:
+    def publish_event(
+        self,
+        execution_id: str,
+        event_type: ExecutionEventType,
+        payload: JsonValue,
+        *,
+        durable_sequence: int | None,
+    ) -> None:
+        if execution_id not in self._base_sequences:
             return
-        marker = _DurableMarker(execution_id, sequence)
-        self._durable_sequences[execution_id] = sequence
-        self._buffers.setdefault(execution_id, deque()).append(marker)
+        event = _LiveEvent(execution_id, event_type, payload, durable_sequence)
+        self._buffers.setdefault(execution_id, deque()).append(event)
         self._buffer_bytes.setdefault(execution_id, 0)
         self._last_type.pop(execution_id, None)
         for subscription in tuple(self._subscriptions.get(execution_id, ())):
-            subscription.put_marker(marker)
-        _logger.debug(
-            "live durable marker published: execution=%s sequence=%s",
-            execution_id,
-            sequence,
-        )
+            subscription.put_event(event)
+        self._signal(execution_id)
+
+    def confirm_events(
+        self,
+        execution_id: str,
+        *,
+        first_sequence: int,
+        count: int,
+    ) -> None:
+        if count < 0 or first_sequence < 1:
+            raise ValueError("durable event confirmation range is invalid")
+        if count == 0 or execution_id not in self._base_sequences:
+            return
+        sequence = first_sequence
+        confirmed = 0
+        for value in self._buffers.get(execution_id, ()):
+            if not isinstance(value, _LiveEvent) or value.durable_sequence is not None:
+                continue
+            value.durable_sequence = sequence
+            sequence += 1
+            confirmed += 1
+            if confirmed == count:
+                break
+        if confirmed != count:
+            raise RuntimeError("live event confirmation does not match pending audit")
         self._signal(execution_id)
 
     def subscribe(self, execution_id: str) -> _LiveSubscription:
         subscription = _LiveSubscription(self, execution_id, self._max_bytes)
         self._subscriptions.setdefault(execution_id, set()).add(subscription)
-        for item in self._buffers.get(execution_id, ()):
-            if isinstance(item, ExecutionDelta):
-                subscription.put_nowait(
-                    ExecutionDelta(
-                        item.execution_id,
-                        item.delta_type,
-                        item.content,
-                        item.stream_truncated or execution_id in self._truncated,
-                    )
-                )
-            else:
-                subscription.put_marker(item)
+        self._fill_subscription(subscription, execution_id)
         if execution_id in self._completed:
             subscription.finish()
         return subscription
@@ -259,7 +302,6 @@ class LiveExecutionEventBroker:
             return current
         lease = _PreparedStreamLease(execution_id)
         self._prepared[execution_id] = lease
-        self._local_producers[execution_id] = "prepared"
         _logger.debug("local event stream prepared: execution=%s", execution_id)
         return lease
 
@@ -267,18 +309,19 @@ class LiveExecutionEventBroker:
         current = self._prepared.get(lease.execution_id)
         if current is not lease or lease.state != "PREPARED":
             raise RuntimeError("prepared event stream lease is not claimable")
+        if lease.base_sequence is None:
+            raise RuntimeError("prepared event stream has no durable base")
         subscription = _LiveSubscription(self, lease.execution_id, self._max_bytes)
         lease.state = "CLAIMED"
         lease.subscription = subscription
         self._prepared.pop(lease.execution_id, None)
-        self._local_producers[lease.execution_id] = "active"
         self._subscriptions.setdefault(lease.execution_id, set()).add(subscription)
         self._fill_subscription(subscription, lease.execution_id)
         if lease.execution_id in self._completed:
             subscription.finish()
         return subscription
 
-    def abort_local_producer(self, lease: _PreparedStreamLease, *, worker_installed: bool) -> None:
+    def abort_local_producer(self, lease: _PreparedStreamLease) -> None:
         if lease.state != "PREPARED":
             return
         current = self._prepared.get(lease.execution_id)
@@ -287,20 +330,24 @@ class LiveExecutionEventBroker:
             return
         lease.state = "ABANDONED"
         self._prepared.pop(lease.execution_id, None)
-        if worker_installed:
-            if self._local_producers.get(lease.execution_id) == "prepared":
-                self._local_producers[lease.execution_id] = "active"
-        else:
+        if lease.base_sequence is None or (
+            lease.execution_id in self._completed
+            and not self._subscriptions.get(lease.execution_id)
+        ):
             self._release_execution(lease.execution_id)
-        self._signal(lease.execution_id)
+        else:
+            self._signal(lease.execution_id)
         _logger.debug(
-            "local event stream lease abandoned: execution=%s worker_installed=%s",
+            "local event stream lease abandoned: execution=%s base_sequence=%s",
             lease.execution_id,
-            worker_installed,
+            lease.base_sequence,
         )
 
     def is_local_producer(self, execution_id: str) -> bool:
-        return execution_id in self._local_producers
+        return execution_id in self._base_sequences
+
+    def is_completed(self, execution_id: str) -> bool:
+        return execution_id in self._completed
 
     async def wait_for_activity(self, execution_id: str) -> None:
         event = self._activity.setdefault(execution_id, asyncio.Event())
@@ -309,16 +356,11 @@ class LiveExecutionEventBroker:
 
     def complete(self, execution_id: str) -> None:
         self._completed.add(execution_id)
-        if execution_id in self._local_producers:
-            self._local_producers[execution_id] = "completed"
-        prepared = self._prepared.get(execution_id)
-        if prepared is not None and prepared.subscription is not None:
-            prepared.subscription.finish()
         subscriptions = tuple(self._subscriptions.get(execution_id, ()))
         for subscription in subscriptions:
             subscription.finish()
         self._signal(execution_id)
-        if not subscriptions and prepared is None:
+        if not subscriptions and execution_id not in self._prepared:
             self._release_execution(execution_id)
 
     def _signal(self, execution_id: str) -> None:
@@ -336,7 +378,7 @@ class LiveExecutionEventBroker:
     def _fill_subscription(self, subscription: _LiveSubscription, execution_id: str) -> None:
         for item in self._buffers.get(execution_id, ()):
             if isinstance(item, ExecutionDelta):
-                subscription.put_nowait(
+                subscription.put_delta(
                     ExecutionDelta(
                         item.execution_id,
                         item.delta_type,
@@ -345,7 +387,7 @@ class LiveExecutionEventBroker:
                     )
                 )
             else:
-                subscription.put_marker(item)
+                subscription.put_event(item)
 
     def _drop_oldest_delta(self, buffer: deque[_OrderedItem], execution_id: str) -> bool:
         for index, value in enumerate(buffer):
@@ -365,10 +407,9 @@ class LiveExecutionEventBroker:
         self._truncated.discard(execution_id)
         self._last_type.pop(execution_id, None)
         self._completed.discard(execution_id)
-        self._durable_sequences.pop(execution_id, None)
+        self._base_sequences.pop(execution_id, None)
         self._activity.pop(execution_id, None)
         self._prepared.pop(execution_id, None)
-        self._local_producers.pop(execution_id, None)
 
 
 def _bounded_delta(delta: ExecutionDelta, max_bytes: int) -> ExecutionDelta:
@@ -487,6 +528,8 @@ class DefaultEventService:
         ):
             yield event
 
+
+
     async def _stream_with_live(
         self,
         execution_id: str,
@@ -496,28 +539,36 @@ class DefaultEventService:
         live: "_LiveSubscription | None" = None,
         authorized: bool = False,
     ) -> AsyncIterator[ExecutionStreamEvent]:
-        cursor = after_sequence
-        live = self._live.subscribe(execution_id) if live is None else live
-        local_producer = self._live.is_local_producer(execution_id)
-        live_task: asyncio.Task[_OrderedItem] | None = None
-        activity_task: asyncio.Task[None] | None = None
-        try:
-            if not authorized:
-                await self._authorize_stream(execution_id, principal)
+        if not authorized:
+            await self._authorize_stream(execution_id, principal)
+        if not self._live.is_local_producer(execution_id):
+            async for event in self._stream_durable(
+                execution_id,
+                tenant_id=principal.tenant_id,
+                after_sequence=after_sequence,
+            ):
+                yield event
+            return
 
-            while True:
+        base_sequence = self._live.base_sequence(execution_id)
+        if base_sequence is None:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        live = self._live.subscribe(execution_id) if live is None else live
+        cursor = after_sequence
+        try:
+            while cursor < base_sequence:
                 page = await self._read_durable(
                     execution_id,
                     tenant_id=principal.tenant_id,
                     after_sequence=cursor,
-                    limit=200,
+                    limit=min(200, base_sequence - cursor),
                 )
-                marker_sequence = live.first_marker_sequence(after_sequence=cursor)
-                items = page.items
-                if marker_sequence is not None:
-                    items = tuple(item for item in items if item.sequence < marker_sequence)
-                terminal_seen = False
+                items = tuple(item for item in page.items if item.sequence <= base_sequence)
+                if not items:
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                 for event in items:
+                    if event.sequence != cursor + 1:
+                        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                     cursor = event.sequence
                     yield ExecutionStreamEvent(
                         event.execution_id,
@@ -525,155 +576,112 @@ class DefaultEventService:
                         event.event_type,
                         event.payload,
                     )
-                    terminal_seen = event.event_type in {
-                        ExecutionEventType.EXECUTION_SUCCEEDED,
-                        ExecutionEventType.EXECUTION_FAILED,
-                        ExecutionEventType.EXECUTION_CANCELLED,
-                    }
-                if terminal_seen:
-                    return
-                if marker_sequence is not None or page.next_cursor is None:
-                    break
-                cursor = int(page.next_cursor)
-
-            while True:
-                if live_task is None:
-                    live_task = asyncio.create_task(live.__anext__())
-                if not local_producer and activity_task is None:
-                    activity_task = asyncio.create_task(self._live.wait_for_activity(execution_id))
-                wait_tasks = (live_task,) if local_producer else (live_task, activity_task)
-                done, _ = await asyncio.wait(
-                    wait_tasks,
-                    timeout=None if local_producer else 1.0,
-                    return_when=asyncio.FIRST_COMPLETED,
-                )
-                if not done:
-                    _logger.debug(
-                        "event stream durable fallback read: execution=%s cursor=%s",
-                        execution_id,
-                        cursor,
-                    )
-                    page = await self._read_durable(
-                        execution_id,
-                        tenant_id=principal.tenant_id,
-                        after_sequence=cursor,
-                        limit=200,
-                    )
-                    marker_sequence = live.first_marker_sequence(after_sequence=cursor)
-                    items = page.items
-                    if marker_sequence is not None:
-                        items = tuple(item for item in items if item.sequence < marker_sequence)
-                    for event in items:
-                        cursor = event.sequence
-                        yield ExecutionStreamEvent(
-                            event.execution_id,
-                            event.sequence,
-                            event.event_type,
-                            event.payload,
-                        )
-                        if event.event_type in {
-                            ExecutionEventType.EXECUTION_SUCCEEDED,
-                            ExecutionEventType.EXECUTION_FAILED,
-                            ExecutionEventType.EXECUTION_CANCELLED,
-                        }:
-                            return
-                    continue
-                if live_task in done:
-                    try:
-                        item = live_task.result()
-                    except StopAsyncIteration:
-                        live_task = None
-                        execution = await self._executions.get(
-                            execution_id,
-                            tenant_id=principal.tenant_id,
-                        )
-                        if execution is None:
-                            return
-                        failure = self._worker_failure(
-                            execution_id,
-                            tenant_id=principal.tenant_id,
-                        )
-                        if failure is not None:
-                            raise failure
-                        if execution.status in {
-                            ExecutionStatus.SUCCEEDED,
-                            ExecutionStatus.FAILED,
-                            ExecutionStatus.CANCELLED,
-                        }:
-                            page = await self._read_durable(
-                                execution_id,
-                                tenant_id=principal.tenant_id,
-                                after_sequence=cursor,
-                                limit=200,
-                            )
-                            for event in page.items:
-                                cursor = event.sequence
-                                yield ExecutionStreamEvent(
-                                    event.execution_id,
-                                    event.sequence,
-                                    event.event_type,
-                                    event.payload,
-                                )
-                            return
+                    if event.event_type in _TERMINAL_EVENT_TYPES:
                         return
-                    else:
-                        live_task = None
-                        if isinstance(item, ExecutionDelta):
-                            yield ExecutionStreamEvent(
-                                item.execution_id,
-                                None,
-                                item.delta_type,
-                                {
-                                    "text": item.content,
-                                    "stream_truncated": item.stream_truncated,
-                                },
-                            )
-                        elif item.sequence > cursor:
-                            while cursor < item.sequence:
-                                page = await self._read_durable(
-                                    execution_id,
-                                    tenant_id=principal.tenant_id,
-                                    after_sequence=cursor,
-                                    limit=min(200, item.sequence - cursor),
-                                )
-                                if not page.items:
-                                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                                for event in page.items:
-                                    if event.sequence > item.sequence:
-                                        break
-                                    cursor = event.sequence
-                                    yield ExecutionStreamEvent(
-                                        event.execution_id,
-                                        event.sequence,
-                                        event.event_type,
-                                        event.payload,
-                                    )
-                                    if event.event_type in {
-                                        ExecutionEventType.EXECUTION_SUCCEEDED,
-                                        ExecutionEventType.EXECUTION_FAILED,
-                                        ExecutionEventType.EXECUTION_CANCELLED,
-                                    }:
-                                        _logger.debug(
-                                            "event stream reached terminal: execution=%s sequence=%s",
-                                            execution_id,
-                                            event.sequence,
-                                        )
-                                        return
-                        if activity_task in done:
-                            activity_task = None
+
+            replay_cursor = after_sequence if after_sequence > base_sequence else None
+            async for item in live:
+                if replay_cursor is not None:
+                    if isinstance(item, ExecutionDelta):
                         continue
-                if activity_task in done:
-                    activity_task = None
+                    while item.durable_sequence is None:
+                        if self._live.is_completed(execution_id):
+                            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                        try:
+                            await asyncio.wait_for(
+                                self._live.wait_for_activity(execution_id),
+                                timeout=1.0,
+                            )
+                        except TimeoutError:
+                            pass
+                    if item.durable_sequence <= replay_cursor:
+                        if item.event_type in _TERMINAL_EVENT_TYPES:
+                            return
+                        if item.durable_sequence == replay_cursor:
+                            replay_cursor = None
+                        continue
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                if isinstance(item, ExecutionDelta):
+                    yield ExecutionStreamEvent(
+                        item.execution_id,
+                        None,
+                        item.delta_type,
+                        {"text": item.content, "stream_truncated": item.stream_truncated},
+                    )
+                    continue
+                if item.durable_sequence is not None:
+                    if item.durable_sequence <= after_sequence:
+                        if item.event_type in _TERMINAL_EVENT_TYPES:
+                            return
+                        continue
+                    cursor = max(cursor, item.durable_sequence)
+                yield ExecutionStreamEvent(
+                    item.execution_id,
+                    item.durable_sequence,
+                    item.event_type,
+                    item.payload,
+                )
+                if item.event_type in _TERMINAL_EVENT_TYPES:
+                    return
         finally:
-            if live_task is not None:
-                live_task.cancel()
-            if activity_task is not None:
-                activity_task.cancel()
-            await asyncio.gather(
-                *(task for task in (live_task, activity_task) if task is not None),
-                return_exceptions=True,
-            )
             await live.close()
+
+        failure = self._worker_failure(execution_id, tenant_id=principal.tenant_id)
+        if failure is not None:
+            raise failure
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+
+
+    async def _stream_durable(
+        self,
+        execution_id: str,
+        *,
+        tenant_id: str,
+        after_sequence: int,
+    ) -> AsyncIterator[ExecutionStreamEvent]:
+        cursor = after_sequence
+        while True:
+            page = await self._read_durable(
+                execution_id,
+                tenant_id=tenant_id,
+                after_sequence=cursor,
+                limit=200,
+            )
+            if page.items:
+                for event in page.items:
+                    if event.sequence != cursor + 1:
+                        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                    cursor = event.sequence
+                    yield ExecutionStreamEvent(
+                        event.execution_id,
+                        event.sequence,
+                        event.event_type,
+                        event.payload,
+                    )
+                    if event.event_type in _TERMINAL_EVENT_TYPES:
+                        return
+                continue
+            failure = self._worker_failure(execution_id, tenant_id=tenant_id)
+            if failure is not None:
+                raise failure
+            execution = await self._executions.get(execution_id, tenant_id=tenant_id)
+            if execution is None:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            if execution.status in {
+                ExecutionStatus.SUCCEEDED,
+                ExecutionStatus.FAILED,
+                ExecutionStatus.CANCELLED,
+            }:
+                if cursor >= execution.event_sequence:
+                    return
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            try:
+                await asyncio.wait_for(
+                    self._live.wait_for_activity(execution_id),
+                    timeout=1.0,
+                )
+            except TimeoutError:
+                pass
 
     async def _authorize_stream(self, execution_id: str, principal: Principal) -> None:
         header = await self._executions.get_header(execution_id, tenant_id=principal.tenant_id)

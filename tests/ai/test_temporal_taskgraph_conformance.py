@@ -10,6 +10,7 @@ from types import SimpleNamespace
 
 import linktools.ai.temporal._activity as temporal_activity
 import pytest
+from linktools.ai.agent import AgentBindingSnapshot
 from linktools.ai.core import Principal, TaskStatus, canonical_sha256
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.runtime import (
@@ -17,6 +18,7 @@ from linktools.ai.runtime import (
     RuntimeObjectKeyFactory,
     RuntimeState,
 )
+from linktools.ai.spec import AgentSpec
 from linktools.ai.storage import InMemoryObjectStore
 from linktools.ai.task import (
     TaskDependencyResult,
@@ -39,9 +41,26 @@ from linktools.ai.temporal.workflow import (
 )
 
 
+def _binding() -> AgentBindingSnapshot:
+    return AgentBindingSnapshot(
+        version=1,
+        agent_spec=AgentSpec("agent", 1, "model"),
+        output_type_module="builtins",
+        output_type_qualname="str",
+        output_schema_id="test-output",
+        output_schema_revision=1,
+        output_schema_fingerprint="b" * 64,
+        local_runtime_capability_descriptors=(),
+        binding_digest="a" * 64,
+    )
+
+
 def _request(graph_id: str = "graph") -> TaskGraphRequest:
     principal = Principal("principal", "tenant", "service")
-    graph = TaskGraph(graph_id, (TaskNode("node", input={"kind": "test"}),))
+    graph = TaskGraph(
+        graph_id,
+        (TaskNode("node", input={"kind": "test", "binding": _binding().to_payload()}),),
+    )
     return TaskGraphRequest(graph, principal, idempotency_key=f"request-{graph_id}")
 
 
@@ -71,7 +90,7 @@ class _ReplayRunner:
         del node, graph_id, dependency_results
         if self.failure is not None:
             raise self.failure
-        return "binding", ExecutionRequest(
+        return _binding().binding_digest, ExecutionRequest(
             "prompt",
             principal,
             "key",
@@ -692,15 +711,14 @@ class _GraphActivity:
             datetime.now(timezone.utc) + timedelta(seconds=60),
         )
         execution = ExecutionWorkflowInput(
-            f"{request.graph_id}:{node_id}",
-            request.tenant_id,
-            "a" * 64,
-            "b" * 64,
-            request.request_ref,
-            request.worker_build,
-            owner,
-            1,
-            f"operation-{node_id}",
+            execution_id=f"{request.graph_id}:{node_id}",
+            tenant_id=request.tenant_id,
+            binding_digest="a" * 64,
+            request_ref=request.request_ref,
+            worker_build=request.worker_build,
+            owner=owner,
+            fence=1,
+            operation_id=f"operation-{node_id}",
         )
         return lease, execution
 

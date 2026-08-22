@@ -165,6 +165,13 @@ class ExecutionBackend(Protocol):
     ) -> ExecutionRecord: ...
     async def abort_start(self, execution: ExecutionRecord) -> None: ...
     async def launch(self, request: ExecutionRequest, execution: ExecutionRecord) -> None: ...
+
+    async def commit_cancel_checkpoint(
+        self,
+        commit: ExecutionCancelRequestCommit,
+        *,
+        expected_status: ExecutionStatus,
+    ) -> ExecutionRecord: ...
     async def cancel(self, execution: ExecutionRecord) -> "CancelEffectOutcome": ...
     def worker_failure(self, execution_id: str, *, tenant_id: str) -> AIError | None: ...
     def worker_installed(self, execution_id: str) -> bool: ...
@@ -1147,9 +1154,11 @@ class DefaultExecutionService:
             resolved = await self._resolve_cancel_race(execution_id, request.principal.tenant_id, operation)
             if resolved is not None:
                 return resolved
+        if self._backend is None:
+            raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
         try:
             try:
-                cancelling = await self._state.executions.request_cancel(
+                cancelling = await self._backend.commit_cancel_checkpoint(
                     ExecutionCancelRequestCommit(
                         execution_id=execution_id,
                         tenant_id=request.principal.tenant_id,
@@ -1157,7 +1166,8 @@ class DefaultExecutionService:
                         expected_event_sequence=execution.event_sequence,
                         operation_id=operation.operation_id,
                         requested_at=datetime.now(timezone.utc),
-                    )
+                    ),
+                    expected_status=execution.status,
                 )
             except AIError as error:
                 if error.code is not ErrorCode.STORAGE_CONFLICT:
@@ -1166,8 +1176,15 @@ class DefaultExecutionService:
                 if resolved is not None:
                     return resolved
                 raise
-            if self._backend is None:
-                raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+            if cancelling.status is not ExecutionStatus.CANCELLING:
+                resolved = await self._resolve_cancel_race(
+                    execution_id,
+                    request.principal.tenant_id,
+                    operation,
+                )
+                if resolved is not None:
+                    return resolved
+                raise AIError(ErrorCode.STORAGE_CONFLICT)
             if self._subagent_cancellation is not None:
                 await self._subagent_cancellation.cancel_children(cancelling.execution_id, request.principal)
             outcome = await self._backend.cancel(cancelling)
