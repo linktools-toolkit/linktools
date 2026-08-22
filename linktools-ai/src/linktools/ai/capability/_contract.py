@@ -124,7 +124,10 @@ class RuntimeCapability:
         payload = self._descriptor_payload
         if payload is None:
             return None
-        value = json.loads(payload.decode("utf-8"))
+        try:
+            value = json.loads(payload.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as error:
+            raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID) from error
         if not isinstance(value, dict):
             raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
         return cast("dict[str, JsonValue]", value)
@@ -173,15 +176,23 @@ class RuntimeCapability:
         revision: int = 1,
     ) -> "RuntimeCapability":
         if (
-            not isinstance(capability_type, type)
+            not isinstance(id, str)
+            or not id.strip()
+            or not isinstance(revision, int)
+            or isinstance(revision, bool)
+            or revision < 1
+            or not isinstance(capability_type, type)
             or not issubclass(capability_type, AbstractCapability)
         ):
             raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
+        normalized = _normalize_json_mapping(config)
         _validate_importable_capability_type(capability_type)
-        serialization_name = capability_type.get_serialization_name()
+        try:
+            serialization_name = capability_type.get_serialization_name()
+        except Exception as error:
+            raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID) from error
         if not isinstance(serialization_name, str) or not serialization_name.strip():
             raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
-        normalized = _normalize_json_mapping(config)
         try:
             capability = capability_type.from_spec(**normalized)
         except Exception as error:
@@ -230,9 +241,9 @@ class RuntimeCapability:
         qualname = cast(str, type_value["qualname"])
         try:
             target = _resolve_capability_type(module_name, qualname)
-        except AIError as error:
+            serialization_name = target.get_serialization_name()
+        except Exception as error:
             raise AIError(ErrorCode.AGENT_DEFINITION_UNAVAILABLE) from error
-        serialization_name = target.get_serialization_name()
         if serialization_name != value["serialization_name"]:
             raise AIError(ErrorCode.AGENT_DEFINITION_UNAVAILABLE)
         config = value["config"]
@@ -301,7 +312,7 @@ def _resolve_capability_type(
         target: object = importlib.import_module(module_name)
         for part in qualname.split("."):
             target = getattr(target, part)
-    except (AttributeError, ImportError, ModuleNotFoundError) as error:
+    except Exception as error:
         raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID) from error
     if not isinstance(target, type) or not issubclass(target, AbstractCapability):
         raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
