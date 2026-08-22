@@ -1,9 +1,15 @@
 ===== python .bootstrap/patch.py =====
+region_length=10033 invalid_count=9
+invalid index=10000 char='[' context='7j5f9N1iFc1Rj6o3erNr2BgizPMrHnXuBtqwIYan1+zHAnN51XIaEO3Fs4Ln[...truncated for display...]=\n"\n'
+invalid index=10001 char='.' context='j5f9N1iFc1Rj6o3erNr2BgizPMrHnXuBtqwIYan1+zHAnN51XIaEO3Fs4Ln[...truncated for display...]=\n"\n'
+invalid index=10002 char='.' context='5f9N1iFc1Rj6o3erNr2BgizPMrHnXuBtqwIYan1+zHAnN51XIaEO3Fs4Ln[...truncated for display...]=\n"\n'
+invalid index=10003 char='.' context='f9N1iFc1Rj6o3erNr2BgizPMrHnXuBtqwIYan1+zHAnN51XIaEO3Fs4Ln[...truncated for display...]=\n"\n'
+invalid index=10025 char='.' context='PMrHnXuBtqwIYan1+zHAnN51XIaEO3Fs4Ln[...truncated for display...]=\n"\n'
+invalid index=10026 char='.' context='MrHnXuBtqwIYan1+zHAnN51XIaEO3Fs4Ln[...truncated for display...]=\n"\n'
+invalid index=10027 char='.' context='rHnXuBtqwIYan1+zHAnN51XIaEO3Fs4Ln[...truncated for display...]=\n"\n'
+invalid index=10028 char=']' context='HnXuBtqwIYan1+zHAnN51XIaEO3Fs4Ln[...truncated for display...]=\n"\n'
+invalid index=10031 char='"' context='uBtqwIYan1+zHAnN51XIaEO3Fs4Ln[...truncated for display...]=\n"\n'
 Traceback (most recent call last):
   File "/home/runner/work/linktools/linktools/.bootstrap/patch.py", line 17, in <module>
-    compressed = base64.b64decode(payload, validate=True)
-                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "/opt/hostedtoolcache/Python/3.12.14/x64/lib/python3.12/base64.py", line 88, in b64decode
-    return binascii.a2b_base64(s, strict_mode=validate)
-           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-binascii.Error: Only base64 data is allowed
+    raise RuntimeError("payload framing diagnostic")
+RuntimeError: payload framing diagnostic
