@@ -1,6 +1,250 @@
-===== python .bootstrap/patch.py =====
-Traceback (most recent call last):
-  File "/home/runner/work/linktools/linktools/.bootstrap/patch.py", line 41, in <module>
-    end = value.index("    def _ensure_open(\n", start)
-          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-ValueError: substring not found
+48 |     ExecutionRequest,
+   -     ExecutionResult,
+   -     ExecutionService,
+49 |     ExecutionStreamEvent,
+50 |     ReplayEvaluationRequest,
+51 |     ResumeSessionRequest,
+52 |     RunEvaluationRequest,
+   -     SessionService,
+53 |     SessionView,
+   -     TaskService,
+54 | )
+   |
+
+F401 [*] `.service_api.TaskService` imported but unused
+  --> linktools-ai/src/linktools/ai/runtime/_runtime_service.py:63:5
+   |
+61 |     SessionService,
+62 |     SessionView,
+63 |     TaskService,
+   |     ^^^^^^^^^^^
+64 | )
+   |
+help: Remove unused import
+   |
+44 | from .service_api import (
+   -     ApprovalService,
+   -     ArtifactService,
+   -     CancelExecutionRequest,
+   -     CancelExecutionResult,
+45 |     CreateSessionRequest,
+46 |     EvaluationHandle,
+   -     EvaluationService,
+   -     EventService,
+47 |     ExecutionHandle,
+48 |     ExecutionRequest,
+   -     ExecutionResult,
+   -     ExecutionService,
+49 |     ExecutionStreamEvent,
+50 |     ReplayEvaluationRequest,
+51 |     ResumeSessionRequest,
+52 |     RunEvaluationRequest,
+   -     SessionService,
+53 |     SessionView,
+   -     TaskService,
+54 | )
+   |
+
+F822 Undefined name `Runtime` in `__all__`
+   --> linktools-ai/src/linktools/ai/runtime/_runtime_service.py:374:12
+    |
+374 | __all__ = ["Runtime"]
+    |            ^^^^^^^^^
+
+F401 [*] `.state._contracts.ConversationHistoryRecord` imported but unused
+  --> linktools-ai/src/linktools/ai/runtime/_session.py:54:5
+   |
+52 | from .state._contracts import (
+53 |     ConversationCursor,
+54 |     ConversationHistoryRecord,
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^
+55 |     ConversationState,
+56 |     ExecutionRecord,
+   |
+help: Remove unused import
+   |
+53 |     ConversationCursor,
+   -     ConversationHistoryRecord,
+54 |     ConversationState,
+55 |     ExecutionRecord,
+56 |     ExecutionRepository,
+   -     HistoryQuality,
+57 |     OperationLedgerInput,
+   |
+
+F401 [*] `.state._contracts.HistoryQuality` imported but unused
+  --> linktools-ai/src/linktools/ai/runtime/_session.py:58:5
+   |
+56 |     ExecutionRecord,
+57 |     ExecutionRepository,
+58 |     HistoryQuality,
+   |     ^^^^^^^^^^^^^^
+59 |     OperationLedgerInput,
+60 |     OperationLedgerRecord,
+   |
+help: Remove unused import
+   |
+53 |     ConversationCursor,
+   -     ConversationHistoryRecord,
+54 |     ConversationState,
+55 |     ExecutionRecord,
+56 |     ExecutionRepository,
+   -     HistoryQuality,
+57 |     OperationLedgerInput,
+   |
+
+E402 Module level import not at top of file
+  --> linktools-ai/src/linktools/ai/runtime/state/_contracts.py:11:1
+   |
+ 9 | """
+10 |
+11 | from collections.abc import Mapping, Sequence
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+12 | from dataclasses import dataclass
+13 | from datetime import datetime
+   |
+help: Move module level imports to top of file
+
+E402 Module level import not at top of file
+  --> linktools-ai/src/linktools/ai/runtime/state/_contracts.py:12:1
+   |
+11 | from collections.abc import Mapping, Sequence
+12 | from dataclasses import dataclass
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+13 | from datetime import datetime
+14 | from enum import StrEnum
+   |
+help: Move module level imports to top of file
+
+E402 Module level import not at top of file
+  --> linktools-ai/src/linktools/ai/runtime/state/_contracts.py:13:1
+   |
+11 | from collections.abc import Mapping, Sequence
+12 | from dataclasses import dataclass
+13 | from datetime import datetime
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+14 | from enum import StrEnum
+15 | from typing import TYPE_CHECKING, Protocol
+   |
+help: Move module level imports to top of file
+
+E402 Module level import not at top of file
+  --> linktools-ai/src/linktools/ai/runtime/state/_contracts.py:14:1
+   |
+12 | from dataclasses import dataclass
+13 | from datetime import datetime
+14 | from enum import StrEnum
+   | ^^^^^^^^^^^^^^^^^^^^^^^^
+15 | from typing import TYPE_CHECKING, Protocol
+   |
+help: Move module level imports to top of file
+
+E402 Module level import not at top of file
+  --> linktools-ai/src/linktools/ai/runtime/state/_contracts.py:15:1
+   |
+13 | from datetime import datetime
+14 | from enum import StrEnum
+15 | from typing import TYPE_CHECKING, Protocol
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+16 |
+17 | from pydantic_ai.messages import ModelMessage
+   |
+help: Move module level imports to top of file
+
+E402 Module level import not at top of file
+  --> linktools-ai/src/linktools/ai/runtime/state/_contracts.py:17:1
+   |
+15 | from typing import TYPE_CHECKING, Protocol
+16 |
+17 | from pydantic_ai.messages import ModelMessage
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+18 |
+19 | from ...agent import AgentBindingSnapshot
+   |
+help: Move module level imports to top of file
+
+E402 Module level import not at top of file
+  --> linktools-ai/src/linktools/ai/runtime/state/_contracts.py:19:1
+   |
+17 | from pydantic_ai.messages import ModelMessage
+18 |
+19 | from ...agent import AgentBindingSnapshot
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+20 | from ...core import (
+21 |     ApprovalDecision,
+   |
+help: Move module level imports to top of file
+
+E402 Module level import not at top of file
+  --> linktools-ai/src/linktools/ai/runtime/state/_contracts.py:20:1
+   |
+19 |   from ...agent import AgentBindingSnapshot
+20 | / from ...core import (
+21 | |     ApprovalDecision,
+22 | |     ApprovalStatus,
+23 | |     EvaluationStatus,
+24 | |     ExecutionEventType,
+25 | |     ExecutionLineageKind,
+26 | |     ExecutionStatus,
+27 | |     ExternalCallStatus,
+28 | |     IdempotencyStatus,
+29 | |     JsonValue,
+30 | |     OperationLedgerInput,
+31 | |     OperationLedgerRecord,
+32 | |     OperationStatus,
+33 | |     Page,
+34 | |     ResourceKind,
+35 | |     ResourceRef,
+36 | |     SessionStatus,
+37 | |     StopReason,
+38 | |     UsageMetrics,
+39 | | )
+   | |_^
+40 |   from ...storage import ObjectRef, StoredPayload
+41 |   from ...task import (
+   |
+help: Move module level imports to top of file
+
+E402 Module level import not at top of file
+  --> linktools-ai/src/linktools/ai/runtime/state/_contracts.py:40:1
+   |
+38 |     UsageMetrics,
+39 | )
+40 | from ...storage import ObjectRef, StoredPayload
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+41 | from ...task import (
+42 |     TaskGraph,
+   |
+help: Move module level imports to top of file
+
+E402 Module level import not at top of file
+  --> linktools-ai/src/linktools/ai/runtime/state/_contracts.py:41:1
+   |
+39 |   )
+40 |   from ...storage import ObjectRef, StoredPayload
+41 | / from ...task import (
+42 | |     TaskGraph,
+43 | |     TaskGraphView,
+44 | |     TaskLease,
+45 | |     TaskNodeView,
+46 | |     TaskTerminalRecord,
+47 | | )
+   | |_^
+48 |   from ._plan import RuntimeDomain
+   |
+help: Move module level imports to top of file
+
+E402 Module level import not at top of file
+  --> linktools-ai/src/linktools/ai/runtime/state/_contracts.py:48:1
+   |
+46 |     TaskTerminalRecord,
+47 | )
+48 | from ._plan import RuntimeDomain
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+49 |
+50 | if TYPE_CHECKING:
+   |
+help: Move module level imports to top of file
+
+Found 42 errors.
+[*] 29 fixable with the `--fix` option.
