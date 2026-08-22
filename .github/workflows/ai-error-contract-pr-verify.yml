@@ -1,0 +1,71 @@
+name: AI error contract PR verify
+
+on:
+  pull_request:
+    branches:
+      - master
+
+permissions:
+  contents: write
+
+jobs:
+  verify:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.head_ref }}
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Apply exact repair patches
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          text = Path('.github/workflows/ai-error-contract-closure.yml').read_text()
+          start_marker = "          python - <<'PY'\n"
+          end_marker = "\n          PY\n\n      - name: Install verification dependencies"
+          start = text.index(start_marker) + len(start_marker)
+          end = text.index(end_marker, start)
+          script = text[start:end]
+          script = '\n'.join(line[10:] if line.startswith('          ') else line for line in script.splitlines())
+          exec(compile(script, 'ai-error-contract-patch', 'exec'))
+          PY
+
+      - name: Install verification dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install \
+            filelock 'pydantic-ai-slim[mcp,openai,temporal]>=2.27.0,<3.0.0' \
+            'pydantic-ai-harness[skills,dynamic-workflow]>=0.13.0' \
+            'PyYAML>=6,<7' pytest pytest-asyncio 'sqlalchemy[asyncio]==2.0.51' \
+            'aiosqlite==0.22.1' ruff rich requests packaging
+
+      - name: Compile
+        env:
+          PYTHONPATH: linktools-ai:linktools-ai/src:linktools/src
+        run: python -m compileall -q linktools-ai/src/linktools/ai linktools-ai/src/linktools/commands/ai
+
+      - name: Ruff
+        env:
+          PYTHONPATH: linktools-ai:linktools-ai/src:linktools/src
+        run: python -m ruff check linktools-ai/src/linktools/ai linktools-ai/src/linktools/commands/ai tests/ai
+
+      - name: AI tests
+        env:
+          PYTHONPATH: linktools-ai:linktools-ai/src:linktools/src
+        run: python -m pytest -q tests/ai
+
+      - name: Commit verified repair
+        run: |
+          git config user.name github-actions[bot]
+          git config user.email github-actions[bot]@users.noreply.github.com
+          git add linktools-ai/src/linktools/ai linktools-ai/src/linktools/commands/ai tests/ai
+          if ! git diff --cached --quiet; then
+            git commit -m 'fix(ai): complete error contract closure'
+            git push origin HEAD:${{ github.head_ref }}
+          fi
