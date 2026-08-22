@@ -1,9 +1,6 @@
 ===== python .bootstrap/patch.py =====
 Traceback (most recent call last):
-  File "/home/runner/work/linktools/linktools/.bootstrap/patch.py", line 278, in <module>
-    text = replace_span(text, "    def agent(\n", "    def _definition(\n", agent_block)
-           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "/home/runner/work/linktools/linktools/.bootstrap/patch.py", line 11, in replace_span
-    right = text.index(end, left)
-            ^^^^^^^^^^^^^^^^^^^^^
+  File "/home/runner/work/linktools/linktools/.bootstrap/patch.py", line 41, in <module>
+    end = value.index("    def _ensure_open(\n", start)
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 ValueError: substring not found
