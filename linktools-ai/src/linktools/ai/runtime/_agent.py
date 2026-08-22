@@ -137,7 +137,10 @@ class AgentHandle:
         validate_user_prompt(user_prompt)
         definition = self._runtime._definition(self.binding_digest)
         if definition.spec.id != self.agent_id:
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            raise AIError(
+                ErrorCode.INTERNAL_ERROR,
+                safe_details={"phase": "agent_handle_task"},
+            )
         return TaskNode(
             node_id,
             dependencies,
