@@ -390,25 +390,6 @@ class _ExecutionWorkerFailureProbe(Protocol):
     def __call__(self, execution_id: str, *, tenant_id: str) -> AIError | None: ...
 
 
-class EventApi(Protocol):
-    async def list(
-        self,
-        execution_id: str,
-        *,
-        principal: Principal,
-        after_sequence: int = 0,
-        limit: int = 100,
-    ) -> "Page[ExecutionEvent]": ...
-
-    def stream(
-        self,
-        execution_id: str,
-        *,
-        principal: Principal,
-        after_sequence: int = 0,
-    ) -> "AsyncIterator[ExecutionStreamEvent]": ...
-
-
 class DefaultEventService:
     """Read durable events and merge them with ephemeral live deltas."""
 
@@ -724,4 +705,4 @@ class DefaultEventService:
         )
 
 
-__all__ = ["DefaultEventService", "EventApi", "ExecutionDelta", "LiveExecutionEventBroker"]
+__all__ = ["DefaultEventService", "ExecutionDelta", "LiveExecutionEventBroker"]
