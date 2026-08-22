@@ -262,6 +262,16 @@ async def _restore_recovery_definitions(
                     ErrorCode.AGENT_DEFINITION_UNAVAILABLE,
                     safe_details={"execution_id": checkpoint.execution_id},
                 )
+            handoff = checkpoint.terminal_handoff
+            if handoff is not None and handoff.outcome.output is not None:
+                output = definition.output_binding
+                outcome = handoff.outcome
+                if (
+                    outcome.output_schema_id != output.schema_id
+                    or outcome.output_schema_revision != output.schema_revision
+                    or outcome.output_schema_fingerprint != output.schema_fingerprint
+                ):
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         if page.next_cursor is None:
             return
         cursor = page.next_cursor
