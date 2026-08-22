@@ -1,0 +1,25 @@
+name: AI Agent Runtime Bootstrap
+
+on:
+  push:
+    branches:
+      - refactor/ai-agent-runtime-asset-composition
+
+permissions:
+  contents: read
+
+jobs:
+  snapshot:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Archive source
+        run: |
+          tar --exclude=.git -czf /tmp/linktools-source.tgz .
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linktools-source-${{ github.sha }}
+          path: /tmp/linktools-source.tgz
+          if-no-files-found: error
