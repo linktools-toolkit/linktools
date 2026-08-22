@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 """Focused regression coverage for the v3 Agent composition contract."""
 
+from contextlib import asynccontextmanager
 from types import SimpleNamespace
 
 import pytest
@@ -12,7 +13,15 @@ from linktools.ai.agent import AgentBindingSnapshot
 from linktools.ai.capability import RuntimeCapability
 from linktools.ai.core import SessionStatus
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.runtime import AgentHandle, Runtime, SessionView
+from linktools.ai.runtime import (
+    AgentHandle,
+    ExecutionHandle,
+    ExecutionRequest,
+    ResumeSessionRequest,
+    Runtime,
+    SessionView,
+)
+from linktools.ai.runtime._session import DefaultSessionService
 from linktools.ai.spec import AgentSpec
 from linktools.ai.workspace import trusted_workspace_principal
 
@@ -97,6 +106,26 @@ class _SessionService:
         )
 
 
+class _AllowAuthorization:
+    async def authorize(self, principal: object, action: object, resource: object) -> None:
+        del principal, action, resource
+
+
+class _CaptureSessionExecution:
+    def __init__(self) -> None:
+        self.request: ExecutionRequest | None = None
+
+    async def run_for_session(
+        self,
+        binding_digest: str,
+        session_id: str,
+        request: ExecutionRequest,
+    ) -> ExecutionHandle:
+        del binding_digest, session_id
+        self.request = request
+        return ExecutionHandle("execution")
+
+
 @pytest.mark.asyncio
 async def test_runtime_session_definition_reports_binding_mismatch() -> None:
     runtime = object.__new__(Runtime)
@@ -131,3 +160,43 @@ async def test_runtime_existing_session_reports_binding_mismatch() -> None:
         )
 
     assert error.value.code is ErrorCode.SESSION_BINDING_MISMATCH
+
+
+@pytest.mark.asyncio
+async def test_session_resume_preserves_execution_modes() -> None:
+    service = object.__new__(DefaultSessionService)
+    capture = _CaptureSessionExecution()
+    service._authorization = _AllowAuthorization()
+    service._gated_execution = capture
+
+    @asynccontextmanager
+    async def _consumer(session_id: str, tenant_id: str):
+        del session_id, tenant_id
+        yield None
+
+    async def _authorized(session_id: str, principal: object, action: object) -> object:
+        del session_id, principal, action
+        return SimpleNamespace(binding_digest="a" * 64)
+
+    async def _reconcile(record: object) -> object:
+        return record
+
+    service._session_consumer = _consumer
+    service._authorized = _authorized
+    service._reconcile_terminal_admission = _reconcile
+
+    await service.resume(
+        "a" * 64,
+        "session",
+        ResumeSessionRequest(
+            principal=trusted_workspace_principal("tenant"),
+            user_prompt="prompt",
+            idempotency_key="resume-modes",
+            planning=True,
+            thinking=True,
+        ),
+    )
+
+    assert capture.request is not None
+    assert capture.request.planning is True
+    assert capture.request.thinking is True
