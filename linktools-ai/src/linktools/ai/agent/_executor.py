@@ -30,12 +30,14 @@ from pydantic_ai.usage import RunUsage, UsageLimitExceeded, UsageLimits
 from pydantic_ai_harness.memory import SearchableMemoryStore
 from pydantic_ai_harness.step_persistence import StepStore
 
-from ..capability import CapabilityMaterializationContext, SKILL_TOOL_NAMES
+from ..capability import CapabilityMaterializationContext
 from ..core import ExecutionDeltaType, ExecutionEventType, JsonValue, UsageMetrics, canonical_sha256
 from ..errors import AIError, ErrorCode
 from ..spec import AgentUsageLimits
 from ._builder import build_pydantic_agent
 from ._capabilities import (
+    MEMORY_READ_TOOL_NAMES,
+    MEMORY_TOOL_NAMES,
     PLANNING_TOOL_NAMES,
     SUBAGENT_TOOL_NAMES,
     AgentRunScope,
@@ -43,6 +45,7 @@ from ._capabilities import (
     ToolOperationBridge,
     compose_platform_capabilities,
     tool_allowed_in_planning,
+    tool_is_control,
     tool_name_allowed,
 )
 from ._definition import AgentDefinition
@@ -193,10 +196,9 @@ class AgentExecutor:
         materialized: "list[PydanticAgentCapability[None]]" = []
         for binding in definition.effective_capabilities:
             materialized.extend(await binding.materialize(capability_context))
-        control_tool_names = _control_tool_names(
+        trusted_tool_classes = _trusted_tool_classes(
             definition,
-            planning=planning,
-            subagent_available=subagent_delegate is not None,
+            platform_tool_names=platform_tool_names,
         )
         scope = AgentRunScope(
             root=self._execution_root,
@@ -210,7 +212,8 @@ class AgentExecutor:
             memory_store=memory_store,
             platform_tool_names=platform_tool_names,
             planning=planning,
-            control_tool_names=control_tool_names,
+            trusted_tool_classes=trusted_tool_classes,
+            trusted_mcp_tools=definition.trusted_mcp_tools,
             parent_step_run_id=parent_step_run_id,
             subagent_delegate=subagent_delegate,
             tool_operations=tool_operations,
@@ -226,7 +229,8 @@ class AgentExecutor:
             _ToolPresentation(
                 definition.spec.allow_tools,
                 planning=planning,
-                control_tool_names=control_tool_names,
+                trusted_tool_classes=trusted_tool_classes,
+                trusted_mcp_tools=definition.trusted_mcp_tools,
             ),
         )
         _logger.debug(
@@ -279,11 +283,13 @@ class _ToolPresentation(AbstractCapability[None]):
         allow_tools: "tuple[str, ...]",
         *,
         planning: bool,
-        control_tool_names: "frozenset[str]",
+        trusted_tool_classes: "tuple[tuple[str, str], ...]",
+        trusted_mcp_tools: bool,
     ) -> None:
         self._allow_tools = allow_tools
         self._planning = planning
-        self._control_tool_names = control_tool_names
+        self._trusted_tool_classes = trusted_tool_classes
+        self._trusted_mcp_tools = trusted_mcp_tools
 
     async def prepare_tools(
         self,
@@ -295,14 +301,18 @@ class _ToolPresentation(AbstractCapability[None]):
             raise AIError(ErrorCode.CAPABILITY_CONFLICT)
         selected: list[ToolDefinition] = []
         for tool in tool_defs:
-            if tool.name not in self._control_tool_names and not _function_tool_allowed(
+            if not tool_is_control(
+                tool.name,
+                trusted_tool_classes=self._trusted_tool_classes,
+            ) and not _function_tool_allowed(
                 tool.name,
                 self._allow_tools,
             ):
                 continue
             if self._planning and not tool_allowed_in_planning(
                 tool,
-                control_tool_names=self._control_tool_names,
+                trusted_tool_classes=self._trusted_tool_classes,
+                trusted_mcp_tools=self._trusted_mcp_tools,
             ):
                 continue
             selected.append(tool)
@@ -313,20 +323,24 @@ class _ToolPresentation(AbstractCapability[None]):
         return None
 
 
-def _control_tool_names(
+def _trusted_tool_classes(
     definition: AgentDefinition,
     *,
-    planning: bool,
-    subagent_available: bool,
-) -> "frozenset[str]":
-    names: set[str] = set()
-    if any(binding.provider == "skill" for binding in definition.effective_capabilities):
-        names.update(SKILL_TOOL_NAMES)
-    if subagent_available:
-        names.update(SUBAGENT_TOOL_NAMES)
-    if planning:
-        names.update(PLANNING_TOOL_NAMES)
-    return frozenset(names)
+    platform_tool_names: "tuple[str, ...]",
+) -> "tuple[tuple[str, str], ...]":
+    values = dict(definition.trusted_tool_classes)
+    for name in platform_tool_names:
+        if name in MEMORY_TOOL_NAMES:
+            tool_class = "memory.read" if name in MEMORY_READ_TOOL_NAMES else "memory.write"
+        elif name in PLANNING_TOOL_NAMES or name in SUBAGENT_TOOL_NAMES:
+            tool_class = "control"
+        else:
+            raise AIError(ErrorCode.CAPABILITY_POLICY_CONFLICT)
+        previous = values.get(name)
+        if previous is not None and previous != tool_class:
+            raise AIError(ErrorCode.CAPABILITY_POLICY_CONFLICT)
+        values[name] = tool_class
+    return tuple(sorted(values.items()))
 
 
 def _function_tool_allowed(name: str, allow_tools: "tuple[str, ...]") -> bool:
