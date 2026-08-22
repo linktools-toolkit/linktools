@@ -21,7 +21,7 @@ from ..agent import (
     WORKSPACE_SHELL_TOOL_NAMES,
     AgentCompiler,
     AgentDefinition,
-    AgentDefinitionCatalog,
+    AgentCatalog,
 )
 from ..asset import (
     AssetDiscoveryStatus,
@@ -431,7 +431,7 @@ async def open_workspace_runtime(
 
 async def _compose_runtime(
     workspace: Workspace,
-    catalog: AgentDefinitionCatalog,
+    catalog: AgentCatalog,
     *,
     compiler: AgentCompiler,
     assets: AssetRepository,
@@ -490,13 +490,13 @@ async def _compose_runtime(
 def _build_catalog(
     specs: "dict[str, AgentSpec]",
     compiler: AgentCompiler,
-) -> AgentDefinitionCatalog:
+) -> AgentCatalog:
     roots: dict[str, AgentDefinition] = {
         agent_id: compiler.compile(specs[agent_id])
         for agent_id in sorted(specs)
     }
     _logger.info("workspace Agent catalog frozen: agents=%s", tuple(sorted(roots)))
-    return AgentDefinitionCatalog(roots)
+    return AgentCatalog(roots)
 
 
 def _grant_key(workspace: Workspace) -> bytes:

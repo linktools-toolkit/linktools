@@ -8,7 +8,7 @@ from collections.abc import Mapping
 
 from linktools.core import environ
 
-from ..agent import AgentBindingSnapshot, AgentCompiler, AgentDefinitionCatalog
+from ..agent import AgentBindingSnapshot, AgentCompiler, AgentCatalog
 from ..core import (
     ExecutionStatus,
     Principal,
@@ -51,7 +51,7 @@ class RuntimeTaskNodeRunner:
     def __init__(
         self,
         execution: ExecutionService,
-        catalog: AgentDefinitionCatalog,
+        catalog: AgentCatalog,
         compiler: AgentCompiler,
     ) -> None:
         self._execution = execution

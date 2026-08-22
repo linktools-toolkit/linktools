@@ -14,7 +14,7 @@ from ..agent import (
     AgentBindingSnapshot,
     AgentCompiler,
     AgentDefinition,
-    AgentDefinitionCatalog,
+    AgentCatalog,
 )
 from ..asset import AssetRepository
 from ..capability import RuntimeCapability
@@ -104,7 +104,7 @@ class Runtime:
 
     def __init__(
         self,
-        catalog: AgentDefinitionCatalog,
+        catalog: AgentCatalog,
         compiler: AgentCompiler,
         assets: AssetRepository,
         execution: ExecutionService,

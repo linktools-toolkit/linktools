@@ -1,0 +1,11 @@
+===== python .bootstrap/patch.py =====
+Traceback (most recent call last):
+  File "/home/runner/work/linktools/linktools/.bootstrap/patch.py", line 25, in <module>
+    data = lzma.decompress(compressed)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/hostedtoolcache/Python/3.12.14/x64/lib/python3.12/lzma.py", line 351, in decompress
+    raise LZMAError("Compressed data ended before the "
+_lzma.LZMAError: Compressed data ended before the end-of-stream marker was reached
+===== python -m compileall -q linktools-ai/src/linktools/ai =====
+===== python -m pip install --upgrade pip =====
+Requirement already satisfied: pip in /opt/hostedtoolcache/Python/3.12.14/x64/lib/python3.12/site-packages (26.2.1)

@@ -2,10 +2,10 @@
 # -*- coding: utf-8 -*-
 """Immutable declaration contracts for Agent and Asset specifications."""
 
-from collections.abc import Mapping, Sequence
-from dataclasses import dataclass, field
+from collections.abc import Sequence
+from dataclasses import dataclass
 
-from ..core import ImmutableJsonMapping, JsonValue, canonical_string_tuple
+from ..core import canonical_string_tuple
 
 
 @dataclass(frozen=True, slots=True)
@@ -39,12 +39,11 @@ class AgentSpec:
     """Durable, runtime-independent declaration of one Agent."""
 
     id: str
-    revision: int
-    model: str
+    revision: int = 1
+    model: str = "default"
     system_prompt: str = ""
     instructions: "tuple[str, ...]" = ()
     allow_tools: "tuple[str, ...]" = ("*",)
-    metadata: "Mapping[str, JsonValue]" = field(default_factory=dict)
     usage_limits: "AgentUsageLimits | None" = None
 
     def __post_init__(self) -> None:
@@ -61,13 +60,10 @@ class AgentSpec:
         instructions = tuple(self.instructions)
         if any(not isinstance(item, str) for item in instructions):
             raise ValueError("agent instructions must be strings")
-        if not isinstance(self.metadata, Mapping):
-            raise ValueError("agent metadata must be an object")
         if self.usage_limits is not None and not isinstance(self.usage_limits, AgentUsageLimits):
             raise ValueError("agent usage_limits must be AgentUsageLimits or None")
         object.__setattr__(self, "instructions", instructions)
         object.__setattr__(self, "allow_tools", canonical_string_tuple(self.allow_tools, field="allow_tools"))
-        object.__setattr__(self, "metadata", ImmutableJsonMapping(self.metadata))
 
 
 @dataclass(frozen=True, slots=True)

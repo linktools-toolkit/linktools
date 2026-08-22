@@ -1,0 +1,80 @@
+name: AI Agent Runtime Implementation Gate
+
+on:
+  push:
+    branches:
+      - refactor/ai-agent-runtime-asset-composition
+
+permissions:
+  contents: write
+
+jobs:
+  validate:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: refactor/ai-agent-runtime-asset-composition
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Export or validate implementation
+        shell: bash
+        run: |
+          set -uo pipefail
+          git config user.name github-actions[bot]
+          git config user.email github-actions[bot]@users.noreply.github.com
+          if [[ -f .bootstrap/export ]]; then
+            rm -f .bootstrap/export .bootstrap/worktree.tar.gz
+            tar -czf .bootstrap/worktree.tar.gz linktools linktools-ai tests/ai
+            git add -A .bootstrap
+            git commit -m 'ci: export agent runtime implementation worktree'
+            git push origin HEAD:refactor/ai-agent-runtime-asset-composition
+            exit 0
+          fi
+          if [[ ! -f .bootstrap/ready ]]; then
+            echo 'validation trigger not present; nothing to run'
+            exit 0
+          fi
+          RESULT=/tmp/agent-runtime-result.txt
+          : > "$RESULT"
+          status=0
+          export PYTHONPATH="linktools-ai:linktools-ai/src:linktools/src"
+          run_check() {
+            echo "===== $* =====" | tee -a "$RESULT"
+            "$@" >>"$RESULT" 2>&1 || status=1
+            return 0
+          }
+          if [[ -f .bootstrap/patch.py ]]; then
+            run_check python .bootstrap/patch.py
+            rm -f .bootstrap/patch.py
+          fi
+          run_check python -m compileall -q linktools-ai/src/linktools/ai
+          run_check python -m pip install --upgrade pip
+          if [[ $status -eq 0 ]]; then
+            run_check python -m pip install -e ./linktools -e './linktools-ai[sqlite,evaluation,temporal]' pytest pytest-asyncio ruff
+          fi
+          if [[ $status -eq 0 ]]; then
+            mapfile -t changed_python < <(
+              git diff --name-only a4ded79a152ccfbc635503ee7b7bd394bd50970e -- \
+                linktools-ai/src/linktools/ai linktools-ai/src/linktools/commands/ai \
+                | grep '\.py$' || true
+            )
+            if [[ ${#changed_python[@]} -gt 0 ]]; then
+              run_check ruff check --select E4,E7,E9,F "${changed_python[@]}"
+            fi
+            run_check python -m scripts.build.architecture
+            run_check pytest -q tests/ai --maxfail=30
+          fi
+          mkdir -p .bootstrap
+          rm -f .bootstrap/ready
+          cp "$RESULT" .bootstrap/result.txt
+          printf '%s\n' "$status" > .bootstrap/status
+          git add -A
+          if ! git diff --cached --quiet; then
+            git commit -m 'ci: record agent runtime implementation validation'
+            git push origin HEAD:refactor/ai-agent-runtime-asset-composition
+          fi
+          exit 0

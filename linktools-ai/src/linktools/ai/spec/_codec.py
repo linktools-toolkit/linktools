@@ -22,7 +22,6 @@ _AGENT_FIELDS = frozenset(
         "system_prompt",
         "instructions",
         "allow_tools",
-        "metadata",
         "usage_limits",
     }
 )
@@ -45,7 +44,6 @@ class AgentSpecCodec:
                 "system_prompt": value.system_prompt,
                 "instructions": list(value.instructions),
                 "allow_tools": list(value.allow_tools),
-                "metadata": dict(value.metadata),
                 "usage_limits": None
                 if value.usage_limits is None
                 else {
@@ -65,12 +63,11 @@ class AgentSpecCodec:
             raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID, "agent spec is invalid") from error
         if set(raw) - _AGENT_FIELDS:
             raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID, "agent spec fields are invalid")
-        for required in ("id", "revision", "model"):
-            if required not in raw:
-                raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID, f"agent spec requires {required}")
+        if "id" not in raw:
+            raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID, "agent spec requires id")
         identity = raw["id"]
-        revision = raw["revision"]
-        model = raw["model"]
+        revision = raw.get("revision", 1)
+        model = raw.get("model", "default")
         if not isinstance(identity, str) or not identity.strip():
             raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID, "agent id must be a non-empty string")
         if not isinstance(revision, int) or isinstance(revision, bool) or revision < 1:
@@ -83,9 +80,6 @@ class AgentSpecCodec:
         instructions = raw.get("instructions", [])
         if not isinstance(instructions, list) or any(not isinstance(item, str) for item in instructions):
             raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID, "instructions must be a string array")
-        metadata = raw.get("metadata", {})
-        if not isinstance(metadata, Mapping):
-            raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID, "metadata must be an object")
         try:
             return AgentSpec(
                 id=identity,
@@ -94,7 +88,6 @@ class AgentSpecCodec:
                 system_prompt=system_prompt,
                 instructions=tuple(instructions),
                 allow_tools=_strict_allowlist(raw, "allow_tools", ("*",)),
-                metadata=cast("Mapping[str, object]", metadata),
                 usage_limits=_decode_usage_limits(raw.get("usage_limits")),
             )
         except AIError:
