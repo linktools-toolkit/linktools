@@ -69,7 +69,7 @@ class RuntimeTaskNodeRunner:
         payload = node.input
         if set(payload) != _AGENT_TASK_FIELDS:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        if payload["type"] != "linktools.ai.agent" or payload["version"] != 2:
+        if payload["type"] != "linktools.ai.agent" or payload["version"] != 1:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         agent_id = payload["agent_id"]
         binding_digest = payload["binding_digest"]
@@ -124,7 +124,7 @@ class RuntimeTaskNodeRunner:
         validate_user_prompt(effective_user_prompt)
         idempotency_key = canonical_sha256(
             {
-                "version": 3,
+                "version": 1,
                 "graph_id": graph_id,
                 "node_id": node.node_id,
                 "agent_id": agent_id,
