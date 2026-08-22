@@ -23,6 +23,7 @@ def validate_matrix(
     """Check that every requirement points at real implementation and tests."""
     source = Path(source_root)
     package_root = source.parents[2]
+    repository_root = package_root.parent
     _tests = Path(test_root)
     errors: "list[str]" = []
     requirements = matrix.get("requirements", {})
@@ -38,7 +39,10 @@ def validate_matrix(
         implementations = value.get("implementation", ())
         linked_tests = value.get("tests", ())
         for implementation in implementations if isinstance(implementations, list) else ():
-            if not (source / implementation).exists() and not (package_root / implementation).exists():
+            if not any(
+                (root / implementation).exists()
+                for root in (source, package_root, repository_root)
+            ):
                 errors.append(f"{requirement_id}: missing implementation {implementation}")
         for test_id in linked_tests if isinstance(linked_tests, list) else ():
             if not isinstance(test_id, str) or not (test_id.startswith("T-") or test_id.startswith("MT-")):
