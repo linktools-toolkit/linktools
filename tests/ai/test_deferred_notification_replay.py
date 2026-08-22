@@ -14,6 +14,7 @@ from linktools.ai.core import (
     ApprovalDecision,
     ApprovalStatus,
     ExternalCallStatus,
+    Principal,
     ResourceKind,
     ResourceRef,
 )
@@ -223,8 +224,9 @@ async def test_external_supply_replays_notification_after_durable_commit() -> No
 
 
 @pytest.mark.asyncio
-async def test_approval_replays_notification_after_durable_commit() -> None:
-    principal = trusted_workspace_principal("tenant")
+async def test_approval_replays_persisted_actor_after_notification_failure() -> None:
+    first_principal = Principal("approver-1", "tenant", "service")
+    retry_principal = Principal("approver-2", "tenant", "service")
     now = datetime.now(timezone.utc)
     approvals = _Approvals(
         ApprovalRecord(
@@ -249,7 +251,7 @@ async def test_approval_replays_notification_after_durable_commit() -> None:
         gateway,
     )
     request = ApprovalDecisionRequest(
-        principal,
+        first_principal,
         "approval",
         "approval-key",
         ApprovalDecision.APPROVE,
@@ -258,12 +260,26 @@ async def test_approval_replays_notification_after_durable_commit() -> None:
     with pytest.raises(RuntimeError, match="transport failed"):
         await service.decide("execution", request)
 
-    result = await service.decide("execution", request)
+    persisted_digest = approvals.record.decision_digest
+    assert approvals.record.decided_by == first_principal.principal_id
+    assert persisted_digest is not None
+
+    result = await service.decide(
+        "execution",
+        ApprovalDecisionRequest(
+            retry_principal,
+            "approval",
+            "approval-key",
+            ApprovalDecision.APPROVE,
+        ),
+    )
 
     assert result.decision is ApprovalDecision.APPROVE
     assert approvals.record.idempotency_key_digest == hashlib.sha256(
         b"approval-key"
     ).hexdigest()
+    assert approvals.record.decided_by == first_principal.principal_id
+    assert approvals.record.decision_digest == persisted_digest
     assert len(gateway.calls) == 2
     workflow_id, operation, payload = gateway.calls[-1]
     assert workflow_id == "execution"
@@ -272,9 +288,11 @@ async def test_approval_replays_notification_after_durable_commit() -> None:
     assert payload["approval_id"] == "approval"
     assert payload["idempotency_key"] == "approval-key"
     assert payload["decision"] == ApprovalDecision.APPROVE.value
+    assert payload["principal_id"] == first_principal.principal_id
+    assert payload["decision_digest"] == persisted_digest
 
     conflicting = ApprovalDecisionRequest(
-        principal,
+        retry_principal,
         "approval",
         "approval-key",
         ApprovalDecision.DENY,
