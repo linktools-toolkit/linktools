@@ -43,7 +43,7 @@ class AgentDefinition:
         if not isinstance(self.output_binding, OutputBinding):
             raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID)
         if not isinstance(self.binding_snapshot, AgentBindingSnapshot):
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            raise AIError(ErrorCode.BINDING_CONFLICT)
         if (
             self.binding_snapshot.binding_digest != self.digest
             or self.binding_snapshot.agent_spec != self.spec
@@ -53,7 +53,7 @@ class AgentDefinition:
             or self.binding_snapshot.output_type_module != self.output_type.__module__
             or self.binding_snapshot.output_type_qualname != self.output_type.__qualname__
         ):
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            raise AIError(ErrorCode.BINDING_CONFLICT)
         if any(capability is None for capability in self.effective_capabilities):
             raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
         try:
