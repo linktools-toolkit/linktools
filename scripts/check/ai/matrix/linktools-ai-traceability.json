@@ -59,9 +59,9 @@
       "owner": "architecture",
       "requirements": "R-07,R-08,T-08,T-10,T-11",
       "implementation": [
-        "scripts/build/names.py",
-        "scripts/build/architecture.py",
-        "scripts/build/matrix/linktools-ai-package-policy.json"
+        "scripts/check/ai/names.py",
+        "scripts/check/ai/architecture.py",
+        "scripts/check/ai/matrix/linktools-ai-package-policy.json"
       ],
       "tests": [
         "tests/ai/test_architecture.py"
@@ -102,16 +102,16 @@
       "owner": "evidence",
       "requirements": "R-05",
       "implementation": [
-        "scripts/build/matrix/requirement-matrix.json",
-        "scripts/build/matrix/runtime-step-requirements.json",
-        "scripts/build/matrix/linktools-ai-evidence.json",
-        "scripts/build/matrix/linktools-ai-review-coverage.json"
+        "scripts/check/ai/matrix/requirement-matrix.json",
+        "scripts/check/ai/matrix/runtime-step-requirements.json",
+        "scripts/check/ai/matrix/linktools-ai-evidence.json",
+        "scripts/check/ai/matrix/linktools-ai-review-coverage.json"
       ],
       "tests": [
-        "linktools-ai/scripts/build/matrix/requirement-matrix.json",
-        "linktools-ai/scripts/build/matrix/runtime-step-requirements.json",
-        "linktools-ai/scripts/build/matrix/linktools-ai-evidence.json",
-        "linktools-ai/scripts/build/matrix/linktools-ai-review-coverage.json"
+        "scripts/check/ai/matrix/requirement-matrix.json",
+        "scripts/check/ai/matrix/runtime-step-requirements.json",
+        "scripts/check/ai/matrix/linktools-ai-evidence.json",
+        "scripts/check/ai/matrix/linktools-ai-review-coverage.json"
       ]
     },
     {
@@ -134,7 +134,7 @@
       "owner": "naming",
       "requirements": "R-07,T-32",
       "implementation": [
-        "scripts/build/names.py"
+        "scripts/check/ai/names.py"
       ],
       "tests": [
         "tests/ai/test_architecture.py::test_name_gate_allows_parallel_names_and_rejects_namespace_collisions",
@@ -182,8 +182,8 @@
       "owner": "contract-provenance",
       "requirements": "F-05,T-29,DOD-023,DOD-024",
       "implementation": [
-        "scripts/build/matrix/runtime-step-requirements.json",
-        "scripts/build/matrix/requirement-matrix.json"
+        "scripts/check/ai/matrix/runtime-step-requirements.json",
+        "scripts/check/ai/matrix/requirement-matrix.json"
       ],
       "tests": [
         "tests/ai/test_architecture.py::test_runtime_step_contract_matrix_is_current"
