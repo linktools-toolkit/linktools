@@ -59,15 +59,24 @@ class AgentCompiler:
             raise TypeError("agent-local capabilities must contain RuntimeCapability values")
         if any(not capability.durable for capability in local_capabilities):
             raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
+        restored_locals: list[RuntimeCapability] = []
         local_descriptors: list[Mapping[str, JsonValue]] = []
         for capability in local_capabilities:
             descriptor = capability.descriptor
             if descriptor is None:
                 raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
-            local_descriptors.append(descriptor)
+            try:
+                restored = RuntimeCapability.restore(descriptor)
+            except AIError as error:
+                raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID) from error
+            restored_descriptor = restored.descriptor
+            if restored_descriptor is None or restored_descriptor != descriptor:
+                raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
+            restored_locals.append(restored)
+            local_descriptors.append(restored_descriptor)
         effective: tuple[CapabilityBinding, ...] = (
             *self._capabilities,
-            *local_capabilities,
+            *restored_locals,
             *self._platform_capabilities,
         )
         _validate_bindings(effective)
