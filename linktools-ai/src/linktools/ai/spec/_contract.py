@@ -2,13 +2,10 @@
 # -*- coding: utf-8 -*-
 """Immutable declaration contracts for Agent and Asset specifications."""
 
-import json
-import math
-from collections.abc import Iterator, Mapping, Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
-from typing import cast
 
-from ..core import JsonValue, canonical_json_bytes, canonical_string_tuple
+from ..core import ImmutableJsonMapping, JsonValue, canonical_string_tuple
 
 
 @dataclass(frozen=True, slots=True)
@@ -35,53 +32,6 @@ class AgentUsageLimits:
             for value in values
         ):
             raise ValueError("usage limits must be positive integers or None")
-
-
-class _ImmutableJsonMapping(Mapping[str, JsonValue]):
-    """Store a JSON object as canonical bytes and decode fresh values on read."""
-
-    __slots__ = ("_payload",)
-
-    def __init__(self, value: Mapping[str, JsonValue]) -> None:
-        normalized = _normalize_mapping(value)
-        self._payload = canonical_json_bytes(normalized)
-
-    def __getitem__(self, key: str) -> JsonValue:
-        return self._decode()[key]
-
-    def __iter__(self) -> Iterator[str]:
-        return iter(self._decode())
-
-    def __len__(self) -> int:
-        return len(self._decode())
-
-    def _decode(self) -> "dict[str, JsonValue]":
-        return cast("dict[str, JsonValue]", json.loads(self._payload.decode("utf-8")))
-
-
-def _normalize_mapping(value: Mapping[str, JsonValue]) -> "dict[str, JsonValue]":
-    normalized: dict[str, JsonValue] = {}
-    for key, item in value.items():
-        if not isinstance(key, str) or not key:
-            raise ValueError("JSON object keys must be non-empty strings")
-        normalized[key] = _normalize_value(item)
-    return normalized
-
-
-def _normalize_value(value: object) -> JsonValue:
-    if value is None or isinstance(value, (str, bool)):
-        return value
-    if isinstance(value, int):
-        return value
-    if isinstance(value, float):
-        if not math.isfinite(value):
-            raise ValueError("JSON numbers must be finite")
-        return value
-    if isinstance(value, list):
-        return [_normalize_value(item) for item in value]
-    if isinstance(value, Mapping):
-        return _normalize_mapping(cast("Mapping[str, JsonValue]", value))
-    raise TypeError(f"unsupported JSON value: {type(value).__name__}")
 
 
 @dataclass(frozen=True, slots=True)
@@ -117,7 +67,7 @@ class AgentSpec:
             raise ValueError("agent usage_limits must be AgentUsageLimits or None")
         object.__setattr__(self, "instructions", instructions)
         object.__setattr__(self, "allow_tools", canonical_string_tuple(self.allow_tools, field="allow_tools"))
-        object.__setattr__(self, "metadata", _ImmutableJsonMapping(self.metadata))
+        object.__setattr__(self, "metadata", ImmutableJsonMapping(self.metadata))
 
 
 @dataclass(frozen=True, slots=True)
