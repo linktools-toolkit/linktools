@@ -21,7 +21,9 @@ from linktools.ai.runtime import (
     Runtime,
     SessionView,
 )
+from linktools.ai.runtime._factory import _restore_recovery_definitions
 from linktools.ai.runtime._session import DefaultSessionService
+from linktools.ai.runtime.state import RecoveryCheckpointState
 from linktools.ai.spec import AgentSpec
 from linktools.ai.workspace import trusted_workspace_principal
 
@@ -200,3 +202,75 @@ async def test_session_resume_preserves_execution_modes() -> None:
     assert capture.request is not None
     assert capture.request.planning is True
     assert capture.request.thinking is True
+
+
+@pytest.mark.asyncio
+async def test_recovery_handoff_schema_must_match_restored_definition() -> None:
+    digest = "a" * 64
+    snapshot = SimpleNamespace(
+        binding_digest=digest,
+        agent_spec=SimpleNamespace(id="agent"),
+    )
+    recovery_input = SimpleNamespace(
+        binding_digest=digest,
+        planning=False,
+        thinking=False,
+        binding=snapshot,
+        agent_id="agent",
+    )
+    checkpoint = SimpleNamespace(
+        execution_id="execution",
+        state=RecoveryCheckpointState.HANDOFF,
+        input=recovery_input,
+        terminal_handoff=SimpleNamespace(
+            outcome=SimpleNamespace(
+                output=object(),
+                output_schema_id="wrong",
+                output_schema_revision=1,
+                output_schema_fingerprint="c" * 64,
+            )
+        ),
+    )
+    checkpoints = SimpleNamespace(
+        list_recoverable_page=lambda **kwargs: None,
+    )
+
+    async def _list_recoverable_page(**kwargs: object) -> object:
+        del kwargs
+        return SimpleNamespace(items=(checkpoint,), next_cursor=None)
+
+    async def _get_execution(*args: object, **kwargs: object) -> None:
+        del args, kwargs
+        return None
+
+    checkpoints.list_recoverable_page = _list_recoverable_page
+    state = SimpleNamespace(
+        recovery=SimpleNamespace(checkpoints=checkpoints),
+        execution=SimpleNamespace(
+            executions=SimpleNamespace(get=_get_execution),
+        ),
+    )
+    definition = SimpleNamespace(
+        spec=SimpleNamespace(id="agent"),
+        output_binding=SimpleNamespace(
+            schema_id="expected",
+            schema_revision=1,
+            schema_fingerprint="b" * 64,
+        ),
+    )
+    catalog = SimpleNamespace(
+        register=lambda value: value,
+    )
+    compiler = SimpleNamespace(
+        restore=lambda value: definition,
+    )
+
+    with pytest.raises(AIError) as error:
+        await _restore_recovery_definitions(
+            catalog,
+            compiler,
+            state,
+            tenant_id="tenant",
+        )
+
+    assert error.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
