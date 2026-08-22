@@ -10,7 +10,12 @@ from typing import Protocol
 from linktools.core import environ
 from pydantic import BaseModel
 
-from ..agent import AgentBindingSnapshot, AgentCompiler, AgentDefinition, AgentDefinitionCatalog
+from ..agent import (
+    AgentBindingSnapshot,
+    AgentCompiler,
+    AgentDefinition,
+    AgentDefinitionCatalog,
+)
 from ..asset import AssetRepository
 from ..capability import RuntimeCapability
 from ..core import (
@@ -27,7 +32,13 @@ from ..core import (
 )
 from ..errors import AIError, ErrorCode
 from ..spec import AgentSpec
-from ..task import TaskGraph, TaskGraphLimits, TaskGraphRequest, TaskGraphResult, TaskNode
+from ..task import (
+    TaskGraph,
+    TaskGraphLimits,
+    TaskGraphRequest,
+    TaskGraphResult,
+    TaskNode,
+)
 from ._agent import AgentHandle
 from .service_api import (
     ApprovalService,
@@ -68,7 +79,9 @@ _AGENT_TASK_CURRENT_V1_FIELDS = frozenset(
 
 
 class _LocalRuntimeCoordinatorPort(Protocol):
-    async def run(self, binding_digest: str, request: ExecutionRequest) -> ExecutionHandle: ...
+    async def run(
+        self, binding_digest: str, request: ExecutionRequest
+    ) -> ExecutionHandle: ...
 
     async def resume(
         self,
@@ -168,7 +181,9 @@ class Runtime:
         self._ensure_open()
         if not isinstance(planning, bool) or not isinstance(thinking, bool):
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
-        if any(not isinstance(capability, RuntimeCapability) for capability in capabilities):
+        if any(
+            not isinstance(capability, RuntimeCapability) for capability in capabilities
+        ):
             raise TypeError("capabilities must contain RuntimeCapability values")
         if isinstance(agent, str):
             validate_agent_id(agent)
@@ -608,7 +623,10 @@ class Runtime:
         agent_ids: set[str] = set()
         for node in graph.nodes:
             payload = node.input
-            if payload.get("type") != "linktools.ai.agent" or payload.get("version") != 1:
+            if (
+                payload.get("type") != "linktools.ai.agent"
+                or payload.get("version") != 1
+            ):
                 raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
             fields = frozenset(payload)
             if fields == _AGENT_TASK_LEGACY_V1_FIELDS:
