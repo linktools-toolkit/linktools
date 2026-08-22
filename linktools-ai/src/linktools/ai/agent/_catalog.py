@@ -78,6 +78,8 @@ def _same_definition(left: AgentDefinition, right: AgentDefinition) -> bool:
             and left.output_binding.descriptor == right.output_binding.descriptor
             and left_capabilities == right_capabilities
             and left.binding_snapshot == right.binding_snapshot
+            and left.trusted_tool_classes == right.trusted_tool_classes
+            and left.trusted_mcp_tools is right.trusted_mcp_tools
         )
     except (AttributeError, TypeError) as error:
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
