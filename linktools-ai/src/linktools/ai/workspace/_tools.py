@@ -139,14 +139,31 @@ def build_workspace_capabilities(root: 'str | Path') -> 'tuple[RuntimeCapability
     _logger.debug("local workspace tools configured root=%s", project_root)
     filesystem = FileSystem(root_dir=project_root)
     shell = Shell(cwd=project_root, denied_env_patterns=LLM_API_KEY_ENV_PATTERNS)
+    filesystem_fingerprint = canonical_sha256(
+        {
+            "version": 1,
+            "kind": "workspace-filesystem",
+            "root": str(project_root),
+        }
+    )
+    shell_fingerprint = canonical_sha256(
+        {
+            "version": 1,
+            "kind": "workspace-shell",
+            "cwd": str(project_root),
+            "denied_env_patterns": sorted(str(value) for value in LLM_API_KEY_ENV_PATTERNS),
+        }
+    )
     return (
         RuntimeCapability(
             "workspace-filesystem",
             filesystem,
+            semantic_fingerprint=filesystem_fingerprint,
         ),
         RuntimeCapability(
             "workspace-shell",
             shell,
+            semantic_fingerprint=shell_fingerprint,
         ),
     )
 
