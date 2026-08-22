@@ -246,7 +246,7 @@ Retry and fork restore the source definition and inherit source planning/thinkin
 
 ## 9. TaskGraph and Temporal
 
-`AgentHandle.task()` writes TaskGraph Agent input version 2 with:
+`AgentHandle.task()` writes the final TaskGraph Agent V1 input with:
 
 ```text
 agent_id
@@ -257,9 +257,9 @@ planning
 thinking
 ```
 
-The Runtime Task planner restores that snapshot before admitting an execution. Legacy version 1 Task input remains read-only compatibility data.
+The Runtime admission boundary accepts the frozen legacy root-only V1 shape exactly, resolves it against the root Agent catalog, and normalizes it to the final V1 shape before persistence. Partial or unknown shapes are rejected. The Runtime Task planner consumes only the final V1 shape and restores the persisted snapshot before admitting an execution.
 
-Temporal execution request transport uses the same rule: version 1 remains readable with `planning=False` and `thinking=False`; current version 2 stores modes, binding digest, and the full binding snapshot. The workflow pins the binding digest and verifies it when loading the persisted request.
+Temporal execution transport follows the same V1 rule. Current writers persist `planning`, `thinking`, `binding_digest`, and the full binding snapshot. The reader accepts either the frozen legacy V1 field set or the final V1 field set exactly; partial shapes are rejected. The workflow pins the binding digest and verifies it when loading the persisted request.
 
 Applications integrating Temporal should use the public `WorkflowGateway` / worker components instead of parsing request objects directly.
 
