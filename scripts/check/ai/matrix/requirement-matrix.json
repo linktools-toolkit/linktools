@@ -72,13 +72,13 @@
       "id": "R-05",
       "owner": "evidence",
       "implementation": [
-        "scripts/build/matrix/linktools-ai-evidence.json",
-        "scripts/build/matrix/linktools-ai-review-coverage.json",
-        "scripts/build/matrix/linktools-ai-traceability.json"
+        "scripts/check/ai/matrix/linktools-ai-evidence.json",
+        "scripts/check/ai/matrix/linktools-ai-review-coverage.json",
+        "scripts/check/ai/matrix/linktools-ai-traceability.json"
       ],
       "tests": [
-        "linktools-ai/scripts/build/matrix/linktools-ai-review-coverage.json",
-        "linktools-ai/scripts/build/matrix/linktools-ai-evidence.json"
+        "scripts/check/ai/matrix/linktools-ai-review-coverage.json",
+        "scripts/check/ai/matrix/linktools-ai-evidence.json"
       ],
       "requirement": "Release evidence is complete, deterministic and bound to the actual source commit.",
       "constraints": "Preserve the v5 public and ownership boundary.",
@@ -102,7 +102,7 @@
       "id": "R-07",
       "owner": "architecture",
       "implementation": [
-        "scripts/build/names.py"
+        "scripts/check/ai/names.py"
       ],
       "tests": [
         "tests/ai/test_architecture.py::test_names_and_module_imports_are_clean",
@@ -117,8 +117,8 @@
       "id": "R-08",
       "owner": "architecture",
       "implementation": [
-        "scripts/build/architecture.py",
-        "scripts/build/matrix/linktools-ai-package-policy.json"
+        "scripts/check/ai/architecture.py",
+        "scripts/check/ai/matrix/linktools-ai-package-policy.json"
       ],
       "tests": [
         "tests/ai/test_architecture.py::test_source_graph_is_acyclic_and_static",
@@ -281,8 +281,8 @@
       "id": "T-08",
       "owner": "tests",
       "implementation": [
-        "scripts/build/architecture.py",
-        "scripts/build/names.py"
+        "scripts/check/ai/architecture.py",
+        "scripts/check/ai/names.py"
       ],
       "tests": [
         "tests/ai/test_architecture.py"
@@ -308,7 +308,7 @@
       "id": "T-10",
       "owner": "tests",
       "implementation": [
-        "scripts/build/names.py"
+        "scripts/check/ai/names.py"
       ],
       "tests": [
         "tests/ai/test_architecture.py::test_name_gate_allows_parallel_names_and_rejects_namespace_collisions",
@@ -322,7 +322,7 @@
       "id": "T-11",
       "owner": "tests",
       "implementation": [
-        "scripts/build/architecture.py"
+        "scripts/check/ai/architecture.py"
       ],
       "tests": [
         "tests/ai/test_architecture.py::test_architecture_gate_normalizes_relative_module_policy_and_rejects_stale_entries"
@@ -485,7 +485,7 @@
       "requirement": "Naming grandfather fixtures are exact and reject generic exceptions",
       "constraints": "Executable verification must exercise the exact requirement; the named test must execute the exact behavior.",
       "implementation": [
-        "linktools-ai/scripts/build/names.py",
+        "scripts/check/ai/names.py",
         "tests/ai/test_architecture.py"
       ],
       "tests": [
@@ -587,21 +587,21 @@
       "requirement": "DOD-001～DOD-089 current contract 连续、evidence path/test node 存在、stale profile/category wording 清除、private/public module contract 与 provenance 一致。",
       "constraints": "Source S 阶段 DOD-023/DOD-024 不得 complete，E 阶段由 provenance test 验证。",
       "implementation": [
-        "linktools-ai/scripts/build/matrix/runtime-step-requirements.json",
-        "linktools-ai/scripts/build/matrix/requirement-matrix.json"
+        "scripts/check/ai/matrix/runtime-step-requirements.json",
+        "scripts/check/ai/matrix/requirement-matrix.json"
       ],
       "tests": [
         "tests/ai/test_architecture.py::test_runtime_step_contract_matrix_is_current"
       ],
       "finding_mapping": "F-05/provenance",
       "status": "PASS"
-    }
-    ,{
+    },
+    {
       "id": "T-30",
       "owner": "architecture/visibility",
       "requirement": "所有 unprefixed source module 精确属于 public_modules，private module 不得进入 policy，stale policy entry 必须失败。",
       "constraints": "真实 tree 与 synthetic classification gate 均必须验证。",
-      "implementation": ["linktools-ai/scripts/build/architecture.py", "linktools-ai/scripts/build/matrix/linktools-ai-package-policy.json"],
+      "implementation": ["scripts/check/ai/architecture.py", "scripts/check/ai/matrix/linktools-ai-package-policy.json"],
       "tests": ["tests/ai/test_architecture.py::test_public_private_classification_gate_is_exact"],
       "finding_mapping": "F-15/T-30",
       "status": "PASS"
@@ -611,7 +611,7 @@
       "owner": "architecture/visibility",
       "requirement": "跨 package 目录 direct private import 在 runtime、TYPE_CHECKING 与 nested package 场景均失败，package surface import 通过。",
       "constraints": "不允许通过放宽 dependency allowlist 绕过 private boundary。",
-      "implementation": ["linktools-ai/scripts/build/architecture.py"],
+      "implementation": ["scripts/check/ai/architecture.py"],
       "tests": ["tests/ai/test_architecture.py::test_private_cross_package_import_gate_covers_runtime_type_checking_and_nested_packages"],
       "finding_mapping": "F-15/T-31",
       "status": "PASS"
@@ -621,7 +621,7 @@
       "owner": "architecture/naming",
       "requirement": "namespace-scoped semantic naming: parallel parent namespaces allow the same leaf; ancestor/descendant parent namespaces reject the same leaf; module/package均参与；`_` 仅为 visibility，private package directory remains invalid。",
       "constraints": "不保留 grandfather。",
-      "implementation": ["linktools-ai/scripts/build/names.py"],
+      "implementation": ["scripts/check/ai/names.py"],
       "tests": ["tests/ai/test_architecture.py::test_name_gate_allows_parallel_names_and_rejects_namespace_collisions", "tests/ai/test_architecture.py::test_name_gate_includes_modules_and_packages_in_namespace_model", "tests/ai/test_architecture.py::test_name_gate_treats_private_marker_as_semantic_only"],
       "finding_mapping": "F-15/T-32",
       "status": "PASS"
@@ -631,7 +631,7 @@
       "owner": "architecture/rename",
       "requirement": "最终 private conversion tree 精确完成，旧路径消失，新路径和唯一 public_modules 清单一致。",
       "constraints": "不得新增 compatibility forwarding module 或 private package directory。",
-      "implementation": ["linktools-ai/src/linktools/ai", "linktools-ai/scripts/build/matrix/linktools-ai-package-policy.json"],
+      "implementation": ["linktools-ai/src/linktools/ai", "scripts/check/ai/matrix/linktools-ai-package-policy.json"],
       "tests": ["tests/ai/test_architecture.py::test_private_conversion_tree_is_exact"],
       "finding_mapping": "F-15/T-33",
       "status": "PASS"
@@ -681,7 +681,7 @@
       "owner": "release/provenance",
       "requirement": "S 可解析且完成 exact validation 后，E 可作为 evidence-only metadata revision；squash 后不把 parent topology 作为 correctness 条件。",
       "constraints": "source SHA 不可解析或 evidence 无法追溯到 logical/source revision 时必须失败。",
-      "implementation": ["linktools-ai/scripts/build/matrix"],
+      "implementation": ["scripts/check/ai/matrix"],
       "tests": ["tests/ai/test_architecture.py::test_runtime_step_contract_matrix_is_current"],
       "finding_mapping": "F-15/T-38",
       "status": "PASS"
