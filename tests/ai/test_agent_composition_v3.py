@@ -9,7 +9,12 @@ import pytest
 from pydantic_ai.capabilities import AbstractCapability
 
 import linktools.ai as ai
-from linktools.ai.agent import AgentBindingSnapshot
+from linktools.ai.agent import (
+    AgentBindingSnapshot,
+    AgentDefinition,
+    AgentDefinitionCatalog,
+)
+from linktools.ai.agent._output import bind_output
 from linktools.ai.capability import RuntimeCapability
 from linktools.ai.core import SessionStatus
 from linktools.ai.errors import AIError, ErrorCode
@@ -93,6 +98,52 @@ def test_agent_binding_snapshot_is_deeply_immutable() -> None:
 
     persisted = snapshot.to_payload()["local_runtime_capability_descriptors"]
     assert persisted == [{"config": {"items": ["first"]}}]
+
+
+def test_catalog_uses_durable_semantics_for_restored_capability_instances() -> None:
+    digest = "a" * 64
+    spec = AgentSpec("agent", 1, "model")
+    output = bind_output()
+    first_capability = RuntimeCapability.from_spec(
+        "local",
+        _DurableCapability,
+        config={},
+    )
+    restored_capability = RuntimeCapability.from_spec(
+        "local",
+        _DurableCapability,
+        config={},
+    )
+    assert first_capability.capability is not restored_capability.capability
+
+    def definition(capability: RuntimeCapability) -> AgentDefinition:
+        descriptor = capability.descriptor
+        assert descriptor is not None
+        snapshot = AgentBindingSnapshot(
+            version=1,
+            agent_spec=spec,
+            output_type_module=output.value_type.__module__,
+            output_type_qualname=output.value_type.__qualname__,
+            output_schema_id=output.schema_id,
+            output_schema_revision=output.schema_revision,
+            output_schema_fingerprint=output.schema_fingerprint,
+            local_runtime_capability_descriptors=(descriptor,),
+            binding_digest=digest,
+        )
+        return AgentDefinition(
+            digest,
+            spec,
+            SimpleNamespace(fingerprint="b" * 64),
+            output,
+            (capability,),
+            snapshot,
+        )
+
+    first = definition(first_capability)
+    restored = definition(restored_capability)
+    catalog = AgentDefinitionCatalog({})
+    assert catalog.register(first) is first
+    assert catalog.register(restored) is first
 
 
 class _SessionService:
