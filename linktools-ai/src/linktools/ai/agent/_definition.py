@@ -13,7 +13,16 @@ from ..spec import AgentSpec
 from ._binding import AgentBindingSnapshot
 from ._output import OutputBinding
 
-_TRUSTED_TOOL_CLASSES = frozenset({"control", "filesystem", "shell", "memory"})
+_TRUSTED_TOOL_CLASSES = frozenset(
+    {
+        "control",
+        "filesystem.read",
+        "filesystem.write",
+        "shell",
+        "memory.read",
+        "memory.write",
+    }
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -67,19 +76,19 @@ class AgentDefinition:
                 raise AIError(ErrorCode.CAPABILITY_POLICY_CONFLICT)
             selectors.add(selector)
             previous_selector = selector
-        capability_ids: set[str] = set()
+        names: set[str] = set()
         previous: str | None = None
-        for capability_id, tool_class in self.trusted_tool_classes:
+        for name, tool_class in self.trusted_tool_classes:
             if (
-                not isinstance(capability_id, str)
-                or not capability_id.strip()
+                not isinstance(name, str)
+                or not name.strip()
                 or tool_class not in _TRUSTED_TOOL_CLASSES
-                or capability_id in capability_ids
-                or (previous is not None and capability_id < previous)
+                or name in names
+                or (previous is not None and name < previous)
             ):
                 raise AIError(ErrorCode.CAPABILITY_POLICY_CONFLICT)
-            capability_ids.add(capability_id)
-            previous = capability_id
+            names.add(name)
+            previous = name
 
     @property
     def output_type(self) -> type[BaseModel]:
