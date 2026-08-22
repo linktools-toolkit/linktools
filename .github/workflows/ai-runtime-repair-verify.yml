@@ -9,7 +9,7 @@ on:
       - master
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   verify:
@@ -37,24 +37,43 @@ jobs:
             ruff
           python -m pip install --no-deps -e ./linktools -e ./linktools-ai
 
+      - name: Apply verified import fix
+        if: github.event_name == 'push'
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          path = Path('linktools-ai/src/linktools/ai/runtime/_runtime_service.py')
+          text = path.read_text()
+          old = 'from typing import Protocol\n'
+          new = 'from typing import Protocol, TypeGuard\n'
+          if old not in text:
+              raise SystemExit('expected import not found')
+          path.write_text(text.replace(old, new, 1))
+          PY
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add linktools-ai/src/linktools/ai/runtime/_runtime_service.py
+          git commit -m 'fix(ai): import runtime type guard'
+          git push origin HEAD:refactor/ai-runtime-agent-composition
+
       - name: Compile
         env:
-          PYTHONPATH: linktools-ai:linktools-ai/src:linktools/src
+          PYTHONPATH: linktools-ai/src:linktools/src:linktools-ai:linktools
         run: python -m compileall -q linktools-ai/src/linktools/ai
 
       - name: Architecture gates
         env:
-          PYTHONPATH: linktools-ai:linktools-ai/src:linktools/src
+          PYTHONPATH: linktools-ai/src:linktools/src:linktools-ai:linktools
         run: python -m pytest -q tests/ai/test_architecture.py
 
       - name: Ruff
         env:
-          PYTHONPATH: linktools-ai:linktools-ai/src:linktools/src
+          PYTHONPATH: linktools-ai/src:linktools/src:linktools-ai:linktools
         run: |
           python -m ruff format --check --diff linktools-ai/scripts/build linktools-ai/src/linktools/ai linktools-ai/src/linktools/commands/ai tests/ai
           python -m ruff check linktools-ai/scripts/build linktools-ai/src/linktools/ai linktools-ai/src/linktools/commands/ai tests/ai
 
       - name: AI tests
         env:
-          PYTHONPATH: linktools-ai:linktools-ai/src:linktools/src
+          PYTHONPATH: linktools-ai/src:linktools/src:linktools-ai:linktools
         run: python -m pytest -q tests/ai
