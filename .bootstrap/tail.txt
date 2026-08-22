@@ -1,55 +1,55 @@
-48 |     ExecutionRequest,
-   -     ExecutionResult,
-   -     ExecutionService,
-49 |     ExecutionStreamEvent,
-50 |     ReplayEvaluationRequest,
-51 |     ResumeSessionRequest,
-52 |     RunEvaluationRequest,
-   -     SessionService,
-53 |     SessionView,
-   -     TaskService,
-54 | )
+===== python .bootstrap/patch.py =====
+runtime restored and refactored
+===== python -m compileall -q linktools-ai/src/linktools/ai =====
+===== python -m pip install -q --upgrade pip =====
+===== python -m pip install -q -e ./linktools -e ./linktools-ai[sqlite,evaluation,temporal] pytest pytest-asyncio ruff =====
+===== ruff check --select E4,E7,E9,F linktools-ai/src/linktools/ai linktools-ai/src/linktools/commands/ai tests/ai =====
+F401 [*] `pydantic_ai_harness.step_persistence.ContinuableSnapshot` imported but unused
+  --> linktools-ai/src/linktools/ai/adapter/_history.py:15:5
+   |
+13 | from pydantic_ai.messages import ModelRequest, ModelResponse
+14 | from pydantic_ai_harness.step_persistence import (
+15 |     ContinuableSnapshot,
+   |     ^^^^^^^^^^^^^^^^^^^
+16 |     RunRecord,
+17 |     StepEvent,
+   |
+help: Remove unused import: `pydantic_ai_harness.step_persistence.ContinuableSnapshot`
+   |
+14 | from pydantic_ai_harness.step_persistence import (
+   -     ContinuableSnapshot,
+15 |     RunRecord,
    |
 
-F401 [*] `.service_api.TaskService` imported but unused
-  --> linktools-ai/src/linktools/ai/runtime/_runtime_service.py:63:5
+F401 `._mcp.mcp_server_selector` imported but unused; consider removing, adding to `__all__`, or using a redundant alias
+  --> linktools-ai/src/linktools/ai/capability/__init__.py:13:54
    |
-61 |     SessionService,
-62 |     SessionView,
-63 |     TaskService,
-   |     ^^^^^^^^^^^
-64 | )
+11 |     validate_fingerprint,
+12 | )
+13 | from ._mcp import MCPCapabilityProvider, MCPRuntime, mcp_server_selector
+   |                                                      ^^^^^^^^^^^^^^^^^^^
+14 | from ._names import SKILL_TOOL_NAMES
+15 | from ._skill import SkillCapabilityProvider
    |
-help: Remove unused import
-   |
-44 | from .service_api import (
-   -     ApprovalService,
-   -     ArtifactService,
-   -     CancelExecutionRequest,
-   -     CancelExecutionResult,
-45 |     CreateSessionRequest,
-46 |     EvaluationHandle,
-   -     EvaluationService,
-   -     EventService,
-47 |     ExecutionHandle,
-48 |     ExecutionRequest,
-   -     ExecutionResult,
-   -     ExecutionService,
-49 |     ExecutionStreamEvent,
-50 |     ReplayEvaluationRequest,
-51 |     ResumeSessionRequest,
-52 |     RunEvaluationRequest,
-   -     SessionService,
-53 |     SessionView,
-   -     TaskService,
-54 | )
-   |
+help: Add unused import `mcp_server_selector` to __all__
 
-F822 Undefined name `Runtime` in `__all__`
-   --> linktools-ai/src/linktools/ai/runtime/_runtime_service.py:374:12
-    |
-374 | __all__ = ["Runtime"]
-    |            ^^^^^^^^^
+F401 [*] `typing.TypeGuard` imported but unused
+  --> linktools-ai/src/linktools/ai/runtime/_runtime_service.py:8:30
+   |
+ 6 | import secrets
+ 7 | from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
+ 8 | from typing import Protocol, TypeGuard
+   |                              ^^^^^^^^^
+ 9 |
+10 | from linktools.core import environ
+   |
+help: Remove unused import: `typing.TypeGuard`
+  |
+7 | from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
+  - from typing import Protocol, TypeGuard
+8 + from typing import Protocol
+9 |
+  |
 
 F401 [*] `.state._contracts.ConversationHistoryRecord` imported but unused
   --> linktools-ai/src/linktools/ai/runtime/_session.py:54:5
@@ -246,5 +246,5 @@ E402 Module level import not at top of file
    |
 help: Move module level imports to top of file
 
-Found 42 errors.
-[*] 29 fixable with the `--fix` option.
+Found 16 errors.
+[*] 4 fixable with the `--fix` option.

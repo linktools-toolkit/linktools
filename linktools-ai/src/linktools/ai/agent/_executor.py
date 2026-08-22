@@ -49,7 +49,6 @@ from ._capabilities import (
     tool_is_control,
     tool_name_allowed,
 )
-from ._binding import AgentBinding
 from ._definition import AgentDefinition
 
 
