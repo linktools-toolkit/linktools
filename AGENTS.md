@@ -16,25 +16,30 @@ Each package lives under `{name}/src/linktools/` and extends the core framework 
 
 ## Development Commands
 
-`manage.py` provides `init`, `install`, `build`, and `clean`. Commands operate on all discovered packages by default or an optional package list. `VERSION` controls the `.version` written at build time.
+`manage.py` is the repository-wide project and release-gate entry point. Commands operate on all registered packages by default or an optional package list. `VERSION` controls the `.version` written at build time.
 
-```bash id="6djwhe"
+```bash
 python manage.py install --editable
 python manage.py install --editable linktools linktools-mobile
 python manage.py install --editable --no-isolation linktools-mobile
+python manage.py check
+python manage.py check linktools-ai
 python manage.py build [linktools-mobile]
+python manage.py verify [linktools-mobile]
 python manage.py clean [linktools-mobile]
 ```
 
+Repository development, build, and release helper code belongs under root `scripts/`. Package directories must not add their own release-script trees. Project-specific gates belong under `scripts/check/<project>/` only when the project has real project-specific rules.
+
 After installation:
 
-```bash id="93nfj6"
+```bash
 python3 -m linktools
 at-frida --help
 ct-tools apktool -h
 ```
 
-Package-specific build steps, such as Frida TypeScript and Android APK builds, are documented in each package's `AGENTS.md`.
+Package-specific generated assets, such as Frida TypeScript and Android APKs, are documented in each package's `AGENTS.md`.
 
 ## Entry Points / Plugin Discovery
 
@@ -48,7 +53,20 @@ Keep subjects short and describe the actual change, e.g. `fix(ai): release tenan
 
 ## Release / CI
 
-GitHub releases build the Frida JS bundle, Android APK, and Python wheels, publish to PyPI, and commit generated artifacts and `.version` files back to the repository.
+A Python package release uses one fixed gate sequence from the repository root:
+
+```text
+prepare generated assets
+-> install editable development environment
+-> python manage.py check
+-> python manage.py build
+-> python manage.py verify
+-> publish to PyPI
+-> commit generated artifacts
+-> tag / GitHub Release
+```
+
+`check` is a read-only source/test gate and `verify` validates the built artifacts. Publishing or tagging must not run after either command fails. GitHub releases also build the Frida JS bundle and Android APK before the Python gates.
 
 ## Python Code Style
 
