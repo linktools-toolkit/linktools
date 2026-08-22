@@ -6,7 +6,6 @@ from collections.abc import Mapping
 from dataclasses import dataclass, replace
 from datetime import timedelta
 from enum import StrEnum
-from typing import Protocol
 
 try:
     from temporalio import workflow as _temporal_workflow
@@ -21,6 +20,7 @@ from ...core import (
     ApprovalDecision,
     ExecutionStatus,
     JsonValue,
+    canonical_sha256,
     validate_lease_owner,
     validate_tenant_id,
 )
@@ -68,7 +68,6 @@ class ExecutionWorkflowInput:
     execution_id: str
     tenant_id: str
     binding_digest: str
-    bundle_digest: str
     request_ref: str
     worker_build: str
     owner: str = ""
@@ -77,6 +76,24 @@ class ExecutionWorkflowInput:
 
     def __post_init__(self) -> None:
         _require_request(self)
+
+
+@dataclass(frozen=True, slots=True)
+class ApprovalReplay:
+    approval_id: str
+    idempotency_key: str
+    decision: ApprovalDecision
+    principal_id: str
+    decision_digest: str
+
+
+@dataclass(frozen=True, slots=True)
+class ExternalResultReplay:
+    call_id: str
+    idempotency_key: str
+    object_ref: str
+    payload_digest: str
+    principal_id: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -95,7 +112,6 @@ class ExecutionWorkflowState:
     session_revision: int
     resource_generation: int
     binding_digest: str
-    bundle_digest: str
     prompt_digest: str
     model_registry_revision: int
     budget_reservation_id: str
@@ -106,9 +122,8 @@ class ExecutionWorkflowState:
     continue_count: int
     operation_ledger_ref: str
     last_stage: str = ""
-    external_result_refs: "tuple[tuple[str, str, str], ...]" = ()
-    approval_decisions: "tuple[tuple[str, ApprovalDecision], ...]" = ()
-    approval_idempotency_keys: "tuple[tuple[str, str], ...]" = ()
+    external_result_replays: "tuple[ExternalResultReplay, ...]" = ()
+    approval_replays: "tuple[ApprovalReplay, ...]" = ()
     last_operation_id: str = ""
 
 
@@ -121,13 +136,8 @@ class ExecutionWorkflowResult:
     state: "ExecutionWorkflowState | None" = None
 
 
-class ExecutionActivity(Protocol):
-    async def run(self, request: ExecutionWorkflowInput) -> ExecutionWorkflowResult: ...
-
-
 class ExecutionWorkflow:
-    def __init__(self, activity: "ExecutionActivity | None" = None) -> None:
-        self._activity = activity
+    def __init__(self) -> None:
         self._state: "ExecutionWorkflowState | None" = None
 
     async def run(
@@ -137,47 +147,16 @@ class ExecutionWorkflow:
     ) -> ExecutionWorkflowResult:
         _require_request(request)
         self._state = _resume_state(request, resume_state)
-        if self._activity is not None:
-            result = await self._activity.run(request)
-        elif _temporal_workflow is not None and _TemporalRetryPolicy is not None:
-            state = await self._run_stages(request)
-            result = ExecutionWorkflowResult(
-                request.execution_id,
-                state.status,
-                state.result_ref,
-                state.last_event_sequence,
-                state,
-            )
-        else:
+        if _temporal_workflow is None or _TemporalRetryPolicy is None:
             raise RuntimeError("Temporal SDK is required for production workflow execution")
-        if result.execution_id != request.execution_id:
-            raise ValueError("execution activity returned a different execution id")
-        if result.status not in {"SUCCEEDED", "FAILED", "CANCELLED", "WAITING"}:
-            raise ValueError("execution activity returned an invalid terminal status")
-        if result.state is not None:
-            _validate_stage_transition(self._require_state(), result.state, "run")
-            self._state = result.state
-        if self._require_state().status == WorkflowPhase.CANCELLING.value:
-            cancelled = replace(
-                self._require_state(),
-                status=WorkflowPhase.CANCELLED.value,
-            )
-            self._state = cancelled
-            return ExecutionWorkflowResult(
-                request.execution_id,
-                cancelled.status,
-                cancelled.result_ref,
-                cancelled.last_event_sequence,
-                cancelled,
-            )
-        state = replace(
-            self._require_state(),
-            status=result.status,
-            result_ref=result.result_ref,
-            last_event_sequence=result.last_event_sequence,
+        state = await self._run_stages(request)
+        return ExecutionWorkflowResult(
+            request.execution_id,
+            state.status,
+            state.result_ref,
+            state.last_event_sequence,
+            state,
         )
-        self._state = state
-        return replace(result, state=state)
 
     async def _run_stages(
         self,
@@ -196,14 +175,7 @@ class ExecutionWorkflow:
             elif state.last_stage == "run_agent":
                 state = await _persist_deferred(state)
                 if _has_pending_deferred(state):
-                    state = replace(
-                        state,
-                        status=(
-                            WorkflowPhase.WAITING_APPROVAL.value
-                            if state.pending_approval_ids
-                            else WorkflowPhase.WAITING_EXTERNAL.value
-                        ),
-                    )
+                    state = _waiting_state(state)
             elif state.last_stage == "persist_deferred":
                 if _has_pending_deferred(state):
                     state = _waiting_state(state)
@@ -256,19 +228,31 @@ class ExecutionWorkflow:
         self,
         operation_id: str,
         approval_id: str,
-        decision: ApprovalDecision = ApprovalDecision.APPROVE,
-        idempotency_key: str = "",
+        idempotency_key: str,
+        decision: ApprovalDecision,
+        principal_id: str,
+        decision_digest: str,
     ) -> ExecutionWorkflowState:
         state = self._require_state()
+        replay = ApprovalReplay(
+            approval_id,
+            idempotency_key,
+            decision,
+            principal_id,
+            decision_digest,
+        )
+        _validate_approval_replay(replay)
+        existing = next(
+            (item for item in state.approval_replays if item.approval_id == approval_id),
+            None,
+        )
+        if existing is not None:
+            if existing == replay:
+                return state
+            raise AIError(ErrorCode.APPROVAL_CONFLICT)
         if state.status in {"SUCCEEDED", "FAILED", "CANCELLED"}:
             return state
         if approval_id not in state.pending_approval_ids:
-            if any(
-                item[0] == approval_id
-                and (not idempotency_key or item[1] == idempotency_key)
-                for item in state.approval_idempotency_keys
-            ):
-                return state
             raise ValueError("approval is not pending")
         remaining = tuple(
             item for item in state.pending_approval_ids if item != approval_id
@@ -285,43 +269,45 @@ class ExecutionWorkflow:
             operation_id,
             status=next_status,
             pending_approval_ids=remaining,
-            approval_decisions=(*state.approval_decisions, (approval_id, decision)),
-            approval_idempotency_keys=(
-                *state.approval_idempotency_keys,
-                (approval_id, idempotency_key or operation_id),
-            ),
+            approval_replays=(*state.approval_replays, replay),
         )
 
     def supply_external_result(
         self,
         operation_id: str,
-        external_id: str,
+        call_id: str,
+        idempotency_key: str,
         object_ref: str,
         payload_digest: str,
+        principal_id: str,
     ) -> ExecutionWorkflowState:
         state = self._require_state()
+        replay = ExternalResultReplay(
+            call_id,
+            idempotency_key,
+            object_ref,
+            payload_digest,
+            principal_id,
+        )
+        _validate_external_replay(replay)
+        existing = next(
+            (item for item in state.external_result_replays if item.call_id == call_id),
+            None,
+        )
+        if existing is not None:
+            if existing == replay:
+                return state
+            raise AIError(ErrorCode.EXTERNAL_RESULT_CONFLICT)
         if state.status in {"SUCCEEDED", "FAILED", "CANCELLED"}:
             return state
-        if external_id not in state.pending_external_ids:
-            if any(
-                item[0] == external_id
-                and item[1] == object_ref
-                and item[2] == payload_digest
-                for item in state.external_result_refs
-            ):
-                return state
+        if call_id not in state.pending_external_ids:
             raise ValueError("external call is not pending")
-        if not object_ref.strip() or not payload_digest.strip():
-            raise ValueError("external result reference and digest are required")
         return self._record_operation(
             state,
             operation_id,
-            external_result_refs=(
-                *state.external_result_refs,
-                (external_id, object_ref, payload_digest),
-            ),
+            external_result_replays=(*state.external_result_replays, replay),
             pending_external_ids=tuple(
-                item for item in state.pending_external_ids if item != external_id
+                item for item in state.pending_external_ids if item != call_id
             ),
         )
 
@@ -367,9 +353,8 @@ class ExecutionWorkflow:
         status: "str | None" = None,
         pending_approval_ids: "tuple[str, ...] | None" = None,
         pending_external_ids: "tuple[str, ...] | None" = None,
-        external_result_refs: "tuple[tuple[str, str, str], ...] | None" = None,
-        approval_decisions: "tuple[tuple[str, ApprovalDecision], ...] | None" = None,
-        approval_idempotency_keys: "tuple[tuple[str, str], ...] | None" = None,
+        external_result_replays: "tuple[ExternalResultReplay, ...] | None" = None,
+        approval_replays: "tuple[ApprovalReplay, ...] | None" = None,
     ) -> ExecutionWorkflowState:
         if not operation_id.strip():
             raise ValueError("operation id is required")
@@ -389,20 +374,15 @@ class ExecutionWorkflow:
                 else pending_external_ids
             ),
             operation_ledger_ref=state.operation_ledger_ref or operation_id,
-            external_result_refs=(
-                state.external_result_refs
-                if external_result_refs is None
-                else external_result_refs
+            external_result_replays=(
+                state.external_result_replays
+                if external_result_replays is None
+                else external_result_replays
             ),
-            approval_decisions=(
-                state.approval_decisions
-                if approval_decisions is None
-                else approval_decisions
-            ),
-            approval_idempotency_keys=(
-                state.approval_idempotency_keys
-                if approval_idempotency_keys is None
-                else approval_idempotency_keys
+            approval_replays=(
+                state.approval_replays
+                if approval_replays is None
+                else approval_replays
             ),
             last_operation_id=operation_id,
         )
@@ -415,12 +395,48 @@ class ExecutionWorkflow:
         return self._state
 
 
+def _validate_approval_replay(replay: ApprovalReplay) -> None:
+    if not all(
+        isinstance(value, str) and value.strip()
+        for value in (
+            replay.approval_id,
+            replay.idempotency_key,
+            replay.principal_id,
+            replay.decision_digest,
+        )
+    ):
+        raise ValueError("approval replay identity is incomplete")
+    expected = canonical_sha256(
+        {
+            "approval_id": replay.approval_id,
+            "idempotency_key": replay.idempotency_key,
+            "decision": replay.decision.value,
+            "principal_id": replay.principal_id,
+        }
+    )
+    if replay.decision_digest != expected:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+
+
+def _validate_external_replay(replay: ExternalResultReplay) -> None:
+    if not all(
+        isinstance(value, str) and value.strip()
+        for value in (
+            replay.call_id,
+            replay.idempotency_key,
+            replay.object_ref,
+            replay.payload_digest,
+            replay.principal_id,
+        )
+    ):
+        raise ValueError("external replay identity is incomplete")
+
+
 def _require_request(request: ExecutionWorkflowInput) -> None:
     values = (
         request.execution_id,
         request.tenant_id,
         request.binding_digest,
-        request.bundle_digest,
         request.request_ref,
         request.worker_build,
     )
@@ -459,7 +475,6 @@ def _initial_state(request: ExecutionWorkflowInput) -> ExecutionWorkflowState:
         session_revision=0,
         resource_generation=0,
         binding_digest=request.binding_digest,
-        bundle_digest=request.bundle_digest,
         prompt_digest="",
         model_registry_revision=0,
         budget_reservation_id="",
@@ -487,7 +502,6 @@ def _resume_state(
         state.fence,
         state.operation_id,
         state.binding_digest,
-        state.bundle_digest,
     )
     pinned_request = (
         request.execution_id,
@@ -498,7 +512,6 @@ def _resume_state(
         request.fence,
         request.operation_id,
         request.binding_digest,
-        request.bundle_digest,
     )
     if pinned_state != pinned_request:
         raise ValueError("execution continue snapshot does not match the workflow input")
@@ -549,7 +562,6 @@ def _validate_stage_transition(
         previous.fence,
         previous.operation_id,
         previous.binding_digest,
-        previous.bundle_digest,
     )
     current_identity = (
         current.execution_id,
@@ -560,7 +572,6 @@ def _validate_stage_transition(
         current.fence,
         current.operation_id,
         current.binding_digest,
-        current.bundle_digest,
     )
     if current_identity != previous_identity:
         raise ValueError(f"activity {stage} changed the pinned execution identity")
@@ -578,16 +589,16 @@ def _validate_stage_transition(
     ):
         raise ValueError(f"activity {stage} changed the operation ledger reference")
     if (
-        current.external_result_refs[: len(previous.external_result_refs)]
-        != previous.external_result_refs
+        current.external_result_replays[: len(previous.external_result_replays)]
+        != previous.external_result_replays
     ):
-        raise ValueError(f"activity {stage} removed an external result reference")
+        raise ValueError(f"activity {stage} removed an external result replay")
     if (
-        current.approval_decisions[: len(previous.approval_decisions)]
-        != previous.approval_decisions
+        current.approval_replays[: len(previous.approval_replays)]
+        != previous.approval_replays
     ):
-        raise ValueError(f"activity {stage} removed an approval decision")
-    if len(current.external_result_refs) > 1000 or len(current.approval_decisions) > 1000:
+        raise ValueError(f"activity {stage} removed an approval replay")
+    if len(current.external_result_replays) > 1000 or len(current.approval_replays) > 1000:
         raise AIError(ErrorCode.TOO_MANY_PENDING_OPERATIONS)
 
 
@@ -719,10 +730,11 @@ if _temporal_workflow is not None:
 
 
 __all__ = [
-    "ExecutionActivity",
+    "ApprovalReplay",
     "ExecutionWorkflow",
     "ExecutionWorkflowInput",
     "ExecutionWorkflowResult",
     "ExecutionWorkflowState",
+    "ExternalResultReplay",
     "WorkflowPhase",
 ]
