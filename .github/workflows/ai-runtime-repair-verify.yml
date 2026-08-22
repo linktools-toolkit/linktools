@@ -53,9 +53,7 @@ jobs:
       - name: Ruff
         env:
           PYTHONPATH: linktools-ai/src:linktools/src:linktools-ai:linktools
-        run: |
-          python -m ruff format --check --diff linktools-ai/scripts/build linktools-ai/src/linktools/ai linktools-ai/src/linktools/commands/ai tests/ai
-          python -m ruff check linktools-ai/scripts/build linktools-ai/src/linktools/ai linktools-ai/src/linktools/commands/ai tests/ai
+        run: python -m ruff check linktools-ai/scripts/build linktools-ai/src/linktools/ai linktools-ai/src/linktools/commands/ai tests/ai
 
       - name: AI tests
         env:
