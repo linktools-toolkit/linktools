@@ -4,6 +4,7 @@
 
 from dataclasses import replace
 
+from linktools.ai.core import ApprovalDecision
 from linktools.ai.temporal.workflow._execution import (
     CONTINUE_EVENT_THRESHOLD,
     ExecutionWorkflow,
@@ -77,3 +78,46 @@ def test_cancel_wakes_deferred_wait_immediately() -> None:
 
     assert cancelled.status == WorkflowPhase.CANCELLING.value
     assert workflow._deferred_resolved() is True
+
+
+def test_last_approval_switches_to_external_wait_phase() -> None:
+    workflow = ExecutionWorkflow()
+    workflow._state = replace(
+        _initial_state(_request()),
+        status=WorkflowPhase.WAITING_APPROVAL.value,
+        last_stage="persist_deferred",
+        pending_approval_ids=("approval",),
+        pending_external_ids=("external",),
+    )
+
+    updated = workflow.approve(
+        "approval-operation",
+        "approval",
+        ApprovalDecision.APPROVE,
+        "approval-key",
+    )
+
+    assert updated.pending_approval_ids == ()
+    assert updated.pending_external_ids == ("external",)
+    assert updated.status == WorkflowPhase.WAITING_EXTERNAL.value
+    assert workflow._deferred_resolved() is False
+
+
+def test_approval_does_not_overwrite_cancelling_phase() -> None:
+    workflow = ExecutionWorkflow()
+    workflow._state = replace(
+        _initial_state(_request()),
+        status=WorkflowPhase.CANCELLING.value,
+        last_stage="persist_deferred",
+        pending_approval_ids=("approval",),
+        pending_external_ids=("external",),
+    )
+
+    updated = workflow.approve(
+        "approval-operation",
+        "approval",
+        ApprovalDecision.APPROVE,
+        "approval-key",
+    )
+
+    assert updated.status == WorkflowPhase.CANCELLING.value
