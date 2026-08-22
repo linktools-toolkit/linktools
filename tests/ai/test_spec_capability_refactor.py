@@ -46,16 +46,51 @@ def test_platform_tool_selection_keeps_planning_outside_allow_tools() -> None:
     ) == ("delegate_task",)
 
 
+def test_planning_gate_requires_framework_filesystem_provenance() -> None:
+    classes = (("read_file", "filesystem.read"),)
+    trusted = ToolDefinition(
+        name="read_file",
+        capability_id="workspace-filesystem",
+    )
+    fake = ToolDefinition(name="read_file", capability_id="custom-filesystem")
+    explicit_custom = ToolDefinition(
+        name="read_file",
+        capability_id="custom-filesystem",
+        metadata={PLAN_SAFE_METADATA_KEY: True},
+    )
+
+    assert tool_allowed_in_planning(
+        trusted,
+        trusted_tool_classes=classes,
+        trusted_mcp_selectors=(),
+    )
+    assert not tool_allowed_in_planning(
+        fake,
+        trusted_tool_classes=classes,
+        trusted_mcp_selectors=(),
+    )
+    assert tool_allowed_in_planning(
+        explicit_custom,
+        trusted_tool_classes=classes,
+        trusted_mcp_selectors=(),
+    )
+
+
 def test_planning_gate_uses_trusted_mcp_provenance_not_name_prefix() -> None:
     trusted = ToolDefinition(
         name="mcp__trusted__read",
+        capability_id="mcp__trusted",
         metadata={PLAN_SAFE_METADATA_KEY: True},
     )
     custom = ToolDefinition(
         name="mcp__custom__read",
+        capability_id="custom-mcp",
         metadata={PLAN_SAFE_METADATA_KEY: True},
     )
-    custom_without_metadata = ToolDefinition(name="mcp__custom__other")
+    spoofed = ToolDefinition(
+        name="mcp__trusted__read",
+        capability_id="custom-mcp",
+    )
 
     assert not tool_allowed_in_planning(
         trusted,
@@ -68,7 +103,7 @@ def test_planning_gate_uses_trusted_mcp_provenance_not_name_prefix() -> None:
         trusted_mcp_selectors=("mcp__trusted",),
     )
     assert not tool_allowed_in_planning(
-        custom_without_metadata,
+        spoofed,
         trusted_tool_classes=(),
         trusted_mcp_selectors=("mcp__trusted",),
     )
@@ -77,6 +112,7 @@ def test_planning_gate_uses_trusted_mcp_provenance_not_name_prefix() -> None:
 def test_planning_gate_rejects_non_boolean_plan_safe_metadata() -> None:
     tool = ToolDefinition(
         name="custom",
+        capability_id="custom",
         metadata={PLAN_SAFE_METADATA_KEY: "yes"},
     )
 
