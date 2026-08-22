@@ -296,7 +296,11 @@ class Runtime:
                     resume_request,
                 )
             else:
-                handle = await self.session.resume(definition.digest, session_id, resume_request)
+                handle = await self.session.resume(
+                    definition.digest,
+                    session_id,
+                    resume_request,
+                )
         _logger.info(
             "runtime execution admitted: execution=%s agent=%s session=%s planning=%s thinking=%s",
             handle.execution_id,
@@ -375,7 +379,9 @@ class Runtime:
             execution_id,
             CancelExecutionRequest(
                 principal,
-                secrets.token_urlsafe(32) if idempotency_key is None else idempotency_key,
+                secrets.token_urlsafe(32)
+                if idempotency_key is None
+                else idempotency_key,
                 force,
             ),
         )
@@ -457,7 +463,10 @@ class Runtime:
         stream = (
             self.event.stream(handle.execution_id, principal=principal)
             if self._local_coordinator is None
-            else self._local_coordinator.stream(handle.execution_id, principal=principal)
+            else self._local_coordinator.stream(
+                handle.execution_id,
+                principal=principal,
+            )
         )
         async for event in stream:
             yield event
@@ -527,7 +536,11 @@ class Runtime:
         request: ReplayEvaluationRequest,
     ) -> ExecutionHandle:
         definition = self._catalog.root_definition("default")
-        return await self._replay_evaluation_for_binding(definition.digest, snapshot_id, request)
+        return await self._replay_evaluation_for_binding(
+            definition.digest,
+            snapshot_id,
+            request,
+        )
 
     async def _replay_evaluation_for_binding(
         self,
@@ -536,7 +549,11 @@ class Runtime:
         request: ReplayEvaluationRequest,
     ) -> ExecutionHandle:
         definition = self._catalog.definition(binding_digest)
-        return await self.evaluation.replay(definition.digest, snapshot_id, request)
+        return await self.evaluation.replay(
+            definition.digest,
+            snapshot_id,
+            request,
+        )
 
     async def run_graph(
         self,
@@ -569,7 +586,10 @@ class Runtime:
             idempotency_key=idempotency_key,
             limits=limits,
         )
-        return await self.task.run_graph_and_wait(request, timeout_seconds=timeout_seconds)
+        return await self.task.run_graph_and_wait(
+            request,
+            timeout_seconds=timeout_seconds,
+        )
 
     async def _admit_graph(
         self,
@@ -622,7 +642,10 @@ class Runtime:
                     snapshot = AgentBindingSnapshot.from_payload(binding)
                 except AIError as error:
                     raise AIError(ErrorCode.REQUEST_FIELD_INVALID) from error
-                if snapshot.binding_digest != binding_digest or snapshot.agent_spec.id != agent_id:
+                if (
+                    snapshot.binding_digest != binding_digest
+                    or snapshot.agent_spec.id != agent_id
+                ):
                     raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
                 definition = self._restore_definition(snapshot)
             else:
@@ -655,7 +678,12 @@ class Runtime:
             tuple(sorted(agent_ids)),
             len(admitted.nodes),
         )
-        return TaskGraphRequest(admitted, principal, idempotency_key, selected_limits)
+        return TaskGraphRequest(
+            admitted,
+            principal,
+            idempotency_key,
+            selected_limits,
+        )
 
     async def _ensure_session(
         self,
@@ -666,19 +694,27 @@ class Runtime:
         try:
             session = await self.session.get(session_id, principal=principal)
         except AIError as error:
-            if error.code not in {ErrorCode.SESSION_NOT_FOUND, ErrorCode.AUTHORIZATION_DENIED}:
+            if error.code not in {
+                ErrorCode.SESSION_NOT_FOUND,
+                ErrorCode.AUTHORIZATION_DENIED,
+            }:
                 raise
-            await self.session.create(
-                definition.digest,
-                CreateSessionRequest(
-                    principal,
-                    session_id,
-                    secrets.token_urlsafe(32),
-                    None,
-                    {"linktools.ai.agent_id": definition.spec.id},
-                ),
-            )
-            return
+            try:
+                await self.session.create(
+                    definition.digest,
+                    CreateSessionRequest(
+                        principal,
+                        session_id,
+                        secrets.token_urlsafe(32),
+                        None,
+                        {"linktools.ai.agent_id": definition.spec.id},
+                    ),
+                )
+                return
+            except AIError as create_error:
+                if create_error.code is not ErrorCode.STORAGE_CONFLICT:
+                    raise
+            session = await self.session.get(session_id, principal=principal)
         if session.status is not SessionStatus.OPEN:
             raise AIError(ErrorCode.SESSION_CONFLICT)
         if session.binding_digest != definition.digest:
@@ -694,7 +730,10 @@ class Runtime:
         try:
             session = await self.session.get(session_id, principal=principal)
         except AIError as error:
-            if error.code not in {ErrorCode.SESSION_NOT_FOUND, ErrorCode.AUTHORIZATION_DENIED}:
+            if error.code not in {
+                ErrorCode.SESSION_NOT_FOUND,
+                ErrorCode.AUTHORIZATION_DENIED,
+            }:
                 raise
             return preferred
         if session.binding_digest != preferred.digest:
@@ -720,7 +759,10 @@ class Runtime:
             if self._closed:
                 return
             if self._close_task is None:
-                self._close_task = asyncio.create_task(self._cleanup(), name="linktools-runtime-close")
+                self._close_task = asyncio.create_task(
+                    self._cleanup(),
+                    name="linktools-runtime-close",
+                )
             task = self._close_task
         cancelled = False
         try:
