@@ -20,8 +20,9 @@ Each package owns one concern:
 | `adapter` | Runtime, step, provider, identity, NATS, and history adapters; never Asset storage |
 | `temporal` | Durable workflows, activities, gateway, worker, and launcher |
 | `migrate` | Explicit database schema provisioning |
-| `scripts/build` | Bundle compilation, architecture, import, dependency, and evidence gates |
 | `src/linktools/commands/ai` | Thin CLI composition over public `linktools.ai` APIs |
+
+Repository-level architecture, import, dependency, and evidence gates live under root `scripts/check/ai`; they are release tooling, not part of the `linktools-ai` package architecture.
 
 Normal library modules live directly under `linktools/ai/<package>/`. Only Temporal may use `workflow/` and `activity/` subpackages. A cross-package public boundary may live directly under `linktools/ai/` only when listed in the package policy's `public_modules`.
 
@@ -158,12 +159,11 @@ Workflow code must remain deterministic. Network access, processes, filesystem m
 
 ## 8. Verification
 
-Run from the repository root:
+Install the development environment once, then run the project gate from the repository root:
 
 ```bash
-PYTHONPATH=linktools-ai:linktools-ai/src:linktools/src python3 -m compileall -q linktools-ai/src/linktools/ai
-PYTHONPATH=linktools-ai:linktools-ai/src:linktools/src python3 -m pytest -q tests/ai
-PYTHONPATH=linktools-ai:linktools-ai/src:linktools/src python3 -m ruff check linktools-ai/scripts/build linktools-ai/src/linktools/ai linktools-ai/src/linktools/commands/ai tests/ai
+python manage.py install --editable
+python manage.py check linktools-ai
 ```
 
-The specification, package policy, contract map, traceability files, schema reference, and evidence matrices under `scripts/build/matrix` are release inputs. Update them only from deterministic current-source evidence. Run architecture checks after changing imports, package ownership, public exports, or module paths.
+The specification, package policy, contract map, traceability files, schema reference, and evidence matrices under root `scripts/check/ai/matrix` are release inputs. Update them only from deterministic current-source evidence. Run `python manage.py check linktools-ai` after changing imports, package ownership, public exports, module paths, or release evidence.
