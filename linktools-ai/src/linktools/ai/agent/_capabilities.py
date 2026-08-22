@@ -142,17 +142,18 @@ class _RuntimeStepPersistence(StepPersistence[None]):
         tool_operations: ToolOperationBridge,
         planning: bool = False,
         trusted_tool_classes: "tuple[tuple[str, str], ...]" = (),
-        trusted_mcp_tools: bool = False,
+        trusted_mcp_selectors: "tuple[str, ...]" = (),
         **kwargs: Any,
     ) -> None:
-        if not isinstance(planning, bool) or not isinstance(trusted_mcp_tools, bool):
+        if not isinstance(planning, bool):
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
         _validate_trusted_tool_classes(trusted_tool_classes)
+        _validate_trusted_mcp_selectors(trusted_mcp_selectors)
         super().__init__(**kwargs)
         self._tool_operations = tool_operations
         self._planning = planning
         self._trusted_tool_classes = trusted_tool_classes
-        self._trusted_mcp_tools = trusted_mcp_tools
+        self._trusted_mcp_selectors = trusted_mcp_selectors
         self._calls: dict[tuple[str, str], _ToolCallState] = {}
 
     async def before_tool_execute(
@@ -166,7 +167,7 @@ class _RuntimeStepPersistence(StepPersistence[None]):
         if self._planning and not tool_allowed_in_planning(
             tool_def,
             trusted_tool_classes=self._trusted_tool_classes,
-            trusted_mcp_tools=self._trusted_mcp_tools,
+            trusted_mcp_selectors=self._trusted_mcp_selectors,
         ):
             raise AIError(
                 ErrorCode.CAPABILITY_POLICY_CONFLICT,
@@ -457,7 +458,7 @@ class AgentRunScope:
     platform_tool_names: "tuple[str, ...]" = ()
     planning: bool = False
     trusted_tool_classes: "tuple[tuple[str, str], ...]" = ()
-    trusted_mcp_tools: bool = False
+    trusted_mcp_selectors: "tuple[str, ...]" = ()
     context_target_tokens: "int | None" = None
     parent_step_run_id: "str | None" = None
     subagent_delegate: "SubagentDelegate | None" = None
@@ -477,12 +478,13 @@ async def compose_platform_capabilities(
     del model_factory, parent_model
     _validate_compaction_target(scope.context_target_tokens)
     _validate_trusted_tool_classes(scope.trusted_tool_classes)
+    _validate_trusted_mcp_selectors(scope.trusted_mcp_selectors)
     capabilities: list[PydanticAgentCapability[None]] = [
         _RuntimeStepPersistence(
             tool_operations=scope.tool_operations or _MissingToolOperationBridge(),
             planning=scope.planning,
             trusted_tool_classes=scope.trusted_tool_classes,
-            trusted_mcp_tools=scope.trusted_mcp_tools,
+            trusted_mcp_selectors=scope.trusted_mcp_selectors,
             store=scope.step_store,
             agent_name=scope.agent_name,
             run_id=scope.step_run_id,
@@ -555,7 +557,7 @@ def tool_allowed_in_planning(
     tool_def: ToolDefinition,
     *,
     trusted_tool_classes: "tuple[tuple[str, str], ...]",
-    trusted_mcp_tools: bool,
+    trusted_mcp_selectors: "tuple[str, ...]",
 ) -> bool:
     tool_class = _tool_class(tool_def.name, trusted_tool_classes)
     if tool_class == "control":
@@ -564,7 +566,8 @@ def tool_allowed_in_planning(
         return False
     if tool_class in {"filesystem.read", "memory.read"}:
         return True
-    if trusted_mcp_tools and tool_def.name.startswith("mcp__"):
+    _validate_trusted_mcp_selectors(trusted_mcp_selectors)
+    if any(tool_def.name.startswith(f"{selector}__") for selector in trusted_mcp_selectors):
         return False
     metadata = tool_def.metadata or {}
     value = metadata.get(PLAN_SAFE_METADATA_KEY)
@@ -605,6 +608,25 @@ def _validate_trusted_tool_classes(
             raise AIError(ErrorCode.CAPABILITY_POLICY_CONFLICT)
         seen.add(name)
         previous = name
+
+
+def _validate_trusted_mcp_selectors(
+    trusted_mcp_selectors: "tuple[str, ...]",
+) -> None:
+    previous: str | None = None
+    seen: set[str] = set()
+    for selector in trusted_mcp_selectors:
+        if (
+            not isinstance(selector, str)
+            or not selector.startswith("mcp__")
+            or selector == "mcp__"
+            or "__" in selector[5:]
+            or selector in seen
+            or (previous is not None and selector < previous)
+        ):
+            raise AIError(ErrorCode.CAPABILITY_POLICY_CONFLICT)
+        seen.add(selector)
+        previous = selector
 
 
 def select_platform_tool_names(
