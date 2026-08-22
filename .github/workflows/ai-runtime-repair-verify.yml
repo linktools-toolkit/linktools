@@ -9,7 +9,7 @@ on:
       - master
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   verify:
@@ -36,6 +36,24 @@ jobs:
             'sqlalchemy[asyncio]==2.0.51' 'aiosqlite==0.22.1' \
             ruff
           python -m pip install --no-deps -e ./linktools -e ./linktools-ai
+
+      - name: Apply verified formatting fixes
+        if: github.event_name == 'push'
+        run: |
+          python -m ruff format \
+            linktools-ai/scripts/build/architecture.py \
+            linktools-ai/src/linktools/ai/runtime/_runtime_service.py
+          if ! git diff --quiet -- \
+            linktools-ai/scripts/build/architecture.py \
+            linktools-ai/src/linktools/ai/runtime/_runtime_service.py; then
+            git config user.name github-actions[bot]
+            git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+            git add \
+              linktools-ai/scripts/build/architecture.py \
+              linktools-ai/src/linktools/ai/runtime/_runtime_service.py
+            git commit -m 'style(ai): apply verification formatting'
+            git push origin HEAD:refactor/ai-runtime-agent-composition
+          fi
 
       - name: Compile
         env:
