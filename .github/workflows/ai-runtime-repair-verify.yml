@@ -41,8 +41,7 @@ jobs:
 
       - name: Prepare generated core metadata
         run: |
-          mkdir -p .ci-generated/linktools
-          cat > .ci-generated/linktools/metadata.py <<'PY'
+          cat > linktools/src/linktools/metadata.py <<'PY'
           __name__ = "linktools"
           __version__ = "0.0.0"
           __description__ = "LinkTools"
@@ -52,20 +51,20 @@ jobs:
 
       - name: Compile
         env:
-          PYTHONPATH: .ci-generated:linktools-ai/src:linktools/src:linktools-ai
+          PYTHONPATH: linktools-ai/src:linktools/src:linktools-ai
         run: python -m compileall -q linktools-ai/src/linktools/ai
 
       - name: Architecture gates
         env:
-          PYTHONPATH: .ci-generated:linktools-ai/src:linktools/src:linktools-ai
+          PYTHONPATH: linktools-ai/src:linktools/src:linktools-ai
         run: python -m pytest -q tests/ai/test_architecture.py
 
       - name: Ruff
         env:
-          PYTHONPATH: .ci-generated:linktools-ai/src:linktools/src:linktools-ai
+          PYTHONPATH: linktools-ai/src:linktools/src:linktools-ai
         run: python -m ruff check linktools-ai/scripts/build linktools-ai/src/linktools/ai linktools-ai/src/linktools/commands/ai tests/ai
 
       - name: AI tests
         env:
-          PYTHONPATH: .ci-generated:linktools-ai/src:linktools/src:linktools-ai
+          PYTHONPATH: linktools-ai/src:linktools/src:linktools-ai
         run: python -m pytest -q tests/ai
