@@ -6,6 +6,7 @@ from dataclasses import replace
 
 from linktools.ai.temporal.workflow._execution import (
     CONTINUE_EVENT_THRESHOLD,
+    ExecutionWorkflow,
     ExecutionWorkflowInput,
     WorkflowPhase,
     _initial_state,
@@ -61,3 +62,18 @@ def test_resume_preserves_exact_stage_checkpoint() -> None:
         continue_count=1,
     )
     assert _resume_state(request, state) == state
+
+
+def test_cancel_wakes_deferred_wait_immediately() -> None:
+    workflow = ExecutionWorkflow()
+    workflow._state = replace(
+        _initial_state(_request()),
+        status=WorkflowPhase.WAITING_APPROVAL.value,
+        last_stage="persist_deferred",
+        pending_approval_ids=("approval",),
+    )
+
+    cancelled = workflow.cancel("cancel-operation")
+
+    assert cancelled.status == WorkflowPhase.CANCELLING.value
+    assert workflow._deferred_resolved() is True
