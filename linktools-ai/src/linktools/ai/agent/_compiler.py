@@ -34,17 +34,24 @@ class AgentCompiler:
         capabilities: "Sequence[CapabilityBinding]" = (),
         platform_capabilities: "Sequence[CapabilityBinding]" = (),
         runtime_fingerprint: str,
+        trusted_tool_classes: "Mapping[str, str] | None" = None,
+        trusted_mcp_tools: bool = False,
     ) -> None:
         if model_resolver is None:
             raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+        if not isinstance(trusted_mcp_tools, bool):
+            raise AIError(ErrorCode.CAPABILITY_POLICY_CONFLICT)
         validate_fingerprint(runtime_fingerprint)
         global_capabilities = tuple(capabilities)
         platform = tuple(platform_capabilities)
         _validate_bindings((*global_capabilities, *platform))
+        trusted = tuple(sorted((trusted_tool_classes or {}).items()))
         self._model_resolver = model_resolver
         self._capabilities = global_capabilities
         self._platform_capabilities = platform
         self._runtime_fingerprint = runtime_fingerprint
+        self._trusted_tool_classes = trusted
+        self._trusted_mcp_tools = trusted_mcp_tools
 
     def compile(
         self,
@@ -107,6 +114,8 @@ class AgentCompiler:
             output_binding,
             effective,
             snapshot,
+            self._trusted_tool_classes,
+            self._trusted_mcp_tools,
         )
         _logger.debug(
             "agent definition compiled: agent=%s digest=%s capabilities=%s",
