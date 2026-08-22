@@ -22,19 +22,7 @@ jobs:
           python-version: '3.12'
 
       - name: Apply exact repair patches
-        run: |
-          python - <<'PY'
-          from pathlib import Path
-
-          text = Path('.github/workflows/ai-error-contract-closure.yml').read_text()
-          start_marker = "          python - <<'PY'\n"
-          end_marker = "\n          PY\n\n      - name: Install verification dependencies"
-          start = text.index(start_marker) + len(start_marker)
-          end = text.index(end_marker, start)
-          script = text[start:end]
-          script = '\n'.join(line[10:] if line.startswith('          ') else line for line in script.splitlines())
-          exec(compile(script, 'ai-error-contract-patch', 'exec'))
-          PY
+        run: python linktools-ai/scripts/build/_error_contract_closure.py
 
       - name: Install verification dependencies
         run: |
