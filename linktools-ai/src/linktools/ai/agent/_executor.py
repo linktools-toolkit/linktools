@@ -48,6 +48,7 @@ from ._capabilities import (
     tool_is_control,
     tool_name_allowed,
 )
+from ._binding import AgentBinding
 from ._definition import AgentDefinition
 
 
@@ -94,7 +95,7 @@ class AgentExecutor:
 
     async def execute(
         self,
-        definition: AgentDefinition,
+        binding: AgentBinding,
         user_prompt: str,
         history: "list[ModelMessage]",
         conversation_id: str,
@@ -117,12 +118,13 @@ class AgentExecutor:
     ) -> AgentExecutionResult:
         if not isinstance(planning, bool) or not isinstance(thinking, bool):
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+        definition = binding.definition
         run_usage = RunUsage()
         usage_limits = _to_usage_limits(definition.spec.usage_limits)
         result: AgentExecutionResult | None = None
         try:
             result = await self._execute(
-                definition,
+                binding,
                 user_prompt,
                 history,
                 conversation_id,
@@ -160,7 +162,7 @@ class AgentExecutor:
 
     async def _execute(
         self,
-        definition: AgentDefinition,
+        binding: AgentBinding,
         user_prompt: str,
         history: "list[ModelMessage]",
         conversation_id: str,
@@ -182,6 +184,7 @@ class AgentExecutor:
         usage_limits: UsageLimits,
         tool_operations: "ToolOperationBridge | None",
     ) -> AgentExecutionResult:
+        definition = binding.definition
         if not self._execution_root.is_dir():
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
         if await step_store.get_run(run_id=step_run_id) is not None:
@@ -192,7 +195,7 @@ class AgentExecutor:
                 ErrorCode.REQUEST_FIELD_INVALID,
                 safe_details={"field": "thinking", "reason": "model_not_supported"},
             )
-        agent = build_pydantic_agent(definition, model=model)
+        agent = build_pydantic_agent(binding, model=model)
         materialized: "list[PydanticAgentCapability[None]]" = []
         for binding in definition.effective_capabilities:
             materialized.extend(await binding.materialize(capability_context))
@@ -269,7 +272,7 @@ class AgentExecutor:
         if run is None or snapshot is None or unresolved or run.conversation_id != conversation_id:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         output = final_result.output
-        if not isinstance(output, definition.output_type):
+        if not isinstance(output, binding.output_type):
             raise AIError(ErrorCode.OUTPUT_VALIDATION_FAILED)
         payload = cast(dict[str, JsonValue], output.model_dump(mode="json"))
         _logger.debug("agent execution completed: definition=%s step=%s", definition.digest, step_run_id)

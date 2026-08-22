@@ -16,7 +16,7 @@ from typing import Protocol
 
 from linktools.core import environ
 
-from ..agent import AgentBindingSnapshot, AgentCompiler, AgentDefinition, AgentDefinitionCatalog
+from ..agent import AgentBindingSnapshot, AgentCompiler, AgentDefinition, AgentCatalog
 from ..core import (
     AuthorizationAction,
     AuthorizationPolicy,
@@ -192,7 +192,7 @@ class DefaultExecutionService:
         authorization: AuthorizationPolicy,
         *,
         sessions: SessionRepository,
-        catalog: AgentDefinitionCatalog,
+        catalog: AgentCatalog,
         compiler: AgentCompiler,
         backend: "ExecutionBackend | None" = None,
         operation_ids: "Callable[[], str] | None" = None,

@@ -27,7 +27,7 @@ from pydantic_ai_harness.step_persistence import (
 from ..agent import (
     MEMORY_TOOL_NAMES,
     AgentDefinition,
-    AgentDefinitionCatalog,
+    AgentCatalog,
     AgentExecutor,
     DurableBoundary,
     LiveDelta,
@@ -209,7 +209,7 @@ class LocalExecutionBackend:
         namespace: str,
         steps: StepStore,
         executor: AgentExecutor,
-        catalog: AgentDefinitionCatalog,
+        catalog: AgentCatalog,
         *,
         tenant_id: str,
         execution_root: Path,

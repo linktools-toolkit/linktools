@@ -33,7 +33,7 @@ from ._logical import (
     AssetRef,
     AssetResource,
     AssetTypeBinding,
-    AssetTypeRegistrySnapshot,
+    AssetTypeRegistry,
     AssetVariantBinding,
     DirectoryLayout,
     ResolvedAsset,
@@ -269,17 +269,33 @@ class AssetScope:
 class AssetRepository:
     """Resolve typed logical assets over the raw AssetStore API."""
 
-    def __init__(self, store: AssetStore, registry: AssetTypeRegistrySnapshot) -> None:
-        if store is None or registry is None or not registry.frozen:
+    def __init__(
+        self,
+        store: AssetStore,
+        bindings: Sequence[AssetTypeBinding[object]],
+    ) -> None:
+        if store is None:
             raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+        registry = AssetTypeRegistry()
+        for binding in tuple(bindings):
+            registry.register(binding)
         self._store = store
-        self._registry = registry
+        self._registry = registry.freeze()
         self._locks = _RepositoryKeyedLock()
 
     @property
     def ready(self) -> bool:
         """Return whether the underlying raw asset store is initialized."""
         return self._store.ready
+
+    @property
+    def kinds(self) -> tuple[str, ...]:
+        """Return registered logical Asset kinds in canonical order."""
+        return self._registry.kinds
+
+    def binding(self, kind: str) -> AssetTypeBinding[object]:
+        """Return the logical binding registered for one kind."""
+        return self._registry.binding(kind)
 
     async def current_revision(self) -> StorageRevision:
         """Return the raw storage revision used for composition stability checks."""

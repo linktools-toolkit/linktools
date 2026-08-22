@@ -1,310 +1,4 @@
 ===== python .bootstrap/patch.py =====
-linktools-ai/src/linktools/ai/workspace/_factory.py:24:    AgentDefinitionCatalog,
-linktools-ai/src/linktools/ai/workspace/_factory.py:434:    catalog: AgentDefinitionCatalog,
-linktools-ai/src/linktools/ai/workspace/_factory.py:493:) -> AgentDefinitionCatalog:
-linktools-ai/src/linktools/ai/workspace/_factory.py:499:    return AgentDefinitionCatalog(roots)
-linktools-ai/src/linktools/ai/runtime/_planner.py:11:from ..agent import AgentBindingSnapshot, AgentCompiler, AgentDefinitionCatalog
-linktools-ai/src/linktools/ai/runtime/_planner.py:54:        catalog: AgentDefinitionCatalog,
-linktools-ai/src/linktools/ai/runtime/_factory.py:12:from ..agent import AgentCompiler, AgentDefinitionCatalog, AgentExecutor
-linktools-ai/src/linktools/ai/runtime/_factory.py:38:    catalog: AgentDefinitionCatalog,
-linktools-ai/src/linktools/ai/runtime/_factory.py:206:    catalog: AgentDefinitionCatalog,
-linktools-ai/src/linktools/ai/runtime/_local.py:30:    AgentDefinitionCatalog,
-linktools-ai/src/linktools/ai/runtime/_local.py:212:        catalog: AgentDefinitionCatalog,
-linktools-ai/src/linktools/ai/runtime/_execution.py:19:from ..agent import AgentBindingSnapshot, AgentCompiler, AgentDefinition, AgentDefinitionCatalog
-linktools-ai/src/linktools/ai/runtime/_execution.py:195:        catalog: AgentDefinitionCatalog,
-linktools-ai/src/linktools/ai/runtime/_runtime_service.py:17:    AgentDefinitionCatalog,
-linktools-ai/src/linktools/ai/runtime/_runtime_service.py:107:        catalog: AgentDefinitionCatalog,
-linktools-ai/src/linktools/ai/runtime/_subagent.py:10:from ..agent import AgentDefinitionCatalog, SubagentDelegate
-linktools-ai/src/linktools/ai/runtime/_subagent.py:24:        catalog: AgentDefinitionCatalog,
-tests/ai/test_agent_composition.py:15:    AgentDefinitionCatalog,
-tests/ai/test_agent_composition.py:144:    catalog = AgentDefinitionCatalog({})
-linktools-ai/src/linktools/ai/runtime/_session.py:182:        record = SessionRecord(
-linktools-ai/src/linktools/ai/runtime/_session.py:424:            target = SessionRecord(
-tests/ai/test_session_admission.py:21:    return SessionRecord(
-tests/ai/test_session_history_projection.py:44:    return SessionRecord(
-tests/ai/test_session_admission_conformance.py:32:    return SessionRecord(
-linktools-ai/src/linktools/ai/runtime/_session.py:848:        return SessionView(
-tests/ai/test_agent_composition.py:155:        return SessionView(
-tests/ai/test_runtime_session_auto_create.py:26:        return SessionView(
-linktools-ai/src/linktools/ai/runtime/state/_history.py:214:        return ContextProjection(binding_digest, tuple(items), digest)
-linktools-ai/src/linktools/ai/runtime/state/_history.py:741:        return ContextProjection(projection.binding_digest, tuple(items), digest)
-linktools-ai/src/linktools/ai/temporal/_request.py:136:    if snapshot.binding_digest != binding_digest:
-linktools-ai/src/linktools/ai/temporal/_request.py:204:    elif binding_digest != state.binding_digest:
-linktools-ai/src/linktools/ai/temporal/_request.py:360:        if binding.binding_digest != binding_digest:
-linktools-ai/src/linktools/ai/temporal/workflow/_evaluation.py:72:    binding_digest = request.binding_digest or f"evaluation:{request.evaluation_id}:{request.target_revision}"
-linktools-ai/src/linktools/ai/temporal/workflow/_execution.py:445:        request.binding_digest,
-linktools-ai/src/linktools/ai/temporal/workflow/_execution.py:483:        binding_digest=request.binding_digest,
-linktools-ai/src/linktools/ai/temporal/workflow/_execution.py:510:        state.binding_digest,
-linktools-ai/src/linktools/ai/temporal/workflow/_execution.py:520:        request.binding_digest,
-linktools-ai/src/linktools/ai/temporal/workflow/_execution.py:570:        previous.binding_digest,
-linktools-ai/src/linktools/ai/temporal/workflow/_execution.py:580:        current.binding_digest,
-linktools-ai/src/linktools/ai/observe/_snapshot.py:20:        return self.digest == snapshot_digest({"snapshot_id": self.snapshot_id, "execution_id": self.execution_id, "binding_digest": self.binding_digest, "trace_digest": self.trace_digest, "result_digest": self.result_digest})
-linktools-ai/src/linktools/ai/runtime/_agent.py:44:            self.binding_digest,
-linktools-ai/src/linktools/ai/runtime/_agent.py:65:            self.binding_digest,
-linktools-ai/src/linktools/ai/runtime/_agent.py:86:            self.binding_digest,
-linktools-ai/src/linktools/ai/runtime/_agent.py:105:            self.binding_digest,
-linktools-ai/src/linktools/ai/runtime/_agent.py:113:        return await self._runtime._run_evaluation_for_binding(self.binding_digest, request)
-linktools-ai/src/linktools/ai/runtime/_agent.py:121:            self.binding_digest,
-linktools-ai/src/linktools/ai/runtime/_agent.py:138:        definition = self._runtime._definition(self.binding_digest)
-linktools-ai/src/linktools/ai/runtime/_agent.py:148:                "binding_digest": self.binding_digest,
-linktools-ai/src/linktools/ai/runtime/_session.py:301:                    binding_digest=record.binding_digest,
-linktools-ai/src/linktools/ai/runtime/_session.py:305:                binding_digest=record.binding_digest,
-linktools-ai/src/linktools/ai/runtime/_session.py:366:            if record.binding_digest != binding_digest:
-linktools-ai/src/linktools/ai/runtime/_session.py:410:            if source.binding_digest != binding_digest:
-linktools-ai/src/linktools/ai/runtime/_session.py:419:                    "binding": source.binding_digest,
-linktools-ai/src/linktools/ai/runtime/_session.py:428:                binding_digest=source.binding_digest,
-linktools-ai/src/linktools/ai/runtime/_session.py:465:        if current.binding_digest != binding_digest:
-linktools-ai/src/linktools/ai/runtime/_session.py:850:            record.binding_digest,
-linktools-ai/src/linktools/ai/runtime/_planner.py:91:        if snapshot.binding_digest != binding_digest or snapshot.agent_spec.id != agent_id:
-linktools-ai/src/linktools/ai/runtime/state/_history.py:740:        digest = self._projector._digest(projection.binding_digest, items)
-linktools-ai/src/linktools/ai/runtime/state/_history.py:741:        return ContextProjection(projection.binding_digest, tuple(items), digest)
-linktools-ai/src/linktools/ai/runtime/state/_history.py:928:            if binding_digest is not None and projection.binding_digest != binding_digest:
-linktools-ai/src/linktools/ai/runtime/state/_history.py:1130:        if binding_digest is not None and projection.binding_digest != binding_digest:
-linktools-ai/src/linktools/ai/runtime/state/_contracts.py:412:        elif self.binding.binding_digest != self.binding_digest:
-linktools-ai/src/linktools/ai/runtime/state/_contracts.py:855:            self.binding.binding_digest != self.binding_digest
-linktools-ai/src/linktools/ai/runtime/state/_repositories.py:1135:            or existing_target.binding_digest != target.binding_digest
-linktools-ai/src/linktools/ai/runtime/state/_repositories.py:4871:        and left.binding_digest == right.binding_digest
-linktools-ai/src/linktools/ai/runtime/state/_commands.py:895:                binding_digest=commit.execution.binding_digest,
-linktools-ai/src/linktools/ai/runtime/state/_commands.py:906:                binding_digest=commit.execution.binding_digest,
-linktools-ai/src/linktools/ai/runtime/state/_commands.py:918:                binding_digest=commit.execution.binding_digest,
-linktools-ai/src/linktools/ai/runtime/state/_commands.py:978:                            binding_digest=commit.execution.binding_digest,
-linktools-ai/src/linktools/ai/runtime/state/_commands.py:1184:                    binding_digest=commit.execution.binding_digest,
-linktools-ai/src/linktools/ai/runtime/state/_commands.py:1225:                            binding_digest=commit.execution.binding_digest,
-linktools-ai/src/linktools/ai/runtime/state/_commands.py:1462:                    binding_digest=commit.execution.binding_digest,
-linktools-ai/src/linktools/ai/runtime/state/_commands.py:2111:                commit.execution.binding_digest,
-linktools-ai/src/linktools/ai/runtime/state/_commands.py:2117:                commit.execution.binding_digest,
-linktools-ai/src/linktools/ai/runtime/state/_commands.py:2151:                binding_digest=commit.execution.binding_digest,
-linktools-ai/src/linktools/ai/runtime/state/_commands.py:2269:                binding_digest=commit.execution.binding_digest,
-linktools-ai/src/linktools/ai/runtime/state/_commands.py:2316:                    binding_digest=commit.execution.binding_digest,
-linktools-ai/src/linktools/ai/runtime/state/_steps.py:1332:            snapshot.projection.binding_digest != binding_digest
-linktools-ai/src/linktools/ai/runtime/state/_steps.py:2024:        if binding_digest is not None and projection.binding_digest != binding_digest:
-linktools-ai/src/linktools/ai/runtime/state/_steps.py:3133:                    binding_digest=captured.binding_digest,
-linktools-ai/src/linktools/ai/runtime/state/_steps.py:3195:        binding = captured.binding_digest or self._projection_bindings.get(
-linktools-ai/src/linktools/ai/runtime/_evaluation.py:241:                or baseline.binding_digest != candidate.binding_digest
-linktools-ai/src/linktools/ai/runtime/_evaluation.py:256:            digest = canonical_sha256({"snapshot_id": evaluation_id, "execution_id": record.execution_id, "binding_digest": record.binding_digest, "trace_digest": record.artifact_digest or "", "result_digest": result_digest})
-linktools-ai/src/linktools/ai/runtime/_evaluation.py:257:            snapshot = RunSnapshot(evaluation_id, record.execution_id, record.binding_digest, record.artifact_digest or "", result_digest, digest)
-linktools-ai/src/linktools/ai/runtime/_evaluation.py:265:            if record.binding_digest != binding_digest:
-linktools-ai/src/linktools/ai/runtime/_factory.py:228:                execution.binding_digest != recovery_input.binding_digest
-linktools-ai/src/linktools/ai/runtime/_factory.py:237:                    snapshot.binding_digest != recovery_input.binding_digest
-linktools-ai/src/linktools/ai/runtime/_factory.py:255:                    definition = catalog.definition(recovery_input.binding_digest)
-linktools-ai/src/linktools/ai/runtime/_local.py:304:        definition = self._catalog.definition(execution.binding_digest)
-linktools-ai/src/linktools/ai/runtime/_local.py:384:        definition = self._catalog.definition(execution.binding_digest)
-linktools-ai/src/linktools/ai/runtime/_local.py:395:            binding_digest=execution.binding_digest,
-linktools-ai/src/linktools/ai/runtime/_local.py:568:            or current.binding_digest != execution.binding_digest
-linktools-ai/src/linktools/ai/runtime/_local.py:622:            execution.binding_digest,
-linktools-ai/src/linktools/ai/runtime/_local.py:631:            execution.binding_digest != recovery_input.binding_digest
-linktools-ai/src/linktools/ai/runtime/_local.py:827:                execution.binding_digest != recovery_input.binding_digest
-linktools-ai/src/linktools/ai/runtime/_local.py:1182:            binding_digest=recovery_input.binding_digest,
-linktools-ai/src/linktools/ai/runtime/_local.py:1854:            definition = self._catalog.definition(current.binding_digest)
-linktools-ai/src/linktools/ai/runtime/_local.py:1928:                binding_fingerprint=current.binding_digest,
-linktools-ai/src/linktools/ai/runtime/_local.py:1947:                    binding_digest=current.binding_digest,
-linktools-ai/src/linktools/ai/runtime/_local.py:1953:                    binding_digest=current.binding_digest,
-linktools-ai/src/linktools/ai/runtime/_local.py:2144:                                binding_digest=execution.binding_digest,
-linktools-ai/src/linktools/ai/runtime/_local.py:2460:                    binding_digest=execution.binding_digest,
-linktools-ai/src/linktools/ai/runtime/_local.py:2939:                    binding_digest=current.binding_digest,
-linktools-ai/src/linktools/ai/runtime/_execution.py:266:            if binding.binding_digest != binding_digest:
-linktools-ai/src/linktools/ai/runtime/_execution.py:280:            execution.binding_digest != definition.digest
-linktools-ai/src/linktools/ai/runtime/_execution.py:1032:        if previous.binding_digest != binding_digest:
-linktools-ai/src/linktools/ai/runtime/_execution.py:1034:        definition = self._definition(previous.binding_digest, previous.binding)
-linktools-ai/src/linktools/ai/runtime/_execution.py:1060:        if previous.binding_digest != binding_digest:
-linktools-ai/src/linktools/ai/runtime/_execution.py:1062:        definition = self._definition(previous.binding_digest, previous.binding)
-linktools-ai/src/linktools/ai/runtime/_runtime_service.py:223:            current = self._catalog.definition(snapshot.binding_digest)
-linktools-ai/src/linktools/ai/runtime/_runtime_service.py:660:                    snapshot.binding_digest != binding_digest
-linktools-ai/src/linktools/ai/runtime/_runtime_service.py:734:        if session.binding_digest != definition.digest:
-linktools-ai/src/linktools/ai/runtime/_runtime_service.py:753:        if session.binding_digest != preferred.digest:
-linktools-ai/src/linktools/ai/runtime/_runtime_service.py:755:        return self._catalog.definition(session.binding_digest)
-linktools-ai/src/linktools/ai/agent/_binding.py:69:            or not _is_digest(self.binding_digest)
-linktools-ai/src/linktools/ai/agent/_binding.py:94:            "binding_digest": self.binding_digest,
-linktools-ai/src/linktools/ai/agent/_binding.py:152:            self.digest != self.snapshot.binding_digest
-linktools-ai/src/linktools/ai/agent/_compiler.py:202:            or binding.digest != snapshot.binding_digest
-tests/ai/test_temporal_taskgraph_conformance.py:93:        return _binding().binding_digest, ExecutionRequest(
-tests/ai/test_contracts.py:553:        binding_digest=snapshot.binding_digest,
-tests/ai/test_contracts.py:561:    assert request.binding_digest == snapshot.binding_digest
-linktools-ai/src/linktools/ai/temporal/_gateway.py:104:            binding_digest=binding_digest,
-linktools-ai/src/linktools/ai/temporal/_gateway.py:110:            binding_digest=binding_digest,
-linktools-ai/src/linktools/ai/temporal/workflow/_evaluation.py:79:                binding_digest=binding_digest,
-linktools-ai/src/linktools/ai/temporal/workflow/_execution.py:483:        binding_digest=request.binding_digest,
-linktools-ai/src/linktools/ai/temporal/_task_operation.py:94:            binding_digest=binding_digest,
-linktools-ai/src/linktools/ai/temporal/_task_operation.py:108:            binding_digest=binding_digest,
-linktools-ai/src/linktools/ai/runtime/_session.py:186:            binding_digest=binding_digest,
-linktools-ai/src/linktools/ai/runtime/_session.py:301:                    binding_digest=record.binding_digest,
-linktools-ai/src/linktools/ai/runtime/_session.py:305:                binding_digest=record.binding_digest,
-linktools-ai/src/linktools/ai/runtime/_session.py:428:                binding_digest=source.binding_digest,
-linktools-ai/src/linktools/ai/runtime/state/_history.py:932:                binding_digest=binding_digest,
-linktools-ai/src/linktools/ai/runtime/state/_history.py:1669:            binding_digest=binding_digest,
-linktools-ai/src/linktools/ai/runtime/state/_commands.py:895:                binding_digest=commit.execution.binding_digest,
-linktools-ai/src/linktools/ai/runtime/state/_commands.py:906:                binding_digest=commit.execution.binding_digest,
-linktools-ai/src/linktools/ai/runtime/state/_commands.py:918:                binding_digest=commit.execution.binding_digest,
-linktools-ai/src/linktools/ai/runtime/state/_commands.py:978:                            binding_digest=commit.execution.binding_digest,
-linktools-ai/src/linktools/ai/runtime/state/_commands.py:1184:                    binding_digest=commit.execution.binding_digest,
-linktools-ai/src/linktools/ai/runtime/state/_commands.py:1225:                            binding_digest=commit.execution.binding_digest,
-linktools-ai/src/linktools/ai/runtime/state/_commands.py:1462:                    binding_digest=commit.execution.binding_digest,
-linktools-ai/src/linktools/ai/runtime/state/_commands.py:1519:            binding_digest=binding_digest,
-linktools-ai/src/linktools/ai/runtime/state/_commands.py:1525:            binding_digest=binding_digest,
-linktools-ai/src/linktools/ai/runtime/state/_commands.py:1543:                        binding_digest=binding_digest,
-linktools-ai/src/linktools/ai/runtime/state/_commands.py:1570:                binding_digest=binding_digest,
-linktools-ai/src/linktools/ai/runtime/state/_commands.py:1586:            binding_digest=binding_digest,
-linktools-ai/src/linktools/ai/runtime/state/_commands.py:1593:                binding_digest=binding_digest,
-linktools-ai/src/linktools/ai/runtime/state/_commands.py:1603:                    binding_digest=binding_digest,
-linktools-ai/src/linktools/ai/runtime/state/_commands.py:1735:                binding_digest=binding_digest,
-linktools-ai/src/linktools/ai/runtime/state/_commands.py:1760:                binding_digest=binding_digest,
-linktools-ai/src/linktools/ai/runtime/state/_commands.py:1780:                binding_digest=binding_digest,
-linktools-ai/src/linktools/ai/runtime/state/_commands.py:2128:                binding_digest=binding_digest,
-linktools-ai/src/linktools/ai/runtime/state/_commands.py:2151:                binding_digest=commit.execution.binding_digest,
-linktools-ai/src/linktools/ai/runtime/state/_commands.py:2269:                binding_digest=commit.execution.binding_digest,
-linktools-ai/src/linktools/ai/runtime/state/_commands.py:2316:                    binding_digest=commit.execution.binding_digest,
-linktools-ai/src/linktools/ai/runtime/state/_commands.py:2449:            binding_digest=binding_digest,
-linktools-ai/src/linktools/ai/runtime/state/_commands.py:2467:                binding_digest=binding_digest,
-linktools-ai/src/linktools/ai/runtime/state/_steps.py:878:            binding_digest=binding_digest,
-linktools-ai/src/linktools/ai/runtime/state/_steps.py:897:            binding_digest=binding_digest,
-linktools-ai/src/linktools/ai/runtime/state/_steps.py:1133:                binding_digest=projection_binding,
-linktools-ai/src/linktools/ai/runtime/state/_steps.py:1396:            binding_digest=binding_digest,
-linktools-ai/src/linktools/ai/runtime/state/_steps.py:1450:            binding_digest=binding_digest,
-linktools-ai/src/linktools/ai/runtime/state/_steps.py:1584:            binding_digest=binding_digest,
-linktools-ai/src/linktools/ai/runtime/state/_steps.py:1665:            binding_digest=binding_digest,
-linktools-ai/src/linktools/ai/runtime/state/_steps.py:1689:            binding_digest=binding_digest,
-linktools-ai/src/linktools/ai/runtime/state/_steps.py:1888:            binding_digest=binding_digest,
-linktools-ai/src/linktools/ai/runtime/state/_steps.py:1903:                binding_digest=binding_digest,
-linktools-ai/src/linktools/ai/runtime/state/_steps.py:1907:            binding_digest=binding_digest,
-linktools-ai/src/linktools/ai/runtime/state/_steps.py:2001:                binding_digest=binding_digest,
-linktools-ai/src/linktools/ai/runtime/state/_steps.py:2028:            binding_digest=binding_digest,
-linktools-ai/src/linktools/ai/runtime/state/_steps.py:2495:            binding_digest=binding_digest,
-linktools-ai/src/linktools/ai/runtime/state/_steps.py:2667:            binding_digest=binding_digest,
-linktools-ai/src/linktools/ai/runtime/state/_steps.py:2849:                    binding_digest=binding_digest,
-linktools-ai/src/linktools/ai/runtime/state/_steps.py:3133:                    binding_digest=captured.binding_digest,
-linktools-ai/src/linktools/ai/runtime/state/_steps.py:3203:                binding_digest=binding,
-linktools-ai/src/linktools/ai/runtime/state/_steps.py:3614:            binding_digest=binding_digest,
-linktools-ai/src/linktools/ai/runtime/_local.py:395:            binding_digest=execution.binding_digest,
-linktools-ai/src/linktools/ai/runtime/_local.py:1182:            binding_digest=recovery_input.binding_digest,
-linktools-ai/src/linktools/ai/runtime/_local.py:1947:                    binding_digest=current.binding_digest,
-linktools-ai/src/linktools/ai/runtime/_local.py:1953:                    binding_digest=current.binding_digest,
-linktools-ai/src/linktools/ai/runtime/_local.py:2144:                                binding_digest=execution.binding_digest,
-linktools-ai/src/linktools/ai/runtime/_local.py:2460:                    binding_digest=execution.binding_digest,
-linktools-ai/src/linktools/ai/runtime/_local.py:2939:                    binding_digest=current.binding_digest,
-linktools-ai/src/linktools/ai/runtime/_execution.py:581:            binding_digest=binding_digest,
-linktools-ai/src/linktools/ai/agent/_binding.py:129:            binding_digest=_require_digest(value["binding_digest"]),
-linktools-ai/src/linktools/ai/agent/_compiler.py:154:            binding_digest=binding_digest,
-linktools-ai/src/linktools/ai/agent/_compiler.py:163:            "agent binding compiled: agent=%s agent_digest=%s binding_digest=%s",
-tests/ai/test_session_admission.py:25:        binding_digest="binding",
-tests/ai/test_agent_composition.py:89:        binding_digest="a" * 64,
-tests/ai/test_agent_composition.py:131:            binding_digest=digest,
-tests/ai/test_agent_composition.py:232:        return SimpleNamespace(binding_digest="a" * 64)
-tests/ai/test_agent_composition.py:262:        binding_digest=digest,
-tests/ai/test_agent_composition.py:266:        binding_digest=digest,
-tests/ai/test_runtime_binding_contract.py:23:        binding_digest="a" * 64,
-tests/ai/test_runtime_binding_contract.py:51:        binding_digest="a" * 64,
-tests/ai/test_recovery_integrity_validator.py:42:            binding_digest="binding",
-tests/ai/test_temporal_taskgraph_conformance.py:54:        binding_digest="a" * 64,
-tests/ai/test_temporal_taskgraph_conformance.py:716:            binding_digest="a" * 64,
-tests/ai/test_history_projection_conformance.py:66:        binding_digest="binding",
-tests/ai/test_history_projection_conformance.py:267:            binding_digest="binding",
-tests/ai/test_history_projection_conformance.py:655:            binding_digest="binding",
-tests/ai/persistence/test_execution_start_service.py:32:        binding_digest=digest,
-tests/ai/test_contracts.py:88:        binding_digest=digest,
-tests/ai/test_contracts.py:144:        binding_digest="binding",
-tests/ai/test_contracts.py:553:        binding_digest=snapshot.binding_digest,
-tests/ai/test_session_history_projection.py:48:        binding_digest="binding",
-tests/ai/test_step_io_final_fix.py:45:        binding_digest="binding",
-tests/ai/test_session_admission_conformance.py:36:        binding_digest="b" * 64,
-tests/ai/test_session_admission_conformance.py:210:        binding_digest=digest,
-tests/ai/test_temporal_continuation.py:26:        binding_digest="a" * 64,
-tests/ai/test_runtime_composition_regressions.py:90:        binding_digest="a" * 64,
-tests/ai/test_runtime_composition_regressions.py:100:        binding_digest="a" * 64,
-tests/ai/test_runtime_composition_regressions.py:131:        binding_digest="a" * 64,
-tests/ai/test_runtime_storage_io_convergence.py:352:            binding_digest="a" * 64,
-tests/ai/test_runtime_stream_order.py:51:        binding_digest="binding",
-tests/ai/test_v1_final_closure.py:352:        binding_digest="binding",
-tests/ai/test_local_execution_recovery.py:69:        binding_digest="a" * 64,
-linktools-ai/src/linktools/ai/runtime/_factory.py:271:                output = definition.output_binding
-linktools-ai/src/linktools/ai/runtime/_local.py:2575:            schema_id = definition.output_binding.schema_id
-linktools-ai/src/linktools/ai/runtime/_local.py:2576:            schema_revision = definition.output_binding.schema_revision
-linktools-ai/src/linktools/ai/runtime/_local.py:2835:            schema_id = definition.output_binding.schema_id
-linktools-ai/src/linktools/ai/runtime/_local.py:2836:            schema_revision = definition.output_binding.schema_revision
-linktools-ai/src/linktools/ai/agent/_catalog.py:116:        and left.output_binding.descriptor == right.output_binding.descriptor
-linktools-ai/src/linktools/ai/agent/_binding.py:147:        if not isinstance(self.output_binding, OutputBinding):
-linktools-ai/src/linktools/ai/agent/_binding.py:157:            or self.output_binding.schema_id != self.snapshot.output_schema_id
-linktools-ai/src/linktools/ai/agent/_binding.py:158:            or self.output_binding.schema_revision
-linktools-ai/src/linktools/ai/agent/_binding.py:160:            or self.output_binding.schema_fingerprint
-linktools-ai/src/linktools/ai/agent/_binding.py:169:        return self.output_binding.value_type
-linktools-ai/src/linktools/ai/agent/_binding.py:173:        return self.output_binding.schema_fingerprint
-linktools-ai/src/linktools/ai/runtime/_agent.py:149:                "binding": definition.binding_snapshot.to_payload(),
-linktools-ai/src/linktools/ai/runtime/_local.py:310:                and execution.binding != definition.binding_snapshot
-linktools-ai/src/linktools/ai/runtime/_local.py:385:        if execution.binding != definition.binding_snapshot:
-linktools-ai/src/linktools/ai/runtime/_local.py:1855:            if current.binding is not None and current.binding != definition.binding_snapshot:
-linktools-ai/src/linktools/ai/runtime/_execution.py:269:        if binding is not None and definition.binding_snapshot != binding:
-linktools-ai/src/linktools/ai/runtime/_execution.py:284:            or execution.binding != definition.binding_snapshot
-linktools-ai/src/linktools/ai/runtime/_execution.py:599:            binding=definition.binding_snapshot,
-linktools-ai/src/linktools/ai/runtime/_runtime_service.py:228:            if current.binding_snapshot != snapshot:
-linktools-ai/src/linktools/ai/runtime/_runtime_service.py:679:                        "binding": definition.binding_snapshot.to_payload(),
-linktools-ai/src/linktools/ai/runtime/_runtime_service.py:66:_AGENT_TASK_LEGACY_V1_FIELDS = frozenset({"type", "version", "agent_id", "user_prompt"})
-linktools-ai/src/linktools/ai/runtime/_runtime_service.py:67:_AGENT_TASK_CURRENT_V1_FIELDS = frozenset(
-linktools-ai/src/linktools/ai/runtime/_runtime_service.py:632:            if fields == _AGENT_TASK_LEGACY_V1_FIELDS:
-linktools-ai/src/linktools/ai/runtime/_runtime_service.py:640:            elif fields == _AGENT_TASK_CURRENT_V1_FIELDS:
-linktools-ai/src/linktools/ai/temporal/_request.py:31:_EXECUTION_LEGACY_V1_FIELDS = frozenset(
-linktools-ai/src/linktools/ai/temporal/_request.py:34:_EXECUTION_CURRENT_V1_FIELDS = frozenset(
-linktools-ai/src/linktools/ai/temporal/_request.py:346:    if fields == _EXECUTION_LEGACY_V1_FIELDS:
-linktools-ai/src/linktools/ai/temporal/_request.py:347:        payload = _mapping(value, _EXECUTION_LEGACY_V1_FIELDS)
-linktools-ai/src/linktools/ai/temporal/_request.py:352:    elif fields == _EXECUTION_CURRENT_V1_FIELDS:
-linktools-ai/src/linktools/ai/temporal/_request.py:353:        payload = _mapping(value, _EXECUTION_CURRENT_V1_FIELDS)
-linktools-ai/src/linktools/ai/workspace/_factory.py:32:    AssetTypeRegistry,
-linktools-ai/src/linktools/ai/workspace/_factory.py:33:    AssetTypeRegistrySnapshot,
-linktools-ai/src/linktools/ai/workspace/_factory.py:63:) -> AssetTypeRegistrySnapshot:
-linktools-ai/src/linktools/ai/workspace/_factory.py:74:    registry = AssetTypeRegistry()
-linktools-ai/src/linktools/ai/workspace/_factory.py:84:    snapshot: AssetTypeRegistrySnapshot,
-linktools-ai/src/linktools/ai/workspace/_factory.py:152:    snapshot: AssetTypeRegistrySnapshot,
-linktools-ai/src/linktools/ai/workspace/_factory.py:179:    snapshot: AssetTypeRegistrySnapshot,
-linktools-ai/src/linktools/ai/asset/__init__.py:36:    AssetTypeRegistry,
-linktools-ai/src/linktools/ai/asset/__init__.py:37:    AssetTypeRegistrySnapshot,
-linktools-ai/src/linktools/ai/asset/__init__.py:74:    "AssetTypeRegistry",
-linktools-ai/src/linktools/ai/asset/__init__.py:75:    "AssetTypeRegistrySnapshot",
-linktools-ai/src/linktools/ai/asset/_logical.py:326:class AssetTypeRegistry:
-linktools-ai/src/linktools/ai/asset/_logical.py:331:        self._snapshot: AssetTypeRegistrySnapshot | None = None
-linktools-ai/src/linktools/ai/asset/_logical.py:348:    def freeze(self) -> "AssetTypeRegistrySnapshot":
-linktools-ai/src/linktools/ai/asset/_logical.py:367:        self._snapshot = AssetTypeRegistrySnapshot._create(
-linktools-ai/src/linktools/ai/asset/_logical.py:376:class AssetTypeRegistrySnapshot:
-linktools-ai/src/linktools/ai/asset/_logical.py:403:    ) -> "AssetTypeRegistrySnapshot":
-linktools-ai/src/linktools/ai/asset/_logical.py:488:    "AssetTypeRegistry",
-linktools-ai/src/linktools/ai/asset/_logical.py:489:    "AssetTypeRegistrySnapshot",
-linktools-ai/src/linktools/ai/asset/_repository.py:36:    AssetTypeRegistrySnapshot,
-linktools-ai/src/linktools/ai/asset/_repository.py:272:    def __init__(self, store: AssetStore, registry: AssetTypeRegistrySnapshot) -> None:
-tests/ai/test_asset_repository.py:19:    AssetTypeRegistry,
-tests/ai/test_asset_repository.py:46:    registry = AssetTypeRegistry()
-tests/ai/test_asset_repository.py:183:    registry = AssetTypeRegistry()
-tests/ai/test_asset_repository.py:250:    registry = AssetTypeRegistry()
-tests/ai/test_asset_repository.py:276:    registry = AssetTypeRegistry()
-tests/ai/test_asset_repository.py:324:    registry = AssetTypeRegistry()
-tests/ai/test_asset_repository.py:338:    frozen = AssetTypeRegistry()
-tests/ai/test_asset_repository.py:363:    registry = AssetTypeRegistry()
-tests/ai/test_asset_repository.py:380:    registry = AssetTypeRegistry()
-tests/ai/test_asset_repository.py:474:    registry = AssetTypeRegistry()
-tests/ai/test_asset_repository.py:507:    registry = AssetTypeRegistry()
-tests/ai/test_asset_repository.py:522:    registry = AssetTypeRegistry()
-tests/ai/test_asset_repository.py:539:    registry = AssetTypeRegistry()
-linktools-ai/src/linktools/commands/ai/run.py:130:    agent = runtime.agent(planning=planning, thinking=thinking)
-
-===== GREP AgentDefinitionCatalog =====
-
-===== GREP SessionRecord\( =====
-
-===== GREP SessionView\( =====
-
-===== GREP ContextProjection\( =====
-
-===== GREP \.binding_digest =====
-
-===== GREP binding_digest= =====
-
-===== GREP \.output_binding =====
-
-===== GREP \.binding_snapshot =====
-
-===== GREP _AGENT_TASK_LEGACY_V1_FIELDS|_AGENT_TASK_CURRENT_V1_FIELDS =====
-
-===== GREP _EXECUTION_LEGACY_V1_FIELDS|_EXECUTION_CURRENT_V1_FIELDS =====
-
-===== GREP AssetTypeRegistry|AssetTypeRegistrySnapshot =====
-
-===== GREP runtime\.agent\(.*(output|planning|thinking)= =====
 ===== python -m compileall -q linktools-ai/src/linktools/ai =====
 ===== python -m pip install --upgrade pip =====
 Requirement already satisfied: pip in /opt/hostedtoolcache/Python/3.12.14/x64/lib/python3.12/site-packages (26.2.1)
@@ -509,38 +203,38 @@ Collecting urllib3<3,>=1.26 (from requests->tiktoken>=0.12.0->pydantic-ai-slim[m
   Downloading urllib3-2.7.0-py3-none-any.whl.metadata (6.9 kB)
 Downloading aiosqlite-0.22.1-py3-none-any.whl (17 kB)
 Downloading sqlalchemy-2.0.51-cp312-cp312-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl (3.4 MB)
-   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 3.4/3.4 MB 196.7 MB/s  0:00:00
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 3.4/3.4 MB 158.9 MB/s  0:00:00
 Downloading pydantic_ai_slim-2.33.0-py3-none-any.whl (1.4 MB)
-   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 1.4/1.4 MB 234.6 MB/s  0:00:00
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 1.4/1.4 MB 204.6 MB/s  0:00:00
 Downloading pydantic_graph-2.33.0-py3-none-any.whl (52 kB)
 Downloading fastmcp_slim-3.4.7-py3-none-any.whl (769 kB)
-   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 769.4/769.4 kB 160.7 MB/s  0:00:00
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 769.4/769.4 kB 172.0 MB/s  0:00:00
 Downloading httpx-0.28.1-py3-none-any.whl (73 kB)
 Downloading httpcore-1.0.9-py3-none-any.whl (78 kB)
 Downloading mcp-1.29.0-py3-none-any.whl (223 kB)
 Downloading py_key_value_aio-0.4.5-py3-none-any.whl (170 kB)
 Downloading pydantic-2.13.4-py3-none-any.whl (472 kB)
 Downloading pydantic_core-2.46.4-cp312-cp312-manylinux_2_17_x86_64.manylinux2014_x86_64.whl (2.1 MB)
-   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 2.1/2.1 MB 297.0 MB/s  0:00:00
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 2.1/2.1 MB 254.5 MB/s  0:00:00
 Using cached pyyaml-6.0.3-cp312-cp312-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl (807 kB)
 Downloading pytest-9.1.1-py3-none-any.whl (386 kB)
 Downloading pluggy-1.6.0-py3-none-any.whl (20 kB)
 Downloading pytest_asyncio-1.4.0-py3-none-any.whl (16 kB)
 Downloading ruff-0.16.4-py3-none-manylinux_2_17_x86_64.manylinux2014_x86_64.whl (10.3 MB)
-   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 10.3/10.3 MB 352.7 MB/s  0:00:00
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 10.3/10.3 MB 295.3 MB/s  0:00:00
 Downloading aiofile-3.12.3-py3-none-any.whl (22 kB)
 Downloading caio-0.12.2-cp312-cp312-manylinux_2_34_x86_64.whl (196 kB)
 Downloading annotated_types-0.8.0-py3-none-any.whl (13 kB)
 Downloading anyio-4.14.2-py3-none-any.whl (125 kB)
 Downloading authlib-1.7.2-py2.py3-none-any.whl (259 kB)
 Downloading beartype-0.22.9-py3-none-any.whl (1.3 MB)
-   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 1.3/1.3 MB 247.7 MB/s  0:00:00
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 1.3/1.3 MB 237.7 MB/s  0:00:00
 Downloading cachetools-7.1.7-py3-none-any.whl (16 kB)
 Downloading exceptiongroup-1.3.1-py3-none-any.whl (16 kB)
 Downloading filelock-3.32.3-py3-none-any.whl (98 kB)
 Downloading genai_prices-0.1.4-py3-none-any.whl (99 kB)
 Downloading greenlet-3.5.5-cp312-cp312-manylinux_2_24_x86_64.manylinux_2_28_x86_64.whl (621 kB)
-   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 621.4/621.4 kB 109.5 MB/s  0:00:00
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 621.4/621.4 kB 124.7 MB/s  0:00:00
 Downloading griffelib-2.2.0-py3-none-any.whl (166 kB)
 Downloading h11-0.16.0-py3-none-any.whl (37 kB)
 Downloading httpx_sse-0.4.3-py3-none-any.whl (9.0 kB)
@@ -550,7 +244,7 @@ Downloading idna-3.19-py3-none-any.whl (68 kB)
 Downloading iniconfig-2.3.0-py3-none-any.whl (7.5 kB)
 Downloading joserfc-1.7.4-py3-none-any.whl (71 kB)
 Downloading cryptography-50.0.0-cp311-abi3-manylinux_2_34_x86_64.whl (4.7 MB)
-   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 4.7/4.7 MB 287.6 MB/s  0:00:00
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 4.7/4.7 MB 309.3 MB/s  0:00:00
 Downloading cffi-2.1.1-cp312-cp312-manylinux2014_x86_64.manylinux_2_17_x86_64.whl (221 kB)
 Downloading jsonschema-4.26.0-py3-none-any.whl (90 kB)
 Downloading attrs-26.1.0-py3-none-any.whl (67 kB)
@@ -559,25 +253,25 @@ Downloading keyring-25.7.0-py3-none-any.whl (39 kB)
 Downloading jeepney-0.9.0-py3-none-any.whl (49 kB)
 Downloading logfire_api-4.41.0-py3-none-any.whl (143 kB)
 Downloading openai-3.3.1-py3-none-any.whl (1.7 MB)
-   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 1.7/1.7 MB 224.9 MB/s  0:00:00
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 1.7/1.7 MB 252.0 MB/s  0:00:00
 Downloading jiter-0.16.0-cp312-cp312-manylinux_2_17_x86_64.manylinux2014_x86_64.whl (343 kB)
 Downloading typing_extensions-4.16.0-py3-none-any.whl (45 kB)
 Downloading opentelemetry_api-1.44.0-py3-none-any.whl (60 kB)
 Downloading packaging-26.3-py3-none-any.whl (129 kB)
 Downloading platformdirs-4.11.3-py3-none-any.whl (23 kB)
 Downloading pydantic_ai_harness-0.24.0-py3-none-any.whl (734 kB)
-   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 734.4/734.4 kB 167.2 MB/s  0:00:00
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 734.4/734.4 kB 147.5 MB/s  0:00:00
 Downloading pydantic_evals-2.33.0-py3-none-any.whl (101 kB)
 Downloading pydantic_monty-0.0.21-py3-none-any.whl (4.7 kB)
 Downloading pydantic_monty_client-0.0.21-cp312-cp312-manylinux_2_28_x86_64.whl (3.5 MB)
-   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 3.5/3.5 MB 243.1 MB/s  0:00:00
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 3.5/3.5 MB 253.9 MB/s  0:00:00
 Downloading pydantic_monty_runtime-0.0.21-cp312-cp312-manylinux_2_28_x86_64.whl (10.4 MB)
-   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 10.4/10.4 MB 299.0 MB/s  0:00:00
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 10.4/10.4 MB 196.4 MB/s  0:00:00
 Downloading pydantic_settings-2.15.0-py3-none-any.whl (69 kB)
 Downloading email_validator-2.3.0-py3-none-any.whl (35 kB)
 Downloading dnspython-2.8.0-py3-none-any.whl (331 kB)
 Downloading pygments-2.21.0-py3-none-any.whl (1.3 MB)
-   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 1.3/1.3 MB 232.5 MB/s  0:00:00
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 1.3/1.3 MB 240.3 MB/s  0:00:00
 Downloading pyjwt-2.13.0-py3-none-any.whl (31 kB)
 Downloading python_dotenv-1.2.3-py3-none-any.whl (22 kB)
 Downloading python_multipart-0.0.32-py3-none-any.whl (30 kB)
@@ -590,12 +284,12 @@ Downloading secretstorage-3.5.0-py3-none-any.whl (15 kB)
 Downloading sse_starlette-3.4.8-py3-none-any.whl (16 kB)
 Downloading starlette-1.6.0-py3-none-any.whl (75 kB)
 Downloading temporalio-1.31.0-cp310-abi3-manylinux_2_17_x86_64.manylinux2014_x86_64.whl (14.8 MB)
-   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 14.8/14.8 MB 301.6 MB/s  0:00:00
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 14.8/14.8 MB 322.1 MB/s  0:00:00
 Downloading nexus_rpc-1.4.0-py3-none-any.whl (29 kB)
 Downloading protobuf-7.36.0-cp310-abi3-manylinux2014_x86_64.whl (340 kB)
 Downloading types_protobuf-7.35.1.20260822-py3-none-any.whl (86 kB)
 Downloading tiktoken-0.14.0-cp312-cp312-manylinux_2_28_x86_64.whl (1.2 MB)
-   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 1.2/1.2 MB 239.5 MB/s  0:00:00
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 1.2/1.2 MB 229.7 MB/s  0:00:00
 Downloading truststore-0.10.4-py3-none-any.whl (18 kB)
 Downloading typing_inspection-0.4.4-py3-none-any.whl (14 kB)
 Downloading uvicorn-0.52.4-py3-none-any.whl (79 kB)
@@ -608,7 +302,7 @@ Downloading more_itertools-11.1.0-py3-none-any.whl (72 kB)
 Downloading psutil-7.2.2-cp36-abi3-manylinux2010_x86_64.manylinux_2_12_x86_64.manylinux_2_28_x86_64.whl (155 kB)
 Downloading pycparser-3.0-py3-none-any.whl (48 kB)
 Downloading regex-2026.7.19-cp312-cp312-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl (801 kB)
-   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 801.8/801.8 kB 156.6 MB/s  0:00:00
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 801.8/801.8 kB 181.6 MB/s  0:00:00
 Downloading requests-2.34.2-py3-none-any.whl (73 kB)
 Downloading charset_normalizer-3.5.1-cp312-cp312-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl (248 kB)
 Downloading urllib3-2.7.0-py3-none-any.whl (131 kB)
@@ -616,12 +310,12 @@ Downloading sniffio-1.3.1-py3-none-any.whl (10 kB)
 Building wheels for collected packages: linktools, linktools-ai
   Building editable for linktools (pyproject.toml): started
   Building editable for linktools (pyproject.toml): finished with status 'done'
-  Created wheel for linktools: filename=linktools-0.9.1.post100.dev0-0.editable-py3-none-any.whl size=6045 sha256=0277e33a97c6cf7770d3a7e5943991c93cbcdfcac2e4a30de9be9f3485b73176
-  Stored in directory: /tmp/pip-ephem-wheel-cache-3clg11nd/wheels/e5/50/d0/0d24bfdc0ab21509a012622c53bd84039fa6f547804efa2376
+  Created wheel for linktools: filename=linktools-0.9.1.post100.dev0-0.editable-py3-none-any.whl size=6045 sha256=9b73360ce3138d00d819e3db77370cb2f6bd0aa46316f5fffec0c38673f56469
+  Stored in directory: /tmp/pip-ephem-wheel-cache-v9x690i2/wheels/e5/50/d0/0d24bfdc0ab21509a012622c53bd84039fa6f547804efa2376
   Building editable for linktools-ai (pyproject.toml): started
   Building editable for linktools-ai (pyproject.toml): finished with status 'done'
-  Created wheel for linktools-ai: filename=linktools_ai-0.10.0.post100.dev0-0.editable-py3-none-any.whl size=6512 sha256=1c31ce76081fbaf443bf00355edcc0a42197687d31f4f26cc9a6d8e2aefeb22c
-  Stored in directory: /tmp/pip-ephem-wheel-cache-3clg11nd/wheels/e5/5a/b9/c291aedae11f520717aebc31d61e541d4ea9708b19097b8566
+  Created wheel for linktools-ai: filename=linktools_ai-0.10.0.post100.dev0-0.editable-py3-none-any.whl size=6512 sha256=f858702295dfde85867b65ac2b54e58c7e5d51301235c7b7fbb81e4445abb972
+  Stored in directory: /tmp/pip-ephem-wheel-cache-v9x690i2/wheels/e5/5a/b9/c291aedae11f520717aebc31d61e541d4ea9708b19097b8566
 Successfully built linktools linktools-ai
 Installing collected packages: urllib3, typing-extensions, types-protobuf, truststore, sniffio, ruff, rpds-py, regex, pyyaml, python-multipart, python-dotenv, pyjwt, pygments, pydantic-monty-runtime, pycparser, psutil, protobuf, pluggy, platformdirs, packaging, more-itertools, mdurl, logfire-api, jiter, jeepney, jaraco.context, iniconfig, idna, httpx-sse, h11, griffelib, greenlet, filelock, dnspython, click, charset_normalizer, certifi, caio, cachetools, beartype, attrs, annotated-types, aiosqlite, uvicorn, typing-inspection, sqlalchemy, requests, referencing, pytest, pydantic-monty-client, pydantic-core, py-key-value-aio, opentelemetry-api, nexus-rpc, markdown-it-py, linktools, jaraco.functools, jaraco.classes, httpcore2, httpcore, exceptiongroup, email-validator, cffi, anyio, aiofile, tiktoken, temporalio, starlette, rich, pytest-asyncio, pydantic-monty, pydantic, jsonschema-specifications, httpx2, httpx, cryptography, sse-starlette, SecretStorage, pydantic-settings, pydantic-graph, openai, jsonschema, joserfc, genai-prices, pydantic-ai-slim, mcp, keyring, fastmcp-slim, authlib, pydantic-evals, pydantic-ai-harness, linktools-ai
 
