@@ -13,7 +13,7 @@ from ..errors import AIError, ErrorCode
 from ..runtime import RuntimeObjectKeyFactory, RuntimeTaskNodeRunner
 from ..runtime.state import TaskState
 from ..storage import ObjectStore
-from ..task import TaskDependencyResult, TaskLease, TaskNode, TaskNodeView
+from ..task import TaskDependencyResult, TaskGraphRequest, TaskLease, TaskNode, TaskNodeView
 from ._request import put_execution_request, read_task_request
 from .workflow import ExecutionWorkflowInput, ExecutionWorkflowResult, TaskWorkflowInput
 
@@ -106,7 +106,6 @@ class _RuntimeTaskOperation:
             execution_id=f"{request.graph_id}:{node_id}",
             tenant_id=request.tenant_id,
             binding_digest=binding_digest,
-            bundle_digest=binding_digest,
             request_ref=request_ref,
             worker_build=request.worker_build,
             owner=lease.owner,
@@ -360,7 +359,7 @@ class _RuntimeTaskOperation:
         ):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
 
-    async def _load_request(self, request: TaskWorkflowInput) -> object:
+    async def _load_request(self, request: TaskWorkflowInput) -> TaskGraphRequest:
         stored = await read_task_request(
             self._request_store,
             self._request_keys,
