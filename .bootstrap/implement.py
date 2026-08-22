@@ -1,14 +1,17 @@
 #!/usr/bin/env python3
 import base64
 import gzip
+import io
 import json
 import subprocess
+import tarfile
 from pathlib import Path
 
 ROOT = Path.cwd().resolve()
+BOOTSTRAP = ROOT / ".bootstrap"
 STAGES = (
-    ROOT / ".bootstrap" / "stage1.json",
-    ROOT / ".bootstrap" / "stage2.json",
+    BOOTSTRAP / "stage1.json",
+    BOOTSTRAP / "stage2.json",
 )
 
 tracked_modes: dict[str, str] = {}
@@ -19,6 +22,22 @@ for entry in subprocess.check_output(("git", "ls-files", "-s", "-z")).split(b"\0
     tracked_modes[raw_path.decode("utf-8")] = metadata.split(b" ", 1)[0].decode("ascii")
 
 written: set[str] = set()
+source_parts = sorted(BOOTSTRAP.glob("source.b64.part-*"))
+if source_parts:
+    payload = "".join(part.read_text(encoding="utf-8").strip() for part in source_parts)
+    data = gzip.decompress(base64.b64decode(payload, validate=True))
+    with tarfile.open(fileobj=io.BytesIO(data), mode="r:") as archive:
+        for member in archive.getmembers():
+            target = (ROOT / member.name).resolve()
+            if target == ROOT or ROOT not in target.parents:
+                raise RuntimeError(f"unsafe archive member: {member.name}")
+        archive.extractall(ROOT)
+        written.update(
+            member.name
+            for member in archive.getmembers()
+            if member.isfile()
+        )
+
 for stage_path in STAGES:
     stage = json.loads(stage_path.read_text(encoding="utf-8"))
     if not isinstance(stage, dict):
@@ -36,6 +55,8 @@ for stage_path in STAGES:
 
 for relative_path in written:
     path = ROOT / relative_path
+    if not path.exists():
+        continue
     tracked_mode = tracked_modes.get(relative_path)
     current_mode = path.stat().st_mode
     if tracked_mode == "100755":
