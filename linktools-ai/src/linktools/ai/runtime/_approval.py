@@ -113,11 +113,13 @@ class DefaultApprovalService:
                 execution_id=execution_id,
                 idempotency_key_digest=idempotency_digest,
                 decision=request.decision,
-                principal_id=request.principal.principal_id,
-                decision_digest=decision_digest,
             ):
                 raise
-        if updated.decision is None or updated.decision_digest is None:
+        if (
+            updated.decision is None
+            or updated.decided_by is None
+            or updated.decision_digest is None
+        ):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         if self._workflow_gateway is not None:
             await self._workflow_gateway.update_execution(
@@ -128,7 +130,7 @@ class DefaultApprovalService:
                     "approval_id": updated.approval_id,
                     "idempotency_key": request.idempotency_key,
                     "decision": updated.decision.value,
-                    "principal_id": request.principal.principal_id,
+                    "principal_id": updated.decided_by,
                     "decision_digest": updated.decision_digest,
                 },
             )
@@ -150,8 +152,6 @@ def _is_exact_replay(
     execution_id: str,
     idempotency_key_digest: str,
     decision: ApprovalDecision,
-    principal_id: str,
-    decision_digest: str,
 ) -> bool:
     expected_status = (
         ApprovalStatus.APPROVED
@@ -164,8 +164,6 @@ def _is_exact_replay(
         and record.status is expected_status
         and record.idempotency_key_digest == idempotency_key_digest
         and record.decision is decision
-        and record.decided_by == principal_id
-        and record.decision_digest == decision_digest
     )
 
 
