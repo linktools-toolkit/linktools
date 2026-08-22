@@ -1,33 +1,35 @@
 {
   "baseline_commit": "e9fe29cffd674efd8d817d77d4f7de52050102a8",
-  "validated_source_commit": "ed02e1331484691a03d46bf1f20d59e28393ea5f",
-  "status": "COMPLETE",
-  "open_findings": [],
+  "validated_source_commit": null,
+  "status": "IN_PROGRESS",
+  "open_findings": [
+    "verification_in_progress"
+  ],
   "environment": {
-    "python": "3.13",
+    "python": "3.11",
     "debug": "false",
-    "pydantic_ai_harness": "0.13.0",
-    "pydantic_ai_slim": "2.27.0",
-    "ruff": "passed: configured linktools-ai source, build scripts, commands, and AI tests",
+    "pydantic_ai_harness": "0.24.0",
+    "pydantic_ai_slim": "2.33.0",
+    "ruff": "pending",
     "mysql_server": "not_run_no_environment_accepted",
     "postgresql_server": "not_run_no_environment_accepted"
   },
   "runtime_backends": {
-    "memory": "passed",
-    "file": "passed",
-    "sqlite": "passed",
+    "memory": "pending",
+    "file": "pending",
+    "sqlite": "pending",
     "mysql": "not_run_no_environment_accepted",
     "postgresql": "not_run_no_environment_accepted"
   },
   "mandatory": {
-    "conformance": "passed: 203 AI tests; optional live MySQL/PostgreSQL tests not run without server environments",
-    "cancellation": "passed: exact S Runtime/Task cancellation and terminal convergence regression suite",
-    "concurrency": "passed: exact S Runtime/Task CAS, resume, shutdown and effect-ownership regression suite",
-    "fault_injection": "passed: exact S FILE/SQL fault-injection and rollback regression suite",
-    "public_api": "passed: exact S package exports, profile-free contract, command imports and optional dependency isolation",
-    "architecture": "passed: compileall, Ruff, architecture, SCC, dynamic import, dependency, naming, cohesion, visibility, and private-import gates",
-    "schema": "passed: canonical 24-table metadata and init_schema.sql agree; all tables use ai_ names, with no FK or schema manifest",
-    "provenance": "passed: exact S validated; E is evidence-only and directly based on S"
+    "conformance": "pending",
+    "cancellation": "pending",
+    "concurrency": "pending",
+    "fault_injection": "pending",
+    "public_api": "pending",
+    "architecture": "pending",
+    "schema": "pending",
+    "provenance": "pending"
   },
   "spec_revision": "linktools-ai-spec-capability-agent-runtime-refactor",
   "review_scope": "linktools-ai-spec-capability-agent-runtime-refactor"
