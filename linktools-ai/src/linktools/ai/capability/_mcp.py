@@ -79,7 +79,7 @@ class MCPServerCapabilityBinding:
         return tuple(
             MCP(
                 local=toolset.prefixed(f"mcp__{mcp_server_namespace(server.id)}__"),
-                id=toolset.id,
+                id=mcp_server_selector(server.id),
             )
             for server, toolset in zip(selected, toolsets)
         )
