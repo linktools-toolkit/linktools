@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Focused regression coverage for the v3 Agent composition contract."""
+"""Focused regression coverage for the final Agent composition contract."""
 
 from contextlib import asynccontextmanager
 from types import SimpleNamespace
