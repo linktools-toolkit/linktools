@@ -53,11 +53,13 @@
     ],
     "runtime": [
       "core",
+      "storage",
+      "asset",
+      "spec",
       "observe",
-      "task",
-      "agent",
       "capability",
-      "storage"
+      "task",
+      "agent"
     ],
     "workspace": [
       "core",
@@ -132,6 +134,9 @@
     ],
     "runtime._runtime_service": [
       "core",
+      "asset",
+      "spec",
+      "capability",
       "agent",
       "task"
     ],
@@ -159,6 +164,7 @@
       "core"
     ],
     "runtime._execution": [
+      "agent",
       "core",
       "storage"
     ]

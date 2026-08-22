@@ -1,144 +1,174 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Compile declarations into immutable executable agent definitions."""
+"""Compile declarations into immutable executable Agent definitions."""
 
-from collections.abc import Sequence
-from types import MappingProxyType
+from collections.abc import Mapping, Sequence
 
 from linktools.core import environ
+from pydantic import BaseModel
 
-from ..asset import AssetRepository
 from ..capability import (
     CapabilityBinding,
-    CapabilityProvider,
     CapabilityRefResolution,
     RuntimeCapability,
-    group_capability_refs,
-    unresolved_binding,
     validate_fingerprint,
 )
-from ..core import canonical_sha256, validate_agent_id, validate_capability_provider
+from ..core import JsonValue, canonical_sha256, validate_agent_id, validate_capability_provider
 from ..errors import AIError, ErrorCode
 from ..model import ModelResolver
-from ..spec import AgentCapabilityRef, AgentSpec
+from ..spec import AgentSpec
+from ._binding import AgentBindingSnapshot
 from ._definition import AgentDefinition
-from ._output import OutputTypeRegistry
+from ._output import bind_output, restore_output
 
 _logger = environ.get_logger("ai.agent.compiler")
 
 
 class AgentCompiler:
+    """Pure compiler over already-frozen Runtime composition inputs."""
+
     def __init__(
         self,
-        assets: AssetRepository,
         *,
         model_resolver: ModelResolver,
-        output_types: OutputTypeRegistry,
-        capability_providers: "Sequence[CapabilityProvider]" = (),
-        capabilities: "Sequence[RuntimeCapability]" = (),
-        execution_profile_fingerprint: str,
+        capabilities: "Sequence[CapabilityBinding]" = (),
+        platform_capabilities: "Sequence[CapabilityBinding]" = (),
+        runtime_fingerprint: str,
+        trusted_tool_classes: "Mapping[str, str] | None" = None,
+        trusted_mcp_selectors: "Sequence[str]" = (),
     ) -> None:
-        if assets is None or not assets.ready or model_resolver is None or output_types is None or not output_types.frozen:
+        if model_resolver is None:
             raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
-        validate_fingerprint(execution_profile_fingerprint)
-        providers: "dict[str, CapabilityProvider]" = {}
-        for provider in capability_providers:
-            name = provider.provider
-            if not isinstance(name, str) or not name.strip() or name in providers:
-                raise AIError(ErrorCode.CAPABILITY_CONFLICT)
-            providers[name] = provider
-        direct_capabilities = tuple(capabilities)
-        _validate_bindings(direct_capabilities)
-        if any(capability.provider in providers for capability in direct_capabilities):
-            raise AIError(ErrorCode.CAPABILITY_CONFLICT)
-        if any(provider_name == "runtime" for provider_name in providers):
-            raise AIError(ErrorCode.CAPABILITY_CONFLICT)
-        self._assets = assets
+        validate_fingerprint(runtime_fingerprint)
+        global_capabilities = tuple(capabilities)
+        platform = tuple(platform_capabilities)
+        _validate_bindings((*global_capabilities, *platform))
+        trusted = tuple(sorted((trusted_tool_classes or {}).items()))
+        selectors = tuple(sorted(trusted_mcp_selectors))
+        if len(selectors) != len(set(selectors)) or any(
+            not isinstance(selector, str)
+            or not selector.startswith("mcp__")
+            or selector == "mcp__"
+            or "__" in selector[5:]
+            for selector in selectors
+        ):
+            raise AIError(ErrorCode.CAPABILITY_POLICY_CONFLICT)
         self._model_resolver = model_resolver
-        self._output_types = output_types
-        self._providers = MappingProxyType(providers)
-        self._capabilities = direct_capabilities
-        self._execution_profile_fingerprint = execution_profile_fingerprint
+        self._capabilities = global_capabilities
+        self._platform_capabilities = platform
+        self._runtime_fingerprint = runtime_fingerprint
+        self._trusted_tool_classes = trusted
+        self._trusted_mcp_selectors = selectors
 
-    async def compile(self, spec: AgentSpec) -> AgentDefinition:
-        return await self._compile(spec=spec, direct_capabilities=self._capabilities)
-
-    def derive_subagent(self, definition: AgentDefinition) -> AgentDefinition:
-        effective = tuple(
-            capability
-            for capability in definition.effective_capabilities
-            if not isinstance(capability, RuntimeCapability)
-            or capability.inherit_to_subagents
-        )
-        if effective == definition.effective_capabilities:
-            return definition
-        digest = _definition_digest(
-            definition.spec,
-            definition.model,
-            definition.output_schema_fingerprint,
-            effective,
-            self._execution_profile_fingerprint,
-        )
-        return AgentDefinition(
-            digest,
-            definition.spec,
-            definition.model,
-            definition.output_type,
-            definition.output_schema_fingerprint,
-            effective,
-        )
-
-    async def _compile(
+    def compile(
         self,
-        *,
         spec: AgentSpec,
-        direct_capabilities: "Sequence[RuntimeCapability]",
+        *,
+        capabilities: "Sequence[RuntimeCapability]" = (),
+        output: "type[BaseModel] | None" = None,
     ) -> AgentDefinition:
         validate_agent_id(spec.id)
-        direct_providers = {capability.provider for capability in direct_capabilities}
-        if any(ref.provider in direct_providers for ref in spec.capabilities):
-            raise AIError(ErrorCode.CAPABILITY_CONFLICT)
-        declarative: "list[CapabilityBinding]" = []
-        for provider_name, refs in group_capability_refs(spec.capabilities):
-            provider = self._providers.get(provider_name)
-            if provider is None:
-                if any(ref.required for ref in refs):
-                    raise AIError(ErrorCode.CAPABILITY_PROVIDER_UNKNOWN)
-                binding = unresolved_binding(provider_name, refs)
-            else:
-                binding = await provider.bind(refs, assets=self._assets)
-                _validate_binding(provider_name, refs, binding)
-            declarative.append(binding)
-        effective = tuple(declarative) + tuple(direct_capabilities)
+        local_capabilities = tuple(capabilities)
+        if any(not isinstance(capability, RuntimeCapability) for capability in local_capabilities):
+            raise TypeError("agent-local capabilities must contain RuntimeCapability values")
+        if any(not capability.durable for capability in local_capabilities):
+            raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
+        restored_locals: list[RuntimeCapability] = []
+        local_descriptors: list[Mapping[str, JsonValue]] = []
+        for capability in local_capabilities:
+            descriptor = capability.descriptor
+            if descriptor is None:
+                raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
+            try:
+                restored = RuntimeCapability.restore(descriptor)
+            except AIError as error:
+                raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID) from error
+            restored_descriptor = restored.descriptor
+            if restored_descriptor is None or restored_descriptor != descriptor:
+                raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
+            restored_locals.append(restored)
+            local_descriptors.append(restored_descriptor)
+        effective: tuple[CapabilityBinding, ...] = (
+            *self._capabilities,
+            *restored_locals,
+            *self._platform_capabilities,
+        )
         _validate_bindings(effective)
         model = self._model_resolver.resolve(spec.model)
-        output_type = self._output_types.resolve(spec.output_schema, spec.output_schema_revision)
-        output_fingerprint = self._output_types.fingerprint(spec.output_schema, spec.output_schema_revision)
-        digest = _definition_digest(spec, model, output_fingerprint, effective, self._execution_profile_fingerprint)
-        definition = AgentDefinition(digest, spec, model, output_type, output_fingerprint, effective)
+        output_binding = bind_output(output)
+        digest = _definition_digest(
+            spec,
+            model.fingerprint,
+            output_binding.fingerprint,
+            effective,
+            self._runtime_fingerprint,
+        )
+        snapshot = AgentBindingSnapshot(
+            version=1,
+            agent_spec=spec,
+            output_type_module=output_binding.value_type.__module__,
+            output_type_qualname=output_binding.value_type.__qualname__,
+            output_schema_id=output_binding.schema_id,
+            output_schema_revision=output_binding.schema_revision,
+            output_schema_fingerprint=output_binding.schema_fingerprint,
+            local_runtime_capability_descriptors=tuple(local_descriptors),
+            binding_digest=digest,
+        )
+        definition = AgentDefinition(
+            digest,
+            spec,
+            model,
+            output_binding,
+            effective,
+            snapshot,
+            self._trusted_tool_classes,
+            self._trusted_mcp_selectors,
+        )
         _logger.debug(
             "agent definition compiled: agent=%s digest=%s capabilities=%s",
             spec.id,
             digest,
-            tuple(capability.id for capability in effective),
+            tuple((capability.provider, capability.id) for capability in effective),
         )
         return definition
 
-def _validate_binding(provider: str, refs: "tuple[AgentCapabilityRef, ...]", binding: CapabilityBinding) -> None:
-    _validate_binding_shape(binding)
-    if binding.provider != provider or len(binding.resolutions) != len(refs):
-        raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
-    for ref, resolution in zip(refs, binding.resolutions):
-        if resolution.id != ref.id or resolution.requested_revision != ref.revision or resolution.required != ref.required:
-            raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
-        if ref.required and resolution.status != "resolved":
-            raise AIError(ErrorCode.CAPABILITY_REQUIRED_MISSING)
+    def restore(self, snapshot: AgentBindingSnapshot) -> AgentDefinition:
+        if not isinstance(snapshot, AgentBindingSnapshot):
+            raise TypeError("snapshot must be AgentBindingSnapshot")
+        try:
+            local_capabilities = tuple(
+                RuntimeCapability.restore(descriptor)
+                for descriptor in snapshot.local_runtime_capability_descriptors
+            )
+            output_binding = restore_output(
+                {
+                    "version": 1,
+                    "schema_id": snapshot.output_schema_id,
+                    "schema_revision": snapshot.output_schema_revision,
+                    "schema_fingerprint": snapshot.output_schema_fingerprint,
+                    "module": snapshot.output_type_module,
+                    "qualname": snapshot.output_type_qualname,
+                }
+            )
+            definition = self.compile(
+                snapshot.agent_spec,
+                capabilities=local_capabilities,
+                output=output_binding.value_type,
+            )
+        except AIError as error:
+            if error.code is ErrorCode.AGENT_DEFINITION_UNAVAILABLE:
+                raise
+            raise AIError(ErrorCode.AGENT_DEFINITION_UNAVAILABLE) from error
+        if definition.digest != snapshot.binding_digest or definition.binding_snapshot != snapshot:
+            raise AIError(ErrorCode.AGENT_DEFINITION_UNAVAILABLE)
+        return definition
 
 
 def _validate_bindings(bindings: "Sequence[CapabilityBinding]") -> None:
+    identities: list[tuple[str, str]] = []
     for binding in bindings:
         _validate_binding_shape(binding)
-    identities = [(binding.provider, binding.id) for binding in bindings]
+        identities.append((binding.provider, binding.id))
     if len(identities) != len(set(identities)):
         raise AIError(ErrorCode.CAPABILITY_CONFLICT)
 
@@ -164,50 +194,55 @@ def _validate_binding_shape(binding: CapabilityBinding) -> None:
 
 def _definition_digest(
     spec: AgentSpec,
-    model: object,
+    model_fingerprint: str,
     output_fingerprint: str,
     capabilities: "Sequence[CapabilityBinding]",
-    execution_profile_fingerprint: str,
+    runtime_fingerprint: str,
 ) -> str:
-    return canonical_sha256({
-        "version": 3,
-        "agent": {
-            "id": spec.id,
-            "revision": spec.revision,
-            "model": spec.model,
-            "capabilities": [_ref_payload(ref) for ref in spec.capabilities],
-            "output_schema": spec.output_schema,
-            "output_schema_revision": spec.output_schema_revision,
-            "system_prompt": spec.system_prompt,
-            "instructions": list(spec.instructions),
-            "allow_tools": spec.allow_tools,
-            "allow_skills": spec.allow_skills,
-            "metadata": dict(spec.metadata),
-            "usage_limits": None
-            if spec.usage_limits is None
-            else {
-                "model_requests": spec.usage_limits.model_requests,
-                "tool_calls": spec.usage_limits.tool_calls,
-                "input_tokens": spec.usage_limits.input_tokens,
-                "output_tokens": spec.usage_limits.output_tokens,
-                "total_tokens": spec.usage_limits.total_tokens,
+    return canonical_sha256(
+        {
+            "version": 1,
+            "agent": {
+                "id": spec.id,
+                "revision": spec.revision,
+                "model": spec.model,
+                "system_prompt": spec.system_prompt,
+                "instructions": list(spec.instructions),
+                "allow_tools": list(spec.allow_tools),
+                "metadata": dict(spec.metadata),
+                "usage_limits": None
+                if spec.usage_limits is None
+                else {
+                    "model_requests": spec.usage_limits.model_requests,
+                    "tool_calls": spec.usage_limits.tool_calls,
+                    "input_tokens": spec.usage_limits.input_tokens,
+                    "output_tokens": spec.usage_limits.output_tokens,
+                    "total_tokens": spec.usage_limits.total_tokens,
+                },
             },
-        },
-        "model_fingerprint": model.fingerprint,
-        "output_schema_fingerprint": output_fingerprint,
-        "capabilities": [_binding_payload(binding) for binding in capabilities],
-        "execution_profile_fingerprint": execution_profile_fingerprint,
-    })
-
-
-def _ref_payload(ref: AgentCapabilityRef) -> "dict[str, object]":
-    return {"provider": ref.provider, "id": ref.id, "revision": ref.revision, "required": ref.required, "config": dict(ref.config)}
+            "model_fingerprint": model_fingerprint,
+            "output_binding_fingerprint": output_fingerprint,
+            "capabilities": [_binding_payload(binding) for binding in capabilities],
+            "runtime_fingerprint": runtime_fingerprint,
+        }
+    )
 
 
 def _binding_payload(binding: CapabilityBinding) -> "dict[str, object]":
-    payload = {"id": binding.id, "provider": binding.provider, "fingerprint": binding.fingerprint, "resolutions": []}
-    payload["resolutions"] = [{"id": resolution.id, "requested_revision": resolution.requested_revision, "resolved_revision": resolution.resolved_revision, "required": resolution.required, "status": resolution.status, "fingerprint": resolution.fingerprint} for resolution in binding.resolutions]
-    return payload
+    return {
+        "id": binding.id,
+        "provider": binding.provider,
+        "fingerprint": binding.fingerprint,
+        "resolutions": [
+            {
+                "kind": resolution.ref.kind,
+                "id": resolution.ref.id,
+                "resolved_revision": resolution.resolved_revision,
+                "fingerprint": resolution.fingerprint,
+            }
+            for resolution in binding.resolutions
+        ],
+    }
 
 
 __all__ = ["AgentCompiler"]

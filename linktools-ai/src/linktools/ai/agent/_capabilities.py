@@ -33,6 +33,7 @@ from ..errors import AIError, ErrorCode
 _logger = environ.get_logger("ai.agent.capabilities")
 
 MEMORY_TOOL_NAMES = ("delete_memory", "read_memory", "search_memory", "write_memory")
+MEMORY_READ_TOOL_NAMES = ("read_memory", "search_memory")
 PLANNING_TOOL_NAMES = ("write_plan",)
 SUBAGENT_TOOL_NAMES = ("delegate_task",)
 WORKSPACE_FILESYSTEM_TOOL_NAMES = (
@@ -45,7 +46,31 @@ WORKSPACE_FILESYSTEM_TOOL_NAMES = (
     "search_files",
     "write_file",
 )
+WORKSPACE_FILESYSTEM_READ_TOOL_NAMES = (
+    "file_info",
+    "find_files",
+    "list_directory",
+    "read_file",
+    "search_files",
+)
 WORKSPACE_SHELL_TOOL_NAMES = ("check_command", "run_command", "start_command", "stop_command")
+PLAN_SAFE_METADATA_KEY = "linktools.ai.plan_safe"
+_TRUSTED_TOOL_CLASSES = frozenset(
+    {
+        "control",
+        "filesystem.read",
+        "filesystem.write",
+        "shell",
+        "memory.read",
+        "memory.write",
+    }
+)
+_WORKSPACE_FILESYSTEM_CAPABILITY_ID = "workspace-filesystem"
+_WORKSPACE_SHELL_CAPABILITY_ID = "workspace-shell"
+_SKILL_CAPABILITY_ID = "linktools-skill"
+_MEMORY_CAPABILITY_ID = "linktools-memory"
+_PLANNING_CAPABILITY_ID = "linktools-planning"
+_SUBAGENT_CAPABILITY_ID = "linktools-subagent"
 
 
 @dataclass(frozen=True, slots=True)
@@ -117,9 +142,24 @@ class _MissingToolOperationBridge:
 
 
 class _RuntimeStepPersistence(StepPersistence[None]):
-    def __init__(self, *, tool_operations: ToolOperationBridge, **kwargs: Any) -> None:
+    def __init__(
+        self,
+        *,
+        tool_operations: ToolOperationBridge,
+        planning: bool = False,
+        trusted_tool_classes: "tuple[tuple[str, str], ...]" = (),
+        trusted_mcp_selectors: "tuple[str, ...]" = (),
+        **kwargs: Any,
+    ) -> None:
+        if not isinstance(planning, bool):
+            raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+        _validate_trusted_tool_classes(trusted_tool_classes)
+        _validate_trusted_mcp_selectors(trusted_mcp_selectors)
         super().__init__(**kwargs)
         self._tool_operations = tool_operations
+        self._planning = planning
+        self._trusted_tool_classes = trusted_tool_classes
+        self._trusted_mcp_selectors = trusted_mcp_selectors
         self._calls: dict[tuple[str, str], _ToolCallState] = {}
 
     async def before_tool_execute(
@@ -130,6 +170,15 @@ class _RuntimeStepPersistence(StepPersistence[None]):
         tool_def: ToolDefinition,
         args: dict[str, Any],
     ) -> dict[str, Any]:
+        if self._planning and not tool_allowed_in_planning(
+            tool_def,
+            trusted_tool_classes=self._trusted_tool_classes,
+            trusted_mcp_selectors=self._trusted_mcp_selectors,
+        ):
+            raise AIError(
+                ErrorCode.CAPABILITY_POLICY_CONFLICT,
+                safe_details={"tool_name": tool_def.name, "planning": True},
+            )
         decision = await self._tool_operations.begin(ctx, call, tool_def, args)
         key = self._decision_key(ctx, call)
         state = _ToolCallState(
@@ -274,7 +323,6 @@ class _RuntimeStepPersistence(StepPersistence[None]):
                 await self._mark_unknown(state, error)
             elif not state.handler_entered:
                 state.preserve_started = True
-            # Generic replay-safe failures are terminalized by the error hook.
             raise
         finally:
             await self._stop_heartbeat(state)
@@ -377,14 +425,21 @@ class _RuntimeStepPersistence(StepPersistence[None]):
         error: BaseException,
         state: _ToolCallState,
     ) -> Any:
+        if state.effect_terminalized:
+            raise error
+        try:
+            result = await super().on_tool_execute_error(
+                ctx,
+                call=call,
+                tool_def=tool_def,
+                args=args,
+                error=error,
+            )
+        except (ModelRetry, ToolRetryError):
+            state.effect_terminalized = True
+            raise
         state.effect_terminalized = True
-        return await super().on_tool_execute_error(
-            ctx,
-            call=call,
-            tool_def=tool_def,
-            args=args,
-            error=error,
-        )
+        return result
 
     async def _mark_unknown(self, state: _ToolCallState, error: BaseException) -> None:
         state.preserve_started = True
@@ -407,6 +462,9 @@ class AgentRunScope:
     memory_store: "SearchableMemoryStore | None"
     history_id: "str | None" = None
     platform_tool_names: "tuple[str, ...]" = ()
+    planning: bool = False
+    trusted_tool_classes: "tuple[tuple[str, str], ...]" = ()
+    trusted_mcp_selectors: "tuple[str, ...]" = ()
     context_target_tokens: "int | None" = None
     parent_step_run_id: "str | None" = None
     subagent_delegate: "SubagentDelegate | None" = None
@@ -425,9 +483,14 @@ async def compose_platform_capabilities(
 ) -> "tuple[PydanticAgentCapability[None], ...]":
     del model_factory, parent_model
     _validate_compaction_target(scope.context_target_tokens)
+    _validate_trusted_tool_classes(scope.trusted_tool_classes)
+    _validate_trusted_mcp_selectors(scope.trusted_mcp_selectors)
     capabilities: list[PydanticAgentCapability[None]] = [
         _RuntimeStepPersistence(
             tool_operations=scope.tool_operations or _MissingToolOperationBridge(),
+            planning=scope.planning,
+            trusted_tool_classes=scope.trusted_tool_classes,
+            trusted_mcp_selectors=scope.trusted_mcp_selectors,
             store=scope.step_store,
             agent_name=scope.agent_name,
             run_id=scope.step_run_id,
@@ -453,10 +516,11 @@ async def compose_platform_capabilities(
                 inject_memory=False,
                 guidance=_memory_guidance(selected_memory),
                 selected_tool_names=selected_memory,
+                id=_MEMORY_CAPABILITY_ID,
             )
         )
     if any(name in selected for name in PLANNING_TOOL_NAMES):
-        capabilities.append(Planning())
+        capabilities.append(Planning(id=_PLANNING_CAPABILITY_ID))
     if "delegate_task" in selected:
         if scope.subagent_delegate is None:
             raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
@@ -488,22 +552,145 @@ def tool_name_allowed(name: str, allow_tools: "tuple[str, ...]") -> bool:
     return "*" in allow_tools or name in allow_tools
 
 
+def tool_is_control(
+    tool_def: ToolDefinition,
+    *,
+    trusted_tool_classes: "tuple[tuple[str, str], ...]",
+) -> bool:
+    return _tool_class(tool_def, trusted_tool_classes) == "control"
+
+
+def tool_allowed_in_planning(
+    tool_def: ToolDefinition,
+    *,
+    trusted_tool_classes: "tuple[tuple[str, str], ...]",
+    trusted_mcp_selectors: "tuple[str, ...]",
+) -> bool:
+    tool_class = _tool_class(tool_def, trusted_tool_classes)
+    if tool_class == "control":
+        return True
+    if tool_class in {"filesystem.write", "shell", "memory.write"}:
+        return False
+    if tool_class in {"filesystem.read", "memory.read"}:
+        return True
+    _validate_trusted_mcp_selectors(trusted_mcp_selectors)
+    capability_id = tool_def.capability_id
+    if capability_id in trusted_mcp_selectors:
+        if not tool_def.name.startswith(f"{capability_id}__"):
+            raise AIError(ErrorCode.CAPABILITY_POLICY_CONFLICT)
+        return False
+    metadata = tool_def.metadata or {}
+    value = metadata.get(PLAN_SAFE_METADATA_KEY)
+    if value is None:
+        return False
+    if not isinstance(value, bool):
+        raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+    return value
+
+
+def _tool_class(
+    tool_def: ToolDefinition,
+    trusted_tool_classes: "tuple[tuple[str, str], ...]",
+) -> "str | None":
+    _validate_trusted_tool_classes(trusted_tool_classes)
+    for tool_name, tool_class in trusted_tool_classes:
+        if tool_name != tool_def.name:
+            continue
+        expected_capability_id = _trusted_capability_id(tool_name, tool_class)
+        return tool_class if tool_def.capability_id == expected_capability_id else None
+    return None
+
+
+def _trusted_capability_id(name: str, tool_class: str) -> str:
+    if tool_class == "filesystem.read" and name in WORKSPACE_FILESYSTEM_READ_TOOL_NAMES:
+        return _WORKSPACE_FILESYSTEM_CAPABILITY_ID
+    if (
+        tool_class == "filesystem.write"
+        and name in WORKSPACE_FILESYSTEM_TOOL_NAMES
+        and name not in WORKSPACE_FILESYSTEM_READ_TOOL_NAMES
+    ):
+        return _WORKSPACE_FILESYSTEM_CAPABILITY_ID
+    if tool_class == "shell" and name in WORKSPACE_SHELL_TOOL_NAMES:
+        return _WORKSPACE_SHELL_CAPABILITY_ID
+    if tool_class == "memory.read" and name in MEMORY_READ_TOOL_NAMES:
+        return _MEMORY_CAPABILITY_ID
+    if tool_class == "memory.write" and name in MEMORY_TOOL_NAMES and name not in MEMORY_READ_TOOL_NAMES:
+        return _MEMORY_CAPABILITY_ID
+    if tool_class == "control":
+        if name in SKILL_TOOL_NAMES:
+            return _SKILL_CAPABILITY_ID
+        if name in PLANNING_TOOL_NAMES:
+            return _PLANNING_CAPABILITY_ID
+        if name in SUBAGENT_TOOL_NAMES:
+            return _SUBAGENT_CAPABILITY_ID
+    raise AIError(ErrorCode.CAPABILITY_POLICY_CONFLICT)
+
+
+def _validate_trusted_tool_classes(
+    trusted_tool_classes: "tuple[tuple[str, str], ...]",
+) -> None:
+    previous: str | None = None
+    seen: set[str] = set()
+    for item in trusted_tool_classes:
+        if not isinstance(item, tuple) or len(item) != 2:
+            raise AIError(ErrorCode.CAPABILITY_POLICY_CONFLICT)
+        name, tool_class = item
+        if (
+            not isinstance(name, str)
+            or not name.strip()
+            or tool_class not in _TRUSTED_TOOL_CLASSES
+            or name in seen
+            or (previous is not None and name < previous)
+        ):
+            raise AIError(ErrorCode.CAPABILITY_POLICY_CONFLICT)
+        _trusted_capability_id(name, tool_class)
+        seen.add(name)
+        previous = name
+
+
+def _validate_trusted_mcp_selectors(
+    trusted_mcp_selectors: "tuple[str, ...]",
+) -> None:
+    previous: str | None = None
+    seen: set[str] = set()
+    for selector in trusted_mcp_selectors:
+        if (
+            not isinstance(selector, str)
+            or not selector.startswith("mcp__")
+            or selector == "mcp__"
+            or "__" in selector[5:]
+            or selector in seen
+            or (previous is not None and selector < previous)
+        ):
+            raise AIError(ErrorCode.CAPABILITY_POLICY_CONFLICT)
+        seen.add(selector)
+        previous = selector
+
+
 def select_platform_tool_names(
     *,
     allow_tools: "tuple[str, ...]",
     memory_scope: "str | None",
+    planning: bool = False,
     subagent_available: bool = False,
 ) -> "tuple[str, ...]":
-    candidates = list(PLANNING_TOOL_NAMES)
-    if memory_scope is not None:
-        candidates.extend(MEMORY_TOOL_NAMES)
+    if not isinstance(planning, bool) or not isinstance(subagent_available, bool):
+        raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+    selected = [
+        name
+        for name in MEMORY_TOOL_NAMES
+        if memory_scope is not None and tool_name_allowed(name, allow_tools)
+    ]
+    if planning:
+        selected.extend(PLANNING_TOOL_NAMES)
     if subagent_available:
-        candidates.extend(SUBAGENT_TOOL_NAMES)
-    return tuple(sorted(name for name in candidates if tool_name_allowed(name, allow_tools)))
+        selected.extend(SUBAGENT_TOOL_NAMES)
+    return tuple(sorted(selected))
 
 
 class _SubagentCapability(AbstractCapability[None]):
     def __init__(self, delegate: SubagentDelegate) -> None:
+        self.id = _SUBAGENT_CAPABILITY_ID
         self._delegate = delegate
 
     def get_toolset(self) -> "FunctionToolset[None]":
@@ -564,10 +751,13 @@ def _workspace_file_key(part: ToolCallPart) -> "str | None":
 
 
 __all__ = [
+    "MEMORY_READ_TOOL_NAMES",
     "MEMORY_TOOL_NAMES",
+    "PLAN_SAFE_METADATA_KEY",
     "PLANNING_TOOL_NAMES",
     "SKILL_TOOL_NAMES",
     "SUBAGENT_TOOL_NAMES",
+    "WORKSPACE_FILESYSTEM_READ_TOOL_NAMES",
     "WORKSPACE_FILESYSTEM_TOOL_NAMES",
     "WORKSPACE_SHELL_TOOL_NAMES",
     "AgentRunScope",
@@ -576,5 +766,7 @@ __all__ = [
     "ToolOperationDecision",
     "compose_platform_capabilities",
     "select_platform_tool_names",
+    "tool_allowed_in_planning",
+    "tool_is_control",
     "tool_name_allowed",
 ]

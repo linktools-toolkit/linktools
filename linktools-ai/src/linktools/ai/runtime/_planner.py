@@ -8,7 +8,7 @@ from collections.abc import Mapping
 
 from linktools.core import environ
 
-from ..agent import AgentDefinitionCatalog
+from ..agent import AgentBindingSnapshot, AgentCompiler, AgentDefinitionCatalog
 from ..core import (
     ExecutionStatus,
     Principal,
@@ -28,16 +28,21 @@ from ..task import (
     TaskNode,
     TaskNodeRunResult,
 )
-from .service_api import (
-    CancelExecutionRequest,
-    ExecutionRequest,
-    ExecutionResult,
-    ExecutionService,
-    WorkflowGateway,
-)
+from .service_api import CancelExecutionRequest, ExecutionRequest, ExecutionResult, ExecutionService, WorkflowGateway
 
 _logger = environ.get_logger("ai.runtime.planner")
-_AGENT_TASK_FIELDS = frozenset({"type", "version", "agent_id", "binding_digest", "user_prompt"})
+_AGENT_TASK_FIELDS = frozenset(
+    {
+        "type",
+        "version",
+        "agent_id",
+        "binding_digest",
+        "binding",
+        "user_prompt",
+        "planning",
+        "thinking",
+    }
+)
 
 
 class RuntimeTaskNodeRunner:
@@ -47,9 +52,11 @@ class RuntimeTaskNodeRunner:
         self,
         execution: ExecutionService,
         catalog: AgentDefinitionCatalog,
+        compiler: AgentCompiler,
     ) -> None:
         self._execution = execution
         self._catalog = catalog
+        self._compiler = compiler
 
     async def prepare(
         self,
@@ -67,16 +74,34 @@ class RuntimeTaskNodeRunner:
         agent_id = payload["agent_id"]
         binding_digest = payload["binding_digest"]
         base_user_prompt = payload["user_prompt"]
+        planning = payload["planning"]
+        thinking = payload["thinking"]
         if (
             not isinstance(agent_id, str)
             or not isinstance(binding_digest, str)
             or not isinstance(base_user_prompt, str)
+            or not isinstance(planning, bool)
+            or not isinstance(thinking, bool)
         ):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        try:
+            snapshot = AgentBindingSnapshot.from_payload(payload["binding"])
+        except AIError as error:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
+        if snapshot.binding_digest != binding_digest or snapshot.agent_spec.id != agent_id:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         validate_agent_id(agent_id)
         validate_user_prompt(base_user_prompt)
-        definition = self._catalog.definition(binding_digest)
-        if definition.spec.id != agent_id:
+        try:
+            definition = self._catalog.register(self._compiler.restore(snapshot))
+        except AIError as error:
+            if error.code is ErrorCode.STORAGE_INTEGRITY_ERROR:
+                raise
+            raise AIError(
+                ErrorCode.AGENT_DEFINITION_UNAVAILABLE,
+                safe_details={"agent_id": agent_id, "binding_digest": binding_digest},
+            ) from error
+        if definition.digest != binding_digest or definition.spec.id != agent_id:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         if set(dependency_results) != set(node.dependencies):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -99,7 +124,7 @@ class RuntimeTaskNodeRunner:
         validate_user_prompt(effective_user_prompt)
         idempotency_key = canonical_sha256(
             {
-                "version": 2,
+                "version": 1,
                 "graph_id": graph_id,
                 "node_id": node.node_id,
                 "agent_id": agent_id,
@@ -120,15 +145,12 @@ class RuntimeTaskNodeRunner:
             principal=principal,
             idempotency_key=idempotency_key,
             memory_scope=None,
+            planning=planning,
+            thinking=thinking,
         )
         return binding_digest, request
 
-    async def result(
-        self,
-        execution_id: str,
-        *,
-        principal: Principal,
-    ) -> TaskNodeRunResult:
+    async def result(self, execution_id: str, *, principal: Principal) -> TaskNodeRunResult:
         result = await self._execution.result(execution_id, principal=principal)
         if result.status is not ExecutionStatus.SUCCEEDED:
             raise AIError(ErrorCode.EXECUTION_FAILED)
@@ -225,14 +247,26 @@ async def _cancel_execution(
     )
     cleanup = asyncio.create_task(execution.cancel(execution_id, request))
     try:
-        await asyncio.shield(cleanup)
-    except BaseException:
-        _logger.warning(
-            "task execution cancellation cleanup failed: graph=%s task=%s execution=%s",
-            graph_id,
-            node_id,
-            execution_id,
-        )
+        result = await asyncio.shield(cleanup)
+    except asyncio.CancelledError:
+        try:
+            result = await cleanup
+        except BaseException as error:
+            raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED) from error
+    except BaseException as error:
+        raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED) from error
+    if result.cancelled:
+        return
+    try:
+        current = await execution.inspect(execution_id, principal=principal)
+    except BaseException as error:
+        raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED) from error
+    if current.status not in {
+        ExecutionStatus.SUCCEEDED,
+        ExecutionStatus.FAILED,
+        ExecutionStatus.CANCELLED,
+    }:
+        raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
 
 
 __all__ = ["DefaultTaskService", "RuntimeTaskNodeRunner", "WorkflowTaskGraphLauncher"]

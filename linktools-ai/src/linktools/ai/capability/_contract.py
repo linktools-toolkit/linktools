@@ -1,38 +1,38 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Capability binding, runtime capability, and provider contracts."""
+"""Capability binding and runtime materialization contracts."""
 
-from collections.abc import Sequence
-from dataclasses import dataclass
+import importlib
+import json
+from collections.abc import Mapping
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Literal, Protocol
+from typing import Protocol, cast
 
+from pydantic_ai.capabilities import AbstractCapability
 from pydantic_ai.capabilities import AgentCapability as PydanticAgentCapability
 
-from ..asset import AssetRepository
-from ..core import Principal, ResourceRef, canonical_sha256, canonical_string_tuple
+from ..asset import AssetRef, AssetRepository
+from ..core import (
+    JsonValue,
+    Principal,
+    ResourceRef,
+    canonical_json_bytes,
+    canonical_sha256,
+    canonical_string_tuple,
+)
 from ..errors import AIError, ErrorCode
-from ..spec import AgentCapabilityRef
 
 
 @dataclass(frozen=True, slots=True)
 class CapabilityRefResolution:
-    id: str
-    requested_revision: "int | None"
-    resolved_revision: "int | None"
-    required: bool
-    status: Literal["resolved", "unresolved"]
-    fingerprint: "str | None"
+    ref: AssetRef
+    resolved_revision: int
+    fingerprint: str
 
     def __post_init__(self) -> None:
-        if not self.id.strip() or not isinstance(self.required, bool):
-            raise ValueError("capability resolution identity is invalid")
-        if self.status == "resolved" and (self.resolved_revision is None or not _is_fingerprint(self.fingerprint)):
+        if self.resolved_revision < 1 or not _is_fingerprint(self.fingerprint):
             raise AIError(ErrorCode.CAPABILITY_FINGERPRINT_INVALID)
-        if self.status == "unresolved" and (self.required or self.resolved_revision is not None or self.fingerprint is not None):
-            raise ValueError("unresolved capability resolution is invalid")
-        if self.status not in {"resolved", "unresolved"}:
-            raise ValueError("capability resolution status is invalid")
 
 
 @dataclass(frozen=True, slots=True)
@@ -41,16 +41,22 @@ class CapabilityMaterializationContext:
     execution: ResourceRef
     execution_root: Path
     allow_tools: "tuple[str, ...]" = ("*",)
-    allow_skills: "tuple[str, ...]" = ("*",)
 
     def __post_init__(self) -> None:
         if self.principal.tenant_id != self.execution.tenant_id:
             raise ValueError("capability context tenant mismatch")
         if not isinstance(self.execution_root, Path):
             raise TypeError("execution_root must be a Path")
-        object.__setattr__(self, "execution_root", self.execution_root.expanduser().resolve(strict=False))
-        object.__setattr__(self, "allow_tools", canonical_string_tuple(self.allow_tools, field="allow_tools"))
-        object.__setattr__(self, "allow_skills", canonical_string_tuple(self.allow_skills, field="allow_skills"))
+        object.__setattr__(
+            self,
+            "execution_root",
+            self.execution_root.expanduser().resolve(strict=False),
+        )
+        object.__setattr__(
+            self,
+            "allow_tools",
+            canonical_string_tuple(self.allow_tools, field="allow_tools"),
+        )
 
 
 class CapabilityBinding(Protocol):
@@ -73,12 +79,20 @@ class CapabilityBinding(Protocol):
 
 
 class CapabilityProvider(Protocol):
+    """Bind one Asset value type into one frozen Runtime capability."""
+
     @property
     def provider(self) -> str: ...
 
+    @property
+    def value_type(self) -> type[object]: ...
+
+    @property
+    def revision(self) -> int: ...
+
     async def bind(
         self,
-        refs: "tuple[AgentCapabilityRef, ...]",
+        refs: "tuple[AssetRef, ...]",
         *,
         assets: AssetRepository,
     ) -> CapabilityBinding: ...
@@ -86,10 +100,13 @@ class CapabilityProvider(Protocol):
 
 @dataclass(frozen=True, slots=True)
 class RuntimeCapability:
+    """Stable Python capability binding supplied by Runtime composition."""
+
     id: str
     capability: "PydanticAgentCapability[None]"
-    revision: "int | None" = None
-    inherit_to_subagents: bool = True
+    revision: int = 1
+    semantic_fingerprint: "str | None" = None
+    _descriptor_payload: "bytes | None" = field(default=None, repr=False, compare=True)
 
     @property
     def provider(self) -> str:
@@ -100,62 +117,171 @@ class RuntimeCapability:
         return ()
 
     @property
+    def durable(self) -> bool:
+        return self._descriptor_payload is not None
+
+    @property
+    def descriptor(self) -> "dict[str, JsonValue] | None":
+        payload = self._descriptor_payload
+        if payload is None:
+            return None
+        try:
+            value = json.loads(payload.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as error:
+            raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID) from error
+        if not isinstance(value, dict):
+            raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
+        return cast("dict[str, JsonValue]", value)
+
+    @property
     def fingerprint(self) -> str:
-        payload: dict[str, object] = {"provider": self.provider, "id": self.id}
-        if self.revision is not None:
-            payload["revision"] = self.revision
-        return canonical_sha256(payload)
+        descriptor = self.descriptor
+        if descriptor is not None:
+            value = descriptor.get("fingerprint")
+            if not isinstance(value, str) or not _is_fingerprint(value):
+                raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
+            return value
+        value = self.semantic_fingerprint
+        if not isinstance(value, str) or not _is_fingerprint(value):
+            raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
+        return value
 
     def __post_init__(self) -> None:
         if (
-            not self.id.strip()
+            not isinstance(self.id, str)
+            or not self.id.strip()
             or self.capability is None
-            or (
-                self.revision is not None
-                and (
-                    not isinstance(self.revision, int)
-                    or isinstance(self.revision, bool)
-                    or self.revision < 1
-                )
-            )
-            or not isinstance(self.inherit_to_subagents, bool)
+            or not isinstance(self.revision, int)
+            or isinstance(self.revision, bool)
+            or self.revision < 1
         ):
             raise ValueError("runtime capability is incomplete")
+        if self._descriptor_payload is None:
+            if not _is_fingerprint(self.semantic_fingerprint):
+                raise AIError(ErrorCode.CAPABILITY_FINGERPRINT_INVALID)
+            return
+        if self.semantic_fingerprint is not None:
+            raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
+        descriptor = self.descriptor
+        if descriptor is None:
+            raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
+        _validate_runtime_capability_descriptor(descriptor)
 
-    async def materialize(self, context: CapabilityMaterializationContext) -> "tuple[PydanticAgentCapability[None], ...]":
+    @classmethod
+    def from_spec(
+        cls,
+        id: str,
+        capability_type: "type[AbstractCapability[None]]",
+        *,
+        config: "Mapping[str, JsonValue]",
+        revision: int = 1,
+    ) -> "RuntimeCapability":
+        if (
+            not isinstance(id, str)
+            or not id.strip()
+            or not isinstance(revision, int)
+            or isinstance(revision, bool)
+            or revision < 1
+            or not isinstance(capability_type, type)
+            or not issubclass(capability_type, AbstractCapability)
+        ):
+            raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
+        normalized = _normalize_json_mapping(config)
+        _validate_importable_capability_type(capability_type)
+        try:
+            serialization_name = capability_type.get_serialization_name()
+        except Exception as error:
+            raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID) from error
+        if not isinstance(serialization_name, str) or not serialization_name.strip():
+            raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
+        try:
+            capability = capability_type.from_spec(**normalized)
+        except Exception as error:
+            raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID) from error
+        if type(capability) is not capability_type:
+            raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
+        fingerprint = _runtime_descriptor_fingerprint(
+            id=id,
+            revision=revision,
+            module=capability_type.__module__,
+            qualname=capability_type.__qualname__,
+            serialization_name=serialization_name,
+            config=normalized,
+        )
+        descriptor: dict[str, JsonValue] = {
+            "id": id,
+            "revision": revision,
+            "capability_type": {
+                "module": capability_type.__module__,
+                "qualname": capability_type.__qualname__,
+            },
+            "serialization_name": serialization_name,
+            "config": normalized,
+            "fingerprint": fingerprint,
+        }
+        _validate_runtime_capability_descriptor(descriptor)
+        return cls(
+            id=id,
+            capability=capability,
+            revision=revision,
+            _descriptor_payload=canonical_json_bytes(descriptor),
+        )
+
+    @classmethod
+    def restore(
+        cls,
+        descriptor: "Mapping[str, JsonValue]",
+    ) -> "RuntimeCapability":
+        try:
+            value = _normalize_json_mapping(descriptor)
+            _validate_runtime_capability_descriptor(value)
+        except AIError as error:
+            raise AIError(ErrorCode.AGENT_DEFINITION_UNAVAILABLE) from error
+        type_value = cast("dict[str, JsonValue]", value["capability_type"])
+        module_name = cast(str, type_value["module"])
+        qualname = cast(str, type_value["qualname"])
+        try:
+            target = _resolve_capability_type(module_name, qualname)
+            serialization_name = target.get_serialization_name()
+        except Exception as error:
+            raise AIError(ErrorCode.AGENT_DEFINITION_UNAVAILABLE) from error
+        if serialization_name != value["serialization_name"]:
+            raise AIError(ErrorCode.AGENT_DEFINITION_UNAVAILABLE)
+        config = value["config"]
+        if not isinstance(config, dict):
+            raise AIError(ErrorCode.AGENT_DEFINITION_UNAVAILABLE)
+        expected = _runtime_descriptor_fingerprint(
+            id=cast(str, value["id"]),
+            revision=cast(int, value["revision"]),
+            module=module_name,
+            qualname=qualname,
+            serialization_name=cast(str, value["serialization_name"]),
+            config=cast("Mapping[str, JsonValue]", config),
+        )
+        if expected != value["fingerprint"]:
+            raise AIError(ErrorCode.AGENT_DEFINITION_UNAVAILABLE)
+        try:
+            capability = target.from_spec(**config)
+        except Exception as error:
+            raise AIError(ErrorCode.AGENT_DEFINITION_UNAVAILABLE) from error
+        if type(capability) is not target:
+            raise AIError(ErrorCode.AGENT_DEFINITION_UNAVAILABLE)
+        restored = cls(
+            id=cast(str, value["id"]),
+            capability=capability,
+            revision=cast(int, value["revision"]),
+            _descriptor_payload=canonical_json_bytes(value),
+        )
+        if restored.fingerprint != expected:
+            raise AIError(ErrorCode.AGENT_DEFINITION_UNAVAILABLE)
+        return restored
+
+    async def materialize(
+        self,
+        context: CapabilityMaterializationContext,
+    ) -> "tuple[PydanticAgentCapability[None], ...]":
         del context
         return (self.capability,)
-
-
-@dataclass(frozen=True, slots=True)
-class UnresolvedCapabilityBinding:
-    provider: str
-    resolutions: "tuple[CapabilityRefResolution, ...]"
-    fingerprint: str
-
-    @property
-    def id(self) -> str:
-        return f"unresolved:{self.provider}"
-
-    async def materialize(self, context: CapabilityMaterializationContext) -> "tuple[PydanticAgentCapability[None], ...]":
-        del context
-        return ()
-
-
-def unresolved_binding(provider: str, refs: Sequence[AgentCapabilityRef]) -> UnresolvedCapabilityBinding:
-    resolutions = tuple(CapabilityRefResolution(ref.id, ref.revision, None, False, "unresolved", None) for ref in refs)
-    return UnresolvedCapabilityBinding(
-        provider,
-        resolutions,
-        canonical_sha256({"provider": provider, "status": "UNRESOLVED_PROVIDER", "refs": [_ref_payload(ref) for ref in refs]}),
-    )
-
-
-def group_capability_refs(refs: Sequence[AgentCapabilityRef]) -> "tuple[tuple[str, tuple[AgentCapabilityRef, ...]], ...]":
-    grouped: dict[str, list[AgentCapabilityRef]] = {}
-    for ref in refs:
-        grouped.setdefault(ref.provider, []).append(ref)
-    return tuple((provider, tuple(values)) for provider, values in grouped.items())
 
 
 def validate_fingerprint(value: str) -> None:
@@ -163,22 +289,133 @@ def validate_fingerprint(value: str) -> None:
         raise AIError(ErrorCode.CAPABILITY_FINGERPRINT_INVALID)
 
 
+def _validate_importable_capability_type(
+    capability_type: "type[AbstractCapability[None]]",
+) -> None:
+    try:
+        resolved = _resolve_capability_type(
+            capability_type.__module__,
+            capability_type.__qualname__,
+        )
+    except AIError as error:
+        raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID) from error
+    if resolved is not capability_type:
+        raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
+
+
+def _resolve_capability_type(
+    module_name: str,
+    qualname: str,
+) -> "type[AbstractCapability[None]]":
+    if module_name == "__main__" or "<locals>" in qualname:
+        raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
+    try:
+        target: object = importlib.import_module(module_name)
+        for part in qualname.split("."):
+            target = getattr(target, part)
+    except Exception as error:
+        raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID) from error
+    if not isinstance(target, type) or not issubclass(target, AbstractCapability):
+        raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
+    return target
+
+
+def _runtime_descriptor_fingerprint(
+    *,
+    id: str,
+    revision: int,
+    module: str,
+    qualname: str,
+    serialization_name: str,
+    config: "Mapping[str, JsonValue]",
+) -> str:
+    return canonical_sha256(
+        {
+            "id": id,
+            "revision": revision,
+            "module": module,
+            "qualname": qualname,
+            "serialization_name": serialization_name,
+            "config": dict(config),
+        }
+    )
+
+
+def _normalize_json_mapping(
+    value: Mapping[str, JsonValue],
+) -> "dict[str, JsonValue]":
+    try:
+        decoded = json.loads(canonical_json_bytes(dict(value)).decode("utf-8"))
+    except (TypeError, ValueError) as error:
+        raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID) from error
+    if not isinstance(decoded, dict):
+        raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
+    return cast("dict[str, JsonValue]", decoded)
+
+
+def _validate_runtime_capability_descriptor(
+    value: Mapping[str, JsonValue],
+) -> None:
+    fields = {
+        "id",
+        "revision",
+        "capability_type",
+        "serialization_name",
+        "config",
+        "fingerprint",
+    }
+    if set(value) != fields:
+        raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
+    identity = value.get("id")
+    revision = value.get("revision")
+    capability_type = value.get("capability_type")
+    serialization_name = value.get("serialization_name")
+    config = value.get("config")
+    fingerprint = value.get("fingerprint")
+    if not isinstance(identity, str) or not identity.strip():
+        raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
+    if not isinstance(revision, int) or isinstance(revision, bool) or revision < 1:
+        raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
+    if (
+        not isinstance(capability_type, dict)
+        or set(capability_type) != {"module", "qualname"}
+    ):
+        raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
+    module = capability_type.get("module")
+    qualname = capability_type.get("qualname")
+    if not isinstance(module, str) or not module.strip():
+        raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
+    if not isinstance(qualname, str) or not qualname.strip():
+        raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
+    if not isinstance(serialization_name, str) or not serialization_name.strip():
+        raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
+    if not isinstance(config, dict):
+        raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
+    if not isinstance(fingerprint, str) or not _is_fingerprint(fingerprint):
+        raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
+    expected = _runtime_descriptor_fingerprint(
+        id=identity,
+        revision=revision,
+        module=module,
+        qualname=qualname,
+        serialization_name=serialization_name,
+        config=cast("Mapping[str, JsonValue]", config),
+    )
+    if fingerprint != expected:
+        raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
+
+
 def _is_fingerprint(value: "str | None") -> bool:
-    return isinstance(value, str) and len(value) == 64 and all(character in "0123456789abcdef" for character in value)
-
-
-def _ref_payload(ref: AgentCapabilityRef) -> dict[str, object]:
-    return {"provider": ref.provider, "id": ref.id, "revision": ref.revision, "required": ref.required, "config": dict(ref.config)}
+    return isinstance(value, str) and len(value) == 64 and all(
+        character in "0123456789abcdef" for character in value
+    )
 
 
 __all__ = [
     "CapabilityBinding",
-    "RuntimeCapability",
     "CapabilityMaterializationContext",
     "CapabilityProvider",
     "CapabilityRefResolution",
-    "UnresolvedCapabilityBinding",
-    "group_capability_refs",
-    "unresolved_binding",
+    "RuntimeCapability",
     "validate_fingerprint",
 ]

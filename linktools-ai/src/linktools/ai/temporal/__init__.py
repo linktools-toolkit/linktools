@@ -8,7 +8,6 @@ from ._activity import (
     EvaluationOperation,
     ExecuteActivity,
     ExecutionOperation,
-    ExecutionStageOperation,
     SessionActivity,
     SessionOperation,
     TaskActivity,
@@ -46,5 +45,5 @@ __all__ = [
     "production_registration",
     "load_execution_request",
     "ActivityOptions", "EvaluationActivity", "EvaluationOperation", "ExecuteActivity", "ExecutionOperation",
-    "ExecutionStageOperation", "SessionActivity", "SessionOperation", "TaskActivity", "TaskOperation",
+    "SessionActivity", "SessionOperation", "TaskActivity", "TaskOperation",
 ]

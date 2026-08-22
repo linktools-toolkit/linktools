@@ -16,6 +16,7 @@ from typing import Protocol
 
 from linktools.core import environ
 
+from ..agent import AgentBindingSnapshot, AgentCompiler, AgentDefinition, AgentDefinitionCatalog
 from ..core import (
     AuthorizationAction,
     AuthorizationPolicy,
@@ -155,23 +156,6 @@ class ExecutionStartIdentity:
     request_digest: str
 
 
-class ExecutionQueryApi(Protocol):
-    async def inspect(self, execution_id: str, *, principal: Principal) -> ExecutionView: ...
-    async def result(self, execution_id: str, *, principal: Principal) -> ExecutionResult: ...
-    async def wait(self, execution_id: str, *, principal: Principal, timeout_seconds: "float | None" = None) -> ExecutionResult: ...
-    async def trace(self, execution_id: str, *, principal: Principal, cursor: 'str | None' = None, limit: int = 100) -> 'Page[ExecutionTraceItem]': ...
-    async def transcript(self, execution_id: str, *, principal: Principal, cursor: 'str | None' = None, limit: int = 100) -> 'Page[TranscriptItem]': ...
-    async def history(self, execution_id: str, *, principal: Principal, cursor: 'str | None' = None, limit: int = 100) -> 'Page[ExecutionHistoryItem]': ...
-
-
-class ExecutionApi(ExecutionQueryApi, Protocol):
-    async def run(self, request: ExecutionRequest) -> ExecutionHandle: ...
-    async def run_and_wait(self, request: ExecutionRequest, *, timeout_seconds: "float | None" = None) -> ExecutionResult: ...
-    async def retry(self, execution_id: str, request: RetryExecutionRequest) -> ExecutionHandle: ...
-    async def fork(self, execution_id: str, request: ForkExecutionRequest) -> ExecutionHandle: ...
-    async def cancel(self, execution_id: str, request: CancelExecutionRequest) -> CancelExecutionResult: ...
-
-
 class ExecutionBackend(Protocol):
     async def prepare_start(
         self,
@@ -201,6 +185,8 @@ class DefaultExecutionService:
         authorization: AuthorizationPolicy,
         *,
         sessions: SessionRepository,
+        catalog: AgentDefinitionCatalog,
+        compiler: AgentCompiler,
         backend: "ExecutionBackend | None" = None,
         operation_ids: "Callable[[], str] | None" = None,
         history_reader: ExecutionHistoryReader,
@@ -211,6 +197,8 @@ class DefaultExecutionService:
         self._state = state
         self._object_store = object_store
         self._sessions = sessions
+        self._catalog = catalog
+        self._compiler = compiler
         self._authorization = authorization
         self._backend = backend
         self._operation_ids = operation_ids or (lambda: uuid.uuid4().hex)
@@ -257,6 +245,38 @@ class DefaultExecutionService:
         if self._local_waiter is not None:
             raise RuntimeError("local execution waiter is already bound")
         self._local_waiter = waiter
+
+    def _definition(
+        self,
+        binding_digest: str,
+        binding: "AgentBindingSnapshot | None" = None,
+    ) -> AgentDefinition:
+        try:
+            definition = self._catalog.definition(binding_digest)
+        except AIError as error:
+            if error.code is not ErrorCode.AGENT_DEFINITION_UNAVAILABLE or binding is None:
+                raise
+            if binding.binding_digest != binding_digest:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
+            definition = self._catalog.register(self._compiler.restore(binding))
+        if binding is not None and definition.binding_snapshot != binding:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        return definition
+
+    def _validate_replayed_execution(
+        self,
+        execution: ExecutionRecord,
+        definition: AgentDefinition,
+        request: ExecutionRequest,
+    ) -> None:
+        if (
+            execution.binding_digest != definition.digest
+            or execution.planning is not request.planning
+            or execution.thinking is not request.thinking
+            or execution.binding is None
+            or execution.binding != definition.binding_snapshot
+        ):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
 
     async def acquire_dependency_hold(
         self,
@@ -474,6 +494,7 @@ class DefaultExecutionService:
             raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
         if request.idempotency_key is None:
             raise AIError(ErrorCode.IDEMPOTENCY_KEY_INVALID)
+        definition = self._definition(binding_digest)
         conversation_run_id = conversation_step_run_id
         if session_id is not None and source_execution_id is None:
             session = await self._sessions.get(session_id, tenant_id=request.principal.tenant_id)
@@ -499,6 +520,8 @@ class DefaultExecutionService:
                 raise AIError(ErrorCode.EXECUTION_START_UNKNOWN)
             if existing.status is IdempotencyStatus.RESERVED:
                 pending = await self._state.executions.get(existing.resource_id, tenant_id=request.principal.tenant_id)
+                if pending is not None:
+                    self._validate_replayed_execution(pending, definition, request)
                 if pending is not None and pending.status is ExecutionStatus.STARTED:
                     await self._launch_started(
                         request,
@@ -526,6 +549,7 @@ class DefaultExecutionService:
             started = await self._state.executions.get(existing.resource_id, tenant_id=request.principal.tenant_id)
             if started is None:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            self._validate_replayed_execution(started, definition, request)
             if existing.status is IdempotencyStatus.COMPLETED:
                 if started.status not in {ExecutionStatus.SUCCEEDED, ExecutionStatus.FAILED, ExecutionStatus.CANCELLED}:
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -563,6 +587,9 @@ class DefaultExecutionService:
             agent_run_sequence=0,
             memory_scope=request.memory_scope,
             conversation_step_run_id=conversation_run_id,
+            planning=request.planning,
+            thinking=request.thinking,
+            binding=definition.binding_snapshot,
         )
         reservation = await self._state.executions.reserve_start(
             ExecutionStartReservation(
@@ -586,6 +613,7 @@ class DefaultExecutionService:
         if not reservation.created:
             if reservation.idempotency.request_digest != request_digest:
                 raise AIError(ErrorCode.IDEMPOTENCY_CONFLICT)
+            self._validate_replayed_execution(reservation.execution, definition, request)
             if reservation.execution.status is ExecutionStatus.PENDING_START and reservation.idempotency.status is IdempotencyStatus.RESERVED:
                 await self._prepare_and_launch(
                     request,
@@ -996,11 +1024,16 @@ class DefaultExecutionService:
         previous = await self._load_authorized(execution_id, request.principal, AuthorizationAction.EXECUTION_READ)
         if previous.binding_digest != binding_digest:
             raise AIError(ErrorCode.RUNTIME_SERVICE_MISMATCH)
+        definition = self._definition(previous.binding_digest, previous.binding)
+        if definition.digest != binding_digest:
+            raise AIError(ErrorCode.RUNTIME_SERVICE_MISMATCH)
         retry_request = ExecutionRequest(
             user_prompt=request.user_prompt,
             principal=request.principal,
             idempotency_key=request.idempotency_key,
             memory_scope=previous.memory_scope,
+            planning=previous.planning,
+            thinking=previous.thinking,
         )
         return await self._start(
             binding_digest,
@@ -1019,11 +1052,16 @@ class DefaultExecutionService:
         previous = await self._load_authorized(execution_id, request.principal, AuthorizationAction.EXECUTION_READ)
         if previous.binding_digest != binding_digest:
             raise AIError(ErrorCode.RUNTIME_SERVICE_MISMATCH)
+        definition = self._definition(previous.binding_digest, previous.binding)
+        if definition.digest != binding_digest:
+            raise AIError(ErrorCode.RUNTIME_SERVICE_MISMATCH)
         fork_request = ExecutionRequest(
             user_prompt=request.user_prompt,
             principal=request.principal,
             idempotency_key=request.idempotency_key,
             memory_scope=previous.memory_scope,
+            planning=previous.planning,
+            thinking=previous.thinking,
         )
         return await self._start(
             binding_digest,
@@ -1389,6 +1427,8 @@ def _request_digest(
             "root_identity": root_execution_id or "$self",
             "lineage_kind": lineage_kind.value,
             "memory_scope_digest": None if request.memory_scope is None else canonical_sha256(request.memory_scope),
+            "planning": request.planning,
+            "thinking": request.thinking,
         }
     )
 
@@ -1485,4 +1525,4 @@ def _stable_operation_error(error_code: "str | None") -> AIError:
         return AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
 
 
-__all__ = ["CancelEffectOutcome", "DefaultExecutionService", "ExecutionApi", "ExecutionBackend", "ExecutionQueryApi"]
+__all__ = ["CancelEffectOutcome", "DefaultExecutionService", "ExecutionBackend"]

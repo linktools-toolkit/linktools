@@ -15,10 +15,10 @@ from linktools.core import ConfigField, environ
 from pydantic_ai.exceptions import ModelAPIError, UserError
 
 from ...ai.core import ExecutionDeltaType, ExecutionEventType, ExecutionStatus
-from ...ai.errors import AIError
+from ...ai.errors import AIError, ErrorCode
 from ...ai.migrate import provision_runtime_database
 from ...ai.model import ModelRegistry
-from ...ai.runtime import Runtime, RuntimeState
+from ...ai.runtime import ExecutionResult, Runtime, RuntimeState
 from ...ai.workspace import Workspace, open_workspace_runtime
 
 if TYPE_CHECKING:
@@ -43,13 +43,19 @@ class Command(BaseCommand):
         parser.add_argument(
             "--storage",
             choices=("filesystem", "sqlite"),
-            default="filesystem",
-            help="Runtime state storage backend (default: filesystem)",
+            default="sqlite",
+            help="Runtime state storage backend (default: sqlite)",
         )
         parser.add_argument("--base-url", action=ConfigAction, config=OPENAI_BASE_URL)
         parser.add_argument("--model", action=ConfigAction, config=OPENAI_MODEL)
         parser.add_argument("--api-key", action=ConfigAction, config=OPENAI_API_KEY)
-        parser.add_argument("--json", action="store_true", help="emit one final JSON result")
+        parser.add_argument("--planning", action="store_true", help="enable planning for this execution")
+        parser.add_argument("--thinking", action="store_true", help="enable model thinking for this execution")
+        parser.add_argument(
+            "--json",
+            action="store_true",
+            help="emit one final JSON result",
+        )
 
     def run(self, args: Namespace) -> int:
         workspace = Workspace.discover(Path.cwd(), root=args.project)
@@ -81,6 +87,8 @@ class Command(BaseCommand):
                     session_id,
                     memory_scope,
                     args.json,
+                    args.planning,
+                    args.thinking,
                 )
 
         try:
@@ -116,9 +124,12 @@ async def _emit_result(
     session_id: str,
     memory_scope: str,
     as_json: bool,
+    planning: bool,
+    thinking: bool,
 ) -> int:
+    agent = runtime.agent(planning=planning, thinking=thinking)
     if as_json:
-        result = await runtime.run(prompt, session_id=session_id, memory_scope=memory_scope)
+        result = await agent.run(prompt, session_id=session_id, memory_scope=memory_scope)
         payload = _result_payload(result)
         if result.status is not ExecutionStatus.SUCCEEDED:
             error_code, safe_details = await _terminal_failure_details(runtime, result.execution_id)
@@ -139,7 +150,7 @@ async def _emit_result(
     terminal_status = "UNKNOWN"
     terminal_error_code: object = None
     terminal_safe_details: object = {}
-    async for event in runtime.stream(prompt, session_id=session_id, memory_scope=memory_scope):
+    async for event in agent.stream(prompt, session_id=session_id, memory_scope=memory_scope):
         execution_id = event.execution_id
         if event.event_type is ExecutionDeltaType.ASSISTANT_TEXT_DELTA:
             text = event.payload.get("text") if isinstance(event.payload, dict) else None
@@ -178,25 +189,35 @@ async def _terminal_failure_details(
     runtime: Runtime,
     execution_id: str,
 ) -> tuple[object, object]:
-    page = await runtime.event.list(
-        execution_id,
-        principal=runtime.default_principal,
-        after_sequence=0,
-        limit=100,
-    )
-    for event in reversed(page.items):
-        if event.event_type not in {
-            ExecutionEventType.EXECUTION_FAILED,
-            ExecutionEventType.EXECUTION_CANCELLED,
-        }:
-            continue
-        if not isinstance(event.payload, dict):
+    after_sequence = 0
+    while True:
+        page = await runtime.event.list(
+            execution_id,
+            principal=runtime.default_principal,
+            after_sequence=after_sequence,
+            limit=100,
+        )
+        for event in reversed(page.items):
+            if event.event_type not in {
+                ExecutionEventType.EXECUTION_FAILED,
+                ExecutionEventType.EXECUTION_CANCELLED,
+            }:
+                continue
+            if not isinstance(event.payload, dict):
+                return None, {}
+            return event.payload.get("error_code"), event.payload.get("safe_error_details", {})
+        if page.next_cursor is None:
             return None, {}
-        return event.payload.get("error_code"), event.payload.get("safe_error_details", {})
-    return None, {}
+        try:
+            next_sequence = int(page.next_cursor)
+        except (TypeError, ValueError) as error:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
+        if next_sequence <= after_sequence:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        after_sequence = next_sequence
 
 
-def _result_payload(result: object) -> dict[str, object]:
+def _result_payload(result: ExecutionResult) -> dict[str, object]:
     return {
         "execution_id": result.execution_id,
         "status": result.status.value,

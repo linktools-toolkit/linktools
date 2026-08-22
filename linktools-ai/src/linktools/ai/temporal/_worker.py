@@ -356,15 +356,14 @@ def _temporal_activity_functions(activities: Sequence[ActivityType]) -> tuple[Te
         if isinstance(activity, ExecuteActivity):
             functions.extend(
                 (
-                    cast(TemporalActivity, activity.run),
                     cast(TemporalActivity, activity.load_input),
-                    cast(TemporalActivity, activity.fix_bundle_route),
-                    cast(TemporalActivity, activity.fix_binding),
                     cast(TemporalActivity, activity.reserve_budget),
                     cast(TemporalActivity, activity.run_agent),
-                    cast(TemporalActivity, activity.process_deferred),
+                    cast(TemporalActivity, activity.persist_deferred),
+                    cast(TemporalActivity, activity.load_resume_input),
                     cast(TemporalActivity, activity.commit_result),
                     cast(TemporalActivity, activity.settle_budget),
+                    cast(TemporalActivity, activity.cancel_effect),
                 )
             )
         elif isinstance(activity, SessionActivity):

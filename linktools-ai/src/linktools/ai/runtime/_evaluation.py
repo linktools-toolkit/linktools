@@ -98,17 +98,6 @@ def validate_compare_request(request: CompareEvaluationRequest) -> None:
         raise AIError(ErrorCode.EVALUATION_INCOMPATIBLE)
 
 
-class EvaluationQueryApi(Protocol):
-    async def inspect(self, evaluation_id: str, *, principal: Principal) -> EvaluationView: ...
-    async def compare(self, request: CompareEvaluationRequest) -> EvaluationComparison: ...
-    async def snapshot(self, evaluation_id: str, *, principal: Principal) -> RunSnapshot: ...
-
-
-class EvaluationApi(EvaluationQueryApi, Protocol):
-    async def run(self, request: RunEvaluationRequest) -> EvaluationHandle: ...
-    async def replay(self, snapshot_id: str, request: ReplayEvaluationRequest) -> ExecutionHandle: ...
-
-
 class DefaultEvaluationService:
     """Persist evaluation identity and enforce compatibility before replay."""
 
@@ -418,4 +407,4 @@ def _stable_error(error_code: str | None, fallback: ErrorCode) -> AIError:
         return AIError(fallback)
 
 
-__all__ = ["DefaultEvaluationService", "EvaluationApi", "EvaluationQueryApi", "validate_compare_request"]
+__all__ = ["DefaultEvaluationService", "validate_compare_request"]

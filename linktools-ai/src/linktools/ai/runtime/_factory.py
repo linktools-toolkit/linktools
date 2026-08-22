@@ -9,7 +9,8 @@ from pathlib import Path
 from linktools.core import environ
 from pydantic_ai_harness.memory import SearchableMemoryStore
 
-from ..agent import AgentDefinitionCatalog, AgentExecutor
+from ..agent import AgentCompiler, AgentDefinitionCatalog, AgentExecutor
+from ..asset import AssetRepository
 from ..core import AuthorizationPolicy, HmacCursorSigner
 from ..errors import AIError, ErrorCode
 from ..storage import ObjectStore
@@ -26,12 +27,7 @@ from ._runtime_service import Runtime
 from ._session import DefaultSessionService
 from ._subagent import SubagentDispatcher
 from .service_api import ExecutionHistoryReader, SessionHistoryReader
-from .state import (
-    RecoveryCheckpointState,
-    RuntimeDomain,
-    RuntimeRetentionMode,
-    RuntimeState,
-)
+from .state import RecoveryCheckpointState, RuntimeDomain, RuntimeRetentionMode, RuntimeState
 
 _logger = environ.get_logger("ai.runtime.factory")
 
@@ -40,6 +36,8 @@ async def build_local_runtime(
     *,
     state: RuntimeState,
     catalog: AgentDefinitionCatalog,
+    compiler: AgentCompiler,
+    assets: AssetRepository,
     authorization: AuthorizationPolicy,
     tenant_id: str,
     namespace: str,
@@ -49,13 +47,15 @@ async def build_local_runtime(
     memory_store_factory: "Callable[[str, str, str, ObjectStore, bool], SearchableMemoryStore] | None",
     grant_key: bytes,
 ) -> Runtime:
-    if not state.ready:
+    if not state.ready or not assets.ready:
         raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
     execution = DefaultExecutionService(
         state.execution,
         state.object_store(RuntimeDomain.EXECUTION),
         authorization,
         sessions=state.conversation.sessions,
+        catalog=catalog,
+        compiler=compiler,
         history_reader=history_reader,
         release_terminal=state.retention.release_execution_handoff,
     )
@@ -72,20 +72,11 @@ async def build_local_runtime(
         route = state.plan.route(RuntimeDomain.MEMORY)
         transient = route.retention is RuntimeRetentionMode.TRANSIENT
         store = (
-            state.working_object_store(
-                RuntimeDomain.MEMORY,
-                owner_scope=f"execution:{execution_id}",
-            )
+            state.working_object_store(RuntimeDomain.MEMORY, owner_scope=f"execution:{execution_id}")
             if transient
             else state.object_store(RuntimeDomain.MEMORY)
         )
-        return memory_store_factory(
-            memory_tenant,
-            execution_id,
-            memory_scope,
-            store,
-            transient,
-        )
+        return memory_store_factory(memory_tenant, execution_id, memory_scope, store, transient)
 
     backend: LocalExecutionBackend | None = None
     task_launcher: LocalTaskGraphLauncher | None = None
@@ -106,11 +97,7 @@ async def build_local_runtime(
             execution_root=execution_root,
             step_reads={
                 domain: state.steps.read_store(domain)
-                for domain in (
-                    RuntimeDomain.CONVERSATION,
-                    RuntimeDomain.EXECUTION,
-                    RuntimeDomain.RECOVERY,
-                )
+                for domain in (RuntimeDomain.CONVERSATION, RuntimeDomain.EXECUTION, RuntimeDomain.RECOVERY)
             },
             step_lifecycle=state.steps,
             memory_store_factory=build_memory_store,
@@ -119,10 +106,7 @@ async def build_local_runtime(
             handoff_contract_digest=state.handoff_contract_digest,
             subagent_dispatcher=dispatcher,
             live_broker=live_broker,
-            execution_objects_durable=(
-                state.plan.route(RuntimeDomain.EXECUTION).retention
-                is RuntimeRetentionMode.DURABLE
-            ),
+            execution_objects_durable=state.plan.route(RuntimeDomain.EXECUTION).retention is RuntimeRetentionMode.DURABLE,
             tool_operations=state.recovery.tools,
         )
         state.retention.bind_execution_runtime_release(backend.release_runtime_execution)
@@ -142,7 +126,7 @@ async def build_local_runtime(
             release_terminal=state.retention.release_session,
             gated_execution=execution,
         )
-        task_runner = RuntimeTaskNodeRunner(execution, catalog)
+        task_runner = RuntimeTaskNodeRunner(execution, catalog, compiler)
         task_launcher = LocalTaskGraphLauncher(
             state.task.tasks,
             task_runner,
@@ -165,7 +149,11 @@ async def build_local_runtime(
             release_execution_hold=execution.release_dependency_hold,
             request_execution_handoff=execution.request_terminal_handoff,
         )
-        approval = DefaultApprovalService(state.recovery.approvals, authorization)
+        approval = DefaultApprovalService(
+            state.recovery.approvals,
+            state.execution.executions,
+            authorization,
+        )
         event = DefaultEventService(
             state.execution.executions,
             state.execution.events,
@@ -180,11 +168,11 @@ async def build_local_runtime(
             cursor_signer=_cursor_signer("artifact", grant_key),
         )
         local_coordinator = _LocalRuntimeCoordinator(execution, session, event, backend)
-        coordinator = _RuntimeCloseCoordinator(
-            (task_launcher.shutdown, backend.close, state.close)
-        )
+        coordinator = _RuntimeCloseCoordinator((task_launcher.shutdown, backend.close, state.close))
         runtime = Runtime(
             catalog,
+            compiler,
+            assets,
             execution,
             session,
             task,
@@ -196,7 +184,7 @@ async def build_local_runtime(
             close_callback=coordinator.close,
             local_coordinator=local_coordinator,
         )
-        await _validate_recovery_definitions(catalog, state, tenant_id=tenant_id)
+        await _restore_recovery_definitions(catalog, compiler, state, tenant_id=tenant_id)
         if RuntimeDomain.RECOVERY in state.plan.durable_domains:
             await backend.reconcile()
     except BaseException:
@@ -214,8 +202,9 @@ async def build_local_runtime(
     return runtime
 
 
-async def _validate_recovery_definitions(
+async def _restore_recovery_definitions(
     catalog: AgentDefinitionCatalog,
+    compiler: AgentCompiler,
     state: RuntimeState,
     *,
     tenant_id: str,
@@ -230,30 +219,63 @@ async def _validate_recovery_definitions(
         for checkpoint in page.items:
             if checkpoint.state is RecoveryCheckpointState.COMPLETED:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            try:
-                definition = (
-                    catalog.subagent_definition(checkpoint.input.agent_id)
-                    if checkpoint.input.parent_execution_id is not None
-                    else catalog.root_definition(checkpoint.input.agent_id)
-                )
-            except AIError as error:
-                raise AIError(
-                    ErrorCode.AGENT_DEFINITION_UNAVAILABLE,
-                    safe_details={
-                        "execution_id": checkpoint.execution_id,
-                        "agent_id": checkpoint.input.agent_id,
-                    },
-                ) from error
-            if definition.spec.id != checkpoint.input.agent_id:
+            recovery_input = checkpoint.input
+            execution = await state.execution.executions.get(
+                checkpoint.execution_id,
+                tenant_id=tenant_id,
+            )
+            if execution is not None and (
+                execution.binding_digest != recovery_input.binding_digest
+                or execution.planning is not recovery_input.planning
+                or execution.thinking is not recovery_input.thinking
+                or execution.binding != recovery_input.binding
+            ):
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            snapshot = recovery_input.binding
+            if snapshot is not None:
+                if (
+                    snapshot.binding_digest != recovery_input.binding_digest
+                    or snapshot.agent_spec.id != recovery_input.agent_id
+                ):
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                try:
+                    definition = catalog.register(compiler.restore(snapshot))
+                except AIError as error:
+                    if error.code is ErrorCode.STORAGE_INTEGRITY_ERROR:
+                        raise
+                    raise AIError(
+                        ErrorCode.AGENT_DEFINITION_UNAVAILABLE,
+                        safe_details={
+                            "execution_id": checkpoint.execution_id,
+                            "agent_id": recovery_input.agent_id,
+                        },
+                    ) from error
+            else:
+                try:
+                    definition = catalog.definition(recovery_input.binding_digest)
+                except AIError as error:
+                    raise AIError(
+                        ErrorCode.AGENT_DEFINITION_UNAVAILABLE,
+                        safe_details={
+                            "execution_id": checkpoint.execution_id,
+                            "agent_id": recovery_input.agent_id,
+                        },
+                    ) from error
+            if definition.spec.id != recovery_input.agent_id:
                 raise AIError(
                     ErrorCode.AGENT_DEFINITION_UNAVAILABLE,
                     safe_details={"execution_id": checkpoint.execution_id},
                 )
-            if definition.digest != checkpoint.input.binding_digest:
-                raise AIError(
-                    ErrorCode.AGENT_DEFINITION_UNAVAILABLE,
-                    safe_details={"execution_id": checkpoint.execution_id},
-                )
+            handoff = checkpoint.terminal_handoff
+            if handoff is not None and handoff.outcome.output is not None:
+                output = definition.output_binding
+                outcome = handoff.outcome
+                if (
+                    outcome.output_schema_id != output.schema_id
+                    or outcome.output_schema_revision != output.schema_revision
+                    or outcome.output_schema_fingerprint != output.schema_fingerprint
+                ):
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         if page.next_cursor is None:
             return
         cursor = page.next_cursor

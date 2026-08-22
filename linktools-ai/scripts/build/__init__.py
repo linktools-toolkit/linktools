@@ -3,26 +3,23 @@
 
 """Static build-time API."""
 
-from .agent_bundle import AgentBundle, build_bundle
 from .architecture import (
     ArchitectureCheckResult,
     ArchitecturePolicyChecker,
     build_report,
 )
-from .bundle import (
-    AgentBundleCompiler,
-    AssemblyInput,
-    BundleCompilation,
-    CapabilityAssemblyEntry,
-    CapabilityAssemblyPlan,
-)
 from .compatibility import build_manifest, validate_manifest
-from .entry import build_agent_bundle
 from .inventory import SourceInventoryBuilder, build_inventory
 from .traceability import load_matrix, validate_matrix
 
 __all__ = [
-    "AgentBundle", "AgentBundleCompiler", "ArchitectureCheckResult", "ArchitecturePolicyChecker", "AssemblyInput",
-    "BundleCompilation", "CapabilityAssemblyEntry", "CapabilityAssemblyPlan", "SourceInventoryBuilder", "build_inventory", "build_manifest", "build_report", "load_matrix",
-    "build_agent_bundle", "build_bundle", "validate_manifest", "validate_matrix",
+    "ArchitectureCheckResult",
+    "ArchitecturePolicyChecker",
+    "SourceInventoryBuilder",
+    "build_inventory",
+    "build_manifest",
+    "build_report",
+    "load_matrix",
+    "validate_manifest",
+    "validate_matrix",
 ]

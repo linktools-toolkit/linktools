@@ -33,6 +33,7 @@ from pydantic_ai_harness.step_persistence import (
     ToolEffectRecord,
 )
 
+from ...agent import AgentBindingSnapshot
 from ...core import (
     ApprovalDecision,
     ApprovalStatus,
@@ -479,6 +480,172 @@ class _VersionCodec:
     external_schema_types: Mapping[type[object], JsonValue]
 
 
+_EXECUTION_V1_LEGACY_FIELDS = frozenset(
+    {
+        "execution_id",
+        "tenant_id",
+        "session_id",
+        "binding_digest",
+        "parent_execution_id",
+        "root_execution_id",
+        "source_execution_id",
+        "base_execution_id",
+        "lineage_kind",
+        "status",
+        "revision",
+        "event_sequence",
+        "agent_run_sequence",
+        "error_code",
+        "safe_error_details",
+        "created_at",
+        "updated_at",
+        "memory_scope",
+        "conversation_step_run_id",
+        "result",
+    }
+)
+_EXECUTION_V1_CURRENT_FIELDS = _EXECUTION_V1_LEGACY_FIELDS | frozenset(
+    {"planning", "thinking", "binding"}
+)
+_RECOVERY_EXECUTION_V1_LEGACY_FIELDS = frozenset(
+    {
+        "user_prompt",
+        "principal_id",
+        "principal_kind",
+        "session_id",
+        "memory_scope",
+        "agent_id",
+        "binding_digest",
+        "lineage_kind",
+        "parent_execution_id",
+        "root_execution_id",
+        "source_execution_id",
+        "base_execution_id",
+        "conversation_step_run_id",
+        "idempotency",
+    }
+)
+_RECOVERY_EXECUTION_V1_CURRENT_FIELDS = _RECOVERY_EXECUTION_V1_LEGACY_FIELDS | frozenset(
+    {"planning", "thinking", "binding"}
+)
+
+
+def _encode_v1_extended_record(
+    value: object,
+    legacy_fields: frozenset[str],
+    codec: "_VersionCodec",
+) -> Mapping[str, JsonValue]:
+    planning = attrgetter("planning")(value)
+    thinking = attrgetter("thinking")(value)
+    binding = attrgetter("binding")(value)
+    if not isinstance(planning, bool) or not isinstance(thinking, bool):
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    if binding is None:
+        if planning or thinking:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        return {
+            name: _encode_domain(attrgetter(name)(value), codec)
+            for name in legacy_fields
+        }
+    if not isinstance(binding, AgentBindingSnapshot):
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    encoded = {
+        name: _encode_domain(attrgetter(name)(value), codec)
+        for name in legacy_fields
+    }
+    encoded["planning"] = planning
+    encoded["thinking"] = thinking
+    encoded["binding"] = binding.to_payload()
+    return encoded
+
+
+def _decode_v1_extended_record_fields(
+    raw_fields: Mapping[str, object],
+    target: type[object],
+    legacy_fields: frozenset[str],
+    current_fields: frozenset[str],
+    codec: "_VersionCodec",
+) -> dict[str, object]:
+    actual = frozenset(raw_fields)
+    if actual == legacy_fields:
+        planning = False
+        thinking = False
+        binding = None
+    elif actual == current_fields:
+        planning = _decode_domain(raw_fields["planning"], bool, codec)
+        thinking = _decode_domain(raw_fields["thinking"], bool, codec)
+        binding = AgentBindingSnapshot.from_payload(raw_fields["binding"])
+    else:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    hints = get_type_hints(target)
+    decoded = {
+        name: _decode_domain(raw_fields[name], hints[name], codec)
+        for name in legacy_fields
+    }
+    decoded.update(
+        planning=planning,
+        thinking=thinking,
+        binding=binding,
+    )
+    return decoded
+
+
+def _encode_v1_execution_record(
+    value: object,
+    codec: "_VersionCodec",
+) -> Mapping[str, JsonValue]:
+    if not isinstance(value, ExecutionRecord):
+        raise TypeError("V1 execution_record encoder received the wrong type")
+    return _encode_v1_extended_record(value, _EXECUTION_V1_LEGACY_FIELDS, codec)
+
+
+def _decode_v1_execution_record(
+    raw_fields: Mapping[str, object],
+    codec: "_VersionCodec",
+) -> ExecutionRecord:
+    decoded = _decode_v1_extended_record_fields(
+        raw_fields,
+        ExecutionRecord,
+        _EXECUTION_V1_LEGACY_FIELDS,
+        _EXECUTION_V1_CURRENT_FIELDS,
+        codec,
+    )
+    try:
+        return ExecutionRecord(**decoded)
+    except (TypeError, ValueError) as error:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
+
+
+def _encode_v1_recovery_execution_input(
+    value: object,
+    codec: "_VersionCodec",
+) -> Mapping[str, JsonValue]:
+    if not isinstance(value, RecoveryExecutionInput):
+        raise TypeError("V1 recovery_execution_input encoder received the wrong type")
+    return _encode_v1_extended_record(
+        value,
+        _RECOVERY_EXECUTION_V1_LEGACY_FIELDS,
+        codec,
+    )
+
+
+def _decode_v1_recovery_execution_input(
+    raw_fields: Mapping[str, object],
+    codec: "_VersionCodec",
+) -> RecoveryExecutionInput:
+    decoded = _decode_v1_extended_record_fields(
+        raw_fields,
+        RecoveryExecutionInput,
+        _RECOVERY_EXECUTION_V1_LEGACY_FIELDS,
+        _RECOVERY_EXECUTION_V1_CURRENT_FIELDS,
+        codec,
+    )
+    try:
+        return RecoveryExecutionInput(**decoded)
+    except (TypeError, ValueError) as error:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
+
+
 def _encode_v1_task_node(
     value: object,
     codec: "_VersionCodec",
@@ -529,10 +696,18 @@ def _decode_v1_task_node(
 
 
 _V1_DATACLASS_ENCODERS: Mapping[str, DataclassEncoder] = MappingProxyType(
-    {"task_node": _encode_v1_task_node}
+    {
+        "execution_record": _encode_v1_execution_record,
+        "recovery_execution_input": _encode_v1_recovery_execution_input,
+        "task_node": _encode_v1_task_node,
+    }
 )
 _V1_DATACLASS_DECODERS: Mapping[str, DataclassDecoder] = MappingProxyType(
-    {"task_node": _decode_v1_task_node}
+    {
+        "execution_record": _decode_v1_execution_record,
+        "recovery_execution_input": _decode_v1_recovery_execution_input,
+        "task_node": _decode_v1_task_node,
+    }
 )
 
 
@@ -1745,9 +1920,14 @@ def _validate_v1_codec_definition() -> None:
         )
     if set(_V1_ENUM_VALUES) != set(enum_wire_ids):
         raise RuntimeError("GA v1 enum value manifest does not match enum types")
-    if set(_V1_DATACLASS_ENCODERS) != {"task_node"}:
+    custom_dataclasses = {
+        "execution_record",
+        "recovery_execution_input",
+        "task_node",
+    }
+    if set(_V1_DATACLASS_ENCODERS) != custom_dataclasses:
         raise RuntimeError("GA v1 dataclass encoder manifest is invalid")
-    if set(_V1_DATACLASS_DECODERS) != {"task_node"}:
+    if set(_V1_DATACLASS_DECODERS) != custom_dataclasses:
         raise RuntimeError("GA v1 dataclass decoder manifest is invalid")
     if not set(_V1_DATACLASS_ENCODERS).issubset(dataclass_wire_ids):
         raise RuntimeError("GA v1 dataclass encoder manifest contains an unknown type")

@@ -1,29 +1,16 @@
 {
   "types": {
-    "AgentCapabilityRef": {
-      "module": "linktools.ai.spec._contract",
-      "fields": [
-        {"name": "provider", "type": "str"},
-        {"name": "id", "type": "str"},
-        {"name": "revision", "type": "int | None", "default": null},
-        {"name": "required", "type": "bool", "default": true},
-        {"name": "config", "type": "Mapping[str, JsonValue]", "default": "empty mapping"}
-      ]
-    },
     "AgentSpec": {
       "module": "linktools.ai.spec._contract",
       "fields": [
         {"name": "id", "type": "str"},
         {"name": "revision", "type": "int"},
         {"name": "model", "type": "str"},
-        {"name": "capabilities", "type": "tuple[AgentCapabilityRef, ...]"},
-        {"name": "output_schema", "type": "str"},
-        {"name": "output_schema_revision", "type": "int"},
         {"name": "system_prompt", "type": "str", "default": ""},
         {"name": "instructions", "type": "tuple[str, ...]", "default": []},
         {"name": "allow_tools", "type": "tuple[str, ...]", "default": ["*"]},
-        {"name": "allow_skills", "type": "tuple[str, ...]", "default": ["*"]},
-        {"name": "metadata", "type": "Mapping[str, JsonValue]", "default": "empty mapping"}
+        {"name": "metadata", "type": "Mapping[str, JsonValue]", "default": "empty mapping"},
+        {"name": "usage_limits", "type": "AgentUsageLimits | None", "default": null}
       ]
     },
     "SkillSpec": {

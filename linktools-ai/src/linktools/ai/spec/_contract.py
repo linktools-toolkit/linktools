@@ -1,20 +1,11 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Immutable declaration contracts for Agents and capabilities."""
+"""Immutable declaration contracts for Agent and Asset specifications."""
 
-import json
-import math
-from collections.abc import Iterator, Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
-from typing import cast
 
-from ..core import (
-    JsonValue,
-    canonical_json_bytes,
-    canonical_string_tuple,
-    validate_capability_provider,
-)
-from ..errors import AIError, ErrorCode
+from ..core import ImmutableJsonMapping, JsonValue, canonical_string_tuple
 
 
 @dataclass(frozen=True, slots=True)
@@ -43,108 +34,40 @@ class AgentUsageLimits:
             raise ValueError("usage limits must be positive integers or None")
 
 
-class _ImmutableJsonMapping(Mapping[str, JsonValue]):
-    """Store a JSON object as canonical bytes and decode fresh values on read."""
-
-    __slots__ = ("_payload",)
-
-    def __init__(self, value: Mapping[str, JsonValue]) -> None:
-        normalized = _normalize_mapping(value)
-        self._payload = canonical_json_bytes(normalized)
-
-    def __getitem__(self, key: str) -> JsonValue:
-        return self._decode()[key]
-
-    def __iter__(self) -> Iterator[str]:
-        return iter(self._decode())
-
-    def __len__(self) -> int:
-        return len(self._decode())
-
-    def _decode(self) -> "dict[str, JsonValue]":
-        return cast("dict[str, JsonValue]", json.loads(self._payload.decode("utf-8")))
-
-
-def _normalize_mapping(value: Mapping[str, JsonValue]) -> "dict[str, JsonValue]":
-    normalized: dict[str, JsonValue] = {}
-    for key, item in value.items():
-        if not isinstance(key, str) or not key:
-            raise ValueError("JSON object keys must be non-empty strings")
-        normalized[key] = _normalize_value(item)
-    return normalized
-
-
-def _normalize_value(value: object) -> JsonValue:
-    if value is None or isinstance(value, (str, bool)):
-        return value
-    if isinstance(value, int):
-        return value
-    if isinstance(value, float):
-        if not math.isfinite(value):
-            raise ValueError("JSON numbers must be finite")
-        return value
-    if isinstance(value, list):
-        return [_normalize_value(item) for item in value]
-    if isinstance(value, Mapping):
-        return _normalize_mapping(cast("Mapping[str, JsonValue]", value))
-    raise TypeError(f"unsupported JSON value: {type(value).__name__}")
-
-
-@dataclass(frozen=True, slots=True)
-class AgentCapabilityRef:
-    provider: str
-    id: str
-    revision: "int | None" = None
-    required: bool = True
-    config: "Mapping[str, JsonValue]" = field(default_factory=dict)
-
-    def __post_init__(self) -> None:
-        try:
-            validate_capability_provider(self.provider)
-        except AIError as error:
-            raise ValueError("agent capability reference is invalid") from error
-        if not self.id.strip() or not isinstance(self.required, bool) or (self.revision is not None and self.revision < 1):
-            raise ValueError("agent capability reference is invalid")
-        object.__setattr__(self, "config", _ImmutableJsonMapping(self.config))
-
-
 @dataclass(frozen=True, slots=True)
 class AgentSpec:
+    """Durable, runtime-independent declaration of one Agent."""
+
     id: str
     revision: int
     model: str
-    capabilities: "tuple[AgentCapabilityRef, ...]"
-    output_schema: str
-    output_schema_revision: int
     system_prompt: str = ""
     instructions: "tuple[str, ...]" = ()
     allow_tools: "tuple[str, ...]" = ("*",)
-    allow_skills: "tuple[str, ...]" = ("*",)
     metadata: "Mapping[str, JsonValue]" = field(default_factory=dict)
     usage_limits: "AgentUsageLimits | None" = None
 
     def __post_init__(self) -> None:
-        if not self.id.strip() or self.revision < 1 or not self.model.strip() or not self.output_schema.strip() or self.output_schema_revision < 1:
-            raise ValueError("agent spec is incomplete")
+        if not isinstance(self.id, str) or not self.id.strip():
+            raise ValueError("agent id must be a non-empty string")
+        if not isinstance(self.revision, int) or isinstance(self.revision, bool) or self.revision < 1:
+            raise ValueError("agent revision must be a positive integer")
+        if not isinstance(self.model, str) or not self.model.strip():
+            raise ValueError("agent model must be a non-empty string")
         if not isinstance(self.system_prompt, str):
             raise ValueError("agent system prompt must be a string")
+        if isinstance(self.instructions, (str, bytes, bytearray)) or not isinstance(self.instructions, Sequence):
+            raise ValueError("agent instructions must be a string array")
         instructions = tuple(self.instructions)
         if any(not isinstance(item, str) for item in instructions):
             raise ValueError("agent instructions must be strings")
-        object.__setattr__(self, "capabilities", tuple(self.capabilities))
-        object.__setattr__(self, "allow_tools", canonical_string_tuple(self.allow_tools, field="allow_tools"))
-        object.__setattr__(self, "allow_skills", canonical_string_tuple(self.allow_skills, field="allow_skills"))
+        if not isinstance(self.metadata, Mapping):
+            raise ValueError("agent metadata must be an object")
+        if self.usage_limits is not None and not isinstance(self.usage_limits, AgentUsageLimits):
+            raise ValueError("agent usage_limits must be AgentUsageLimits or None")
         object.__setattr__(self, "instructions", instructions)
-        object.__setattr__(self, "metadata", _ImmutableJsonMapping(self.metadata))
-        unique: dict[tuple[str, str], AgentCapabilityRef] = {}
-        for capability in self.capabilities:
-            key = capability.provider, capability.id
-            previous = unique.get(key)
-            if previous is not None:
-                del previous
-                raise AIError(ErrorCode.CAPABILITY_CONFLICT)
-            unique[key] = capability
-        object.__setattr__(self, "capabilities", tuple(unique.values()))
+        object.__setattr__(self, "allow_tools", canonical_string_tuple(self.allow_tools, field="allow_tools"))
+        object.__setattr__(self, "metadata", ImmutableJsonMapping(self.metadata))
 
 
 @dataclass(frozen=True, slots=True)
@@ -154,7 +77,14 @@ class SkillSpec:
     content: str
 
     def __post_init__(self) -> None:
-        if not self.id.strip() or self.revision < 1:
+        if (
+            not isinstance(self.id, str)
+            or not self.id.strip()
+            or not isinstance(self.revision, int)
+            or isinstance(self.revision, bool)
+            or self.revision < 1
+            or not isinstance(self.content, str)
+        ):
             raise ValueError("skill spec is incomplete")
 
 
@@ -166,9 +96,22 @@ class MCPServerSpec:
     args: "tuple[str, ...]" = ()
 
     def __post_init__(self) -> None:
-        if not self.id.strip() or self.revision < 1 or not self.command.strip():
+        if (
+            not isinstance(self.id, str)
+            or not self.id.strip()
+            or not isinstance(self.revision, int)
+            or isinstance(self.revision, bool)
+            or self.revision < 1
+            or not isinstance(self.command, str)
+            or not self.command.strip()
+            or isinstance(self.args, (str, bytes, bytearray))
+            or not isinstance(self.args, Sequence)
+        ):
             raise ValueError("MCP server spec is incomplete")
-        object.__setattr__(self, "args", tuple(self.args))
+        args = tuple(self.args)
+        if any(not isinstance(item, str) for item in args):
+            raise ValueError("MCP server args must be strings")
+        object.__setattr__(self, "args", args)
 
 
-__all__ = ["AgentCapabilityRef", "AgentSpec", "AgentUsageLimits", "MCPServerSpec", "SkillSpec"]
+__all__ = ["AgentSpec", "AgentUsageLimits", "MCPServerSpec", "SkillSpec"]

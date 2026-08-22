@@ -19,8 +19,8 @@ from ..runtime import (
 )
 from ..storage import ObjectStore
 from ..task import TaskGraphHandle, TaskGraphRequest, TaskGraphView
-from ._request import put_task_request
-from .workflow import TaskWorkflowInput
+from ._request import put_execution_request, put_task_request
+from .workflow import ExecutionWorkflowInput, TaskWorkflowInput
 
 _logger = environ.get_logger("ai.temporal.gateway")
 QUERY_NAMES = frozenset({"inspect", "pending_approvals", "pending_external_calls"})
@@ -31,7 +31,7 @@ class TemporalClient(Protocol):
     async def start_workflow(
         self,
         workflow: str,
-        request: ExecutionRequest,
+        request: ExecutionWorkflowInput,
         *,
         workflow_id: str,
     ) -> ExecutionHandle: ...
@@ -88,15 +88,38 @@ class WorkflowGateway:
         self._request_keys = RuntimeObjectKeyFactory(namespace)
 
     async def start_execution(
-        self, workflow_id: str, request: ExecutionRequest
+        self,
+        workflow_id: str,
+        request: ExecutionRequest,
+        *,
+        binding_digest: str,
+        binding: Mapping[str, JsonValue],
     ) -> ExecutionHandle:
         if not workflow_id.strip():
             raise ValueError("workflow id is required")
+        request_ref = await put_execution_request(
+            self._request_store,
+            self._request_keys,
+            request,
+            binding_digest=binding_digest,
+            binding=binding,
+        )
+        workflow_request = ExecutionWorkflowInput(
+            execution_id=workflow_id,
+            tenant_id=request.principal.tenant_id,
+            binding_digest=binding_digest,
+            request_ref=request_ref,
+            worker_build=self._worker_build,
+        )
         _logger.debug(
-            "starting durable execution workflow: workflow_id=%s", workflow_id
+            "starting durable execution workflow: workflow_id=%s binding=%s",
+            workflow_id,
+            binding_digest,
         )
         return await self._client.start_workflow(
-            "execution", request, workflow_id=workflow_id
+            "execution",
+            workflow_request,
+            workflow_id=workflow_id,
         )
 
     async def update_execution(
@@ -109,6 +132,7 @@ class WorkflowGateway:
             raise ValueError("unsupported execution update")
         if operation == "supply_external_result":
             required = {
+                "operation_id",
                 "call_id",
                 "idempotency_key",
                 "object_ref",
@@ -120,8 +144,9 @@ class WorkflowGateway:
                 for key in required
             ):
                 raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
-        if operation == "approve":
+        elif operation == "approve":
             required = {
+                "operation_id",
                 "approval_id",
                 "idempotency_key",
                 "decision",
@@ -132,6 +157,12 @@ class WorkflowGateway:
                 not isinstance(payload[key], str) or not payload[key].strip()
                 for key in required
             ):
+                raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+        elif operation == "cancel":
+            required = {"operation_id"}
+            if set(payload) != required or not isinstance(
+                payload["operation_id"], str
+            ) or not payload["operation_id"].strip():
                 raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
         return await self._client.update_workflow(workflow_id, operation, payload)
 

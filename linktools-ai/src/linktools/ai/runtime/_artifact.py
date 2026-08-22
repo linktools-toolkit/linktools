@@ -10,7 +10,6 @@ import json
 import secrets
 import time
 from datetime import datetime, timezone
-from typing import Protocol
 
 from linktools.core import environ
 
@@ -37,11 +36,6 @@ from .state._contracts import (
 from .service_api import ArtifactDownload, ArtifactView
 
 _logger = environ.get_logger("ai.runtime.artifact")
-
-
-class ArtifactApi(Protocol):
-    async def list(self, execution_id: str, *, principal: Principal, cursor: 'str | None' = None, limit: int = 100) -> 'Page[ArtifactView]': ...
-    async def get(self, artifact_id: str, *, principal: Principal) -> ArtifactDownload: ...
 
 
 class DefaultArtifactService:
@@ -118,7 +112,7 @@ def _decode_grant(token: str) -> dict[str, str | int]:
     return value
 
 
-__all__ = ["ArtifactApi", "DefaultArtifactService"]
+__all__ = ["DefaultArtifactService"]
 
 
 def _artifact_filter(execution_id: str) -> str:

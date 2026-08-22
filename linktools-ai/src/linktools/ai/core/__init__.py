@@ -11,7 +11,7 @@ from ._ids import (
     step_conversation_id,
     step_run_id,
 )
-from ._json import JsonValue, canonical_json_bytes
+from ._json import ImmutableJsonMapping, JsonValue, canonical_json_bytes
 from ._operation import (
     OperationLedgerInput,
     OperationLedgerRecord,
@@ -79,6 +79,7 @@ from ._value import (
 )
 
 __all__ = [
+    "ImmutableJsonMapping",
     "JsonValue",
     "UsageMetrics",
     "Page",

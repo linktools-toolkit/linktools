@@ -134,40 +134,6 @@ class _SessionHandoffState:
     continuation: ConversationCursor | None = None
 
 
-class SessionQueryApi(Protocol):
-    async def get(self, session_id: str, *, principal: Principal) -> SessionView: ...
-    async def list(self, request: ListSessionRequest) -> "Page[SessionView]": ...
-    async def history(
-        self,
-        session_id: str,
-        *,
-        principal: Principal,
-        cursor: "str | None" = None,
-        limit: int = 100,
-    ) -> "Page[SessionHistoryItem]": ...
-    async def load(self, session_id: str, *, principal: Principal) -> LoadedSession: ...
-    def iter_session_messages(
-        self,
-        session_id: str,
-        *,
-        principal: Principal,
-    ) -> AsyncIterator[object]: ...
-    async def load_model_context(
-        self,
-        session_id: str,
-        *,
-        principal: Principal,
-    ) -> tuple[object, ...]: ...
-
-
-class SessionApi(SessionQueryApi, Protocol):
-    async def create(self, request: CreateSessionRequest) -> SessionView: ...
-    async def resume(self, session_id: str, request: ResumeSessionRequest) -> ExecutionHandle: ...
-    async def fork(self, session_id: str, request: ForkSessionRequest) -> SessionView: ...
-    async def update(self, session_id: str, request: UpdateSessionRequest) -> SessionView: ...
-    async def close(self, session_id: str, request: CloseSessionRequest) -> SessionView: ...
-
-
 class DefaultSessionService:
     """Enforce session ownership, binding immutability, and revision CAS."""
 
@@ -404,6 +370,8 @@ class DefaultSessionService:
                 principal=request.principal,
                 idempotency_key=request.idempotency_key,
                 memory_scope=request.memory_scope,
+                planning=request.planning,
+                thinking=request.thinking,
             )
             if self._gated_execution is None:
                 raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
@@ -1163,7 +1131,7 @@ class DefaultSessionService:
         )
 
 
-__all__ = ["DefaultSessionService", "SessionApi", "SessionQueryApi"]
+__all__ = ["DefaultSessionService"]
 
 
 def _make_cursor(

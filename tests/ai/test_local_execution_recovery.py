@@ -93,7 +93,6 @@ def _backend(error: Exception) -> LocalExecutionBackend:
             spec=SimpleNamespace(
                 id="default",
                 allow_tools=(),
-                allow_skills=(),
             ),
         )
     )
@@ -123,7 +122,12 @@ async def test_local_business_failure_commits_failed_without_escaping() -> None:
     backend = _backend(ValueError("model output failed"))
     failures: list[Exception] = []
 
-    async def commit_failure(execution: ExecutionRecord, error: Exception, *, run_id: str | None = None) -> None:
+    async def commit_failure(
+        execution: ExecutionRecord,
+        error: Exception,
+        *,
+        run_id: str | None = None,
+    ) -> None:
         del run_id
         failures.append(error)
         backend._execution.executions.record = replace(

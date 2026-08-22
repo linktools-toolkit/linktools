@@ -13,12 +13,8 @@ from pydantic_ai.toolsets import FunctionToolset
 from ..asset import AssetRef, AssetRepository
 from ..core import canonical_sha256
 from ..errors import AIError, ErrorCode
-from ..spec import AgentCapabilityRef, SkillSpec
-from ._contract import (
-    CapabilityBinding,
-    CapabilityMaterializationContext,
-    CapabilityRefResolution,
-)
+from ..spec import SkillSpec
+from ._contract import CapabilityBinding, CapabilityMaterializationContext, CapabilityRefResolution
 from ._names import SKILL_TOOL_NAMES
 
 
@@ -51,10 +47,11 @@ class SkillCatalogSnapshot(SkillCatalogView):
         descriptor_ids = tuple(item.id for item in descriptors)
         specification_ids = tuple(item.id for item in specifications)
         if len(set(descriptor_ids)) != len(descriptor_ids) or len(set(specification_ids)) != len(specification_ids):
-            raise ValueError("skill catalog contains duplicate ids")
+            raise AIError(ErrorCode.CAPABILITY_CONFLICT)
         if set(descriptor_ids) != set(specification_ids):
             raise ValueError("skill catalog snapshot is incomplete")
-        if any(descriptor.revision != specification.revision for descriptor, specification in zip(descriptors, specifications)):
+        revisions = {item.id: item.revision for item in specifications}
+        if any(revisions[item.id] != item.revision for item in descriptors):
             raise ValueError("skill catalog snapshot revision mismatch")
 
     async def list_skills(self) -> "tuple[SkillDescriptor, ...]":
@@ -78,53 +75,48 @@ class SkillCapabilityBinding:
     def provider(self) -> str:
         return "skill"
 
-    async def materialize(self, context: CapabilityMaterializationContext) -> "tuple[AbstractCapability[None], ...]":
-        selected_ids = frozenset(
-            resolution.id
-            for resolution in self.resolutions
-            if resolution.status == "resolved" and _allowed(resolution.id, context.allow_skills)
-        )
-        selected_tools = tuple(name for name in SKILL_TOOL_NAMES if _allowed(name, context.allow_tools))
-        if not selected_ids or not selected_tools:
+    async def materialize(
+        self,
+        context: CapabilityMaterializationContext,
+    ) -> "tuple[AbstractCapability[None], ...]":
+        del context
+        if not self.catalog.specifications:
             return ()
-        catalog = SkillCatalogSnapshot(
-            tuple(item for item in self.catalog.descriptors if item.id in selected_ids),
-            tuple(item for item in self.catalog.specifications if item.id in selected_ids),
-        )
-        return (SkillCapability(catalog, selected_tools),)
+        return (SkillCapability(self.catalog, id="linktools-skill"),)
 
 
 def bind_skill_capability(
-    refs: "Sequence[AgentCapabilityRef]",
-    specifications: "Sequence[SkillSpec | None]",
+    refs: "Sequence[AssetRef]",
+    specifications: "Sequence[SkillSpec]",
 ) -> SkillCapabilityBinding:
-    """Compile resolved Skill declarations into one immutable capability binding."""
+    """Compile discovered Skill Assets into one immutable capability binding."""
     if len(refs) != len(specifications):
         raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
     resolutions: list[CapabilityRefResolution] = []
     resolved: list[SkillSpec] = []
+    ids: set[str] = set()
     for ref, specification in zip(refs, specifications):
-        if specification is None:
-            if ref.required:
-                raise AIError(ErrorCode.CAPABILITY_REQUIRED_MISSING)
-            resolutions.append(CapabilityRefResolution(ref.id, ref.revision, None, False, "unresolved", None))
-            continue
-        if specification.id != ref.id or (ref.revision is not None and specification.revision != ref.revision):
+        if specification.id != ref.id:
             raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
+        if specification.id in ids:
+            raise AIError(ErrorCode.CAPABILITY_CONFLICT)
+        ids.add(specification.id)
         fingerprint = canonical_sha256(
             {"id": specification.id, "revision": specification.revision, "content": specification.content}
         )
-        resolutions.append(CapabilityRefResolution(ref.id, ref.revision, specification.revision, ref.required, "resolved", fingerprint))
+        resolutions.append(CapabilityRefResolution(ref, specification.revision, fingerprint))
         resolved.append(specification)
     binding_resolutions = tuple(resolutions)
-    descriptors = tuple(SkillDescriptor(item.id, item.revision, f"Authorized skill {item.id}") for item in resolved)
+    descriptors = tuple(
+        SkillDescriptor(item.id, item.revision, f"Available skill {item.id}")
+        for item in resolved
+    )
     return SkillCapabilityBinding(
         binding_resolutions,
         SkillCatalogSnapshot(descriptors, tuple(resolved)),
         canonical_sha256(
             {
                 "provider": "skill",
-                "configs": [dict(ref.config) for ref in refs],
                 "resolutions": [_resolution_payload(item) for item in binding_resolutions],
             }
         ),
@@ -145,7 +137,6 @@ async def snapshot_skill_catalog(catalog: SkillCatalogView) -> SkillCatalogSnaps
 @dataclass
 class SkillCapability(AbstractCapability[None]):
     catalog: SkillCatalogView
-    selected_tools: "tuple[str, ...]" = SKILL_TOOL_NAMES
 
     def get_instructions(self) -> "Callable[[RunContext[None]], Awaitable[str | None]]":
         async def render(ctx: RunContext[None]) -> "str | None":
@@ -153,9 +144,10 @@ class SkillCapability(AbstractCapability[None]):
             descriptors = await self.catalog.list_skills()
             if not descriptors:
                 return None
-            lines = ["The following skills are available for this agent run."]
-            if "load_skill" in self.selected_tools:
-                lines.append("Use the `load_skill` tool to load the full instructions for a skill when it is relevant.")
+            lines = [
+                "The following skills are available for this agent run.",
+                "Use the `load_skill` tool to load the full instructions for a skill when it is relevant.",
+            ]
             lines.extend(f"- {item.id}: {item.description}" for item in descriptors)
             return "\n".join(lines)
 
@@ -180,7 +172,7 @@ class SkillCapability(AbstractCapability[None]):
                 raise ValueError("skill not found")
             return {"id": specification.id, "content": specification.content}
 
-        return toolset.filtered(lambda _ctx, definition: definition.name in self.selected_tools)
+        return toolset
 
     @classmethod
     def get_serialization_name(cls) -> "str | None":
@@ -188,21 +180,22 @@ class SkillCapability(AbstractCapability[None]):
 
 
 class SkillCapabilityProvider:
-    """Resolve skills and bootstrap refs through the logical AssetRepository."""
+    """Bind every registered SkillSpec Asset kind into one Runtime-global capability."""
 
     provider = "skill"
+    value_type = SkillSpec
+    revision = 1
 
-    async def bind(self, refs: "tuple[AgentCapabilityRef, ...]", *, assets: AssetRepository) -> CapabilityBinding:
-        values: list[SkillSpec | None] = []
+    async def bind(
+        self,
+        refs: "tuple[AssetRef, ...]",
+        *,
+        assets: AssetRepository,
+    ) -> CapabilityBinding:
+        values: list[SkillSpec] = []
         for ref in refs:
-            try:
-                resolved = await assets.resolve(AssetRef("skill", ref.id))
-            except AIError as error:
-                if error.code is ErrorCode.STORAGE_NOT_FOUND and not ref.required:
-                    values.append(None)
-                    continue
-                raise
-            if not isinstance(resolved.spec, SkillSpec):
+            resolved = await assets.resolve(ref)
+            if type(resolved.spec) is not SkillSpec:
                 raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
             values.append(resolved.spec)
         return bind_skill_capability(refs, values)
@@ -220,20 +213,22 @@ async def merge_skill_catalogs(catalogs: "tuple[SkillCatalogView, ...]") -> Skil
 
 def _resolution_payload(resolution: CapabilityRefResolution) -> "dict[str, object]":
     return {
-        "id": resolution.id,
-        "requested_revision": resolution.requested_revision,
+        "kind": resolution.ref.kind,
+        "id": resolution.ref.id,
         "resolved_revision": resolution.resolved_revision,
-        "required": resolution.required,
-        "status": resolution.status,
         "fingerprint": resolution.fingerprint,
     }
 
 
-def _allowed(value: str, allowlist: "tuple[str, ...]") -> bool:
-    return "*" in allowlist or value in allowlist
-
-
 __all__ = [
-    "SkillCapabilityProvider", "SKILL_TOOL_NAMES", "SkillCapability", "SkillCapabilityBinding", "SkillCatalogSnapshot", "SkillCatalogView", "SkillDescriptor",
-    "bind_skill_capability", "merge_skill_catalogs", "snapshot_skill_catalog",
+    "SKILL_TOOL_NAMES",
+    "SkillCapability",
+    "SkillCapabilityBinding",
+    "SkillCapabilityProvider",
+    "SkillCatalogSnapshot",
+    "SkillCatalogView",
+    "SkillDescriptor",
+    "bind_skill_capability",
+    "merge_skill_catalogs",
+    "snapshot_skill_catalog",
 ]

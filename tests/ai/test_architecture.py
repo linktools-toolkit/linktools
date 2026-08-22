@@ -313,13 +313,18 @@ def test_package_public_surface_and_optional_dependency_isolation() -> None:
         "build_runtime_sql_metadata",
     } <= set(runtime_state.__all__)
     assert {
+        "CapabilityBinding",
+        "CapabilityMaterializationContext",
+        "CapabilityProvider",
+        "CapabilityRefResolution",
+        "MCPCapabilityProvider",
+        "MCPRuntime",
+        "RuntimeCapability",
         "SKILL_TOOL_NAMES",
-        "group_capability_refs",
-        "unresolved_binding",
+        "SkillCapabilityProvider",
         "validate_fingerprint",
-    } <= set(capability.__all__)
+    } == set(capability.__all__)
     assert workspace.__all__ == [
-        "CapabilitySource",
         "DisabledSandbox",
         "Sandbox",
         "Workspace",

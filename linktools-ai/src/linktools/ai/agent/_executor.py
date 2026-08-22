@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Protocol, cast
 
 from linktools.core import environ
-from pydantic_ai import AgentRunResultEvent
+from pydantic_ai import AgentRunResultEvent, ModelSettings
 from pydantic_ai.capabilities import AbstractCapability
 from pydantic_ai.capabilities import AgentCapability as PydanticAgentCapability
 from pydantic_ai.messages import (
@@ -36,13 +36,20 @@ from ..errors import AIError, ErrorCode
 from ..spec import AgentUsageLimits
 from ._builder import build_pydantic_agent
 from ._capabilities import (
+    MEMORY_READ_TOOL_NAMES,
+    MEMORY_TOOL_NAMES,
+    PLANNING_TOOL_NAMES,
+    SUBAGENT_TOOL_NAMES,
     AgentRunScope,
     SubagentDelegate,
     ToolOperationBridge,
     compose_platform_capabilities,
+    tool_allowed_in_planning,
+    tool_is_control,
     tool_name_allowed,
 )
 from ._definition import AgentDefinition
+
 
 @dataclass(frozen=True, slots=True)
 class LiveDelta:
@@ -66,6 +73,7 @@ EventSink = Callable[[AgentEmission], Awaitable[None]]
 
 class UsageSink(Protocol):
     async def __call__(self, usage: UsageMetrics) -> None: ...
+
 
 _logger = environ.get_logger("ai.agent.executor")
 
@@ -99,12 +107,16 @@ class AgentExecutor:
         memory_scope: "str | None" = None,
         memory_store: "SearchableMemoryStore | None" = None,
         platform_tool_names: "tuple[str, ...]" = (),
+        planning: bool = False,
+        thinking: bool = False,
         parent_step_run_id: "str | None" = None,
         subagent_delegate: "SubagentDelegate | None" = None,
         event_sink: EventSink,
         usage_sink: "UsageSink | None" = None,
         tool_operations: "ToolOperationBridge | None" = None,
     ) -> AgentExecutionResult:
+        if not isinstance(planning, bool) or not isinstance(thinking, bool):
+            raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
         run_usage = RunUsage()
         usage_limits = _to_usage_limits(definition.spec.usage_limits)
         result: AgentExecutionResult | None = None
@@ -122,6 +134,8 @@ class AgentExecutor:
                 memory_scope=memory_scope,
                 memory_store=memory_store,
                 platform_tool_names=platform_tool_names,
+                planning=planning,
+                thinking=thinking,
                 parent_step_run_id=parent_step_run_id,
                 subagent_delegate=subagent_delegate,
                 event_sink=event_sink,
@@ -159,6 +173,8 @@ class AgentExecutor:
         memory_scope: "str | None",
         memory_store: "SearchableMemoryStore | None",
         platform_tool_names: "tuple[str, ...]",
+        planning: bool,
+        thinking: bool,
         parent_step_run_id: "str | None",
         subagent_delegate: "SubagentDelegate | None",
         event_sink: EventSink,
@@ -171,10 +187,19 @@ class AgentExecutor:
         if await step_store.get_run(run_id=step_run_id) is not None:
             raise AIError(ErrorCode.STORAGE_CONFLICT)
         model = definition.model.materialize()
+        if thinking and not model.profile.get("supports_thinking", False):
+            raise AIError(
+                ErrorCode.REQUEST_FIELD_INVALID,
+                safe_details={"field": "thinking", "reason": "model_not_supported"},
+            )
         agent = build_pydantic_agent(definition, model=model)
         materialized: "list[PydanticAgentCapability[None]]" = []
         for binding in definition.effective_capabilities:
             materialized.extend(await binding.materialize(capability_context))
+        trusted_tool_classes = _trusted_tool_classes(
+            definition,
+            platform_tool_names=platform_tool_names,
+        )
         scope = AgentRunScope(
             root=self._execution_root,
             agent_name=definition.spec.id,
@@ -186,6 +211,9 @@ class AgentExecutor:
             step_store=step_store,
             memory_store=memory_store,
             platform_tool_names=platform_tool_names,
+            planning=planning,
+            trusted_tool_classes=trusted_tool_classes,
+            trusted_mcp_selectors=definition.trusted_mcp_selectors,
             parent_step_run_id=parent_step_run_id,
             subagent_delegate=subagent_delegate,
             tool_operations=tool_operations,
@@ -196,15 +224,26 @@ class AgentExecutor:
             parent_model=model,
         )
         capabilities = tuple(materialized) + platform
-        capabilities = (*capabilities, _AllowlistPresentation(definition.spec.allow_tools))
+        capabilities = (
+            *capabilities,
+            _ToolPresentation(
+                definition.spec.allow_tools,
+                planning=planning,
+                trusted_tool_classes=trusted_tool_classes,
+                trusted_mcp_selectors=definition.trusted_mcp_selectors,
+            ),
+        )
         _logger.debug(
-            "agent execution started: agent=%s definition=%s step=%s capability_count=%s",
+            "agent execution started: agent=%s definition=%s step=%s capability_count=%s planning=%s thinking=%s",
             definition.spec.id,
             definition.digest,
             step_run_id,
             len(capabilities),
+            planning,
+            thinking,
         )
         final_result = None
+        model_settings = ModelSettings(thinking=True) if thinking else None
         async with agent.run_stream_events(
             user_prompt,
             message_history=history or None,
@@ -213,6 +252,7 @@ class AgentExecutor:
             usage_limits=usage_limits,
             usage=run_usage,
             capabilities=capabilities,
+            model_settings=model_settings,
         ) as events:
             async for event in events:
                 if isinstance(event, AgentRunResultEvent):
@@ -236,20 +276,71 @@ class AgentExecutor:
         usage = _usage_metrics(run_usage)
         return AgentExecutionResult(final_result.run_id, payload, final_result.all_messages(), usage)
 
-class _AllowlistPresentation(AbstractCapability[None]):
-    def __init__(self, allow_tools: "tuple[str, ...]") -> None:
-        self._allow_tools = allow_tools
 
-    async def prepare_tools(self, _ctx: RunContext[None], tool_defs: "list[ToolDefinition]") -> "list[ToolDefinition]":
-        selected = [tool for tool in tool_defs if _function_tool_allowed(tool.name, self._allow_tools)]
-        names = [tool.name for tool in selected]
+class _ToolPresentation(AbstractCapability[None]):
+    def __init__(
+        self,
+        allow_tools: "tuple[str, ...]",
+        *,
+        planning: bool,
+        trusted_tool_classes: "tuple[tuple[str, str], ...]",
+        trusted_mcp_selectors: "tuple[str, ...]",
+    ) -> None:
+        self._allow_tools = allow_tools
+        self._planning = planning
+        self._trusted_tool_classes = trusted_tool_classes
+        self._trusted_mcp_selectors = trusted_mcp_selectors
+
+    async def prepare_tools(
+        self,
+        _ctx: RunContext[None],
+        tool_defs: "list[ToolDefinition]",
+    ) -> "list[ToolDefinition]":
+        names = [tool.name for tool in tool_defs]
         if len(names) != len(set(names)):
             raise AIError(ErrorCode.CAPABILITY_CONFLICT)
+        selected: list[ToolDefinition] = []
+        for tool in tool_defs:
+            if not tool_is_control(
+                tool,
+                trusted_tool_classes=self._trusted_tool_classes,
+            ) and not _function_tool_allowed(
+                tool.name,
+                self._allow_tools,
+            ):
+                continue
+            if self._planning and not tool_allowed_in_planning(
+                tool,
+                trusted_tool_classes=self._trusted_tool_classes,
+                trusted_mcp_selectors=self._trusted_mcp_selectors,
+            ):
+                continue
+            selected.append(tool)
         return selected
 
     @classmethod
     def get_serialization_name(cls) -> "str | None":
         return None
+
+
+def _trusted_tool_classes(
+    definition: AgentDefinition,
+    *,
+    platform_tool_names: "tuple[str, ...]",
+) -> "tuple[tuple[str, str], ...]":
+    values = dict(definition.trusted_tool_classes)
+    for name in platform_tool_names:
+        if name in MEMORY_TOOL_NAMES:
+            tool_class = "memory.read" if name in MEMORY_READ_TOOL_NAMES else "memory.write"
+        elif name in PLANNING_TOOL_NAMES or name in SUBAGENT_TOOL_NAMES:
+            tool_class = "control"
+        else:
+            raise AIError(ErrorCode.CAPABILITY_POLICY_CONFLICT)
+        previous = values.get(name)
+        if previous is not None and previous != tool_class:
+            raise AIError(ErrorCode.CAPABILITY_POLICY_CONFLICT)
+        values[name] = tool_class
+    return tuple(sorted(values.items()))
 
 
 def _function_tool_allowed(name: str, allow_tools: "tuple[str, ...]") -> bool:

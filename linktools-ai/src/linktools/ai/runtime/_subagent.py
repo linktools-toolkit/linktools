@@ -34,13 +34,23 @@ class SubagentDispatcher:
         root_execution_id: str,
         memory_scope: "str | None",
         principal: Principal,
+        allowed_agent_ids: "tuple[str, ...]",
+        planning: bool,
+        thinking: bool,
     ) -> SubagentDelegate:
+        allowed = frozenset(allowed_agent_ids)
+        if len(allowed) != len(allowed_agent_ids):
+            raise AIError(ErrorCode.CAPABILITY_CONFLICT)
+
         async def dispatch(agent_id: str, user_prompt: str, *, tool_call_id: str) -> JsonValue:
             return await self.dispatch(
                 parent_execution_id=parent_execution_id,
                 root_execution_id=root_execution_id,
                 memory_scope=memory_scope,
                 principal=principal,
+                allowed_agent_ids=allowed,
+                planning=planning,
+                thinking=thinking,
                 agent_id=agent_id,
                 user_prompt=user_prompt,
                 tool_call_id=tool_call_id,
@@ -55,12 +65,17 @@ class SubagentDispatcher:
         root_execution_id: str,
         memory_scope: "str | None",
         principal: Principal,
+        allowed_agent_ids: "frozenset[str]",
+        planning: bool,
+        thinking: bool,
         agent_id: str,
         user_prompt: str,
         tool_call_id: str,
     ) -> "dict[str, JsonValue]":
         if not isinstance(tool_call_id, str) or not tool_call_id.strip():
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+        if agent_id not in allowed_agent_ids:
+            raise ModelRetry("requested subagent Agent is unavailable")
         try:
             definition = self._catalog.subagent_definition(agent_id)
         except AIError as error:
@@ -69,9 +84,12 @@ class SubagentDispatcher:
             raise
         idempotency_key = "subagent:" + canonical_sha256(
             {
-                "version": 3,
+                "version": 1,
                 "parent_execution_id": parent_execution_id,
                 "tool_call_id": tool_call_id,
+                "agent_id": agent_id,
+                "planning": planning,
+                "thinking": thinking,
             }
         )
         request = ExecutionRequest(
@@ -79,6 +97,8 @@ class SubagentDispatcher:
             principal=principal,
             idempotency_key=idempotency_key,
             memory_scope=memory_scope,
+            planning=planning,
+            thinking=thinking,
         )
         child = await self._execution.start_subagent(
             definition.digest,

@@ -26,13 +26,7 @@ from ..core import (
 from ..errors import AIError, ErrorCode
 from ..observe import RunSnapshot
 from ..storage import ObjectRef
-from ..task import (
-    CancelGraphRequest,
-    TaskGraphHandle,
-    TaskGraphRequest,
-    TaskGraphResult,
-    TaskGraphView,
-)
+from ..task import CancelGraphRequest, TaskGraphHandle, TaskGraphRequest, TaskGraphResult, TaskGraphView
 
 
 @dataclass(frozen=True, slots=True)
@@ -41,6 +35,8 @@ class ExecutionRequest:
     principal: Principal
     idempotency_key: "str | None" = None
     memory_scope: "str | None" = None
+    planning: bool = False
+    thinking: bool = False
 
     def __post_init__(self) -> None:
         validate_user_prompt(self.user_prompt)
@@ -49,6 +45,8 @@ class ExecutionRequest:
         validate_idempotency_key(self.idempotency_key)
         if self.memory_scope is not None:
             validate_memory_scope(self.memory_scope)
+        if not isinstance(self.planning, bool) or not isinstance(self.thinking, bool):
+            raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
 
 
 @dataclass(frozen=True, slots=True)
@@ -105,9 +103,9 @@ class ExecutionResult:
     execution_id: str
     status: ExecutionStatus
     output: JsonValue | None
-    output_schema_id: str
-    output_schema_revision: int
-    output_schema_fingerprint: str
+    output_schema_id: str | None
+    output_schema_revision: int | None
+    output_schema_fingerprint: str | None
     usage: UsageMetrics
 
 
@@ -149,13 +147,7 @@ class SessionHistoryItem:
 
     def __post_init__(self) -> None:
         if self.sequence < 1 or self.item_kind not in {
-            "system",
-            "user",
-            "assistant",
-            "thinking",
-            "tool_call",
-            "tool_result",
-            "retry",
+            "system", "user", "assistant", "thinking", "tool_call", "tool_result", "retry"
         }:
             raise ValueError("session history item is invalid")
 
@@ -227,12 +219,16 @@ class ResumeSessionRequest:
     user_prompt: str
     idempotency_key: str = ""
     memory_scope: "str | None" = None
+    planning: bool = False
+    thinking: bool = False
 
     def __post_init__(self) -> None:
         validate_user_prompt(self.user_prompt)
         validate_idempotency_key(self.idempotency_key)
         if self.memory_scope is not None:
             validate_memory_scope(self.memory_scope)
+        if not isinstance(self.planning, bool) or not isinstance(self.thinking, bool):
+            raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
 
 
 @dataclass(frozen=True, slots=True)
@@ -359,14 +355,7 @@ class EvaluationComparison:
         if (
             not self.baseline_id.strip()
             or not self.candidate_id.strip()
-            or min(
-                self.pass_rate,
-                self.error_rate,
-                self.refusal_rate,
-                self.total_cost,
-                self.latency_p50,
-                self.latency_p95,
-            ) < 0
+            or min(self.pass_rate, self.error_rate, self.refusal_rate, self.total_cost, self.latency_p50, self.latency_p95) < 0
             or min(self.retry_count, self.input_tokens, self.output_tokens) < 0
         ):
             raise ValueError("evaluation comparison contains invalid metrics")
@@ -497,7 +486,15 @@ class BudgetSettlementRequest:
 
 
 class WorkflowGateway(Protocol):
-    async def start_execution(self, workflow_id: str, request: ExecutionRequest) -> ExecutionHandle: ...
+    async def start_execution(
+        self,
+        workflow_id: str,
+        request: ExecutionRequest,
+        *,
+        binding_digest: str,
+        binding: Mapping[str, JsonValue],
+    ) -> ExecutionHandle: ...
+
     async def update_execution(self, workflow_id: str, operation: str, payload: 'Mapping[str, JsonValue]') -> WorkflowUpdateResult: ...
     async def query_execution(self, workflow_id: str, query: str) -> WorkflowQueryResult: ...
     async def cancel_execution(self, workflow_id: str) -> CancelExecutionResult: ...
@@ -523,14 +520,7 @@ class SessionService(Protocol):
     async def create(self, binding_digest: str, request: CreateSessionRequest) -> SessionView: ...
     async def get(self, session_id: str, *, principal: Principal) -> SessionView: ...
     async def list(self, request: ListSessionRequest) -> 'Page[SessionView]': ...
-    async def history(
-        self,
-        session_id: str,
-        *,
-        principal: Principal,
-        cursor: 'str | None' = None,
-        limit: int = 100,
-    ) -> 'Page[SessionHistoryItem]': ...
+    async def history(self, session_id: str, *, principal: Principal, cursor: 'str | None' = None, limit: int = 100) -> 'Page[SessionHistoryItem]': ...
     async def load(self, session_id: str, *, principal: Principal) -> LoadedSession: ...
     async def resume(self, binding_digest: str, session_id: str, request: ResumeSessionRequest) -> ExecutionHandle: ...
     async def fork(self, binding_digest: str, session_id: str, request: ForkSessionRequest) -> SessionView: ...
@@ -564,22 +554,9 @@ class ExternalService(Protocol):
 
 
 class EventService(Protocol):
-    async def list(
-        self,
-        execution_id: str,
-        *,
-        principal: Principal,
-        after_sequence: int = 0,
-        limit: int = 100,
-    ) -> 'Page[ExecutionEvent]': ...
+    async def list(self, execution_id: str, *, principal: Principal, after_sequence: int = 0, limit: int = 100) -> 'Page[ExecutionEvent]': ...
 
-    def stream(
-        self,
-        execution_id: str,
-        *,
-        principal: Principal,
-        after_sequence: int = 0,
-    ) -> 'AsyncIterator[ExecutionStreamEvent]': ...
+    def stream(self, execution_id: str, *, principal: Principal, after_sequence: int = 0) -> 'AsyncIterator[ExecutionStreamEvent]': ...
 
 
 class ArtifactService(Protocol):
@@ -597,16 +574,13 @@ __all__ = [
     "ExternalSupplyRequest", "ExternalSupplyResult", "ExternalService",
     "ArtifactDownload", "ArtifactService", "ArtifactView", "BudgetService", "CancelExecutionRequest",
     "BudgetReservation", "BudgetReservationRequest", "BudgetSettlement", "BudgetSettlementRequest",
-    "CancelExecutionResult",
-    "CancelGraphRequest", "CloseSessionRequest", "CompareEvaluationRequest",
+    "CancelExecutionResult", "CancelGraphRequest", "CloseSessionRequest", "CompareEvaluationRequest",
     "CreateSessionRequest", "EvaluationComparison", "EvaluationHandle", "EvaluationService",
-    "EvaluationView", "EventService", "ExecutionEvent",
-    "ExecutionStreamEvent", "ExecutionHandle",
+    "EvaluationView", "EventService", "ExecutionEvent", "ExecutionStreamEvent", "ExecutionHandle",
     "ExecutionRequest", "ExecutionResult", "ExecutionService", "ExecutionView",
     "ExecutionHistoryItem", "ExecutionHistoryReader", "SessionHistoryItem", "SessionHistoryReader",
     "ForkExecutionRequest", "ForkSessionRequest", "ListSessionRequest", "LoadedSession", "Page",
-    "ReplayEvaluationRequest", "ResumeSessionRequest",
-    "RetryExecutionRequest", "RunEvaluationRequest", "SessionService", "SessionView",
-    "TaskService", "ExecutionTraceItem", "TranscriptItem", "UpdateSessionRequest",
+    "ReplayEvaluationRequest", "ResumeSessionRequest", "RetryExecutionRequest", "RunEvaluationRequest",
+    "SessionService", "SessionView", "TaskService", "ExecutionTraceItem", "TranscriptItem", "UpdateSessionRequest",
     "WorkflowGateway", "WorkflowQueryResult", "WorkflowUpdateResult",
 ]
