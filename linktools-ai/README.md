@@ -278,10 +278,11 @@ Applications integrating Temporal should use the public `WorkflowGateway` / work
 
 ## 11. Development checks
 
-From the repository root:
+Install the editable development environment once, then use the repository gate:
 
 ```bash
-PYTHONPATH=linktools-ai:linktools-ai/src:linktools/src python3 -m compileall -q linktools-ai/src/linktools/ai
-PYTHONPATH=linktools-ai:linktools-ai/src:linktools/src python3 -m pytest -q tests/ai
-PYTHONPATH=linktools-ai:linktools-ai/src:linktools/src python3 -m ruff check linktools-ai/scripts/build linktools-ai/src/linktools/ai linktools-ai/src/linktools/commands/ai tests/ai
+python manage.py install --editable
+python manage.py check linktools-ai
 ```
+
+AI-specific release checks and evidence live under root `scripts/check/ai`; `linktools-ai` does not maintain a package-local release-script tree.
