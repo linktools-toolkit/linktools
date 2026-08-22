@@ -270,12 +270,21 @@ class ExecutionWorkflow:
             ):
                 return state
             raise ValueError("approval is not pending")
+        remaining = tuple(
+            item for item in state.pending_approval_ids if item != approval_id
+        )
+        next_status = state.status
+        if (
+            state.status == WorkflowPhase.WAITING_APPROVAL.value
+            and not remaining
+            and state.pending_external_ids
+        ):
+            next_status = WorkflowPhase.WAITING_EXTERNAL.value
         return self._record_operation(
             state,
             operation_id,
-            pending_approval_ids=tuple(
-                item for item in state.pending_approval_ids if item != approval_id
-            ),
+            status=next_status,
+            pending_approval_ids=remaining,
             approval_decisions=(*state.approval_decisions, (approval_id, decision)),
             approval_idempotency_keys=(
                 *state.approval_idempotency_keys,
