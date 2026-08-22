@@ -40,16 +40,12 @@ jobs:
           if [[ $status -eq 0 ]]; then run_gate python -m compileall -q linktools-ai/src/linktools/ai; fi
           if [[ $status -eq 0 ]]; then run_gate python -m pip install --upgrade pip; fi
           if [[ $status -eq 0 ]]; then run_gate python -m pip install -e ./linktools -e './linktools-ai[sqlite,evaluation,temporal]' pytest pytest-asyncio ruff; fi
-          if [[ $status -eq 0 ]]; then run_gate ruff check linktools-ai/src/linktools/ai tests/ai; fi
+          if [[ $status -eq 0 ]]; then run_gate ruff check linktools-ai/scripts/build linktools-ai/src/linktools/ai linktools-ai/src/linktools/commands/ai tests/ai; fi
           if [[ $status -eq 0 ]]; then run_gate python linktools-ai/scripts/build/architecture.py; fi
           if [[ $status -eq 0 ]]; then run_gate pytest -q tests/ai --maxfail=30; fi
-          cp "$RESULT" /tmp/result.saved
-          if [[ $status -ne 0 ]]; then
-            git reset --hard HEAD
-          fi
           mkdir -p .bootstrap
           rm -f .bootstrap/ready
-          cp /tmp/result.saved .bootstrap/result.txt
+          cp "$RESULT" .bootstrap/result.txt
           printf '%s\n' "$status" > .bootstrap/status
           git config user.name github-actions[bot]
           git config user.email github-actions[bot]@users.noreply.github.com
@@ -58,7 +54,7 @@ jobs:
             if [[ $status -eq 0 ]]; then
               git commit -m 'refactor(ai): implement agent runtime asset composition'
             else
-              git commit -m 'ci: record agent runtime implementation gate'
+              git commit -m 'wip(ai): apply agent runtime asset composition implementation'
             fi
             git push origin HEAD:refactor/ai-agent-runtime-asset-composition
           fi
