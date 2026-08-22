@@ -149,7 +149,11 @@ async def build_local_runtime(
             release_execution_hold=execution.release_dependency_hold,
             request_execution_handoff=execution.request_terminal_handoff,
         )
-        approval = DefaultApprovalService(state.recovery.approvals, authorization)
+        approval = DefaultApprovalService(
+            state.recovery.approvals,
+            state.execution.executions,
+            authorization,
+        )
         event = DefaultEventService(
             state.execution.executions,
             state.execution.events,
