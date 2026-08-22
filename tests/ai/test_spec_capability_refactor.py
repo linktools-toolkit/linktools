@@ -5,8 +5,10 @@
 import json
 
 import pytest
+from pydantic_ai.tools import ToolDefinition
 
 from linktools.ai.agent import select_platform_tool_names
+from linktools.ai.agent._capabilities import PLAN_SAFE_METADATA_KEY, tool_allowed_in_planning
 from linktools.ai.asset import AssetRef
 from linktools.ai.capability._skill import (
     SkillCatalogSnapshot,
@@ -42,6 +44,50 @@ def test_platform_tool_selection_keeps_planning_outside_allow_tools() -> None:
         memory_scope=None,
         subagent_available=True,
     ) == ("delegate_task",)
+
+
+def test_planning_gate_uses_trusted_mcp_provenance_not_name_prefix() -> None:
+    trusted = ToolDefinition(
+        name="mcp__trusted__read",
+        metadata={PLAN_SAFE_METADATA_KEY: True},
+    )
+    custom = ToolDefinition(
+        name="mcp__custom__read",
+        metadata={PLAN_SAFE_METADATA_KEY: True},
+    )
+    custom_without_metadata = ToolDefinition(name="mcp__custom__other")
+
+    assert not tool_allowed_in_planning(
+        trusted,
+        trusted_tool_classes=(),
+        trusted_mcp_selectors=("mcp__trusted",),
+    )
+    assert tool_allowed_in_planning(
+        custom,
+        trusted_tool_classes=(),
+        trusted_mcp_selectors=("mcp__trusted",),
+    )
+    assert not tool_allowed_in_planning(
+        custom_without_metadata,
+        trusted_tool_classes=(),
+        trusted_mcp_selectors=("mcp__trusted",),
+    )
+
+
+def test_planning_gate_rejects_non_boolean_plan_safe_metadata() -> None:
+    tool = ToolDefinition(
+        name="custom",
+        metadata={PLAN_SAFE_METADATA_KEY: "yes"},
+    )
+
+    with pytest.raises(AIError) as error:
+        tool_allowed_in_planning(
+            tool,
+            trusted_tool_classes=(),
+            trusted_mcp_selectors=(),
+        )
+
+    assert error.value.code is ErrorCode.REQUEST_FIELD_INVALID
 
 
 @pytest.mark.parametrize(
