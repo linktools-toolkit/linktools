@@ -42,6 +42,7 @@ from ..capability import (
     MCPCapabilityProvider,
     RuntimeCapability,
     SkillCapabilityProvider,
+    mcp_server_selector,
     validate_fingerprint,
 )
 from ..core import HmacCursorSigner, TenantAuthorizationPolicy, canonical_sha256, validate_tenant_id
@@ -284,6 +285,21 @@ def _trusted_tool_classes(
     return result
 
 
+def _trusted_mcp_selectors(
+    asset_capabilities: Sequence[CapabilityBinding],
+) -> "tuple[str, ...]":
+    return tuple(
+        sorted(
+            {
+                mcp_server_selector(resolution.ref.id)
+                for binding in asset_capabilities
+                if binding.provider == "mcp"
+                for resolution in binding.resolutions
+            }
+        )
+    )
+
+
 def _runtime_fingerprint(
     *,
     active_provider_fingerprint: str,
@@ -371,9 +387,7 @@ async def open_workspace_runtime(
         platform_capabilities=platform_capabilities,
         runtime_fingerprint=runtime_fingerprint,
         trusted_tool_classes=_trusted_tool_classes(asset_capabilities),
-        trusted_mcp_tools=any(
-            binding.provider == "mcp" for binding in asset_capabilities
-        ),
+        trusted_mcp_selectors=_trusted_mcp_selectors(asset_capabilities),
     )
     catalog = _build_catalog(specs, compiler)
     if await selected_assets.current_revision() != initial_revision:
