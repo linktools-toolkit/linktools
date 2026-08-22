@@ -1,12 +1,9 @@
 name: AI Runtime Repair Verify
 
 on:
-  push:
-    branches:
-      - refactor/ai-runtime-agent-composition
   pull_request:
     branches:
-      - master
+      - refactor/ai-runtime-agent-composition
 
 permissions:
   contents: read
