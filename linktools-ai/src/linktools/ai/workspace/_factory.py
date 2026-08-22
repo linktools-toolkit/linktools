@@ -15,7 +15,14 @@ from ..adapter import (
     StepExecutionHistoryReader,
     StepSessionHistoryReader,
 )
-from ..agent import AgentCompiler, AgentDefinition, AgentDefinitionCatalog
+from ..agent import (
+    WORKSPACE_FILESYSTEM_READ_TOOL_NAMES,
+    WORKSPACE_FILESYSTEM_TOOL_NAMES,
+    WORKSPACE_SHELL_TOOL_NAMES,
+    AgentCompiler,
+    AgentDefinition,
+    AgentDefinitionCatalog,
+)
 from ..asset import (
     AssetDiscoveryStatus,
     AssetPathAdapter,
@@ -29,6 +36,7 @@ from ..asset import (
     PrefixAssetPathAdapter,
 )
 from ..capability import (
+    SKILL_TOOL_NAMES,
     CapabilityBinding,
     CapabilityProvider,
     MCPCapabilityProvider,
@@ -254,17 +262,26 @@ def _platform_policy_fingerprint() -> str:
     return canonical_sha256(
         {
             "version": 1,
-            "control_tool_contract": 1,
-            "filesystem": 1,
-            "shell": 1,
-            "memory_platform_contract": 1,
-            "skill_control_tools": 1,
-            "subagent_nesting_policy": {"version": 2, "nested": False},
-            "planning_policy": {"version": 2, "hard_gate": True},
-            "thinking": 1,
-            "tool_operation_admission_contract": 1,
+            "runtime_contract_revision": 1,
         }
     )
+
+
+def _trusted_tool_classes(
+    asset_capabilities: Sequence[CapabilityBinding],
+) -> "dict[str, str]":
+    result = {
+        name: (
+            "filesystem.read"
+            if name in WORKSPACE_FILESYSTEM_READ_TOOL_NAMES
+            else "filesystem.write"
+        )
+        for name in WORKSPACE_FILESYSTEM_TOOL_NAMES
+    }
+    result.update({name: "shell" for name in WORKSPACE_SHELL_TOOL_NAMES})
+    if any(binding.provider == "skill" for binding in asset_capabilities):
+        result.update({name: "control" for name in SKILL_TOOL_NAMES})
+    return result
 
 
 def _runtime_fingerprint(
@@ -353,6 +370,10 @@ async def open_workspace_runtime(
         capabilities=global_capabilities,
         platform_capabilities=platform_capabilities,
         runtime_fingerprint=runtime_fingerprint,
+        trusted_tool_classes=_trusted_tool_classes(asset_capabilities),
+        trusted_mcp_tools=any(
+            binding.provider == "mcp" for binding in asset_capabilities
+        ),
     )
     catalog = _build_catalog(specs, compiler)
     if await selected_assets.current_revision() != initial_revision:
