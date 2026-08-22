@@ -108,7 +108,6 @@ class WorkflowGateway:
             execution_id=workflow_id,
             tenant_id=request.principal.tenant_id,
             binding_digest=binding_digest,
-            bundle_digest=binding_digest,
             request_ref=request_ref,
             worker_build=self._worker_build,
         )
@@ -133,6 +132,7 @@ class WorkflowGateway:
             raise ValueError("unsupported execution update")
         if operation == "supply_external_result":
             required = {
+                "operation_id",
                 "call_id",
                 "idempotency_key",
                 "object_ref",
@@ -144,8 +144,9 @@ class WorkflowGateway:
                 for key in required
             ):
                 raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
-        if operation == "approve":
+        elif operation == "approve":
             required = {
+                "operation_id",
                 "approval_id",
                 "idempotency_key",
                 "decision",
@@ -156,6 +157,12 @@ class WorkflowGateway:
                 not isinstance(payload[key], str) or not payload[key].strip()
                 for key in required
             ):
+                raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+        elif operation == "cancel":
+            required = {"operation_id"}
+            if set(payload) != required or not isinstance(
+                payload["operation_id"], str
+            ) or not payload["operation_id"].strip():
                 raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
         return await self._client.update_workflow(workflow_id, operation, payload)
 
