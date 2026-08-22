@@ -87,6 +87,7 @@ class DefaultExternalService:
                 execution_id,
                 "supply_external_result",
                 {
+                    "operation_id": updated.operation_id,
                     "call_id": updated.call_id,
                     "idempotency_key": request.idempotency_key,
                     "object_ref": _object_ref_token(updated.object_ref),
