@@ -404,6 +404,8 @@ class DefaultSessionService:
                 principal=request.principal,
                 idempotency_key=request.idempotency_key,
                 memory_scope=request.memory_scope,
+                planning=request.planning,
+                thinking=request.thinking,
             )
             if self._gated_execution is None:
                 raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
