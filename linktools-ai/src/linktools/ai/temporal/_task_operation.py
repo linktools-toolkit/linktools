@@ -197,13 +197,31 @@ class _RuntimeTaskOperation:
                     error,
                 )
         elif result.status in {"FAILED", "CANCELLED"}:
+            terminal = await self._runner.terminal_result(
+                result.execution_id,
+                principal=stored.principal,
+            )
+            if (
+                terminal.execution_id != result.execution_id
+                or terminal.status.value != result.status
+                or terminal.error_code is None
+            ):
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            try:
+                ErrorCode(terminal.error_code)
+            except ValueError as error:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
             try:
                 await self._repository.fail(
                     lease,
                     tenant_id=request.tenant_id,
-                    error_code=ErrorCode.EXECUTION_FAILED.value,
+                    error_code=terminal.error_code,
                     error_digest=canonical_sha256(
-                        {"type": "ExecutionResult", "code": result.status}
+                        {
+                            "type": "ExecutionResult",
+                            "code": terminal.error_code,
+                            "safe_error_details": dict(terminal.safe_error_details),
+                        }
                     ),
                 )
             except AIError as error:
