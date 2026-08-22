@@ -13,7 +13,7 @@ from ..core import (
 )
 from ..errors import AIError, ErrorCode
 from ..storage import ObjectRef
-from .state._contracts import RecoveryState
+from .state._contracts import ExternalCallRecord, RecoveryState
 from .service_api import ExternalSupplyRequest, ExternalSupplyResult, WorkflowGateway
 
 
@@ -103,7 +103,7 @@ class DefaultExternalService:
 
 
 def _is_exact_replay(
-    record: object,
+    record: "ExternalCallRecord | None",
     *,
     execution_id: str,
     idempotency_key_digest: str,
@@ -112,11 +112,11 @@ def _is_exact_replay(
 ) -> bool:
     return bool(
         record is not None
-        and getattr(record, "execution_id", None) == execution_id
-        and getattr(record, "status", None) is ExternalCallStatus.SUPPLIED
-        and getattr(record, "idempotency_key_digest", None) == idempotency_key_digest
-        and getattr(record, "object_ref", None) == object_ref
-        and getattr(record, "payload_digest", None) == payload_digest
+        and record.execution_id == execution_id
+        and record.status is ExternalCallStatus.SUPPLIED
+        and record.idempotency_key_digest == idempotency_key_digest
+        and record.object_ref == object_ref
+        and record.payload_digest == payload_digest
     )
 
 
