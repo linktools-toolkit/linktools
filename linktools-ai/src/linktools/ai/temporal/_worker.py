@@ -356,7 +356,6 @@ def _temporal_activity_functions(activities: Sequence[ActivityType]) -> tuple[Te
         if isinstance(activity, ExecuteActivity):
             functions.extend(
                 (
-                    cast(TemporalActivity, activity.run),
                     cast(TemporalActivity, activity.load_input),
                     cast(TemporalActivity, activity.reserve_budget),
                     cast(TemporalActivity, activity.run_agent),
