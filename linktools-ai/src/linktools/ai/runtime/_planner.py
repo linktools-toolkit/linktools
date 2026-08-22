@@ -150,10 +150,18 @@ class RuntimeTaskNodeRunner:
         )
         return binding_digest, request
 
+    async def terminal_result(
+        self,
+        execution_id: str,
+        *,
+        principal: Principal,
+    ) -> ExecutionResult:
+        return await self._execution.result(execution_id, principal=principal)
+
     async def result(self, execution_id: str, *, principal: Principal) -> TaskNodeRunResult:
-        result = await self._execution.result(execution_id, principal=principal)
+        result = await self.terminal_result(execution_id, principal=principal)
         if result.status is not ExecutionStatus.SUCCEEDED:
-            raise AIError(ErrorCode.EXECUTION_FAILED)
+            raise _execution_failure(result)
         if result.output is None:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         return TaskNodeRunResult(canonical_sha256(result.output), result.execution_id)
@@ -221,6 +229,18 @@ class WorkflowTaskGraphLauncher:
             }
         )
         return await self._gateway.cancel_task_graph(workflow_id, request.idempotency_key)
+
+
+def _execution_failure(result: ExecutionResult) -> AIError:
+    if result.status not in {ExecutionStatus.FAILED, ExecutionStatus.CANCELLED}:
+        return AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    if result.error_code is None:
+        return AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    try:
+        code = ErrorCode(result.error_code)
+    except ValueError:
+        return AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    return AIError(code, safe_details=result.safe_error_details)
 
 
 def _validate_dependency_result(result: ExecutionResult, expected_digest: str) -> None:

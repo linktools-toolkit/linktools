@@ -400,7 +400,7 @@ class RuntimeToolOperationBridge:
             run, effect = await self._terminal_effect(
                 decision,
                 status="failed",
-                effect_summary=repr(error),
+                effect_summary=f"error_code={code}",
             )
             if self._terminal_commands is not None:
                 return await self._terminal_commands.commit_tool_terminal(
@@ -535,34 +535,50 @@ class RuntimeToolOperationBridge:
 
     async def _decode_error(self, record: ToolOperationRecord) -> BaseException:
         if record.error_payload is None:
+            if record.error_code is None:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             try:
-                code = ErrorCode(record.error_code or ErrorCode.EXECUTION_FAILED.value)
-            except ValueError:
-                code = ErrorCode.EXECUTION_FAILED
+                code = ErrorCode(record.error_code)
+            except ValueError as error:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
             return AIError(code)
-        payload = record.error_payload
-        if payload is None:
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        value = await self._payload_json(payload)
+        value = await self._payload_json(record.error_payload)
         if not isinstance(value, dict):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         kind = value.get("kind")
         if kind == "model_retry" and isinstance(value.get("message"), str):
+            if record.error_code != ErrorCode.TOOL_RETRY_REQUIRED.value:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             return ModelRetry(value["message"])
         if kind == "tool_retry" and isinstance(value.get("content"), str):
-            return ToolRetryError(RetryPromptPart(value["content"], tool_call_id=str(value.get("tool_call_id", ""))))
+            if record.error_code != ErrorCode.TOOL_RETRY_REQUIRED.value:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            return ToolRetryError(
+                RetryPromptPart(
+                    value["content"],
+                    tool_call_id=str(value.get("tool_call_id", "")),
+                )
+            )
         if kind == "error" and isinstance(value.get("code"), str):
             try:
                 code = ErrorCode(value["code"])
-            except ValueError:
-                code = ErrorCode.EXECUTION_FAILED
-            return AIError(code, safe_details={"error_digest": value.get("digest", "")})
+            except ValueError as error:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
+            if record.error_code != code.value:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            safe_details = value.get("safe_details", {})
+            if not isinstance(safe_details, dict):
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            try:
+                return AIError(code, safe_details=safe_details)
+            except (TypeError, ValueError) as error:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
 
     async def _error_payload(self, error: BaseException) -> tuple[str, StoredPayload]:
         if isinstance(error, ModelRetry):
             value = {"kind": "model_retry", "message": error.message}
-            return ErrorCode.OUTPUT_VALIDATION_FAILED.value, await self._json_payload(value)
+            return ErrorCode.TOOL_RETRY_REQUIRED.value, await self._json_payload(value)
         if isinstance(error, ToolRetryError):
             retry = error.tool_retry
             value = {
@@ -570,10 +586,25 @@ class RuntimeToolOperationBridge:
                 "content": str(retry.content),
                 "tool_call_id": retry.tool_call_id,
             }
-            return ErrorCode.OUTPUT_VALIDATION_FAILED.value, await self._json_payload(value)
+            return ErrorCode.TOOL_RETRY_REQUIRED.value, await self._json_payload(value)
+        if isinstance(error, AIError):
+            return error.code.value, await self._json_payload(
+                {
+                    "kind": "error",
+                    "code": error.code.value,
+                    "safe_details": dict(error.safe_details),
+                }
+            )
         digest = hashlib.sha256(f"{type(error).__name__}:{error}".encode()).hexdigest()
-        return ErrorCode.EXECUTION_FAILED.value, await self._json_payload(
-            {"kind": "error", "code": ErrorCode.EXECUTION_FAILED.value, "digest": digest}
+        return ErrorCode.INTERNAL_ERROR.value, await self._json_payload(
+            {
+                "kind": "error",
+                "code": ErrorCode.INTERNAL_ERROR.value,
+                "safe_details": {
+                    "error_digest": digest,
+                    "phase": "tool_execution",
+                },
+            }
         )
 
     async def _finish_with_readback(

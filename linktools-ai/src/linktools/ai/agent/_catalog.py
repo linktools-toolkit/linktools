@@ -18,7 +18,7 @@ class AgentDefinitionCatalog:
         for definition in roots.values():
             existing = by_digest.get(definition.digest)
             if existing is not None and not _same_definition(existing, definition):
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                raise AIError(ErrorCode.BINDING_CONFLICT)
             by_digest[definition.digest] = definition
         self._roots = MappingProxyType(dict(roots))
         self._definitions = by_digest
@@ -45,7 +45,7 @@ class AgentDefinitionCatalog:
         existing = self._definitions.get(definition.digest)
         if existing is not None:
             if not _same_definition(existing, definition):
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                raise AIError(ErrorCode.BINDING_CONFLICT)
             return existing
         self._definitions[definition.digest] = definition
         return definition
@@ -82,7 +82,10 @@ def _same_definition(left: AgentDefinition, right: AgentDefinition) -> bool:
             and left.trusted_mcp_selectors == right.trusted_mcp_selectors
         )
     except (AttributeError, TypeError) as error:
-        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
+        raise AIError(
+            ErrorCode.INTERNAL_ERROR,
+            safe_details={"phase": "agent_catalog_compare"},
+        ) from error
 
 
 __all__ = ["AgentDefinitionCatalog"]
