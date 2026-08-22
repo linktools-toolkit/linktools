@@ -1,5 +1,3 @@
-===== python .bootstrap/patch.py =====
-runtime service updated
 ===== python -m compileall -q linktools-ai/src/linktools/ai =====
 ===== python -m pip install -q --upgrade pip =====
 ===== python -m pip install -q -e ./linktools -e ./linktools-ai[sqlite,evaluation,temporal] pytest pytest-asyncio ruff =====
