@@ -52,8 +52,8 @@ from .service_api import (
 )
 
 _logger = environ.get_logger("ai.runtime")
-_AGENT_TASK_V1_FIELDS = frozenset({"type", "version", "agent_id", "user_prompt"})
-_AGENT_TASK_V2_FIELDS = frozenset(
+_AGENT_TASK_LEGACY_V1_FIELDS = frozenset({"type", "version", "agent_id", "user_prompt"})
+_AGENT_TASK_CURRENT_V1_FIELDS = frozenset(
     {
         "type",
         "version",
@@ -608,12 +608,10 @@ class Runtime:
         agent_ids: set[str] = set()
         for node in graph.nodes:
             payload = node.input
-            if payload.get("type") != "linktools.ai.agent":
+            if payload.get("type") != "linktools.ai.agent" or payload.get("version") != 1:
                 raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
-            version = payload.get("version")
-            if version == 1:
-                if set(payload) != _AGENT_TASK_V1_FIELDS:
-                    raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+            fields = frozenset(payload)
+            if fields == _AGENT_TASK_LEGACY_V1_FIELDS:
                 agent_id = payload.get("agent_id")
                 user_prompt = payload.get("user_prompt")
                 if not isinstance(agent_id, str) or not isinstance(user_prompt, str):
@@ -621,9 +619,7 @@ class Runtime:
                 definition = self._catalog.root_definition(agent_id)
                 planning = False
                 thinking = False
-            elif version == 2:
-                if set(payload) != _AGENT_TASK_V2_FIELDS:
-                    raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+            elif fields == _AGENT_TASK_CURRENT_V1_FIELDS:
                 agent_id = payload.get("agent_id")
                 binding_digest = payload.get("binding_digest")
                 binding = payload.get("binding")
@@ -659,7 +655,7 @@ class Runtime:
                     node.dependencies,
                     input={
                         "type": "linktools.ai.agent",
-                        "version": 2,
+                        "version": 1,
                         "agent_id": agent_id,
                         "binding_digest": definition.digest,
                         "binding": definition.binding_snapshot.to_payload(),
