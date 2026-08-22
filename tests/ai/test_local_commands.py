@@ -19,10 +19,10 @@ def test_ai_run_exposes_model_configuration_but_not_asset_storage() -> None:
     assert not any(action.dest in {"assets", "asset_root", "asset_store", "storage_root"} for action in parser._actions)
 
 
-def test_ai_run_storage_backend_defaults_to_filesystem() -> None:
+def test_ai_run_storage_backend_defaults_to_sqlite() -> None:
     parser = run_command.create_parser()
-    assert parser.parse_args(["prompt"]).storage == "filesystem"
-    assert parser.parse_args(["prompt", "--storage", "sqlite"]).storage == "sqlite"
+    assert parser.parse_args(["prompt"]).storage == "sqlite"
+    assert parser.parse_args(["prompt", "--storage", "filesystem"]).storage == "filesystem"
 
 
 def test_ai_acp_memory_scope_defaults_to_workspace() -> None:

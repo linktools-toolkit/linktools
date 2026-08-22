@@ -31,6 +31,7 @@ from ._contracts import (
     AgentAttemptClaim,
     ConversationCursor,
     ConversationHistoryRecord,
+    ExecutionCancelRequestCommit,
     ExecutionEventAppend,
     ExecutionHistorySealRecord,
     ExecutionHistoryState,
@@ -151,6 +152,134 @@ class RuntimeStateCommands:
                 history,
             )
         return history
+
+
+
+    async def commit_cancel_checkpoint(
+        self,
+        commit: ExecutionCancelRequestCommit,
+        *,
+        expected_status: ExecutionStatus,
+        audit_events: Sequence[ExecutionEventAppend] = (),
+    ) -> ExecutionRecord:
+        expected_events = tuple(audit_events) + (
+            ExecutionEventAppend(
+                ExecutionEventType.CANCEL_REQUESTED,
+                {"operation_id": commit.operation_id},
+            ),
+        )
+        target_revision = commit.expected_revision + len(expected_events)
+        target_sequence = commit.expected_event_sequence + len(expected_events)
+
+        async def operation() -> ExecutionRecord:
+            return await self._execution.request_cancel(commit, pending_events=audit_events)
+
+        async def readback() -> CommitObservation[ExecutionRecord]:
+            try:
+                execution = await self._execution.get(
+                    commit.execution_id,
+                    tenant_id=commit.tenant_id,
+                )
+                if execution is None:
+                    return CommitObservation(
+                        DurableCommitState.PARTIAL_INTEGRITY_ERROR,
+                        error=AIError(ErrorCode.STORAGE_INTEGRITY_ERROR),
+                    )
+                page = await self._events.list(
+                    commit.execution_id,
+                    tenant_id=commit.tenant_id,
+                    after_sequence=commit.expected_event_sequence,
+                    limit=len(expected_events) + 1,
+                )
+                items = page.items
+                if any(
+                    event.sequence != commit.expected_event_sequence + index
+                    for index, event in enumerate(items, 1)
+                ):
+                    return CommitObservation(
+                        DurableCommitState.PARTIAL_INTEGRITY_ERROR,
+                        error=AIError(ErrorCode.STORAGE_INTEGRITY_ERROR),
+                    )
+                revision_delta = execution.revision - commit.expected_revision
+                sequence_delta = execution.event_sequence - commit.expected_event_sequence
+                if (
+                    revision_delta < 0
+                    or sequence_delta < 0
+                    or revision_delta < sequence_delta
+                    or items and items[-1].sequence > execution.event_sequence
+                ):
+                    return CommitObservation(
+                        DurableCommitState.PARTIAL_INTEGRITY_ERROR,
+                        error=AIError(ErrorCode.STORAGE_INTEGRITY_ERROR),
+                    )
+
+                prefix = items[:len(expected_events)]
+                prefix_matches = (
+                    len(prefix) == len(expected_events)
+                    and all(
+                        actual.event_type is expected.event_type
+                        and actual.payload == expected.payload
+                        for actual, expected in zip(prefix, expected_events)
+                    )
+                )
+                if prefix_matches:
+                    if execution.revision < target_revision or execution.event_sequence < target_sequence:
+                        return CommitObservation(
+                            DurableCommitState.PARTIAL_INTEGRITY_ERROR,
+                            error=AIError(ErrorCode.STORAGE_INTEGRITY_ERROR),
+                        )
+                    if execution.status in {
+                        ExecutionStatus.CANCELLING,
+                        ExecutionStatus.FINALIZING,
+                        ExecutionStatus.SUCCEEDED,
+                        ExecutionStatus.FAILED,
+                        ExecutionStatus.CANCELLED,
+                    }:
+                        return CommitObservation(DurableCommitState.COMMITTED, value=execution)
+                    return CommitObservation(
+                        DurableCommitState.PARTIAL_INTEGRITY_ERROR,
+                        error=AIError(ErrorCode.STORAGE_INTEGRITY_ERROR),
+                    )
+
+                if revision_delta == 0 and sequence_delta == 0:
+                    if execution.status is expected_status and not items:
+                        return CommitObservation(DurableCommitState.NOT_COMMITTED)
+                    return CommitObservation(
+                        DurableCommitState.PARTIAL_INTEGRITY_ERROR,
+                        error=AIError(ErrorCode.STORAGE_INTEGRITY_ERROR),
+                    )
+
+                if sequence_delta > 0 and not items:
+                    return CommitObservation(
+                        DurableCommitState.PARTIAL_INTEGRITY_ERROR,
+                        error=AIError(ErrorCode.STORAGE_INTEGRITY_ERROR),
+                    )
+                return CommitObservation(
+                    DurableCommitState.NOT_COMMITTED,
+                    error=AIError(ErrorCode.STORAGE_CONFLICT),
+                )
+            except AIError as error:
+                if error.code is ErrorCode.STORAGE_INTEGRITY_ERROR:
+                    return CommitObservation(
+                        DurableCommitState.PARTIAL_INTEGRITY_ERROR,
+                        error=error,
+                    )
+                return CommitObservation(DurableCommitState.UNRESOLVED, error=error)
+
+        outcome = await run_durable_commit(operation, readback)
+        if outcome.state is DurableCommitState.COMMITTED:
+            if outcome.value is None:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            if outcome.cancelled:
+                raise asyncio.CancelledError
+            return outcome.value
+        if outcome.state is DurableCommitState.NOT_COMMITTED:
+            if outcome.error is not None:
+                raise outcome.error
+            raise AIError(ErrorCode.STORAGE_CONFLICT)
+        if outcome.state is DurableCommitState.PARTIAL_INTEGRITY_ERROR:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from outcome.error
+        raise AIError(ErrorCode.STORAGE_COMMIT_UNKNOWN) from outcome.error
 
     async def commit_start_checkpoint(
         self,

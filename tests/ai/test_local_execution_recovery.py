@@ -88,6 +88,7 @@ def _backend(error: Exception) -> LocalExecutionBackend:
     backend = object.__new__(LocalExecutionBackend)
     backend._execution = _ExecutionState(record)
     backend._catalog = SimpleNamespace(
+        root_ids=("default",),
         definition=lambda digest: SimpleNamespace(
             digest=digest,
             spec=SimpleNamespace(

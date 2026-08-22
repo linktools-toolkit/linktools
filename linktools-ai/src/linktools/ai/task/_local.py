@@ -235,7 +235,7 @@ class LocalTaskGraphLauncher:
         key = request.principal.tenant_id, request.graph.graph_id
         inflight: dict[str, _InflightNode] = {}
         try:
-            while True:
+            while not run.closed:
                 _reap_inflight(inflight)
                 view = await self._repository.reconcile_graph(
                     request.graph.graph_id,

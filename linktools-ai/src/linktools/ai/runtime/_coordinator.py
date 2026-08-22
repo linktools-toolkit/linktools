@@ -51,7 +51,7 @@ class _LocalRuntimeCoordinator:
             handle = await self._execution._run_with_launch_gate(binding_digest, request, gate)
             if lease is not None:
                 await self._event._authorize_stream(handle.execution_id, request.principal)
-                if self._backend.worker_installed(handle.execution_id):
+                if lease.base_sequence is not None:
                     await self._event._claim_local_stream(lease)
                 else:
                     self._abort(lease)
@@ -86,7 +86,7 @@ class _LocalRuntimeCoordinator:
             )
             if lease is not None:
                 await self._event._authorize_stream(handle.execution_id, request.principal)
-                if self._backend.worker_installed(handle.execution_id):
+                if lease.base_sequence is not None:
                     await self._event._claim_local_stream(lease)
                 else:
                     self._abort(lease)
@@ -124,12 +124,10 @@ class _LocalRuntimeCoordinator:
             if lease.state == "PREPARED":
                 self._abort(lease)
 
+
     def _abort(self, lease: _PreparedStreamLease) -> None:
         self._leases.pop(lease.execution_id, None)
-        self._event.live_broker.abort_local_producer(
-            lease,
-            worker_installed=self._backend.worker_installed(lease.execution_id),
-        )
+        self._event.live_broker.abort_local_producer(lease)
 
 
 __all__ = ["_LocalRuntimeCoordinator"]

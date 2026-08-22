@@ -1984,7 +1984,13 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
             updated_at=commit.occurred_at,
         )
 
-    async def request_cancel(self, commit: ExecutionCancelRequestCommit) -> ExecutionRecord:
+
+    async def request_cancel(
+        self,
+        commit: ExecutionCancelRequestCommit,
+        *,
+        pending_events: Sequence[ExecutionEventAppend] = (),
+    ) -> ExecutionRecord:
         return await self._transition_execution(
             commit.execution_id,
             tenant_id=commit.tenant_id,
@@ -1994,6 +2000,7 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
             event_type=ExecutionEventType.CANCEL_REQUESTED,
             payload={"operation_id": commit.operation_id},
             updated_at=commit.requested_at,
+            pending_events=pending_events,
         )
 
     async def advance_event_sequence(
@@ -2023,6 +2030,7 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
 
         return await self._store.mutate(mutate)
 
+
     async def _transition_execution(
         self,
         execution_id: str,
@@ -2035,9 +2043,12 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
         event_type: ExecutionEventType,
         payload: Mapping[str, object],
         updated_at: datetime,
+        pending_events: Sequence[ExecutionEventAppend] = (),
         transaction: StateTransaction | None = None,
     ) -> ExecutionRecord:
         _require_repository_tenant(tenant_id, self._tenant_id)
+        if any(not isinstance(event.event_type, ExecutionEventType) for event in pending_events):
+            raise TypeError("pending execution events must use ExecutionEventType")
         key = self._key("execution", execution_id)
         stream = stream_digest(self._namespace, self._tenant_id, self._domain.value, "execution", execution_id)
 
@@ -2052,16 +2063,30 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
                 or expected_status is not None and stored_value.status is not expected_status
             ):
                 raise AIError(ErrorCode.STORAGE_CONFLICT)
+            event_count = len(pending_events) + 1
             next_value = replace(
                 stored_value,
                 status=next_status,
-                revision=stored_value.revision + 1,
-                event_sequence=stored_value.event_sequence + 1,
+                revision=stored_value.revision + event_count,
+                event_sequence=stored_value.event_sequence + event_count,
                 updated_at=updated_at,
             )
             candidate = _projected_record(self, stored, next_value)
             await _replace_checked(transaction, candidate, stored.storage_version)
-            await transaction.insert_fact(
+            first_sequence = stored_value.event_sequence + 1
+            facts = [
+                StoredFact(
+                    stream,
+                    first_sequence + index,
+                    key,
+                    event.event_type.value,
+                    None,
+                    None,
+                    event.payload,
+                )
+                for index, event in enumerate(pending_events)
+            ]
+            facts.append(
                 StoredFact(
                     stream,
                     next_value.event_sequence,
@@ -2072,6 +2097,7 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
                     payload,
                 )
             )
+            await transaction.insert_facts(tuple(facts))
             return next_value
 
         if transaction is not None:

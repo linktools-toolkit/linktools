@@ -4,12 +4,12 @@
 
 import asyncio
 import uuid
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from time import monotonic
-from typing import Protocol, cast
+from typing import Protocol, TypeVar, cast
 
 from linktools.core import environ
 from pydantic import ValidationError
@@ -81,6 +81,7 @@ from .state import (
 from .state._contracts import (
     AgentAttemptClaim,
     ConversationCursor,
+    ExecutionCancelRequestCommit,
     ExecutionEventAppend,
     ExecutionRecord,
     ExecutionStartClaim,
@@ -123,6 +124,26 @@ class _SubagentDispatcher(Protocol):
 
 
 _logger = environ.get_logger("ai.runtime.local")
+
+
+_CheckpointT = TypeVar("_CheckpointT")
+
+
+async def _settle_local_checkpoint(
+    operation: Awaitable[_CheckpointT],
+) -> tuple[_CheckpointT, asyncio.CancelledError | None]:
+    task = asyncio.create_task(operation)
+    cancellation: asyncio.CancelledError | None = None
+    while not task.done():
+        try:
+            await asyncio.shield(task)
+        except asyncio.CancelledError as error:
+            if task.done():
+                break
+            if cancellation is None:
+                cancellation = error
+    return task.result(), cancellation
+
 
 _HANDOFF_PHASE_RANK = {
     RecoveryHandoffPhase.PREPARED: 0,
@@ -234,6 +255,7 @@ class LocalExecutionBackend:
         self._captured_usage: dict[str, UsageMetrics] = {}
         self._terminal_events: dict[str, asyncio.Event] = {}
         self._pending_audit_events: dict[str, list[ExecutionEventAppend]] = {}
+        self._pending_audit_locks: dict[str, asyncio.Lock] = {}
         self._accepting = True
         execution_steps = self._step_reads[RuntimeDomain.EXECUTION]
         conversation_steps = self._step_reads[RuntimeDomain.CONVERSATION]
@@ -290,16 +312,65 @@ class LocalExecutionBackend:
         ):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
 
+
+
     async def commit_terminal_checkpoint(
         self,
         commit: ExecutionTerminalCommit,
         *,
         session_id: str | None,
     ) -> ExecutionTerminalCommitResult:
-        return await self._runtime_commands.commit_terminal_checkpoint(
-            commit,
-            session_id=session_id,
-        )
+        execution_id = commit.execution.execution_id
+        async with self._audit_lock(execution_id):
+            pending = tuple(self._pending_audit_events.get(execution_id, ()))
+            committed, cancellation = await _settle_local_checkpoint(
+                self._runtime_commands.commit_terminal_checkpoint(
+                    commit,
+                    session_id=session_id,
+                    audit_events=pending,
+                )
+            )
+            self._pending_audit_events.pop(execution_id, None)
+            self._publish_committed_events(
+                execution_id,
+                pending_count=len(pending),
+                event_type=commit.terminal_event_type,
+                payload=dict(commit.terminal_event_payload),
+                durable_sequence=committed.execution.event_sequence,
+            )
+            self._terminal_events.setdefault(execution_id, asyncio.Event()).set()
+        if cancellation is not None:
+            raise cancellation
+        return committed
+
+
+    async def commit_cancel_checkpoint(
+        self,
+        commit: ExecutionCancelRequestCommit,
+        *,
+        expected_status: ExecutionStatus,
+    ) -> ExecutionRecord:
+        async with self._audit_lock(commit.execution_id):
+            pending = tuple(self._pending_audit_events.get(commit.execution_id, ()))
+            committed, cancellation = await _settle_local_checkpoint(
+                self._runtime_commands.commit_cancel_checkpoint(
+                    commit,
+                    expected_status=expected_status,
+                    audit_events=pending,
+                )
+            )
+            self._pending_audit_events.pop(commit.execution_id, None)
+            cancel_sequence = commit.expected_event_sequence + len(pending) + 1
+            self._publish_committed_events(
+                commit.execution_id,
+                pending_count=len(pending),
+                event_type=ExecutionEventType.CANCEL_REQUESTED,
+                payload={"operation_id": commit.operation_id},
+                durable_sequence=cancel_sequence,
+            )
+        if cancellation is not None:
+            raise cancellation
+        return committed
 
     async def prepare_start(
         self,
@@ -536,6 +607,7 @@ class LocalExecutionBackend:
                 return
         if execution.execution_id in self._worker_failures:
             return
+        self._live_broker.register_local_producer(current.execution_id, current.event_sequence)
         task = asyncio.create_task(self._run(request, current), name=f"ai-execution-{execution.execution_id}")
         self._tasks[execution.execution_id] = task
         task.add_done_callback(
@@ -1519,7 +1591,7 @@ class LocalExecutionBackend:
                     execution_id=current.execution_id,
                     segment_sequence=current.agent_run_sequence,
                 )
-            committed = await self._commit_execution_terminal_checkpoint(
+            await self._commit_execution_terminal_checkpoint(
                 current,
                 ExecutionTerminalCommit(
                     current.revision,
@@ -1532,10 +1604,6 @@ class LocalExecutionBackend:
                 run_id=terminal_run_id,
             )
             self._pending_audit_events.pop(current.execution_id, None)
-            self._live_broker.publish_durable(
-                current.execution_id,
-                committed.execution.event_sequence,
-            )
             self._terminal_events.setdefault(current.execution_id, asyncio.Event()).set()
         except AIError as error:
             if error.code not in {
@@ -1656,6 +1724,7 @@ class LocalExecutionBackend:
         self._terminal_events.clear()
         self._worker_failures.clear()
         self._pending_audit_events.clear()
+        self._pending_audit_locks.clear()
 
     async def release_runtime_execution(
         self,
@@ -1674,6 +1743,7 @@ class LocalExecutionBackend:
         self._worker_failures.pop(execution_id, None)
         self._captured_usage.pop(execution_id, None)
         self._pending_audit_events.pop(execution_id, None)
+        self._pending_audit_locks.pop(execution_id, None)
         _logger.debug(
             "local execution runtime cache released: tenant=%s execution=%s",
             tenant_id,
@@ -2128,16 +2198,54 @@ class LocalExecutionBackend:
         except LookupError as error:
             raise AIError(ErrorCode.EXECUTION_HISTORY_UNAVAILABLE) from error
 
-    async def _append_event(self, execution: ExecutionRecord, event_type: ExecutionEventType, payload: JsonValue) -> None:
+
+    async def _append_event(
+        self,
+        execution: ExecutionRecord,
+        event_type: ExecutionEventType,
+        payload: JsonValue,
+    ) -> None:
         event_payload = payload if isinstance(payload, Mapping) else {"value": payload}
-        self._pending_audit_events.setdefault(execution.execution_id, []).append(
-            ExecutionEventAppend(event_type, event_payload)
-        )
+        async with self._audit_lock(execution.execution_id):
+            self._pending_audit_events.setdefault(execution.execution_id, []).append(
+                ExecutionEventAppend(event_type, event_payload)
+            )
+            self._live_broker.publish_event(
+                execution.execution_id,
+                event_type,
+                event_payload,
+                durable_sequence=None,
+            )
         _logger.debug(
             "execution audit event buffered: execution=%s type=%s pending=%s",
             execution.execution_id,
             event_type.value,
-            len(self._pending_audit_events[execution.execution_id]),
+            len(self._pending_audit_events.get(execution.execution_id, ())),
+        )
+
+    def _audit_lock(self, execution_id: str) -> asyncio.Lock:
+        return self._pending_audit_locks.setdefault(execution_id, asyncio.Lock())
+
+    def _publish_committed_events(
+        self,
+        execution_id: str,
+        *,
+        pending_count: int,
+        event_type: ExecutionEventType,
+        payload: JsonValue,
+        durable_sequence: int,
+    ) -> None:
+        if pending_count:
+            self._live_broker.confirm_events(
+                execution_id,
+                first_sequence=durable_sequence - pending_count,
+                count=pending_count,
+            )
+        self._live_broker.publish_event(
+            execution_id,
+            event_type,
+            payload,
+            durable_sequence=durable_sequence,
         )
 
     def _step_store(self, runtime_domain: RuntimeDomain) -> StepStore:
@@ -2649,7 +2757,7 @@ class LocalExecutionBackend:
                 }
             ),
         )
-        committed = await self._commit_execution_terminal_checkpoint(
+        await self._commit_execution_terminal_checkpoint(
             current,
             terminal_commit,
             run_id=run_id,
@@ -2657,10 +2765,6 @@ class LocalExecutionBackend:
             conversation_run=conversation_run,
             conversation_snapshot=conversation_snapshot,
             recovery_checkpoint=recovery_checkpoint,
-        )
-        self._live_broker.publish_durable(
-            current.execution_id,
-            committed.execution.event_sequence,
         )
         self._terminal_events.setdefault(current.execution_id, asyncio.Event()).set()
         _logger.info(
@@ -2795,13 +2899,14 @@ class LocalExecutionBackend:
             recovery_snapshot=recovery_snapshot,
         )
         self._pending_audit_events.pop(current.execution_id, None)
-        self._live_broker.publish_durable(current.execution_id, commit.execution.event_sequence)
         self._terminal_events.setdefault(current.execution_id, asyncio.Event()).set()
         _logger.info(
             "same-group terminal checkpoint committed: execution=%s status=%s",
             current.execution_id,
             status.value,
         )
+
+
 
     async def _commit_execution_terminal_checkpoint(
         self,
@@ -2908,7 +3013,46 @@ class LocalExecutionBackend:
             terminal_plan=terminal_plan,
         )
 
+
     async def _commit_execution_terminal_checkpoint_locked(
+        self,
+        current: ExecutionRecord,
+        commit: ExecutionTerminalCommit,
+        *,
+        run_id: str | None,
+        expected_cursor: ConversationCursor | None = None,
+        conversation_run: RunRecord | None = None,
+        conversation_snapshot: ContinuableSnapshot | None = None,
+        recovery_checkpoint: RecoveryCheckpoint | None = None,
+        recovery_run: RunRecord | None = None,
+        recovery_snapshot: ContinuableSnapshot | None = None,
+        terminal_plan: ExecutionTerminalSealPlan | None,
+    ) -> ExecutionTerminalCommitResult:
+        async with self._audit_lock(current.execution_id):
+            pending_count = len(self._pending_audit_events.get(current.execution_id, ()))
+            committed = await self._commit_execution_terminal_checkpoint_locked_body(
+                current,
+                commit,
+                run_id=run_id,
+                expected_cursor=expected_cursor,
+                conversation_run=conversation_run,
+                conversation_snapshot=conversation_snapshot,
+                recovery_checkpoint=recovery_checkpoint,
+                recovery_run=recovery_run,
+                recovery_snapshot=recovery_snapshot,
+                terminal_plan=terminal_plan,
+            )
+            self._publish_committed_events(
+                current.execution_id,
+                pending_count=pending_count,
+                event_type=commit.terminal_event_type,
+                payload=dict(commit.terminal_event_payload),
+                durable_sequence=committed.execution.event_sequence,
+            )
+            return committed
+
+
+    async def _commit_execution_terminal_checkpoint_locked_body(
         self,
         current: ExecutionRecord,
         commit: ExecutionTerminalCommit,

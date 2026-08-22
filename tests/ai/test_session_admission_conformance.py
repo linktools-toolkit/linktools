@@ -17,6 +17,8 @@ from linktools.ai.core import (
     TenantAuthorizationPolicy,
 )
 from linktools.ai.errors import AIError, ErrorCode
+from linktools.ai.agent import AgentBindingSnapshot
+from linktools.ai.spec import AgentSpec
 from linktools.ai.migrate import provision_database
 from linktools.ai.runtime import ExecutionRequest, RuntimeState
 from linktools.ai.runtime._execution import CancelEffectOutcome, DefaultExecutionService
@@ -195,6 +197,26 @@ async def test_closing_session_can_commit_owned_continuation_then_close() -> Non
         await state.close()
 
 
+def _binding(digest: str) -> AgentBindingSnapshot:
+    return AgentBindingSnapshot(
+        version=1,
+        agent_spec=AgentSpec("agent", 1, "model"),
+        output_type_module="builtins",
+        output_type_qualname="str",
+        output_schema_id="test-output",
+        output_schema_revision=1,
+        output_schema_fingerprint="c" * 64,
+        local_runtime_capability_descriptors=(),
+        binding_digest=digest,
+    )
+
+
+class _DefinitionCatalog:
+    def definition(self, digest: str) -> object:
+        return SimpleNamespace(digest=digest, binding_snapshot=_binding(digest))
+
+
+
 class _History:
     async def trace(self, execution_id: str, *, tenant_id: str, cursor: str | None, limit: int) -> Page[object]:
         del execution_id, tenant_id, cursor, limit
@@ -262,6 +284,8 @@ async def test_rejected_admission_terminalizes_pending_start() -> None:
             state._object_store(RuntimeDomain.EXECUTION),
             TenantAuthorizationPolicy(),
             sessions=state.conversation.sessions,
+        catalog=_DefinitionCatalog(),
+        compiler=object(),
             backend=backend,
             history_reader=_History(),
         )

@@ -742,7 +742,7 @@ async def test_read_model_rejects_a_different_complete_source() -> None:
 
 
 @pytest.mark.asyncio
-async def test_read_model_rejects_a_v1_record() -> None:
+async def test_read_model_accepts_current_v1_record() -> None:
     state = RuntimeState.in_memory()
     await state.initialize(namespace="read-model-v1", tenant_id="tenant")
     try:
@@ -808,27 +808,32 @@ async def test_read_model_rejects_a_v1_record() -> None:
             tenant_id="tenant",
         )
 
-        with pytest.raises(AIError) as raised:
-            await repository.get_complete("execution", tenant_id="tenant")
-        assert raised.value.code is ErrorCode.STORAGE_VERSION_UNSUPPORTED
+        current = await repository.get_complete("execution", tenant_id="tenant")
+        assert current is not None
+        assert current.model_version == 1
+        assert current.source_digest == "legacy-source"
+
+        build_called = False
 
         async def build() -> ExecutionReadModelBuild:
+            nonlocal build_called
+            build_called = True
             return ExecutionReadModelBuild(
                 "execution",
                 "tenant",
-                "v2-source",
+                "unexpected-source",
                 (),
                 (),
                 (),
             )
 
-        with pytest.raises(AIError) as raised:
-            await repository.ensure(
-                "execution",
-                tenant_id="tenant",
-                builder=build,
-            )
-        assert raised.value.code is ErrorCode.STORAGE_VERSION_UNSUPPORTED
+        reused = await repository.ensure(
+            "execution",
+            tenant_id="tenant",
+            builder=build,
+        )
+        assert reused == current
+        assert not build_called
     finally:
         await state.close()
 
