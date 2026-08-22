@@ -247,14 +247,26 @@ async def _cancel_execution(
     )
     cleanup = asyncio.create_task(execution.cancel(execution_id, request))
     try:
-        await asyncio.shield(cleanup)
-    except BaseException:
-        _logger.warning(
-            "task execution cancellation cleanup failed: graph=%s task=%s execution=%s",
-            graph_id,
-            node_id,
-            execution_id,
-        )
+        result = await asyncio.shield(cleanup)
+    except asyncio.CancelledError:
+        try:
+            result = await cleanup
+        except BaseException as error:
+            raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED) from error
+    except BaseException as error:
+        raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED) from error
+    if result.cancelled:
+        return
+    try:
+        current = await execution.inspect(execution_id, principal=principal)
+    except BaseException as error:
+        raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED) from error
+    if current.status not in {
+        ExecutionStatus.SUCCEEDED,
+        ExecutionStatus.FAILED,
+        ExecutionStatus.CANCELLED,
+    }:
+        raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
 
 
 __all__ = ["DefaultTaskService", "RuntimeTaskNodeRunner", "WorkflowTaskGraphLauncher"]
