@@ -1,9 +1,12 @@
 name: AI Runtime Repair Verify
 
 on:
-  pull_request:
+  push:
     branches:
       - refactor/ai-runtime-agent-composition
+  pull_request:
+    branches:
+      - master
 
 permissions:
   contents: read
@@ -13,6 +16,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - uses: actions/setup-python@v5
         with:
