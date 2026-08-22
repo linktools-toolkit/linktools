@@ -268,7 +268,7 @@ def _layout_errors(root: Path, expected_packages: 'tuple[str, ...]', public_modu
         elif (
             relative[0] == "runtime"
             and len(relative) == 3
-            and relative[1] in {"state", "_message_codec"}
+            and relative[1] == "state"
         ):
             continue
         elif len(relative) != 2:

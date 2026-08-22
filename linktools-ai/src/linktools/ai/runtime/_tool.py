@@ -36,7 +36,7 @@ from ..storage import (
     StoredPayload,
     payload_fits_inline,
 )
-from ._message_codec import decode_v1_model_messages, encode_v1_model_messages
+from ._message import decode_model_messages, encode_model_messages
 from ._object import RuntimeObjectKeyFactory, put_runtime_object, read_runtime_object
 from .state._contracts import ToolOperationAdmission
 from .state._durability import (
@@ -515,14 +515,14 @@ class RuntimeToolOperationBridge:
         message = ModelRequest(
             parts=[ToolReturnPart("runtime", result, tool_call_id=decision.operation_id)],
         )
-        data = encode_v1_model_messages((message,))
+        data = encode_model_messages((message,))
         return await self._payload(data)
 
     async def _decode_result(self, record: ToolOperationRecord) -> Any:
         payload = record.result_payload
         if payload is None:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        messages = decode_v1_model_messages(await self._payload_bytes(payload))
+        messages = decode_model_messages(await self._payload_bytes(payload))
         if len(messages) != 1 or not isinstance(messages[0], ModelRequest) or len(messages[0].parts) != 1:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         part = messages[0].parts[0]

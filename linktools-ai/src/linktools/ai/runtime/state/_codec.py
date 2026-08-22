@@ -68,7 +68,7 @@ from ...task import (
     TaskNodeView,
     TaskTerminalRecord,
 )
-from .._message_codec import decode_v1_model_messages, encode_v1_model_messages
+from .._message import decode_model_messages, encode_model_messages
 from .._tool import ToolOperationRecord
 from ._contracts import (
     AgentAttemptClaim,
@@ -969,10 +969,10 @@ def _encode_external(value: object, codec: _VersionCodec) -> JsonValue:
             "error_code": _encode_domain(value.error_code, codec),
         }
     if isinstance(value, (ModelRequest, ModelResponse)):
-        raw = encode_v1_model_messages((value,))
+        raw = encode_model_messages((value,))
         decoded = json.loads(raw.decode("utf-8"))
         if not isinstance(decoded, list) or len(decoded) != 1:
-            raise RuntimeError("GA v1 message codec returned an invalid single-message wire")
+            raise RuntimeError("model message codec returned an invalid single-message value")
         return cast(JsonValue, decoded[0])
     raise TypeError(f"unsupported external type: {type(value).__name__}")
 
@@ -983,7 +983,7 @@ def _decode_external(value: object, target: type[object], codec: _VersionCodec) 
     if target in (ModelRequest, ModelResponse):
         try:
             raw = canonical_json_bytes([cast(JsonValue, value)])
-            messages = decode_v1_model_messages(raw)
+            messages = decode_model_messages(raw)
         except AIError:
             raise
         except (TypeError, ValueError) as error:

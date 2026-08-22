@@ -14,10 +14,7 @@ from pydantic_ai.messages import ModelMessage
 from ...core import canonical_json_bytes
 from ...errors import AIError, ErrorCode
 from ...storage import ObjectRef, ObjectStore, StoredPayload, runtime_object_key
-from .._message_codec import (
-    decode_v1_model_messages,
-    encode_v1_model_messages,
-)
+from .._message import decode_model_messages, encode_model_messages
 from ..service_api import SessionHistoryItem
 from ._codec import (
     _decode_enveloped_domain,
@@ -80,7 +77,7 @@ _TRANSCRIPT_SEEK_BLOCK = 128
 def _overlap_signature(message: ModelMessage) -> bytes:
     """Timestamp-ignoring signature used only for overlap/dedup matching."""
     value = json.loads(
-        encode_v1_model_messages((message,)).decode("utf-8")
+        encode_model_messages((message,)).decode("utf-8")
     )
 
     def remove_timestamps(candidate: object) -> object:
@@ -99,7 +96,7 @@ def _overlap_signature(message: ModelMessage) -> bytes:
 
 def _exact_message_signature(message: ModelMessage) -> bytes:
     """Full canonical serialization including timestamp, for exact-content proof."""
-    return encode_v1_model_messages((message,))
+    return encode_model_messages((message,))
 
 
 def suffix_prefix_overlap(
@@ -203,7 +200,7 @@ class _ContextProjector:
                     )
                 )
             else:
-                raw = encode_v1_model_messages(values[index:end])
+                raw = encode_model_messages(values[index:end])
                 items.append(
                     InlineContextBlock(
                         RuntimePayloadRef(
@@ -367,7 +364,7 @@ class TranscriptRepository:
         current_start = first_message_index
         current_size = 2
         for message in values:
-            encoded = encode_v1_model_messages((message,))
+            encoded = encode_model_messages((message,))
             part = encoded[1:-1]
             candidate_size = current_size + len(part) + (1 if current else 0)
             split = (
@@ -398,7 +395,7 @@ class TranscriptRepository:
         messages: Sequence[ModelMessage],
         origin: TranscriptOrigin,
     ) -> TranscriptChunk:
-        raw = encode_v1_model_messages(messages)
+        raw = encode_model_messages(messages)
         raw_digest = hashlib.sha256(raw).hexdigest()
         content = raw
         codec = "raw"
@@ -807,7 +804,7 @@ class TranscriptRepository:
             raw = zlib.decompress(raw)
         if hashlib.sha256(raw).hexdigest() != chunk.raw_digest or len(raw) != chunk.raw_size:
             raise ValueError("transcript chunk integrity check failed")
-        return decode_v1_model_messages(raw)
+        return decode_model_messages(raw)
 
     async def load_messages(self, owner_id: str) -> tuple[ModelMessage, ...]:
         require_no_run_history_lock("TranscriptRepository.load_messages")
@@ -1166,7 +1163,7 @@ class TranscriptRepository:
             raw = await self._read_payload(item.content.payload)  # type: ignore[union-attr]
             values.extend(
                 LoadedContextMessage(message, None)
-                for message in decode_v1_model_messages(raw)
+                for message in decode_model_messages(raw)
             )
         return LoadedModelContext(tuple(values))
 

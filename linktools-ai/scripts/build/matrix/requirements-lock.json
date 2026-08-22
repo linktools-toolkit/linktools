@@ -2,7 +2,6 @@
   "packages": {
     "pydantic-ai-harness": {"version": "0.13.0", "wheel_sha256": "c688c3536017017e10947c5ea78085ca5fd9eb0e9f2b4ab3857df21a079ef5c8"},
     "pydantic-ai-slim": {"version": "2.27.0", "wheel_sha256": "d30cabd5e60680574f46df2b8d8e78eb7a5dd5d0963fc50e26fa802909130219"},
-    "jsonschema": {"version": "4.23.0", "wheel_sha256": "fbadb6f8b144a8f8cf9f0b89ba94501d143e50411a1278633f56a7acf7fd5566"},
     "sqlalchemy": {"version": "2.0.51", "wheel_sha256": "1bed1ee8b01da6088210aa9412023326fb98a599ba502e6118308601dcbef77f"},
     "aiosqlite": {"version": "0.22.1", "wheel_sha256": "21c002eb13823fad740196c5a2e9d8e62f6243bd9e7e4a1f87fb5e44ecb4fceb"},
     "asyncmy": {"version": "0.2.11", "source_sha256": "c3d65d959dde62c911e39ecd1ad0f1339a5e6929fc411d48cfc2f82846190bf4", "cp313_linux_x86_64_wheel_sha256": "373aecf8cd17662c13bab69dc36db7242be8e956242164469b8733886fb2ec0a"},
