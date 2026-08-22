@@ -51,25 +51,25 @@ class ExecutionStageOperation(Protocol):
     async def load_input(
         self, state: ExecutionWorkflowState
     ) -> ExecutionWorkflowState: ...
-    async def fix_bundle_route(
-        self, state: ExecutionWorkflowState
-    ) -> ExecutionWorkflowState: ...
-    async def fix_binding(
-        self, state: ExecutionWorkflowState
-    ) -> ExecutionWorkflowState: ...
     async def reserve_budget(
         self, state: ExecutionWorkflowState
     ) -> ExecutionWorkflowState: ...
     async def run_agent(
         self, state: ExecutionWorkflowState
     ) -> ExecutionWorkflowState: ...
-    async def process_deferred(
+    async def persist_deferred(
+        self, state: ExecutionWorkflowState
+    ) -> ExecutionWorkflowState: ...
+    async def load_resume_input(
         self, state: ExecutionWorkflowState
     ) -> ExecutionWorkflowState: ...
     async def commit_result(
         self, state: ExecutionWorkflowState
     ) -> ExecutionWorkflowState: ...
     async def settle_budget(
+        self, state: ExecutionWorkflowState
+    ) -> ExecutionWorkflowState: ...
+    async def cancel_effect(
         self, state: ExecutionWorkflowState
     ) -> ExecutionWorkflowState: ...
 
@@ -97,18 +97,6 @@ class ExecuteActivity:
     async def load_input(self, state: ExecutionWorkflowState) -> ExecutionWorkflowState:
         return await cast(ExecutionStageOperation, self._operation).load_input(state)
 
-    async def fix_bundle_route(
-        self, state: ExecutionWorkflowState
-    ) -> ExecutionWorkflowState:
-        return await cast(ExecutionStageOperation, self._operation).fix_bundle_route(
-            state
-        )
-
-    async def fix_binding(
-        self, state: ExecutionWorkflowState
-    ) -> ExecutionWorkflowState:
-        return await cast(ExecutionStageOperation, self._operation).fix_binding(state)
-
     async def reserve_budget(
         self, state: ExecutionWorkflowState
     ) -> ExecutionWorkflowState:
@@ -119,10 +107,17 @@ class ExecuteActivity:
     async def run_agent(self, state: ExecutionWorkflowState) -> ExecutionWorkflowState:
         return await cast(ExecutionStageOperation, self._operation).run_agent(state)
 
-    async def process_deferred(
+    async def persist_deferred(
         self, state: ExecutionWorkflowState
     ) -> ExecutionWorkflowState:
-        return await cast(ExecutionStageOperation, self._operation).process_deferred(
+        return await cast(ExecutionStageOperation, self._operation).persist_deferred(
+            state
+        )
+
+    async def load_resume_input(
+        self, state: ExecutionWorkflowState
+    ) -> ExecutionWorkflowState:
+        return await cast(ExecutionStageOperation, self._operation).load_resume_input(
             state
         )
 
@@ -135,6 +130,11 @@ class ExecuteActivity:
         self, state: ExecutionWorkflowState
     ) -> ExecutionWorkflowState:
         return await cast(ExecutionStageOperation, self._operation).settle_budget(state)
+
+    async def cancel_effect(
+        self, state: ExecutionWorkflowState
+    ) -> ExecutionWorkflowState:
+        return await cast(ExecutionStageOperation, self._operation).cancel_effect(state)
 
 
 class EvaluationOperation(Protocol):
@@ -285,26 +285,26 @@ if _temporal_activity is not None:
     ExecuteActivity.load_input = _temporal_activity.defn(name="load_input")(
         ExecuteActivity.load_input
     )
-    ExecuteActivity.fix_bundle_route = _temporal_activity.defn(name="fix_bundle_route")(
-        ExecuteActivity.fix_bundle_route
-    )
-    ExecuteActivity.fix_binding = _temporal_activity.defn(name="fix_binding")(
-        ExecuteActivity.fix_binding
-    )
     ExecuteActivity.reserve_budget = _temporal_activity.defn(name="reserve_budget")(
         ExecuteActivity.reserve_budget
     )
     ExecuteActivity.run_agent = _temporal_activity.defn(name="run_agent")(
         ExecuteActivity.run_agent
     )
-    ExecuteActivity.process_deferred = _temporal_activity.defn(name="process_deferred")(
-        ExecuteActivity.process_deferred
+    ExecuteActivity.persist_deferred = _temporal_activity.defn(name="persist_deferred")(
+        ExecuteActivity.persist_deferred
+    )
+    ExecuteActivity.load_resume_input = _temporal_activity.defn(name="load_resume_input")(
+        ExecuteActivity.load_resume_input
     )
     ExecuteActivity.commit_result = _temporal_activity.defn(name="commit_result")(
         ExecuteActivity.commit_result
     )
     ExecuteActivity.settle_budget = _temporal_activity.defn(name="settle_budget")(
         ExecuteActivity.settle_budget
+    )
+    ExecuteActivity.cancel_effect = _temporal_activity.defn(name="cancel_effect")(
+        ExecuteActivity.cancel_effect
     )
     EvaluationActivity.run = _temporal_activity.defn(name="evaluation")(
         EvaluationActivity.run
