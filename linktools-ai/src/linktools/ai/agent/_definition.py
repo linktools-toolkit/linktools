@@ -13,6 +13,17 @@ from ..spec import AgentSpec
 from ._binding import AgentBindingSnapshot
 from ._output import OutputBinding
 
+_TRUSTED_TOOL_CLASSES = frozenset(
+    {
+        "control",
+        "filesystem.read",
+        "filesystem.write",
+        "shell",
+        "memory.read",
+        "memory.write",
+    }
+)
+
 
 @dataclass(frozen=True, slots=True)
 class AgentDefinition:
@@ -24,6 +35,8 @@ class AgentDefinition:
     output_binding: OutputBinding
     effective_capabilities: "tuple[CapabilityBinding, ...]"
     binding_snapshot: AgentBindingSnapshot
+    trusted_tool_classes: "tuple[tuple[str, str], ...]" = ()
+    trusted_mcp_tools: bool = False
 
     def __post_init__(self) -> None:
         validate_fingerprint(self.digest)
@@ -49,6 +62,21 @@ class AgentDefinition:
             raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID) from error
         if len(set(identities)) != len(identities):
             raise AIError(ErrorCode.CAPABILITY_CONFLICT)
+        if not isinstance(self.trusted_mcp_tools, bool):
+            raise AIError(ErrorCode.CAPABILITY_POLICY_CONFLICT)
+        names: set[str] = set()
+        previous: str | None = None
+        for name, tool_class in self.trusted_tool_classes:
+            if (
+                not isinstance(name, str)
+                or not name.strip()
+                or tool_class not in _TRUSTED_TOOL_CLASSES
+                or name in names
+                or (previous is not None and name < previous)
+            ):
+                raise AIError(ErrorCode.CAPABILITY_POLICY_CONFLICT)
+            names.add(name)
+            previous = name
 
     @property
     def output_type(self) -> type[BaseModel]:
