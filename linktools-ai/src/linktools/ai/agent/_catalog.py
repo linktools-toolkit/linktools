@@ -17,7 +17,7 @@ class AgentDefinitionCatalog:
         by_digest: dict[str, AgentDefinition] = {}
         for definition in roots.values():
             existing = by_digest.get(definition.digest)
-            if existing is not None and existing != definition:
+            if existing is not None and not _same_definition(existing, definition):
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             by_digest[definition.digest] = definition
         self._roots = MappingProxyType(dict(roots))
@@ -44,7 +44,7 @@ class AgentDefinitionCatalog:
         """Register one effective definition without changing named Agent lookup."""
         existing = self._definitions.get(definition.digest)
         if existing is not None:
-            if existing != definition:
+            if not _same_definition(existing, definition):
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             return existing
         self._definitions[definition.digest] = definition
@@ -58,6 +58,29 @@ class AgentDefinitionCatalog:
                 ErrorCode.AGENT_DEFINITION_UNAVAILABLE,
                 safe_details={"binding_digest": digest},
             ) from error
+
+
+def _same_definition(left: AgentDefinition, right: AgentDefinition) -> bool:
+    if left.digest != right.digest:
+        return False
+    try:
+        left_capabilities = tuple(
+            (capability.provider, capability.id, capability.fingerprint)
+            for capability in left.effective_capabilities
+        )
+        right_capabilities = tuple(
+            (capability.provider, capability.id, capability.fingerprint)
+            for capability in right.effective_capabilities
+        )
+        return (
+            left.spec == right.spec
+            and left.model.fingerprint == right.model.fingerprint
+            and left.output_binding.descriptor == right.output_binding.descriptor
+            and left_capabilities == right_capabilities
+            and left.binding_snapshot == right.binding_snapshot
+        )
+    except (AttributeError, TypeError) as error:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
 
 
 __all__ = ["AgentDefinitionCatalog"]
