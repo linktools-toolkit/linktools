@@ -176,7 +176,7 @@ def _definition_digest(
 ) -> str:
     return canonical_sha256(
         {
-            "version": 8,
+            "version": 1,
             "agent": {
                 "id": spec.id,
                 "revision": spec.revision,
