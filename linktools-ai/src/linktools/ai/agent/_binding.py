@@ -3,11 +3,11 @@
 """Durable data contract for one effective Agent definition."""
 
 import json
-from collections.abc import Iterator, Mapping
+from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import cast
 
-from ..core import JsonValue, canonical_json_bytes
+from ..core import ImmutableJsonMapping, JsonValue, canonical_json_bytes
 from ..errors import AIError, ErrorCode
 from ..spec import AgentSpec, AgentSpecCodec
 
@@ -24,33 +24,6 @@ _FIELDS = frozenset(
         "binding_digest",
     }
 )
-
-
-class _ImmutableJsonMapping(Mapping[str, JsonValue]):
-    """Keep one JSON object immutable while exposing Mapping semantics."""
-
-    __slots__ = ("_payload",)
-
-    def __init__(self, value: Mapping[str, JsonValue]) -> None:
-        self._payload = canonical_json_bytes(_normalize_mapping(value))
-
-    def __getitem__(self, key: str) -> JsonValue:
-        return self._decode()[key]
-
-    def __iter__(self) -> Iterator[str]:
-        return iter(self._decode())
-
-    def __len__(self) -> int:
-        return len(self._decode())
-
-    def __eq__(self, other: object) -> bool:
-        return isinstance(other, Mapping) and self._decode() == dict(other)
-
-    def _decode(self) -> "dict[str, JsonValue]":
-        value = json.loads(self._payload.decode("utf-8"))
-        if not isinstance(value, dict):
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        return cast("dict[str, JsonValue]", value)
 
 
 @dataclass(frozen=True, slots=True)
@@ -87,10 +60,13 @@ class AgentBindingSnapshot:
             or not _is_digest(self.binding_digest)
         ):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        descriptors = tuple(
-            _ImmutableJsonMapping(value)
-            for value in self.local_runtime_capability_descriptors
-        )
+        try:
+            descriptors = tuple(
+                ImmutableJsonMapping(value)
+                for value in self.local_runtime_capability_descriptors
+            )
+        except (TypeError, ValueError) as error:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
         object.__setattr__(self, "local_runtime_capability_descriptors", descriptors)
 
     def to_payload(self) -> "dict[str, JsonValue]":
@@ -154,12 +130,9 @@ def _normalize_mapping(value: object) -> "dict[str, JsonValue]":
     if not isinstance(value, Mapping):
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     try:
-        normalized = json.loads(canonical_json_bytes(dict(value)).decode("utf-8"))
+        return dict(ImmutableJsonMapping(cast("Mapping[str, JsonValue]", value)))
     except (TypeError, ValueError) as error:
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
-    if not isinstance(normalized, dict):
-        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-    return cast("dict[str, JsonValue]", normalized)
 
 
 def _require_mapping(value: object) -> "dict[str, JsonValue]":
