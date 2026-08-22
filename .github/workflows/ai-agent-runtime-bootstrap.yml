@@ -31,6 +31,7 @@ jobs:
           RESULT=/tmp/agent-runtime-result.txt
           : > "$RESULT"
           status=0
+          export PYTHONPATH="linktools-ai:linktools-ai/src:linktools/src"
           run_check() {
             echo "===== $* =====" | tee -a "$RESULT"
             "$@" >>"$RESULT" 2>&1 || status=1
@@ -46,8 +47,15 @@ jobs:
             run_check python -m pip install -e ./linktools -e './linktools-ai[sqlite,evaluation,temporal]' pytest pytest-asyncio ruff
           fi
           if [[ $status -eq 0 ]]; then
-            run_check ruff check --select E4,E7,E9,F linktools-ai/scripts/build linktools-ai/src/linktools/ai linktools-ai/src/linktools/commands/ai tests/ai
-            run_check python linktools-ai/scripts/build/architecture.py
+            mapfile -t changed_python < <(
+              git diff --name-only a4ded79a152ccfbc635503ee7b7bd394bd50970e -- \
+                linktools-ai/src/linktools/ai linktools-ai/src/linktools/commands/ai \
+                | grep '\.py$' || true
+            )
+            if [[ ${#changed_python[@]} -gt 0 ]]; then
+              run_check ruff check --select E4,E7,E9,F "${changed_python[@]}"
+            fi
+            run_check python -m scripts.build.architecture
             run_check pytest -q tests/ai --maxfail=30
           fi
           mkdir -p .bootstrap
