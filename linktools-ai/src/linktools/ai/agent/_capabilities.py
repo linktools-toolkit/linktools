@@ -55,17 +55,14 @@ WORKSPACE_FILESYSTEM_READ_TOOL_NAMES = (
 )
 WORKSPACE_SHELL_TOOL_NAMES = ("check_command", "run_command", "start_command", "stop_command")
 PLAN_SAFE_METADATA_KEY = "linktools.ai.plan_safe"
-_FILESYSTEM_MUTATION_TOOL_NAMES = frozenset(
+_TRUSTED_TOOL_CLASSES = frozenset(
     {
-        "create_directory",
-        "edit_file",
-        "write_file",
-        "delete_file",
-        "delete_directory",
-        "move_file",
-        "move_directory",
-        "rename_file",
-        "rename_directory",
+        "control",
+        "filesystem.read",
+        "filesystem.write",
+        "shell",
+        "memory.read",
+        "memory.write",
     }
 )
 
@@ -144,15 +141,18 @@ class _RuntimeStepPersistence(StepPersistence[None]):
         *,
         tool_operations: ToolOperationBridge,
         planning: bool = False,
-        control_tool_names: "frozenset[str]" = frozenset(),
+        trusted_tool_classes: "tuple[tuple[str, str], ...]" = (),
+        trusted_mcp_tools: bool = False,
         **kwargs: Any,
     ) -> None:
-        if not isinstance(planning, bool):
+        if not isinstance(planning, bool) or not isinstance(trusted_mcp_tools, bool):
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+        _validate_trusted_tool_classes(trusted_tool_classes)
         super().__init__(**kwargs)
         self._tool_operations = tool_operations
         self._planning = planning
-        self._control_tool_names = control_tool_names
+        self._trusted_tool_classes = trusted_tool_classes
+        self._trusted_mcp_tools = trusted_mcp_tools
         self._calls: dict[tuple[str, str], _ToolCallState] = {}
 
     async def before_tool_execute(
@@ -165,7 +165,8 @@ class _RuntimeStepPersistence(StepPersistence[None]):
     ) -> dict[str, Any]:
         if self._planning and not tool_allowed_in_planning(
             tool_def,
-            control_tool_names=self._control_tool_names,
+            trusted_tool_classes=self._trusted_tool_classes,
+            trusted_mcp_tools=self._trusted_mcp_tools,
         ):
             raise AIError(
                 ErrorCode.CAPABILITY_POLICY_CONFLICT,
@@ -417,14 +418,21 @@ class _RuntimeStepPersistence(StepPersistence[None]):
         error: BaseException,
         state: _ToolCallState,
     ) -> Any:
+        if state.effect_terminalized:
+            raise error
+        try:
+            result = await super().on_tool_execute_error(
+                ctx,
+                call=call,
+                tool_def=tool_def,
+                args=args,
+                error=error,
+            )
+        except (ModelRetry, ToolRetryError):
+            state.effect_terminalized = True
+            raise
         state.effect_terminalized = True
-        return await super().on_tool_execute_error(
-            ctx,
-            call=call,
-            tool_def=tool_def,
-            args=args,
-            error=error,
-        )
+        return result
 
     async def _mark_unknown(self, state: _ToolCallState, error: BaseException) -> None:
         state.preserve_started = True
@@ -448,7 +456,8 @@ class AgentRunScope:
     history_id: "str | None" = None
     platform_tool_names: "tuple[str, ...]" = ()
     planning: bool = False
-    control_tool_names: "frozenset[str]" = frozenset()
+    trusted_tool_classes: "tuple[tuple[str, str], ...]" = ()
+    trusted_mcp_tools: bool = False
     context_target_tokens: "int | None" = None
     parent_step_run_id: "str | None" = None
     subagent_delegate: "SubagentDelegate | None" = None
@@ -467,11 +476,13 @@ async def compose_platform_capabilities(
 ) -> "tuple[PydanticAgentCapability[None], ...]":
     del model_factory, parent_model
     _validate_compaction_target(scope.context_target_tokens)
+    _validate_trusted_tool_classes(scope.trusted_tool_classes)
     capabilities: list[PydanticAgentCapability[None]] = [
         _RuntimeStepPersistence(
             tool_operations=scope.tool_operations or _MissingToolOperationBridge(),
             planning=scope.planning,
-            control_tool_names=scope.control_tool_names,
+            trusted_tool_classes=scope.trusted_tool_classes,
+            trusted_mcp_tools=scope.trusted_mcp_tools,
             store=scope.step_store,
             agent_name=scope.agent_name,
             run_id=scope.step_run_id,
@@ -532,22 +543,29 @@ def tool_name_allowed(name: str, allow_tools: "tuple[str, ...]") -> bool:
     return "*" in allow_tools or name in allow_tools
 
 
+def tool_is_control(
+    name: str,
+    *,
+    trusted_tool_classes: "tuple[tuple[str, str], ...]",
+) -> bool:
+    return _tool_class(name, trusted_tool_classes) == "control"
+
+
 def tool_allowed_in_planning(
     tool_def: ToolDefinition,
     *,
-    control_tool_names: "frozenset[str]",
+    trusted_tool_classes: "tuple[tuple[str, str], ...]",
+    trusted_mcp_tools: bool,
 ) -> bool:
-    name = tool_def.name
-    if name in control_tool_names:
+    tool_class = _tool_class(tool_def.name, trusted_tool_classes)
+    if tool_class == "control":
         return True
-    if name.startswith("mcp__") or name in WORKSPACE_SHELL_TOOL_NAMES:
+    if tool_class in {"filesystem.write", "shell", "memory.write"}:
         return False
-    if name in _FILESYSTEM_MUTATION_TOOL_NAMES:
-        return False
-    if name in WORKSPACE_FILESYSTEM_READ_TOOL_NAMES:
+    if tool_class in {"filesystem.read", "memory.read"}:
         return True
-    if name in MEMORY_TOOL_NAMES:
-        return name in MEMORY_READ_TOOL_NAMES
+    if trusted_mcp_tools and tool_def.name.startswith("mcp__"):
+        return False
     metadata = tool_def.metadata or {}
     value = metadata.get(PLAN_SAFE_METADATA_KEY)
     if value is None:
@@ -555,6 +573,38 @@ def tool_allowed_in_planning(
     if not isinstance(value, bool):
         raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
     return value
+
+
+def _tool_class(
+    name: str,
+    trusted_tool_classes: "tuple[tuple[str, str], ...]",
+) -> "str | None":
+    _validate_trusted_tool_classes(trusted_tool_classes)
+    for tool_name, tool_class in trusted_tool_classes:
+        if tool_name == name:
+            return tool_class
+    return None
+
+
+def _validate_trusted_tool_classes(
+    trusted_tool_classes: "tuple[tuple[str, str], ...]",
+) -> None:
+    previous: str | None = None
+    seen: set[str] = set()
+    for item in trusted_tool_classes:
+        if not isinstance(item, tuple) or len(item) != 2:
+            raise AIError(ErrorCode.CAPABILITY_POLICY_CONFLICT)
+        name, tool_class = item
+        if (
+            not isinstance(name, str)
+            or not name.strip()
+            or tool_class not in _TRUSTED_TOOL_CLASSES
+            or name in seen
+            or (previous is not None and name < previous)
+        ):
+            raise AIError(ErrorCode.CAPABILITY_POLICY_CONFLICT)
+        seen.add(name)
+        previous = name
 
 
 def select_platform_tool_names(
@@ -656,5 +706,6 @@ __all__ = [
     "compose_platform_capabilities",
     "select_platform_tool_names",
     "tool_allowed_in_planning",
+    "tool_is_control",
     "tool_name_allowed",
 ]
