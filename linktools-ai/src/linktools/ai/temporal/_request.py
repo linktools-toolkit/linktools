@@ -28,10 +28,10 @@ _GRAPH_FIELDS = frozenset({"graph_id", "nodes"})
 _NODE_FIELDS = frozenset({"node_id", "dependencies", "input", "budget_cost"})
 _PRINCIPAL_FIELDS = frozenset({"principal_id", "tenant_id", "kind"})
 _LIMIT_FIELDS = frozenset({"max_concurrency", "max_depth", "max_nodes", "max_budget"})
-_EXECUTION_V1_FIELDS = frozenset(
+_EXECUTION_LEGACY_V1_FIELDS = frozenset(
     {"version", "user_prompt", "principal", "idempotency_key", "memory_scope"}
 )
-_EXECUTION_V2_FIELDS = frozenset(
+_EXECUTION_CURRENT_V1_FIELDS = frozenset(
     {
         "version",
         "user_prompt",
@@ -136,7 +136,7 @@ async def put_execution_request(
     if snapshot.binding_digest != binding_digest:
         raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
     payload: dict[str, JsonValue] = {
-        "version": 2,
+        "version": 1,
         "user_prompt": request.user_prompt,
         "principal": _principal_payload(request.principal),
         "idempotency_key": request.idempotency_key,
@@ -340,15 +340,17 @@ def _task_node_from_payload(value: object) -> TaskNode:
 def _execution_request_from_payload(
     value: Mapping[str, object],
 ) -> tuple[ExecutionRequest, str | None, AgentBindingSnapshot | None]:
-    version = value.get("version")
-    if version == 1:
-        payload = _mapping(value, _EXECUTION_V1_FIELDS)
+    if value.get("version") != 1 or isinstance(value.get("version"), bool):
+        raise ValueError("request version is invalid")
+    fields = frozenset(value)
+    if fields == _EXECUTION_LEGACY_V1_FIELDS:
+        payload = _mapping(value, _EXECUTION_LEGACY_V1_FIELDS)
         planning = False
         thinking = False
         binding_digest = None
         binding = None
-    elif version == 2:
-        payload = _mapping(value, _EXECUTION_V2_FIELDS)
+    elif fields == _EXECUTION_CURRENT_V1_FIELDS:
+        payload = _mapping(value, _EXECUTION_CURRENT_V1_FIELDS)
         planning = payload["planning"]
         thinking = payload["thinking"]
         if not isinstance(planning, bool) or not isinstance(thinking, bool):
@@ -358,7 +360,7 @@ def _execution_request_from_payload(
         if binding.binding_digest != binding_digest:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     else:
-        raise ValueError("request version is invalid")
+        raise ValueError("request payload fields are invalid")
     memory_scope = payload["memory_scope"]
     if memory_scope is not None and not isinstance(memory_scope, str):
         raise ValueError("execution memory scope is invalid")
