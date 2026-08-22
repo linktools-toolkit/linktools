@@ -5,7 +5,7 @@
 import asyncio
 import secrets
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
-from typing import Protocol, TypeGuard
+from typing import Protocol
 
 from linktools.core import environ
 from pydantic import BaseModel

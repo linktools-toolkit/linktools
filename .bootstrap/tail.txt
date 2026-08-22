@@ -1,69 +1,250 @@
-===== python .bootstrap/patch.py =====
-session and context projection identity split applied
-===== python .bootstrap/patch2.py =====
+--
+825-        if execution is not None:
+826-            if (
+827:                execution.binding_digest != recovery_input.binding_digest
+828-                or execution.parent_execution_id != recovery_input.parent_execution_id
+829-                or execution.root_execution_id != recovery_input.root_execution_id
+--
+1180-            tenant_id=checkpoint.tenant_id,
+1181-            session_id=session_id,
+1182:            binding_digest=recovery_input.binding_digest,
+1183-            parent_execution_id=recovery_input.parent_execution_id,
+1184-            root_execution_id=recovery_input.root_execution_id,
+--
+1852-                    expected_agent_run_sequence=current.agent_run_sequence,
+1853-                )
+1854:            definition = self._catalog.definition(current.binding_digest)
+1855:            if current.binding is not None and current.binding != definition.binding_snapshot:
+1856-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+1857-            run_id = (
+--
+1926-                execution_id=execution_id,
+1927-                step_run_id=run_id,
+1928:                binding_fingerprint=current.binding_digest,
+1929-                owner=tool_owner,
+1930-                payload_policy=self._payload_policy,
+--
+1945-                    RuntimeDomain.RECOVERY,
+1946-                    recovery_history_run_id,
+1947:                    binding_digest=current.binding_digest,
+1948-                )
+1949-            elif history_id is not None:
+--
+1951-                    RuntimeDomain.CONVERSATION,
+1952-                    history_id,
+1953:                    binding_digest=current.binding_digest,
+1954-                )
+1955-            if recovery_history_run_id is not None or history_id is not None:
+--
+1974-            allowed_subagent_ids = tuple(
+1975-                agent_id
+1976:                for agent_id in self._catalog.root_ids
+1977-                if agent_id != definition.spec.id
+1978-            )
+--
+1999-                )
+2000-            try:
+2001:                result = await self._executor.execute(
+2002-                    definition,
+2003-                    request.user_prompt,
+--
+2142-                            await recovery_archive.load_loaded_model_context(
+2143-                                owner_id=recovery_run_id,
+2144:                                binding_digest=execution.binding_digest,
+2145-                            )
+2146-                        ).model_messages()
+--
+2458-                    step_run=run,
+2459-                    snapshot=snapshot,
+2460:                    binding_digest=execution.binding_digest,
+2461-                )
+2462-            except AIError as error:
+--
+2573-            if definition is None or output is None:
+2574-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+2575:            schema_id = definition.output_binding.schema_id
+2576:            schema_revision = definition.output_binding.schema_revision
+2577-            schema_fingerprint = definition.output_schema_fingerprint
+2578-        elif output is not None:
+--
+2833-            if definition is None or output is None:
+2834-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+2835:            schema_id = definition.output_binding.schema_id
+2836:            schema_revision = definition.output_binding.schema_revision
+2837-            schema_fingerprint = definition.output_schema_fingerprint
+2838-        elif output is not None:
+--
+2937-                    execution_id=current.execution_id,
+2938-                    run_ids=candidate_run_ids,
+2939:                    binding_digest=current.binding_digest,
+2940-                )
+2941-            durable_commit = False
+240-                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+241-                try:
+242:                    definition = catalog.register(compiler.restore(snapshot))
+243-                except AIError as error:
+244-                    if error.code is ErrorCode.STORAGE_INTEGRITY_ERROR:
+--
+253-            else:
+254-                try:
+255:                    definition = catalog.definition(recovery_input.binding_digest)
+256-                except AIError as error:
+257-                    raise AIError(
+--
+269-            handoff = checkpoint.terminal_handoff
+270-            if handoff is not None and handoff.outcome.output is not None:
+271:                output = definition.output_binding
+272-                outcome = handoff.outcome
+273-                if (
+36-        principal: Principal,
+37-        allowed_agent_ids: "tuple[str, ...]",
+38:        planning: bool,
+39:        thinking: bool,
+40-    ) -> SubagentDelegate:
+41-        allowed = frozenset(allowed_agent_ids)
+--
+50-                principal=principal,
+51-                allowed_agent_ids=allowed,
+52:                planning=planning,
+53:                thinking=thinking,
+54-                agent_id=agent_id,
+55-                user_prompt=user_prompt,
+--
+67-        principal: Principal,
+68-        allowed_agent_ids: "frozenset[str]",
+69:        planning: bool,
+70:        thinking: bool,
+71-        agent_id: str,
+72-        user_prompt: str,
+--
+78-            raise ModelRetry("requested subagent Agent is unavailable")
+79-        try:
+80:            definition = self._catalog.subagent_definition(agent_id)
+81-        except AIError as error:
+82-            if error.code is ErrorCode.AGENT_DEFINITION_UNAVAILABLE:
+--
+89-                "tool_call_id": tool_call_id,
+90-                "agent_id": agent_id,
+91:                "planning": planning,
+92:                "thinking": thinking,
+93-            }
+94-        )
+--
+98-            idempotency_key=idempotency_key,
+99-            memory_scope=memory_scope,
+100:            planning=planning,
+101:            thinking=thinking,
+102-        )
+103-        child = await self._execution.start_subagent(
+37-        "version",
+38-        "agent_id",
+39:        "binding_digest",
+40:        "binding",
+41-        "user_prompt",
+42-        "planning",
+--
+73-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+74-        agent_id = payload["agent_id"]
+75:        binding_digest = payload["binding_digest"]
+76-        base_user_prompt = payload["user_prompt"]
+77-        planning = payload["planning"]
+--
+79-        if (
+80-            not isinstance(agent_id, str)
+81:            or not isinstance(binding_digest, str)
+82-            or not isinstance(base_user_prompt, str)
+83-            or not isinstance(planning, bool)
+--
+86-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+87-        try:
+88:            snapshot = AgentBindingSnapshot.from_payload(payload["binding"])
+89-        except AIError as error:
+90-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
+91:        if snapshot.binding_digest != binding_digest or snapshot.agent_spec.id != agent_id:
+92-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+93-        validate_agent_id(agent_id)
+94-        validate_user_prompt(base_user_prompt)
+95-        try:
+96:            definition = self._catalog.register(self._compiler.restore(snapshot))
+97-        except AIError as error:
+98-            if error.code is ErrorCode.STORAGE_INTEGRITY_ERROR:
+--
+100-            raise AIError(
+101-                ErrorCode.AGENT_DEFINITION_UNAVAILABLE,
+102:                safe_details={"agent_id": agent_id, "binding_digest": binding_digest},
+103-            ) from error
+104:        if definition.digest != binding_digest or definition.spec.id != agent_id:
+105-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+106-        if set(dependency_results) != set(node.dependencies):
+--
+129-                "node_id": node.node_id,
+130-                "agent_id": agent_id,
+131:                "binding_digest": binding_digest,
+132-                "input": node.input,
+133-                "dependencies": [
+--
+149-            thinking=thinking,
+150-        )
+151:        return binding_digest, request
+152-
+153-    async def result(self, execution_id: str, *, principal: Principal) -> TaskNodeRunResult:
+--
+167-        dependency_results: "Mapping[str, TaskDependencyResult]",
+168-    ) -> TaskNodeRunResult:
+169:        binding_digest, request = await self.prepare(
+170-            node,
+171-            graph_id=graph_id,
+--
+173-            dependency_results=dependency_results,
+174-        )
+175:        launch_task = asyncio.create_task(self._execution.run(binding_digest, request))
+176-        try:
+177-            handle = await asyncio.shield(launch_task)
+grep: linktools-ai/src/linktools/ai/runtime/temporal: No such file or directory
+
+===== linktools-ai/src/linktools/ai/runtime/_execution.py :: _definition\(|binding_snapshot|output_binding|binding_digest|AgentDefinition =====
+
+===== linktools-ai/src/linktools/ai/runtime/_local.py :: catalog\.|binding_snapshot|output_binding|executor\.execute|binding_digest =====
+
+===== linktools-ai/src/linktools/ai/runtime/_factory.py :: binding_snapshot|output_binding|compiler\.restore|catalog\.|RecoveryExecutionInput =====
+
+===== linktools-ai/src/linktools/ai/runtime/_subagent.py :: catalog\.|AgentDefinition|binding_digest|planning|thinking =====
+
+===== linktools-ai/src/linktools/ai/runtime/_planner.py :: binding|AgentDefinition|catalog\. =====
+
+===== linktools-ai/src/linktools/ai/runtime/temporal :: LEGACY|CURRENT|binding_digest|agent_id|binding_snapshot|AgentBindingSnapshot =====
 ===== python -m compileall -q linktools-ai/src/linktools/ai =====
 ===== python -m pip install -q --upgrade pip =====
 ===== python -m pip install -q -e ./linktools -e ./linktools-ai[sqlite,evaluation,temporal] pytest pytest-asyncio ruff =====
 ===== ruff check --select E4,E7,E9,F linktools-ai/src/linktools/ai/agent/__init__.py linktools-ai/src/linktools/ai/agent/_binding.py linktools-ai/src/linktools/ai/agent/_builder.py linktools-ai/src/linktools/ai/agent/_catalog.py linktools-ai/src/linktools/ai/agent/_compiler.py linktools-ai/src/linktools/ai/agent/_definition.py linktools-ai/src/linktools/ai/agent/_executor.py linktools-ai/src/linktools/ai/asset/__init__.py linktools-ai/src/linktools/ai/asset/_repository.py linktools-ai/src/linktools/ai/runtime/_agent.py linktools-ai/src/linktools/ai/runtime/_coordinator.py linktools-ai/src/linktools/ai/runtime/_execution.py linktools-ai/src/linktools/ai/runtime/_factory.py linktools-ai/src/linktools/ai/runtime/_local.py linktools-ai/src/linktools/ai/runtime/_planner.py linktools-ai/src/linktools/ai/runtime/_runtime_service.py linktools-ai/src/linktools/ai/runtime/_session.py linktools-ai/src/linktools/ai/runtime/_subagent.py linktools-ai/src/linktools/ai/runtime/service_api.py linktools-ai/src/linktools/ai/runtime/state/_contracts.py linktools-ai/src/linktools/ai/runtime/state/_history.py linktools-ai/src/linktools/ai/runtime/state/_steps.py linktools-ai/src/linktools/ai/spec/_codec.py linktools-ai/src/linktools/ai/spec/_contract.py linktools-ai/src/linktools/ai/workspace/__init__.py linktools-ai/src/linktools/ai/workspace/_factory.py tests/ai/test_agent_composition.py =====
-F401 [*] `typing.TypeGuard` imported but unused
-  --> linktools-ai/src/linktools/ai/runtime/_runtime_service.py:8:30
-   |
- 6 | import secrets
- 7 | from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
- 8 | from typing import Protocol, TypeGuard
-   |                              ^^^^^^^^^
- 9 |
-10 | from linktools.core import environ
-   |
-help: Remove unused import: `typing.TypeGuard`
-  |
-7 | from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
-  - from typing import Protocol, TypeGuard
-8 + from typing import Protocol
-9 |
-  |
+All checks passed!
+===== python -m scripts.build.architecture =====
+<frozen runpy>:128: RuntimeWarning: 'scripts.build.architecture' found in sys.modules after import of package 'scripts.build', but prior to execution of 'scripts.build.architecture'; this may result in unpredictable behaviour
+===== pytest -q tests/ai --maxfail=30 =====
 
-F401 [*] `.state._contracts.ConversationHistoryRecord` imported but unused
-  --> linktools-ai/src/linktools/ai/runtime/_session.py:54:5
-   |
-52 | from .state._contracts import (
-53 |     ConversationCursor,
-54 |     ConversationHistoryRecord,
-   |     ^^^^^^^^^^^^^^^^^^^^^^^^^
-55 |     ConversationState,
-56 |     ExecutionRecord,
-   |
-help: Remove unused import
-   |
-53 |     ConversationCursor,
-   -     ConversationHistoryRecord,
-54 |     ConversationState,
-55 |     ExecutionRecord,
-56 |     ExecutionRepository,
-   -     HistoryQuality,
-57 |     OperationLedgerInput,
-   |
-
-F401 [*] `.state._contracts.HistoryQuality` imported but unused
-  --> linktools-ai/src/linktools/ai/runtime/_session.py:58:5
-   |
-56 |     ExecutionRecord,
-57 |     ExecutionRepository,
-58 |     HistoryQuality,
-   |     ^^^^^^^^^^^^^^
-59 |     OperationLedgerInput,
-60 |     OperationLedgerRecord,
-   |
-help: Remove unused import
-   |
-53 |     ConversationCursor,
-   -     ConversationHistoryRecord,
-54 |     ConversationState,
-55 |     ExecutionRecord,
-56 |     ExecutionRepository,
-   -     HistoryQuality,
-57 |     OperationLedgerInput,
-   |
-
-Found 3 errors.
-[*] 3 fixable with the `--fix` option.
+==================================== ERRORS ====================================
+______________ ERROR collecting tests/ai/test_asset_repository.py ______________
+ImportError while importing test module '/home/runner/work/linktools/linktools/tests/ai/test_asset_repository.py'.
+Hint: make sure your test modules/packages have valid Python names.
+Traceback:
+/opt/hostedtoolcache/Python/3.12.14/x64/lib/python3.12/importlib/__init__.py:90: in import_module
+    return _bootstrap._gcd_import(name[level:], package, level)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+tests/ai/test_asset_repository.py:12: in <module>
+    from linktools.ai.asset import (
+E   ImportError: cannot import name 'AssetTypeRegistry' from 'linktools.ai.asset' (/home/runner/work/linktools/linktools/linktools-ai/src/linktools/ai/asset/__init__.py)
+_______ ERROR collecting tests/ai/test_workspace_runtime_regressions.py ________
+ImportError while importing test module '/home/runner/work/linktools/linktools/tests/ai/test_workspace_runtime_regressions.py'.
+Hint: make sure your test modules/packages have valid Python names.
+Traceback:
+/opt/hostedtoolcache/Python/3.12.14/x64/lib/python3.12/importlib/__init__.py:90: in import_module
+    return _bootstrap._gcd_import(name[level:], package, level)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+tests/ai/test_workspace_runtime_regressions.py:12: in <module>
+    from linktools.ai.workspace._factory import _build_asset_registry, _build_asset_repository
+E   ImportError: cannot import name '_build_asset_registry' from 'linktools.ai.workspace._factory' (/home/runner/work/linktools/linktools/linktools-ai/src/linktools/ai/workspace/_factory.py)
+=========================== short test summary info ============================
+ERROR tests/ai/test_asset_repository.py
+ERROR tests/ai/test_workspace_runtime_regressions.py
+!!!!!!!!!!!!!!!!!!! Interrupted: 2 errors during collection !!!!!!!!!!!!!!!!!!!!
+2 errors in 4.02s

@@ -197,8 +197,8 @@ class AgentExecutor:
             )
         agent = build_pydantic_agent(binding, model=model)
         materialized: "list[PydanticAgentCapability[None]]" = []
-        for binding in definition.effective_capabilities:
-            materialized.extend(await binding.materialize(capability_context))
+        for capability in definition.effective_capabilities:
+            materialized.extend(await capability.materialize(capability_context))
         trusted_tool_classes = _trusted_tool_classes(
             definition,
             platform_tool_names=platform_tool_names,
