@@ -11,9 +11,9 @@ import subprocess
 import sys
 from pathlib import Path
 
-from scripts.build.architecture import ArchitecturePolicyChecker, build_report
-from scripts.build.cohesion import check_files
-from scripts.build.names import check_names
+from scripts.check.ai.architecture import ArchitecturePolicyChecker, build_report
+from scripts.check.ai.cohesion import check_files
+from scripts.check.ai.names import check_names
 
 
 def test_source_graph_is_acyclic_and_static() -> None:
@@ -99,6 +99,17 @@ def test_name_gate_treats_private_marker_as_semantic_only(tmp_path: Path) -> Non
     assert str(root / "_internal") in check_names(root)
 
 
+def _temporary_policy_path(package_root: Path) -> Path:
+    return (
+        package_root.parent
+        / "scripts"
+        / "check"
+        / "ai"
+        / "matrix"
+        / "linktools-ai-package-policy.json"
+    )
+
+
 def test_architecture_gate_normalizes_relative_module_policy_and_rejects_stale_entries(tmp_path: Path) -> None:
     package_root = tmp_path / "package"
     source_root = package_root / "src" / "linktools" / "ai"
@@ -110,7 +121,7 @@ def test_architecture_gate_normalizes_relative_module_policy_and_rejects_stale_e
     (source_root / "app" / "__init__.py").write_text("__all__ = []\n", encoding="utf-8")
     (source_root / "task" / "__init__.py").write_text("__all__ = []\n", encoding="utf-8")
     (source_root / "app" / "facade.py").write_text("from ..core import Value\n\nVALUE = Value\n", encoding="utf-8")
-    policy_path = package_root / "scripts" / "build" / "matrix" / "linktools-ai-package-policy.json"
+    policy_path = _temporary_policy_path(package_root)
     policy_path.parent.mkdir(parents=True)
     policy = {
         "top_level_packages": ["core", "app", "task"],
@@ -139,7 +150,7 @@ def test_public_private_classification_gate_is_exact(tmp_path: Path) -> None:
     (source_root / "app").mkdir(parents=True)
     (source_root / "app" / "__init__.py").write_text("__all__ = []\n", encoding="utf-8")
     (source_root / "app" / "facade.py").write_text("VALUE = 1\n", encoding="utf-8")
-    policy_path = package_root / "scripts" / "build" / "matrix" / "linktools-ai-package-policy.json"
+    policy_path = _temporary_policy_path(package_root)
     policy_path.parent.mkdir(parents=True)
     policy_path.write_text(json.dumps({"top_level_packages": ["app"], "public_modules": ["app.facade"]}), encoding="utf-8")
     checker = ArchitecturePolicyChecker()
@@ -181,7 +192,7 @@ def test_private_cross_package_import_gate_covers_runtime_type_checking_and_nest
         "    from ..adapter._persistence import VALUE as TYPE_VALUE\n",
         encoding="utf-8",
     )
-    policy_path = package_root / "scripts" / "build" / "matrix" / "linktools-ai-package-policy.json"
+    policy_path = _temporary_policy_path(package_root)
     policy_path.parent.mkdir(parents=True)
     policy_path.write_text(
         json.dumps(
@@ -219,7 +230,7 @@ def test_private_import_policy_is_forbidden(tmp_path: Path) -> None:
         encoding="utf-8",
     )
     (source_root / "adapter" / "_persistence.py").write_text("VALUE = 1\n", encoding="utf-8")
-    policy_path = package_root / "scripts" / "build" / "matrix" / "linktools-ai-package-policy.json"
+    policy_path = _temporary_policy_path(package_root)
     policy_path.parent.mkdir(parents=True)
     policy_path.write_text(
         json.dumps(
@@ -262,7 +273,7 @@ def test_private_conversion_tree_is_exact() -> None:
     assert (root / "errors.py").is_file()
     assert not (root / "core" / "errors.py").is_file()
     assert check_names(root) == ()
-    policy = json.loads(Path("linktools-ai/scripts/build/matrix/linktools-ai-package-policy.json").read_text(encoding="utf-8"))
+    policy = json.loads(Path("scripts/check/ai/matrix/linktools-ai-package-policy.json").read_text(encoding="utf-8"))
     assert policy["public_modules"] == [
         "errors",
         "acp",
@@ -366,7 +377,7 @@ def test_facade_launcher_boundary_is_class_scoped() -> None:
 
 
 def test_runtime_step_contract_matrix_is_current() -> None:
-    root = Path("linktools-ai/scripts/build/matrix")
+    root = Path("scripts/check/ai/matrix")
     requirements_path = root / "runtime-step-requirements.json"
     requirements = json.loads(requirements_path.read_text(encoding="utf-8"))
     entries = requirements["requirements"]
