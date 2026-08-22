@@ -24,8 +24,8 @@ jobs:
         shell: bash
         run: |
           set -uo pipefail
-          if [[ ! -f .bootstrap/implement.py ]]; then
-            echo 'implementation script not present; nothing to run'
+          if [[ ! -f .bootstrap/ready ]]; then
+            echo 'implementation trigger not present; nothing to run'
             exit 0
           fi
           RESULT=/tmp/agent-runtime-result.txt
@@ -48,6 +48,7 @@ jobs:
             git reset --hard HEAD
           fi
           mkdir -p .bootstrap
+          rm -f .bootstrap/ready
           cp /tmp/result.saved .bootstrap/result.txt
           printf '%s\n' "$status" > .bootstrap/status
           git config user.name github-actions[bot]
