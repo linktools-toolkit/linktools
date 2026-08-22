@@ -84,7 +84,7 @@ class SubagentDispatcher:
             raise
         idempotency_key = "subagent:" + canonical_sha256(
             {
-                "version": 4,
+                "version": 1,
                 "parent_execution_id": parent_execution_id,
                 "tool_call_id": tool_call_id,
                 "agent_id": agent_id,
