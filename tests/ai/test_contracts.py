@@ -357,7 +357,7 @@ def test_temporal_registration_has_one_explicit_worker_surface() -> None:
         ) -> SessionWorkflowResult:
             return SessionWorkflowResult(
                 request.session_id,
-                request.mutation_id,
+                request.operation_id,
                 "SUCCEEDED",
             )
 
@@ -404,13 +404,13 @@ def test_temporal_registration_has_one_explicit_worker_surface() -> None:
     )
     assert ExecuteActivity.run.__name__ == "run"
     assert ExecuteActivity.load_input.__name__ == "load_input"
-    assert ExecuteActivity.fix_bundle_route.__name__ == "fix_bundle_route"
-    assert ExecuteActivity.fix_binding.__name__ == "fix_binding"
     assert ExecuteActivity.reserve_budget.__name__ == "reserve_budget"
     assert ExecuteActivity.run_agent.__name__ == "run_agent"
-    assert ExecuteActivity.process_deferred.__name__ == "process_deferred"
+    assert ExecuteActivity.persist_deferred.__name__ == "persist_deferred"
+    assert ExecuteActivity.load_resume_input.__name__ == "load_resume_input"
     assert ExecuteActivity.commit_result.__name__ == "commit_result"
     assert ExecuteActivity.settle_budget.__name__ == "settle_budget"
+    assert ExecuteActivity.cancel_effect.__name__ == "cancel_effect"
     assert EvaluationActivity.run.__name__ == "run"
     assert SessionActivity.run.__name__ == "run"
     assert TaskActivity.prepare.__name__ == "prepare"
