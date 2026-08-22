@@ -213,7 +213,7 @@ class AgentExecutor:
             platform_tool_names=platform_tool_names,
             planning=planning,
             trusted_tool_classes=trusted_tool_classes,
-            trusted_mcp_tools=definition.trusted_mcp_tools,
+            trusted_mcp_selectors=definition.trusted_mcp_selectors,
             parent_step_run_id=parent_step_run_id,
             subagent_delegate=subagent_delegate,
             tool_operations=tool_operations,
@@ -230,7 +230,7 @@ class AgentExecutor:
                 definition.spec.allow_tools,
                 planning=planning,
                 trusted_tool_classes=trusted_tool_classes,
-                trusted_mcp_tools=definition.trusted_mcp_tools,
+                trusted_mcp_selectors=definition.trusted_mcp_selectors,
             ),
         )
         _logger.debug(
@@ -284,12 +284,12 @@ class _ToolPresentation(AbstractCapability[None]):
         *,
         planning: bool,
         trusted_tool_classes: "tuple[tuple[str, str], ...]",
-        trusted_mcp_tools: bool,
+        trusted_mcp_selectors: "tuple[str, ...]",
     ) -> None:
         self._allow_tools = allow_tools
         self._planning = planning
         self._trusted_tool_classes = trusted_tool_classes
-        self._trusted_mcp_tools = trusted_mcp_tools
+        self._trusted_mcp_selectors = trusted_mcp_selectors
 
     async def prepare_tools(
         self,
@@ -312,7 +312,7 @@ class _ToolPresentation(AbstractCapability[None]):
             if self._planning and not tool_allowed_in_planning(
                 tool,
                 trusted_tool_classes=self._trusted_tool_classes,
-                trusted_mcp_tools=self._trusted_mcp_tools,
+                trusted_mcp_selectors=self._trusted_mcp_selectors,
             ):
                 continue
             selected.append(tool)
