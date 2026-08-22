@@ -302,7 +302,7 @@ class _ToolPresentation(AbstractCapability[None]):
         selected: list[ToolDefinition] = []
         for tool in tool_defs:
             if not tool_is_control(
-                tool.name,
+                tool,
                 trusted_tool_classes=self._trusted_tool_classes,
             ) and not _function_tool_allowed(
                 tool.name,
