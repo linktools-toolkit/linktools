@@ -9,7 +9,7 @@ on:
       - master
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   verify:
@@ -36,25 +36,6 @@ jobs:
             'sqlalchemy[asyncio]==2.0.51' 'aiosqlite==0.22.1' \
             ruff
           python -m pip install --no-deps -e ./linktools -e ./linktools-ai
-
-      - name: Apply verified import fix
-        if: github.event_name == 'push'
-        run: |
-          python - <<'PY'
-          from pathlib import Path
-          path = Path('linktools-ai/src/linktools/ai/runtime/_runtime_service.py')
-          text = path.read_text()
-          old = 'from typing import Protocol\n'
-          new = 'from typing import Protocol, TypeGuard\n'
-          if old not in text:
-              raise SystemExit('expected import not found')
-          path.write_text(text.replace(old, new, 1))
-          PY
-          git config user.name github-actions[bot]
-          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
-          git add linktools-ai/src/linktools/ai/runtime/_runtime_service.py
-          git commit -m 'fix(ai): import runtime type guard'
-          git push origin HEAD:refactor/ai-runtime-agent-composition
 
       - name: Compile
         env:
