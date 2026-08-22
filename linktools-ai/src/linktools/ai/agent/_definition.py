@@ -36,7 +36,7 @@ class AgentDefinition:
     effective_capabilities: "tuple[CapabilityBinding, ...]"
     binding_snapshot: AgentBindingSnapshot
     trusted_tool_classes: "tuple[tuple[str, str], ...]" = ()
-    trusted_mcp_tools: bool = False
+    trusted_mcp_selectors: "tuple[str, ...]" = ()
 
     def __post_init__(self) -> None:
         validate_fingerprint(self.digest)
@@ -62,8 +62,20 @@ class AgentDefinition:
             raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID) from error
         if len(set(identities)) != len(identities):
             raise AIError(ErrorCode.CAPABILITY_CONFLICT)
-        if not isinstance(self.trusted_mcp_tools, bool):
-            raise AIError(ErrorCode.CAPABILITY_POLICY_CONFLICT)
+        selectors: set[str] = set()
+        previous_selector: str | None = None
+        for selector in self.trusted_mcp_selectors:
+            if (
+                not isinstance(selector, str)
+                or not selector.startswith("mcp__")
+                or selector == "mcp__"
+                or "__" in selector[5:]
+                or selector in selectors
+                or (previous_selector is not None and selector < previous_selector)
+            ):
+                raise AIError(ErrorCode.CAPABILITY_POLICY_CONFLICT)
+            selectors.add(selector)
+            previous_selector = selector
         names: set[str] = set()
         previous: str | None = None
         for name, tool_class in self.trusted_tool_classes:
