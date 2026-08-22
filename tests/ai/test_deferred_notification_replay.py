@@ -34,6 +34,13 @@ class _AllowAuthorization:
         del principal, action, resource
 
 
+class _Executions:
+    async def get_header(self, execution_id: str, *, tenant_id: str) -> ResourceRef | None:
+        if execution_id == "execution" and tenant_id == "tenant":
+            return ResourceRef(ResourceKind.EXECUTION, execution_id, tenant_id)
+        return None
+
+
 class _FailOnceGateway:
     def __init__(self) -> None:
         self.calls: list[tuple[str, str, dict[str, object]]] = []
@@ -192,6 +199,7 @@ async def test_external_supply_replays_notification_after_durable_commit() -> No
     workflow_id, operation, payload = gateway.calls[-1]
     assert workflow_id == "execution"
     assert operation == "supply_external_result"
+    assert payload["operation_id"] == "operation"
     assert payload["call_id"] == "external"
     assert payload["idempotency_key"] == "supply-key"
     assert payload["payload_digest"] == "b" * 64
@@ -236,6 +244,7 @@ async def test_approval_replays_notification_after_durable_commit() -> None:
     gateway = _FailOnceGateway()
     service = DefaultApprovalService(
         approvals,
+        _Executions(),
         _AllowAuthorization(),
         gateway,
     )
@@ -259,6 +268,7 @@ async def test_approval_replays_notification_after_durable_commit() -> None:
     workflow_id, operation, payload = gateway.calls[-1]
     assert workflow_id == "execution"
     assert operation == "approve"
+    assert payload["operation_id"] == "operation"
     assert payload["approval_id"] == "approval"
     assert payload["idempotency_key"] == "approval-key"
     assert payload["decision"] == ApprovalDecision.APPROVE.value
