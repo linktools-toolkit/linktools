@@ -65,6 +65,12 @@ _TRUSTED_TOOL_CLASSES = frozenset(
         "memory.write",
     }
 )
+_WORKSPACE_FILESYSTEM_CAPABILITY_ID = "workspace-filesystem"
+_WORKSPACE_SHELL_CAPABILITY_ID = "workspace-shell"
+_SKILL_CAPABILITY_ID = "linktools-skill"
+_MEMORY_CAPABILITY_ID = "linktools-memory"
+_PLANNING_CAPABILITY_ID = "linktools-planning"
+_SUBAGENT_CAPABILITY_ID = "linktools-subagent"
 
 
 @dataclass(frozen=True, slots=True)
@@ -510,10 +516,11 @@ async def compose_platform_capabilities(
                 inject_memory=False,
                 guidance=_memory_guidance(selected_memory),
                 selected_tool_names=selected_memory,
+                id=_MEMORY_CAPABILITY_ID,
             )
         )
     if any(name in selected for name in PLANNING_TOOL_NAMES):
-        capabilities.append(Planning())
+        capabilities.append(Planning(id=_PLANNING_CAPABILITY_ID))
     if "delegate_task" in selected:
         if scope.subagent_delegate is None:
             raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
@@ -546,11 +553,11 @@ def tool_name_allowed(name: str, allow_tools: "tuple[str, ...]") -> bool:
 
 
 def tool_is_control(
-    name: str,
+    tool_def: ToolDefinition,
     *,
     trusted_tool_classes: "tuple[tuple[str, str], ...]",
 ) -> bool:
-    return _tool_class(name, trusted_tool_classes) == "control"
+    return _tool_class(tool_def, trusted_tool_classes) == "control"
 
 
 def tool_allowed_in_planning(
@@ -559,7 +566,7 @@ def tool_allowed_in_planning(
     trusted_tool_classes: "tuple[tuple[str, str], ...]",
     trusted_mcp_selectors: "tuple[str, ...]",
 ) -> bool:
-    tool_class = _tool_class(tool_def.name, trusted_tool_classes)
+    tool_class = _tool_class(tool_def, trusted_tool_classes)
     if tool_class == "control":
         return True
     if tool_class in {"filesystem.write", "shell", "memory.write"}:
@@ -567,7 +574,10 @@ def tool_allowed_in_planning(
     if tool_class in {"filesystem.read", "memory.read"}:
         return True
     _validate_trusted_mcp_selectors(trusted_mcp_selectors)
-    if any(tool_def.name.startswith(f"{selector}__") for selector in trusted_mcp_selectors):
+    capability_id = tool_def.capability_id
+    if capability_id in trusted_mcp_selectors:
+        if not tool_def.name.startswith(f"{capability_id}__"):
+            raise AIError(ErrorCode.CAPABILITY_POLICY_CONFLICT)
         return False
     metadata = tool_def.metadata or {}
     value = metadata.get(PLAN_SAFE_METADATA_KEY)
@@ -579,14 +589,41 @@ def tool_allowed_in_planning(
 
 
 def _tool_class(
-    name: str,
+    tool_def: ToolDefinition,
     trusted_tool_classes: "tuple[tuple[str, str], ...]",
 ) -> "str | None":
     _validate_trusted_tool_classes(trusted_tool_classes)
     for tool_name, tool_class in trusted_tool_classes:
-        if tool_name == name:
-            return tool_class
+        if tool_name != tool_def.name:
+            continue
+        expected_capability_id = _trusted_capability_id(tool_name, tool_class)
+        return tool_class if tool_def.capability_id == expected_capability_id else None
     return None
+
+
+def _trusted_capability_id(name: str, tool_class: str) -> str:
+    if tool_class == "filesystem.read" and name in WORKSPACE_FILESYSTEM_READ_TOOL_NAMES:
+        return _WORKSPACE_FILESYSTEM_CAPABILITY_ID
+    if (
+        tool_class == "filesystem.write"
+        and name in WORKSPACE_FILESYSTEM_TOOL_NAMES
+        and name not in WORKSPACE_FILESYSTEM_READ_TOOL_NAMES
+    ):
+        return _WORKSPACE_FILESYSTEM_CAPABILITY_ID
+    if tool_class == "shell" and name in WORKSPACE_SHELL_TOOL_NAMES:
+        return _WORKSPACE_SHELL_CAPABILITY_ID
+    if tool_class == "memory.read" and name in MEMORY_READ_TOOL_NAMES:
+        return _MEMORY_CAPABILITY_ID
+    if tool_class == "memory.write" and name in MEMORY_TOOL_NAMES and name not in MEMORY_READ_TOOL_NAMES:
+        return _MEMORY_CAPABILITY_ID
+    if tool_class == "control":
+        if name in SKILL_TOOL_NAMES:
+            return _SKILL_CAPABILITY_ID
+        if name in PLANNING_TOOL_NAMES:
+            return _PLANNING_CAPABILITY_ID
+        if name in SUBAGENT_TOOL_NAMES:
+            return _SUBAGENT_CAPABILITY_ID
+    raise AIError(ErrorCode.CAPABILITY_POLICY_CONFLICT)
 
 
 def _validate_trusted_tool_classes(
@@ -606,6 +643,7 @@ def _validate_trusted_tool_classes(
             or (previous is not None and name < previous)
         ):
             raise AIError(ErrorCode.CAPABILITY_POLICY_CONFLICT)
+        _trusted_capability_id(name, tool_class)
         seen.add(name)
         previous = name
 
@@ -652,6 +690,7 @@ def select_platform_tool_names(
 
 class _SubagentCapability(AbstractCapability[None]):
     def __init__(self, delegate: SubagentDelegate) -> None:
+        self.id = _SUBAGENT_CAPABILITY_ID
         self._delegate = delegate
 
     def get_toolset(self) -> "FunctionToolset[None]":
