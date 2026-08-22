@@ -1,604 +1,69 @@
 ===== python .bootstrap/patch.py =====
-75-    AgentAttemptClaim,
-76-    ApprovalRecord,
-77-    ArtifactRecord,
-78:    ContextProjection,
-79-    ConversationCursor,
-80-    ConversationHistoryIndexNodeRecord,
-81-    ConversationHistoryRecord,
---
-119-    ResultRecord,
-120-    RuntimePayloadRef,
-121-    SessionForkResultRecord,
-122:    SessionRecord,
-123-    StoredStepSnapshot,
-124-    ToolOperationAdmission,
-125-    TranscriptChunk,
---
-151-    ("conversation_history_index_node", ConversationHistoryIndexNodeRecord),
-152-    ("conversation_history", ConversationHistoryRecord),
-153-    ("conversation_history_segment", ConversationHistorySegmentRef),
-154:    ("context_projection", ContextProjection),
-155-    ("evaluation_record", EvaluationRecord),
-156-    ("execution_event", ExecutionEventRecord),
-157-    ("execution_history_head", ExecutionHistoryHeadRecord),
---
-185-    ("recovery_terminal_outcome", RecoveryTerminalOutcome),
-186-    ("resource_ref", ResourceRef),
-187-    ("result_record", ResultRecord),
-188:    ("session_record", SessionRecord),
-189-    ("session_fork_result", SessionForkResultRecord),
-190-    ("stored_step_snapshot", StoredStepSnapshot),
-191-    ("object_ref", ObjectRef),
---
-485-        "execution_id",
-486-        "tenant_id",
-487-        "session_id",
-488:        "binding_digest",
-489-        "parent_execution_id",
-490-        "root_execution_id",
-491-        "source_execution_id",
---
-515-        "session_id",
-516-        "memory_scope",
-517-        "agent_id",
-518:        "binding_digest",
-519-        "lineage_kind",
-520-        "parent_execution_id",
-521-        "root_execution_id",
-30-    _encode_step_envelope,
-31-)
-32-from ._contracts import (
-33:    ContextProjection,
-34-    ConversationHistoryRepository,
-35-    ExecutionHistoryHeadRecord,
-36-    ExecutionHistoryState,
---
-142-    owner_id: str
-143-    stored: StoredStepSnapshot
-144-    chunks: tuple[TranscriptChunk, ...]
-145:    projection: ContextProjection
-146-    history_quality: HistoryQuality = HistoryQuality.COMPLETE
-147-    chunk_session_history_item_counts: tuple[int, ...] = ()
-148-    chunk_execution_transcript_item_counts: tuple[int, ...] = ()
---
-824-            if projection_record is not None:
-825-                projection = _decode_enveloped_domain(
-826-                    projection_record.data,
-827:                    ContextProjection,
-828-                )
-829-                projection_digest = projection.digest
-830-            result[run_id] = ExecutionRunSealHead(
---
-1130-            projection = self._history.project_context(
-1131-                owner_id,
-1132-                snapshot.messages,
-1133:                binding_digest=projection_binding,
-1134-                origins=origins,
-1135-                sources=sources,
-1136-            )
---
-1169-
-1170-    def _validate_projection_sources(
-1171-        self,
-1172:        projection: ContextProjection,
-1173-        sources: Sequence[TranscriptMessageRef | None],
-1174-    ) -> None:
-1175-        allowed: dict[tuple[RuntimeDomain, str], list[int]] = {}
---
-1329-        if any(not isinstance(snapshot, PreparedStepSnapshot) for snapshot in values):
-1330-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-1331-        if binding_digest is not None and any(
-1332:            snapshot.projection.binding_digest != binding_digest
-1333-            for snapshot in values
-1334-        ):
-1335-            raise AIError(ErrorCode.SESSION_BINDING_MISMATCH)
---
-2021-        projection = await self._history.load_projection(run_id)
-2022-        if projection is None or projection.digest != stored.projection_digest:
-2023-            return False
-2024:        if binding_digest is not None and projection.binding_digest != binding_digest:
-2025-            return False
-2026-        context = await self._history.load_model_context(
-2027-            run_id,
---
-2256-        self._initialized = False
-2257-        self._preflight = False
-2258-        self._projection_offsets: dict[str, _ProjectionOffset] = {}
-2259:        self._projection_bindings: dict[str, str] = {}
-2260-        self._projection_dirty: set[str] = set()
-2261-        self._durability_flights: dict[str, _RunDurabilityFlight] = {}
-2262-        self._terminal_seals: dict[str, _LocalExecutionTerminalSeal] = {}
---
-2270-        for archive in self._archives.values():
-2271-            await archive.initialize()
-2272-        self._projection_offsets.clear()
-2273:        self._projection_bindings.clear()
-2274-        self._projection_dirty.clear()
-2275-        self._durability_flights.clear()
-2276-        self._terminal_seals.clear()
---
-3022-                    if projection is None:
-3023-                        return None
-3024-                    if binding_digest is not None:
-3025:                        self._projection_bindings[step_run_id] = binding_digest
-3026-                    flight = self._install_durability_flight_locked(
-3027-                        step_run_id,
-3028-                        _RunDurabilityKind.PROJECTION,
---
-3192-            await self.finalize_execution_projection(flight, captured)
-3193-            return
-3194-        started = monotonic()
-3195:        binding = captured.binding_digest or self._projection_bindings.get(
-3196-            flight.run_id,
-3197-            flight.run_id,
-3198-        )
---
-3382-                            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-3383-                        self._staging.release_run_local(run_id)
-3384-                        self._projection_offsets.pop(run_id, None)
-3385:                        self._projection_bindings.pop(run_id, None)
-3386-                        self._projection_dirty.discard(run_id)
-3387-                        for archive in self._archives.values():
-3388-                            if isinstance(archive, StateStepArchive):
---
-3428-                    if runtime_domain is RuntimeDomain.EXECUTION:
-3429-                        self._ensure_run_mutable(step_run_id)
-3430-                    self._projection_offsets.pop(step_run_id, None)
-3431:                    self._projection_bindings.pop(step_run_id, None)
-3432-                    self._projection_dirty.discard(step_run_id)
-3433-                    flight = self._install_durability_flight_locked(
-3434-                        step_run_id,
-22-    encode_envelope,
-23-)
-24-from ._contracts import (
-25:    ContextProjection,
-26-    ConversationHistoryRepository,
-27-    HistoryQuality,
-28-    InlineContextBlock,
---
-156-        owner_id: str,
-157-        messages: Sequence[ModelMessage],
-158-        *,
-159:        binding_digest: str,
-160-        origins: Sequence[TranscriptOrigin] = (),
-161-        sources: Sequence[TranscriptMessageRef | None] = (),
-162:    ) -> ContextProjection:
-163-        values = tuple(messages)
-164-        origin_values = tuple(origins)
-165-        source_values = tuple(sources)
---
-210-                    )
-211-                )
-212-            index = end
-213:        digest = self._digest(binding_digest, items)
-214:        return ContextProjection(binding_digest, tuple(items), digest)
-215-
-216-    def _digest(
-217-        self,
-218:        binding_digest: str,
-219-        items: Sequence[TranscriptSpanRef | InlineContextBlock],
-220-    ) -> str:
-221-        return hashlib.sha256(
-222-            canonical_json_bytes(
-223-                {
-224:                    "binding_digest": binding_digest,
-225-                    "items": encode_domain(tuple(items)),
-226-                }
-227-            )
---
-694-    async def prepare_projection(
-695-        self,
-696-        run_id: str,
-697:        projection: ContextProjection,
-698:    ) -> ContextProjection:
-699-        require_no_run_history_lock("TranscriptRepository.prepare_projection")
-700-        items: list[TranscriptSpanRef | InlineContextBlock] = []
-701-        changed = False
---
-737-            changed = True
-738-        if not changed:
-739-            return projection
-740:        digest = self._projector._digest(projection.binding_digest, items)
-741:        return ContextProjection(projection.binding_digest, tuple(items), digest)
-742-
-743-    def history_stream(self, history_id: str) -> bytes:
-744-        return stream_digest(
---
-920-        history_id: str,
-921-        *,
-922-        tenant_id: str,
-923:        binding_digest: str | None = None,
-924-    ) -> LoadedModelContext:
-925-        require_no_run_history_lock("TranscriptRepository.load_session_model_context")
-926-        projection = await self.load_projection(history_id)
-927-        if projection is not None:
-928:            if binding_digest is not None and projection.binding_digest != binding_digest:
-929-                raise AIError(ErrorCode.SESSION_BINDING_MISMATCH)
-930-            return await self.load_model_context(
-931-                history_id,
-932:                binding_digest=binding_digest,
-933-            )
-934-        head = await self.get_head(history_id)
-935-        if head is None:
---
-1006-        self,
-1007-        transaction: StateTransaction,
-1008-        run_id: str,
-1009:        projection: ContextProjection,
-1010-    ) -> None:
-1011-        key = self._projection_key(run_id)
-1012-        value = StoredRecord(
---
-1044-        ):
-1045-            raise AIError(ErrorCode.STORAGE_CONFLICT)
-1046-
-1047:    async def load_projection(self, owner_id: str) -> ContextProjection | None:
-1048-        require_no_run_history_lock("TranscriptRepository.load_projection")
-1049-        value = await self._store.read(
-1050-            lambda transaction: transaction.get_record(self._projection_key(owner_id))
-1051-        )
-1052-        if value is None:
-1053-            return None
-1054:        return _decode_enveloped_domain(value.data, ContextProjection)
-1055-
-1056-    async def resolve_transcript_message_refs(
-1057-        self,
---
-1116-        self,
-1117-        owner_id: str,
-1118-        *,
-1119:        binding_digest: str | None = None,
-1120-    ) -> LoadedModelContext:
-1121-        require_no_run_history_lock("TranscriptRepository.load_model_context")
-1122-        projection = await self.load_projection(owner_id)
---
-1127-            if head.message_count:
-1128-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-1129-            return LoadedModelContext(())
-1130:        if binding_digest is not None and projection.binding_digest != binding_digest:
-1131-            _logger.info(
-1132-                "context projection binding mismatch: domain=%s owner=%s",
-1133-                self._runtime_domain.value,
---
-1659-        owner_id: str,
-1660-        messages: Sequence[ModelMessage],
-1661-        *,
-1662:        binding_digest: str,
-1663-        origins: Sequence[TranscriptOrigin] = (),
-1664-        sources: Sequence[TranscriptMessageRef | None] = (),
-1665:    ) -> ContextProjection:
-1666-        return self._projector.project(
-1667-            owner_id,
-1668-            messages,
-1669:            binding_digest=binding_digest,
-1670-            origins=origins,
-1671-            sources=sources,
-1672-        )
-252-
-253-
-254-@dataclass(frozen=True, slots=True)
-255:class ContextProjection:
-256:    binding_digest: str
-257-    items: tuple[ContextProjectionItem, ...]
-258-    digest: str
-259-
---
-304-
-305-
-306-@dataclass(frozen=True, slots=True)
-307:class SessionRecord:
-308-    session_id: str
-309-    tenant_id: str
-310-    owner_principal_id: str
-311:    binding_digest: str
-312-    status: SessionStatus
-313-    revision: int
-314-    resource_generation: int
---
-378-
-379-
-380-@dataclass(frozen=True, slots=True)
-381:class ExecutionRecord:
-382-    execution_id: str
-383-    tenant_id: str
-384-    session_id: str | None
-385:    binding_digest: str
-386-    parent_execution_id: str | None
-387-    root_execution_id: str
-388-    source_execution_id: str | None
---
-409-        if self.binding is None:
-410-            if self.planning or self.thinking:
-411-                raise ValueError("legacy execution without binding cannot enable modes")
-412:        elif self.binding.binding_digest != self.binding_digest:
-413-            raise ValueError("execution binding snapshot does not match binding digest")
-414-
-415-
---
-612-    dataset_revision: int
-613-    evaluator_id: str
-614-    evaluator_revision: int
-615:    binding_digest: str
-616-    output_schema_fingerprint: str
-617-    artifact_digest: str | None
-618-    status: EvaluationStatus
---
-821-
-822-
-823-@dataclass(frozen=True, slots=True)
-824:class RecoveryExecutionInput:
-825-    user_prompt: StoredPayload | str
-826-    principal_id: str
-827-    principal_kind: str
-828-    session_id: str | None
-829-    memory_scope: str | None
-830-    agent_id: str
-831:    binding_digest: str
-832-    lineage_kind: str
-833-    parent_execution_id: str | None
-834-    root_execution_id: str
---
-852-            if self.planning or self.thinking:
-853-                raise ValueError("legacy recovery input without binding cannot enable modes")
-854-        elif (
-855:            self.binding.binding_digest != self.binding_digest
-856-            or self.binding.agent_spec.id != self.agent_id
-857-        ):
-858-            raise ValueError("recovery binding snapshot does not match execution identity")
-75-class _GatedExecutionService(Protocol):
-76-    async def run_for_session(
-77-        self,
-78:        binding_digest: str,
-79-        session_id: str,
-80-        request: ExecutionRequest,
-81-    ) -> ExecutionHandle: ...
---
-96-        history_id: str,
-97-        *,
-98-        tenant_id: str,
-99:        binding_digest: str | None = None,
-100-    ) -> tuple[object, ...]: ...
-101-
-102-    async def load_model_context(
-103-        self,
-104-        *,
-105-        run_id: str,
-106:        binding_digest: str,
-107-    ) -> tuple[object, ...]: ...
-108-
-109-    async def latest_snapshot(
---
-115-
-116-    async def _run_for_session_with_launch_gate(
-117-        self,
-118:        binding_digest: str,
-119-        session_id: str,
-120-        request: ExecutionRequest,
-121-        gate: _LaunchGate,
---
-162-        self._handoff_states: dict[tuple[str, str], _SessionHandoffState] = {}
-163-        self._handoff_condition = asyncio.Condition()
-164-
-165:    async def create(self, binding_digest: str, request: CreateSessionRequest) -> SessionView:
-166-        resource = ResourceRef(
-167-            ResourceKind.SESSION, request.session_id, request.principal.tenant_id, request.principal.principal_id
-168-        )
---
-173-                "tenant_id": request.principal.tenant_id,
-174-                "principal_id": request.principal.principal_id,
-175-                "session_id": request.session_id,
-176:                "binding": binding_digest,
-177-                "cwd": request.cwd,
-178-                "metadata": dict(request.metadata),
-179-            }
---
-183-            session_id=request.session_id,
-184-            tenant_id=request.principal.tenant_id,
-185-            owner_principal_id=request.principal.principal_id,
-186:            binding_digest=binding_digest,
-187-            status=SessionStatus.OPEN,
-188-            revision=0,
-189-            resource_generation=0,
---
-298-                return await self._transcript_store.load_session_model_context(
-299-                    record.history_id,
-300-                    tenant_id=record.tenant_id,
-301:                    binding_digest=record.binding_digest,
-302-                )
-303-            return await self._transcript_store.load_model_context(
-304-                run_id=record.continuation.step_run_id,
-305:                binding_digest=record.binding_digest,
-306-            )
-307-
-308-    async def _iter_session_messages(
---
-335-    ) -> AsyncIterator[object]:
-336-        return self._iter_session_messages(session_id, principal=principal)
-337-
-338:    async def resume(self, binding_digest: str, session_id: str, request: ResumeSessionRequest) -> ExecutionHandle:
-339:        return await self._resume(binding_digest, session_id, request, launch_gate=None)
-340-
-341-    async def _resume_with_launch_gate(
-342-        self,
-343:        binding_digest: str,
-344-        session_id: str,
-345-        request: ResumeSessionRequest,
-346-        gate: _LaunchGate,
-347-    ) -> ExecutionHandle:
-348:        return await self._resume(binding_digest, session_id, request, launch_gate=gate)
-349-
-350-    async def _resume(
-351-        self,
-352:        binding_digest: str,
-353-        session_id: str,
-354-        request: ResumeSessionRequest,
-355-        *,
---
-363-                AuthorizationAction.EXECUTION_RUN,
-364-                ResourceRef(ResourceKind.EXECUTION, session_id, request.principal.tenant_id),
-365-            )
-366:            if record.binding_digest != binding_digest:
-367-                raise AIError(ErrorCode.SESSION_BINDING_MISMATCH)
-368-            execution_request = ExecutionRequest(
-369-                user_prompt=request.user_prompt,
---
-378-            if launch_gate is None:
-379-                try:
-380-                    return await self._gated_execution.run_for_session(
-381:                        binding_digest,
-382-                        session_id,
-383-                        execution_request,
-384-                    )
---
-386-                    raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY) from error
-387-            try:
-388-                return await self._gated_execution._run_for_session_with_launch_gate(
-389:                    binding_digest,
-390-                    session_id,
-391-                    execution_request,
-392-                    launch_gate,
---
-394-            except AttributeError as error:
-395-                raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY) from error
-396-
-397:    async def fork(self, binding_digest: str, session_id: str, request: ForkSessionRequest) -> SessionView:
-398-        async with self._session_consumer(session_id, request.principal.tenant_id):
-399-            source = await self._authorized(session_id, request.principal, AuthorizationAction.SESSION_READ)
-400-            await self._authorization.authorize(
---
-407-                    request.principal.principal_id,
-408-                ),
-409-            )
-410:            if source.binding_digest != binding_digest:
-411-                raise AIError(ErrorCode.SESSION_BINDING_MISMATCH)
-412-            digest = canonical_sha256(
-413-                {
---
-416-                    "principal_id": request.principal.principal_id,
-417-                    "source": session_id,
-418-                    "target": request.new_session_id,
-419:                    "binding": source.binding_digest,
-420-                    "cwd": request.cwd,
-421-                }
-422-            )
---
-425-                session_id=request.new_session_id,
-426-                tenant_id=source.tenant_id,
-427-                owner_principal_id=source.owner_principal_id,
-428:                binding_digest=source.binding_digest,
-429-                status=SessionStatus.OPEN,
-430-                revision=0,
-431-                resource_generation=0,
---
-456-            _logger.debug("session forked: source=%s target=%s", session_id, target.session_id)
-457-            return await self._view(target, request.principal)
-458-
-459:    async def update(self, binding_digest: str, session_id: str, request: UpdateSessionRequest) -> SessionView:
-460-        async with self._session_consumer(session_id, request.principal.tenant_id):
-461:            return await self._update(binding_digest, session_id, request)
-462-
-463:    async def _update(self, binding_digest: str, session_id: str, request: UpdateSessionRequest) -> SessionView:
-464-        current = await self._authorized(session_id, request.principal, AuthorizationAction.SESSION_UPDATE)
-465:        if current.binding_digest != binding_digest:
-466-            raise AIError(ErrorCode.SESSION_BINDING_MISMATCH)
-467-        if any(
-468-            key.startswith("linktools.ai.") and current.metadata.get(key) != value
---
-847-        active = () if active_execution is None else (active_execution.execution_id,)
-848-        return SessionView(
-849-            record.session_id,
-850:            record.binding_digest,
-851-            record.status,
-852-            record.revision,
-853-            record.resource_generation,
-268-
-269-
-270-@dataclass(frozen=True, slots=True)
-271:class SessionView:
-272-    session_id: str
-273:    binding_digest: str
-274-    status: SessionStatus
-275-    revision: int = 0
-276-    resource_generation: int = 0
---
-282-
-283-@dataclass(frozen=True, slots=True)
-284-class LoadedSession:
-285:    view: SessionView
-286-    active_execution_ids: "tuple[str, ...]"
-287-
-288-
---
-491-        workflow_id: str,
-492-        request: ExecutionRequest,
-493-        *,
-494:        binding_digest: str,
-495-        binding: Mapping[str, JsonValue],
-496-    ) -> ExecutionHandle: ...
-497-
---
-503-
-504-
-505-class ExecutionService(Protocol):
-506:    async def run(self, binding_digest: str, request: ExecutionRequest) -> ExecutionHandle: ...
-507-    async def inspect(self, execution_id: str, *, principal: Principal) -> ExecutionView: ...
-508-    async def result(self, execution_id: str, *, principal: Principal) -> ExecutionResult: ...
-509-    async def wait(self, execution_id: str, *, principal: Principal, timeout_seconds: "float | None" = None) -> ExecutionResult: ...
-510:    async def run_and_wait(self, binding_digest: str, request: ExecutionRequest, *, timeout_seconds: "float | None" = None) -> ExecutionResult: ...
-511:    async def retry(self, binding_digest: str, execution_id: str, request: RetryExecutionRequest) -> ExecutionHandle: ...
-512:    async def fork(self, binding_digest: str, execution_id: str, request: ForkExecutionRequest) -> ExecutionHandle: ...
-513-    async def cancel(self, execution_id: str, request: CancelExecutionRequest) -> CancelExecutionResult: ...
-514-    async def trace(self, execution_id: str, *, principal: Principal, cursor: 'str | None' = None, limit: int = 100) -> 'Page[ExecutionTraceItem]': ...
-515-    async def transcript(self, execution_id: str, *, principal: Principal, cursor: 'str | None' = None, limit: int = 100) -> 'Page[TranscriptItem]': ...
-516-    async def history(self, execution_id: str, *, principal: Principal, cursor: 'str | None' = None, limit: int = 100) -> 'Page[ExecutionHistoryItem]': ...
-517-
-518-
-519:class SessionService(Protocol):
-520:    async def create(self, binding_digest: str, request: CreateSessionRequest) -> SessionView: ...
-521:    async def get(self, session_id: str, *, principal: Principal) -> SessionView: ...
-522:    async def list(self, request: ListSessionRequest) -> 'Page[SessionView]': ...
-523-    async def history(self, session_id: str, *, principal: Principal, cursor: 'str | None' = None, limit: int = 100) -> 'Page[SessionHistoryItem]': ...
-524-    async def load(self, session_id: str, *, principal: Principal) -> LoadedSession: ...
-525:    async def resume(self, binding_digest: str, session_id: str, request: ResumeSessionRequest) -> ExecutionHandle: ...
-526:    async def fork(self, binding_digest: str, session_id: str, request: ForkSessionRequest) -> SessionView: ...
-527:    async def update(self, binding_digest: str, session_id: str, request: UpdateSessionRequest) -> SessionView: ...
-528:    async def close(self, session_id: str, request: CloseSessionRequest) -> SessionView: ...
-529-
-530-
-531-class TaskService(Protocol):
---
-537-
-538-
-539-class EvaluationService(Protocol):
-540:    async def run(self, binding_digest: str, output_schema_fingerprint: str, request: RunEvaluationRequest) -> EvaluationHandle: ...
-541-    async def inspect(self, evaluation_id: str, *, principal: Principal) -> EvaluationView: ...
-542-    async def compare(self, request: CompareEvaluationRequest) -> EvaluationComparison: ...
-543-    async def snapshot(self, evaluation_id: str, *, principal: Principal) -> RunSnapshot: ...
-544:    async def replay(self, binding_digest: str, snapshot_id: str, request: ReplayEvaluationRequest) -> ExecutionHandle: ...
-545-
-546-
-547-class ApprovalService(Protocol):
---
-581-    "ExecutionHistoryItem", "ExecutionHistoryReader", "SessionHistoryItem", "SessionHistoryReader",
-582-    "ForkExecutionRequest", "ForkSessionRequest", "ListSessionRequest", "LoadedSession", "Page",
-583-    "ReplayEvaluationRequest", "ResumeSessionRequest", "RetryExecutionRequest", "RunEvaluationRequest",
-584:    "SessionService", "SessionView", "TaskService", "ExecutionTraceItem", "TranscriptItem", "UpdateSessionRequest",
-585-    "WorkflowGateway", "WorkflowQueryResult", "WorkflowUpdateResult",
-586-]
+session and context projection identity split applied
+===== python .bootstrap/patch2.py =====
+===== python -m compileall -q linktools-ai/src/linktools/ai =====
+===== python -m pip install -q --upgrade pip =====
+===== python -m pip install -q -e ./linktools -e ./linktools-ai[sqlite,evaluation,temporal] pytest pytest-asyncio ruff =====
+===== ruff check --select E4,E7,E9,F linktools-ai/src/linktools/ai/agent/__init__.py linktools-ai/src/linktools/ai/agent/_binding.py linktools-ai/src/linktools/ai/agent/_builder.py linktools-ai/src/linktools/ai/agent/_catalog.py linktools-ai/src/linktools/ai/agent/_compiler.py linktools-ai/src/linktools/ai/agent/_definition.py linktools-ai/src/linktools/ai/agent/_executor.py linktools-ai/src/linktools/ai/asset/__init__.py linktools-ai/src/linktools/ai/asset/_repository.py linktools-ai/src/linktools/ai/runtime/_agent.py linktools-ai/src/linktools/ai/runtime/_coordinator.py linktools-ai/src/linktools/ai/runtime/_execution.py linktools-ai/src/linktools/ai/runtime/_factory.py linktools-ai/src/linktools/ai/runtime/_local.py linktools-ai/src/linktools/ai/runtime/_planner.py linktools-ai/src/linktools/ai/runtime/_runtime_service.py linktools-ai/src/linktools/ai/runtime/_session.py linktools-ai/src/linktools/ai/runtime/_subagent.py linktools-ai/src/linktools/ai/runtime/service_api.py linktools-ai/src/linktools/ai/runtime/state/_contracts.py linktools-ai/src/linktools/ai/runtime/state/_history.py linktools-ai/src/linktools/ai/runtime/state/_steps.py linktools-ai/src/linktools/ai/spec/_codec.py linktools-ai/src/linktools/ai/spec/_contract.py linktools-ai/src/linktools/ai/workspace/__init__.py linktools-ai/src/linktools/ai/workspace/_factory.py tests/ai/test_agent_composition.py =====
+F401 [*] `typing.TypeGuard` imported but unused
+  --> linktools-ai/src/linktools/ai/runtime/_runtime_service.py:8:30
+   |
+ 6 | import secrets
+ 7 | from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
+ 8 | from typing import Protocol, TypeGuard
+   |                              ^^^^^^^^^
+ 9 |
+10 | from linktools.core import environ
+   |
+help: Remove unused import: `typing.TypeGuard`
+  |
+7 | from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
+  - from typing import Protocol, TypeGuard
+8 + from typing import Protocol
+9 |
+  |
 
-===== linktools-ai/src/linktools/ai/runtime/state/_codec.py :: SessionRecord|ContextProjection|binding_digest =====
+F401 [*] `.state._contracts.ConversationHistoryRecord` imported but unused
+  --> linktools-ai/src/linktools/ai/runtime/_session.py:54:5
+   |
+52 | from .state._contracts import (
+53 |     ConversationCursor,
+54 |     ConversationHistoryRecord,
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^
+55 |     ConversationState,
+56 |     ExecutionRecord,
+   |
+help: Remove unused import
+   |
+53 |     ConversationCursor,
+   -     ConversationHistoryRecord,
+54 |     ConversationState,
+55 |     ExecutionRecord,
+56 |     ExecutionRepository,
+   -     HistoryQuality,
+57 |     OperationLedgerInput,
+   |
 
-===== linktools-ai/src/linktools/ai/runtime/state/_steps.py :: ContextProjection|projection\.binding_digest|binding_digest.*projection|_projection_bindings =====
+F401 [*] `.state._contracts.HistoryQuality` imported but unused
+  --> linktools-ai/src/linktools/ai/runtime/_session.py:58:5
+   |
+56 |     ExecutionRecord,
+57 |     ExecutionRepository,
+58 |     HistoryQuality,
+   |     ^^^^^^^^^^^^^^
+59 |     OperationLedgerInput,
+60 |     OperationLedgerRecord,
+   |
+help: Remove unused import
+   |
+53 |     ConversationCursor,
+   -     ConversationHistoryRecord,
+54 |     ConversationState,
+55 |     ExecutionRecord,
+56 |     ExecutionRepository,
+   -     HistoryQuality,
+57 |     OperationLedgerInput,
+   |
 
-===== linktools-ai/src/linktools/ai/runtime/state/_history.py :: ContextProjection|projection\.binding_digest|binding_digest =====
-
-===== linktools-ai/src/linktools/ai/runtime/state/_contracts.py :: class RecoveryExecutionInput|class ContextProjection|class SessionRecord|class ExecutionRecord|binding_digest =====
-
-===== linktools-ai/src/linktools/ai/runtime/_session.py :: binding_digest =====
-
-===== linktools-ai/src/linktools/ai/runtime/service_api.py :: SessionView|class SessionService|binding_digest =====
-Traceback (most recent call last):
-  File "/home/runner/work/linktools/linktools/.bootstrap/patch.py", line 15, in <module>
-    raise RuntimeError("diagnostic only")
-RuntimeError: diagnostic only
+Found 3 errors.
+[*] 3 fixable with the `--fix` option.

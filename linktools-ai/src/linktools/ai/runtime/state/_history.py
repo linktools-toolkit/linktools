@@ -156,7 +156,7 @@ class _ContextProjector:
         owner_id: str,
         messages: Sequence[ModelMessage],
         *,
-        binding_digest: str,
+        agent_digest: str,
         origins: Sequence[TranscriptOrigin] = (),
         sources: Sequence[TranscriptMessageRef | None] = (),
     ) -> ContextProjection:
@@ -210,18 +210,18 @@ class _ContextProjector:
                     )
                 )
             index = end
-        digest = self._digest(binding_digest, items)
-        return ContextProjection(binding_digest, tuple(items), digest)
+        digest = self._digest(agent_digest, items)
+        return ContextProjection(agent_digest, tuple(items), digest)
 
     def _digest(
         self,
-        binding_digest: str,
+        agent_digest: str,
         items: Sequence[TranscriptSpanRef | InlineContextBlock],
     ) -> str:
         return hashlib.sha256(
             canonical_json_bytes(
                 {
-                    "binding_digest": binding_digest,
+                    "agent_digest": agent_digest,
                     "items": encode_domain(tuple(items)),
                 }
             )
@@ -737,8 +737,8 @@ class TranscriptRepository:
             changed = True
         if not changed:
             return projection
-        digest = self._projector._digest(projection.binding_digest, items)
-        return ContextProjection(projection.binding_digest, tuple(items), digest)
+        digest = self._projector._digest(projection.agent_digest, items)
+        return ContextProjection(projection.agent_digest, tuple(items), digest)
 
     def history_stream(self, history_id: str) -> bytes:
         return stream_digest(
@@ -920,16 +920,16 @@ class TranscriptRepository:
         history_id: str,
         *,
         tenant_id: str,
-        binding_digest: str | None = None,
+        agent_digest: str | None = None,
     ) -> LoadedModelContext:
         require_no_run_history_lock("TranscriptRepository.load_session_model_context")
         projection = await self.load_projection(history_id)
         if projection is not None:
-            if binding_digest is not None and projection.binding_digest != binding_digest:
+            if agent_digest is not None and projection.agent_digest != agent_digest:
                 raise AIError(ErrorCode.SESSION_BINDING_MISMATCH)
             return await self.load_model_context(
                 history_id,
-                binding_digest=binding_digest,
+                agent_digest=agent_digest,
             )
         head = await self.get_head(history_id)
         if head is None:
@@ -1116,7 +1116,7 @@ class TranscriptRepository:
         self,
         owner_id: str,
         *,
-        binding_digest: str | None = None,
+        agent_digest: str | None = None,
     ) -> LoadedModelContext:
         require_no_run_history_lock("TranscriptRepository.load_model_context")
         projection = await self.load_projection(owner_id)
@@ -1127,7 +1127,7 @@ class TranscriptRepository:
             if head.message_count:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             return LoadedModelContext(())
-        if binding_digest is not None and projection.binding_digest != binding_digest:
+        if agent_digest is not None and projection.agent_digest != agent_digest:
             _logger.info(
                 "context projection binding mismatch: domain=%s owner=%s",
                 self._runtime_domain.value,
@@ -1659,14 +1659,14 @@ class TranscriptRepository:
         owner_id: str,
         messages: Sequence[ModelMessage],
         *,
-        binding_digest: str,
+        agent_digest: str,
         origins: Sequence[TranscriptOrigin] = (),
         sources: Sequence[TranscriptMessageRef | None] = (),
     ) -> ContextProjection:
         return self._projector.project(
             owner_id,
             messages,
-            binding_digest=binding_digest,
+            agent_digest=agent_digest,
             origins=origins,
             sources=sources,
         )

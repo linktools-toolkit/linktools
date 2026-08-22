@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-from __future__ import annotations
-
 """Runtime persistence contracts and immutable records.
 
 This module contains no backend, filesystem, database, or workflow code.  It
 is the single semantic boundary shared by the local and SQL implementations.
 """
+
+from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
@@ -253,7 +253,7 @@ ContextProjectionItem = TranscriptSpanRef | InlineContextBlock
 
 @dataclass(frozen=True, slots=True)
 class ContextProjection:
-    binding_digest: str
+    agent_digest: str
     items: tuple[ContextProjectionItem, ...]
     digest: str
 
@@ -308,7 +308,7 @@ class SessionRecord:
     session_id: str
     tenant_id: str
     owner_principal_id: str
-    binding_digest: str
+    agent_digest: str
     status: SessionStatus
     revision: int
     resource_generation: int
