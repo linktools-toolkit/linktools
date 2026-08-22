@@ -14,7 +14,14 @@ from linktools.ai.capability._skill import (
     bind_skill_capability,
 )
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.spec import AgentSpecCodec, SkillSpec
+from linktools.ai.spec import (
+    AgentSpec,
+    AgentSpecCodec,
+    MCPServerSpec,
+    MCPServerSpecCodec,
+    SkillSpec,
+    SkillSpecCodec,
+)
 
 
 def test_platform_tool_selection_keeps_planning_outside_allow_tools() -> None:
@@ -50,6 +57,32 @@ def test_agent_spec_codec_rejects_type_coercion(payload: dict[str, object]) -> N
     with pytest.raises(AIError) as error:
         AgentSpecCodec().decode(json.dumps(payload).encode("utf-8"))
     assert error.value.code is ErrorCode.OUTPUT_CONTRACT_INVALID
+
+
+@pytest.mark.parametrize(
+    ("codec", "payload"),
+    (
+        (SkillSpecCodec(), {"id": 1, "revision": 1, "content": "skill"}),
+        (SkillSpecCodec(), {"id": "skill", "revision": True, "content": "skill"}),
+        (MCPServerSpecCodec(), {"id": "mcp", "revision": "1", "command": "echo"}),
+        (MCPServerSpecCodec(), {"id": "mcp", "revision": 1, "command": "echo", "args": [1]}),
+    ),
+)
+def test_asset_spec_codecs_reject_type_coercion(codec: object, payload: dict[str, object]) -> None:
+    with pytest.raises(AIError) as error:
+        codec.decode(json.dumps(payload).encode("utf-8"))
+    assert error.value.code is ErrorCode.OUTPUT_CONTRACT_INVALID
+
+
+def test_spec_constructors_reject_mismatched_runtime_types() -> None:
+    with pytest.raises(ValueError):
+        AgentSpec("agent", 1, "default", instructions="not-an-array")
+    with pytest.raises(ValueError):
+        AgentSpec("agent", 1, "default", usage_limits=object())
+    with pytest.raises(ValueError):
+        SkillSpec("skill", True, "content")
+    with pytest.raises(ValueError):
+        MCPServerSpec("mcp", 1, "echo", args="not-an-array")
 
 
 def test_skill_catalog_snapshot_is_sorted_and_immutable() -> None:
