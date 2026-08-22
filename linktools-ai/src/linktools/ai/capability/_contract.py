@@ -13,7 +13,14 @@ from pydantic_ai.capabilities import AbstractCapability
 from pydantic_ai.capabilities import AgentCapability as PydanticAgentCapability
 
 from ..asset import AssetRef, AssetRepository
-from ..core import JsonValue, Principal, ResourceRef, canonical_json_bytes, canonical_sha256, canonical_string_tuple
+from ..core import (
+    JsonValue,
+    Principal,
+    ResourceRef,
+    canonical_json_bytes,
+    canonical_sha256,
+    canonical_string_tuple,
+)
 from ..errors import AIError, ErrorCode
 
 
@@ -40,8 +47,16 @@ class CapabilityMaterializationContext:
             raise ValueError("capability context tenant mismatch")
         if not isinstance(self.execution_root, Path):
             raise TypeError("execution_root must be a Path")
-        object.__setattr__(self, "execution_root", self.execution_root.expanduser().resolve(strict=False))
-        object.__setattr__(self, "allow_tools", canonical_string_tuple(self.allow_tools, field="allow_tools"))
+        object.__setattr__(
+            self,
+            "execution_root",
+            self.execution_root.expanduser().resolve(strict=False),
+        )
+        object.__setattr__(
+            self,
+            "allow_tools",
+            canonical_string_tuple(self.allow_tools, field="allow_tools"),
+        )
 
 
 class CapabilityBinding(Protocol):
@@ -157,7 +172,10 @@ class RuntimeCapability:
         config: "Mapping[str, JsonValue]",
         revision: int = 1,
     ) -> "RuntimeCapability":
-        if not isinstance(capability_type, type) or not issubclass(capability_type, AbstractCapability):
+        if (
+            not isinstance(capability_type, type)
+            or not issubclass(capability_type, AbstractCapability)
+        ):
             raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
         _validate_importable_capability_type(capability_type)
         serialization_name = capability_type.get_serialization_name()
@@ -168,6 +186,8 @@ class RuntimeCapability:
             capability = capability_type.from_spec(**normalized)
         except Exception as error:
             raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID) from error
+        if type(capability) is not capability_type:
+            raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
         fingerprint = _runtime_descriptor_fingerprint(
             id=id,
             revision=revision,
@@ -196,7 +216,10 @@ class RuntimeCapability:
         )
 
     @classmethod
-    def restore(cls, descriptor: "Mapping[str, JsonValue]") -> "RuntimeCapability":
+    def restore(
+        cls,
+        descriptor: "Mapping[str, JsonValue]",
+    ) -> "RuntimeCapability":
         try:
             value = _normalize_json_mapping(descriptor)
             _validate_runtime_capability_descriptor(value)
@@ -229,6 +252,8 @@ class RuntimeCapability:
             capability = target.from_spec(**config)
         except Exception as error:
             raise AIError(ErrorCode.AGENT_DEFINITION_UNAVAILABLE) from error
+        if type(capability) is not target:
+            raise AIError(ErrorCode.AGENT_DEFINITION_UNAVAILABLE)
         restored = cls(
             id=cast(str, value["id"]),
             capability=capability,
@@ -304,7 +329,9 @@ def _runtime_descriptor_fingerprint(
     )
 
 
-def _normalize_json_mapping(value: Mapping[str, JsonValue]) -> "dict[str, JsonValue]":
+def _normalize_json_mapping(
+    value: Mapping[str, JsonValue],
+) -> "dict[str, JsonValue]":
     try:
         decoded = json.loads(canonical_json_bytes(dict(value)).decode("utf-8"))
     except (TypeError, ValueError) as error:
@@ -314,7 +341,9 @@ def _normalize_json_mapping(value: Mapping[str, JsonValue]) -> "dict[str, JsonVa
     return cast("dict[str, JsonValue]", decoded)
 
 
-def _validate_runtime_capability_descriptor(value: Mapping[str, JsonValue]) -> None:
+def _validate_runtime_capability_descriptor(
+    value: Mapping[str, JsonValue],
+) -> None:
     fields = {
         "id",
         "revision",
@@ -335,7 +364,10 @@ def _validate_runtime_capability_descriptor(value: Mapping[str, JsonValue]) -> N
         raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
     if not isinstance(revision, int) or isinstance(revision, bool) or revision < 1:
         raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
-    if not isinstance(capability_type, dict) or set(capability_type) != {"module", "qualname"}:
+    if (
+        not isinstance(capability_type, dict)
+        or set(capability_type) != {"module", "qualname"}
+    ):
         raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
     module = capability_type.get("module")
     qualname = capability_type.get("qualname")
