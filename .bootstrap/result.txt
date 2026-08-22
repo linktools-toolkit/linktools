@@ -203,38 +203,38 @@ Collecting urllib3<3,>=1.26 (from requests->tiktoken>=0.12.0->pydantic-ai-slim[m
   Downloading urllib3-2.7.0-py3-none-any.whl.metadata (6.9 kB)
 Downloading aiosqlite-0.22.1-py3-none-any.whl (17 kB)
 Downloading sqlalchemy-2.0.51-cp312-cp312-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl (3.4 MB)
-   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 3.4/3.4 MB 50.1 MB/s  0:00:00
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 3.4/3.4 MB 115.6 MB/s  0:00:00
 Downloading pydantic_ai_slim-2.33.0-py3-none-any.whl (1.4 MB)
-   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 1.4/1.4 MB 229.3 MB/s  0:00:00
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 1.4/1.4 MB 61.2 MB/s  0:00:00
 Downloading pydantic_graph-2.33.0-py3-none-any.whl (52 kB)
 Downloading fastmcp_slim-3.4.7-py3-none-any.whl (769 kB)
-   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 769.4/769.4 kB 182.9 MB/s  0:00:00
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 769.4/769.4 kB 126.8 MB/s  0:00:00
 Downloading httpx-0.28.1-py3-none-any.whl (73 kB)
 Downloading httpcore-1.0.9-py3-none-any.whl (78 kB)
 Downloading mcp-1.29.0-py3-none-any.whl (223 kB)
 Downloading py_key_value_aio-0.4.5-py3-none-any.whl (170 kB)
 Downloading pydantic-2.13.4-py3-none-any.whl (472 kB)
 Downloading pydantic_core-2.46.4-cp312-cp312-manylinux_2_17_x86_64.manylinux2014_x86_64.whl (2.1 MB)
-   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 2.1/2.1 MB 317.8 MB/s  0:00:00
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 2.1/2.1 MB 193.2 MB/s  0:00:00
 Using cached pyyaml-6.0.3-cp312-cp312-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl (807 kB)
 Downloading pytest-9.1.1-py3-none-any.whl (386 kB)
 Downloading pluggy-1.6.0-py3-none-any.whl (20 kB)
 Downloading pytest_asyncio-1.4.0-py3-none-any.whl (16 kB)
 Downloading ruff-0.16.4-py3-none-manylinux_2_17_x86_64.manylinux2014_x86_64.whl (10.3 MB)
-   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 10.3/10.3 MB 259.1 MB/s  0:00:00
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 10.3/10.3 MB 321.9 MB/s  0:00:00
 Downloading aiofile-3.12.3-py3-none-any.whl (22 kB)
 Downloading caio-0.12.2-cp312-cp312-manylinux_2_34_x86_64.whl (196 kB)
 Downloading annotated_types-0.8.0-py3-none-any.whl (13 kB)
 Downloading anyio-4.14.2-py3-none-any.whl (125 kB)
 Downloading authlib-1.7.2-py2.py3-none-any.whl (259 kB)
 Downloading beartype-0.22.9-py3-none-any.whl (1.3 MB)
-   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 1.3/1.3 MB 256.2 MB/s  0:00:00
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 1.3/1.3 MB 236.1 MB/s  0:00:00
 Downloading cachetools-7.1.7-py3-none-any.whl (16 kB)
 Downloading exceptiongroup-1.3.1-py3-none-any.whl (16 kB)
 Downloading filelock-3.32.3-py3-none-any.whl (98 kB)
 Downloading genai_prices-0.1.4-py3-none-any.whl (99 kB)
 Downloading greenlet-3.5.5-cp312-cp312-manylinux_2_24_x86_64.manylinux_2_28_x86_64.whl (621 kB)
-   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 621.4/621.4 kB 128.3 MB/s  0:00:00
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 621.4/621.4 kB 123.4 MB/s  0:00:00
 Downloading griffelib-2.2.0-py3-none-any.whl (166 kB)
 Downloading h11-0.16.0-py3-none-any.whl (37 kB)
 Downloading httpx_sse-0.4.3-py3-none-any.whl (9.0 kB)
@@ -244,7 +244,7 @@ Downloading idna-3.19-py3-none-any.whl (68 kB)
 Downloading iniconfig-2.3.0-py3-none-any.whl (7.5 kB)
 Downloading joserfc-1.7.4-py3-none-any.whl (71 kB)
 Downloading cryptography-50.0.0-cp311-abi3-manylinux_2_34_x86_64.whl (4.7 MB)
-   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 4.7/4.7 MB 374.8 MB/s  0:00:00
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 4.7/4.7 MB 292.0 MB/s  0:00:00
 Downloading cffi-2.1.1-cp312-cp312-manylinux2014_x86_64.manylinux_2_17_x86_64.whl (221 kB)
 Downloading jsonschema-4.26.0-py3-none-any.whl (90 kB)
 Downloading attrs-26.1.0-py3-none-any.whl (67 kB)
@@ -253,25 +253,25 @@ Downloading keyring-25.7.0-py3-none-any.whl (39 kB)
 Downloading jeepney-0.9.0-py3-none-any.whl (49 kB)
 Downloading logfire_api-4.41.0-py3-none-any.whl (143 kB)
 Downloading openai-3.3.1-py3-none-any.whl (1.7 MB)
-   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 1.7/1.7 MB 291.8 MB/s  0:00:00
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 1.7/1.7 MB 256.7 MB/s  0:00:00
 Downloading jiter-0.16.0-cp312-cp312-manylinux_2_17_x86_64.manylinux2014_x86_64.whl (343 kB)
 Downloading typing_extensions-4.16.0-py3-none-any.whl (45 kB)
 Downloading opentelemetry_api-1.44.0-py3-none-any.whl (60 kB)
 Downloading packaging-26.3-py3-none-any.whl (129 kB)
 Downloading platformdirs-4.11.3-py3-none-any.whl (23 kB)
 Downloading pydantic_ai_harness-0.24.0-py3-none-any.whl (734 kB)
-   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 734.4/734.4 kB 148.3 MB/s  0:00:00
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 734.4/734.4 kB 119.6 MB/s  0:00:00
 Downloading pydantic_evals-2.33.0-py3-none-any.whl (101 kB)
 Downloading pydantic_monty-0.0.21-py3-none-any.whl (4.7 kB)
 Downloading pydantic_monty_client-0.0.21-cp312-cp312-manylinux_2_28_x86_64.whl (3.5 MB)
-   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 3.5/3.5 MB 213.7 MB/s  0:00:00
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 3.5/3.5 MB 69.8 MB/s  0:00:00
 Downloading pydantic_monty_runtime-0.0.21-cp312-cp312-manylinux_2_28_x86_64.whl (10.4 MB)
-   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 10.4/10.4 MB 267.7 MB/s  0:00:00
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 10.4/10.4 MB 98.7 MB/s  0:00:00
 Downloading pydantic_settings-2.15.0-py3-none-any.whl (69 kB)
 Downloading email_validator-2.3.0-py3-none-any.whl (35 kB)
 Downloading dnspython-2.8.0-py3-none-any.whl (331 kB)
 Downloading pygments-2.21.0-py3-none-any.whl (1.3 MB)
-   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 1.3/1.3 MB 237.7 MB/s  0:00:00
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 1.3/1.3 MB 211.3 MB/s  0:00:00
 Downloading pyjwt-2.13.0-py3-none-any.whl (31 kB)
 Downloading python_dotenv-1.2.3-py3-none-any.whl (22 kB)
 Downloading python_multipart-0.0.32-py3-none-any.whl (30 kB)
@@ -284,12 +284,12 @@ Downloading secretstorage-3.5.0-py3-none-any.whl (15 kB)
 Downloading sse_starlette-3.4.8-py3-none-any.whl (16 kB)
 Downloading starlette-1.6.0-py3-none-any.whl (75 kB)
 Downloading temporalio-1.31.0-cp310-abi3-manylinux_2_17_x86_64.manylinux2014_x86_64.whl (14.8 MB)
-   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 14.8/14.8 MB 312.9 MB/s  0:00:00
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 14.8/14.8 MB 40.3 MB/s  0:00:00
 Downloading nexus_rpc-1.4.0-py3-none-any.whl (29 kB)
 Downloading protobuf-7.36.0-cp310-abi3-manylinux2014_x86_64.whl (340 kB)
 Downloading types_protobuf-7.35.1.20260822-py3-none-any.whl (86 kB)
 Downloading tiktoken-0.14.0-cp312-cp312-manylinux_2_28_x86_64.whl (1.2 MB)
-   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 1.2/1.2 MB 243.7 MB/s  0:00:00
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 1.2/1.2 MB 195.1 MB/s  0:00:00
 Downloading truststore-0.10.4-py3-none-any.whl (18 kB)
 Downloading typing_inspection-0.4.4-py3-none-any.whl (14 kB)
 Downloading uvicorn-0.52.4-py3-none-any.whl (79 kB)
@@ -302,7 +302,7 @@ Downloading more_itertools-11.1.0-py3-none-any.whl (72 kB)
 Downloading psutil-7.2.2-cp36-abi3-manylinux2010_x86_64.manylinux_2_12_x86_64.manylinux_2_28_x86_64.whl (155 kB)
 Downloading pycparser-3.0-py3-none-any.whl (48 kB)
 Downloading regex-2026.7.19-cp312-cp312-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl (801 kB)
-   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 801.8/801.8 kB 174.9 MB/s  0:00:00
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 801.8/801.8 kB 160.2 MB/s  0:00:00
 Downloading requests-2.34.2-py3-none-any.whl (73 kB)
 Downloading charset_normalizer-3.5.1-cp312-cp312-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl (248 kB)
 Downloading urllib3-2.7.0-py3-none-any.whl (131 kB)
@@ -310,12 +310,12 @@ Downloading sniffio-1.3.1-py3-none-any.whl (10 kB)
 Building wheels for collected packages: linktools, linktools-ai
   Building editable for linktools (pyproject.toml): started
   Building editable for linktools (pyproject.toml): finished with status 'done'
-  Created wheel for linktools: filename=linktools-0.9.1.post100.dev0-0.editable-py3-none-any.whl size=6045 sha256=860c449f8d6b3179744b3e3625cfa816910d018c05a6eea0ec730374aa02c15e
-  Stored in directory: /tmp/pip-ephem-wheel-cache-nho3w6_a/wheels/e5/50/d0/0d24bfdc0ab21509a012622c53bd84039fa6f547804efa2376
+  Created wheel for linktools: filename=linktools-0.9.1.post100.dev0-0.editable-py3-none-any.whl size=6045 sha256=b97784e17b5f1bde7d1cfde6a604129d96edab154c7f121d504d39b8a124327c
+  Stored in directory: /tmp/pip-ephem-wheel-cache-y33tobol/wheels/e5/50/d0/0d24bfdc0ab21509a012622c53bd84039fa6f547804efa2376
   Building editable for linktools-ai (pyproject.toml): started
   Building editable for linktools-ai (pyproject.toml): finished with status 'done'
-  Created wheel for linktools-ai: filename=linktools_ai-0.10.0.post100.dev0-0.editable-py3-none-any.whl size=6512 sha256=3c2b671a4149a493aa57849751516a60a9fe774f5d60465fb2a945531be8dddc
-  Stored in directory: /tmp/pip-ephem-wheel-cache-nho3w6_a/wheels/e5/5a/b9/c291aedae11f520717aebc31d61e541d4ea9708b19097b8566
+  Created wheel for linktools-ai: filename=linktools_ai-0.10.0.post100.dev0-0.editable-py3-none-any.whl size=6512 sha256=d4d451d10fb3766b9202b26323de5c399452dc0cfc01effa21436f39d8848534
+  Stored in directory: /tmp/pip-ephem-wheel-cache-y33tobol/wheels/e5/5a/b9/c291aedae11f520717aebc31d61e541d4ea9708b19097b8566
 Successfully built linktools linktools-ai
 Installing collected packages: urllib3, typing-extensions, types-protobuf, truststore, sniffio, ruff, rpds-py, regex, pyyaml, python-multipart, python-dotenv, pyjwt, pygments, pydantic-monty-runtime, pycparser, psutil, protobuf, pluggy, platformdirs, packaging, more-itertools, mdurl, logfire-api, jiter, jeepney, jaraco.context, iniconfig, idna, httpx-sse, h11, griffelib, greenlet, filelock, dnspython, click, charset_normalizer, certifi, caio, cachetools, beartype, attrs, annotated-types, aiosqlite, uvicorn, typing-inspection, sqlalchemy, requests, referencing, pytest, pydantic-monty-client, pydantic-core, py-key-value-aio, opentelemetry-api, nexus-rpc, markdown-it-py, linktools, jaraco.functools, jaraco.classes, httpcore2, httpcore, exceptiongroup, email-validator, cffi, anyio, aiofile, tiktoken, temporalio, starlette, rich, pytest-asyncio, pydantic-monty, pydantic, jsonschema-specifications, httpx2, httpx, cryptography, sse-starlette, SecretStorage, pydantic-settings, pydantic-graph, openai, jsonschema, joserfc, genai-prices, pydantic-ai-slim, mcp, keyring, fastmcp-slim, authlib, pydantic-evals, pydantic-ai-harness, linktools-ai
 
@@ -1019,50 +1019,6 @@ help: Remove unnecessary coding comment
 2 | """Agent definition compilation and execution."""
   |
 
-I001 [*] Import block is un-sorted or un-formatted
-  --> linktools-ai/src/linktools/ai/agent/__init__.py:5:1
-   |
- 3 |   """Agent definition compilation and execution."""
- 4 |
- 5 | / from ._binding import AgentBindingSnapshot
- 6 | | from ._builder import build_pydantic_agent
- 7 | | from ._capabilities import (
- 8 | |     MEMORY_TOOL_NAMES,
- 9 | |     PLANNING_TOOL_NAMES,
-10 | |     SUBAGENT_TOOL_NAMES,
-11 | |     WORKSPACE_FILESYSTEM_READ_TOOL_NAMES,
-12 | |     WORKSPACE_FILESYSTEM_TOOL_NAMES,
-13 | |     WORKSPACE_SHELL_TOOL_NAMES,
-14 | |     SubagentDelegate,
-15 | |     ToolOperationBridge,
-16 | |     ToolOperationDecision,
-17 | |     select_platform_tool_names,
-18 | |     tool_name_allowed,
-19 | | )
-20 | | from ._compiler import AgentCompiler
-21 | | from ._catalog import AgentDefinitionCatalog
-22 | | from ._definition import AgentDefinition
-23 | | from ._executor import (
-24 | |     AgentExecutionResult,
-25 | |     AgentExecutor,
-26 | |     DurableBoundary,
-27 | |     EventSink,
-28 | |     LiveDelta,
-29 | |     UsageSink,
-30 | | )
-   | |_^
-31 |
-32 |   __all__ = [
-   |
-help: Organize imports
-   |
-19 | )
-20 + from ._catalog import AgentDefinitionCatalog
-21 | from ._compiler import AgentCompiler
-   - from ._catalog import AgentDefinitionCatalog
-22 | from ._definition import AgentDefinition
-   |
-
 RUF022 [*] `__all__` is not sorted
   --> linktools-ai/src/linktools/ai/agent/__init__.py:32:11
    |
@@ -1070,29 +1026,30 @@ RUF022 [*] `__all__` is not sorted
 31 |
 32 |   __all__ = [
    |  ___________^
-33 | |     "AgentBindingSnapshot",
-34 | |     "AgentCompiler",
-35 | |     "AgentDefinitionCatalog",
-36 | |     "build_pydantic_agent",
-37 | |     "AgentDefinition",
-38 | |     "AgentExecutionResult",
-39 | |     "AgentExecutor",
-40 | |     "DurableBoundary",
-41 | |     "EventSink",
-42 | |     "LiveDelta",
-43 | |     "UsageSink",
-44 | |     "MEMORY_TOOL_NAMES",
-45 | |     "PLANNING_TOOL_NAMES",
-46 | |     "SUBAGENT_TOOL_NAMES",
-47 | |     "SubagentDelegate",
-48 | |     "ToolOperationBridge",
-49 | |     "ToolOperationDecision",
-50 | |     "WORKSPACE_FILESYSTEM_READ_TOOL_NAMES",
-51 | |     "WORKSPACE_FILESYSTEM_TOOL_NAMES",
-52 | |     "WORKSPACE_SHELL_TOOL_NAMES",
-53 | |     "select_platform_tool_names",
-54 | |     "tool_name_allowed",
-55 | | ]
+33 | |     "AgentBinding",
+34 | |     "AgentBindingSnapshot",
+35 | |     "AgentCatalog",
+36 | |     "AgentCompiler",
+37 | |     "build_pydantic_agent",
+38 | |     "AgentDefinition",
+39 | |     "AgentExecutionResult",
+40 | |     "AgentExecutor",
+41 | |     "DurableBoundary",
+42 | |     "EventSink",
+43 | |     "LiveDelta",
+44 | |     "UsageSink",
+45 | |     "MEMORY_TOOL_NAMES",
+46 | |     "PLANNING_TOOL_NAMES",
+47 | |     "SUBAGENT_TOOL_NAMES",
+48 | |     "SubagentDelegate",
+49 | |     "ToolOperationBridge",
+50 | |     "ToolOperationDecision",
+51 | |     "WORKSPACE_FILESYSTEM_READ_TOOL_NAMES",
+52 | |     "WORKSPACE_FILESYSTEM_TOOL_NAMES",
+53 | |     "WORKSPACE_SHELL_TOOL_NAMES",
+54 | |     "select_platform_tool_names",
+55 | |     "tool_name_allowed",
+56 | | ]
    | |_^
 help: Apply an isort-style sorting to `__all__`
    |
@@ -1103,28 +1060,27 @@ help: Apply an isort-style sorting to `__all__`
 36 +     "WORKSPACE_FILESYSTEM_READ_TOOL_NAMES",
 37 +     "WORKSPACE_FILESYSTEM_TOOL_NAMES",
 38 +     "WORKSPACE_SHELL_TOOL_NAMES",
-39 |     "AgentBindingSnapshot",
-40 |     "AgentCompiler",
-41 +     "AgentDefinition",
-42 |     "AgentDefinitionCatalog",
+39 |     "AgentBinding",
+40 |     "AgentBindingSnapshot",
+41 |     "AgentCatalog",
+42 |     "AgentCompiler",
    -     "build_pydantic_agent",
-   -     "AgentDefinition",
-43 |     "AgentExecutionResult",
+43 |     "AgentDefinition",
 --------------------------------------------------------------------------------
-47 |     "LiveDelta",
+48 |     "LiveDelta",
    -     "UsageSink",
    -     "MEMORY_TOOL_NAMES",
    -     "PLANNING_TOOL_NAMES",
    -     "SUBAGENT_TOOL_NAMES",
-48 |     "SubagentDelegate",
-49 |     "ToolOperationBridge",
-50 |     "ToolOperationDecision",
+49 |     "SubagentDelegate",
+50 |     "ToolOperationBridge",
+51 |     "ToolOperationDecision",
    -     "WORKSPACE_FILESYSTEM_READ_TOOL_NAMES",
    -     "WORKSPACE_FILESYSTEM_TOOL_NAMES",
    -     "WORKSPACE_SHELL_TOOL_NAMES",
-51 +     "UsageSink",
-52 +     "build_pydantic_agent",
-53 |     "select_platform_tool_names",
+52 +     "UsageSink",
+53 +     "build_pydantic_agent",
+54 |     "select_platform_tool_names",
    |
 
 EXE001 Shebang is present but file is not executable
@@ -1133,7 +1089,7 @@ EXE001 Shebang is present but file is not executable
 1 | #!/usr/bin/env python3
   | ^^^^^^^^^^^^^^^^^^^^^^
 2 | # -*- coding: utf-8 -*-
-3 | """Durable data contract for one effective Agent definition."""
+3 | """Runtime and durable contracts for one exact Agent execution binding."""
   |
 
 UP009 [*] UTF-8 encoding declaration is unnecessary
@@ -1142,13 +1098,13 @@ UP009 [*] UTF-8 encoding declaration is unnecessary
 1 | #!/usr/bin/env python3
 2 | # -*- coding: utf-8 -*-
   | ^^^^^^^^^^^^^^^^^^^^^^^
-3 | """Durable data contract for one effective Agent definition."""
+3 | """Runtime and durable contracts for one exact Agent execution binding."""
   |
 help: Remove unnecessary coding comment
   |
 1 | #!/usr/bin/env python3
   - # -*- coding: utf-8 -*-
-2 | """Durable data contract for one effective Agent definition."""
+2 | """Runtime and durable contracts for one exact Agent execution binding."""
   |
 
 EXE001 Shebang is present but file is not executable
@@ -1157,7 +1113,7 @@ EXE001 Shebang is present but file is not executable
 1 | #!/usr/bin/env python3
   | ^^^^^^^^^^^^^^^^^^^^^^
 2 | # -*- coding: utf-8 -*-
-3 | """Build a Pydantic AI agent from an already materialized definition."""
+3 | """Build a Pydantic AI agent from an already materialized binding."""
   |
 
 UP009 [*] UTF-8 encoding declaration is unnecessary
@@ -1166,31 +1122,31 @@ UP009 [*] UTF-8 encoding declaration is unnecessary
 1 | #!/usr/bin/env python3
 2 | # -*- coding: utf-8 -*-
   | ^^^^^^^^^^^^^^^^^^^^^^^
-3 | """Build a Pydantic AI agent from an already materialized definition."""
+3 | """Build a Pydantic AI agent from an already materialized binding."""
   |
 help: Remove unnecessary coding comment
   |
 1 | #!/usr/bin/env python3
   - # -*- coding: utf-8 -*-
-2 | """Build a Pydantic AI agent from an already materialized definition."""
+2 | """Build a Pydantic AI agent from an already materialized binding."""
   |
 
 UP037 [*] Remove quotes from type annotation
-  --> linktools-ai/src/linktools/ai/agent/_builder.py:20:18
+  --> linktools-ai/src/linktools/ai/agent/_builder.py:21:18
    |
-18 |     model: Model,
 19 | ) -> "Agent[None, object]":
-20 |     output_type: "type[BaseModel] | TextOutput" = definition.output_type
+20 |     definition = binding.definition
+21 |     output_type: "type[BaseModel] | TextOutput" = binding.output_type
    |                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-21 |     if output_type is AssistantTextOutput:
-22 |         output_type = TextOutput(_assistant_text_output)
+22 |     if output_type is AssistantTextOutput:
+23 |         output_type = TextOutput(_assistant_text_output)
    |
 help: Remove quotes
    |
-19 | ) -> "Agent[None, object]":
-   -     output_type: "type[BaseModel] | TextOutput" = definition.output_type
-20 +     output_type: type[BaseModel] | TextOutput = definition.output_type
-21 |     if output_type is AssistantTextOutput:
+20 |     definition = binding.definition
+   -     output_type: "type[BaseModel] | TextOutput" = binding.output_type
+21 +     output_type: type[BaseModel] | TextOutput = binding.output_type
+22 |     if output_type is AssistantTextOutput:
    |
 
 EXE001 Shebang is present but file is not executable
@@ -1257,7 +1213,7 @@ EXE001 Shebang is present but file is not executable
 1 | #!/usr/bin/env python3
   | ^^^^^^^^^^^^^^^^^^^^^^
 2 | # -*- coding: utf-8 -*-
-3 | """Agent definition lookup for Runtime services."""
+3 | """Agent definition and exact binding lookup for Runtime services."""
   |
 
 UP009 [*] UTF-8 encoding declaration is unnecessary
@@ -1266,13 +1222,13 @@ UP009 [*] UTF-8 encoding declaration is unnecessary
 1 | #!/usr/bin/env python3
 2 | # -*- coding: utf-8 -*-
   | ^^^^^^^^^^^^^^^^^^^^^^^
-3 | """Agent definition lookup for Runtime services."""
+3 | """Agent definition and exact binding lookup for Runtime services."""
   |
 help: Remove unnecessary coding comment
   |
 1 | #!/usr/bin/env python3
   - # -*- coding: utf-8 -*-
-2 | """Agent definition lookup for Runtime services."""
+2 | """Agent definition and exact binding lookup for Runtime services."""
   |
 
 EXE001 Shebang is present but file is not executable
@@ -1281,7 +1237,7 @@ EXE001 Shebang is present but file is not executable
 1 | #!/usr/bin/env python3
   | ^^^^^^^^^^^^^^^^^^^^^^
 2 | # -*- coding: utf-8 -*-
-3 | """Compile declarations into immutable executable Agent definitions."""
+3 | """Compile declarations and exact output bindings from frozen Runtime inputs."""
   |
 
 UP009 [*] UTF-8 encoding declaration is unnecessary
@@ -1290,19 +1246,19 @@ UP009 [*] UTF-8 encoding declaration is unnecessary
 1 | #!/usr/bin/env python3
 2 | # -*- coding: utf-8 -*-
   | ^^^^^^^^^^^^^^^^^^^^^^^
-3 | """Compile declarations into immutable executable Agent definitions."""
+3 | """Compile declarations and exact output bindings from frozen Runtime inputs."""
   |
 help: Remove unnecessary coding comment
   |
 1 | #!/usr/bin/env python3
   - # -*- coding: utf-8 -*-
-2 | """Compile declarations into immutable executable Agent definitions."""
+2 | """Compile declarations and exact output bindings from frozen Runtime inputs."""
   |
 
 I001 [*] Import block is un-sorted or un-formatted
   --> linktools-ai/src/linktools/ai/agent/_compiler.py:5:1
    |
- 3 |   """Compile declarations into immutable executable Agent definitions."""
+ 3 |   """Compile declarations and exact output bindings from frozen Runtime inputs."""
  4 |
  5 | / from collections.abc import Mapping, Sequence
  6 | |
@@ -1319,7 +1275,7 @@ I001 [*] Import block is un-sorted or un-formatted
 17 | | from ..errors import AIError, ErrorCode
 18 | | from ..model import ModelResolver
 19 | | from ..spec import AgentSpec
-20 | | from ._binding import AgentBindingSnapshot
+20 | | from ._binding import AgentBinding, AgentBindingSnapshot
 21 | | from ._definition import AgentDefinition
 22 | | from ._output import bind_output, restore_output
    | |________________________________________________^
@@ -11918,5 +11874,5 @@ help: Organize imports
 15 |
    |
 
-Found 630 errors.
-[*] 326 fixable with the `--fix` option (14 hidden fixes can be enabled with the `--unsafe-fixes` option).
+Found 629 errors.
+[*] 325 fixable with the `--fix` option (14 hidden fixes can be enabled with the `--unsafe-fixes` option).

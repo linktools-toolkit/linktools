@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """Agent definition compilation and execution."""
 
-from ._binding import AgentBindingSnapshot
+from ._binding import AgentBinding, AgentBindingSnapshot
 from ._builder import build_pydantic_agent
 from ._capabilities import (
     MEMORY_TOOL_NAMES,
@@ -17,8 +17,8 @@ from ._capabilities import (
     select_platform_tool_names,
     tool_name_allowed,
 )
+from ._catalog import AgentCatalog
 from ._compiler import AgentCompiler
-from ._catalog import AgentDefinitionCatalog
 from ._definition import AgentDefinition
 from ._executor import (
     AgentExecutionResult,
@@ -30,9 +30,10 @@ from ._executor import (
 )
 
 __all__ = [
+    "AgentBinding",
     "AgentBindingSnapshot",
+    "AgentCatalog",
     "AgentCompiler",
-    "AgentDefinitionCatalog",
     "build_pydantic_agent",
     "AgentDefinition",
     "AgentExecutionResult",

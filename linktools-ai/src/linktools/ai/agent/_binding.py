@@ -1,20 +1,27 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Durable data contract for one effective Agent definition."""
+"""Runtime and durable contracts for one exact Agent execution binding."""
 
 import json
 from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import cast
+from typing import TYPE_CHECKING, cast
+
+from pydantic import BaseModel
 
 from ..core import ImmutableJsonMapping, JsonValue, canonical_json_bytes
 from ..errors import AIError, ErrorCode
 from ..spec import AgentSpec, AgentSpecCodec
+from ._output import OutputBinding
+
+if TYPE_CHECKING:
+    from ._definition import AgentDefinition
 
 _FIELDS = frozenset(
     {
         "version",
         "agent_spec",
+        "agent_digest",
         "output_type_module",
         "output_type_qualname",
         "output_schema_id",
@@ -28,10 +35,11 @@ _FIELDS = frozenset(
 
 @dataclass(frozen=True, slots=True)
 class AgentBindingSnapshot:
-    """Persist the local parts required to reconstruct an effective definition."""
+    """Persist the inputs required to reconstruct one exact Agent binding."""
 
     version: int
     agent_spec: AgentSpec
+    agent_digest: str
     output_type_module: str
     output_type_qualname: str
     output_schema_id: str
@@ -53,7 +61,8 @@ class AgentBindingSnapshot:
             if not isinstance(value, str) or not value.strip():
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         if (
-            not isinstance(self.output_schema_revision, int)
+            not _is_digest(self.agent_digest)
+            or not isinstance(self.output_schema_revision, int)
             or isinstance(self.output_schema_revision, bool)
             or self.output_schema_revision < 1
             or not _is_digest(self.output_schema_fingerprint)
@@ -73,6 +82,7 @@ class AgentBindingSnapshot:
         return {
             "version": 1,
             "agent_spec": _agent_spec_payload(self.agent_spec),
+            "agent_digest": self.agent_digest,
             "output_type_module": self.output_type_module,
             "output_type_qualname": self.output_type_qualname,
             "output_schema_id": self.output_schema_id,
@@ -107,6 +117,7 @@ class AgentBindingSnapshot:
         return cls(
             version=1,
             agent_spec=agent_spec,
+            agent_digest=_require_digest(value["agent_digest"]),
             output_type_module=_require_string(value["output_type_module"]),
             output_type_qualname=_require_string(value["output_type_qualname"]),
             output_schema_id=_require_string(value["output_schema_id"]),
@@ -117,6 +128,49 @@ class AgentBindingSnapshot:
             local_runtime_capability_descriptors=normalized,
             binding_digest=_require_digest(value["binding_digest"]),
         )
+
+
+@dataclass(frozen=True, slots=True)
+class AgentBinding:
+    """Bind an AgentDefinition to the exact output contract used by execution."""
+
+    digest: str
+    definition: "AgentDefinition"
+    output_binding: OutputBinding
+    snapshot: AgentBindingSnapshot
+
+    def __post_init__(self) -> None:
+        from ._definition import AgentDefinition
+
+        if not isinstance(self.definition, AgentDefinition):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        if not isinstance(self.output_binding, OutputBinding):
+            raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID)
+        if not isinstance(self.snapshot, AgentBindingSnapshot):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        if (
+            self.digest != self.snapshot.binding_digest
+            or self.definition.digest != self.snapshot.agent_digest
+            or self.definition.spec != self.snapshot.agent_spec
+            or self.definition.local_runtime_capability_descriptors
+            != self.snapshot.local_runtime_capability_descriptors
+            or self.output_binding.schema_id != self.snapshot.output_schema_id
+            or self.output_binding.schema_revision
+            != self.snapshot.output_schema_revision
+            or self.output_binding.schema_fingerprint
+            != self.snapshot.output_schema_fingerprint
+            or self.output_type.__module__ != self.snapshot.output_type_module
+            or self.output_type.__qualname__ != self.snapshot.output_type_qualname
+        ):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+
+    @property
+    def output_type(self) -> type[BaseModel]:
+        return self.output_binding.value_type
+
+    @property
+    def output_schema_fingerprint(self) -> str:
+        return self.output_binding.schema_fingerprint
 
 
 def _agent_spec_payload(spec: AgentSpec) -> "dict[str, JsonValue]":
@@ -157,4 +211,4 @@ def _is_digest(value: object) -> bool:
     )
 
 
-__all__ = ["AgentBindingSnapshot"]
+__all__ = ["AgentBinding", "AgentBindingSnapshot"]
