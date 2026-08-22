@@ -16,7 +16,6 @@ from linktools.ai.asset import (
     AssetRepository,
     AssetStore,
     AssetTypeBinding,
-    AssetTypeRegistry,
     AssetVariantBinding,
     DirectoryLayout,
     InMemoryAssetBackend,
@@ -43,12 +42,7 @@ def build_asset_repository(
     *,
     extra_bindings: tuple[AssetTypeBinding[object], ...] = (),
 ) -> AssetRepository:
-    registry = AssetTypeRegistry()
-    for binding in builtin_asset_bindings():
-        registry.register(binding)
-    for binding in extra_bindings:
-        registry.register(binding)
-    return AssetRepository(store, registry.freeze())
+    return AssetRepository(store, (*builtin_asset_bindings(), *extra_bindings))
 
 
 @dataclass(frozen=True, slots=True)

@@ -32,16 +32,7 @@ from .service_api import CancelExecutionRequest, ExecutionRequest, ExecutionResu
 
 _logger = environ.get_logger("ai.runtime.planner")
 _AGENT_TASK_FIELDS = frozenset(
-    {
-        "type",
-        "version",
-        "agent_id",
-        "binding_digest",
-        "binding",
-        "user_prompt",
-        "planning",
-        "thinking",
-    }
+    {"type", "version", "binding", "user_prompt", "planning", "thinking"}
 )
 
 
@@ -71,38 +62,29 @@ class RuntimeTaskNodeRunner:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         if payload["type"] != "linktools.ai.agent" or payload["version"] != 1:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        agent_id = payload["agent_id"]
-        binding_digest = payload["binding_digest"]
         base_user_prompt = payload["user_prompt"]
         planning = payload["planning"]
         thinking = payload["thinking"]
         if (
-            not isinstance(agent_id, str)
-            or not isinstance(binding_digest, str)
-            or not isinstance(base_user_prompt, str)
+            not isinstance(base_user_prompt, str)
             or not isinstance(planning, bool)
             or not isinstance(thinking, bool)
         ):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         try:
             snapshot = AgentBindingSnapshot.from_payload(payload["binding"])
-        except AIError as error:
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
-        if snapshot.binding_digest != binding_digest or snapshot.agent_spec.id != agent_id:
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        validate_agent_id(agent_id)
-        validate_user_prompt(base_user_prompt)
-        try:
-            definition = self._catalog.register(self._compiler.restore(snapshot))
+            binding = self._catalog.register_binding(self._compiler.restore(snapshot))
         except AIError as error:
             if error.code is ErrorCode.STORAGE_INTEGRITY_ERROR:
                 raise
             raise AIError(
                 ErrorCode.AGENT_DEFINITION_UNAVAILABLE,
-                safe_details={"agent_id": agent_id, "binding_digest": binding_digest},
+                safe_details={"binding_digest": snapshot.binding_digest if "snapshot" in locals() else None},
             ) from error
-        if definition.digest != binding_digest or definition.spec.id != agent_id:
+        if binding.snapshot != snapshot or binding.digest != snapshot.binding_digest:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        validate_agent_id(binding.definition.spec.id)
+        validate_user_prompt(base_user_prompt)
         if set(dependency_results) != set(node.dependencies):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         dependency_payload: dict[str, object] = {}
@@ -127,8 +109,7 @@ class RuntimeTaskNodeRunner:
                 "version": 1,
                 "graph_id": graph_id,
                 "node_id": node.node_id,
-                "agent_id": agent_id,
-                "binding_digest": binding_digest,
+                "binding_digest": binding.digest,
                 "input": node.input,
                 "dependencies": [
                     {
@@ -148,7 +129,7 @@ class RuntimeTaskNodeRunner:
             planning=planning,
             thinking=thinking,
         )
-        return binding_digest, request
+        return binding.digest, request
 
     async def result(self, execution_id: str, *, principal: Principal) -> TaskNodeRunResult:
         result = await self._execution.result(execution_id, principal=principal)

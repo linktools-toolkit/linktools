@@ -8,8 +8,7 @@ from linktools.ai.adapter import RuntimeMemoryStore
 from linktools.ai.model import ModelRegistry
 from linktools.ai.runtime import RuntimeDomain, RuntimeState
 from linktools.ai.spec import AgentSpec, AgentSpecCodec
-from linktools.ai.workspace import Workspace, open_workspace_runtime
-from linktools.ai.workspace._factory import _build_asset_registry, _build_asset_repository
+from linktools.ai.workspace import Workspace, build_workspace_assets, open_workspace_runtime
 
 
 @pytest.mark.asyncio
@@ -67,13 +66,7 @@ async def test_workspace_assets_use_kind_scoped_paths(tmp_path) -> None:
         encoding="utf-8",
     )
 
-    snapshot = _build_asset_registry(())
-    assets = await _build_asset_repository(
-        Workspace.load(tmp_path),
-        asset=None,
-        snapshot=snapshot,
-        path_adapter=None,
-    )
+    assets = await build_workspace_assets(Workspace.load(tmp_path))
 
     agents = await assets.list(kind="agent")
     skills = await assets.list(kind="skill")
@@ -90,7 +83,7 @@ async def test_workspace_session_survives_cold_restart(tmp_path) -> None:
     async with open_workspace_runtime(workspace, models=models) as runtime:
         assert runtime.tenant_id == "default"
         assert runtime.default_principal.tenant_id == "default"
-        created = await runtime.create_session("remember")
+        created = await runtime.agent("default").create_session("remember")
         agent_created = await runtime.agent("default").create_session("remember-agent")
         assert (
             await runtime.session.history(
@@ -106,7 +99,7 @@ async def test_workspace_session_survives_cold_restart(tmp_path) -> None:
     ) as runtime:
         assert runtime.tenant_id == "tenant-a"
         assert runtime.default_principal.tenant_id == "tenant-a"
-        await runtime.create_session("custom-tenant")
+        await runtime.agent("default").create_session("custom-tenant")
 
     async with open_workspace_runtime(workspace, models=models) as runtime:
         loaded = await runtime.session.get(
