@@ -60,7 +60,7 @@ from linktools.ai.temporal.workflow import (
     EvaluationWorkflowResult,
     ExecutionWorkflow,
     ExecutionWorkflowInput,
-    ExecutionWorkflowResult,
+    ExecutionWorkflowState,
     SessionWorkflow,
     SessionWorkflowInput,
     SessionWorkflowResult,
@@ -347,10 +347,29 @@ async def test_trace_is_monotonic_and_snapshot_digest_is_verified() -> None:
 
 def test_temporal_registration_has_one_explicit_worker_surface() -> None:
     class ExecutionOperation:
-        async def execute(
-            self, request: ExecutionWorkflowInput
-        ) -> ExecutionWorkflowResult:
-            return ExecutionWorkflowResult(request.execution_id, "SUCCEEDED", None, 0)
+        async def load_input(self, state: ExecutionWorkflowState) -> ExecutionWorkflowState:
+            return state
+
+        async def reserve_budget(self, state: ExecutionWorkflowState) -> ExecutionWorkflowState:
+            return state
+
+        async def run_agent(self, state: ExecutionWorkflowState) -> ExecutionWorkflowState:
+            return state
+
+        async def persist_deferred(self, state: ExecutionWorkflowState) -> ExecutionWorkflowState:
+            return state
+
+        async def load_resume_input(self, state: ExecutionWorkflowState) -> ExecutionWorkflowState:
+            return state
+
+        async def commit_result(self, state: ExecutionWorkflowState) -> ExecutionWorkflowState:
+            return state
+
+        async def settle_budget(self, state: ExecutionWorkflowState) -> ExecutionWorkflowState:
+            return state
+
+        async def cancel_effect(self, state: ExecutionWorkflowState) -> ExecutionWorkflowState:
+            return state
 
     class SessionOperation:
         async def execute(
@@ -403,7 +422,7 @@ def test_temporal_registration_has_one_explicit_worker_surface() -> None:
         "TaskActivity",
         "EvaluationActivity",
     )
-    assert ExecuteActivity.run.__name__ == "run"
+    assert "run" not in ExecuteActivity.__dict__
     assert ExecuteActivity.load_input.__name__ == "load_input"
     assert ExecuteActivity.reserve_budget.__name__ == "reserve_budget"
     assert ExecuteActivity.run_agent.__name__ == "run_agent"
@@ -472,7 +491,6 @@ async def test_temporal_workflow_inputs_apply_canonical_tenant_validation() -> N
                 "execution",
                 "tenant ",
                 "binding",
-                "bundle",
                 "request",
                 "worker",
             )
@@ -485,7 +503,7 @@ async def test_temporal_workflow_inputs_apply_canonical_tenant_validation() -> N
 
 
 @pytest.mark.asyncio
-async def test_workflow_gateway_persists_v2_execution_request() -> None:
+async def test_workflow_gateway_persists_v1_execution_request() -> None:
     started: list[tuple[str, ExecutionWorkflowInput, str]] = []
 
     class Client:
