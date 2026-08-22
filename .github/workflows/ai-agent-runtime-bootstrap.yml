@@ -20,10 +20,20 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-      - name: Validate implementation
+      - name: Export or validate implementation
         shell: bash
         run: |
           set -uo pipefail
+          git config user.name github-actions[bot]
+          git config user.email github-actions[bot]@users.noreply.github.com
+          if [[ -f .bootstrap/export ]]; then
+            rm -f .bootstrap/export .bootstrap/worktree.tar.gz
+            tar -czf .bootstrap/worktree.tar.gz linktools linktools-ai tests/ai
+            git add -A .bootstrap
+            git commit -m 'ci: export agent runtime implementation worktree'
+            git push origin HEAD:refactor/ai-agent-runtime-asset-composition
+            exit 0
+          fi
           if [[ ! -f .bootstrap/ready ]]; then
             echo 'validation trigger not present; nothing to run'
             exit 0
@@ -62,8 +72,6 @@ jobs:
           rm -f .bootstrap/ready
           cp "$RESULT" .bootstrap/result.txt
           printf '%s\n' "$status" > .bootstrap/status
-          git config user.name github-actions[bot]
-          git config user.email github-actions[bot]@users.noreply.github.com
           git add -A
           if ! git diff --cached --quiet; then
             git commit -m 'ci: record agent runtime implementation validation'
