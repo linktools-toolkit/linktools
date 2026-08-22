@@ -143,7 +143,7 @@ class AgentHandle:
             dependencies,
             input={
                 "type": "linktools.ai.agent",
-                "version": 2,
+                "version": 1,
                 "agent_id": self.agent_id,
                 "binding_digest": self.binding_digest,
                 "binding": definition.binding_snapshot.to_payload(),
