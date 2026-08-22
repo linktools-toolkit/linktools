@@ -34,6 +34,7 @@ from ..capability import CapabilityMaterializationContext
 from ..core import ExecutionDeltaType, ExecutionEventType, JsonValue, UsageMetrics, canonical_sha256
 from ..errors import AIError, ErrorCode
 from ..spec import AgentUsageLimits
+from ._binding import AgentBinding
 from ._builder import build_pydantic_agent
 from ._capabilities import (
     MEMORY_READ_TOOL_NAMES,
