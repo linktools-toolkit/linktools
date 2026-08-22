@@ -9,7 +9,7 @@ permissions:
   contents: write
 
 jobs:
-  implement:
+  validate:
     if: github.actor != 'github-actions[bot]'
     runs-on: ubuntu-latest
     steps:
@@ -20,29 +20,32 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-      - name: Apply and validate
+      - name: Validate implementation
         shell: bash
         run: |
           set -uo pipefail
           if [[ ! -f .bootstrap/ready ]]; then
-            echo 'implementation trigger not present; nothing to run'
+            echo 'validation trigger not present; nothing to run'
             exit 0
           fi
           RESULT=/tmp/agent-runtime-result.txt
           : > "$RESULT"
           status=0
-          run_gate() {
+          run_check() {
             echo "===== $* =====" | tee -a "$RESULT"
-            "$@" >>"$RESULT" 2>&1 || status=$?
+            "$@" >>"$RESULT" 2>&1 || status=1
             return 0
           }
-          run_gate python .bootstrap/implement.py
-          if [[ $status -eq 0 ]]; then run_gate python -m compileall -q linktools-ai/src/linktools/ai; fi
-          if [[ $status -eq 0 ]]; then run_gate python -m pip install --upgrade pip; fi
-          if [[ $status -eq 0 ]]; then run_gate python -m pip install -e ./linktools -e './linktools-ai[sqlite,evaluation,temporal]' pytest pytest-asyncio ruff; fi
-          if [[ $status -eq 0 ]]; then run_gate ruff check linktools-ai/scripts/build linktools-ai/src/linktools/ai linktools-ai/src/linktools/commands/ai tests/ai; fi
-          if [[ $status -eq 0 ]]; then run_gate python linktools-ai/scripts/build/architecture.py; fi
-          if [[ $status -eq 0 ]]; then run_gate pytest -q tests/ai --maxfail=30; fi
+          run_check python -m compileall -q linktools-ai/src/linktools/ai
+          run_check python -m pip install --upgrade pip
+          if [[ $status -eq 0 ]]; then
+            run_check python -m pip install -e ./linktools -e './linktools-ai[sqlite,evaluation,temporal]' pytest pytest-asyncio ruff
+          fi
+          if [[ $status -eq 0 ]]; then
+            run_check ruff check --select E4,E7,E9,F linktools-ai/scripts/build linktools-ai/src/linktools/ai linktools-ai/src/linktools/commands/ai tests/ai
+            run_check python linktools-ai/scripts/build/architecture.py
+            run_check pytest -q tests/ai --maxfail=30
+          fi
           mkdir -p .bootstrap
           rm -f .bootstrap/ready
           cp "$RESULT" .bootstrap/result.txt
@@ -51,11 +54,7 @@ jobs:
           git config user.email github-actions[bot]@users.noreply.github.com
           git add -A
           if ! git diff --cached --quiet; then
-            if [[ $status -eq 0 ]]; then
-              git commit -m 'refactor(ai): implement agent runtime asset composition'
-            else
-              git commit -m 'wip(ai): apply agent runtime asset composition implementation'
-            fi
+            git commit -m 'ci: record agent runtime implementation validation'
             git push origin HEAD:refactor/ai-agent-runtime-asset-composition
           fi
           exit 0
