@@ -1,14 +1,873 @@
 ===== python .bootstrap/patch.py =====
+linktools-ai/src/linktools/ai/workspace/_factory.py:24:    AgentDefinitionCatalog,
+linktools-ai/src/linktools/ai/workspace/_factory.py:434:    catalog: AgentDefinitionCatalog,
+linktools-ai/src/linktools/ai/workspace/_factory.py:493:) -> AgentDefinitionCatalog:
+linktools-ai/src/linktools/ai/workspace/_factory.py:499:    return AgentDefinitionCatalog(roots)
+linktools-ai/src/linktools/ai/runtime/_planner.py:11:from ..agent import AgentBindingSnapshot, AgentCompiler, AgentDefinitionCatalog
+linktools-ai/src/linktools/ai/runtime/_planner.py:54:        catalog: AgentDefinitionCatalog,
+linktools-ai/src/linktools/ai/runtime/_factory.py:12:from ..agent import AgentCompiler, AgentDefinitionCatalog, AgentExecutor
+linktools-ai/src/linktools/ai/runtime/_factory.py:38:    catalog: AgentDefinitionCatalog,
+linktools-ai/src/linktools/ai/runtime/_factory.py:206:    catalog: AgentDefinitionCatalog,
+linktools-ai/src/linktools/ai/runtime/_local.py:30:    AgentDefinitionCatalog,
+linktools-ai/src/linktools/ai/runtime/_local.py:212:        catalog: AgentDefinitionCatalog,
+linktools-ai/src/linktools/ai/runtime/_execution.py:19:from ..agent import AgentBindingSnapshot, AgentCompiler, AgentDefinition, AgentDefinitionCatalog
+linktools-ai/src/linktools/ai/runtime/_execution.py:195:        catalog: AgentDefinitionCatalog,
+linktools-ai/src/linktools/ai/runtime/_runtime_service.py:17:    AgentDefinitionCatalog,
+linktools-ai/src/linktools/ai/runtime/_runtime_service.py:107:        catalog: AgentDefinitionCatalog,
+linktools-ai/src/linktools/ai/runtime/_subagent.py:10:from ..agent import AgentDefinitionCatalog, SubagentDelegate
+linktools-ai/src/linktools/ai/runtime/_subagent.py:24:        catalog: AgentDefinitionCatalog,
+tests/ai/test_agent_composition.py:15:    AgentDefinitionCatalog,
+tests/ai/test_agent_composition.py:144:    catalog = AgentDefinitionCatalog({})
+linktools-ai/src/linktools/ai/runtime/_session.py:182:        record = SessionRecord(
+linktools-ai/src/linktools/ai/runtime/_session.py:424:            target = SessionRecord(
+tests/ai/test_session_admission.py:21:    return SessionRecord(
+tests/ai/test_session_history_projection.py:44:    return SessionRecord(
+tests/ai/test_session_admission_conformance.py:32:    return SessionRecord(
+linktools-ai/src/linktools/ai/runtime/_session.py:848:        return SessionView(
+tests/ai/test_agent_composition.py:155:        return SessionView(
+tests/ai/test_runtime_session_auto_create.py:26:        return SessionView(
+linktools-ai/src/linktools/ai/runtime/state/_history.py:214:        return ContextProjection(binding_digest, tuple(items), digest)
+linktools-ai/src/linktools/ai/runtime/state/_history.py:741:        return ContextProjection(projection.binding_digest, tuple(items), digest)
+linktools-ai/src/linktools/ai/temporal/_request.py:136:    if snapshot.binding_digest != binding_digest:
+linktools-ai/src/linktools/ai/temporal/_request.py:204:    elif binding_digest != state.binding_digest:
+linktools-ai/src/linktools/ai/temporal/_request.py:360:        if binding.binding_digest != binding_digest:
+linktools-ai/src/linktools/ai/temporal/workflow/_evaluation.py:72:    binding_digest = request.binding_digest or f"evaluation:{request.evaluation_id}:{request.target_revision}"
+linktools-ai/src/linktools/ai/temporal/workflow/_execution.py:445:        request.binding_digest,
+linktools-ai/src/linktools/ai/temporal/workflow/_execution.py:483:        binding_digest=request.binding_digest,
+linktools-ai/src/linktools/ai/temporal/workflow/_execution.py:510:        state.binding_digest,
+linktools-ai/src/linktools/ai/temporal/workflow/_execution.py:520:        request.binding_digest,
+linktools-ai/src/linktools/ai/temporal/workflow/_execution.py:570:        previous.binding_digest,
+linktools-ai/src/linktools/ai/temporal/workflow/_execution.py:580:        current.binding_digest,
+linktools-ai/src/linktools/ai/observe/_snapshot.py:20:        return self.digest == snapshot_digest({"snapshot_id": self.snapshot_id, "execution_id": self.execution_id, "binding_digest": self.binding_digest, "trace_digest": self.trace_digest, "result_digest": self.result_digest})
+linktools-ai/src/linktools/ai/runtime/_agent.py:44:            self.binding_digest,
+linktools-ai/src/linktools/ai/runtime/_agent.py:65:            self.binding_digest,
+linktools-ai/src/linktools/ai/runtime/_agent.py:86:            self.binding_digest,
+linktools-ai/src/linktools/ai/runtime/_agent.py:105:            self.binding_digest,
+linktools-ai/src/linktools/ai/runtime/_agent.py:113:        return await self._runtime._run_evaluation_for_binding(self.binding_digest, request)
+linktools-ai/src/linktools/ai/runtime/_agent.py:121:            self.binding_digest,
+linktools-ai/src/linktools/ai/runtime/_agent.py:138:        definition = self._runtime._definition(self.binding_digest)
+linktools-ai/src/linktools/ai/runtime/_agent.py:148:                "binding_digest": self.binding_digest,
+linktools-ai/src/linktools/ai/runtime/_session.py:301:                    binding_digest=record.binding_digest,
+linktools-ai/src/linktools/ai/runtime/_session.py:305:                binding_digest=record.binding_digest,
+linktools-ai/src/linktools/ai/runtime/_session.py:366:            if record.binding_digest != binding_digest:
+linktools-ai/src/linktools/ai/runtime/_session.py:410:            if source.binding_digest != binding_digest:
+linktools-ai/src/linktools/ai/runtime/_session.py:419:                    "binding": source.binding_digest,
+linktools-ai/src/linktools/ai/runtime/_session.py:428:                binding_digest=source.binding_digest,
+linktools-ai/src/linktools/ai/runtime/_session.py:465:        if current.binding_digest != binding_digest:
+linktools-ai/src/linktools/ai/runtime/_session.py:850:            record.binding_digest,
+linktools-ai/src/linktools/ai/runtime/_planner.py:91:        if snapshot.binding_digest != binding_digest or snapshot.agent_spec.id != agent_id:
+linktools-ai/src/linktools/ai/runtime/state/_history.py:740:        digest = self._projector._digest(projection.binding_digest, items)
+linktools-ai/src/linktools/ai/runtime/state/_history.py:741:        return ContextProjection(projection.binding_digest, tuple(items), digest)
+linktools-ai/src/linktools/ai/runtime/state/_history.py:928:            if binding_digest is not None and projection.binding_digest != binding_digest:
+linktools-ai/src/linktools/ai/runtime/state/_history.py:1130:        if binding_digest is not None and projection.binding_digest != binding_digest:
+linktools-ai/src/linktools/ai/runtime/state/_contracts.py:412:        elif self.binding.binding_digest != self.binding_digest:
+linktools-ai/src/linktools/ai/runtime/state/_contracts.py:855:            self.binding.binding_digest != self.binding_digest
+linktools-ai/src/linktools/ai/runtime/state/_repositories.py:1135:            or existing_target.binding_digest != target.binding_digest
+linktools-ai/src/linktools/ai/runtime/state/_repositories.py:4871:        and left.binding_digest == right.binding_digest
+linktools-ai/src/linktools/ai/runtime/state/_commands.py:895:                binding_digest=commit.execution.binding_digest,
+linktools-ai/src/linktools/ai/runtime/state/_commands.py:906:                binding_digest=commit.execution.binding_digest,
+linktools-ai/src/linktools/ai/runtime/state/_commands.py:918:                binding_digest=commit.execution.binding_digest,
+linktools-ai/src/linktools/ai/runtime/state/_commands.py:978:                            binding_digest=commit.execution.binding_digest,
+linktools-ai/src/linktools/ai/runtime/state/_commands.py:1184:                    binding_digest=commit.execution.binding_digest,
+linktools-ai/src/linktools/ai/runtime/state/_commands.py:1225:                            binding_digest=commit.execution.binding_digest,
+linktools-ai/src/linktools/ai/runtime/state/_commands.py:1462:                    binding_digest=commit.execution.binding_digest,
+linktools-ai/src/linktools/ai/runtime/state/_commands.py:2111:                commit.execution.binding_digest,
+linktools-ai/src/linktools/ai/runtime/state/_commands.py:2117:                commit.execution.binding_digest,
+linktools-ai/src/linktools/ai/runtime/state/_commands.py:2151:                binding_digest=commit.execution.binding_digest,
+linktools-ai/src/linktools/ai/runtime/state/_commands.py:2269:                binding_digest=commit.execution.binding_digest,
+linktools-ai/src/linktools/ai/runtime/state/_commands.py:2316:                    binding_digest=commit.execution.binding_digest,
+linktools-ai/src/linktools/ai/runtime/state/_steps.py:1332:            snapshot.projection.binding_digest != binding_digest
+linktools-ai/src/linktools/ai/runtime/state/_steps.py:2024:        if binding_digest is not None and projection.binding_digest != binding_digest:
+linktools-ai/src/linktools/ai/runtime/state/_steps.py:3133:                    binding_digest=captured.binding_digest,
+linktools-ai/src/linktools/ai/runtime/state/_steps.py:3195:        binding = captured.binding_digest or self._projection_bindings.get(
+linktools-ai/src/linktools/ai/runtime/_evaluation.py:241:                or baseline.binding_digest != candidate.binding_digest
+linktools-ai/src/linktools/ai/runtime/_evaluation.py:256:            digest = canonical_sha256({"snapshot_id": evaluation_id, "execution_id": record.execution_id, "binding_digest": record.binding_digest, "trace_digest": record.artifact_digest or "", "result_digest": result_digest})
+linktools-ai/src/linktools/ai/runtime/_evaluation.py:257:            snapshot = RunSnapshot(evaluation_id, record.execution_id, record.binding_digest, record.artifact_digest or "", result_digest, digest)
+linktools-ai/src/linktools/ai/runtime/_evaluation.py:265:            if record.binding_digest != binding_digest:
+linktools-ai/src/linktools/ai/runtime/_factory.py:228:                execution.binding_digest != recovery_input.binding_digest
+linktools-ai/src/linktools/ai/runtime/_factory.py:237:                    snapshot.binding_digest != recovery_input.binding_digest
+linktools-ai/src/linktools/ai/runtime/_factory.py:255:                    definition = catalog.definition(recovery_input.binding_digest)
+linktools-ai/src/linktools/ai/runtime/_local.py:304:        definition = self._catalog.definition(execution.binding_digest)
+linktools-ai/src/linktools/ai/runtime/_local.py:384:        definition = self._catalog.definition(execution.binding_digest)
+linktools-ai/src/linktools/ai/runtime/_local.py:395:            binding_digest=execution.binding_digest,
+linktools-ai/src/linktools/ai/runtime/_local.py:568:            or current.binding_digest != execution.binding_digest
+linktools-ai/src/linktools/ai/runtime/_local.py:622:            execution.binding_digest,
+linktools-ai/src/linktools/ai/runtime/_local.py:631:            execution.binding_digest != recovery_input.binding_digest
+linktools-ai/src/linktools/ai/runtime/_local.py:827:                execution.binding_digest != recovery_input.binding_digest
+linktools-ai/src/linktools/ai/runtime/_local.py:1182:            binding_digest=recovery_input.binding_digest,
+linktools-ai/src/linktools/ai/runtime/_local.py:1854:            definition = self._catalog.definition(current.binding_digest)
+linktools-ai/src/linktools/ai/runtime/_local.py:1928:                binding_fingerprint=current.binding_digest,
+linktools-ai/src/linktools/ai/runtime/_local.py:1947:                    binding_digest=current.binding_digest,
+linktools-ai/src/linktools/ai/runtime/_local.py:1953:                    binding_digest=current.binding_digest,
+linktools-ai/src/linktools/ai/runtime/_local.py:2144:                                binding_digest=execution.binding_digest,
+linktools-ai/src/linktools/ai/runtime/_local.py:2460:                    binding_digest=execution.binding_digest,
+linktools-ai/src/linktools/ai/runtime/_local.py:2939:                    binding_digest=current.binding_digest,
+linktools-ai/src/linktools/ai/runtime/_execution.py:266:            if binding.binding_digest != binding_digest:
+linktools-ai/src/linktools/ai/runtime/_execution.py:280:            execution.binding_digest != definition.digest
+linktools-ai/src/linktools/ai/runtime/_execution.py:1032:        if previous.binding_digest != binding_digest:
+linktools-ai/src/linktools/ai/runtime/_execution.py:1034:        definition = self._definition(previous.binding_digest, previous.binding)
+linktools-ai/src/linktools/ai/runtime/_execution.py:1060:        if previous.binding_digest != binding_digest:
+linktools-ai/src/linktools/ai/runtime/_execution.py:1062:        definition = self._definition(previous.binding_digest, previous.binding)
+linktools-ai/src/linktools/ai/runtime/_runtime_service.py:223:            current = self._catalog.definition(snapshot.binding_digest)
+linktools-ai/src/linktools/ai/runtime/_runtime_service.py:660:                    snapshot.binding_digest != binding_digest
+linktools-ai/src/linktools/ai/runtime/_runtime_service.py:734:        if session.binding_digest != definition.digest:
+linktools-ai/src/linktools/ai/runtime/_runtime_service.py:753:        if session.binding_digest != preferred.digest:
+linktools-ai/src/linktools/ai/runtime/_runtime_service.py:755:        return self._catalog.definition(session.binding_digest)
+linktools-ai/src/linktools/ai/agent/_binding.py:69:            or not _is_digest(self.binding_digest)
+linktools-ai/src/linktools/ai/agent/_binding.py:94:            "binding_digest": self.binding_digest,
+linktools-ai/src/linktools/ai/agent/_binding.py:152:            self.digest != self.snapshot.binding_digest
+linktools-ai/src/linktools/ai/agent/_compiler.py:202:            or binding.digest != snapshot.binding_digest
+tests/ai/test_temporal_taskgraph_conformance.py:93:        return _binding().binding_digest, ExecutionRequest(
+tests/ai/test_contracts.py:553:        binding_digest=snapshot.binding_digest,
+tests/ai/test_contracts.py:561:    assert request.binding_digest == snapshot.binding_digest
+linktools-ai/src/linktools/ai/temporal/_gateway.py:104:            binding_digest=binding_digest,
+linktools-ai/src/linktools/ai/temporal/_gateway.py:110:            binding_digest=binding_digest,
+linktools-ai/src/linktools/ai/temporal/workflow/_evaluation.py:79:                binding_digest=binding_digest,
+linktools-ai/src/linktools/ai/temporal/workflow/_execution.py:483:        binding_digest=request.binding_digest,
+linktools-ai/src/linktools/ai/temporal/_task_operation.py:94:            binding_digest=binding_digest,
+linktools-ai/src/linktools/ai/temporal/_task_operation.py:108:            binding_digest=binding_digest,
+linktools-ai/src/linktools/ai/runtime/_session.py:186:            binding_digest=binding_digest,
+linktools-ai/src/linktools/ai/runtime/_session.py:301:                    binding_digest=record.binding_digest,
+linktools-ai/src/linktools/ai/runtime/_session.py:305:                binding_digest=record.binding_digest,
+linktools-ai/src/linktools/ai/runtime/_session.py:428:                binding_digest=source.binding_digest,
+linktools-ai/src/linktools/ai/runtime/state/_history.py:932:                binding_digest=binding_digest,
+linktools-ai/src/linktools/ai/runtime/state/_history.py:1669:            binding_digest=binding_digest,
+linktools-ai/src/linktools/ai/runtime/state/_commands.py:895:                binding_digest=commit.execution.binding_digest,
+linktools-ai/src/linktools/ai/runtime/state/_commands.py:906:                binding_digest=commit.execution.binding_digest,
+linktools-ai/src/linktools/ai/runtime/state/_commands.py:918:                binding_digest=commit.execution.binding_digest,
+linktools-ai/src/linktools/ai/runtime/state/_commands.py:978:                            binding_digest=commit.execution.binding_digest,
+linktools-ai/src/linktools/ai/runtime/state/_commands.py:1184:                    binding_digest=commit.execution.binding_digest,
+linktools-ai/src/linktools/ai/runtime/state/_commands.py:1225:                            binding_digest=commit.execution.binding_digest,
+linktools-ai/src/linktools/ai/runtime/state/_commands.py:1462:                    binding_digest=commit.execution.binding_digest,
+linktools-ai/src/linktools/ai/runtime/state/_commands.py:1519:            binding_digest=binding_digest,
+linktools-ai/src/linktools/ai/runtime/state/_commands.py:1525:            binding_digest=binding_digest,
+linktools-ai/src/linktools/ai/runtime/state/_commands.py:1543:                        binding_digest=binding_digest,
+linktools-ai/src/linktools/ai/runtime/state/_commands.py:1570:                binding_digest=binding_digest,
+linktools-ai/src/linktools/ai/runtime/state/_commands.py:1586:            binding_digest=binding_digest,
+linktools-ai/src/linktools/ai/runtime/state/_commands.py:1593:                binding_digest=binding_digest,
+linktools-ai/src/linktools/ai/runtime/state/_commands.py:1603:                    binding_digest=binding_digest,
+linktools-ai/src/linktools/ai/runtime/state/_commands.py:1735:                binding_digest=binding_digest,
+linktools-ai/src/linktools/ai/runtime/state/_commands.py:1760:                binding_digest=binding_digest,
+linktools-ai/src/linktools/ai/runtime/state/_commands.py:1780:                binding_digest=binding_digest,
+linktools-ai/src/linktools/ai/runtime/state/_commands.py:2128:                binding_digest=binding_digest,
+linktools-ai/src/linktools/ai/runtime/state/_commands.py:2151:                binding_digest=commit.execution.binding_digest,
+linktools-ai/src/linktools/ai/runtime/state/_commands.py:2269:                binding_digest=commit.execution.binding_digest,
+linktools-ai/src/linktools/ai/runtime/state/_commands.py:2316:                    binding_digest=commit.execution.binding_digest,
+linktools-ai/src/linktools/ai/runtime/state/_commands.py:2449:            binding_digest=binding_digest,
+linktools-ai/src/linktools/ai/runtime/state/_commands.py:2467:                binding_digest=binding_digest,
+linktools-ai/src/linktools/ai/runtime/state/_steps.py:878:            binding_digest=binding_digest,
+linktools-ai/src/linktools/ai/runtime/state/_steps.py:897:            binding_digest=binding_digest,
+linktools-ai/src/linktools/ai/runtime/state/_steps.py:1133:                binding_digest=projection_binding,
+linktools-ai/src/linktools/ai/runtime/state/_steps.py:1396:            binding_digest=binding_digest,
+linktools-ai/src/linktools/ai/runtime/state/_steps.py:1450:            binding_digest=binding_digest,
+linktools-ai/src/linktools/ai/runtime/state/_steps.py:1584:            binding_digest=binding_digest,
+linktools-ai/src/linktools/ai/runtime/state/_steps.py:1665:            binding_digest=binding_digest,
+linktools-ai/src/linktools/ai/runtime/state/_steps.py:1689:            binding_digest=binding_digest,
+linktools-ai/src/linktools/ai/runtime/state/_steps.py:1888:            binding_digest=binding_digest,
+linktools-ai/src/linktools/ai/runtime/state/_steps.py:1903:                binding_digest=binding_digest,
+linktools-ai/src/linktools/ai/runtime/state/_steps.py:1907:            binding_digest=binding_digest,
+linktools-ai/src/linktools/ai/runtime/state/_steps.py:2001:                binding_digest=binding_digest,
+linktools-ai/src/linktools/ai/runtime/state/_steps.py:2028:            binding_digest=binding_digest,
+linktools-ai/src/linktools/ai/runtime/state/_steps.py:2495:            binding_digest=binding_digest,
+linktools-ai/src/linktools/ai/runtime/state/_steps.py:2667:            binding_digest=binding_digest,
+linktools-ai/src/linktools/ai/runtime/state/_steps.py:2849:                    binding_digest=binding_digest,
+linktools-ai/src/linktools/ai/runtime/state/_steps.py:3133:                    binding_digest=captured.binding_digest,
+linktools-ai/src/linktools/ai/runtime/state/_steps.py:3203:                binding_digest=binding,
+linktools-ai/src/linktools/ai/runtime/state/_steps.py:3614:            binding_digest=binding_digest,
+linktools-ai/src/linktools/ai/runtime/_local.py:395:            binding_digest=execution.binding_digest,
+linktools-ai/src/linktools/ai/runtime/_local.py:1182:            binding_digest=recovery_input.binding_digest,
+linktools-ai/src/linktools/ai/runtime/_local.py:1947:                    binding_digest=current.binding_digest,
+linktools-ai/src/linktools/ai/runtime/_local.py:1953:                    binding_digest=current.binding_digest,
+linktools-ai/src/linktools/ai/runtime/_local.py:2144:                                binding_digest=execution.binding_digest,
+linktools-ai/src/linktools/ai/runtime/_local.py:2460:                    binding_digest=execution.binding_digest,
+linktools-ai/src/linktools/ai/runtime/_local.py:2939:                    binding_digest=current.binding_digest,
+linktools-ai/src/linktools/ai/runtime/_execution.py:581:            binding_digest=binding_digest,
+linktools-ai/src/linktools/ai/agent/_binding.py:129:            binding_digest=_require_digest(value["binding_digest"]),
+linktools-ai/src/linktools/ai/agent/_compiler.py:154:            binding_digest=binding_digest,
+linktools-ai/src/linktools/ai/agent/_compiler.py:163:            "agent binding compiled: agent=%s agent_digest=%s binding_digest=%s",
+tests/ai/test_session_admission.py:25:        binding_digest="binding",
+tests/ai/test_agent_composition.py:89:        binding_digest="a" * 64,
+tests/ai/test_agent_composition.py:131:            binding_digest=digest,
+tests/ai/test_agent_composition.py:232:        return SimpleNamespace(binding_digest="a" * 64)
+tests/ai/test_agent_composition.py:262:        binding_digest=digest,
+tests/ai/test_agent_composition.py:266:        binding_digest=digest,
+tests/ai/test_runtime_binding_contract.py:23:        binding_digest="a" * 64,
+tests/ai/test_runtime_binding_contract.py:51:        binding_digest="a" * 64,
+tests/ai/test_recovery_integrity_validator.py:42:            binding_digest="binding",
+tests/ai/test_temporal_taskgraph_conformance.py:54:        binding_digest="a" * 64,
+tests/ai/test_temporal_taskgraph_conformance.py:716:            binding_digest="a" * 64,
+tests/ai/test_history_projection_conformance.py:66:        binding_digest="binding",
+tests/ai/test_history_projection_conformance.py:267:            binding_digest="binding",
+tests/ai/test_history_projection_conformance.py:655:            binding_digest="binding",
+tests/ai/persistence/test_execution_start_service.py:32:        binding_digest=digest,
+tests/ai/test_contracts.py:88:        binding_digest=digest,
+tests/ai/test_contracts.py:144:        binding_digest="binding",
+tests/ai/test_contracts.py:553:        binding_digest=snapshot.binding_digest,
+tests/ai/test_session_history_projection.py:48:        binding_digest="binding",
+tests/ai/test_step_io_final_fix.py:45:        binding_digest="binding",
+tests/ai/test_session_admission_conformance.py:36:        binding_digest="b" * 64,
+tests/ai/test_session_admission_conformance.py:210:        binding_digest=digest,
+tests/ai/test_temporal_continuation.py:26:        binding_digest="a" * 64,
+tests/ai/test_runtime_composition_regressions.py:90:        binding_digest="a" * 64,
+tests/ai/test_runtime_composition_regressions.py:100:        binding_digest="a" * 64,
+tests/ai/test_runtime_composition_regressions.py:131:        binding_digest="a" * 64,
+tests/ai/test_runtime_storage_io_convergence.py:352:            binding_digest="a" * 64,
+tests/ai/test_runtime_stream_order.py:51:        binding_digest="binding",
+tests/ai/test_v1_final_closure.py:352:        binding_digest="binding",
+tests/ai/test_local_execution_recovery.py:69:        binding_digest="a" * 64,
+linktools-ai/src/linktools/ai/runtime/_factory.py:271:                output = definition.output_binding
+linktools-ai/src/linktools/ai/runtime/_local.py:2575:            schema_id = definition.output_binding.schema_id
+linktools-ai/src/linktools/ai/runtime/_local.py:2576:            schema_revision = definition.output_binding.schema_revision
+linktools-ai/src/linktools/ai/runtime/_local.py:2835:            schema_id = definition.output_binding.schema_id
+linktools-ai/src/linktools/ai/runtime/_local.py:2836:            schema_revision = definition.output_binding.schema_revision
+linktools-ai/src/linktools/ai/agent/_catalog.py:116:        and left.output_binding.descriptor == right.output_binding.descriptor
+linktools-ai/src/linktools/ai/agent/_binding.py:147:        if not isinstance(self.output_binding, OutputBinding):
+linktools-ai/src/linktools/ai/agent/_binding.py:157:            or self.output_binding.schema_id != self.snapshot.output_schema_id
+linktools-ai/src/linktools/ai/agent/_binding.py:158:            or self.output_binding.schema_revision
+linktools-ai/src/linktools/ai/agent/_binding.py:160:            or self.output_binding.schema_fingerprint
+linktools-ai/src/linktools/ai/agent/_binding.py:169:        return self.output_binding.value_type
+linktools-ai/src/linktools/ai/agent/_binding.py:173:        return self.output_binding.schema_fingerprint
+linktools-ai/src/linktools/ai/runtime/_agent.py:149:                "binding": definition.binding_snapshot.to_payload(),
+linktools-ai/src/linktools/ai/runtime/_local.py:310:                and execution.binding != definition.binding_snapshot
+linktools-ai/src/linktools/ai/runtime/_local.py:385:        if execution.binding != definition.binding_snapshot:
+linktools-ai/src/linktools/ai/runtime/_local.py:1855:            if current.binding is not None and current.binding != definition.binding_snapshot:
+linktools-ai/src/linktools/ai/runtime/_execution.py:269:        if binding is not None and definition.binding_snapshot != binding:
+linktools-ai/src/linktools/ai/runtime/_execution.py:284:            or execution.binding != definition.binding_snapshot
+linktools-ai/src/linktools/ai/runtime/_execution.py:599:            binding=definition.binding_snapshot,
+linktools-ai/src/linktools/ai/runtime/_runtime_service.py:228:            if current.binding_snapshot != snapshot:
+linktools-ai/src/linktools/ai/runtime/_runtime_service.py:679:                        "binding": definition.binding_snapshot.to_payload(),
+linktools-ai/src/linktools/ai/runtime/_runtime_service.py:66:_AGENT_TASK_LEGACY_V1_FIELDS = frozenset({"type", "version", "agent_id", "user_prompt"})
+linktools-ai/src/linktools/ai/runtime/_runtime_service.py:67:_AGENT_TASK_CURRENT_V1_FIELDS = frozenset(
+linktools-ai/src/linktools/ai/runtime/_runtime_service.py:632:            if fields == _AGENT_TASK_LEGACY_V1_FIELDS:
+linktools-ai/src/linktools/ai/runtime/_runtime_service.py:640:            elif fields == _AGENT_TASK_CURRENT_V1_FIELDS:
+linktools-ai/src/linktools/ai/temporal/_request.py:31:_EXECUTION_LEGACY_V1_FIELDS = frozenset(
+linktools-ai/src/linktools/ai/temporal/_request.py:34:_EXECUTION_CURRENT_V1_FIELDS = frozenset(
+linktools-ai/src/linktools/ai/temporal/_request.py:346:    if fields == _EXECUTION_LEGACY_V1_FIELDS:
+linktools-ai/src/linktools/ai/temporal/_request.py:347:        payload = _mapping(value, _EXECUTION_LEGACY_V1_FIELDS)
+linktools-ai/src/linktools/ai/temporal/_request.py:352:    elif fields == _EXECUTION_CURRENT_V1_FIELDS:
+linktools-ai/src/linktools/ai/temporal/_request.py:353:        payload = _mapping(value, _EXECUTION_CURRENT_V1_FIELDS)
+linktools-ai/src/linktools/ai/workspace/_factory.py:32:    AssetTypeRegistry,
+linktools-ai/src/linktools/ai/workspace/_factory.py:33:    AssetTypeRegistrySnapshot,
+linktools-ai/src/linktools/ai/workspace/_factory.py:63:) -> AssetTypeRegistrySnapshot:
+linktools-ai/src/linktools/ai/workspace/_factory.py:74:    registry = AssetTypeRegistry()
+linktools-ai/src/linktools/ai/workspace/_factory.py:84:    snapshot: AssetTypeRegistrySnapshot,
+linktools-ai/src/linktools/ai/workspace/_factory.py:152:    snapshot: AssetTypeRegistrySnapshot,
+linktools-ai/src/linktools/ai/workspace/_factory.py:179:    snapshot: AssetTypeRegistrySnapshot,
+linktools-ai/src/linktools/ai/asset/__init__.py:36:    AssetTypeRegistry,
+linktools-ai/src/linktools/ai/asset/__init__.py:37:    AssetTypeRegistrySnapshot,
+linktools-ai/src/linktools/ai/asset/__init__.py:74:    "AssetTypeRegistry",
+linktools-ai/src/linktools/ai/asset/__init__.py:75:    "AssetTypeRegistrySnapshot",
+linktools-ai/src/linktools/ai/asset/_logical.py:326:class AssetTypeRegistry:
+linktools-ai/src/linktools/ai/asset/_logical.py:331:        self._snapshot: AssetTypeRegistrySnapshot | None = None
+linktools-ai/src/linktools/ai/asset/_logical.py:348:    def freeze(self) -> "AssetTypeRegistrySnapshot":
+linktools-ai/src/linktools/ai/asset/_logical.py:367:        self._snapshot = AssetTypeRegistrySnapshot._create(
+linktools-ai/src/linktools/ai/asset/_logical.py:376:class AssetTypeRegistrySnapshot:
+linktools-ai/src/linktools/ai/asset/_logical.py:403:    ) -> "AssetTypeRegistrySnapshot":
+linktools-ai/src/linktools/ai/asset/_logical.py:488:    "AssetTypeRegistry",
+linktools-ai/src/linktools/ai/asset/_logical.py:489:    "AssetTypeRegistrySnapshot",
+linktools-ai/src/linktools/ai/asset/_repository.py:36:    AssetTypeRegistrySnapshot,
+linktools-ai/src/linktools/ai/asset/_repository.py:272:    def __init__(self, store: AssetStore, registry: AssetTypeRegistrySnapshot) -> None:
+tests/ai/test_asset_repository.py:19:    AssetTypeRegistry,
+tests/ai/test_asset_repository.py:46:    registry = AssetTypeRegistry()
+tests/ai/test_asset_repository.py:183:    registry = AssetTypeRegistry()
+tests/ai/test_asset_repository.py:250:    registry = AssetTypeRegistry()
+tests/ai/test_asset_repository.py:276:    registry = AssetTypeRegistry()
+tests/ai/test_asset_repository.py:324:    registry = AssetTypeRegistry()
+tests/ai/test_asset_repository.py:338:    frozen = AssetTypeRegistry()
+tests/ai/test_asset_repository.py:363:    registry = AssetTypeRegistry()
+tests/ai/test_asset_repository.py:380:    registry = AssetTypeRegistry()
+tests/ai/test_asset_repository.py:474:    registry = AssetTypeRegistry()
+tests/ai/test_asset_repository.py:507:    registry = AssetTypeRegistry()
+tests/ai/test_asset_repository.py:522:    registry = AssetTypeRegistry()
+tests/ai/test_asset_repository.py:539:    registry = AssetTypeRegistry()
+linktools-ai/src/linktools/commands/ai/run.py:130:    agent = runtime.agent(planning=planning, thinking=thinking)
 
-===== RG AgentDefinitionCatalog =====
-Traceback (most recent call last):
-  File "/home/runner/work/linktools/linktools/.bootstrap/patch.py", line 21, in <module>
-    subprocess.run(
-  File "/opt/hostedtoolcache/Python/3.12.14/x64/lib/python3.12/subprocess.py", line 548, in run
-    with Popen(*popenargs, **kwargs) as process:
-         ^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "/opt/hostedtoolcache/Python/3.12.14/x64/lib/python3.12/subprocess.py", line 1026, in __init__
-    self._execute_child(args, executable, preexec_fn, close_fds,
-  File "/opt/hostedtoolcache/Python/3.12.14/x64/lib/python3.12/subprocess.py", line 1955, in _execute_child
-    raise child_exception_type(errno_num, err_msg, err_filename)
-FileNotFoundError: [Errno 2] No such file or directory: 'rg'
+===== GREP AgentDefinitionCatalog =====
+
+===== GREP SessionRecord\( =====
+
+===== GREP SessionView\( =====
+
+===== GREP ContextProjection\( =====
+
+===== GREP \.binding_digest =====
+
+===== GREP binding_digest= =====
+
+===== GREP \.output_binding =====
+
+===== GREP \.binding_snapshot =====
+
+===== GREP _AGENT_TASK_LEGACY_V1_FIELDS|_AGENT_TASK_CURRENT_V1_FIELDS =====
+
+===== GREP _EXECUTION_LEGACY_V1_FIELDS|_EXECUTION_CURRENT_V1_FIELDS =====
+
+===== GREP AssetTypeRegistry|AssetTypeRegistrySnapshot =====
+
+===== GREP runtime\.agent\(.*(output|planning|thinking)= =====
+===== python -m compileall -q linktools-ai/src/linktools/ai =====
+===== python -m pip install --upgrade pip =====
+Requirement already satisfied: pip in /opt/hostedtoolcache/Python/3.12.14/x64/lib/python3.12/site-packages (26.2.1)
+===== python -m pip install -e ./linktools -e ./linktools-ai[sqlite,evaluation,temporal] pytest pytest-asyncio ruff =====
+Obtaining file:///home/runner/work/linktools/linktools/linktools
+  Installing build dependencies: started
+  Installing build dependencies: finished with status 'done'
+  Checking if build backend supports build_editable: started
+  Checking if build backend supports build_editable: finished with status 'done'
+  Getting requirements to build editable: started
+  Getting requirements to build editable: finished with status 'done'
+  Preparing editable metadata (pyproject.toml): started
+  Preparing editable metadata (pyproject.toml): finished with status 'done'
+Obtaining file:///home/runner/work/linktools/linktools/linktools-ai
+  Installing build dependencies: started
+  Installing build dependencies: finished with status 'done'
+  Checking if build backend supports build_editable: started
+  Checking if build backend supports build_editable: finished with status 'done'
+  Getting requirements to build editable: started
+  Getting requirements to build editable: finished with status 'done'
+  Preparing editable metadata (pyproject.toml): started
+  Preparing editable metadata (pyproject.toml): finished with status 'done'
+Collecting pytest
+  Downloading pytest-9.1.1-py3-none-any.whl.metadata (7.6 kB)
+Collecting pytest-asyncio
+  Downloading pytest_asyncio-1.4.0-py3-none-any.whl.metadata (4.1 kB)
+Collecting ruff
+  Downloading ruff-0.16.4-py3-none-manylinux_2_17_x86_64.manylinux2014_x86_64.whl.metadata (26 kB)
+Collecting filelock>=3.4.0 (from linktools==0.9.1.post100.dev0)
+  Downloading filelock-3.32.3-py3-none-any.whl.metadata (2.0 kB)
+Collecting psutil (from linktools==0.9.1.post100.dev0)
+  Downloading psutil-7.2.2-cp36-abi3-manylinux2010_x86_64.manylinux_2_12_x86_64.manylinux_2_28_x86_64.whl.metadata (22 kB)
+Collecting pyyaml (from linktools==0.9.1.post100.dev0)
+  Using cached pyyaml-6.0.3-cp312-cp312-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl.metadata (2.4 kB)
+Collecting pydantic-ai-slim<3.0.0,>=2.27.0 (from pydantic-ai-slim[mcp,openai]<3.0.0,>=2.27.0->linktools-ai==0.10.0.post100.dev0)
+  Downloading pydantic_ai_slim-2.33.0-py3-none-any.whl.metadata (7.2 kB)
+Collecting pydantic-ai-harness>=0.13.0 (from pydantic-ai-harness[dynamic-workflow,skills]>=0.13.0->linktools-ai==0.10.0.post100.dev0)
+  Downloading pydantic_ai_harness-0.24.0-py3-none-any.whl.metadata (28 kB)
+Collecting sqlalchemy==2.0.51 (from sqlalchemy[asyncio]==2.0.51->linktools-ai==0.10.0.post100.dev0)
+  Downloading sqlalchemy-2.0.51-cp312-cp312-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl.metadata (9.5 kB)
+Collecting aiosqlite==0.22.1 (from linktools-ai==0.10.0.post100.dev0)
+  Downloading aiosqlite-0.22.1-py3-none-any.whl.metadata (4.3 kB)
+Collecting pydantic-evals>=0.1.0 (from linktools-ai==0.10.0.post100.dev0)
+  Downloading pydantic_evals-2.33.0-py3-none-any.whl.metadata (7.9 kB)
+Collecting greenlet>=1 (from sqlalchemy==2.0.51->sqlalchemy[asyncio]==2.0.51->linktools-ai==0.10.0.post100.dev0)
+  Downloading greenlet-3.5.5-cp312-cp312-manylinux_2_24_x86_64.manylinux_2_28_x86_64.whl.metadata (3.8 kB)
+Collecting typing-extensions>=4.6.0 (from sqlalchemy==2.0.51->sqlalchemy[asyncio]==2.0.51->linktools-ai==0.10.0.post100.dev0)
+  Downloading typing_extensions-4.16.0-py3-none-any.whl.metadata (3.3 kB)
+Collecting anyio>=4.7.0 (from pydantic-ai-slim<3.0.0,>=2.27.0->pydantic-ai-slim[mcp,openai]<3.0.0,>=2.27.0->linktools-ai==0.10.0.post100.dev0)
+  Downloading anyio-4.14.2-py3-none-any.whl.metadata (4.6 kB)
+Collecting genai-prices>=0.1.0 (from pydantic-ai-slim<3.0.0,>=2.27.0->pydantic-ai-slim[mcp,openai]<3.0.0,>=2.27.0->linktools-ai==0.10.0.post100.dev0)
+  Downloading genai_prices-0.1.4-py3-none-any.whl.metadata (8.5 kB)
+Collecting griffelib>=2.0 (from pydantic-ai-slim<3.0.0,>=2.27.0->pydantic-ai-slim[mcp,openai]<3.0.0,>=2.27.0->linktools-ai==0.10.0.post100.dev0)
+  Downloading griffelib-2.2.0-py3-none-any.whl.metadata (1.3 kB)
+Collecting httpx2>=2.7 (from pydantic-ai-slim<3.0.0,>=2.27.0->pydantic-ai-slim[mcp,openai]<3.0.0,>=2.27.0->linktools-ai==0.10.0.post100.dev0)
+  Downloading httpx2-2.12.0-py3-none-any.whl.metadata (9.5 kB)
+Collecting opentelemetry-api>=1.28.0 (from pydantic-ai-slim<3.0.0,>=2.27.0->pydantic-ai-slim[mcp,openai]<3.0.0,>=2.27.0->linktools-ai==0.10.0.post100.dev0)
+  Downloading opentelemetry_api-1.44.0-py3-none-any.whl.metadata (1.4 kB)
+Collecting pydantic-graph==2.33.0 (from pydantic-ai-slim<3.0.0,>=2.27.0->pydantic-ai-slim[mcp,openai]<3.0.0,>=2.27.0->linktools-ai==0.10.0.post100.dev0)
+  Downloading pydantic_graph-2.33.0-py3-none-any.whl.metadata (4.2 kB)
+Collecting pydantic>=2.12 (from pydantic-ai-slim<3.0.0,>=2.27.0->pydantic-ai-slim[mcp,openai]<3.0.0,>=2.27.0->linktools-ai==0.10.0.post100.dev0)
+  Downloading pydantic-2.13.4-py3-none-any.whl.metadata (109 kB)
+Collecting typing-inspection>=0.4.0 (from pydantic-ai-slim<3.0.0,>=2.27.0->pydantic-ai-slim[mcp,openai]<3.0.0,>=2.27.0->linktools-ai==0.10.0.post100.dev0)
+  Downloading typing_inspection-0.4.4-py3-none-any.whl.metadata (2.6 kB)
+Collecting logfire-api>=3.14.1 (from pydantic-graph==2.33.0->pydantic-ai-slim<3.0.0,>=2.27.0->pydantic-ai-slim[mcp,openai]<3.0.0,>=2.27.0->linktools-ai==0.10.0.post100.dev0)
+  Downloading logfire_api-4.41.0-py3-none-any.whl.metadata (973 bytes)
+Collecting fastmcp-slim<5,>=3.3.0 (from fastmcp-slim[client]<5,>=3.3.0; extra == "mcp"->pydantic-ai-slim[mcp,openai]<3.0.0,>=2.27.0->linktools-ai==0.10.0.post100.dev0)
+  Downloading fastmcp_slim-3.4.7-py3-none-any.whl.metadata (10 kB)
+Collecting openai>=3.0.0 (from pydantic-ai-slim[mcp,openai]<3.0.0,>=2.27.0->linktools-ai==0.10.0.post100.dev0)
+  Downloading openai-3.3.1-py3-none-any.whl.metadata (41 kB)
+Collecting tiktoken>=0.12.0 (from pydantic-ai-slim[mcp,openai]<3.0.0,>=2.27.0->linktools-ai==0.10.0.post100.dev0)
+  Downloading tiktoken-0.14.0-cp312-cp312-manylinux_2_28_x86_64.whl.metadata (6.7 kB)
+Collecting platformdirs>=4.0.0 (from fastmcp-slim<5,>=3.3.0->fastmcp-slim[client]<5,>=3.3.0; extra == "mcp"->pydantic-ai-slim[mcp,openai]<3.0.0,>=2.27.0->linktools-ai==0.10.0.post100.dev0)
+  Downloading platformdirs-4.11.3-py3-none-any.whl.metadata (5.5 kB)
+Collecting pydantic-settings>=2.0.0 (from fastmcp-slim<5,>=3.3.0->fastmcp-slim[client]<5,>=3.3.0; extra == "mcp"->pydantic-ai-slim[mcp,openai]<3.0.0,>=2.27.0->linktools-ai==0.10.0.post100.dev0)
+  Downloading pydantic_settings-2.15.0-py3-none-any.whl.metadata (3.9 kB)
+Collecting python-dotenv>=1.1.0 (from fastmcp-slim<5,>=3.3.0->fastmcp-slim[client]<5,>=3.3.0; extra == "mcp"->pydantic-ai-slim[mcp,openai]<3.0.0,>=2.27.0->linktools-ai==0.10.0.post100.dev0)
+  Downloading python_dotenv-1.2.3-py3-none-any.whl.metadata (29 kB)
+Collecting rich>=13.9.4 (from fastmcp-slim<5,>=3.3.0->fastmcp-slim[client]<5,>=3.3.0; extra == "mcp"->pydantic-ai-slim[mcp,openai]<3.0.0,>=2.27.0->linktools-ai==0.10.0.post100.dev0)
+  Downloading rich-15.0.0-py3-none-any.whl.metadata (18 kB)
+Collecting authlib>=1.6.11 (from fastmcp-slim[client]<5,>=3.3.0; extra == "mcp"->pydantic-ai-slim[mcp,openai]<3.0.0,>=2.27.0->linktools-ai==0.10.0.post100.dev0)
+  Downloading authlib-1.7.2-py2.py3-none-any.whl.metadata (10 kB)
+Collecting exceptiongroup>=1.2.2 (from fastmcp-slim[client]<5,>=3.3.0; extra == "mcp"->pydantic-ai-slim[mcp,openai]<3.0.0,>=2.27.0->linktools-ai==0.10.0.post100.dev0)
+  Downloading exceptiongroup-1.3.1-py3-none-any.whl.metadata (6.7 kB)
+Collecting httpx<1.0,>=0.28.1 (from fastmcp-slim[client]<5,>=3.3.0; extra == "mcp"->pydantic-ai-slim[mcp,openai]<3.0.0,>=2.27.0->linktools-ai==0.10.0.post100.dev0)
+  Downloading httpx-0.28.1-py3-none-any.whl.metadata (7.1 kB)
+Collecting mcp<2.0,>=1.24.0 (from fastmcp-slim[client]<5,>=3.3.0; extra == "mcp"->pydantic-ai-slim[mcp,openai]<3.0.0,>=2.27.0->linktools-ai==0.10.0.post100.dev0)
+  Downloading mcp-1.29.0-py3-none-any.whl.metadata (9.3 kB)
+Collecting py-key-value-aio<0.5.0,>=0.4.4 (from py-key-value-aio[filetree,keyring,memory]<0.5.0,>=0.4.4; extra == "client"->fastmcp-slim[client]<5,>=3.3.0; extra == "mcp"->pydantic-ai-slim[mcp,openai]<3.0.0,>=2.27.0->linktools-ai==0.10.0.post100.dev0)
+  Downloading py_key_value_aio-0.4.5-py3-none-any.whl.metadata (16 kB)
+Collecting starlette>=1.0.1 (from fastmcp-slim[client]<5,>=3.3.0; extra == "mcp"->pydantic-ai-slim[mcp,openai]<3.0.0,>=2.27.0->linktools-ai==0.10.0.post100.dev0)
+  Downloading starlette-1.6.0-py3-none-any.whl.metadata (6.4 kB)
+Collecting certifi (from httpx<1.0,>=0.28.1->fastmcp-slim[client]<5,>=3.3.0; extra == "mcp"->pydantic-ai-slim[mcp,openai]<3.0.0,>=2.27.0->linktools-ai==0.10.0.post100.dev0)
+  Downloading certifi-2026.7.22-py3-none-any.whl.metadata (2.5 kB)
+Collecting httpcore==1.* (from httpx<1.0,>=0.28.1->fastmcp-slim[client]<5,>=3.3.0; extra == "mcp"->pydantic-ai-slim[mcp,openai]<3.0.0,>=2.27.0->linktools-ai==0.10.0.post100.dev0)
+  Downloading httpcore-1.0.9-py3-none-any.whl.metadata (21 kB)
+Collecting idna (from httpx<1.0,>=0.28.1->fastmcp-slim[client]<5,>=3.3.0; extra == "mcp"->pydantic-ai-slim[mcp,openai]<3.0.0,>=2.27.0->linktools-ai==0.10.0.post100.dev0)
+  Downloading idna-3.19-py3-none-any.whl.metadata (9.2 kB)
+Collecting h11>=0.16 (from httpcore==1.*->httpx<1.0,>=0.28.1->fastmcp-slim[client]<5,>=3.3.0; extra == "mcp"->pydantic-ai-slim[mcp,openai]<3.0.0,>=2.27.0->linktools-ai==0.10.0.post100.dev0)
+  Downloading h11-0.16.0-py3-none-any.whl.metadata (8.3 kB)
+Collecting httpx-sse>=0.4 (from mcp<2.0,>=1.24.0->fastmcp-slim[client]<5,>=3.3.0; extra == "mcp"->pydantic-ai-slim[mcp,openai]<3.0.0,>=2.27.0->linktools-ai==0.10.0.post100.dev0)
+  Downloading httpx_sse-0.4.3-py3-none-any.whl.metadata (9.7 kB)
+Collecting jsonschema>=4.20.0 (from mcp<2.0,>=1.24.0->fastmcp-slim[client]<5,>=3.3.0; extra == "mcp"->pydantic-ai-slim[mcp,openai]<3.0.0,>=2.27.0->linktools-ai==0.10.0.post100.dev0)
+  Downloading jsonschema-4.26.0-py3-none-any.whl.metadata (7.6 kB)
+Collecting pyjwt>=2.10.1 (from pyjwt[crypto]>=2.10.1->mcp<2.0,>=1.24.0->fastmcp-slim[client]<5,>=3.3.0; extra == "mcp"->pydantic-ai-slim[mcp,openai]<3.0.0,>=2.27.0->linktools-ai==0.10.0.post100.dev0)
+  Downloading pyjwt-2.13.0-py3-none-any.whl.metadata (3.4 kB)
+Collecting python-multipart>=0.0.9 (from mcp<2.0,>=1.24.0->fastmcp-slim[client]<5,>=3.3.0; extra == "mcp"->pydantic-ai-slim[mcp,openai]<3.0.0,>=2.27.0->linktools-ai==0.10.0.post100.dev0)
+  Downloading python_multipart-0.0.32-py3-none-any.whl.metadata (2.1 kB)
+Collecting sse-starlette>=1.6.1 (from mcp<2.0,>=1.24.0->fastmcp-slim[client]<5,>=3.3.0; extra == "mcp"->pydantic-ai-slim[mcp,openai]<3.0.0,>=2.27.0->linktools-ai==0.10.0.post100.dev0)
+  Downloading sse_starlette-3.4.8-py3-none-any.whl.metadata (15 kB)
+Collecting uvicorn>=0.31.1 (from mcp<2.0,>=1.24.0->fastmcp-slim[client]<5,>=3.3.0; extra == "mcp"->pydantic-ai-slim[mcp,openai]<3.0.0,>=2.27.0->linktools-ai==0.10.0.post100.dev0)
+  Downloading uvicorn-0.52.4-py3-none-any.whl.metadata (6.6 kB)
+Collecting beartype>=0.20.0 (from py-key-value-aio<0.5.0,>=0.4.4->py-key-value-aio[filetree,keyring,memory]<0.5.0,>=0.4.4; extra == "client"->fastmcp-slim[client]<5,>=3.3.0; extra == "mcp"->pydantic-ai-slim[mcp,openai]<3.0.0,>=2.27.0->linktools-ai==0.10.0.post100.dev0)
+  Downloading beartype-0.22.9-py3-none-any.whl.metadata (37 kB)
+Collecting aiofile>=3.5.0 (from py-key-value-aio[filetree,keyring,memory]<0.5.0,>=0.4.4; extra == "client"->fastmcp-slim[client]<5,>=3.3.0; extra == "mcp"->pydantic-ai-slim[mcp,openai]<3.0.0,>=2.27.0->linktools-ai==0.10.0.post100.dev0)
+  Downloading aiofile-3.12.3-py3-none-any.whl.metadata (17 kB)
+Collecting keyring>=25.6.0 (from py-key-value-aio[filetree,keyring,memory]<0.5.0,>=0.4.4; extra == "client"->fastmcp-slim[client]<5,>=3.3.0; extra == "mcp"->pydantic-ai-slim[mcp,openai]<3.0.0,>=2.27.0->linktools-ai==0.10.0.post100.dev0)
+  Downloading keyring-25.7.0-py3-none-any.whl.metadata (21 kB)
+Collecting cachetools>=5.0.0 (from py-key-value-aio[filetree,keyring,memory]<0.5.0,>=0.4.4; extra == "client"->fastmcp-slim[client]<5,>=3.3.0; extra == "mcp"->pydantic-ai-slim[mcp,openai]<3.0.0,>=2.27.0->linktools-ai==0.10.0.post100.dev0)
+  Downloading cachetools-7.1.7-py3-none-any.whl.metadata (5.5 kB)
+Collecting annotated-types>=0.6.0 (from pydantic>=2.12->pydantic-ai-slim<3.0.0,>=2.27.0->pydantic-ai-slim[mcp,openai]<3.0.0,>=2.27.0->linktools-ai==0.10.0.post100.dev0)
+  Downloading annotated_types-0.8.0-py3-none-any.whl.metadata (15 kB)
+Collecting pydantic-core==2.46.4 (from pydantic>=2.12->pydantic-ai-slim<3.0.0,>=2.27.0->pydantic-ai-slim[mcp,openai]<3.0.0,>=2.27.0->linktools-ai==0.10.0.post100.dev0)
+  Downloading pydantic_core-2.46.4-cp312-cp312-manylinux_2_17_x86_64.manylinux2014_x86_64.whl.metadata (6.6 kB)
+Collecting temporalio>=1.24.0 (from pydantic-ai-slim[temporal]<3.0.0,>=2.27.0; extra == "temporal"->linktools-ai==0.10.0.post100.dev0)
+  Downloading temporalio-1.31.0-cp310-abi3-manylinux_2_17_x86_64.manylinux2014_x86_64.whl.metadata (105 kB)
+Collecting iniconfig>=1.0.1 (from pytest)
+  Downloading iniconfig-2.3.0-py3-none-any.whl.metadata (2.5 kB)
+Collecting packaging>=22 (from pytest)
+  Downloading packaging-26.3-py3-none-any.whl.metadata (3.5 kB)
+Collecting pluggy<2,>=1.5 (from pytest)
+  Downloading pluggy-1.6.0-py3-none-any.whl.metadata (4.8 kB)
+Collecting pygments>=2.7.2 (from pytest)
+  Downloading pygments-2.21.0-py3-none-any.whl.metadata (2.5 kB)
+Collecting caio~=0.12.0 (from aiofile>=3.5.0->py-key-value-aio[filetree,keyring,memory]<0.5.0,>=0.4.4; extra == "client"->fastmcp-slim[client]<5,>=3.3.0; extra == "mcp"->pydantic-ai-slim[mcp,openai]<3.0.0,>=2.27.0->linktools-ai==0.10.0.post100.dev0)
+  Downloading caio-0.12.2-cp312-cp312-manylinux_2_34_x86_64.whl.metadata (4.5 kB)
+Collecting cryptography (from authlib>=1.6.11->fastmcp-slim[client]<5,>=3.3.0; extra == "mcp"->pydantic-ai-slim[mcp,openai]<3.0.0,>=2.27.0->linktools-ai==0.10.0.post100.dev0)
+  Downloading cryptography-50.0.0-cp311-abi3-manylinux_2_34_x86_64.whl.metadata (4.3 kB)
+Collecting joserfc>=1.6.0 (from authlib>=1.6.11->fastmcp-slim[client]<5,>=3.3.0; extra == "mcp"->pydantic-ai-slim[mcp,openai]<3.0.0,>=2.27.0->linktools-ai==0.10.0.post100.dev0)
+  Downloading joserfc-1.7.4-py3-none-any.whl.metadata (3.1 kB)
+Collecting httpcore2==2.12.0 (from httpx2>=2.7->pydantic-ai-slim<3.0.0,>=2.27.0->pydantic-ai-slim[mcp,openai]<3.0.0,>=2.27.0->linktools-ai==0.10.0.post100.dev0)
+  Downloading httpcore2-2.12.0-py3-none-any.whl.metadata (25 kB)
+Collecting truststore>=0.10 (from httpx2>=2.7->pydantic-ai-slim<3.0.0,>=2.27.0->pydantic-ai-slim[mcp,openai]<3.0.0,>=2.27.0->linktools-ai==0.10.0.post100.dev0)
+  Downloading truststore-0.10.4-py3-none-any.whl.metadata (4.4 kB)
+Collecting cffi>=2.0.0 (from cryptography->authlib>=1.6.11->fastmcp-slim[client]<5,>=3.3.0; extra == "mcp"->pydantic-ai-slim[mcp,openai]<3.0.0,>=2.27.0->linktools-ai==0.10.0.post100.dev0)
+  Downloading cffi-2.1.1-cp312-cp312-manylinux2014_x86_64.manylinux_2_17_x86_64.whl.metadata (2.5 kB)
+Collecting pycparser (from cffi>=2.0.0->cryptography->authlib>=1.6.11->fastmcp-slim[client]<5,>=3.3.0; extra == "mcp"->pydantic-ai-slim[mcp,openai]<3.0.0,>=2.27.0->linktools-ai==0.10.0.post100.dev0)
+  Downloading pycparser-3.0-py3-none-any.whl.metadata (8.2 kB)
+Collecting attrs>=22.2.0 (from jsonschema>=4.20.0->mcp<2.0,>=1.24.0->fastmcp-slim[client]<5,>=3.3.0; extra == "mcp"->pydantic-ai-slim[mcp,openai]<3.0.0,>=2.27.0->linktools-ai==0.10.0.post100.dev0)
+  Downloading attrs-26.1.0-py3-none-any.whl.metadata (8.8 kB)
+Collecting jsonschema-specifications>=2023.03.6 (from jsonschema>=4.20.0->mcp<2.0,>=1.24.0->fastmcp-slim[client]<5,>=3.3.0; extra == "mcp"->pydantic-ai-slim[mcp,openai]<3.0.0,>=2.27.0->linktools-ai==0.10.0.post100.dev0)
+  Downloading jsonschema_specifications-2025.9.1-py3-none-any.whl.metadata (2.9 kB)
+Collecting referencing>=0.28.4 (from jsonschema>=4.20.0->mcp<2.0,>=1.24.0->fastmcp-slim[client]<5,>=3.3.0; extra == "mcp"->pydantic-ai-slim[mcp,openai]<3.0.0,>=2.27.0->linktools-ai==0.10.0.post100.dev0)
+  Downloading referencing-0.37.0-py3-none-any.whl.metadata (2.8 kB)
+Collecting rpds-py>=0.25.0 (from jsonschema>=4.20.0->mcp<2.0,>=1.24.0->fastmcp-slim[client]<5,>=3.3.0; extra == "mcp"->pydantic-ai-slim[mcp,openai]<3.0.0,>=2.27.0->linktools-ai==0.10.0.post100.dev0)
+  Downloading rpds_py-2026.6.3-cp312-cp312-manylinux_2_17_x86_64.manylinux2014_x86_64.whl.metadata (4.1 kB)
+Collecting SecretStorage>=3.2 (from keyring>=25.6.0->py-key-value-aio[filetree,keyring,memory]<0.5.0,>=0.4.4; extra == "client"->fastmcp-slim[client]<5,>=3.3.0; extra == "mcp"->pydantic-ai-slim[mcp,openai]<3.0.0,>=2.27.0->linktools-ai==0.10.0.post100.dev0)
+  Downloading secretstorage-3.5.0-py3-none-any.whl.metadata (4.0 kB)
+Collecting jeepney>=0.4.2 (from keyring>=25.6.0->py-key-value-aio[filetree,keyring,memory]<0.5.0,>=0.4.4; extra == "client"->fastmcp-slim[client]<5,>=3.3.0; extra == "mcp"->pydantic-ai-slim[mcp,openai]<3.0.0,>=2.27.0->linktools-ai==0.10.0.post100.dev0)
+  Downloading jeepney-0.9.0-py3-none-any.whl.metadata (1.2 kB)
+Collecting jaraco.classes (from keyring>=25.6.0->py-key-value-aio[filetree,keyring,memory]<0.5.0,>=0.4.4; extra == "client"->fastmcp-slim[client]<5,>=3.3.0; extra == "mcp"->pydantic-ai-slim[mcp,openai]<3.0.0,>=2.27.0->linktools-ai==0.10.0.post100.dev0)
+  Downloading jaraco.classes-3.4.0-py3-none-any.whl.metadata (2.6 kB)
+Collecting jaraco.functools (from keyring>=25.6.0->py-key-value-aio[filetree,keyring,memory]<0.5.0,>=0.4.4; extra == "client"->fastmcp-slim[client]<5,>=3.3.0; extra == "mcp"->pydantic-ai-slim[mcp,openai]<3.0.0,>=2.27.0->linktools-ai==0.10.0.post100.dev0)
+  Downloading jaraco_functools-4.6.0-py3-none-any.whl.metadata (2.9 kB)
+Collecting jaraco.context (from keyring>=25.6.0->py-key-value-aio[filetree,keyring,memory]<0.5.0,>=0.4.4; extra == "client"->fastmcp-slim[client]<5,>=3.3.0; extra == "mcp"->pydantic-ai-slim[mcp,openai]<3.0.0,>=2.27.0->linktools-ai==0.10.0.post100.dev0)
+  Downloading jaraco_context-6.1.2-py3-none-any.whl.metadata (4.2 kB)
+Collecting jiter<1,>=0.16.0 (from openai>=3.0.0->pydantic-ai-slim[mcp,openai]<3.0.0,>=2.27.0->linktools-ai==0.10.0.post100.dev0)
+  Downloading jiter-0.16.0-cp312-cp312-manylinux_2_17_x86_64.manylinux2014_x86_64.whl.metadata (5.2 kB)
+Collecting sniffio (from openai>=3.0.0->pydantic-ai-slim[mcp,openai]<3.0.0,>=2.27.0->linktools-ai==0.10.0.post100.dev0)
+  Downloading sniffio-1.3.1-py3-none-any.whl.metadata (3.9 kB)
+Collecting pydantic-monty>=0.0.19 (from pydantic-ai-harness[dynamic-workflow,skills]>=0.13.0->linktools-ai==0.10.0.post100.dev0)
+  Downloading pydantic_monty-0.0.21-py3-none-any.whl.metadata (11 kB)
+Collecting pydantic-monty-client==0.0.21 (from pydantic-monty>=0.0.19->pydantic-ai-harness[dynamic-workflow,skills]>=0.13.0->linktools-ai==0.10.0.post100.dev0)
+  Downloading pydantic_monty_client-0.0.21-cp312-cp312-manylinux_2_28_x86_64.whl.metadata (3.3 kB)
+Collecting pydantic-monty-runtime==0.0.21 (from pydantic-monty>=0.0.19->pydantic-ai-harness[dynamic-workflow,skills]>=0.13.0->linktools-ai==0.10.0.post100.dev0)
+  Downloading pydantic_monty_runtime-0.0.21-cp312-cp312-manylinux_2_28_x86_64.whl.metadata (5.3 kB)
+Collecting email-validator>=2.0.0 (from pydantic[email]>=2.11.7->fastmcp-slim<5,>=3.3.0->fastmcp-slim[client]<5,>=3.3.0; extra == "mcp"->pydantic-ai-slim[mcp,openai]<3.0.0,>=2.27.0->linktools-ai==0.10.0.post100.dev0)
+  Downloading email_validator-2.3.0-py3-none-any.whl.metadata (26 kB)
+Collecting dnspython>=2.0.0 (from email-validator>=2.0.0->pydantic[email]>=2.11.7->fastmcp-slim<5,>=3.3.0->fastmcp-slim[client]<5,>=3.3.0; extra == "mcp"->pydantic-ai-slim[mcp,openai]<3.0.0,>=2.27.0->linktools-ai==0.10.0.post100.dev0)
+  Downloading dnspython-2.8.0-py3-none-any.whl.metadata (5.7 kB)
+Collecting markdown-it-py>=2.2.0 (from rich>=13.9.4->fastmcp-slim<5,>=3.3.0->fastmcp-slim[client]<5,>=3.3.0; extra == "mcp"->pydantic-ai-slim[mcp,openai]<3.0.0,>=2.27.0->linktools-ai==0.10.0.post100.dev0)
+  Downloading markdown_it_py-4.2.0-py3-none-any.whl.metadata (7.4 kB)
+Collecting mdurl~=0.1 (from markdown-it-py>=2.2.0->rich>=13.9.4->fastmcp-slim<5,>=3.3.0->fastmcp-slim[client]<5,>=3.3.0; extra == "mcp"->pydantic-ai-slim[mcp,openai]<3.0.0,>=2.27.0->linktools-ai==0.10.0.post100.dev0)
+  Downloading mdurl-0.1.2-py3-none-any.whl.metadata (1.6 kB)
+Collecting nexus-rpc==1.4.0 (from temporalio>=1.24.0->pydantic-ai-slim[temporal]<3.0.0,>=2.27.0; extra == "temporal"->linktools-ai==0.10.0.post100.dev0)
+  Downloading nexus_rpc-1.4.0-py3-none-any.whl.metadata (2.9 kB)
+Collecting protobuf<8.0.0,>=3.20 (from temporalio>=1.24.0->pydantic-ai-slim[temporal]<3.0.0,>=2.27.0; extra == "temporal"->linktools-ai==0.10.0.post100.dev0)
+  Downloading protobuf-7.36.0-cp310-abi3-manylinux2014_x86_64.whl.metadata (595 bytes)
+Collecting types-protobuf<8.0.0,>=3.20 (from temporalio>=1.24.0->pydantic-ai-slim[temporal]<3.0.0,>=2.27.0; extra == "temporal"->linktools-ai==0.10.0.post100.dev0)
+  Downloading types_protobuf-7.35.1.20260822-py3-none-any.whl.metadata (2.3 kB)
+Collecting regex (from tiktoken>=0.12.0->pydantic-ai-slim[mcp,openai]<3.0.0,>=2.27.0->linktools-ai==0.10.0.post100.dev0)
+  Downloading regex-2026.7.19-cp312-cp312-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl.metadata (40 kB)
+Collecting requests (from tiktoken>=0.12.0->pydantic-ai-slim[mcp,openai]<3.0.0,>=2.27.0->linktools-ai==0.10.0.post100.dev0)
+  Downloading requests-2.34.2-py3-none-any.whl.metadata (4.8 kB)
+Collecting click>=7.0 (from uvicorn>=0.31.1->mcp<2.0,>=1.24.0->fastmcp-slim[client]<5,>=3.3.0; extra == "mcp"->pydantic-ai-slim[mcp,openai]<3.0.0,>=2.27.0->linktools-ai==0.10.0.post100.dev0)
+  Downloading click-8.4.2-py3-none-any.whl.metadata (2.6 kB)
+Collecting more-itertools (from jaraco.classes->keyring>=25.6.0->py-key-value-aio[filetree,keyring,memory]<0.5.0,>=0.4.4; extra == "client"->fastmcp-slim[client]<5,>=3.3.0; extra == "mcp"->pydantic-ai-slim[mcp,openai]<3.0.0,>=2.27.0->linktools-ai==0.10.0.post100.dev0)
+  Downloading more_itertools-11.1.0-py3-none-any.whl.metadata (41 kB)
+Collecting charset_normalizer<4,>=2 (from requests->tiktoken>=0.12.0->pydantic-ai-slim[mcp,openai]<3.0.0,>=2.27.0->linktools-ai==0.10.0.post100.dev0)
+  Downloading charset_normalizer-3.5.1-cp312-cp312-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl.metadata (45 kB)
+Collecting urllib3<3,>=1.26 (from requests->tiktoken>=0.12.0->pydantic-ai-slim[mcp,openai]<3.0.0,>=2.27.0->linktools-ai==0.10.0.post100.dev0)
+  Downloading urllib3-2.7.0-py3-none-any.whl.metadata (6.9 kB)
+Downloading aiosqlite-0.22.1-py3-none-any.whl (17 kB)
+Downloading sqlalchemy-2.0.51-cp312-cp312-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl (3.4 MB)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 3.4/3.4 MB 196.7 MB/s  0:00:00
+Downloading pydantic_ai_slim-2.33.0-py3-none-any.whl (1.4 MB)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 1.4/1.4 MB 234.6 MB/s  0:00:00
+Downloading pydantic_graph-2.33.0-py3-none-any.whl (52 kB)
+Downloading fastmcp_slim-3.4.7-py3-none-any.whl (769 kB)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 769.4/769.4 kB 160.7 MB/s  0:00:00
+Downloading httpx-0.28.1-py3-none-any.whl (73 kB)
+Downloading httpcore-1.0.9-py3-none-any.whl (78 kB)
+Downloading mcp-1.29.0-py3-none-any.whl (223 kB)
+Downloading py_key_value_aio-0.4.5-py3-none-any.whl (170 kB)
+Downloading pydantic-2.13.4-py3-none-any.whl (472 kB)
+Downloading pydantic_core-2.46.4-cp312-cp312-manylinux_2_17_x86_64.manylinux2014_x86_64.whl (2.1 MB)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 2.1/2.1 MB 297.0 MB/s  0:00:00
+Using cached pyyaml-6.0.3-cp312-cp312-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl (807 kB)
+Downloading pytest-9.1.1-py3-none-any.whl (386 kB)
+Downloading pluggy-1.6.0-py3-none-any.whl (20 kB)
+Downloading pytest_asyncio-1.4.0-py3-none-any.whl (16 kB)
+Downloading ruff-0.16.4-py3-none-manylinux_2_17_x86_64.manylinux2014_x86_64.whl (10.3 MB)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 10.3/10.3 MB 352.7 MB/s  0:00:00
+Downloading aiofile-3.12.3-py3-none-any.whl (22 kB)
+Downloading caio-0.12.2-cp312-cp312-manylinux_2_34_x86_64.whl (196 kB)
+Downloading annotated_types-0.8.0-py3-none-any.whl (13 kB)
+Downloading anyio-4.14.2-py3-none-any.whl (125 kB)
+Downloading authlib-1.7.2-py2.py3-none-any.whl (259 kB)
+Downloading beartype-0.22.9-py3-none-any.whl (1.3 MB)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 1.3/1.3 MB 247.7 MB/s  0:00:00
+Downloading cachetools-7.1.7-py3-none-any.whl (16 kB)
+Downloading exceptiongroup-1.3.1-py3-none-any.whl (16 kB)
+Downloading filelock-3.32.3-py3-none-any.whl (98 kB)
+Downloading genai_prices-0.1.4-py3-none-any.whl (99 kB)
+Downloading greenlet-3.5.5-cp312-cp312-manylinux_2_24_x86_64.manylinux_2_28_x86_64.whl (621 kB)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 621.4/621.4 kB 109.5 MB/s  0:00:00
+Downloading griffelib-2.2.0-py3-none-any.whl (166 kB)
+Downloading h11-0.16.0-py3-none-any.whl (37 kB)
+Downloading httpx_sse-0.4.3-py3-none-any.whl (9.0 kB)
+Downloading httpx2-2.12.0-py3-none-any.whl (95 kB)
+Downloading httpcore2-2.12.0-py3-none-any.whl (83 kB)
+Downloading idna-3.19-py3-none-any.whl (68 kB)
+Downloading iniconfig-2.3.0-py3-none-any.whl (7.5 kB)
+Downloading joserfc-1.7.4-py3-none-any.whl (71 kB)
+Downloading cryptography-50.0.0-cp311-abi3-manylinux_2_34_x86_64.whl (4.7 MB)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 4.7/4.7 MB 287.6 MB/s  0:00:00
+Downloading cffi-2.1.1-cp312-cp312-manylinux2014_x86_64.manylinux_2_17_x86_64.whl (221 kB)
+Downloading jsonschema-4.26.0-py3-none-any.whl (90 kB)
+Downloading attrs-26.1.0-py3-none-any.whl (67 kB)
+Downloading jsonschema_specifications-2025.9.1-py3-none-any.whl (18 kB)
+Downloading keyring-25.7.0-py3-none-any.whl (39 kB)
+Downloading jeepney-0.9.0-py3-none-any.whl (49 kB)
+Downloading logfire_api-4.41.0-py3-none-any.whl (143 kB)
+Downloading openai-3.3.1-py3-none-any.whl (1.7 MB)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 1.7/1.7 MB 224.9 MB/s  0:00:00
+Downloading jiter-0.16.0-cp312-cp312-manylinux_2_17_x86_64.manylinux2014_x86_64.whl (343 kB)
+Downloading typing_extensions-4.16.0-py3-none-any.whl (45 kB)
+Downloading opentelemetry_api-1.44.0-py3-none-any.whl (60 kB)
+Downloading packaging-26.3-py3-none-any.whl (129 kB)
+Downloading platformdirs-4.11.3-py3-none-any.whl (23 kB)
+Downloading pydantic_ai_harness-0.24.0-py3-none-any.whl (734 kB)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 734.4/734.4 kB 167.2 MB/s  0:00:00
+Downloading pydantic_evals-2.33.0-py3-none-any.whl (101 kB)
+Downloading pydantic_monty-0.0.21-py3-none-any.whl (4.7 kB)
+Downloading pydantic_monty_client-0.0.21-cp312-cp312-manylinux_2_28_x86_64.whl (3.5 MB)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 3.5/3.5 MB 243.1 MB/s  0:00:00
+Downloading pydantic_monty_runtime-0.0.21-cp312-cp312-manylinux_2_28_x86_64.whl (10.4 MB)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 10.4/10.4 MB 299.0 MB/s  0:00:00
+Downloading pydantic_settings-2.15.0-py3-none-any.whl (69 kB)
+Downloading email_validator-2.3.0-py3-none-any.whl (35 kB)
+Downloading dnspython-2.8.0-py3-none-any.whl (331 kB)
+Downloading pygments-2.21.0-py3-none-any.whl (1.3 MB)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 1.3/1.3 MB 232.5 MB/s  0:00:00
+Downloading pyjwt-2.13.0-py3-none-any.whl (31 kB)
+Downloading python_dotenv-1.2.3-py3-none-any.whl (22 kB)
+Downloading python_multipart-0.0.32-py3-none-any.whl (30 kB)
+Downloading referencing-0.37.0-py3-none-any.whl (26 kB)
+Downloading rich-15.0.0-py3-none-any.whl (310 kB)
+Downloading markdown_it_py-4.2.0-py3-none-any.whl (91 kB)
+Downloading mdurl-0.1.2-py3-none-any.whl (10.0 kB)
+Downloading rpds_py-2026.6.3-cp312-cp312-manylinux_2_17_x86_64.manylinux2014_x86_64.whl (366 kB)
+Downloading secretstorage-3.5.0-py3-none-any.whl (15 kB)
+Downloading sse_starlette-3.4.8-py3-none-any.whl (16 kB)
+Downloading starlette-1.6.0-py3-none-any.whl (75 kB)
+Downloading temporalio-1.31.0-cp310-abi3-manylinux_2_17_x86_64.manylinux2014_x86_64.whl (14.8 MB)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 14.8/14.8 MB 301.6 MB/s  0:00:00
+Downloading nexus_rpc-1.4.0-py3-none-any.whl (29 kB)
+Downloading protobuf-7.36.0-cp310-abi3-manylinux2014_x86_64.whl (340 kB)
+Downloading types_protobuf-7.35.1.20260822-py3-none-any.whl (86 kB)
+Downloading tiktoken-0.14.0-cp312-cp312-manylinux_2_28_x86_64.whl (1.2 MB)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 1.2/1.2 MB 239.5 MB/s  0:00:00
+Downloading truststore-0.10.4-py3-none-any.whl (18 kB)
+Downloading typing_inspection-0.4.4-py3-none-any.whl (14 kB)
+Downloading uvicorn-0.52.4-py3-none-any.whl (79 kB)
+Downloading click-8.4.2-py3-none-any.whl (119 kB)
+Downloading certifi-2026.7.22-py3-none-any.whl (136 kB)
+Downloading jaraco.classes-3.4.0-py3-none-any.whl (6.8 kB)
+Downloading jaraco_context-6.1.2-py3-none-any.whl (7.9 kB)
+Downloading jaraco_functools-4.6.0-py3-none-any.whl (11 kB)
+Downloading more_itertools-11.1.0-py3-none-any.whl (72 kB)
+Downloading psutil-7.2.2-cp36-abi3-manylinux2010_x86_64.manylinux_2_12_x86_64.manylinux_2_28_x86_64.whl (155 kB)
+Downloading pycparser-3.0-py3-none-any.whl (48 kB)
+Downloading regex-2026.7.19-cp312-cp312-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl (801 kB)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 801.8/801.8 kB 156.6 MB/s  0:00:00
+Downloading requests-2.34.2-py3-none-any.whl (73 kB)
+Downloading charset_normalizer-3.5.1-cp312-cp312-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl (248 kB)
+Downloading urllib3-2.7.0-py3-none-any.whl (131 kB)
+Downloading sniffio-1.3.1-py3-none-any.whl (10 kB)
+Building wheels for collected packages: linktools, linktools-ai
+  Building editable for linktools (pyproject.toml): started
+  Building editable for linktools (pyproject.toml): finished with status 'done'
+  Created wheel for linktools: filename=linktools-0.9.1.post100.dev0-0.editable-py3-none-any.whl size=6045 sha256=0277e33a97c6cf7770d3a7e5943991c93cbcdfcac2e4a30de9be9f3485b73176
+  Stored in directory: /tmp/pip-ephem-wheel-cache-3clg11nd/wheels/e5/50/d0/0d24bfdc0ab21509a012622c53bd84039fa6f547804efa2376
+  Building editable for linktools-ai (pyproject.toml): started
+  Building editable for linktools-ai (pyproject.toml): finished with status 'done'
+  Created wheel for linktools-ai: filename=linktools_ai-0.10.0.post100.dev0-0.editable-py3-none-any.whl size=6512 sha256=1c31ce76081fbaf443bf00355edcc0a42197687d31f4f26cc9a6d8e2aefeb22c
+  Stored in directory: /tmp/pip-ephem-wheel-cache-3clg11nd/wheels/e5/5a/b9/c291aedae11f520717aebc31d61e541d4ea9708b19097b8566
+Successfully built linktools linktools-ai
+Installing collected packages: urllib3, typing-extensions, types-protobuf, truststore, sniffio, ruff, rpds-py, regex, pyyaml, python-multipart, python-dotenv, pyjwt, pygments, pydantic-monty-runtime, pycparser, psutil, protobuf, pluggy, platformdirs, packaging, more-itertools, mdurl, logfire-api, jiter, jeepney, jaraco.context, iniconfig, idna, httpx-sse, h11, griffelib, greenlet, filelock, dnspython, click, charset_normalizer, certifi, caio, cachetools, beartype, attrs, annotated-types, aiosqlite, uvicorn, typing-inspection, sqlalchemy, requests, referencing, pytest, pydantic-monty-client, pydantic-core, py-key-value-aio, opentelemetry-api, nexus-rpc, markdown-it-py, linktools, jaraco.functools, jaraco.classes, httpcore2, httpcore, exceptiongroup, email-validator, cffi, anyio, aiofile, tiktoken, temporalio, starlette, rich, pytest-asyncio, pydantic-monty, pydantic, jsonschema-specifications, httpx2, httpx, cryptography, sse-starlette, SecretStorage, pydantic-settings, pydantic-graph, openai, jsonschema, joserfc, genai-prices, pydantic-ai-slim, mcp, keyring, fastmcp-slim, authlib, pydantic-evals, pydantic-ai-harness, linktools-ai
+
+Successfully installed SecretStorage-3.5.0 aiofile-3.12.3 aiosqlite-0.22.1 annotated-types-0.8.0 anyio-4.14.2 attrs-26.1.0 authlib-1.7.2 beartype-0.22.9 cachetools-7.1.7 caio-0.12.2 certifi-2026.7.22 cffi-2.1.1 charset_normalizer-3.5.1 click-8.4.2 cryptography-50.0.0 dnspython-2.8.0 email-validator-2.3.0 exceptiongroup-1.3.1 fastmcp-slim-3.4.7 filelock-3.32.3 genai-prices-0.1.4 greenlet-3.5.5 griffelib-2.2.0 h11-0.16.0 httpcore-1.0.9 httpcore2-2.12.0 httpx-0.28.1 httpx-sse-0.4.3 httpx2-2.12.0 idna-3.19 iniconfig-2.3.0 jaraco.classes-3.4.0 jaraco.context-6.1.2 jaraco.functools-4.6.0 jeepney-0.9.0 jiter-0.16.0 joserfc-1.7.4 jsonschema-4.26.0 jsonschema-specifications-2025.9.1 keyring-25.7.0 linktools-0.9.1.post100.dev0 linktools-ai-0.10.0.post100.dev0 logfire-api-4.41.0 markdown-it-py-4.2.0 mcp-1.29.0 mdurl-0.1.2 more-itertools-11.1.0 nexus-rpc-1.4.0 openai-3.3.1 opentelemetry-api-1.44.0 packaging-26.3 platformdirs-4.11.3 pluggy-1.6.0 protobuf-7.36.0 psutil-7.2.2 py-key-value-aio-0.4.5 pycparser-3.0 pydantic-2.13.4 pydantic-ai-harness-0.24.0 pydantic-ai-slim-2.33.0 pydantic-core-2.46.4 pydantic-evals-2.33.0 pydantic-graph-2.33.0 pydantic-monty-0.0.21 pydantic-monty-client-0.0.21 pydantic-monty-runtime-0.0.21 pydantic-settings-2.15.0 pygments-2.21.0 pyjwt-2.13.0 pytest-9.1.1 pytest-asyncio-1.4.0 python-dotenv-1.2.3 python-multipart-0.0.32 pyyaml-6.0.3 referencing-0.37.0 regex-2026.7.19 requests-2.34.2 rich-15.0.0 rpds-py-2026.6.3 ruff-0.16.4 sniffio-1.3.1 sqlalchemy-2.0.51 sse-starlette-3.4.8 starlette-1.6.0 temporalio-1.31.0 tiktoken-0.14.0 truststore-0.10.4 types-protobuf-7.35.1.20260822 typing-extensions-4.16.0 typing-inspection-0.4.4 urllib3-2.7.0 uvicorn-0.52.4
+===== ruff check --select E4,E7,E9,F linktools-ai/src/linktools/ai linktools-ai/src/linktools/commands/ai tests/ai =====
+F401 [*] `pydantic_ai_harness.step_persistence.ContinuableSnapshot` imported but unused
+  --> linktools-ai/src/linktools/ai/adapter/_history.py:15:5
+   |
+13 | from pydantic_ai.messages import ModelRequest, ModelResponse
+14 | from pydantic_ai_harness.step_persistence import (
+15 |     ContinuableSnapshot,
+   |     ^^^^^^^^^^^^^^^^^^^
+16 |     RunRecord,
+17 |     StepEvent,
+   |
+help: Remove unused import: `pydantic_ai_harness.step_persistence.ContinuableSnapshot`
+   |
+14 | from pydantic_ai_harness.step_persistence import (
+   -     ContinuableSnapshot,
+15 |     RunRecord,
+   |
+
+F401 `._mcp.mcp_server_selector` imported but unused; consider removing, adding to `__all__`, or using a redundant alias
+  --> linktools-ai/src/linktools/ai/capability/__init__.py:13:54
+   |
+11 |     validate_fingerprint,
+12 | )
+13 | from ._mcp import MCPCapabilityProvider, MCPRuntime, mcp_server_selector
+   |                                                      ^^^^^^^^^^^^^^^^^^^
+14 | from ._names import SKILL_TOOL_NAMES
+15 | from ._skill import SkillCapabilityProvider
+   |
+help: Add unused import `mcp_server_selector` to __all__
+
+F401 [*] `typing.TypeGuard` imported but unused
+  --> linktools-ai/src/linktools/ai/runtime/_runtime_service.py:8:30
+   |
+ 6 | import secrets
+ 7 | from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
+ 8 | from typing import Protocol, TypeGuard
+   |                              ^^^^^^^^^
+ 9 |
+10 | from linktools.core import environ
+   |
+help: Remove unused import: `typing.TypeGuard`
+  |
+7 | from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
+  - from typing import Protocol, TypeGuard
+8 + from typing import Protocol
+9 |
+  |
+
+F401 [*] `.state._contracts.ConversationHistoryRecord` imported but unused
+  --> linktools-ai/src/linktools/ai/runtime/_session.py:54:5
+   |
+52 | from .state._contracts import (
+53 |     ConversationCursor,
+54 |     ConversationHistoryRecord,
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^
+55 |     ConversationState,
+56 |     ExecutionRecord,
+   |
+help: Remove unused import
+   |
+53 |     ConversationCursor,
+   -     ConversationHistoryRecord,
+54 |     ConversationState,
+55 |     ExecutionRecord,
+56 |     ExecutionRepository,
+   -     HistoryQuality,
+57 |     OperationLedgerInput,
+   |
+
+F401 [*] `.state._contracts.HistoryQuality` imported but unused
+  --> linktools-ai/src/linktools/ai/runtime/_session.py:58:5
+   |
+56 |     ExecutionRecord,
+57 |     ExecutionRepository,
+58 |     HistoryQuality,
+   |     ^^^^^^^^^^^^^^
+59 |     OperationLedgerInput,
+60 |     OperationLedgerRecord,
+   |
+help: Remove unused import
+   |
+53 |     ConversationCursor,
+   -     ConversationHistoryRecord,
+54 |     ConversationState,
+55 |     ExecutionRecord,
+56 |     ExecutionRepository,
+   -     HistoryQuality,
+57 |     OperationLedgerInput,
+   |
+
+E402 Module level import not at top of file
+  --> linktools-ai/src/linktools/ai/runtime/state/_contracts.py:11:1
+   |
+ 9 | """
+10 |
+11 | from collections.abc import Mapping, Sequence
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+12 | from dataclasses import dataclass
+13 | from datetime import datetime
+   |
+help: Move module level imports to top of file
+
+E402 Module level import not at top of file
+  --> linktools-ai/src/linktools/ai/runtime/state/_contracts.py:12:1
+   |
+11 | from collections.abc import Mapping, Sequence
+12 | from dataclasses import dataclass
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+13 | from datetime import datetime
+14 | from enum import StrEnum
+   |
+help: Move module level imports to top of file
+
+E402 Module level import not at top of file
+  --> linktools-ai/src/linktools/ai/runtime/state/_contracts.py:13:1
+   |
+11 | from collections.abc import Mapping, Sequence
+12 | from dataclasses import dataclass
+13 | from datetime import datetime
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+14 | from enum import StrEnum
+15 | from typing import TYPE_CHECKING, Protocol
+   |
+help: Move module level imports to top of file
+
+E402 Module level import not at top of file
+  --> linktools-ai/src/linktools/ai/runtime/state/_contracts.py:14:1
+   |
+12 | from dataclasses import dataclass
+13 | from datetime import datetime
+14 | from enum import StrEnum
+   | ^^^^^^^^^^^^^^^^^^^^^^^^
+15 | from typing import TYPE_CHECKING, Protocol
+   |
+help: Move module level imports to top of file
+
+E402 Module level import not at top of file
+  --> linktools-ai/src/linktools/ai/runtime/state/_contracts.py:15:1
+   |
+13 | from datetime import datetime
+14 | from enum import StrEnum
+15 | from typing import TYPE_CHECKING, Protocol
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+16 |
+17 | from pydantic_ai.messages import ModelMessage
+   |
+help: Move module level imports to top of file
+
+E402 Module level import not at top of file
+  --> linktools-ai/src/linktools/ai/runtime/state/_contracts.py:17:1
+   |
+15 | from typing import TYPE_CHECKING, Protocol
+16 |
+17 | from pydantic_ai.messages import ModelMessage
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+18 |
+19 | from ...agent import AgentBindingSnapshot
+   |
+help: Move module level imports to top of file
+
+E402 Module level import not at top of file
+  --> linktools-ai/src/linktools/ai/runtime/state/_contracts.py:19:1
+   |
+17 | from pydantic_ai.messages import ModelMessage
+18 |
+19 | from ...agent import AgentBindingSnapshot
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+20 | from ...core import (
+21 |     ApprovalDecision,
+   |
+help: Move module level imports to top of file
+
+E402 Module level import not at top of file
+  --> linktools-ai/src/linktools/ai/runtime/state/_contracts.py:20:1
+   |
+19 |   from ...agent import AgentBindingSnapshot
+20 | / from ...core import (
+21 | |     ApprovalDecision,
+22 | |     ApprovalStatus,
+23 | |     EvaluationStatus,
+24 | |     ExecutionEventType,
+25 | |     ExecutionLineageKind,
+26 | |     ExecutionStatus,
+27 | |     ExternalCallStatus,
+28 | |     IdempotencyStatus,
+29 | |     JsonValue,
+30 | |     OperationLedgerInput,
+31 | |     OperationLedgerRecord,
+32 | |     OperationStatus,
+33 | |     Page,
+34 | |     ResourceKind,
+35 | |     ResourceRef,
+36 | |     SessionStatus,
+37 | |     StopReason,
+38 | |     UsageMetrics,
+39 | | )
+   | |_^
+40 |   from ...storage import ObjectRef, StoredPayload
+41 |   from ...task import (
+   |
+help: Move module level imports to top of file
+
+E402 Module level import not at top of file
+  --> linktools-ai/src/linktools/ai/runtime/state/_contracts.py:40:1
+   |
+38 |     UsageMetrics,
+39 | )
+40 | from ...storage import ObjectRef, StoredPayload
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+41 | from ...task import (
+42 |     TaskGraph,
+   |
+help: Move module level imports to top of file
+
+E402 Module level import not at top of file
+  --> linktools-ai/src/linktools/ai/runtime/state/_contracts.py:41:1
+   |
+39 |   )
+40 |   from ...storage import ObjectRef, StoredPayload
+41 | / from ...task import (
+42 | |     TaskGraph,
+43 | |     TaskGraphView,
+44 | |     TaskLease,
+45 | |     TaskNodeView,
+46 | |     TaskTerminalRecord,
+47 | | )
+   | |_^
+48 |   from ._plan import RuntimeDomain
+   |
+help: Move module level imports to top of file
+
+E402 Module level import not at top of file
+  --> linktools-ai/src/linktools/ai/runtime/state/_contracts.py:48:1
+   |
+46 |     TaskTerminalRecord,
+47 | )
+48 | from ._plan import RuntimeDomain
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+49 |
+50 | if TYPE_CHECKING:
+   |
+help: Move module level imports to top of file
+
+Found 16 errors.
+[*] 4 fixable with the `--fix` option.
