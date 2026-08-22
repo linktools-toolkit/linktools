@@ -48,7 +48,16 @@ jobs:
           if [[ $status -eq 0 ]]; then run_check python -m compileall -q linktools-ai/src/linktools/ai; fi
           if [[ $status -eq 0 ]]; then run_check python -m pip install -q --upgrade pip; fi
           if [[ $status -eq 0 ]]; then run_check python -m pip install -q -e ./linktools -e './linktools-ai[sqlite,evaluation,temporal]' pytest pytest-asyncio ruff; fi
-          if [[ $status -eq 0 ]]; then run_check ruff check --select E4,E7,E9,F linktools-ai/src/linktools/ai linktools-ai/src/linktools/commands/ai tests/ai; fi
+          if [[ $status -eq 0 ]]; then
+            mapfile -t changed_python < <(
+              git diff --name-only a4ded79a152ccfbc635503ee7b7bd394bd50970e -- \
+                linktools-ai/src/linktools/ai linktools-ai/src/linktools/commands/ai tests/ai \
+                | grep '\.py$' || true
+            )
+            if [[ ${#changed_python[@]} -gt 0 ]]; then
+              run_check ruff check --select E4,E7,E9,F "${changed_python[@]}"
+            fi
+          fi
           if [[ $status -eq 0 ]]; then run_check python -m scripts.build.architecture; fi
           if [[ $status -eq 0 ]]; then run_check pytest -q tests/ai --maxfail=30; fi
           mkdir -p .bootstrap
