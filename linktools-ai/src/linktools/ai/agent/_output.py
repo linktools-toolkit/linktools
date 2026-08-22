@@ -121,13 +121,10 @@ def restore_output(descriptor: Mapping[str, JsonValue]) -> OutputBinding:
         target: object = importlib.import_module(module_name)
         for part in qualname.split("."):
             target = getattr(target, part)
-    except (AttributeError, ImportError, ModuleNotFoundError) as error:
-        raise AIError(ErrorCode.AGENT_DEFINITION_UNAVAILABLE) from error
-    if not isinstance(target, type) or not issubclass(target, BaseModel):
-        raise AIError(ErrorCode.AGENT_DEFINITION_UNAVAILABLE)
-    try:
+        if not isinstance(target, type) or not issubclass(target, BaseModel):
+            raise TypeError("restored output target is not a BaseModel type")
         restored = bind_output(target)
-    except AIError as error:
+    except Exception as error:
         raise AIError(ErrorCode.AGENT_DEFINITION_UNAVAILABLE) from error
     if restored.descriptor != dict(descriptor):
         raise AIError(ErrorCode.AGENT_DEFINITION_UNAVAILABLE)
@@ -143,7 +140,7 @@ def _validate_importable_type(value: type[BaseModel]) -> None:
         target: object = importlib.import_module(module_name)
         for part in qualname.split("."):
             target = getattr(target, part)
-    except (AttributeError, ImportError, ModuleNotFoundError) as error:
+    except Exception as error:
         raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID) from error
     if target is not value:
         raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID)
