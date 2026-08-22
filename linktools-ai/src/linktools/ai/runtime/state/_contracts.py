@@ -406,7 +406,10 @@ class ExecutionRecord:
     def __post_init__(self) -> None:
         if not isinstance(self.planning, bool) or not isinstance(self.thinking, bool):
             raise ValueError("execution modes must be boolean")
-        if self.binding is not None and self.binding.binding_digest != self.binding_digest:
+        if self.binding is None:
+            if self.planning or self.thinking:
+                raise ValueError("legacy execution without binding cannot enable modes")
+        elif self.binding.binding_digest != self.binding_digest:
             raise ValueError("execution binding snapshot does not match binding digest")
 
 
@@ -845,7 +848,10 @@ class RecoveryExecutionInput:
             raise ValueError("recovery prompt payload is invalid")
         if not isinstance(self.planning, bool) or not isinstance(self.thinking, bool):
             raise ValueError("recovery execution modes must be boolean")
-        if self.binding is not None and (
+        if self.binding is None:
+            if self.planning or self.thinking:
+                raise ValueError("legacy recovery input without binding cannot enable modes")
+        elif (
             self.binding.binding_digest != self.binding_digest
             or self.binding.agent_spec.id != self.agent_id
         ):
