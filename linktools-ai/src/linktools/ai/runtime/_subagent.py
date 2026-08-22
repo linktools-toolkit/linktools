@@ -207,6 +207,8 @@ def _subagent_result(result: ExecutionResult) -> "dict[str, JsonValue]":
         "execution_id": result.execution_id,
         "status": result.status.value,
         "output": result.output,
+        "error_code": result.error_code,
+        "safe_error_details": dict(result.safe_error_details),
     }
 
 
