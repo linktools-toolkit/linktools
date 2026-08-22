@@ -105,6 +105,7 @@ class RuntimeCapability:
     id: str
     capability: "PydanticAgentCapability[None]"
     revision: int = 1
+    semantic_fingerprint: "str | None" = None
     _descriptor_payload: "bytes | None" = field(default=None, repr=False, compare=True)
 
     @property
@@ -140,15 +141,10 @@ class RuntimeCapability:
             if not isinstance(value, str) or not _is_fingerprint(value):
                 raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
             return value
-        capability_type = type(self.capability)
-        return canonical_sha256(
-            {
-                "id": self.id,
-                "revision": self.revision,
-                "module": capability_type.__module__,
-                "qualname": capability_type.__qualname__,
-            }
-        )
+        value = self.semantic_fingerprint
+        if not isinstance(value, str) or not _is_fingerprint(value):
+            raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
+        return value
 
     def __post_init__(self) -> None:
         if (
@@ -160,11 +156,16 @@ class RuntimeCapability:
             or self.revision < 1
         ):
             raise ValueError("runtime capability is incomplete")
-        if self._descriptor_payload is not None:
-            descriptor = self.descriptor
-            if descriptor is None:
-                raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
-            _validate_runtime_capability_descriptor(descriptor)
+        if self._descriptor_payload is None:
+            if not _is_fingerprint(self.semantic_fingerprint):
+                raise AIError(ErrorCode.CAPABILITY_FINGERPRINT_INVALID)
+            return
+        if self.semantic_fingerprint is not None:
+            raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
+        descriptor = self.descriptor
+        if descriptor is None:
+            raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
+        _validate_runtime_capability_descriptor(descriptor)
 
     @classmethod
     def from_spec(
