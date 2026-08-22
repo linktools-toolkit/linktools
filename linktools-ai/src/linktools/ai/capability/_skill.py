@@ -82,7 +82,7 @@ class SkillCapabilityBinding:
         del context
         if not self.catalog.specifications:
             return ()
-        return (SkillCapability(self.catalog),)
+        return (SkillCapability(self.catalog, id="linktools-skill"),)
 
 
 def bind_skill_capability(
