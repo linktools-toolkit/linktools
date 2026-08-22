@@ -7,7 +7,7 @@ import asyncio
 from linktools.core import environ
 from pydantic_ai.exceptions import ModelRetry
 
-from ..agent import AgentDefinitionCatalog, SubagentDelegate
+from ..agent import AgentCatalog, SubagentDelegate
 from ..core import ExecutionStatus, JsonValue, Principal, canonical_sha256
 from ..errors import AIError, ErrorCode
 from ._execution import DefaultExecutionService
@@ -21,7 +21,7 @@ class SubagentDispatcher:
 
     def __init__(
         self,
-        catalog: AgentDefinitionCatalog,
+        catalog: AgentCatalog,
         execution: DefaultExecutionService,
     ) -> None:
         self._catalog = catalog

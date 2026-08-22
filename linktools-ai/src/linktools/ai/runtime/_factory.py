@@ -9,7 +9,7 @@ from pathlib import Path
 from linktools.core import environ
 from pydantic_ai_harness.memory import SearchableMemoryStore
 
-from ..agent import AgentCompiler, AgentDefinitionCatalog, AgentExecutor
+from ..agent import AgentCompiler, AgentCatalog, AgentExecutor
 from ..asset import AssetRepository
 from ..core import AuthorizationPolicy, HmacCursorSigner
 from ..errors import AIError, ErrorCode
@@ -35,7 +35,7 @@ _logger = environ.get_logger("ai.runtime.factory")
 async def build_local_runtime(
     *,
     state: RuntimeState,
-    catalog: AgentDefinitionCatalog,
+    catalog: AgentCatalog,
     compiler: AgentCompiler,
     assets: AssetRepository,
     authorization: AuthorizationPolicy,
@@ -203,7 +203,7 @@ async def build_local_runtime(
 
 
 async def _restore_recovery_definitions(
-    catalog: AgentDefinitionCatalog,
+    catalog: AgentCatalog,
     compiler: AgentCompiler,
     state: RuntimeState,
     *,

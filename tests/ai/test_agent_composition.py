@@ -12,7 +12,7 @@ import linktools.ai as ai
 from linktools.ai.agent import (
     AgentBindingSnapshot,
     AgentDefinition,
-    AgentDefinitionCatalog,
+    AgentCatalog,
 )
 from linktools.ai.agent._output import bind_output
 from linktools.ai.capability import RuntimeCapability
@@ -141,7 +141,7 @@ def test_catalog_uses_durable_semantics_for_restored_capability_instances() -> N
 
     first = definition(first_capability)
     restored = definition(restored_capability)
-    catalog = AgentDefinitionCatalog({})
+    catalog = AgentCatalog({})
     assert catalog.register(first) is first
     assert catalog.register(restored) is first
 

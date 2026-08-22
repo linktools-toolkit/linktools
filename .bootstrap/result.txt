@@ -1,3 +1,4 @@
+===== python .bootstrap/patch.py =====
 ===== python -m compileall -q linktools-ai/src/linktools/ai =====
 ===== python -m pip install --upgrade pip =====
 Requirement already satisfied: pip in /opt/hostedtoolcache/Python/3.12.14/x64/lib/python3.12/site-packages (26.2.1)
@@ -202,38 +203,38 @@ Collecting urllib3<3,>=1.26 (from requests->tiktoken>=0.12.0->pydantic-ai-slim[m
   Downloading urllib3-2.7.0-py3-none-any.whl.metadata (6.9 kB)
 Downloading aiosqlite-0.22.1-py3-none-any.whl (17 kB)
 Downloading sqlalchemy-2.0.51-cp312-cp312-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl (3.4 MB)
-   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 3.4/3.4 MB 26.5 MB/s  0:00:00
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 3.4/3.4 MB 8.4 MB/s  0:00:00
 Downloading pydantic_ai_slim-2.33.0-py3-none-any.whl (1.4 MB)
-   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 1.4/1.4 MB 50.8 MB/s  0:00:00
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 1.4/1.4 MB 3.4 MB/s  0:00:00
 Downloading pydantic_graph-2.33.0-py3-none-any.whl (52 kB)
 Downloading fastmcp_slim-3.4.7-py3-none-any.whl (769 kB)
-   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 769.4/769.4 kB 47.9 MB/s  0:00:00
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 769.4/769.4 kB 96.6 MB/s  0:00:00
 Downloading httpx-0.28.1-py3-none-any.whl (73 kB)
 Downloading httpcore-1.0.9-py3-none-any.whl (78 kB)
 Downloading mcp-1.29.0-py3-none-any.whl (223 kB)
 Downloading py_key_value_aio-0.4.5-py3-none-any.whl (170 kB)
 Downloading pydantic-2.13.4-py3-none-any.whl (472 kB)
 Downloading pydantic_core-2.46.4-cp312-cp312-manylinux_2_17_x86_64.manylinux2014_x86_64.whl (2.1 MB)
-   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 2.1/2.1 MB 73.7 MB/s  0:00:00
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 2.1/2.1 MB 250.2 MB/s  0:00:00
 Using cached pyyaml-6.0.3-cp312-cp312-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl (807 kB)
 Downloading pytest-9.1.1-py3-none-any.whl (386 kB)
 Downloading pluggy-1.6.0-py3-none-any.whl (20 kB)
 Downloading pytest_asyncio-1.4.0-py3-none-any.whl (16 kB)
 Downloading ruff-0.16.4-py3-none-manylinux_2_17_x86_64.manylinux2014_x86_64.whl (10.3 MB)
-   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 10.3/10.3 MB 122.3 MB/s  0:00:00
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 10.3/10.3 MB 119.4 MB/s  0:00:00
 Downloading aiofile-3.12.3-py3-none-any.whl (22 kB)
 Downloading caio-0.12.2-cp312-cp312-manylinux_2_34_x86_64.whl (196 kB)
 Downloading annotated_types-0.8.0-py3-none-any.whl (13 kB)
 Downloading anyio-4.14.2-py3-none-any.whl (125 kB)
 Downloading authlib-1.7.2-py2.py3-none-any.whl (259 kB)
 Downloading beartype-0.22.9-py3-none-any.whl (1.3 MB)
-   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 1.3/1.3 MB 129.5 MB/s  0:00:00
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 1.3/1.3 MB 260.2 MB/s  0:00:00
 Downloading cachetools-7.1.7-py3-none-any.whl (16 kB)
 Downloading exceptiongroup-1.3.1-py3-none-any.whl (16 kB)
 Downloading filelock-3.32.3-py3-none-any.whl (98 kB)
 Downloading genai_prices-0.1.4-py3-none-any.whl (99 kB)
 Downloading greenlet-3.5.5-cp312-cp312-manylinux_2_24_x86_64.manylinux_2_28_x86_64.whl (621 kB)
-   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 621.4/621.4 kB 127.1 MB/s  0:00:00
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 621.4/621.4 kB 122.4 MB/s  0:00:00
 Downloading griffelib-2.2.0-py3-none-any.whl (166 kB)
 Downloading h11-0.16.0-py3-none-any.whl (37 kB)
 Downloading httpx_sse-0.4.3-py3-none-any.whl (9.0 kB)
@@ -243,7 +244,7 @@ Downloading idna-3.19-py3-none-any.whl (68 kB)
 Downloading iniconfig-2.3.0-py3-none-any.whl (7.5 kB)
 Downloading joserfc-1.7.4-py3-none-any.whl (71 kB)
 Downloading cryptography-50.0.0-cp311-abi3-manylinux_2_34_x86_64.whl (4.7 MB)
-   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 4.7/4.7 MB 166.7 MB/s  0:00:00
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 4.7/4.7 MB 44.7 MB/s  0:00:00
 Downloading cffi-2.1.1-cp312-cp312-manylinux2014_x86_64.manylinux_2_17_x86_64.whl (221 kB)
 Downloading jsonschema-4.26.0-py3-none-any.whl (90 kB)
 Downloading attrs-26.1.0-py3-none-any.whl (67 kB)
@@ -252,25 +253,25 @@ Downloading keyring-25.7.0-py3-none-any.whl (39 kB)
 Downloading jeepney-0.9.0-py3-none-any.whl (49 kB)
 Downloading logfire_api-4.41.0-py3-none-any.whl (143 kB)
 Downloading openai-3.3.1-py3-none-any.whl (1.7 MB)
-   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 1.7/1.7 MB 172.4 MB/s  0:00:00
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 1.7/1.7 MB 301.6 MB/s  0:00:00
 Downloading jiter-0.16.0-cp312-cp312-manylinux_2_17_x86_64.manylinux2014_x86_64.whl (343 kB)
 Downloading typing_extensions-4.16.0-py3-none-any.whl (45 kB)
 Downloading opentelemetry_api-1.44.0-py3-none-any.whl (60 kB)
 Downloading packaging-26.3-py3-none-any.whl (129 kB)
 Downloading platformdirs-4.11.3-py3-none-any.whl (23 kB)
 Downloading pydantic_ai_harness-0.24.0-py3-none-any.whl (734 kB)
-   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 734.4/734.4 kB 134.5 MB/s  0:00:00
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 734.4/734.4 kB 157.7 MB/s  0:00:00
 Downloading pydantic_evals-2.33.0-py3-none-any.whl (101 kB)
 Downloading pydantic_monty-0.0.21-py3-none-any.whl (4.7 kB)
 Downloading pydantic_monty_client-0.0.21-cp312-cp312-manylinux_2_28_x86_64.whl (3.5 MB)
-   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 3.5/3.5 MB 217.1 MB/s  0:00:00
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 3.5/3.5 MB 136.9 MB/s  0:00:00
 Downloading pydantic_monty_runtime-0.0.21-cp312-cp312-manylinux_2_28_x86_64.whl (10.4 MB)
-   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 10.4/10.4 MB 222.8 MB/s  0:00:00
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 10.4/10.4 MB 56.0 MB/s  0:00:00
 Downloading pydantic_settings-2.15.0-py3-none-any.whl (69 kB)
 Downloading email_validator-2.3.0-py3-none-any.whl (35 kB)
 Downloading dnspython-2.8.0-py3-none-any.whl (331 kB)
 Downloading pygments-2.21.0-py3-none-any.whl (1.3 MB)
-   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 1.3/1.3 MB 220.2 MB/s  0:00:00
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 1.3/1.3 MB 209.4 MB/s  0:00:00
 Downloading pyjwt-2.13.0-py3-none-any.whl (31 kB)
 Downloading python_dotenv-1.2.3-py3-none-any.whl (22 kB)
 Downloading python_multipart-0.0.32-py3-none-any.whl (30 kB)
@@ -283,12 +284,12 @@ Downloading secretstorage-3.5.0-py3-none-any.whl (15 kB)
 Downloading sse_starlette-3.4.8-py3-none-any.whl (16 kB)
 Downloading starlette-1.6.0-py3-none-any.whl (75 kB)
 Downloading temporalio-1.31.0-cp310-abi3-manylinux_2_17_x86_64.manylinux2014_x86_64.whl (14.8 MB)
-   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 14.8/14.8 MB 201.6 MB/s  0:00:00
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 14.8/14.8 MB 154.8 MB/s  0:00:00
 Downloading nexus_rpc-1.4.0-py3-none-any.whl (29 kB)
 Downloading protobuf-7.36.0-cp310-abi3-manylinux2014_x86_64.whl (340 kB)
 Downloading types_protobuf-7.35.1.20260822-py3-none-any.whl (86 kB)
 Downloading tiktoken-0.14.0-cp312-cp312-manylinux_2_28_x86_64.whl (1.2 MB)
-   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 1.2/1.2 MB 238.5 MB/s  0:00:00
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 1.2/1.2 MB 182.3 MB/s  0:00:00
 Downloading truststore-0.10.4-py3-none-any.whl (18 kB)
 Downloading typing_inspection-0.4.4-py3-none-any.whl (14 kB)
 Downloading uvicorn-0.52.4-py3-none-any.whl (79 kB)
@@ -301,7 +302,7 @@ Downloading more_itertools-11.1.0-py3-none-any.whl (72 kB)
 Downloading psutil-7.2.2-cp36-abi3-manylinux2010_x86_64.manylinux_2_12_x86_64.manylinux_2_28_x86_64.whl (155 kB)
 Downloading pycparser-3.0-py3-none-any.whl (48 kB)
 Downloading regex-2026.7.19-cp312-cp312-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl (801 kB)
-   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 801.8/801.8 kB 173.7 MB/s  0:00:00
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 801.8/801.8 kB 6.3 MB/s  0:00:00
 Downloading requests-2.34.2-py3-none-any.whl (73 kB)
 Downloading charset_normalizer-3.5.1-cp312-cp312-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl (248 kB)
 Downloading urllib3-2.7.0-py3-none-any.whl (131 kB)
@@ -309,12 +310,12 @@ Downloading sniffio-1.3.1-py3-none-any.whl (10 kB)
 Building wheels for collected packages: linktools, linktools-ai
   Building editable for linktools (pyproject.toml): started
   Building editable for linktools (pyproject.toml): finished with status 'done'
-  Created wheel for linktools: filename=linktools-0.9.1.post100.dev0-0.editable-py3-none-any.whl size=6045 sha256=00ec86910a5dd99a25d45925a599f8dba99ed2c203b57f18d7f4ebcd1a6a0720
-  Stored in directory: /tmp/pip-ephem-wheel-cache-0gvdl2gx/wheels/e5/50/d0/0d24bfdc0ab21509a012622c53bd84039fa6f547804efa2376
+  Created wheel for linktools: filename=linktools-0.9.1.post100.dev0-0.editable-py3-none-any.whl size=6045 sha256=4cace42fe24d5a6b616eae0ea20ff0ed69333e7352c07324b69463740bce1a4a
+  Stored in directory: /tmp/pip-ephem-wheel-cache-_v_5nsm4/wheels/e5/50/d0/0d24bfdc0ab21509a012622c53bd84039fa6f547804efa2376
   Building editable for linktools-ai (pyproject.toml): started
   Building editable for linktools-ai (pyproject.toml): finished with status 'done'
-  Created wheel for linktools-ai: filename=linktools_ai-0.10.0.post100.dev0-0.editable-py3-none-any.whl size=6512 sha256=3f427053243369dffa5a10dfa8b5a7a55033676abd2045c5effde8cc36ef7369
-  Stored in directory: /tmp/pip-ephem-wheel-cache-0gvdl2gx/wheels/e5/5a/b9/c291aedae11f520717aebc31d61e541d4ea9708b19097b8566
+  Created wheel for linktools-ai: filename=linktools_ai-0.10.0.post100.dev0-0.editable-py3-none-any.whl size=6512 sha256=ec03fa6c1dca8c2938db66c3fecf80ce691646a74a9e5ed9bae5358c58b61141
+  Stored in directory: /tmp/pip-ephem-wheel-cache-_v_5nsm4/wheels/e5/5a/b9/c291aedae11f520717aebc31d61e541d4ea9708b19097b8566
 Successfully built linktools linktools-ai
 Installing collected packages: urllib3, typing-extensions, types-protobuf, truststore, sniffio, ruff, rpds-py, regex, pyyaml, python-multipart, python-dotenv, pyjwt, pygments, pydantic-monty-runtime, pycparser, psutil, protobuf, pluggy, platformdirs, packaging, more-itertools, mdurl, logfire-api, jiter, jeepney, jaraco.context, iniconfig, idna, httpx-sse, h11, griffelib, greenlet, filelock, dnspython, click, charset_normalizer, certifi, caio, cachetools, beartype, attrs, annotated-types, aiosqlite, uvicorn, typing-inspection, sqlalchemy, requests, referencing, pytest, pydantic-monty-client, pydantic-core, py-key-value-aio, opentelemetry-api, nexus-rpc, markdown-it-py, linktools, jaraco.functools, jaraco.classes, httpcore2, httpcore, exceptiongroup, email-validator, cffi, anyio, aiofile, tiktoken, temporalio, starlette, rich, pytest-asyncio, pydantic-monty, pydantic, jsonschema-specifications, httpx2, httpx, cryptography, sse-starlette, SecretStorage, pydantic-settings, pydantic-graph, openai, jsonschema, joserfc, genai-prices, pydantic-ai-slim, mcp, keyring, fastmcp-slim, authlib, pydantic-evals, pydantic-ai-harness, linktools-ai
 
@@ -566,66 +567,12 @@ Found 16 errors.
 [*] 4 fixable with the `--fix` option.
 ===== python linktools-ai/scripts/build/architecture.py =====
 Traceback (most recent call last):
-  File "/home/runner/work/linktools/linktools/linktools-ai/scripts/build/architecture.py", line 12, in <module>
-    from linktools.ai.core import JsonValue
-  File "/home/runner/work/linktools/linktools/linktools-ai/src/linktools/ai/__init__.py", line 7, in <module>
-    from .runtime import AgentHandle, Runtime
-  File "/home/runner/work/linktools/linktools/linktools-ai/src/linktools/ai/runtime/__init__.py", line 10, in <module>
-    from ._execution import DefaultExecutionService
-  File "/home/runner/work/linktools/linktools/linktools-ai/src/linktools/ai/runtime/_execution.py", line 19, in <module>
-    from ..agent import AgentBindingSnapshot, AgentCompiler, AgentDefinition, AgentDefinitionCatalog
-ImportError: cannot import name 'AgentDefinitionCatalog' from 'linktools.ai.agent' (/home/runner/work/linktools/linktools/linktools-ai/src/linktools/ai/agent/__init__.py)
+  File "/home/runner/work/linktools/linktools/linktools-ai/scripts/build/architecture.py", line 14, in <module>
+    from .cohesion import check_files
+ImportError: attempted relative import with no known parent package
 ===== pytest -q tests/ai --maxfail=30 =====
 
 ==================================== ERRORS ====================================
-____ ERROR collecting tests/ai/persistence/test_execution_start_service.py _____
-ImportError while importing test module '/home/runner/work/linktools/linktools/tests/ai/persistence/test_execution_start_service.py'.
-Hint: make sure your test modules/packages have valid Python names.
-Traceback:
-/opt/hostedtoolcache/Python/3.12.14/x64/lib/python3.12/importlib/__init__.py:90: in import_module
-    return _bootstrap._gcd_import(name[level:], package, level)
-           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-tests/ai/persistence/test_execution_start_service.py:11: in <module>
-    from linktools.ai.core import ExecutionStatus, Page, Principal, TenantAuthorizationPolicy
-linktools-ai/src/linktools/ai/__init__.py:7: in <module>
-    from .runtime import AgentHandle, Runtime
-linktools-ai/src/linktools/ai/runtime/__init__.py:10: in <module>
-    from ._execution import DefaultExecutionService
-linktools-ai/src/linktools/ai/runtime/_execution.py:19: in <module>
-    from ..agent import AgentBindingSnapshot, AgentCompiler, AgentDefinition, AgentDefinitionCatalog
-E   ImportError: cannot import name 'AgentDefinitionCatalog' from 'linktools.ai.agent' (/home/runner/work/linktools/linktools/linktools-ai/src/linktools/ai/agent/__init__.py)
-_______ ERROR collecting tests/ai/persistence/test_runtime_resources.py ________
-ImportError while importing test module '/home/runner/work/linktools/linktools/tests/ai/persistence/test_runtime_resources.py'.
-Hint: make sure your test modules/packages have valid Python names.
-Traceback:
-/opt/hostedtoolcache/Python/3.12.14/x64/lib/python3.12/importlib/__init__.py:90: in import_module
-    return _bootstrap._gcd_import(name[level:], package, level)
-           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-tests/ai/persistence/test_runtime_resources.py:10: in <module>
-    from linktools.ai.migrate import provision_database
-linktools-ai/src/linktools/ai/__init__.py:7: in <module>
-    from .runtime import AgentHandle, Runtime
-linktools-ai/src/linktools/ai/runtime/__init__.py:10: in <module>
-    from ._execution import DefaultExecutionService
-linktools-ai/src/linktools/ai/runtime/_execution.py:19: in <module>
-    from ..agent import AgentBindingSnapshot, AgentCompiler, AgentDefinition, AgentDefinitionCatalog
-E   ImportError: cannot import name 'AgentDefinitionCatalog' from 'linktools.ai.agent' (/home/runner/work/linktools/linktools/linktools-ai/src/linktools/ai/agent/__init__.py)
-_____________ ERROR collecting tests/ai/test_agent_composition.py ______________
-ImportError while importing test module '/home/runner/work/linktools/linktools/tests/ai/test_agent_composition.py'.
-Hint: make sure your test modules/packages have valid Python names.
-Traceback:
-/opt/hostedtoolcache/Python/3.12.14/x64/lib/python3.12/importlib/__init__.py:90: in import_module
-    return _bootstrap._gcd_import(name[level:], package, level)
-           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-tests/ai/test_agent_composition.py:11: in <module>
-    import linktools.ai as ai
-linktools-ai/src/linktools/ai/__init__.py:7: in <module>
-    from .runtime import AgentHandle, Runtime
-linktools-ai/src/linktools/ai/runtime/__init__.py:10: in <module>
-    from ._execution import DefaultExecutionService
-linktools-ai/src/linktools/ai/runtime/_execution.py:19: in <module>
-    from ..agent import AgentBindingSnapshot, AgentCompiler, AgentDefinition, AgentDefinitionCatalog
-E   ImportError: cannot import name 'AgentDefinitionCatalog' from 'linktools.ai.agent' (/home/runner/work/linktools/linktools/linktools-ai/src/linktools/ai/agent/__init__.py)
 ________________ ERROR collecting tests/ai/test_architecture.py ________________
 ImportError while importing test module '/home/runner/work/linktools/linktools/tests/ai/test_architecture.py'.
 Hint: make sure your test modules/packages have valid Python names.
@@ -636,454 +583,7 @@ Traceback:
 tests/ai/test_architecture.py:14: in <module>
     from scripts.build.architecture import ArchitecturePolicyChecker, build_report
 E   ModuleNotFoundError: No module named 'scripts.build'
-_________________ ERROR collecting tests/ai/test_contracts.py __________________
-ImportError while importing test module '/home/runner/work/linktools/linktools/tests/ai/test_contracts.py'.
-Hint: make sure your test modules/packages have valid Python names.
-Traceback:
-/opt/hostedtoolcache/Python/3.12.14/x64/lib/python3.12/importlib/__init__.py:90: in import_module
-    return _bootstrap._gcd_import(name[level:], package, level)
-           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-tests/ai/test_contracts.py:32: in <module>
-    from linktools.ai.runtime import ExecutionRequest
-linktools-ai/src/linktools/ai/__init__.py:7: in <module>
-    from .runtime import AgentHandle, Runtime
-linktools-ai/src/linktools/ai/runtime/__init__.py:10: in <module>
-    from ._execution import DefaultExecutionService
-linktools-ai/src/linktools/ai/runtime/_execution.py:19: in <module>
-    from ..agent import AgentBindingSnapshot, AgentCompiler, AgentDefinition, AgentDefinitionCatalog
-E   ImportError: cannot import name 'AgentDefinitionCatalog' from 'linktools.ai.agent' (/home/runner/work/linktools/linktools/linktools-ai/src/linktools/ai/agent/__init__.py)
-________ ERROR collecting tests/ai/test_deferred_notification_replay.py ________
-ImportError while importing test module '/home/runner/work/linktools/linktools/tests/ai/test_deferred_notification_replay.py'.
-Hint: make sure your test modules/packages have valid Python names.
-Traceback:
-/opt/hostedtoolcache/Python/3.12.14/x64/lib/python3.12/importlib/__init__.py:90: in import_module
-    return _bootstrap._gcd_import(name[level:], package, level)
-           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-tests/ai/test_deferred_notification_replay.py:23: in <module>
-    from linktools.ai.runtime._external import DefaultExternalService
-linktools-ai/src/linktools/ai/__init__.py:7: in <module>
-    from .runtime import AgentHandle, Runtime
-linktools-ai/src/linktools/ai/runtime/__init__.py:10: in <module>
-    from ._execution import DefaultExecutionService
-linktools-ai/src/linktools/ai/runtime/_execution.py:19: in <module>
-    from ..agent import AgentBindingSnapshot, AgentCompiler, AgentDefinition, AgentDefinitionCatalog
-E   ImportError: cannot import name 'AgentDefinitionCatalog' from 'linktools.ai.agent' (/home/runner/work/linktools/linktools/linktools-ai/src/linktools/ai/agent/__init__.py)
-_______ ERROR collecting tests/ai/test_filesystem_mutation_invariants.py _______
-ImportError while importing test module '/home/runner/work/linktools/linktools/tests/ai/test_filesystem_mutation_invariants.py'.
-Hint: make sure your test modules/packages have valid Python names.
-Traceback:
-/opt/hostedtoolcache/Python/3.12.14/x64/lib/python3.12/importlib/__init__.py:90: in import_module
-    return _bootstrap._gcd_import(name[level:], package, level)
-           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-tests/ai/test_filesystem_mutation_invariants.py:19: in <module>
-    from linktools.ai.runtime import RuntimeDomain, RuntimeState
-linktools-ai/src/linktools/ai/__init__.py:7: in <module>
-    from .runtime import AgentHandle, Runtime
-linktools-ai/src/linktools/ai/runtime/__init__.py:10: in <module>
-    from ._execution import DefaultExecutionService
-linktools-ai/src/linktools/ai/runtime/_execution.py:19: in <module>
-    from ..agent import AgentBindingSnapshot, AgentCompiler, AgentDefinition, AgentDefinitionCatalog
-E   ImportError: cannot import name 'AgentDefinitionCatalog' from 'linktools.ai.agent' (/home/runner/work/linktools/linktools/linktools-ai/src/linktools/ai/agent/__init__.py)
-___________ ERROR collecting tests/ai/test_final_fix_conformance.py ____________
-ImportError while importing test module '/home/runner/work/linktools/linktools/tests/ai/test_final_fix_conformance.py'.
-Hint: make sure your test modules/packages have valid Python names.
-Traceback:
-/opt/hostedtoolcache/Python/3.12.14/x64/lib/python3.12/importlib/__init__.py:90: in import_module
-    return _bootstrap._gcd_import(name[level:], package, level)
-           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-tests/ai/test_final_fix_conformance.py:20: in <module>
-    from linktools.ai.runtime import CloseSessionRequest, DefaultSessionService
-linktools-ai/src/linktools/ai/__init__.py:7: in <module>
-    from .runtime import AgentHandle, Runtime
-linktools-ai/src/linktools/ai/runtime/__init__.py:10: in <module>
-    from ._execution import DefaultExecutionService
-linktools-ai/src/linktools/ai/runtime/_execution.py:19: in <module>
-    from ..agent import AgentBindingSnapshot, AgentCompiler, AgentDefinition, AgentDefinitionCatalog
-E   ImportError: cannot import name 'AgentDefinitionCatalog' from 'linktools.ai.agent' (/home/runner/work/linktools/linktools/linktools-ai/src/linktools/ai/agent/__init__.py)
-_______ ERROR collecting tests/ai/test_history_projection_conformance.py _______
-ImportError while importing test module '/home/runner/work/linktools/linktools/tests/ai/test_history_projection_conformance.py'.
-Hint: make sure your test modules/packages have valid Python names.
-Traceback:
-/opt/hostedtoolcache/Python/3.12.14/x64/lib/python3.12/importlib/__init__.py:90: in import_module
-    return _bootstrap._gcd_import(name[level:], package, level)
-           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-tests/ai/test_history_projection_conformance.py:10: in <module>
-    from linktools.ai.adapter import StepExecutionHistoryReader
-linktools-ai/src/linktools/ai/__init__.py:7: in <module>
-    from .runtime import AgentHandle, Runtime
-linktools-ai/src/linktools/ai/runtime/__init__.py:10: in <module>
-    from ._execution import DefaultExecutionService
-linktools-ai/src/linktools/ai/runtime/_execution.py:19: in <module>
-    from ..agent import AgentBindingSnapshot, AgentCompiler, AgentDefinition, AgentDefinitionCatalog
-E   ImportError: cannot import name 'AgentDefinitionCatalog' from 'linktools.ai.agent' (/home/runner/work/linktools/linktools/linktools-ai/src/linktools/ai/agent/__init__.py)
-_______________ ERROR collecting tests/ai/test_local_commands.py _______________
-ImportError while importing test module '/home/runner/work/linktools/linktools/tests/ai/test_local_commands.py'.
-Hint: make sure your test modules/packages have valid Python names.
-Traceback:
-/opt/hostedtoolcache/Python/3.12.14/x64/lib/python3.12/importlib/__init__.py:90: in import_module
-    return _bootstrap._gcd_import(name[level:], package, level)
-           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-tests/ai/test_local_commands.py:10: in <module>
-    from linktools.commands.ai.acp import command as acp_command
-linktools-ai/src/linktools/commands/ai/acp.py:13: in <module>
-    from ...ai.acp import ACPApplication
-linktools-ai/src/linktools/ai/__init__.py:7: in <module>
-    from .runtime import AgentHandle, Runtime
-linktools-ai/src/linktools/ai/runtime/__init__.py:10: in <module>
-    from ._execution import DefaultExecutionService
-linktools-ai/src/linktools/ai/runtime/_execution.py:19: in <module>
-    from ..agent import AgentBindingSnapshot, AgentCompiler, AgentDefinition, AgentDefinitionCatalog
-E   ImportError: cannot import name 'AgentDefinitionCatalog' from 'linktools.ai.agent' (/home/runner/work/linktools/linktools/linktools-ai/src/linktools/ai/agent/__init__.py)
-__________ ERROR collecting tests/ai/test_local_execution_recovery.py __________
-ImportError while importing test module '/home/runner/work/linktools/linktools/tests/ai/test_local_execution_recovery.py'.
-Hint: make sure your test modules/packages have valid Python names.
-Traceback:
-/opt/hostedtoolcache/Python/3.12.14/x64/lib/python3.12/importlib/__init__.py:90: in import_module
-    return _bootstrap._gcd_import(name[level:], package, level)
-           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-tests/ai/test_local_execution_recovery.py:14: in <module>
-    from linktools.ai.runtime import ExecutionRequest
-linktools-ai/src/linktools/ai/__init__.py:7: in <module>
-    from .runtime import AgentHandle, Runtime
-linktools-ai/src/linktools/ai/runtime/__init__.py:10: in <module>
-    from ._execution import DefaultExecutionService
-linktools-ai/src/linktools/ai/runtime/_execution.py:19: in <module>
-    from ..agent import AgentBindingSnapshot, AgentCompiler, AgentDefinition, AgentDefinitionCatalog
-E   ImportError: cannot import name 'AgentDefinitionCatalog' from 'linktools.ai.agent' (/home/runner/work/linktools/linktools/linktools-ai/src/linktools/ai/agent/__init__.py)
-______________ ERROR collecting tests/ai/test_memory_terminal.py _______________
-ImportError while importing test module '/home/runner/work/linktools/linktools/tests/ai/test_memory_terminal.py'.
-Hint: make sure your test modules/packages have valid Python names.
-Traceback:
-/opt/hostedtoolcache/Python/3.12.14/x64/lib/python3.12/importlib/__init__.py:90: in import_module
-    return _bootstrap._gcd_import(name[level:], package, level)
-           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-tests/ai/test_memory_terminal.py:18: in <module>
-    from linktools.ai.runtime import RuntimeDomain, RuntimeState
-linktools-ai/src/linktools/ai/__init__.py:7: in <module>
-    from .runtime import AgentHandle, Runtime
-linktools-ai/src/linktools/ai/runtime/__init__.py:10: in <module>
-    from ._execution import DefaultExecutionService
-linktools-ai/src/linktools/ai/runtime/_execution.py:19: in <module>
-    from ..agent import AgentBindingSnapshot, AgentCompiler, AgentDefinition, AgentDefinitionCatalog
-E   ImportError: cannot import name 'AgentDefinitionCatalog' from 'linktools.ai.agent' (/home/runner/work/linktools/linktools/linktools-ai/src/linktools/ai/agent/__init__.py)
-___________ ERROR collecting tests/ai/test_non_workspace_pipeline.py ___________
-ImportError while importing test module '/home/runner/work/linktools/linktools/tests/ai/test_non_workspace_pipeline.py'.
-Hint: make sure your test modules/packages have valid Python names.
-Traceback:
-/opt/hostedtoolcache/Python/3.12.14/x64/lib/python3.12/importlib/__init__.py:90: in import_module
-    return _bootstrap._gcd_import(name[level:], package, level)
-           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-tests/ai/test_non_workspace_pipeline.py:25: in <module>
-    from linktools.ai.workspace import DisabledSandbox
-linktools-ai/src/linktools/ai/__init__.py:7: in <module>
-    from .runtime import AgentHandle, Runtime
-linktools-ai/src/linktools/ai/runtime/__init__.py:10: in <module>
-    from ._execution import DefaultExecutionService
-linktools-ai/src/linktools/ai/runtime/_execution.py:19: in <module>
-    from ..agent import AgentBindingSnapshot, AgentCompiler, AgentDefinition, AgentDefinitionCatalog
-E   ImportError: cannot import name 'AgentDefinitionCatalog' from 'linktools.ai.agent' (/home/runner/work/linktools/linktools/linktools-ai/src/linktools/ai/agent/__init__.py)
-________ ERROR collecting tests/ai/test_recovery_integrity_validator.py ________
-ImportError while importing test module '/home/runner/work/linktools/linktools/tests/ai/test_recovery_integrity_validator.py'.
-Hint: make sure your test modules/packages have valid Python names.
-Traceback:
-/opt/hostedtoolcache/Python/3.12.14/x64/lib/python3.12/importlib/__init__.py:90: in import_module
-    return _bootstrap._gcd_import(name[level:], package, level)
-           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-tests/ai/test_recovery_integrity_validator.py:9: in <module>
-    from linktools.ai.runtime import RuntimeState
-linktools-ai/src/linktools/ai/__init__.py:7: in <module>
-    from .runtime import AgentHandle, Runtime
-linktools-ai/src/linktools/ai/runtime/__init__.py:10: in <module>
-    from ._execution import DefaultExecutionService
-linktools-ai/src/linktools/ai/runtime/_execution.py:19: in <module>
-    from ..agent import AgentBindingSnapshot, AgentCompiler, AgentDefinition, AgentDefinitionCatalog
-E   ImportError: cannot import name 'AgentDefinitionCatalog' from 'linktools.ai.agent' (/home/runner/work/linktools/linktools/linktools-ai/src/linktools/ai/agent/__init__.py)
-______ ERROR collecting tests/ai/test_runtime_composition_regressions.py _______
-ImportError while importing test module '/home/runner/work/linktools/linktools/tests/ai/test_runtime_composition_regressions.py'.
-Hint: make sure your test modules/packages have valid Python names.
-Traceback:
-/opt/hostedtoolcache/Python/3.12.14/x64/lib/python3.12/importlib/__init__.py:90: in import_module
-    return _bootstrap._gcd_import(name[level:], package, level)
-           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-tests/ai/test_runtime_composition_regressions.py:22: in <module>
-    from linktools.ai.runtime._planner import _cancel_execution
-linktools-ai/src/linktools/ai/__init__.py:7: in <module>
-    from .runtime import AgentHandle, Runtime
-linktools-ai/src/linktools/ai/runtime/__init__.py:10: in <module>
-    from ._execution import DefaultExecutionService
-linktools-ai/src/linktools/ai/runtime/_execution.py:19: in <module>
-    from ..agent import AgentBindingSnapshot, AgentCompiler, AgentDefinition, AgentDefinitionCatalog
-E   ImportError: cannot import name 'AgentDefinitionCatalog' from 'linktools.ai.agent' (/home/runner/work/linktools/linktools/linktools-ai/src/linktools/ai/agent/__init__.py)
-________ ERROR collecting tests/ai/test_runtime_session_auto_create.py _________
-ImportError while importing test module '/home/runner/work/linktools/linktools/tests/ai/test_runtime_session_auto_create.py'.
-Hint: make sure your test modules/packages have valid Python names.
-Traceback:
-/opt/hostedtoolcache/Python/3.12.14/x64/lib/python3.12/importlib/__init__.py:90: in import_module
-    return _bootstrap._gcd_import(name[level:], package, level)
-           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-tests/ai/test_runtime_session_auto_create.py:11: in <module>
-    from linktools.ai.runtime import Runtime, SessionView
-linktools-ai/src/linktools/ai/__init__.py:7: in <module>
-    from .runtime import AgentHandle, Runtime
-linktools-ai/src/linktools/ai/runtime/__init__.py:10: in <module>
-    from ._execution import DefaultExecutionService
-linktools-ai/src/linktools/ai/runtime/_execution.py:19: in <module>
-    from ..agent import AgentBindingSnapshot, AgentCompiler, AgentDefinition, AgentDefinitionCatalog
-E   ImportError: cannot import name 'AgentDefinitionCatalog' from 'linktools.ai.agent' (/home/runner/work/linktools/linktools/linktools-ai/src/linktools/ai/agent/__init__.py)
-_______ ERROR collecting tests/ai/test_runtime_storage_io_convergence.py _______
-ImportError while importing test module '/home/runner/work/linktools/linktools/tests/ai/test_runtime_storage_io_convergence.py'.
-Hint: make sure your test modules/packages have valid Python names.
-Traceback:
-/opt/hostedtoolcache/Python/3.12.14/x64/lib/python3.12/importlib/__init__.py:90: in import_module
-    return _bootstrap._gcd_import(name[level:], package, level)
-           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-tests/ai/test_runtime_storage_io_convergence.py:14: in <module>
-    from linktools.ai.migrate import build_sql_schema_metadata, provision_database
-linktools-ai/src/linktools/ai/__init__.py:7: in <module>
-    from .runtime import AgentHandle, Runtime
-linktools-ai/src/linktools/ai/runtime/__init__.py:10: in <module>
-    from ._execution import DefaultExecutionService
-linktools-ai/src/linktools/ai/runtime/_execution.py:19: in <module>
-    from ..agent import AgentBindingSnapshot, AgentCompiler, AgentDefinition, AgentDefinitionCatalog
-E   ImportError: cannot import name 'AgentDefinitionCatalog' from 'linktools.ai.agent' (/home/runner/work/linktools/linktools/linktools-ai/src/linktools/ai/agent/__init__.py)
-____________ ERROR collecting tests/ai/test_runtime_stream_order.py ____________
-ImportError while importing test module '/home/runner/work/linktools/linktools/tests/ai/test_runtime_stream_order.py'.
-Hint: make sure your test modules/packages have valid Python names.
-Traceback:
-/opt/hostedtoolcache/Python/3.12.14/x64/lib/python3.12/importlib/__init__.py:90: in import_module
-    return _bootstrap._gcd_import(name[level:], package, level)
-           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-tests/ai/test_runtime_stream_order.py:20: in <module>
-    from linktools.ai.runtime import RuntimeState
-linktools-ai/src/linktools/ai/__init__.py:7: in <module>
-    from .runtime import AgentHandle, Runtime
-linktools-ai/src/linktools/ai/runtime/__init__.py:10: in <module>
-    from ._execution import DefaultExecutionService
-linktools-ai/src/linktools/ai/runtime/_execution.py:19: in <module>
-    from ..agent import AgentBindingSnapshot, AgentCompiler, AgentDefinition, AgentDefinitionCatalog
-E   ImportError: cannot import name 'AgentDefinitionCatalog' from 'linktools.ai.agent' (/home/runner/work/linktools/linktools/linktools-ai/src/linktools/ai/agent/__init__.py)
-_____________ ERROR collecting tests/ai/test_selective_storage.py ______________
-ImportError while importing test module '/home/runner/work/linktools/linktools/tests/ai/test_selective_storage.py'.
-Hint: make sure your test modules/packages have valid Python names.
-Traceback:
-/opt/hostedtoolcache/Python/3.12.14/x64/lib/python3.12/importlib/__init__.py:90: in import_module
-    return _bootstrap._gcd_import(name[level:], package, level)
-           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-tests/ai/test_selective_storage.py:10: in <module>
-    from linktools.ai import Runtime
-linktools-ai/src/linktools/ai/__init__.py:7: in <module>
-    from .runtime import AgentHandle, Runtime
-linktools-ai/src/linktools/ai/runtime/__init__.py:10: in <module>
-    from ._execution import DefaultExecutionService
-linktools-ai/src/linktools/ai/runtime/_execution.py:19: in <module>
-    from ..agent import AgentBindingSnapshot, AgentCompiler, AgentDefinition, AgentDefinitionCatalog
-E   ImportError: cannot import name 'AgentDefinitionCatalog' from 'linktools.ai.agent' (/home/runner/work/linktools/linktools/linktools-ai/src/linktools/ai/agent/__init__.py)
-_____________ ERROR collecting tests/ai/test_session_admission.py ______________
-ImportError while importing test module '/home/runner/work/linktools/linktools/tests/ai/test_session_admission.py'.
-Hint: make sure your test modules/packages have valid Python names.
-Traceback:
-/opt/hostedtoolcache/Python/3.12.14/x64/lib/python3.12/importlib/__init__.py:90: in import_module
-    return _bootstrap._gcd_import(name[level:], package, level)
-           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-tests/ai/test_session_admission.py:14: in <module>
-    from linktools.ai.migrate import provision_database
-linktools-ai/src/linktools/ai/__init__.py:7: in <module>
-    from .runtime import AgentHandle, Runtime
-linktools-ai/src/linktools/ai/runtime/__init__.py:10: in <module>
-    from ._execution import DefaultExecutionService
-linktools-ai/src/linktools/ai/runtime/_execution.py:19: in <module>
-    from ..agent import AgentBindingSnapshot, AgentCompiler, AgentDefinition, AgentDefinitionCatalog
-E   ImportError: cannot import name 'AgentDefinitionCatalog' from 'linktools.ai.agent' (/home/runner/work/linktools/linktools/linktools-ai/src/linktools/ai/agent/__init__.py)
-_______ ERROR collecting tests/ai/test_session_admission_conformance.py ________
-ImportError while importing test module '/home/runner/work/linktools/linktools/tests/ai/test_session_admission_conformance.py'.
-Hint: make sure your test modules/packages have valid Python names.
-Traceback:
-/opt/hostedtoolcache/Python/3.12.14/x64/lib/python3.12/importlib/__init__.py:90: in import_module
-    return _bootstrap._gcd_import(name[level:], package, level)
-           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-tests/ai/test_session_admission_conformance.py:22: in <module>
-    from linktools.ai.migrate import provision_database
-linktools-ai/src/linktools/ai/__init__.py:7: in <module>
-    from .runtime import AgentHandle, Runtime
-linktools-ai/src/linktools/ai/runtime/__init__.py:10: in <module>
-    from ._execution import DefaultExecutionService
-linktools-ai/src/linktools/ai/runtime/_execution.py:19: in <module>
-    from ..agent import AgentBindingSnapshot, AgentCompiler, AgentDefinition, AgentDefinitionCatalog
-E   ImportError: cannot import name 'AgentDefinitionCatalog' from 'linktools.ai.agent' (/home/runner/work/linktools/linktools/linktools-ai/src/linktools/ai/agent/__init__.py)
-_________ ERROR collecting tests/ai/test_session_history_projection.py _________
-ImportError while importing test module '/home/runner/work/linktools/linktools/tests/ai/test_session_history_projection.py'.
-Hint: make sure your test modules/packages have valid Python names.
-Traceback:
-/opt/hostedtoolcache/Python/3.12.14/x64/lib/python3.12/importlib/__init__.py:90: in import_module
-    return _bootstrap._gcd_import(name[level:], package, level)
-           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-tests/ai/test_session_history_projection.py:21: in <module>
-    from linktools.ai.adapter import StepSessionHistoryReader
-linktools-ai/src/linktools/ai/__init__.py:7: in <module>
-    from .runtime import AgentHandle, Runtime
-linktools-ai/src/linktools/ai/runtime/__init__.py:10: in <module>
-    from ._execution import DefaultExecutionService
-linktools-ai/src/linktools/ai/runtime/_execution.py:19: in <module>
-    from ..agent import AgentBindingSnapshot, AgentCompiler, AgentDefinition, AgentDefinitionCatalog
-E   ImportError: cannot import name 'AgentDefinitionCatalog' from 'linktools.ai.agent' (/home/runner/work/linktools/linktools/linktools-ai/src/linktools/ai/agent/__init__.py)
-_____________ ERROR collecting tests/ai/test_step_io_final_fix.py ______________
-ImportError while importing test module '/home/runner/work/linktools/linktools/tests/ai/test_step_io_final_fix.py'.
-Hint: make sure your test modules/packages have valid Python names.
-Traceback:
-/opt/hostedtoolcache/Python/3.12.14/x64/lib/python3.12/importlib/__init__.py:90: in import_module
-    return _bootstrap._gcd_import(name[level:], package, level)
-           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-tests/ai/test_step_io_final_fix.py:10: in <module>
-    from linktools.ai.runtime import RuntimeDomain, RuntimeState
-linktools-ai/src/linktools/ai/__init__.py:7: in <module>
-    from .runtime import AgentHandle, Runtime
-linktools-ai/src/linktools/ai/runtime/__init__.py:10: in <module>
-    from ._execution import DefaultExecutionService
-linktools-ai/src/linktools/ai/runtime/_execution.py:19: in <module>
-    from ..agent import AgentBindingSnapshot, AgentCompiler, AgentDefinition, AgentDefinitionCatalog
-E   ImportError: cannot import name 'AgentDefinitionCatalog' from 'linktools.ai.agent' (/home/runner/work/linktools/linktools/linktools-ai/src/linktools/ai/agent/__init__.py)
-_________ ERROR collecting tests/ai/test_storage_asset_restoration.py __________
-ImportError while importing test module '/home/runner/work/linktools/linktools/tests/ai/test_storage_asset_restoration.py'.
-Hint: make sure your test modules/packages have valid Python names.
-Traceback:
-/opt/hostedtoolcache/Python/3.12.14/x64/lib/python3.12/importlib/__init__.py:90: in import_module
-    return _bootstrap._gcd_import(name[level:], package, level)
-           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-tests/ai/test_storage_asset_restoration.py:21: in <module>
-    from linktools.ai.migrate import provision_asset_database
-linktools-ai/src/linktools/ai/__init__.py:7: in <module>
-    from .runtime import AgentHandle, Runtime
-linktools-ai/src/linktools/ai/runtime/__init__.py:10: in <module>
-    from ._execution import DefaultExecutionService
-linktools-ai/src/linktools/ai/runtime/_execution.py:19: in <module>
-    from ..agent import AgentBindingSnapshot, AgentCompiler, AgentDefinition, AgentDefinitionCatalog
-E   ImportError: cannot import name 'AgentDefinitionCatalog' from 'linktools.ai.agent' (/home/runner/work/linktools/linktools/linktools-ai/src/linktools/ai/agent/__init__.py)
-___________ ERROR collecting tests/ai/test_temporal_continuation.py ____________
-ImportError while importing test module '/home/runner/work/linktools/linktools/tests/ai/test_temporal_continuation.py'.
-Hint: make sure your test modules/packages have valid Python names.
-Traceback:
-/opt/hostedtoolcache/Python/3.12.14/x64/lib/python3.12/importlib/__init__.py:90: in import_module
-    return _bootstrap._gcd_import(name[level:], package, level)
-           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-tests/ai/test_temporal_continuation.py:11: in <module>
-    from linktools.ai.temporal.workflow._execution import (
-linktools-ai/src/linktools/ai/__init__.py:7: in <module>
-    from .runtime import AgentHandle, Runtime
-linktools-ai/src/linktools/ai/runtime/__init__.py:10: in <module>
-    from ._execution import DefaultExecutionService
-linktools-ai/src/linktools/ai/runtime/_execution.py:19: in <module>
-    from ..agent import AgentBindingSnapshot, AgentCompiler, AgentDefinition, AgentDefinitionCatalog
-E   ImportError: cannot import name 'AgentDefinitionCatalog' from 'linktools.ai.agent' (/home/runner/work/linktools/linktools/linktools-ai/src/linktools/ai/agent/__init__.py)
-_______ ERROR collecting tests/ai/test_temporal_taskgraph_conformance.py _______
-ImportError while importing test module '/home/runner/work/linktools/linktools/tests/ai/test_temporal_taskgraph_conformance.py'.
-Hint: make sure your test modules/packages have valid Python names.
-Traceback:
-/opt/hostedtoolcache/Python/3.12.14/x64/lib/python3.12/importlib/__init__.py:90: in import_module
-    return _bootstrap._gcd_import(name[level:], package, level)
-           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-tests/ai/test_temporal_taskgraph_conformance.py:11: in <module>
-    import linktools.ai.temporal._activity as temporal_activity
-linktools-ai/src/linktools/ai/__init__.py:7: in <module>
-    from .runtime import AgentHandle, Runtime
-linktools-ai/src/linktools/ai/runtime/__init__.py:10: in <module>
-    from ._execution import DefaultExecutionService
-linktools-ai/src/linktools/ai/runtime/_execution.py:19: in <module>
-    from ..agent import AgentBindingSnapshot, AgentCompiler, AgentDefinition, AgentDefinitionCatalog
-E   ImportError: cannot import name 'AgentDefinitionCatalog' from 'linktools.ai.agent' (/home/runner/work/linktools/linktools/linktools-ai/src/linktools/ai/agent/__init__.py)
-______ ERROR collecting tests/ai/test_temporal_taskgraph_durable_state.py ______
-ImportError while importing test module '/home/runner/work/linktools/linktools/tests/ai/test_temporal_taskgraph_durable_state.py'.
-Hint: make sure your test modules/packages have valid Python names.
-Traceback:
-/opt/hostedtoolcache/Python/3.12.14/x64/lib/python3.12/importlib/__init__.py:90: in import_module
-    return _bootstrap._gcd_import(name[level:], package, level)
-           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-tests/ai/test_temporal_taskgraph_durable_state.py:10: in <module>
-    from linktools.ai.migrate import provision_database
-linktools-ai/src/linktools/ai/__init__.py:7: in <module>
-    from .runtime import AgentHandle, Runtime
-linktools-ai/src/linktools/ai/runtime/__init__.py:10: in <module>
-    from ._execution import DefaultExecutionService
-linktools-ai/src/linktools/ai/runtime/_execution.py:19: in <module>
-    from ..agent import AgentBindingSnapshot, AgentCompiler, AgentDefinition, AgentDefinitionCatalog
-E   ImportError: cannot import name 'AgentDefinitionCatalog' from 'linktools.ai.agent' (/home/runner/work/linktools/linktools/linktools-ai/src/linktools/ai/agent/__init__.py)
-______________ ERROR collecting tests/ai/test_v1_final_closure.py ______________
-ImportError while importing test module '/home/runner/work/linktools/linktools/tests/ai/test_v1_final_closure.py'.
-Hint: make sure your test modules/packages have valid Python names.
-Traceback:
-/opt/hostedtoolcache/Python/3.12.14/x64/lib/python3.12/importlib/__init__.py:90: in import_module
-    return _bootstrap._gcd_import(name[level:], package, level)
-           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-tests/ai/test_v1_final_closure.py:13: in <module>
-    from linktools.ai.runtime import RuntimeDomain, RuntimeState
-linktools-ai/src/linktools/ai/__init__.py:7: in <module>
-    from .runtime import AgentHandle, Runtime
-linktools-ai/src/linktools/ai/runtime/__init__.py:10: in <module>
-    from ._execution import DefaultExecutionService
-linktools-ai/src/linktools/ai/runtime/_execution.py:19: in <module>
-    from ..agent import AgentBindingSnapshot, AgentCompiler, AgentDefinition, AgentDefinitionCatalog
-E   ImportError: cannot import name 'AgentDefinitionCatalog' from 'linktools.ai.agent' (/home/runner/work/linktools/linktools/linktools-ai/src/linktools/ai/agent/__init__.py)
-_______________ ERROR collecting tests/ai/test_v5_conformance.py _______________
-ImportError while importing test module '/home/runner/work/linktools/linktools/tests/ai/test_v5_conformance.py'.
-Hint: make sure your test modules/packages have valid Python names.
-Traceback:
-/opt/hostedtoolcache/Python/3.12.14/x64/lib/python3.12/importlib/__init__.py:90: in import_module
-    return _bootstrap._gcd_import(name[level:], package, level)
-           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-tests/ai/test_v5_conformance.py:8: in <module>
-    from linktools.ai.runtime import ExecutionResult
-linktools-ai/src/linktools/ai/__init__.py:7: in <module>
-    from .runtime import AgentHandle, Runtime
-linktools-ai/src/linktools/ai/runtime/__init__.py:10: in <module>
-    from ._execution import DefaultExecutionService
-linktools-ai/src/linktools/ai/runtime/_execution.py:19: in <module>
-    from ..agent import AgentBindingSnapshot, AgentCompiler, AgentDefinition, AgentDefinitionCatalog
-E   ImportError: cannot import name 'AgentDefinitionCatalog' from 'linktools.ai.agent' (/home/runner/work/linktools/linktools/linktools-ai/src/linktools/ai/agent/__init__.py)
-___________ ERROR collecting tests/ai/test_workspace_capabilities.py ___________
-ImportError while importing test module '/home/runner/work/linktools/linktools/tests/ai/test_workspace_capabilities.py'.
-Hint: make sure your test modules/packages have valid Python names.
-Traceback:
-/opt/hostedtoolcache/Python/3.12.14/x64/lib/python3.12/importlib/__init__.py:90: in import_module
-    return _bootstrap._gcd_import(name[level:], package, level)
-           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-tests/ai/test_workspace_capabilities.py:9: in <module>
-    from linktools.ai.workspace._tools import build_workspace_capabilities, build_workspace_tool_map
-linktools-ai/src/linktools/ai/__init__.py:7: in <module>
-    from .runtime import AgentHandle, Runtime
-linktools-ai/src/linktools/ai/runtime/__init__.py:10: in <module>
-    from ._execution import DefaultExecutionService
-linktools-ai/src/linktools/ai/runtime/_execution.py:19: in <module>
-    from ..agent import AgentBindingSnapshot, AgentCompiler, AgentDefinition, AgentDefinitionCatalog
-E   ImportError: cannot import name 'AgentDefinitionCatalog' from 'linktools.ai.agent' (/home/runner/work/linktools/linktools/linktools-ai/src/linktools/ai/agent/__init__.py)
 =========================== short test summary info ============================
-ERROR tests/ai/persistence/test_execution_start_service.py
-ERROR tests/ai/persistence/test_runtime_resources.py
-ERROR tests/ai/test_agent_composition.py
 ERROR tests/ai/test_architecture.py
-ERROR tests/ai/test_contracts.py
-ERROR tests/ai/test_deferred_notification_replay.py
-ERROR tests/ai/test_filesystem_mutation_invariants.py
-ERROR tests/ai/test_final_fix_conformance.py
-ERROR tests/ai/test_history_projection_conformance.py
-ERROR tests/ai/test_local_commands.py
-ERROR tests/ai/test_local_execution_recovery.py
-ERROR tests/ai/test_memory_terminal.py
-ERROR tests/ai/test_non_workspace_pipeline.py
-ERROR tests/ai/test_recovery_integrity_validator.py
-ERROR tests/ai/test_runtime_composition_regressions.py
-ERROR tests/ai/test_runtime_session_auto_create.py
-ERROR tests/ai/test_runtime_storage_io_convergence.py
-ERROR tests/ai/test_runtime_stream_order.py
-ERROR tests/ai/test_selective_storage.py
-ERROR tests/ai/test_session_admission.py
-ERROR tests/ai/test_session_admission_conformance.py
-ERROR tests/ai/test_session_history_projection.py
-ERROR tests/ai/test_step_io_final_fix.py
-ERROR tests/ai/test_storage_asset_restoration.py
-ERROR tests/ai/test_temporal_continuation.py
-ERROR tests/ai/test_temporal_taskgraph_conformance.py
-ERROR tests/ai/test_temporal_taskgraph_durable_state.py
-ERROR tests/ai/test_v1_final_closure.py
-ERROR tests/ai/test_v5_conformance.py
-ERROR tests/ai/test_workspace_capabilities.py
-!!!!!!!!!!!!!!!!!!!!!!!!!! stopping after 30 failures !!!!!!!!!!!!!!!!!!!!!!!!!!
-30 errors in 4.52s
+!!!!!!!!!!!!!!!!!!!! Interrupted: 1 error during collection !!!!!!!!!!!!!!!!!!!!
+1 error in 3.27s
