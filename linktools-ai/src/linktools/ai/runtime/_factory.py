@@ -216,6 +216,17 @@ async def _restore_recovery_definitions(
             if checkpoint.state is RecoveryCheckpointState.COMPLETED:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             recovery_input = checkpoint.input
+            execution = await state.execution.executions.get(
+                checkpoint.execution_id,
+                tenant_id=tenant_id,
+            )
+            if execution is not None and (
+                execution.binding_digest != recovery_input.binding_digest
+                or execution.planning is not recovery_input.planning
+                or execution.thinking is not recovery_input.thinking
+                or execution.binding != recovery_input.binding
+            ):
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             snapshot = recovery_input.binding
             if snapshot is not None:
                 if (
