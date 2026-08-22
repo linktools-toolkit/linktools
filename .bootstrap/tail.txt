@@ -1,250 +1,250 @@
-===== python .bootstrap/patch.py =====
-runtime restored and refactored
-===== python -m compileall -q linktools-ai/src/linktools/ai =====
-===== python -m pip install -q --upgrade pip =====
-===== python -m pip install -q -e ./linktools -e ./linktools-ai[sqlite,evaluation,temporal] pytest pytest-asyncio ruff =====
-===== ruff check --select E4,E7,E9,F linktools-ai/src/linktools/ai linktools-ai/src/linktools/commands/ai tests/ai =====
-F401 [*] `pydantic_ai_harness.step_persistence.ContinuableSnapshot` imported but unused
-  --> linktools-ai/src/linktools/ai/adapter/_history.py:15:5
-   |
-13 | from pydantic_ai.messages import ModelRequest, ModelResponse
-14 | from pydantic_ai_harness.step_persistence import (
-15 |     ContinuableSnapshot,
-   |     ^^^^^^^^^^^^^^^^^^^
-16 |     RunRecord,
-17 |     StepEvent,
-   |
-help: Remove unused import: `pydantic_ai_harness.step_persistence.ContinuableSnapshot`
-   |
-14 | from pydantic_ai_harness.step_persistence import (
-   -     ContinuableSnapshot,
-15 |     RunRecord,
-   |
+81-    ) -> ExecutionHandle: ...
+--
+96-        history_id: str,
+97-        *,
+98-        tenant_id: str,
+99:        binding_digest: str | None = None,
+100-    ) -> tuple[object, ...]: ...
+101-
+102-    async def load_model_context(
+103-        self,
+104-        *,
+105-        run_id: str,
+106:        binding_digest: str,
+107-    ) -> tuple[object, ...]: ...
+108-
+109-    async def latest_snapshot(
+--
+115-
+116-    async def _run_for_session_with_launch_gate(
+117-        self,
+118:        binding_digest: str,
+119-        session_id: str,
+120-        request: ExecutionRequest,
+121-        gate: _LaunchGate,
+--
+162-        self._handoff_states: dict[tuple[str, str], _SessionHandoffState] = {}
+163-        self._handoff_condition = asyncio.Condition()
+164-
+165:    async def create(self, binding_digest: str, request: CreateSessionRequest) -> SessionView:
+166-        resource = ResourceRef(
+167-            ResourceKind.SESSION, request.session_id, request.principal.tenant_id, request.principal.principal_id
+168-        )
+--
+173-                "tenant_id": request.principal.tenant_id,
+174-                "principal_id": request.principal.principal_id,
+175-                "session_id": request.session_id,
+176:                "binding": binding_digest,
+177-                "cwd": request.cwd,
+178-                "metadata": dict(request.metadata),
+179-            }
+--
+183-            session_id=request.session_id,
+184-            tenant_id=request.principal.tenant_id,
+185-            owner_principal_id=request.principal.principal_id,
+186:            binding_digest=binding_digest,
+187-            status=SessionStatus.OPEN,
+188-            revision=0,
+189-            resource_generation=0,
+--
+298-                return await self._transcript_store.load_session_model_context(
+299-                    record.history_id,
+300-                    tenant_id=record.tenant_id,
+301:                    binding_digest=record.binding_digest,
+302-                )
+303-            return await self._transcript_store.load_model_context(
+304-                run_id=record.continuation.step_run_id,
+305:                binding_digest=record.binding_digest,
+306-            )
+307-
+308-    async def _iter_session_messages(
+--
+335-    ) -> AsyncIterator[object]:
+336-        return self._iter_session_messages(session_id, principal=principal)
+337-
+338:    async def resume(self, binding_digest: str, session_id: str, request: ResumeSessionRequest) -> ExecutionHandle:
+339:        return await self._resume(binding_digest, session_id, request, launch_gate=None)
+340-
+341-    async def _resume_with_launch_gate(
+342-        self,
+343:        binding_digest: str,
+344-        session_id: str,
+345-        request: ResumeSessionRequest,
+346-        gate: _LaunchGate,
+347-    ) -> ExecutionHandle:
+348:        return await self._resume(binding_digest, session_id, request, launch_gate=gate)
+349-
+350-    async def _resume(
+351-        self,
+352:        binding_digest: str,
+353-        session_id: str,
+354-        request: ResumeSessionRequest,
+355-        *,
+--
+363-                AuthorizationAction.EXECUTION_RUN,
+364-                ResourceRef(ResourceKind.EXECUTION, session_id, request.principal.tenant_id),
+365-            )
+366:            if record.binding_digest != binding_digest:
+367-                raise AIError(ErrorCode.SESSION_BINDING_MISMATCH)
+368-            execution_request = ExecutionRequest(
+369-                user_prompt=request.user_prompt,
+--
+378-            if launch_gate is None:
+379-                try:
+380-                    return await self._gated_execution.run_for_session(
+381:                        binding_digest,
+382-                        session_id,
+383-                        execution_request,
+384-                    )
+--
+386-                    raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY) from error
+387-            try:
+388-                return await self._gated_execution._run_for_session_with_launch_gate(
+389:                    binding_digest,
+390-                    session_id,
+391-                    execution_request,
+392-                    launch_gate,
+--
+394-            except AttributeError as error:
+395-                raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY) from error
+396-
+397:    async def fork(self, binding_digest: str, session_id: str, request: ForkSessionRequest) -> SessionView:
+398-        async with self._session_consumer(session_id, request.principal.tenant_id):
+399-            source = await self._authorized(session_id, request.principal, AuthorizationAction.SESSION_READ)
+400-            await self._authorization.authorize(
+--
+407-                    request.principal.principal_id,
+408-                ),
+409-            )
+410:            if source.binding_digest != binding_digest:
+411-                raise AIError(ErrorCode.SESSION_BINDING_MISMATCH)
+412-            digest = canonical_sha256(
+413-                {
+--
+416-                    "principal_id": request.principal.principal_id,
+417-                    "source": session_id,
+418-                    "target": request.new_session_id,
+419:                    "binding": source.binding_digest,
+420-                    "cwd": request.cwd,
+421-                }
+422-            )
+--
+425-                session_id=request.new_session_id,
+426-                tenant_id=source.tenant_id,
+427-                owner_principal_id=source.owner_principal_id,
+428:                binding_digest=source.binding_digest,
+429-                status=SessionStatus.OPEN,
+430-                revision=0,
+431-                resource_generation=0,
+--
+456-            _logger.debug("session forked: source=%s target=%s", session_id, target.session_id)
+457-            return await self._view(target, request.principal)
+458-
+459:    async def update(self, binding_digest: str, session_id: str, request: UpdateSessionRequest) -> SessionView:
+460-        async with self._session_consumer(session_id, request.principal.tenant_id):
+461:            return await self._update(binding_digest, session_id, request)
+462-
+463:    async def _update(self, binding_digest: str, session_id: str, request: UpdateSessionRequest) -> SessionView:
+464-        current = await self._authorized(session_id, request.principal, AuthorizationAction.SESSION_UPDATE)
+465:        if current.binding_digest != binding_digest:
+466-            raise AIError(ErrorCode.SESSION_BINDING_MISMATCH)
+467-        if any(
+468-            key.startswith("linktools.ai.") and current.metadata.get(key) != value
+--
+847-        active = () if active_execution is None else (active_execution.execution_id,)
+848-        return SessionView(
+849-            record.session_id,
+850:            record.binding_digest,
+851-            record.status,
+852-            record.revision,
+853-            record.resource_generation,
+268-
+269-
+270-@dataclass(frozen=True, slots=True)
+271:class SessionView:
+272-    session_id: str
+273:    binding_digest: str
+274-    status: SessionStatus
+275-    revision: int = 0
+276-    resource_generation: int = 0
+--
+282-
+283-@dataclass(frozen=True, slots=True)
+284-class LoadedSession:
+285:    view: SessionView
+286-    active_execution_ids: "tuple[str, ...]"
+287-
+288-
+--
+491-        workflow_id: str,
+492-        request: ExecutionRequest,
+493-        *,
+494:        binding_digest: str,
+495-        binding: Mapping[str, JsonValue],
+496-    ) -> ExecutionHandle: ...
+497-
+--
+503-
+504-
+505-class ExecutionService(Protocol):
+506:    async def run(self, binding_digest: str, request: ExecutionRequest) -> ExecutionHandle: ...
+507-    async def inspect(self, execution_id: str, *, principal: Principal) -> ExecutionView: ...
+508-    async def result(self, execution_id: str, *, principal: Principal) -> ExecutionResult: ...
+509-    async def wait(self, execution_id: str, *, principal: Principal, timeout_seconds: "float | None" = None) -> ExecutionResult: ...
+510:    async def run_and_wait(self, binding_digest: str, request: ExecutionRequest, *, timeout_seconds: "float | None" = None) -> ExecutionResult: ...
+511:    async def retry(self, binding_digest: str, execution_id: str, request: RetryExecutionRequest) -> ExecutionHandle: ...
+512:    async def fork(self, binding_digest: str, execution_id: str, request: ForkExecutionRequest) -> ExecutionHandle: ...
+513-    async def cancel(self, execution_id: str, request: CancelExecutionRequest) -> CancelExecutionResult: ...
+514-    async def trace(self, execution_id: str, *, principal: Principal, cursor: 'str | None' = None, limit: int = 100) -> 'Page[ExecutionTraceItem]': ...
+515-    async def transcript(self, execution_id: str, *, principal: Principal, cursor: 'str | None' = None, limit: int = 100) -> 'Page[TranscriptItem]': ...
+516-    async def history(self, execution_id: str, *, principal: Principal, cursor: 'str | None' = None, limit: int = 100) -> 'Page[ExecutionHistoryItem]': ...
+517-
+518-
+519:class SessionService(Protocol):
+520:    async def create(self, binding_digest: str, request: CreateSessionRequest) -> SessionView: ...
+521:    async def get(self, session_id: str, *, principal: Principal) -> SessionView: ...
+522:    async def list(self, request: ListSessionRequest) -> 'Page[SessionView]': ...
+523-    async def history(self, session_id: str, *, principal: Principal, cursor: 'str | None' = None, limit: int = 100) -> 'Page[SessionHistoryItem]': ...
+524-    async def load(self, session_id: str, *, principal: Principal) -> LoadedSession: ...
+525:    async def resume(self, binding_digest: str, session_id: str, request: ResumeSessionRequest) -> ExecutionHandle: ...
+526:    async def fork(self, binding_digest: str, session_id: str, request: ForkSessionRequest) -> SessionView: ...
+527:    async def update(self, binding_digest: str, session_id: str, request: UpdateSessionRequest) -> SessionView: ...
+528:    async def close(self, session_id: str, request: CloseSessionRequest) -> SessionView: ...
+529-
+530-
+531-class TaskService(Protocol):
+--
+537-
+538-
+539-class EvaluationService(Protocol):
+540:    async def run(self, binding_digest: str, output_schema_fingerprint: str, request: RunEvaluationRequest) -> EvaluationHandle: ...
+541-    async def inspect(self, evaluation_id: str, *, principal: Principal) -> EvaluationView: ...
+542-    async def compare(self, request: CompareEvaluationRequest) -> EvaluationComparison: ...
+543-    async def snapshot(self, evaluation_id: str, *, principal: Principal) -> RunSnapshot: ...
+544:    async def replay(self, binding_digest: str, snapshot_id: str, request: ReplayEvaluationRequest) -> ExecutionHandle: ...
+545-
+546-
+547-class ApprovalService(Protocol):
+--
+581-    "ExecutionHistoryItem", "ExecutionHistoryReader", "SessionHistoryItem", "SessionHistoryReader",
+582-    "ForkExecutionRequest", "ForkSessionRequest", "ListSessionRequest", "LoadedSession", "Page",
+583-    "ReplayEvaluationRequest", "ResumeSessionRequest", "RetryExecutionRequest", "RunEvaluationRequest",
+584:    "SessionService", "SessionView", "TaskService", "ExecutionTraceItem", "TranscriptItem", "UpdateSessionRequest",
+585-    "WorkflowGateway", "WorkflowQueryResult", "WorkflowUpdateResult",
+586-]
 
-F401 `._mcp.mcp_server_selector` imported but unused; consider removing, adding to `__all__`, or using a redundant alias
-  --> linktools-ai/src/linktools/ai/capability/__init__.py:13:54
-   |
-11 |     validate_fingerprint,
-12 | )
-13 | from ._mcp import MCPCapabilityProvider, MCPRuntime, mcp_server_selector
-   |                                                      ^^^^^^^^^^^^^^^^^^^
-14 | from ._names import SKILL_TOOL_NAMES
-15 | from ._skill import SkillCapabilityProvider
-   |
-help: Add unused import `mcp_server_selector` to __all__
+===== linktools-ai/src/linktools/ai/runtime/state/_codec.py :: SessionRecord|ContextProjection|binding_digest =====
 
-F401 [*] `typing.TypeGuard` imported but unused
-  --> linktools-ai/src/linktools/ai/runtime/_runtime_service.py:8:30
-   |
- 6 | import secrets
- 7 | from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
- 8 | from typing import Protocol, TypeGuard
-   |                              ^^^^^^^^^
- 9 |
-10 | from linktools.core import environ
-   |
-help: Remove unused import: `typing.TypeGuard`
-  |
-7 | from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
-  - from typing import Protocol, TypeGuard
-8 + from typing import Protocol
-9 |
-  |
+===== linktools-ai/src/linktools/ai/runtime/state/_steps.py :: ContextProjection|projection\.binding_digest|binding_digest.*projection|_projection_bindings =====
 
-F401 [*] `.state._contracts.ConversationHistoryRecord` imported but unused
-  --> linktools-ai/src/linktools/ai/runtime/_session.py:54:5
-   |
-52 | from .state._contracts import (
-53 |     ConversationCursor,
-54 |     ConversationHistoryRecord,
-   |     ^^^^^^^^^^^^^^^^^^^^^^^^^
-55 |     ConversationState,
-56 |     ExecutionRecord,
-   |
-help: Remove unused import
-   |
-53 |     ConversationCursor,
-   -     ConversationHistoryRecord,
-54 |     ConversationState,
-55 |     ExecutionRecord,
-56 |     ExecutionRepository,
-   -     HistoryQuality,
-57 |     OperationLedgerInput,
-   |
+===== linktools-ai/src/linktools/ai/runtime/state/_history.py :: ContextProjection|projection\.binding_digest|binding_digest =====
 
-F401 [*] `.state._contracts.HistoryQuality` imported but unused
-  --> linktools-ai/src/linktools/ai/runtime/_session.py:58:5
-   |
-56 |     ExecutionRecord,
-57 |     ExecutionRepository,
-58 |     HistoryQuality,
-   |     ^^^^^^^^^^^^^^
-59 |     OperationLedgerInput,
-60 |     OperationLedgerRecord,
-   |
-help: Remove unused import
-   |
-53 |     ConversationCursor,
-   -     ConversationHistoryRecord,
-54 |     ConversationState,
-55 |     ExecutionRecord,
-56 |     ExecutionRepository,
-   -     HistoryQuality,
-57 |     OperationLedgerInput,
-   |
+===== linktools-ai/src/linktools/ai/runtime/state/_contracts.py :: class RecoveryExecutionInput|class ContextProjection|class SessionRecord|class ExecutionRecord|binding_digest =====
 
-E402 Module level import not at top of file
-  --> linktools-ai/src/linktools/ai/runtime/state/_contracts.py:11:1
-   |
- 9 | """
-10 |
-11 | from collections.abc import Mapping, Sequence
-   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-12 | from dataclasses import dataclass
-13 | from datetime import datetime
-   |
-help: Move module level imports to top of file
+===== linktools-ai/src/linktools/ai/runtime/_session.py :: binding_digest =====
 
-E402 Module level import not at top of file
-  --> linktools-ai/src/linktools/ai/runtime/state/_contracts.py:12:1
-   |
-11 | from collections.abc import Mapping, Sequence
-12 | from dataclasses import dataclass
-   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-13 | from datetime import datetime
-14 | from enum import StrEnum
-   |
-help: Move module level imports to top of file
-
-E402 Module level import not at top of file
-  --> linktools-ai/src/linktools/ai/runtime/state/_contracts.py:13:1
-   |
-11 | from collections.abc import Mapping, Sequence
-12 | from dataclasses import dataclass
-13 | from datetime import datetime
-   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-14 | from enum import StrEnum
-15 | from typing import TYPE_CHECKING, Protocol
-   |
-help: Move module level imports to top of file
-
-E402 Module level import not at top of file
-  --> linktools-ai/src/linktools/ai/runtime/state/_contracts.py:14:1
-   |
-12 | from dataclasses import dataclass
-13 | from datetime import datetime
-14 | from enum import StrEnum
-   | ^^^^^^^^^^^^^^^^^^^^^^^^
-15 | from typing import TYPE_CHECKING, Protocol
-   |
-help: Move module level imports to top of file
-
-E402 Module level import not at top of file
-  --> linktools-ai/src/linktools/ai/runtime/state/_contracts.py:15:1
-   |
-13 | from datetime import datetime
-14 | from enum import StrEnum
-15 | from typing import TYPE_CHECKING, Protocol
-   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-16 |
-17 | from pydantic_ai.messages import ModelMessage
-   |
-help: Move module level imports to top of file
-
-E402 Module level import not at top of file
-  --> linktools-ai/src/linktools/ai/runtime/state/_contracts.py:17:1
-   |
-15 | from typing import TYPE_CHECKING, Protocol
-16 |
-17 | from pydantic_ai.messages import ModelMessage
-   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-18 |
-19 | from ...agent import AgentBindingSnapshot
-   |
-help: Move module level imports to top of file
-
-E402 Module level import not at top of file
-  --> linktools-ai/src/linktools/ai/runtime/state/_contracts.py:19:1
-   |
-17 | from pydantic_ai.messages import ModelMessage
-18 |
-19 | from ...agent import AgentBindingSnapshot
-   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-20 | from ...core import (
-21 |     ApprovalDecision,
-   |
-help: Move module level imports to top of file
-
-E402 Module level import not at top of file
-  --> linktools-ai/src/linktools/ai/runtime/state/_contracts.py:20:1
-   |
-19 |   from ...agent import AgentBindingSnapshot
-20 | / from ...core import (
-21 | |     ApprovalDecision,
-22 | |     ApprovalStatus,
-23 | |     EvaluationStatus,
-24 | |     ExecutionEventType,
-25 | |     ExecutionLineageKind,
-26 | |     ExecutionStatus,
-27 | |     ExternalCallStatus,
-28 | |     IdempotencyStatus,
-29 | |     JsonValue,
-30 | |     OperationLedgerInput,
-31 | |     OperationLedgerRecord,
-32 | |     OperationStatus,
-33 | |     Page,
-34 | |     ResourceKind,
-35 | |     ResourceRef,
-36 | |     SessionStatus,
-37 | |     StopReason,
-38 | |     UsageMetrics,
-39 | | )
-   | |_^
-40 |   from ...storage import ObjectRef, StoredPayload
-41 |   from ...task import (
-   |
-help: Move module level imports to top of file
-
-E402 Module level import not at top of file
-  --> linktools-ai/src/linktools/ai/runtime/state/_contracts.py:40:1
-   |
-38 |     UsageMetrics,
-39 | )
-40 | from ...storage import ObjectRef, StoredPayload
-   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-41 | from ...task import (
-42 |     TaskGraph,
-   |
-help: Move module level imports to top of file
-
-E402 Module level import not at top of file
-  --> linktools-ai/src/linktools/ai/runtime/state/_contracts.py:41:1
-   |
-39 |   )
-40 |   from ...storage import ObjectRef, StoredPayload
-41 | / from ...task import (
-42 | |     TaskGraph,
-43 | |     TaskGraphView,
-44 | |     TaskLease,
-45 | |     TaskNodeView,
-46 | |     TaskTerminalRecord,
-47 | | )
-   | |_^
-48 |   from ._plan import RuntimeDomain
-   |
-help: Move module level imports to top of file
-
-E402 Module level import not at top of file
-  --> linktools-ai/src/linktools/ai/runtime/state/_contracts.py:48:1
-   |
-46 |     TaskTerminalRecord,
-47 | )
-48 | from ._plan import RuntimeDomain
-   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-49 |
-50 | if TYPE_CHECKING:
-   |
-help: Move module level imports to top of file
-
-Found 16 errors.
-[*] 4 fixable with the `--fix` option.
+===== linktools-ai/src/linktools/ai/runtime/service_api.py :: SessionView|class SessionService|binding_digest =====
+Traceback (most recent call last):
+  File "/home/runner/work/linktools/linktools/.bootstrap/patch.py", line 15, in <module>
+    raise RuntimeError("diagnostic only")
+RuntimeError: diagnostic only
