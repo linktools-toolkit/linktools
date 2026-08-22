@@ -32,6 +32,9 @@ jobs:
             'pydantic-ai-harness[skills,dynamic-workflow]>=0.13.0' \
             'pydantic-evals>=0.1.0' \
             'jsonschema>=4.23.0' 'PyYAML>=6.0,<7.0' \
+            'nats-py>=2.9.0,<3.0.0' 'redis>=5.2.0,<6.0.0' \
+            'asyncpg>=0.29.0,<1.0.0' 'PyMySQL>=1.1.0,<2.0.0' \
+            'cryptography>=43.0.0,<47.0.0' \
             pytest pytest-asyncio \
             'sqlalchemy[asyncio]==2.0.51' 'aiosqlite==0.22.1' \
             ruff
