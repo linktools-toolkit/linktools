@@ -50,9 +50,9 @@ class StructuredRedactor:
         if isinstance(error, AIError):
             return error.to_safe_error(operation_id=operation_id)
         return SafeError(
-            ErrorCode.STORAGE_UNAVAILABLE.value,
-            "STORAGE",
-            True,
+            ErrorCode.INTERNAL_ERROR.value,
+            "INTERNAL",
+            False,
             operation_id,
             {},
             canonical_sha256({"type": type(error).__name__}),
