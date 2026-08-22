@@ -75,7 +75,7 @@ class _ModelRegistrySnapshot:
         try:
             return self._bindings[route_id]
         except KeyError as error:
-            raise AIError(ErrorCode.STORAGE_NOT_FOUND) from error
+            raise AIError(ErrorCode.MODEL_CONNECTION_NOT_FOUND) from error
 
 
 __all__ = ["ModelRegistry"]
