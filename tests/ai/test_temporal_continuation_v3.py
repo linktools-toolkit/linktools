@@ -4,7 +4,10 @@
 
 from dataclasses import replace
 
-from linktools.ai.core import ApprovalDecision
+import pytest
+
+from linktools.ai.core import ApprovalDecision, canonical_sha256
+from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.temporal.workflow._execution import (
     CONTINUE_EVENT_THRESHOLD,
     ExecutionWorkflow,
@@ -21,9 +24,41 @@ def _request() -> ExecutionWorkflowInput:
         execution_id="execution",
         tenant_id="tenant",
         binding_digest="a" * 64,
-        bundle_digest="b" * 64,
         request_ref="request",
         worker_build="build",
+    )
+
+
+def _decision_digest(
+    approval_id: str,
+    idempotency_key: str,
+    decision: ApprovalDecision,
+    principal_id: str,
+) -> str:
+    return canonical_sha256(
+        {
+            "approval_id": approval_id,
+            "idempotency_key": idempotency_key,
+            "decision": decision.value,
+            "principal_id": principal_id,
+        }
+    )
+
+
+def _approve(
+    workflow: ExecutionWorkflow,
+    *,
+    idempotency_key: str = "approval-key",
+    decision: ApprovalDecision = ApprovalDecision.APPROVE,
+) -> object:
+    principal_id = "principal"
+    return workflow.approve(
+        "approval-operation",
+        "approval",
+        idempotency_key,
+        decision,
+        principal_id,
+        _decision_digest("approval", idempotency_key, decision, principal_id),
     )
 
 
@@ -90,12 +125,7 @@ def test_last_approval_switches_to_external_wait_phase() -> None:
         pending_external_ids=("external",),
     )
 
-    updated = workflow.approve(
-        "approval-operation",
-        "approval",
-        ApprovalDecision.APPROVE,
-        "approval-key",
-    )
+    updated = _approve(workflow)
 
     assert updated.pending_approval_ids == ()
     assert updated.pending_external_ids == ("external",)
@@ -113,11 +143,53 @@ def test_approval_does_not_overwrite_cancelling_phase() -> None:
         pending_external_ids=("external",),
     )
 
-    updated = workflow.approve(
-        "approval-operation",
-        "approval",
-        ApprovalDecision.APPROVE,
-        "approval-key",
-    )
+    updated = _approve(workflow)
 
     assert updated.status == WorkflowPhase.CANCELLING.value
+
+
+def test_approval_exact_replay_is_idempotent() -> None:
+    workflow = ExecutionWorkflow()
+    workflow._state = replace(
+        _initial_state(_request()),
+        status=WorkflowPhase.WAITING_APPROVAL.value,
+        last_stage="persist_deferred",
+        pending_approval_ids=("approval",),
+    )
+
+    first = _approve(workflow)
+    second = _approve(workflow)
+
+    assert second == first
+
+
+def test_approval_same_key_different_decision_conflicts() -> None:
+    workflow = ExecutionWorkflow()
+    workflow._state = replace(
+        _initial_state(_request()),
+        status=WorkflowPhase.WAITING_APPROVAL.value,
+        last_stage="persist_deferred",
+        pending_approval_ids=("approval",),
+    )
+    _approve(workflow)
+
+    with pytest.raises(AIError) as error:
+        _approve(workflow, decision=ApprovalDecision.DENY)
+
+    assert error.value.code is ErrorCode.APPROVAL_CONFLICT
+
+
+def test_approval_same_decision_different_key_conflicts() -> None:
+    workflow = ExecutionWorkflow()
+    workflow._state = replace(
+        _initial_state(_request()),
+        status=WorkflowPhase.WAITING_APPROVAL.value,
+        last_stage="persist_deferred",
+        pending_approval_ids=("approval",),
+    )
+    _approve(workflow)
+
+    with pytest.raises(AIError) as error:
+        _approve(workflow, idempotency_key="other-key")
+
+    assert error.value.code is ErrorCode.APPROVAL_CONFLICT
