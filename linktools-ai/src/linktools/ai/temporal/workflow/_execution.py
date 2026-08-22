@@ -339,7 +339,13 @@ class ExecutionWorkflow:
     def _deferred_resolved(self) -> bool:
         state = self._state
         return state is not None and (
-            state.status in {"SUCCEEDED", "FAILED", "CANCELLED"}
+            state.status
+            in {
+                WorkflowPhase.CANCELLING.value,
+                WorkflowPhase.SUCCEEDED.value,
+                WorkflowPhase.FAILED.value,
+                WorkflowPhase.CANCELLED.value,
+            }
             or not state.pending_approval_ids
             and not state.pending_external_ids
         )
