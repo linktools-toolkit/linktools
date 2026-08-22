@@ -3,7 +3,7 @@ name: AI error contract PR verify
 on:
   pull_request:
     branches:
-      - master
+      - fix/ai-error-contract-closure
 
 permissions:
   contents: write
