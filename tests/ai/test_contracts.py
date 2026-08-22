@@ -9,7 +9,8 @@ from datetime import datetime, timezone
 
 import pytest
 
-from linktools.ai.agent import AgentBindingSnapshot, bind_output
+from linktools.ai.agent import AgentBindingSnapshot
+from linktools.ai.agent._output import bind_output
 from linktools.ai.asset import AssetRef
 from linktools.ai.core import (
     OperationLedgerRecord,
