@@ -4,7 +4,7 @@
 
 import json
 import math
-from collections.abc import Iterator, Mapping
+from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import cast
 
@@ -106,9 +106,15 @@ class AgentSpec:
             raise ValueError("agent model must be a non-empty string")
         if not isinstance(self.system_prompt, str):
             raise ValueError("agent system prompt must be a string")
+        if isinstance(self.instructions, (str, bytes, bytearray)) or not isinstance(self.instructions, Sequence):
+            raise ValueError("agent instructions must be a string array")
         instructions = tuple(self.instructions)
         if any(not isinstance(item, str) for item in instructions):
             raise ValueError("agent instructions must be strings")
+        if not isinstance(self.metadata, Mapping):
+            raise ValueError("agent metadata must be an object")
+        if self.usage_limits is not None and not isinstance(self.usage_limits, AgentUsageLimits):
+            raise ValueError("agent usage_limits must be AgentUsageLimits or None")
         object.__setattr__(self, "instructions", instructions)
         object.__setattr__(self, "allow_tools", canonical_string_tuple(self.allow_tools, field="allow_tools"))
         object.__setattr__(self, "metadata", _ImmutableJsonMapping(self.metadata))
@@ -121,7 +127,14 @@ class SkillSpec:
     content: str
 
     def __post_init__(self) -> None:
-        if not self.id.strip() or self.revision < 1:
+        if (
+            not isinstance(self.id, str)
+            or not self.id.strip()
+            or not isinstance(self.revision, int)
+            or isinstance(self.revision, bool)
+            or self.revision < 1
+            or not isinstance(self.content, str)
+        ):
             raise ValueError("skill spec is incomplete")
 
 
@@ -133,9 +146,22 @@ class MCPServerSpec:
     args: "tuple[str, ...]" = ()
 
     def __post_init__(self) -> None:
-        if not self.id.strip() or self.revision < 1 or not self.command.strip():
+        if (
+            not isinstance(self.id, str)
+            or not self.id.strip()
+            or not isinstance(self.revision, int)
+            or isinstance(self.revision, bool)
+            or self.revision < 1
+            or not isinstance(self.command, str)
+            or not self.command.strip()
+            or isinstance(self.args, (str, bytes, bytearray))
+            or not isinstance(self.args, Sequence)
+        ):
             raise ValueError("MCP server spec is incomplete")
-        object.__setattr__(self, "args", tuple(self.args))
+        args = tuple(self.args)
+        if any(not isinstance(item, str) for item in args):
+            raise ValueError("MCP server args must be strings")
+        object.__setattr__(self, "args", args)
 
 
 __all__ = ["AgentSpec", "AgentUsageLimits", "MCPServerSpec", "SkillSpec"]
