@@ -4,24 +4,30 @@ on:
   push:
     branches:
       - refactor/ai-agent-runtime-asset-composition
-  pull_request:
-    branches:
-      - master
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   snapshot:
+    if: github.actor != 'github-actions[bot]'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-      - name: Archive source
-        run: tar --exclude=.git -czf /tmp/linktools-source.tgz .
-      - uses: actions/upload-artifact@v4
-        with:
-          name: linktools-source-${{ github.sha }}
-          path: /tmp/linktools-source.tgz
-          if-no-files-found: error
+          ref: refactor/ai-agent-runtime-asset-composition
+      - name: Materialize source snapshot
+        run: |
+          set -euo pipefail
+          rm -rf .bootstrap
+          mkdir -p .bootstrap
+          tar -czf /tmp/linktools-source.tgz linktools-ai linktools tests/ai examples/minimal_runtime.py AGENTS.md
+          base64 -w0 /tmp/linktools-source.tgz > /tmp/linktools-source.b64
+          split -b 200000 -d -a 3 /tmp/linktools-source.b64 .bootstrap/source.b64.part-
+          printf '%s\n' "${GITHUB_SHA}" > .bootstrap/source.sha
+          git config user.name github-actions[bot]
+          git config user.email github-actions[bot]@users.noreply.github.com
+          git add .bootstrap
+          git commit -m "ci: materialize agent runtime implementation workspace"
+          git push origin HEAD:refactor/ai-agent-runtime-asset-composition
