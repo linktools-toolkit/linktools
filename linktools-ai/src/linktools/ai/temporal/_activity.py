@@ -4,7 +4,7 @@
 
 from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Protocol, cast
+from typing import Protocol
 
 from linktools.core import environ
 
@@ -42,119 +42,59 @@ class ActivityOptions:
 
 
 class ExecutionOperation(Protocol):
-    async def execute(
-        self, request: ExecutionWorkflowInput
-    ) -> ExecutionWorkflowResult: ...
-
-
-class ExecutionStageOperation(Protocol):
-    async def load_input(
-        self, state: ExecutionWorkflowState
-    ) -> ExecutionWorkflowState: ...
-    async def reserve_budget(
-        self, state: ExecutionWorkflowState
-    ) -> ExecutionWorkflowState: ...
-    async def run_agent(
-        self, state: ExecutionWorkflowState
-    ) -> ExecutionWorkflowState: ...
-    async def persist_deferred(
-        self, state: ExecutionWorkflowState
-    ) -> ExecutionWorkflowState: ...
-    async def load_resume_input(
-        self, state: ExecutionWorkflowState
-    ) -> ExecutionWorkflowState: ...
-    async def commit_result(
-        self, state: ExecutionWorkflowState
-    ) -> ExecutionWorkflowState: ...
-    async def settle_budget(
-        self, state: ExecutionWorkflowState
-    ) -> ExecutionWorkflowState: ...
-    async def cancel_effect(
-        self, state: ExecutionWorkflowState
-    ) -> ExecutionWorkflowState: ...
+    async def load_input(self, state: ExecutionWorkflowState) -> ExecutionWorkflowState: ...
+    async def reserve_budget(self, state: ExecutionWorkflowState) -> ExecutionWorkflowState: ...
+    async def run_agent(self, state: ExecutionWorkflowState) -> ExecutionWorkflowState: ...
+    async def persist_deferred(self, state: ExecutionWorkflowState) -> ExecutionWorkflowState: ...
+    async def load_resume_input(self, state: ExecutionWorkflowState) -> ExecutionWorkflowState: ...
+    async def commit_result(self, state: ExecutionWorkflowState) -> ExecutionWorkflowState: ...
+    async def settle_budget(self, state: ExecutionWorkflowState) -> ExecutionWorkflowState: ...
+    async def cancel_effect(self, state: ExecutionWorkflowState) -> ExecutionWorkflowState: ...
 
 
 class ExecuteActivity:
-    options = ActivityOptions(
-        start_to_close_seconds=300, retry_max_attempts=3, heartbeat_timeout_seconds=30
-    )
+    options = ActivityOptions(300, 3, 30)
 
     def __init__(self, operation: ExecutionOperation) -> None:
         self._operation = operation
 
-    async def run(self, request: ExecutionWorkflowInput) -> ExecutionWorkflowResult:
-        _logger.debug(
-            "executing durable activity: execution_id=%s", request.execution_id
-        )
-        result = await self._operation.execute(request)
-        _logger.debug(
-            "durable activity completed: execution_id=%s status=%s",
-            request.execution_id,
-            result.status,
-        )
-        return result
-
     async def load_input(self, state: ExecutionWorkflowState) -> ExecutionWorkflowState:
-        return await cast(ExecutionStageOperation, self._operation).load_input(state)
+        return await self._operation.load_input(state)
 
-    async def reserve_budget(
-        self, state: ExecutionWorkflowState
-    ) -> ExecutionWorkflowState:
-        return await cast(ExecutionStageOperation, self._operation).reserve_budget(
-            state
-        )
+    async def reserve_budget(self, state: ExecutionWorkflowState) -> ExecutionWorkflowState:
+        return await self._operation.reserve_budget(state)
 
     async def run_agent(self, state: ExecutionWorkflowState) -> ExecutionWorkflowState:
-        return await cast(ExecutionStageOperation, self._operation).run_agent(state)
+        return await self._operation.run_agent(state)
 
-    async def persist_deferred(
-        self, state: ExecutionWorkflowState
-    ) -> ExecutionWorkflowState:
-        return await cast(ExecutionStageOperation, self._operation).persist_deferred(
-            state
-        )
+    async def persist_deferred(self, state: ExecutionWorkflowState) -> ExecutionWorkflowState:
+        return await self._operation.persist_deferred(state)
 
-    async def load_resume_input(
-        self, state: ExecutionWorkflowState
-    ) -> ExecutionWorkflowState:
-        return await cast(ExecutionStageOperation, self._operation).load_resume_input(
-            state
-        )
+    async def load_resume_input(self, state: ExecutionWorkflowState) -> ExecutionWorkflowState:
+        return await self._operation.load_resume_input(state)
 
-    async def commit_result(
-        self, state: ExecutionWorkflowState
-    ) -> ExecutionWorkflowState:
-        return await cast(ExecutionStageOperation, self._operation).commit_result(state)
+    async def commit_result(self, state: ExecutionWorkflowState) -> ExecutionWorkflowState:
+        return await self._operation.commit_result(state)
 
-    async def settle_budget(
-        self, state: ExecutionWorkflowState
-    ) -> ExecutionWorkflowState:
-        return await cast(ExecutionStageOperation, self._operation).settle_budget(state)
+    async def settle_budget(self, state: ExecutionWorkflowState) -> ExecutionWorkflowState:
+        return await self._operation.settle_budget(state)
 
-    async def cancel_effect(
-        self, state: ExecutionWorkflowState
-    ) -> ExecutionWorkflowState:
-        return await cast(ExecutionStageOperation, self._operation).cancel_effect(state)
+    async def cancel_effect(self, state: ExecutionWorkflowState) -> ExecutionWorkflowState:
+        return await self._operation.cancel_effect(state)
 
 
 class EvaluationOperation(Protocol):
-    async def execute(
-        self, request: EvaluationWorkflowInput
-    ) -> EvaluationWorkflowResult: ...
+    async def execute(self, request: EvaluationWorkflowInput) -> EvaluationWorkflowResult: ...
 
 
 class EvaluationActivity:
-    options = ActivityOptions(
-        start_to_close_seconds=1800, retry_max_attempts=2, heartbeat_timeout_seconds=60
-    )
+    options = ActivityOptions(1800, 2, 60)
 
     def __init__(self, operation: EvaluationOperation) -> None:
         self._operation = operation
 
     async def run(self, request: EvaluationWorkflowInput) -> EvaluationWorkflowResult:
-        _logger.debug(
-            "executing evaluation activity: evaluation_id=%s", request.evaluation_id
-        )
+        _logger.debug("executing evaluation activity: evaluation_id=%s", request.evaluation_id)
         return await self._operation.execute(request)
 
 
@@ -163,9 +103,7 @@ class SessionOperation(Protocol):
 
 
 class SessionActivity:
-    options = ActivityOptions(
-        start_to_close_seconds=60, retry_max_attempts=3, heartbeat_timeout_seconds=15
-    )
+    options = ActivityOptions(60, 3, 15)
 
     def __init__(self, operation: SessionOperation) -> None:
         self._operation = operation
@@ -200,12 +138,10 @@ class TaskOperation(Protocol):
 
 
 class TaskActivity:
+    options = ActivityOptions(60, 3, 15)
+
     def __init__(self, operation: TaskOperation) -> None:
         self._operation = operation
-
-    options = ActivityOptions(
-        start_to_close_seconds=60, retry_max_attempts=3, heartbeat_timeout_seconds=15
-    )
 
     @classmethod
     def from_runtime(
@@ -233,15 +169,12 @@ class TaskActivity:
         node_id: str,
         dependency_results: Mapping[str, TaskDependencyResult],
     ) -> "TaskNodeView | tuple[TaskLease, ExecutionWorkflowInput]":
-        _logger.debug(
-            "preparing task node: graph_id=%s node=%s", request.graph_id, node_id
-        )
-        workflow_run_id = _workflow_run_id()
+        _logger.debug("preparing task node: graph_id=%s node=%s", request.graph_id, node_id)
         return await self._operation.prepare(
             request,
             node_id,
             dependency_results,
-            workflow_run_id=workflow_run_id,
+            workflow_run_id=_workflow_run_id(),
         )
 
     async def renew(self, lease: TaskLease) -> "TaskLease | TaskNodeView":
@@ -281,46 +214,19 @@ def _workflow_run_id() -> str:
 
 
 if _temporal_activity is not None:
-    ExecuteActivity.run = _temporal_activity.defn(name="execute")(ExecuteActivity.run)
-    ExecuteActivity.load_input = _temporal_activity.defn(name="load_input")(
-        ExecuteActivity.load_input
-    )
-    ExecuteActivity.reserve_budget = _temporal_activity.defn(name="reserve_budget")(
-        ExecuteActivity.reserve_budget
-    )
-    ExecuteActivity.run_agent = _temporal_activity.defn(name="run_agent")(
-        ExecuteActivity.run_agent
-    )
-    ExecuteActivity.persist_deferred = _temporal_activity.defn(name="persist_deferred")(
-        ExecuteActivity.persist_deferred
-    )
-    ExecuteActivity.load_resume_input = _temporal_activity.defn(name="load_resume_input")(
-        ExecuteActivity.load_resume_input
-    )
-    ExecuteActivity.commit_result = _temporal_activity.defn(name="commit_result")(
-        ExecuteActivity.commit_result
-    )
-    ExecuteActivity.settle_budget = _temporal_activity.defn(name="settle_budget")(
-        ExecuteActivity.settle_budget
-    )
-    ExecuteActivity.cancel_effect = _temporal_activity.defn(name="cancel_effect")(
-        ExecuteActivity.cancel_effect
-    )
-    EvaluationActivity.run = _temporal_activity.defn(name="evaluation")(
-        EvaluationActivity.run
-    )
-    SessionActivity.run = _temporal_activity.defn(name="session_mutation")(
-        SessionActivity.run
-    )
-    TaskActivity.prepare = _temporal_activity.defn(name="task_node_prepare")(
-        TaskActivity.prepare
-    )
-    TaskActivity.renew = _temporal_activity.defn(name="task_node_renew")(
-        TaskActivity.renew
-    )
-    TaskActivity.settle = _temporal_activity.defn(name="task_node_settle")(
-        TaskActivity.settle
-    )
+    ExecuteActivity.load_input = _temporal_activity.defn(name="load_input")(ExecuteActivity.load_input)
+    ExecuteActivity.reserve_budget = _temporal_activity.defn(name="reserve_budget")(ExecuteActivity.reserve_budget)
+    ExecuteActivity.run_agent = _temporal_activity.defn(name="run_agent")(ExecuteActivity.run_agent)
+    ExecuteActivity.persist_deferred = _temporal_activity.defn(name="persist_deferred")(ExecuteActivity.persist_deferred)
+    ExecuteActivity.load_resume_input = _temporal_activity.defn(name="load_resume_input")(ExecuteActivity.load_resume_input)
+    ExecuteActivity.commit_result = _temporal_activity.defn(name="commit_result")(ExecuteActivity.commit_result)
+    ExecuteActivity.settle_budget = _temporal_activity.defn(name="settle_budget")(ExecuteActivity.settle_budget)
+    ExecuteActivity.cancel_effect = _temporal_activity.defn(name="cancel_effect")(ExecuteActivity.cancel_effect)
+    EvaluationActivity.run = _temporal_activity.defn(name="evaluation")(EvaluationActivity.run)
+    SessionActivity.run = _temporal_activity.defn(name="session_mutation")(SessionActivity.run)
+    TaskActivity.prepare = _temporal_activity.defn(name="task_node_prepare")(TaskActivity.prepare)
+    TaskActivity.renew = _temporal_activity.defn(name="task_node_renew")(TaskActivity.renew)
+    TaskActivity.settle = _temporal_activity.defn(name="task_node_settle")(TaskActivity.settle)
 
 
 __all__ = [
@@ -329,7 +235,6 @@ __all__ = [
     "EvaluationOperation",
     "ExecuteActivity",
     "ExecutionOperation",
-    "ExecutionStageOperation",
     "SessionActivity",
     "SessionOperation",
     "TaskActivity",
