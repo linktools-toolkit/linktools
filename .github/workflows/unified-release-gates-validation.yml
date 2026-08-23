@@ -12,7 +12,7 @@ permissions:
   contents: read
 
 jobs:
-  diagnostic-build-verify:
+  python310:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -24,7 +24,11 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install -U -r requirements.txt
           python manage.py install --editable
-      - name: Build release artifacts without source gates
+      - name: Clean release artifacts
+        run: python manage.py clean
+      - name: Run source gates
+        run: python manage.py check
+      - name: Build release artifacts
         run: VERSION=v0.0.0 RELEASE=true python manage.py build
       - name: Verify release artifacts
         run: VERSION=v0.0.0 python manage.py verify
@@ -34,7 +38,7 @@ jobs:
           ! git grep -n 'linktools-ai/scripts/build' -- .
           ! git grep -n 'scripts/build/matrix' -- .
 
-  diagnostic-python36-runtime:
+  python36:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -47,7 +51,7 @@ jobs:
             python:3.6.15 \
             bash -lc '
               set -eu
-              python -m pip install "tomlkit==0.11.8"
+              python -m pip install "tomlkit==0.11.6"
               python -m py_compile manage.py
               python -m py_compile scripts/check/python36.py
               python scripts/check/python36.py \
