@@ -12,6 +12,55 @@ permissions:
   contents: read
 
 jobs:
+  diagnostic-python36-scan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+      - name: Run compatibility scanner
+        run: |
+          python scripts/check/python36.py \
+            manage.py \
+            scripts/check/python36.py \
+            linktools/src \
+            linktools-common/src \
+            linktools-mobile/src \
+            linktools-cntr/src
+
+  diagnostic-ruff:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+      - name: Install Ruff
+        run: python -m pip install 'ruff>=0.16,<0.17'
+      - name: Run Ruff
+        run: |
+          ruff check --no-cache \
+            scripts/check/ai \
+            linktools-ai/src/linktools/ai \
+            linktools-ai/src/linktools/commands/ai \
+            tests/ai
+
+  diagnostic-pytest:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+      - name: Install tooling
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -U -r requirements.txt
+          python manage.py install --editable
+      - name: Run pytest
+        run: python -m pytest -q -p no:cacheprovider tests
+
   python310:
     runs-on: ubuntu-latest
     steps:
