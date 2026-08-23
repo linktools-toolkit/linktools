@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -62,3 +63,10 @@ def test_missing_target_ref_fails_closed(
     )
     with pytest.raises(ValueError, match="baseline ref is unavailable"):
         persistence._baseline_commit(Path("."), base_ref="origin/master")
+
+
+def test_checked_in_runtime_persistence_gate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(sys, "argv", ["persistence"])
+    assert persistence.main() == 0
