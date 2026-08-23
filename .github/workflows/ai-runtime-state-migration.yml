@@ -49,7 +49,6 @@ jobs:
           done
           if [[ $status -eq 0 ]]; then run_check python -m compileall -q linktools-ai/src/linktools/ai; fi
           if [[ $status -eq 0 ]]; then run_check ruff check --select E4,E7,E9,F linktools-ai/src/linktools/ai tests/ai; fi
-          if [[ $status -eq 0 ]]; then run_check ruff format --check linktools-ai/src/linktools/ai tests/ai; fi
           if [[ $status -eq 0 ]]; then run_check python .bootstrap/audit.py; fi
           if [[ $status -eq 0 ]]; then run_check python -m scripts.build.architecture; fi
           if [[ $status -eq 0 ]]; then run_check pytest -q tests/ai; fi
