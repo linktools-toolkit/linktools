@@ -11,9 +11,10 @@ from pydantic_ai.exceptions import (
     ModelAPIError,
     UnexpectedModelBehavior,
 )
+from pydantic_ai.messages import FunctionToolResultEvent, RetryPromptPart
 from pydantic_ai.usage import RunUsage, UsageLimits
 
-from linktools.ai.agent._executor import _execution_error
+from linktools.ai.agent._executor import DurableBoundary, _execution_error, _map_event
 from linktools.ai.core import (
     ExecutionStatus,
     Principal,
@@ -79,6 +80,20 @@ def test_unknown_model_route_has_stable_connection_error() -> None:
     with pytest.raises(AIError) as error:
         ModelRegistry().snapshot().resolve("missing")
     assert error.value.code is ErrorCode.MODEL_CONNECTION_NOT_FOUND
+
+
+def test_tool_retry_event_uses_stable_retry_code() -> None:
+    emission = _map_event(
+        FunctionToolResultEvent(
+            part=RetryPromptPart(
+                content="retry",
+                tool_name="tool",
+                tool_call_id="call",
+            )
+        )
+    )
+    assert isinstance(emission, DurableBoundary)
+    assert emission.payload["safe_error_code"] == ErrorCode.TOOL_RETRY_REQUIRED.value
 
 
 @pytest.mark.parametrize(
