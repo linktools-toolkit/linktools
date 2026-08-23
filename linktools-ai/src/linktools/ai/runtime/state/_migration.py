@@ -713,8 +713,11 @@ def _migrate_legacy_binding(
 ) -> tuple[str, AgentBinding]:
     if not isinstance(value, Mapping) or frozenset(value) != _LEGACY_BINDING_FIELDS:
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-    if value.get("version") != 1 or isinstance(value.get("version"), bool):
+    version = value.get("version")
+    if isinstance(version, bool) or not isinstance(version, int) or version < 1:
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    if version != 1:
+        raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
     legacy_digest = _digest(value.get("binding_digest"))
     spec = _legacy_agent_spec(value.get("agent_spec"))
     descriptors = value.get("local_runtime_capability_descriptors")
