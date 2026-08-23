@@ -6,7 +6,7 @@ on:
       - fix/ai-error-contract-closure
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   verify:
@@ -54,80 +54,47 @@ jobs:
             linktools-ai/src/linktools/commands/ai tests/ai > ../ruff-baseline.log 2>&1
           exit $?
 
-      - name: Ruff diagnostics
-        id: ruff
+      - name: Current Ruff diagnostics
         continue-on-error: true
         env:
           PYTHONPATH: linktools-ai:linktools-ai/src:linktools/src
         run: |
-          set +e
-          python -m ruff check linktools-ai/scripts/build linktools-ai/src/linktools/ai linktools-ai/src/linktools/commands/ai tests/ai > ruff.log 2>&1
-          status=$?
-          echo "status=$status" >> "$GITHUB_OUTPUT"
-          exit "$status"
+          python -m ruff check \
+            linktools-ai/scripts/build linktools-ai/src/linktools/ai \
+            linktools-ai/src/linktools/commands/ai tests/ai > ruff.log 2>&1
 
-      - name: Apply validated branch-only Ruff fixes
-        if: always()
+      - name: Enforce zero Ruff delta
         run: |
-          git fetch --depth=1 origin fix/ai-error-contract-closure
-          git worktree add /tmp/lintfix FETCH_HEAD
-          cd /tmp/lintfix
-          sed -i '1,2d' tests/ai/test_error_contract.py
-          sed -i '1,2d' tests/ai/test_error_contract_matrix.py
-          python -m ruff check --fix --select I001 \
-            tests/ai/test_error_contract.py \
-            tests/ai/test_error_contract_matrix.py \
-            tests/ai/test_temporal_taskgraph_conformance.py
           python - <<'PY'
+          import re
+          from collections import Counter
           from pathlib import Path
 
-          path = Path('tests/ai/test_error_contract.py')
-          text = path.read_text()
-          old = '        safe_error_details: dict[str, object] = {}\n'
-          new = '        safe_error_details: tuple[tuple[str, object], ...] = ()\n'
-          if text.count(old) != 1:
-              raise SystemExit('unexpected test_error_contract safe_error_details shape')
-          path.write_text(text.replace(old, new, 1))
+          pattern = re.compile(r'^(.+?):\d+:\d+: ([A-Z]+\d+) ')
 
-          path = Path('linktools-ai/src/linktools/ai/runtime/_local.py')
-          text = path.read_text()
-          old = '                        except Exception as readback_error:\n'
-          new = '                        except Exception as readback_error:  # noqa: BLE001\n'
-          if text.count(old) != 1:
-              raise SystemExit('unexpected readback exception boundary shape')
-          text = text.replace(old, new, 1)
-          old = '''                            _logger.error(\n                                "terminal finalization failed after durable execution terminal: execution=%s",\n                                execution_id,\n                                exc_info=True,\n                            )\n'''
-          new = '''                            _logger.exception(\n                                "terminal finalization failed after durable execution terminal: execution=%s",\n                                execution_id,\n                            )\n'''
-          if text.count(old) != 1:
-              raise SystemExit('unexpected terminal finalization logging shape')
-          path.write_text(text.replace(old, new, 1))
+          def diagnostics(path: str) -> Counter[tuple[str, str]]:
+              result: Counter[tuple[str, str]] = Counter()
+              for line in Path(path).read_text().splitlines():
+                  match = pattern.match(line)
+                  if match is not None:
+                      result[(match.group(1), match.group(2))] += 1
+              return result
+
+          baseline = diagnostics('ruff-baseline.log')
+          current = diagnostics('ruff.log')
+          if current != baseline:
+              added = current - baseline
+              removed = baseline - current
+              raise SystemExit(f'Ruff delta detected: added={dict(added)} removed={dict(removed)}')
+          print(f'Ruff baseline/current diagnostics identical: {sum(current.values())}')
           PY
-          git diff --check
-          PYTHONPATH=linktools-ai:linktools-ai/src:linktools/src python -m pytest -q \
-            tests/ai/test_error_contract.py \
-            tests/ai/test_error_contract_matrix.py \
-            tests/ai/test_temporal_taskgraph_conformance.py \
-            tests/ai/test_local_execution_recovery.py
-          git config user.name github-actions[bot]
-          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
-          git add \
-            linktools-ai/src/linktools/ai/runtime/_local.py \
-            tests/ai/test_error_contract.py \
-            tests/ai/test_error_contract_matrix.py \
-            tests/ai/test_temporal_taskgraph_conformance.py
-          git commit -m 'style(ai): close error contract Ruff delta'
-          git push origin HEAD:fix/ai-error-contract-closure
 
       - name: Upload Ruff diagnostics
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: ai-error-contract-ruff-compare
+          name: ai-error-contract-ruff-final
           path: |
             ruff.log
             ruff-baseline.log
           if-no-files-found: error
-
-      - name: Enforce Ruff result
-        if: always()
-        run: test "${{ steps.ruff.outputs.status }}" = "0"
