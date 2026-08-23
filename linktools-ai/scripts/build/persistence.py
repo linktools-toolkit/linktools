@@ -39,7 +39,7 @@ _CUSTOM_WIRE_FIXTURE_V1 = "runtime_custom_wire_v1.json"
 
 
 def load_manifest(path: str | Path) -> dict[str, JsonValue]:
-    value = json.loads(Path(path).read_text(encoding="utf-8"))
+    value = _load_json(Path(path))
     if not isinstance(value, dict):
         raise ValueError("runtime persistence manifest must be an object")
     return cast("dict[str, JsonValue]", value)
@@ -193,7 +193,10 @@ def validate_external_fixtures(
     binding_contract = external.get("agent_binding_snapshot")
     if not isinstance(binding_contract, Mapping):
         return ("agent_binding_snapshot external contract is invalid",)
-    if binding_contract.get("owner") != "agent" or binding_contract.get("version") != 1:
+    if (
+        binding_contract.get("owner") != "agent"
+        or binding_contract.get("version") != 1
+    ):
         return ("agent_binding_snapshot V1 external contract changed",)
     binding_path = root / _BINDING_FIXTURE_V1
     if not binding_path.is_file():
@@ -204,13 +207,19 @@ def validate_external_fixtures(
         return (str(error),)
     expected_binding = _agent_binding_snapshot_fixture_value()
     if binding_value != expected_binding.to_payload():
-        return ("agent_binding_snapshot writer drifted from the frozen V1 fixture",)
+        return (
+            "agent_binding_snapshot writer drifted from the frozen V1 fixture",
+        )
     try:
         decoded_binding = AgentBindingSnapshot.from_payload(binding_value)
     except Exception as error:
-        return (f"agent_binding_snapshot V1 fixture is no longer readable: {error}",)
+        return (
+            f"agent_binding_snapshot V1 fixture is no longer readable: {error}",
+        )
     if decoded_binding != expected_binding:
-        return ("agent_binding_snapshot V1 fixture decodes to different semantics",)
+        return (
+            "agent_binding_snapshot V1 fixture decodes to different semantics",
+        )
 
     model_contract = external.get("model_message")
     if not isinstance(model_contract, Mapping):
@@ -252,16 +261,16 @@ def _custom_wire_values() -> dict[str, JsonValue]:
         expected_status=IdempotencyStatus.STARTED,
         next_status=IdempotencyStatus.COMPLETED,
         request_digest="b" * 64,
-        result_digest=None,
-        error_code=None,
+        result_digest="c" * 64,
+        error_code="terminal-error",
     )
     operation = OperationTerminalUpdate(
         operation_id="operation",
         expected_status=OperationStatus.RUNNING,
         next_status=OperationStatus.SUCCEEDED,
-        result_ref=None,
-        result_digest=None,
-        error_code=None,
+        result_ref="result",
+        result_digest="d" * 64,
+        error_code="terminal-error",
     )
     return {
         "task_node": runtime_codec._encode_persisted_domain(task_node),
@@ -387,15 +396,17 @@ def validate_upgrade_fixtures(
             )
             rewritten = runtime_codec._encode_persisted_domain(decoded)
         except Exception as error:
-            errors.append(f"upgrade fixture is no longer readable: {key}: {error}")
+            errors.append(
+                f"upgrade fixture is no longer readable: {key}: {error}"
+            )
             continue
         if not isinstance(rewritten, Mapping):
             errors.append(f"upgrade fixture rewrite is invalid: {key}")
             continue
         rewritten_fields = rewritten.get("fields")
-        if not isinstance(rewritten_fields, Mapping) or dict(rewritten_fields) != dict(
-            expected_fields
-        ):
+        if not isinstance(rewritten_fields, Mapping) or dict(
+            rewritten_fields
+        ) != dict(expected_fields):
             errors.append(f"upgrade fixture rewrite changed: {key}")
     return tuple(errors)
 
@@ -409,12 +420,7 @@ def _git(repository: Path, *arguments: str) -> subprocess.CompletedProcess[str]:
     )
 
 
-def load_git_baseline(
-    path_value: str | Path,
-    *,
-    base_ref: str | None = None,
-) -> dict[str, JsonValue] | None:
-    """Load one JSON contract at the immutable branch/release comparison point."""
+def _repository_path(path_value: str | Path) -> tuple[Path, str] | None:
     path = Path(path_value).resolve()
     repository = Path(__file__).resolve().parents[3]
     if not (repository / ".git").exists():
@@ -423,36 +429,67 @@ def load_git_baseline(
         relative = path.relative_to(repository.resolve()).as_posix()
     except ValueError:
         return None
+    return repository, relative
 
+
+def _baseline_commit(
+    repository: Path,
+    *,
+    base_ref: str | None,
+) -> str:
     ref = base_ref or os.environ.get(
         "LINKTOOLS_PERSISTENCE_BASE_REF", "origin/master"
     )
     verified = _git(repository, "rev-parse", "--verify", f"{ref}^{{commit}}")
-    if verified.returncode != 0:
-        return None
-    head = _git(repository, "rev-parse", "HEAD")
-    base = _git(repository, "merge-base", "HEAD", ref)
-    if head.returncode != 0 or base.returncode != 0:
-        return None
-    head_sha = head.stdout.strip()
-    base_sha = base.stdout.strip()
-    if not head_sha or not base_sha:
-        return None
-    if head_sha == base_sha:
-        parent = _git(repository, "rev-parse", "HEAD^")
-        if parent.returncode != 0 or not parent.stdout.strip():
-            return None
-        base_sha = parent.stdout.strip()
+    if verified.returncode != 0 or not verified.stdout.strip():
+        raise ValueError(f"persistence baseline ref is unavailable: {ref}")
+    baseline = verified.stdout.strip()
 
-    historical = _git(repository, "show", f"{base_sha}:{relative}")
+    head = _git(repository, "rev-parse", "HEAD")
+    if head.returncode != 0 or not head.stdout.strip():
+        raise ValueError("current Git HEAD is unavailable")
+    if head.stdout.strip() != baseline:
+        return baseline
+
+    parent = _git(repository, "rev-parse", "HEAD^")
+    if parent.returncode != 0 or not parent.stdout.strip():
+        raise ValueError("persistence baseline parent is unavailable")
+    return parent.stdout.strip()
+
+
+def load_git_json_baseline(
+    path_value: str | Path,
+    *,
+    base_ref: str | None = None,
+) -> object | None:
+    """Load one JSON contract from the target branch's immutable history."""
+    resolved = _repository_path(path_value)
+    if resolved is None:
+        return None
+    repository, relative = resolved
+    baseline = _baseline_commit(repository, base_ref=base_ref)
+    historical = _git(repository, "show", f"{baseline}:{relative}")
     if historical.returncode != 0:
+        # A missing path is legitimate only when this contract is first introduced.
         return None
     try:
-        value = json.loads(historical.stdout)
+        return json.loads(historical.stdout)
     except json.JSONDecodeError as error:
-        raise ValueError(f"historical JSON contract is invalid at {base_sha}") from error
+        raise ValueError(
+            f"historical JSON contract is invalid at {baseline}: {relative}"
+        ) from error
+
+
+def load_git_baseline(
+    path_value: str | Path,
+    *,
+    base_ref: str | None = None,
+) -> dict[str, JsonValue] | None:
+    value = load_git_json_baseline(path_value, base_ref=base_ref)
+    if value is None:
+        return None
     if not isinstance(value, dict):
-        raise ValueError(f"historical JSON contract is not an object at {base_sha}")
+        raise ValueError("historical JSON contract is not an object")
     return cast("dict[str, JsonValue]", value)
 
 
@@ -473,6 +510,29 @@ def _load_optional_baseline(
     except ValueError as error:
         errors.append(str(error))
         return None
+
+
+def _freeze_json_fixture(
+    path: Path,
+    *,
+    base_ref: str | None,
+    label: str,
+    errors: list[str],
+) -> None:
+    try:
+        baseline = load_git_json_baseline(path, base_ref=base_ref)
+    except ValueError as error:
+        errors.append(str(error))
+        return
+    if baseline is None:
+        return
+    try:
+        candidate = _load_json(path)
+    except ValueError as error:
+        errors.append(str(error))
+        return
+    if candidate != baseline:
+        errors.append(f"historical {label} changed")
 
 
 def main() -> int:
@@ -557,6 +617,13 @@ def main() -> int:
             )
         )
 
+    _freeze_json_fixture(
+        args.manifest.parent / _MODEL_MESSAGE_FIXTURE_V1,
+        base_ref=args.baseline_ref,
+        label="model message V1 fixture",
+        errors=errors,
+    )
+
     for error in errors:
         print(error)
     return 1 if errors else 0
@@ -568,6 +635,7 @@ if __name__ == "__main__":
 
 __all__ = [
     "load_git_baseline",
+    "load_git_json_baseline",
     "load_manifest",
     "validate_append_only",
     "validate_custom_wire_fixture",
