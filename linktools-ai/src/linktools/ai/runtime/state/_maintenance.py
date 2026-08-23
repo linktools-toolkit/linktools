@@ -16,7 +16,6 @@ from ._codec import (
     _decode_domain,
     _iter_enveloped_runtime_object_refs,
     decode_envelope,
-    iter_runtime_object_refs,
 )
 from ._plan import RuntimeDomain
 from ._store import (
@@ -227,17 +226,15 @@ class RuntimeStorageInspection:
         for record in records:
             if record.kind == _READ_MODEL_RECORD_KIND:
                 _validate_read_model_record(record.data)
-                self._collect_raw_references(domain, record.data, references)
             else:
                 self._collect_enveloped_references(domain, record.data, references)
         for fact in facts:
             if fact.kind in _ENVELOPED_FACT_KINDS:
                 self._collect_enveloped_references(domain, fact.data, references)
             elif fact.kind in _EXECUTION_EVENT_FACT_KINDS:
-                self._collect_raw_references(domain, fact.data, references)
+                continue
             elif fact.kind in _READ_MODEL_FACT_KINDS:
                 _validate_read_model_fact(fact.data)
-                self._collect_raw_references(domain, fact.data, references)
             else:
                 raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
         for operation in operations:
@@ -255,17 +252,6 @@ class RuntimeStorageInspection:
                 value,
                 default_domain=domain,
             ),
-            references,
-        )
-
-    def _collect_raw_references(
-        self,
-        domain: RuntimeDomain,
-        value: Mapping[str, object],
-        references: dict[int, set[str]],
-    ) -> None:
-        self._record_references(
-            iter_runtime_object_refs(value, default_domain=domain),
             references,
         )
 
@@ -319,7 +305,15 @@ def _validate_enveloped_value(value: Mapping[str, object]) -> None:
     payload = envelope.value.get("payload")
     if payload is None:
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    partial_projected_lease = False
     if wire_id in _LEASE_PROJECTED_WIRE_IDS:
+        if not isinstance(payload, Mapping):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        fields_value = payload.get("fields")
+        if not isinstance(fields_value, Mapping):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        present = _LEASE_FIELDS.intersection(fields_value)
+        partial_projected_lease = bool(present and present != _LEASE_FIELDS)
         payload = _restore_projected_lease_fields(payload)
     try:
         _decode_domain(payload, target, codec, persisted=True)
@@ -327,6 +321,8 @@ def _validate_enveloped_value(value: Mapping[str, object]) -> None:
         raise
     except (KeyError, TypeError, ValueError) as error:
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
+    if partial_projected_lease:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
 
 
 def _restore_projected_lease_fields(value: object) -> object:
@@ -335,17 +331,12 @@ def _restore_projected_lease_fields(value: object) -> object:
     fields = value.get("fields")
     if not isinstance(fields, Mapping):
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-    present = _LEASE_FIELDS.intersection(fields)
-    if present and present != _LEASE_FIELDS:
-        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-    if present == _LEASE_FIELDS:
-        return value
     restored = dict(value)
     restored["fields"] = {
-        **fields,
         "owner": None,
         "fence": 0,
         "lease_expires_at": None,
+        **fields,
     }
     return restored
 
