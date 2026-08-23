@@ -38,7 +38,26 @@ jobs:
           PYTHONPATH: linktools-ai:linktools-ai/src:linktools/src
         run: python -m pytest -q tests/ai
 
-      - name: Ruff
+      - name: Ruff diagnostics
+        id: ruff
+        continue-on-error: true
         env:
           PYTHONPATH: linktools-ai:linktools-ai/src:linktools/src
-        run: python -m ruff check linktools-ai/scripts/build linktools-ai/src/linktools/ai linktools-ai/src/linktools/commands/ai tests/ai
+        run: |
+          set +e
+          python -m ruff check linktools-ai/scripts/build linktools-ai/src/linktools/ai linktools-ai/src/linktools/commands/ai tests/ai > ruff.log 2>&1
+          status=$?
+          echo "status=$status" >> "$GITHUB_OUTPUT"
+          exit "$status"
+
+      - name: Upload Ruff diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ai-error-contract-ruff
+          path: ruff.log
+          if-no-files-found: error
+
+      - name: Enforce Ruff result
+        if: always()
+        run: test "${{ steps.ruff.outputs.status }}" = "0"
