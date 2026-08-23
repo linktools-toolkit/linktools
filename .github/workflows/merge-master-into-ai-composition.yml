@@ -4,6 +4,9 @@ on:
   push:
     branches:
       - automation/merge-master-into-ai-composition
+  pull_request:
+    branches:
+      - refactor/ai-agent-runtime-asset-composition-impl
 
 permissions:
   contents: write
