@@ -8,162 +8,833 @@ final architecture audit passed
 ===== python -m scripts.build.architecture =====
 <frozen runpy>:128: RuntimeWarning: 'scripts.build.architecture' found in sys.modules after import of package 'scripts.build', but prior to execution of 'scripts.build.architecture'; this may result in unpredictable behaviour
 ===== pytest -q tests/ai =====
+.........................F..........F................................... [ 19%]
+........................................................................ [ 38%]
+........................................................................ [ 58%]
+......F..FFFFF.......................................................... [ 77%]
+........................................................................ [ 97%]
+..........                                                               [100%]
+=================================== FAILURES ===================================
+___________________ test_source_graph_is_acyclic_and_static ____________________
 
-==================================== ERRORS ====================================
-_____________ ERROR collecting tests/ai/test_agent_composition.py ______________
-ImportError while importing test module '/home/runner/work/linktools/linktools/tests/ai/test_agent_composition.py'.
-Hint: make sure your test modules/packages have valid Python names.
-Traceback:
-/opt/hostedtoolcache/Python/3.12.14/x64/lib/python3.12/importlib/__init__.py:90: in import_module
-    return _bootstrap._gcd_import(name[level:], package, level)
-           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-tests/ai/test_agent_composition.py:29: in <module>
-    from linktools.ai.workspace import trusted_workspace_principal
-linktools-ai/src/linktools/ai/workspace/__init__.py:5: in <module>
-    from ._factory import build_workspace_assets, open_workspace_runtime
-linktools-ai/src/linktools/ai/workspace/_factory.py:36: in <module>
-    from ..capability import (
-E   ImportError: cannot import name 'mcp_server_selector' from 'linktools.ai.capability' (/home/runner/work/linktools/linktools/linktools-ai/src/linktools/ai/capability/__init__.py)
-_________________ ERROR collecting tests/ai/test_contracts.py __________________
-ImportError while importing test module '/home/runner/work/linktools/linktools/tests/ai/test_contracts.py'.
-Hint: make sure your test modules/packages have valid Python names.
-Traceback:
-/opt/hostedtoolcache/Python/3.12.14/x64/lib/python3.12/importlib/__init__.py:90: in import_module
-    return _bootstrap._gcd_import(name[level:], package, level)
-           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-tests/ai/test_contracts.py:69: in <module>
-    from linktools.ai.workspace import trusted_workspace_principal
-linktools-ai/src/linktools/ai/workspace/__init__.py:5: in <module>
-    from ._factory import build_workspace_assets, open_workspace_runtime
-linktools-ai/src/linktools/ai/workspace/_factory.py:36: in <module>
-    from ..capability import (
-E   ImportError: cannot import name 'mcp_server_selector' from 'linktools.ai.capability' (/home/runner/work/linktools/linktools/linktools-ai/src/linktools/ai/capability/__init__.py)
-________ ERROR collecting tests/ai/test_deferred_notification_replay.py ________
-ImportError while importing test module '/home/runner/work/linktools/linktools/tests/ai/test_deferred_notification_replay.py'.
-Hint: make sure your test modules/packages have valid Python names.
-Traceback:
-/opt/hostedtoolcache/Python/3.12.14/x64/lib/python3.12/importlib/__init__.py:90: in import_module
-    return _bootstrap._gcd_import(name[level:], package, level)
-           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-tests/ai/test_deferred_notification_replay.py:30: in <module>
-    from linktools.ai.workspace import trusted_workspace_principal
-linktools-ai/src/linktools/ai/workspace/__init__.py:5: in <module>
-    from ._factory import build_workspace_assets, open_workspace_runtime
-linktools-ai/src/linktools/ai/workspace/_factory.py:36: in <module>
-    from ..capability import (
-E   ImportError: cannot import name 'mcp_server_selector' from 'linktools.ai.capability' (/home/runner/work/linktools/linktools/linktools-ai/src/linktools/ai/capability/__init__.py)
-_______________ ERROR collecting tests/ai/test_local_commands.py _______________
-ImportError while importing test module '/home/runner/work/linktools/linktools/tests/ai/test_local_commands.py'.
-Hint: make sure your test modules/packages have valid Python names.
-Traceback:
-/opt/hostedtoolcache/Python/3.12.14/x64/lib/python3.12/importlib/__init__.py:90: in import_module
-    return _bootstrap._gcd_import(name[level:], package, level)
-           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-tests/ai/test_local_commands.py:10: in <module>
-    from linktools.commands.ai.acp import command as acp_command
-linktools-ai/src/linktools/commands/ai/acp.py:13: in <module>
-    from ...ai.acp import ACPApplication
-linktools-ai/src/linktools/ai/acp.py:23: in <module>
-    from .workspace import Workspace, open_workspace_runtime
-linktools-ai/src/linktools/ai/workspace/__init__.py:5: in <module>
-    from ._factory import build_workspace_assets, open_workspace_runtime
-linktools-ai/src/linktools/ai/workspace/_factory.py:36: in <module>
-    from ..capability import (
-E   ImportError: cannot import name 'mcp_server_selector' from 'linktools.ai.capability' (/home/runner/work/linktools/linktools/linktools-ai/src/linktools/ai/capability/__init__.py)
-___________ ERROR collecting tests/ai/test_non_workspace_pipeline.py ___________
-ImportError while importing test module '/home/runner/work/linktools/linktools/tests/ai/test_non_workspace_pipeline.py'.
-Hint: make sure your test modules/packages have valid Python names.
-Traceback:
-/opt/hostedtoolcache/Python/3.12.14/x64/lib/python3.12/importlib/__init__.py:90: in import_module
-    return _bootstrap._gcd_import(name[level:], package, level)
-           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-tests/ai/test_non_workspace_pipeline.py:25: in <module>
-    from linktools.ai.workspace import DisabledSandbox
-linktools-ai/src/linktools/ai/workspace/__init__.py:5: in <module>
-    from ._factory import build_workspace_assets, open_workspace_runtime
-linktools-ai/src/linktools/ai/workspace/_factory.py:36: in <module>
-    from ..capability import (
-E   ImportError: cannot import name 'mcp_server_selector' from 'linktools.ai.capability' (/home/runner/work/linktools/linktools/linktools-ai/src/linktools/ai/capability/__init__.py)
-________ ERROR collecting tests/ai/test_runtime_session_auto_create.py _________
-ImportError while importing test module '/home/runner/work/linktools/linktools/tests/ai/test_runtime_session_auto_create.py'.
-Hint: make sure your test modules/packages have valid Python names.
-Traceback:
-/opt/hostedtoolcache/Python/3.12.14/x64/lib/python3.12/importlib/__init__.py:90: in import_module
-    return _bootstrap._gcd_import(name[level:], package, level)
-           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-tests/ai/test_runtime_session_auto_create.py:12: in <module>
-    from linktools.ai.workspace import trusted_workspace_principal
-linktools-ai/src/linktools/ai/workspace/__init__.py:5: in <module>
-    from ._factory import build_workspace_assets, open_workspace_runtime
-linktools-ai/src/linktools/ai/workspace/_factory.py:36: in <module>
-    from ..capability import (
-E   ImportError: cannot import name 'mcp_server_selector' from 'linktools.ai.capability' (/home/runner/work/linktools/linktools/linktools-ai/src/linktools/ai/capability/__init__.py)
-__ ERROR collecting tests/ai/test_runtime_state_identity_migration_sqlite.py ___
-ImportError while importing test module '/home/runner/work/linktools/linktools/tests/ai/test_runtime_state_identity_migration_sqlite.py'.
-Hint: make sure your test modules/packages have valid Python names.
-Traceback:
-/opt/hostedtoolcache/Python/3.12.14/x64/lib/python3.12/importlib/__init__.py:90: in import_module
-    return _bootstrap._gcd_import(name[level:], package, level)
-           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-tests/ai/test_runtime_state_identity_migration_sqlite.py:21: in <module>
-    from linktools.ai.workspace import Workspace, open_workspace_runtime
-linktools-ai/src/linktools/ai/workspace/__init__.py:5: in <module>
-    from ._factory import build_workspace_assets, open_workspace_runtime
-linktools-ai/src/linktools/ai/workspace/_factory.py:36: in <module>
-    from ..capability import (
-E   ImportError: cannot import name 'mcp_server_selector' from 'linktools.ai.capability' (/home/runner/work/linktools/linktools/linktools-ai/src/linktools/ai/capability/__init__.py)
-_____________ ERROR collecting tests/ai/test_selective_storage.py ______________
-ImportError while importing test module '/home/runner/work/linktools/linktools/tests/ai/test_selective_storage.py'.
-Hint: make sure your test modules/packages have valid Python names.
-Traceback:
-/opt/hostedtoolcache/Python/3.12.14/x64/lib/python3.12/importlib/__init__.py:90: in import_module
-    return _bootstrap._gcd_import(name[level:], package, level)
-           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-tests/ai/test_selective_storage.py:12: in <module>
-    from linktools.ai.workspace import open_workspace_runtime
-linktools-ai/src/linktools/ai/workspace/__init__.py:5: in <module>
-    from ._factory import build_workspace_assets, open_workspace_runtime
-linktools-ai/src/linktools/ai/workspace/_factory.py:36: in <module>
-    from ..capability import (
-E   ImportError: cannot import name 'mcp_server_selector' from 'linktools.ai.capability' (/home/runner/work/linktools/linktools/linktools-ai/src/linktools/ai/capability/__init__.py)
-___________ ERROR collecting tests/ai/test_workspace_capabilities.py ___________
-ImportError while importing test module '/home/runner/work/linktools/linktools/tests/ai/test_workspace_capabilities.py'.
-Hint: make sure your test modules/packages have valid Python names.
-Traceback:
-/opt/hostedtoolcache/Python/3.12.14/x64/lib/python3.12/importlib/__init__.py:90: in import_module
-    return _bootstrap._gcd_import(name[level:], package, level)
-           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-tests/ai/test_workspace_capabilities.py:9: in <module>
-    from linktools.ai.workspace._tools import build_workspace_capabilities, build_workspace_tool_map
-linktools-ai/src/linktools/ai/workspace/__init__.py:5: in <module>
-    from ._factory import build_workspace_assets, open_workspace_runtime
-linktools-ai/src/linktools/ai/workspace/_factory.py:36: in <module>
-    from ..capability import (
-E   ImportError: cannot import name 'mcp_server_selector' from 'linktools.ai.capability' (/home/runner/work/linktools/linktools/linktools-ai/src/linktools/ai/capability/__init__.py)
-_______ ERROR collecting tests/ai/test_workspace_runtime_regressions.py ________
-ImportError while importing test module '/home/runner/work/linktools/linktools/tests/ai/test_workspace_runtime_regressions.py'.
-Hint: make sure your test modules/packages have valid Python names.
-Traceback:
-/opt/hostedtoolcache/Python/3.12.14/x64/lib/python3.12/importlib/__init__.py:90: in import_module
-    return _bootstrap._gcd_import(name[level:], package, level)
-           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-tests/ai/test_workspace_runtime_regressions.py:11: in <module>
-    from linktools.ai.workspace import Workspace, build_workspace_assets, open_workspace_runtime
-linktools-ai/src/linktools/ai/workspace/__init__.py:5: in <module>
-    from ._factory import build_workspace_assets, open_workspace_runtime
-linktools-ai/src/linktools/ai/workspace/_factory.py:36: in <module>
-    from ..capability import (
-E   ImportError: cannot import name 'mcp_server_selector' from 'linktools.ai.capability' (/home/runner/work/linktools/linktools/linktools-ai/src/linktools/ai/capability/__init__.py)
+    def test_source_graph_is_acyclic_and_static() -> None:
+        report = build_report("linktools-ai/src/linktools/ai")
+        assert report["scc"] == []
+        assert report["package_scc"] == []
+>       assert report["dynamic_imports"] == []
+E       AssertionError: assert ['linktools-a...:712:getattr'] == []
+E         
+E         Left contains 2 more items, first extra item: 'linktools-ai/src/linktools/ai/runtime/state/_migration.py:710:importlib.import_module'
+E         
+E         Full diff:
+E         - []
+E         + [
+E         +     'linktools-ai/src/linktools/ai/runtime/state/_migration.py:710:importlib.import_module',
+E         +     'linktools-ai/src/linktools/ai/runtime/state/_migration.py:712:getattr',
+E         + ]
+
+tests/ai/test_architecture.py:23: AssertionError
+________ test_package_public_surface_and_optional_dependency_isolation _________
+
+    def test_package_public_surface_and_optional_dependency_isolation() -> None:
+        from linktools.ai import adapter, asset, capability, model, runtime, workspace
+        from linktools.ai.runtime import state as runtime_state
+    
+        command_modules = tuple(
+            importlib.import_module(f"linktools.commands.ai.{name}")
+            for name in ("acp", "run")
+        )
+        assert adapter and asset and capability and model and runtime and workspace
+        assert all(command_modules)
+        assert adapter.__all__ == [
+            "NatsPublisher",
+            "ProviderClient",
+            "PydanticMCPRuntime",
+            "RuntimeMemoryStore",
+            "StaticPrincipalProvider",
+            "StepExecutionHistoryReader",
+            "StepSessionHistoryReader",
+        ]
+        assert model.__all__ == ["ModelBinding", "ModelRegistry", "ModelResolver"]
+        assert {
+            "DefaultApprovalService",
+            "DefaultArtifactService",
+            "DefaultEvaluationService",
+            "DefaultEventService",
+            "DefaultExecutionService",
+            "DefaultSessionService",
+            "DefaultTaskService",
+            "RuntimeObjectKeyFactory",
+            "RuntimeTaskNodeRunner",
+            "put_runtime_object",
+            "read_runtime_object",
+        } <= set(runtime.__all__)
+        assert {
+            "ExecutionRecord",
+            "ExecutionRepository",
+            "MemoryRecord",
+            "MemoryState",
+            "RecoveryCheckpointState",
+            "RecoveryHandoffPhase",
+            "build_runtime_sql_metadata",
+        } <= set(runtime_state.__all__)
+>       assert {
+            "CapabilityBinding",
+            "CapabilityMaterializationContext",
+            "CapabilityProvider",
+            "CapabilityRefResolution",
+            "MCPCapabilityProvider",
+            "MCPRuntime",
+            "RuntimeCapability",
+            "SKILL_TOOL_NAMES",
+            "SkillCapabilityProvider",
+            "validate_fingerprint",
+        } == set(capability.__all__)
+E       AssertionError: assert {'CapabilityB...Runtime', ...} == {'CapabilityB...Runtime', ...}
+E         
+E         Extra items in the right set:
+E         'mcp_server_selector'
+E         
+E         Full diff:
+E           {
+E               'CapabilityBinding',
+E               'CapabilityMaterializationContext',
+E               'CapabilityProvider',
+E               'CapabilityRefResolution',
+E               'MCPCapabilityProvider',
+E               'MCPRuntime',
+E               'RuntimeCapability',
+E               'SKILL_TOOL_NAMES',
+E               'SkillCapabilityProvider',
+E         -     'mcp_server_selector',
+E               'validate_fingerprint',
+E           }
+
+tests/ai/test_architecture.py:315: AssertionError
+_________ test_migration_rewrites_legacy_session_and_execution_exactly _________
+
+    @pytest.mark.asyncio
+    async def test_migration_rewrites_legacy_session_and_execution_exactly() -> None:
+        state = RuntimeState.in_memory()
+        await state.initialize(namespace="legacy-agent-identity", tenant_id="tenant")
+        compiler, catalog = _compiler_catalog()
+        definition = catalog.root_definition("default")
+        binding = compiler.bind(definition)
+        legacy_digest = "f" * 64
+        session = _session(definition.digest)
+        execution = _execution(binding, session_id="session")
+        sessions = state.conversation.sessions
+        executions = state.execution.executions
+        session_stored = sessions._stored(
+            "session", "session", session, state=session.status.value
+        )
+        session_stored = replace(
+            session_stored,
+            data=_legacy_session_data(session, legacy_digest),
+        )
+        execution_stored = executions._stored(
+            "execution", "execution", execution, state=execution.status.value
+        )
+        execution_stored = replace(
+            execution_stored,
+            data=_legacy_execution_data(execution, binding, legacy_digest),
+        )
+        await sessions.state_store.mutate(lambda tx: tx.insert_record(session_stored))
+        await executions.state_store.mutate(lambda tx: tx.insert_record(execution_stored))
+        try:
+            with pytest.raises(AIError) as before:
+                await sessions.get("session", tenant_id="tenant")
+            assert before.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
+    
+>           changed = await migrate_v1_agent_identity_state(
+                state, catalog, compiler, tenant_id="tenant"
+            )
+
+tests/ai/test_runtime_state_identity_migration.py:194: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+state = <linktools.ai.runtime.state._root.RuntimeState object at 0x7f69fd734f80>
+catalog = <linktools.ai.agent._catalog.AgentCatalog object at 0x7f69fd6de540>
+compiler = <linktools.ai.agent._compiler.AgentCompiler object at 0x7f69fd76dd90>
+tenant_id = 'tenant'
+
+    async def migrate_v1_agent_identity_state(
+        state: RuntimeState,
+        catalog: AgentCatalog,
+        compiler: AgentCompiler,
+        *,
+        tenant_id: str,
+    ) -> int:
+        """Normalize known legacy V1 Agent identity shapes in place.
+    
+        Per-domain StateStore sequences are completion markers, so normal startup
+        does not rescan history. Markers are written only after every recognized
+        record has been normalized. A crash before that point is safe because the
+        migration is idempotent and current records are never rewritten.
+        """
+        if not state.ready:
+            raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+        sessions = state.conversation.sessions
+        executions = state.execution.executions
+        recovery = state.recovery.checkpoints
+        evaluations = state.evaluation.records
+        if not isinstance(sessions, SessionRepositoryImpl):
+            raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+        if not isinstance(executions, ExecutionRepositoryImpl):
+            raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+        if not isinstance(recovery, RecoveryCheckpointRepositoryImpl):
+            raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+        if not isinstance(evaluations, EvaluationRepositoryImpl):
+            raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+    
+        repositories = {
+            RuntimeDomain.CONVERSATION: sessions,
+            RuntimeDomain.EXECUTION: executions,
+            RuntimeDomain.RECOVERY: recovery,
+            RuntimeDomain.EVALUATION: evaluations,
+        }
+        completed = [
+            await _migration_complete(repository, domain)
+            for domain, repository in repositories.items()
+        ]
+        if all(completed):
+            return 0
+    
+        # Validate every old-digest -> current-binding relation before any write.
+        # This prevents a malformed execution from partially migrating its Session.
+        legacy_bindings: dict[str, AgentBinding] = {}
+        legacy_agents: dict[str, str] = {}
+        execution_targets: dict[str, tuple[str, str]] = {}
+        execution_records = await _records(executions, "execution")
+        recovery_records = await _records(recovery, "recovery_admission")
+        for record in execution_records:
+            _collect_execution_binding(
+                record,
+                compiler,
+                catalog,
+                legacy_bindings,
+                legacy_agents,
+                execution_targets,
+            )
+        for record in recovery_records:
+            _collect_recovery_binding(
+                record, compiler, catalog, legacy_bindings, legacy_agents
+            )
+    
+        migrated = 0
+        for record in await _records(sessions, "session"):
+            current = _migrate_session_record(record, sessions, legacy_agents)
+            if current is not None:
+                await _replace_data(sessions.state_store, record, _domain_data(current))
+                migrated += 1
+    
+        # Projection digests are historical references from StoredStepSnapshot and
+        # execution seals. Replace only the identity field and preserve `digest`.
+        for domain in (
+            RuntimeDomain.CONVERSATION,
+            RuntimeDomain.EXECUTION,
+            RuntimeDomain.RECOVERY,
+        ):
+>           history = state.steps.read_store(domain).transcript_repository
+                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E           AttributeError: 'InMemoryStepArchive' object has no attribute 'transcript_repository'
+
+linktools-ai/src/linktools/ai/runtime/state/_migration.py:174: AttributeError
+______________ test_migration_rewrites_full_legacy_recovery_shape ______________
+
+    @pytest.mark.asyncio
+    async def test_migration_rewrites_full_legacy_recovery_shape() -> None:
+        state = RuntimeState.in_memory()
+        await state.initialize(namespace="legacy-recovery", tenant_id="tenant")
+        compiler, catalog = _compiler_catalog()
+        definition = catalog.root_definition("default")
+        binding = compiler.bind(definition)
+        legacy_digest = "c" * 64
+        now = datetime.now(timezone.utc)
+        recovery_input = RecoveryExecutionInput(
+            user_prompt="prompt",
+            principal_id="owner",
+            principal_kind="service",
+            session_id=None,
+            memory_scope=None,
+            binding_digest=binding.digest,
+            lineage_kind=ExecutionLineageKind.RUN.value,
+            parent_execution_id=None,
+            root_execution_id="execution",
+            source_execution_id=None,
+            base_execution_id=None,
+            conversation_step_run_id=None,
+            idempotency=RecoveryIdempotencyInput("scope", "key", "request"),
+            planning=False,
+            thinking=False,
+            binding=binding.snapshot,
+        )
+        admission = RecoveryAdmissionRecord("execution", "tenant", recovery_input, now)
+        recovery = state.recovery.checkpoints
+        stored = recovery._stored("recovery_admission", "execution", admission)
+        stored = replace(
+            stored,
+            data=_legacy_recovery_data(admission, binding, legacy_digest),
+        )
+        await recovery.state_store.mutate(lambda tx: tx.insert_record(stored))
+        try:
+>           assert await migrate_v1_agent_identity_state(
+                state, catalog, compiler, tenant_id="tenant"
+            ) == 1
+
+tests/ai/test_runtime_state_identity_migration.py:303: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+state = <linktools.ai.runtime.state._root.RuntimeState object at 0x7f69fd7379b0>
+catalog = <linktools.ai.agent._catalog.AgentCatalog object at 0x7f69fd736e70>
+compiler = <linktools.ai.agent._compiler.AgentCompiler object at 0x7f69fd7367b0>
+tenant_id = 'tenant'
+
+    async def migrate_v1_agent_identity_state(
+        state: RuntimeState,
+        catalog: AgentCatalog,
+        compiler: AgentCompiler,
+        *,
+        tenant_id: str,
+    ) -> int:
+        """Normalize known legacy V1 Agent identity shapes in place.
+    
+        Per-domain StateStore sequences are completion markers, so normal startup
+        does not rescan history. Markers are written only after every recognized
+        record has been normalized. A crash before that point is safe because the
+        migration is idempotent and current records are never rewritten.
+        """
+        if not state.ready:
+            raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+        sessions = state.conversation.sessions
+        executions = state.execution.executions
+        recovery = state.recovery.checkpoints
+        evaluations = state.evaluation.records
+        if not isinstance(sessions, SessionRepositoryImpl):
+            raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+        if not isinstance(executions, ExecutionRepositoryImpl):
+            raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+        if not isinstance(recovery, RecoveryCheckpointRepositoryImpl):
+            raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+        if not isinstance(evaluations, EvaluationRepositoryImpl):
+            raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+    
+        repositories = {
+            RuntimeDomain.CONVERSATION: sessions,
+            RuntimeDomain.EXECUTION: executions,
+            RuntimeDomain.RECOVERY: recovery,
+            RuntimeDomain.EVALUATION: evaluations,
+        }
+        completed = [
+            await _migration_complete(repository, domain)
+            for domain, repository in repositories.items()
+        ]
+        if all(completed):
+            return 0
+    
+        # Validate every old-digest -> current-binding relation before any write.
+        # This prevents a malformed execution from partially migrating its Session.
+        legacy_bindings: dict[str, AgentBinding] = {}
+        legacy_agents: dict[str, str] = {}
+        execution_targets: dict[str, tuple[str, str]] = {}
+        execution_records = await _records(executions, "execution")
+        recovery_records = await _records(recovery, "recovery_admission")
+        for record in execution_records:
+            _collect_execution_binding(
+                record,
+                compiler,
+                catalog,
+                legacy_bindings,
+                legacy_agents,
+                execution_targets,
+            )
+        for record in recovery_records:
+            _collect_recovery_binding(
+                record, compiler, catalog, legacy_bindings, legacy_agents
+            )
+    
+        migrated = 0
+        for record in await _records(sessions, "session"):
+            current = _migrate_session_record(record, sessions, legacy_agents)
+            if current is not None:
+                await _replace_data(sessions.state_store, record, _domain_data(current))
+                migrated += 1
+    
+        # Projection digests are historical references from StoredStepSnapshot and
+        # execution seals. Replace only the identity field and preserve `digest`.
+        for domain in (
+            RuntimeDomain.CONVERSATION,
+            RuntimeDomain.EXECUTION,
+            RuntimeDomain.RECOVERY,
+        ):
+>           history = state.steps.read_store(domain).transcript_repository
+                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E           AttributeError: 'InMemoryStepArchive' object has no attribute 'transcript_repository'
+
+linktools-ai/src/linktools/ai/runtime/state/_migration.py:174: AttributeError
+____________ test_migration_preserves_historical_projection_digest _____________
+
+    @pytest.mark.asyncio
+    async def test_migration_preserves_historical_projection_digest() -> None:
+        state = RuntimeState.in_memory()
+        await state.initialize(namespace="legacy-projection", tenant_id="tenant")
+        compiler, catalog = _compiler_catalog()
+        definition = catalog.root_definition("default")
+        binding = compiler.bind(definition)
+        legacy_digest = "b" * 64
+        execution = _execution(binding)
+        executions = state.execution.executions
+        execution_stored = executions._stored(
+            "execution", "execution", execution, state=execution.status.value
+        )
+        execution_stored = replace(
+            execution_stored,
+            data=_legacy_execution_data(execution, binding, legacy_digest),
+        )
+        await executions.state_store.mutate(lambda tx: tx.insert_record(execution_stored))
+    
+>       history = state.steps.read_store(RuntimeDomain.EXECUTION).transcript_repository
+                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E       AttributeError: 'InMemoryStepArchive' object has no attribute 'transcript_repository'
+
+tests/ai/test_runtime_state_identity_migration.py:336: AttributeError
+_______ test_migration_rewrites_evaluation_from_linked_legacy_execution ________
+
+    @pytest.mark.asyncio
+    async def test_migration_rewrites_evaluation_from_linked_legacy_execution() -> None:
+        state = RuntimeState.in_memory()
+        await state.initialize(namespace="legacy-evaluation", tenant_id="tenant")
+        compiler, catalog = _compiler_catalog()
+        binding = compiler.bind(catalog.root_definition("default"))
+        legacy_digest = "a" * 64
+        execution = _execution(binding)
+        executions = state.execution.executions
+        stored = executions._stored(
+            "execution", "execution", execution, state=execution.status.value
+        )
+        stored = replace(
+            stored,
+            data=_legacy_execution_data(execution, binding, legacy_digest),
+        )
+        await executions.state_store.mutate(lambda tx: tx.insert_record(stored))
+        now = datetime.now(timezone.utc)
+        evaluation = EvaluationRecord(
+            evaluation_id="evaluation",
+            tenant_id="tenant",
+            execution_id="execution",
+            dataset_id="dataset",
+            dataset_revision=1,
+            evaluator_id="default",
+            evaluator_revision=1,
+            binding_digest=legacy_digest,
+            output_schema_fingerprint=binding.snapshot.output_schema_fingerprint,
+            artifact_digest=None,
+            status=EvaluationStatus.SUCCEEDED,
+            revision=0,
+            metrics={},
+            created_at=now,
+            updated_at=now,
+        )
+        await state.evaluation.records.create(evaluation)
+        try:
+>           assert await migrate_v1_agent_identity_state(
+                state, catalog, compiler, tenant_id="tenant"
+            ) == 2
+
+tests/ai/test_runtime_state_identity_migration.py:409: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+state = <linktools.ai.runtime.state._root.RuntimeState object at 0x7f69fd60a780>
+catalog = <linktools.ai.agent._catalog.AgentCatalog object at 0x7f69fd76c830>
+compiler = <linktools.ai.agent._compiler.AgentCompiler object at 0x7f69fd76ff20>
+tenant_id = 'tenant'
+
+    async def migrate_v1_agent_identity_state(
+        state: RuntimeState,
+        catalog: AgentCatalog,
+        compiler: AgentCompiler,
+        *,
+        tenant_id: str,
+    ) -> int:
+        """Normalize known legacy V1 Agent identity shapes in place.
+    
+        Per-domain StateStore sequences are completion markers, so normal startup
+        does not rescan history. Markers are written only after every recognized
+        record has been normalized. A crash before that point is safe because the
+        migration is idempotent and current records are never rewritten.
+        """
+        if not state.ready:
+            raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+        sessions = state.conversation.sessions
+        executions = state.execution.executions
+        recovery = state.recovery.checkpoints
+        evaluations = state.evaluation.records
+        if not isinstance(sessions, SessionRepositoryImpl):
+            raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+        if not isinstance(executions, ExecutionRepositoryImpl):
+            raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+        if not isinstance(recovery, RecoveryCheckpointRepositoryImpl):
+            raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+        if not isinstance(evaluations, EvaluationRepositoryImpl):
+            raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+    
+        repositories = {
+            RuntimeDomain.CONVERSATION: sessions,
+            RuntimeDomain.EXECUTION: executions,
+            RuntimeDomain.RECOVERY: recovery,
+            RuntimeDomain.EVALUATION: evaluations,
+        }
+        completed = [
+            await _migration_complete(repository, domain)
+            for domain, repository in repositories.items()
+        ]
+        if all(completed):
+            return 0
+    
+        # Validate every old-digest -> current-binding relation before any write.
+        # This prevents a malformed execution from partially migrating its Session.
+        legacy_bindings: dict[str, AgentBinding] = {}
+        legacy_agents: dict[str, str] = {}
+        execution_targets: dict[str, tuple[str, str]] = {}
+        execution_records = await _records(executions, "execution")
+        recovery_records = await _records(recovery, "recovery_admission")
+        for record in execution_records:
+            _collect_execution_binding(
+                record,
+                compiler,
+                catalog,
+                legacy_bindings,
+                legacy_agents,
+                execution_targets,
+            )
+        for record in recovery_records:
+            _collect_recovery_binding(
+                record, compiler, catalog, legacy_bindings, legacy_agents
+            )
+    
+        migrated = 0
+        for record in await _records(sessions, "session"):
+            current = _migrate_session_record(record, sessions, legacy_agents)
+            if current is not None:
+                await _replace_data(sessions.state_store, record, _domain_data(current))
+                migrated += 1
+    
+        # Projection digests are historical references from StoredStepSnapshot and
+        # execution seals. Replace only the identity field and preserve `digest`.
+        for domain in (
+            RuntimeDomain.CONVERSATION,
+            RuntimeDomain.EXECUTION,
+            RuntimeDomain.RECOVERY,
+        ):
+>           history = state.steps.read_store(domain).transcript_repository
+                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E           AttributeError: 'InMemoryStepArchive' object has no attribute 'transcript_repository'
+
+linktools-ai/src/linktools/ai/runtime/state/_migration.py:174: AttributeError
+___ test_migration_converges_evaluation_after_execution_was_already_migrated ___
+
+    @pytest.mark.asyncio
+    async def test_migration_converges_evaluation_after_execution_was_already_migrated() -> None:
+        state = RuntimeState.in_memory()
+        await state.initialize(namespace="partial-evaluation", tenant_id="tenant")
+        compiler, catalog = _compiler_catalog()
+        binding = compiler.bind(catalog.root_definition("default"))
+        execution = _execution(binding)
+        executions = state.execution.executions
+        await executions.state_store.mutate(
+            lambda tx: tx.insert_record(
+                executions._stored(
+                    "execution",
+                    execution.execution_id,
+                    execution,
+                    state=execution.status.value,
+                )
+            )
+        )
+        now = datetime.now(timezone.utc)
+        evaluation = EvaluationRecord(
+            evaluation_id="evaluation",
+            tenant_id="tenant",
+            execution_id=execution.execution_id,
+            dataset_id="dataset",
+            dataset_revision=1,
+            evaluator_id="default",
+            evaluator_revision=1,
+            binding_digest="f" * 64,
+            output_schema_fingerprint=binding.snapshot.output_schema_fingerprint,
+            artifact_digest=None,
+            status=EvaluationStatus.SUCCEEDED,
+            revision=0,
+            metrics={},
+            created_at=now,
+            updated_at=now,
+        )
+        await state.evaluation.records.create(evaluation)
+        try:
+>           assert await migrate_v1_agent_identity_state(
+                state, catalog, compiler, tenant_id="tenant"
+            ) == 1
+
+tests/ai/test_runtime_state_identity_migration.py:460: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+state = <linktools.ai.runtime.state._root.RuntimeState object at 0x7f69fd7fb950>
+catalog = <linktools.ai.agent._catalog.AgentCatalog object at 0x7f69fd7f8a40>
+compiler = <linktools.ai.agent._compiler.AgentCompiler object at 0x7f69fd7f97f0>
+tenant_id = 'tenant'
+
+    async def migrate_v1_agent_identity_state(
+        state: RuntimeState,
+        catalog: AgentCatalog,
+        compiler: AgentCompiler,
+        *,
+        tenant_id: str,
+    ) -> int:
+        """Normalize known legacy V1 Agent identity shapes in place.
+    
+        Per-domain StateStore sequences are completion markers, so normal startup
+        does not rescan history. Markers are written only after every recognized
+        record has been normalized. A crash before that point is safe because the
+        migration is idempotent and current records are never rewritten.
+        """
+        if not state.ready:
+            raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+        sessions = state.conversation.sessions
+        executions = state.execution.executions
+        recovery = state.recovery.checkpoints
+        evaluations = state.evaluation.records
+        if not isinstance(sessions, SessionRepositoryImpl):
+            raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+        if not isinstance(executions, ExecutionRepositoryImpl):
+            raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+        if not isinstance(recovery, RecoveryCheckpointRepositoryImpl):
+            raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+        if not isinstance(evaluations, EvaluationRepositoryImpl):
+            raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+    
+        repositories = {
+            RuntimeDomain.CONVERSATION: sessions,
+            RuntimeDomain.EXECUTION: executions,
+            RuntimeDomain.RECOVERY: recovery,
+            RuntimeDomain.EVALUATION: evaluations,
+        }
+        completed = [
+            await _migration_complete(repository, domain)
+            for domain, repository in repositories.items()
+        ]
+        if all(completed):
+            return 0
+    
+        # Validate every old-digest -> current-binding relation before any write.
+        # This prevents a malformed execution from partially migrating its Session.
+        legacy_bindings: dict[str, AgentBinding] = {}
+        legacy_agents: dict[str, str] = {}
+        execution_targets: dict[str, tuple[str, str]] = {}
+        execution_records = await _records(executions, "execution")
+        recovery_records = await _records(recovery, "recovery_admission")
+        for record in execution_records:
+            _collect_execution_binding(
+                record,
+                compiler,
+                catalog,
+                legacy_bindings,
+                legacy_agents,
+                execution_targets,
+            )
+        for record in recovery_records:
+            _collect_recovery_binding(
+                record, compiler, catalog, legacy_bindings, legacy_agents
+            )
+    
+        migrated = 0
+        for record in await _records(sessions, "session"):
+            current = _migrate_session_record(record, sessions, legacy_agents)
+            if current is not None:
+                await _replace_data(sessions.state_store, record, _domain_data(current))
+                migrated += 1
+    
+        # Projection digests are historical references from StoredStepSnapshot and
+        # execution seals. Replace only the identity field and preserve `digest`.
+        for domain in (
+            RuntimeDomain.CONVERSATION,
+            RuntimeDomain.EXECUTION,
+            RuntimeDomain.RECOVERY,
+        ):
+>           history = state.steps.read_store(domain).transcript_repository
+                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E           AttributeError: 'InMemoryStepArchive' object has no attribute 'transcript_repository'
+
+linktools-ai/src/linktools/ai/runtime/state/_migration.py:174: AttributeError
+___________ test_migration_rejects_evaluation_output_contract_drift ____________
+
+    @pytest.mark.asyncio
+    async def test_migration_rejects_evaluation_output_contract_drift() -> None:
+        state = RuntimeState.in_memory()
+        await state.initialize(namespace="evaluation-contract-drift", tenant_id="tenant")
+        compiler, catalog = _compiler_catalog()
+        binding = compiler.bind(catalog.root_definition("default"))
+        execution = _execution(binding)
+        executions = state.execution.executions
+        await executions.state_store.mutate(
+            lambda tx: tx.insert_record(
+                executions._stored(
+                    "execution",
+                    execution.execution_id,
+                    execution,
+                    state=execution.status.value,
+                )
+            )
+        )
+        now = datetime.now(timezone.utc)
+        await state.evaluation.records.create(
+            EvaluationRecord(
+                evaluation_id="evaluation",
+                tenant_id="tenant",
+                execution_id=execution.execution_id,
+                dataset_id="dataset",
+                dataset_revision=1,
+                evaluator_id="default",
+                evaluator_revision=1,
+                binding_digest="e" * 64,
+                output_schema_fingerprint="d" * 64,
+                artifact_digest=None,
+                status=EvaluationStatus.SUCCEEDED,
+                revision=0,
+                metrics={},
+                created_at=now,
+                updated_at=now,
+            )
+        )
+        try:
+            with pytest.raises(AIError) as raised:
+>               await migrate_v1_agent_identity_state(
+                    state, catalog, compiler, tenant_id="tenant"
+                )
+
+tests/ai/test_runtime_state_identity_migration.py:512: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+state = <linktools.ai.runtime.state._root.RuntimeState object at 0x7f69fd7f8050>
+catalog = <linktools.ai.agent._catalog.AgentCatalog object at 0x7f69fd7fac60>
+compiler = <linktools.ai.agent._compiler.AgentCompiler object at 0x7f69fd7fa660>
+tenant_id = 'tenant'
+
+    async def migrate_v1_agent_identity_state(
+        state: RuntimeState,
+        catalog: AgentCatalog,
+        compiler: AgentCompiler,
+        *,
+        tenant_id: str,
+    ) -> int:
+        """Normalize known legacy V1 Agent identity shapes in place.
+    
+        Per-domain StateStore sequences are completion markers, so normal startup
+        does not rescan history. Markers are written only after every recognized
+        record has been normalized. A crash before that point is safe because the
+        migration is idempotent and current records are never rewritten.
+        """
+        if not state.ready:
+            raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+        sessions = state.conversation.sessions
+        executions = state.execution.executions
+        recovery = state.recovery.checkpoints
+        evaluations = state.evaluation.records
+        if not isinstance(sessions, SessionRepositoryImpl):
+            raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+        if not isinstance(executions, ExecutionRepositoryImpl):
+            raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+        if not isinstance(recovery, RecoveryCheckpointRepositoryImpl):
+            raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+        if not isinstance(evaluations, EvaluationRepositoryImpl):
+            raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+    
+        repositories = {
+            RuntimeDomain.CONVERSATION: sessions,
+            RuntimeDomain.EXECUTION: executions,
+            RuntimeDomain.RECOVERY: recovery,
+            RuntimeDomain.EVALUATION: evaluations,
+        }
+        completed = [
+            await _migration_complete(repository, domain)
+            for domain, repository in repositories.items()
+        ]
+        if all(completed):
+            return 0
+    
+        # Validate every old-digest -> current-binding relation before any write.
+        # This prevents a malformed execution from partially migrating its Session.
+        legacy_bindings: dict[str, AgentBinding] = {}
+        legacy_agents: dict[str, str] = {}
+        execution_targets: dict[str, tuple[str, str]] = {}
+        execution_records = await _records(executions, "execution")
+        recovery_records = await _records(recovery, "recovery_admission")
+        for record in execution_records:
+            _collect_execution_binding(
+                record,
+                compiler,
+                catalog,
+                legacy_bindings,
+                legacy_agents,
+                execution_targets,
+            )
+        for record in recovery_records:
+            _collect_recovery_binding(
+                record, compiler, catalog, legacy_bindings, legacy_agents
+            )
+    
+        migrated = 0
+        for record in await _records(sessions, "session"):
+            current = _migrate_session_record(record, sessions, legacy_agents)
+            if current is not None:
+                await _replace_data(sessions.state_store, record, _domain_data(current))
+                migrated += 1
+    
+        # Projection digests are historical references from StoredStepSnapshot and
+        # execution seals. Replace only the identity field and preserve `digest`.
+        for domain in (
+            RuntimeDomain.CONVERSATION,
+            RuntimeDomain.EXECUTION,
+            RuntimeDomain.RECOVERY,
+        ):
+>           history = state.steps.read_store(domain).transcript_repository
+                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E           AttributeError: 'InMemoryStepArchive' object has no attribute 'transcript_repository'
+
+linktools-ai/src/linktools/ai/runtime/state/_migration.py:174: AttributeError
 =========================== short test summary info ============================
-ERROR tests/ai/test_agent_composition.py
-ERROR tests/ai/test_contracts.py
-ERROR tests/ai/test_deferred_notification_replay.py
-ERROR tests/ai/test_local_commands.py
-ERROR tests/ai/test_non_workspace_pipeline.py
-ERROR tests/ai/test_runtime_session_auto_create.py
-ERROR tests/ai/test_runtime_state_identity_migration_sqlite.py
-ERROR tests/ai/test_selective_storage.py
-ERROR tests/ai/test_workspace_capabilities.py
-ERROR tests/ai/test_workspace_runtime_regressions.py
-!!!!!!!!!!!!!!!!!!! Interrupted: 10 errors during collection !!!!!!!!!!!!!!!!!!!
-10 errors in 2.87s
+FAILED tests/ai/test_architecture.py::test_source_graph_is_acyclic_and_static - AssertionError: assert ['linktools-a...:712:getattr'] == []
+  
+  Left contains 2 more items, first extra item: 'linktools-ai/src/linktools/ai/runtime/state/_migration.py:710:importlib.import_module'
+  
+  Full diff:
+  - []
+  + [
+  +     'linktools-ai/src/linktools/ai/runtime/state/_migration.py:710:importlib.import_module',
+  +     'linktools-ai/src/linktools/ai/runtime/state/_migration.py:712:getattr',
+  + ]
+FAILED tests/ai/test_architecture.py::test_package_public_surface_and_optional_dependency_isolation - AssertionError: assert {'CapabilityB...Runtime', ...} == {'CapabilityB...Runtime', ...}
+  
+  Extra items in the right set:
+  'mcp_server_selector'
+  
+  Full diff:
+    {
+        'CapabilityBinding',
+        'CapabilityMaterializationContext',
+        'CapabilityProvider',
+        'CapabilityRefResolution',
+        'MCPCapabilityProvider',
+        'MCPRuntime',
+        'RuntimeCapability',
+        'SKILL_TOOL_NAMES',
+        'SkillCapabilityProvider',
+  -     'mcp_server_selector',
+        'validate_fingerprint',
+    }
+FAILED tests/ai/test_runtime_state_identity_migration.py::test_migration_rewrites_legacy_session_and_execution_exactly - AttributeError: 'InMemoryStepArchive' object has no attribute 'transcript_repository'
+FAILED tests/ai/test_runtime_state_identity_migration.py::test_migration_rewrites_full_legacy_recovery_shape - AttributeError: 'InMemoryStepArchive' object has no attribute 'transcript_repository'
+FAILED tests/ai/test_runtime_state_identity_migration.py::test_migration_preserves_historical_projection_digest - AttributeError: 'InMemoryStepArchive' object has no attribute 'transcript_repository'
+FAILED tests/ai/test_runtime_state_identity_migration.py::test_migration_rewrites_evaluation_from_linked_legacy_execution - AttributeError: 'InMemoryStepArchive' object has no attribute 'transcript_repository'
+FAILED tests/ai/test_runtime_state_identity_migration.py::test_migration_converges_evaluation_after_execution_was_already_migrated - AttributeError: 'InMemoryStepArchive' object has no attribute 'transcript_repository'
+FAILED tests/ai/test_runtime_state_identity_migration.py::test_migration_rejects_evaluation_output_contract_drift - AttributeError: 'InMemoryStepArchive' object has no attribute 'transcript_repository'
+8 failed, 362 passed in 18.07s
