@@ -33,7 +33,6 @@ from linktools.ai.spec import AgentSpec
 from linktools.ai.task import TaskNode
 from pydantic_ai.messages import ModelRequest, UserPromptPart
 
-_BINDING_FIXTURE_V1 = "runtime_agent_binding_snapshot_v1.json"
 _MODEL_MESSAGE_FIXTURE_V1 = "runtime_model_messages_v1.json"
 _CUSTOM_WIRE_FIXTURE_V1 = "runtime_custom_wire_v1.json"
 
@@ -52,6 +51,34 @@ def validate_runtime_persistence_manifest(
     return () if dict(manifest) == expected else (
         "runtime persistence manifest does not match the current codec contract",
     )
+
+
+def _positive_version(value: object) -> int | None:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+        return None
+    return value
+
+
+def _validate_external_append_only(
+    name: str,
+    baseline: object,
+    candidate: object,
+) -> tuple[str, ...]:
+    if name != "agent_binding_snapshot":
+        return () if candidate == baseline else (
+            f"historical external contract changed: {name}",
+        )
+    if not isinstance(baseline, Mapping) or not isinstance(candidate, Mapping):
+        return ("agent_binding_snapshot external contract is invalid",)
+    if baseline.get("owner") != candidate.get("owner"):
+        return ("agent_binding_snapshot owner changed",)
+    baseline_version = _positive_version(baseline.get("version"))
+    candidate_version = _positive_version(candidate.get("version"))
+    if baseline_version is None or candidate_version is None:
+        return ("agent_binding_snapshot version is invalid",)
+    if candidate_version < baseline_version:
+        return ("agent_binding_snapshot version regressed",)
+    return ()
 
 
 def validate_append_only(
@@ -127,8 +154,13 @@ def validate_append_only(
         errors.append("external manifest is invalid")
     else:
         for name, value in baseline_external.items():
-            if candidate_external.get(name) != value:
-                errors.append(f"historical external contract changed: {name}")
+            errors.extend(
+                _validate_external_append_only(
+                    str(name),
+                    value,
+                    candidate_external.get(name),
+                )
+            )
     return tuple(errors)
 
 
@@ -145,7 +177,15 @@ def validate_fixture_append_only(
     )
 
 
-def _agent_binding_snapshot_fixture_value() -> AgentBindingSnapshot:
+def _binding_fixture_name(version: int) -> str:
+    return f"runtime_agent_binding_snapshot_v{version}.json"
+
+
+def _agent_binding_snapshot_fixture_value(version: int) -> AgentBindingSnapshot:
+    if version != 1:
+        raise ValueError(
+            f"add a canonical AgentBindingSnapshot fixture value for version {version}"
+        )
     return AgentBindingSnapshot(
         version=1,
         agent_spec=AgentSpec("runtime-persistence-v1"),
@@ -181,6 +221,47 @@ def _model_message_fixture_values() -> tuple[ModelRequest, ...]:
     )
 
 
+def _validate_binding_fixtures(
+    binding_contract: Mapping[str, object],
+    root: Path,
+) -> tuple[str, ...]:
+    if binding_contract.get("owner") != "agent":
+        return ("agent_binding_snapshot owner changed",)
+    current_version = _positive_version(binding_contract.get("version"))
+    if current_version is None:
+        return ("agent_binding_snapshot version is invalid",)
+    errors: list[str] = []
+    for version in range(1, current_version + 1):
+        path = root / _binding_fixture_name(version)
+        if not path.is_file():
+            errors.append(f"missing external persistence fixture: {path}")
+            continue
+        try:
+            value = _load_json(path)
+            expected = _agent_binding_snapshot_fixture_value(version)
+        except ValueError as error:
+            errors.append(str(error))
+            continue
+        if value != expected.to_payload():
+            errors.append(
+                f"agent_binding_snapshot V{version} writer drifted from its fixture"
+            )
+            continue
+        try:
+            decoded = AgentBindingSnapshot.from_payload(value)
+        except Exception as error:
+            errors.append(
+                f"agent_binding_snapshot V{version} fixture is no longer readable: "
+                f"{error}"
+            )
+            continue
+        if decoded != expected or decoded.to_payload() != value:
+            errors.append(
+                f"agent_binding_snapshot V{version} fixture semantics changed"
+            )
+    return tuple(errors)
+
+
 def validate_external_fixtures(
     manifest: Mapping[str, JsonValue],
     matrix_dir: str | Path,
@@ -193,33 +274,9 @@ def validate_external_fixtures(
     binding_contract = external.get("agent_binding_snapshot")
     if not isinstance(binding_contract, Mapping):
         return ("agent_binding_snapshot external contract is invalid",)
-    if (
-        binding_contract.get("owner") != "agent"
-        or binding_contract.get("version") != 1
-    ):
-        return ("agent_binding_snapshot V1 external contract changed",)
-    binding_path = root / _BINDING_FIXTURE_V1
-    if not binding_path.is_file():
-        return (f"missing external persistence fixture: {binding_path}",)
-    try:
-        binding_value = _load_json(binding_path)
-    except ValueError as error:
-        return (str(error),)
-    expected_binding = _agent_binding_snapshot_fixture_value()
-    if binding_value != expected_binding.to_payload():
-        return (
-            "agent_binding_snapshot writer drifted from the frozen V1 fixture",
-        )
-    try:
-        decoded_binding = AgentBindingSnapshot.from_payload(binding_value)
-    except Exception as error:
-        return (
-            f"agent_binding_snapshot V1 fixture is no longer readable: {error}",
-        )
-    if decoded_binding != expected_binding:
-        return (
-            "agent_binding_snapshot V1 fixture decodes to different semantics",
-        )
+    binding_errors = _validate_binding_fixtures(binding_contract, root)
+    if binding_errors:
+        return binding_errors
 
     model_contract = external.get("model_message")
     if not isinstance(model_contract, Mapping):
@@ -333,8 +390,14 @@ def validate_custom_wire_fixture(matrix_dir: str | Path) -> tuple[str, ...]:
     expected_keys = _custom_wire_keys()
     actual_keys = set(value)
     errors = [
-        *(f"missing custom wire fixture: {key}" for key in sorted(expected_keys - actual_keys)),
-        *(f"unknown custom wire fixture: {key}" for key in sorted(actual_keys - expected_keys)),
+        *(
+            f"missing custom wire fixture: {key}"
+            for key in sorted(expected_keys - actual_keys)
+        ),
+        *(
+            f"unknown custom wire fixture: {key}"
+            for key in sorted(actual_keys - expected_keys)
+        ),
     ]
     for key, expected in _custom_wire_values().items():
         if value.get(key) != expected:
@@ -578,6 +641,17 @@ def _freeze_json_fixture(
         errors.append(f"historical {label} changed")
 
 
+def _binding_versions(manifest: Mapping[str, JsonValue]) -> range:
+    external = manifest.get("external")
+    if not isinstance(external, Mapping):
+        return range(0)
+    binding = external.get("agent_binding_snapshot")
+    if not isinstance(binding, Mapping):
+        return range(0)
+    version = _positive_version(binding.get("version"))
+    return range(1, 0 if version is None else version + 1)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument(
@@ -643,21 +717,12 @@ def main() -> int:
             )
         )
 
-    binding_path = args.manifest.parent / _BINDING_FIXTURE_V1
-    binding_baseline = _load_optional_baseline(
-        binding_path,
-        None,
-        args.baseline_ref,
-        errors,
-    )
-    if binding_baseline is not None:
-        binding_fixture = load_manifest(binding_path)
-        errors.extend(
-            validate_fixture_append_only(
-                binding_baseline,
-                binding_fixture,
-                label="binding snapshot fixture",
-            )
+    for version in _binding_versions(candidate):
+        _freeze_json_fixture(
+            args.manifest.parent / _binding_fixture_name(version),
+            base_ref=args.baseline_ref,
+            label=f"binding snapshot V{version} fixture",
+            errors=errors,
         )
 
     _freeze_json_fixture(
