@@ -534,21 +534,22 @@ async def compose_platform_capabilities(
                 id=_MEMORY_CAPABILITY_ID,
             )
         )
-    if scope.context_target_tokens is not None:
-        capabilities.append(
-            _CompactionCapability(
-                scope.context_target_tokens,
-                step_store=scope.step_store,
-                conversation_id=scope.conversation_id,
-                step_run_id=scope.step_run_id,
-            )
-        )
     if any(name in selected for name in PLANNING_TOOL_NAMES):
         capabilities.append(Planning(id=_PLANNING_CAPABILITY_ID))
     if "delegate_task" in selected:
         if scope.subagent_delegate is None:
             raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
         capabilities.append(_SubagentCapability(scope.subagent_delegate))
+    capabilities.append(
+        _build_compaction(None)
+        if scope.context_target_tokens is None
+        else _CompactionCapability(
+            scope.context_target_tokens,
+            step_store=scope.step_store,
+            conversation_id=scope.conversation_id,
+            step_run_id=scope.step_run_id,
+        )
+    )
     return tuple(capabilities)
 
 

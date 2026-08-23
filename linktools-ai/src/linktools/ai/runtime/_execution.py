@@ -1249,7 +1249,14 @@ class DefaultExecutionService:
             if cancelling_current.status is not ExecutionStatus.CANCELLING:
                 raise AIError(ErrorCode.STORAGE_CONFLICT)
             now = datetime.now(timezone.utc)
-            terminal = _next_execution(cancelling_current, ExecutionStatus.CANCELLED, now, error_code=None, terminal_event=True)
+            terminal = _next_execution(
+                cancelling_current,
+                ExecutionStatus.CANCELLED,
+                now,
+                error_code=ErrorCode.EXECUTION_CANCELLED.value,
+                safe_error_details={},
+                terminal_event=True,
+            )
             result = ResultRecord(
                 execution_id,
                 request.principal.tenant_id,

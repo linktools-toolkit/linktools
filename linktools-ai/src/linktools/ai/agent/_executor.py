@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 """Pydantic AI execution adapter for frozen AgentDefinitions."""
 
+import asyncio
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -163,6 +164,9 @@ class AgentExecutor:
                     tool_operations=tool_operations,
                 )
                 return result
+            except asyncio.CancelledError as error:
+                primary_error = error
+                raise
             except AIError as error:
                 primary_error = error
                 raise
