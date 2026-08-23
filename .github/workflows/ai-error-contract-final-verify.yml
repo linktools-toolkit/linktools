@@ -31,6 +31,7 @@ jobs:
       - name: Prepare semantic TRY004 candidate
         run: |
           cp .github/ai-error-spec-constructor-contract.py /tmp/spec-constructor-contract.py
+          cp .github/ai-error-spec-test-contract.py /tmp/spec-test-contract.py
           git fetch --depth=1 origin fix/ai-error-contract-closure
           git worktree add /tmp/try004-closure FETCH_HEAD
           cd /tmp/try004-closure
@@ -147,6 +148,7 @@ jobs:
               path.write_text(text)
           PY
           python /tmp/spec-constructor-contract.py
+          python /tmp/spec-test-contract.py
           git diff --check
 
       - name: Ruff exact release command
@@ -179,6 +181,6 @@ jobs:
         run: |
           git config user.name github-actions[bot]
           git config user.email 41898282+github-actions[bot]@users.noreply.github.com
-          git add linktools-ai/src/linktools/ai tests/ai/test_spec_capability_refactor.py
+          git add linktools-ai/src/linktools/ai tests/ai/test_spec_capability_refactor.py tests/ai/test_asset_repository.py
           git commit -m 'style(ai): preserve exception semantics under Ruff'
           git push origin HEAD:fix/ai-error-contract-closure
