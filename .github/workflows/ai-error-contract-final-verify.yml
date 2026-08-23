@@ -83,18 +83,88 @@ jobs:
           baseline = diagnostics('ruff-baseline.log')
           current = diagnostics('ruff.log')
           if current != baseline:
-              added = current - baseline
-              removed = baseline - current
-              raise SystemExit(f'Ruff delta detected: added={dict(added)} removed={dict(removed)}')
+              raise SystemExit(
+                  f'Ruff delta detected: added={dict(current - baseline)} removed={dict(baseline - current)}'
+              )
           print(f'Ruff baseline/current diagnostics identical: {sum(current.values())}')
           PY
 
-      - name: Upload Ruff diagnostics
+      - name: Generate final semantic audit
+        run: |
+          python - <<'PY'
+          import re
+          from pathlib import Path
+
+          root = Path('linktools-ai/src/linktools/ai')
+          command_root = Path('linktools-ai/src/linktools/commands/ai')
+          tests = Path('tests/ai')
+
+          def scan(roots, pattern):
+              regex = re.compile(pattern)
+              rows = []
+              for scan_root in roots:
+                  for path in sorted(scan_root.rglob('*.py')):
+                      for number, line in enumerate(path.read_text().splitlines(), 1):
+                          if regex.search(line):
+                              rows.append(f'{path}:{number}:{line.strip()}')
+              return rows
+
+          reports = {
+              'audit-storage-integrity.txt': scan([root], r'ErrorCode\.STORAGE_INTEGRITY_ERROR'),
+              'audit-wide-catches.txt': scan([root, command_root], r'except\s+(?:Exception|BaseException)\b'),
+              'audit-execution-result.txt': scan([root, command_root], r'\bExecutionResult\b'),
+          }
+          for name, rows in reports.items():
+              Path(name).write_text('\n'.join(rows) + ('\n' if rows else ''))
+
+          codes = (
+              'INTERNAL_ERROR',
+              'MODEL_API_ERROR',
+              'MODEL_REQUEST_REJECTED',
+              'MODEL_RATE_LIMITED',
+              'MODEL_TIMEOUT',
+              'MODEL_UNAVAILABLE',
+              'MODEL_RESPONSE_INVALID',
+              'MODEL_CONTENT_FILTERED',
+              'EXECUTION_CONCURRENCY_LIMIT_EXCEEDED',
+              'EXECUTION_NOT_READY',
+              'EXECUTION_WAIT_TIMEOUT',
+              'TASK_WAIT_TIMEOUT',
+              'TOOL_RETRY_REQUIRED',
+              'TOOL_EXECUTION_FAILED',
+              'ASSET_NOT_FOUND',
+              'STORAGE_PATH_INVALID',
+          )
+          production_text = '\n'.join(
+              path.read_text()
+              for path in root.rglob('*.py')
+              if path.name != 'errors.py'
+          ) + '\n' + '\n'.join(path.read_text() for path in command_root.rglob('*.py'))
+          test_text = '\n'.join(path.read_text() for path in tests.rglob('*.py'))
+          matrix = []
+          missing = []
+          for code in codes:
+              token = f'ErrorCode.{code}'
+              production = production_text.count(token)
+              validation = test_text.count(token)
+              matrix.append(f'{code}\tproduction={production}\tvalidation={validation}')
+              if production < 1 or validation < 1:
+                  missing.append(code)
+          Path('audit-error-code-matrix.txt').write_text('\n'.join(matrix) + '\n')
+          if missing:
+              raise SystemExit(f'new error codes missing production use or validation: {missing}')
+          PY
+
+      - name: Upload final audit evidence
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: ai-error-contract-ruff-final
+          name: ai-error-contract-final-audit
           path: |
             ruff.log
             ruff-baseline.log
+            audit-storage-integrity.txt
+            audit-wide-catches.txt
+            audit-execution-result.txt
+            audit-error-code-matrix.txt
           if-no-files-found: error
