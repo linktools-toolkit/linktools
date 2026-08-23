@@ -104,7 +104,7 @@ def main() -> None:
         "_CURRENT_RECOVERY_INPUT_FIELDS",
         "_LEGACY_RECOVERY_INPUT_FIELDS",
         "_rebuild_data(",
-        "dataclass_fields(",
+        "field.name for field in dataclass_fields(",
         "get_type_hints(",
         "_dataclass_persistence_contract(",
     )

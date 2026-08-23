@@ -7,11 +7,17 @@ from __future__ import annotations
 import argparse
 import json
 from collections.abc import Mapping
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import cast
 
-from linktools.ai.core import JsonValue
+from linktools.ai.core import JsonValue, canonical_json_bytes
+from linktools.ai.runtime._message import (
+    decode_model_messages,
+    encode_model_messages,
+)
 from linktools.ai.runtime.state._codec import _runtime_persistence_manifest
+from pydantic_ai.messages import ModelRequest, UserPromptPart
 
 
 def load_manifest(path: str | Path) -> dict[str, JsonValue]:
@@ -98,6 +104,53 @@ def validate_append_only(
     return tuple(errors)
 
 
+def _model_message_fixture_values() -> tuple[ModelRequest, ...]:
+    fixed = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    return (
+        ModelRequest(
+            parts=[
+                UserPromptPart(
+                    content="runtime-persistence-v1",
+                    timestamp=fixed,
+                )
+            ]
+        ),
+    )
+
+
+def validate_external_fixtures(
+    manifest: Mapping[str, JsonValue],
+    matrix_dir: str | Path,
+) -> tuple[str, ...]:
+    external = manifest.get("external")
+    if not isinstance(external, Mapping):
+        return ("external manifest is invalid",)
+    model_contract = external.get("model_message")
+    if not isinstance(model_contract, Mapping):
+        return ("model_message external contract is invalid",)
+    fixture_name = model_contract.get("fixture")
+    if not isinstance(fixture_name, str) or not fixture_name:
+        return ("model_message fixture is not declared",)
+    path = Path(matrix_dir) / fixture_name
+    if not path.is_file():
+        return (f"missing external persistence fixture: {path}",)
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        return (f"invalid external persistence fixture: {path}: {error}",)
+    expected = json.loads(
+        encode_model_messages(_model_message_fixture_values()).decode("utf-8")
+    )
+    if value != expected:
+        return ("model_message writer drifted from the frozen V1 fixture",)
+    try:
+        decoded = decode_model_messages(canonical_json_bytes(value))
+    except Exception as error:
+        return (f"model_message V1 fixture is no longer readable: {error}",)
+    if decoded != _model_message_fixture_values():
+        return ("model_message V1 fixture decodes to different semantics",)
+    return ()
+
 def _default_manifest() -> Path:
     return Path(__file__).with_name("matrix") / "runtime-persistence-v1.json"
 
@@ -109,6 +162,9 @@ def main() -> int:
     args = parser.parse_args()
     candidate = load_manifest(args.manifest)
     errors = list(validate_runtime_persistence_manifest(candidate))
+    errors.extend(
+        validate_external_fixtures(candidate, args.manifest.parent)
+    )
     if args.baseline is not None:
         errors.extend(validate_append_only(load_manifest(args.baseline), candidate))
     for error in errors:
@@ -123,5 +179,6 @@ if __name__ == "__main__":
 __all__ = [
     "load_manifest",
     "validate_append_only",
+    "validate_external_fixtures",
     "validate_runtime_persistence_manifest",
 ]

@@ -321,7 +321,9 @@ class TranscriptRepository:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         try:
             head = _decode_enveloped_domain(record.data, TranscriptHeadRecord)
-        except (TypeError, ValueError, AIError) as error:
+        except AIError:
+            raise
+        except (TypeError, ValueError) as error:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
         if head.owner_domain is not self._owner_domain:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -689,7 +691,9 @@ class TranscriptRepository:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         try:
             return _decode_enveloped_domain(record.data, TranscriptSeekRecord)
-        except (TypeError, ValueError, AIError) as error:
+        except AIError:
+            raise
+        except (TypeError, ValueError) as error:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
 
     async def prepare_projection(
@@ -1691,8 +1695,10 @@ class TranscriptRepository:
     def decode_chunk(self, fact: StoredFact) -> TranscriptChunk:
         try:
             return _decode_enveloped_domain(fact.data, TranscriptChunk)
-        except AIError as error:
-            raise ValueError("transcript chunk payload is invalid") from error
+        except AIError:
+            raise
+        except (TypeError, ValueError) as error:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
 
     def _owner_key(self, owner_id: str) -> bytes:
         return self._head_key(owner_id)

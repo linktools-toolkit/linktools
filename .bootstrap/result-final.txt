@@ -2,13 +2,51 @@
 legacy identity fixtures normalized to authentic unversioned V1
 exit=0
 ===== python .bootstrap/fix_freeze_stale_check.py =====
-migration bootstrap stale-symbol check made exact
+migration bootstrap stale-symbol check made token-exact
 exit=0
 ===== python .bootstrap/freeze_identity_migration_schema1.py =====
-Traceback (most recent call last):
-  File "/home/runner/work/linktools/linktools/.bootstrap/freeze_identity_migration_schema1.py", line 120, in <module>
-    main()
-  File "/home/runner/work/linktools/linktools/.bootstrap/freeze_identity_migration_schema1.py", line 113, in main
-    raise RuntimeError(f"stale migration coupling remains: {stale}")
-RuntimeError: stale migration coupling remains: ['dataclass_fields(']
+identity migration owns frozen V1 shapes and emits schema1
+exit=0
+===== python .bootstrap/complete_binding_codec_simplification.py =====
+{"generic_binding_fingerprints": {"execution_record": "4f839ba310cd505bdc8aa2e52151c6a27628acf9fc837a8cb6749ac7459b0fcc", "recovery_execution_input": "bbc3a92b2d5732d2ba9efe1b20d2ad4b95d5623b9e0b150fe8ce2346fd5f8a2e"}}
+exit=0
+===== python .bootstrap/add_external_persistence_fixture.py =====
+external model_message V1 fixture and gate installed
+exit=0
+===== python .bootstrap/preserve_history_schema_errors.py =====
+transcript schema error classification preserved
+exit=0
+===== python -m compileall -q linktools-ai/src/linktools/ai =====
+exit=0
+===== ruff check --select E4,E7,E9,F linktools-ai/src/linktools/ai tests/ai =====
+All checks passed!
+exit=0
+===== persistence exit=0 =====
+<frozen runpy>:128: RuntimeWarning: 'scripts.build.architecture' found in sys.modules after import of package 'scripts.build', but prior to execution of 'scripts.build.architecture'; this may result in unpredictable behaviour
+===== architecture exit=0 =====
+===== pytest -q tests/ai =====
+........................................................................ [ 18%]
+........................................................................ [ 37%]
+........................................................................ [ 56%]
+............F........................................................... [ 75%]
+........................................................................ [ 93%]
+.......................                                                  [100%]
+=================================== FAILURES ===================================
+_________ test_transcript_decoders_preserve_future_schema_unsupported __________
+
+    @pytest.mark.asyncio
+    async def test_transcript_decoders_preserve_future_schema_unsupported() -> None:
+        state = RuntimeState.in_memory()
+        await state.initialize(namespace="future-transcript-schema", tenant_id="tenant")
+        try:
+            history = state.steps.read_store(
+                RuntimeDomain.EXECUTION
+>           ).transcript_repository
+              ^^^^^^^^^^^^^^^^^^^^^
+E           AttributeError: 'InMemoryStepArchive' object has no attribute 'transcript_repository'
+
+tests/ai/test_runtime_persistence_error_contract.py:38: AttributeError
+=========================== short test summary info ============================
+FAILED tests/ai/test_runtime_persistence_error_contract.py::test_transcript_decoders_preserve_future_schema_unsupported - AttributeError: 'InMemoryStepArchive' object has no attribute 'transcript_repository'
+1 failed, 382 passed in 33.19s
 exit=1

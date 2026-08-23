@@ -11,8 +11,7 @@ the single current V1 shape before normal Runtime reads begin.
 from __future__ import annotations
 
 from collections.abc import Mapping
-from dataclasses import fields as dataclass_fields, replace
-from typing import get_type_hints
+from dataclasses import replace
 
 from ...agent import AgentBinding, AgentBindingSnapshot, AgentCatalog, AgentCompiler
 from ...capability import RuntimeCapability
@@ -21,9 +20,6 @@ from ...errors import AIError, ErrorCode
 from ...spec import AgentSpec, AgentUsageLimits
 from ._codec import (
     _CURRENT_CODEC,
-    _EXECUTION_V1_FIELDS,
-    _RECOVERY_EXECUTION_V1_FIELDS,
-    _dataclass_persistence_contract,
     _decode_domain,
     _decode_enveloped_domain,
     _encode_persisted_domain,
@@ -78,20 +74,91 @@ _LEGACY_AGENT_SPEC_FIELDS = frozenset(
         "usage_limits",
     }
 )
-_CURRENT_SESSION_FIELDS = frozenset(
-    field.name for field in dataclass_fields(SessionRecord)
+# Frozen shapes owned by this one-time semantic migration.  They describe
+# the exact unversioned V1 wire before/after the Agent identity split and must
+# never be derived from the current Runtime dataclasses or codec implementation.
+_POST_COMPOSITION_EXECUTION_V1_FIELDS = frozenset(
+    {
+        "execution_id",
+        "tenant_id",
+        "session_id",
+        "binding_digest",
+        "parent_execution_id",
+        "root_execution_id",
+        "source_execution_id",
+        "base_execution_id",
+        "lineage_kind",
+        "status",
+        "revision",
+        "event_sequence",
+        "agent_run_sequence",
+        "error_code",
+        "safe_error_details",
+        "created_at",
+        "updated_at",
+        "planning",
+        "thinking",
+        "binding",
+        "memory_scope",
+        "conversation_step_run_id",
+        "result",
+    }
 )
-_LEGACY_SESSION_FIELDS = (
-    _CURRENT_SESSION_FIELDS - {"agent_digest"}
-) | {"binding_digest"}
-_CURRENT_PROJECTION_FIELDS = frozenset(
-    field.name for field in dataclass_fields(ContextProjection)
+_POST_COMPOSITION_SESSION_V1_FIELDS = frozenset(
+    {
+        "session_id",
+        "tenant_id",
+        "owner_principal_id",
+        "agent_digest",
+        "status",
+        "revision",
+        "resource_generation",
+        "cwd",
+        "metadata",
+        "created_at",
+        "updated_at",
+        "closed_at",
+        "active_execution_id",
+        "continuation",
+        "history_quality",
+        "history_id",
+    }
 )
-_LEGACY_PROJECTION_FIELDS = (
-    _CURRENT_PROJECTION_FIELDS - {"agent_digest"}
+_PRE_COMPOSITION_SESSION_V1_FIELDS = (
+    _POST_COMPOSITION_SESSION_V1_FIELDS - {"agent_digest"}
 ) | {"binding_digest"}
-_CURRENT_RECOVERY_INPUT_FIELDS = _RECOVERY_EXECUTION_V1_FIELDS
-_LEGACY_RECOVERY_INPUT_FIELDS = _CURRENT_RECOVERY_INPUT_FIELDS | {"agent_id"}
+_POST_COMPOSITION_PROJECTION_V1_FIELDS = frozenset(
+    {"agent_digest", "items", "digest"}
+)
+_PRE_COMPOSITION_PROJECTION_V1_FIELDS = (
+    _POST_COMPOSITION_PROJECTION_V1_FIELDS - {"agent_digest"}
+) | {"binding_digest"}
+_POST_COMPOSITION_RECOVERY_ADMISSION_V1_FIELDS = frozenset(
+    {"execution_id", "tenant_id", "input", "created_at"}
+)
+_POST_COMPOSITION_RECOVERY_INPUT_V1_FIELDS = frozenset(
+    {
+        "user_prompt",
+        "principal_id",
+        "principal_kind",
+        "session_id",
+        "memory_scope",
+        "binding_digest",
+        "lineage_kind",
+        "parent_execution_id",
+        "root_execution_id",
+        "source_execution_id",
+        "base_execution_id",
+        "conversation_step_run_id",
+        "idempotency",
+        "planning",
+        "thinking",
+        "binding",
+    }
+)
+_PRE_COMPOSITION_RECOVERY_INPUT_V1_FIELDS = (
+    _POST_COMPOSITION_RECOVERY_INPUT_V1_FIELDS | {"agent_id"}
+)
 
 
 async def migrate_v1_agent_identity_state(
@@ -340,7 +407,7 @@ def _collect_execution_binding(
         type_name="execution_record",
         wire_id="execution_record",
     )
-    if frozenset(fields) != _EXECUTION_V1_FIELDS:
+    if frozenset(fields) != _POST_COMPOSITION_EXECUTION_V1_FIELDS:
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     binding = fields["binding"]
     if _is_current_binding(binding):
@@ -392,14 +459,16 @@ def _collect_recovery_binding(
         type_name="recovery_admission",
         wire_id="recovery_admission",
     )
+    if frozenset(fields) != _POST_COMPOSITION_RECOVERY_ADMISSION_V1_FIELDS:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     input_fields = _nested_dataclass_fields(
         fields.get("input"), "recovery_execution_input"
     )
     keys = frozenset(input_fields)
     binding = input_fields.get("binding")
-    if keys == _CURRENT_RECOVERY_INPUT_FIELDS:
+    if keys == _POST_COMPOSITION_RECOVERY_INPUT_V1_FIELDS:
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-    if keys != _LEGACY_RECOVERY_INPUT_FIELDS:
+    if keys != _PRE_COMPOSITION_RECOVERY_INPUT_V1_FIELDS:
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     if binding is None:
         raise AIError(
@@ -473,7 +542,7 @@ def _migrate_execution_data(
         type_name="execution_record",
         wire_id="execution_record",
     )
-    if frozenset(fields) != _EXECUTION_V1_FIELDS:
+    if frozenset(fields) != _POST_COMPOSITION_EXECUTION_V1_FIELDS:
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     binding = fields["binding"]
     if _is_current_binding(binding):
@@ -487,7 +556,7 @@ def _migrate_execution_data(
     current_fields = dict(fields)
     current_fields["binding_digest"] = encode_domain(migrated.digest)
     current_fields["binding"] = migrated.snapshot.to_payload()
-    data = _rebuild_data("execution_record", current_fields)
+    data = _schema1_data("execution_record", current_fields)
     value = _decode_enveloped_domain(data, ExecutionRecord)
     return _domain_data(value)
 
@@ -507,14 +576,16 @@ def _migrate_recovery_data(
         type_name="recovery_admission",
         wire_id="recovery_admission",
     )
+    if frozenset(fields) != _POST_COMPOSITION_RECOVERY_ADMISSION_V1_FIELDS:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     input_fields = _nested_dataclass_fields(
         fields.get("input"), "recovery_execution_input"
     )
     keys = frozenset(input_fields)
     binding = input_fields.get("binding")
-    if keys == _CURRENT_RECOVERY_INPUT_FIELDS:
+    if keys == _POST_COMPOSITION_RECOVERY_INPUT_V1_FIELDS:
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-    if keys != _LEGACY_RECOVERY_INPUT_FIELDS:
+    if keys != _PRE_COMPOSITION_RECOVERY_INPUT_V1_FIELDS:
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     if binding is None:
         raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
@@ -532,14 +603,13 @@ def _migrate_recovery_data(
     }
     next_input_fields["binding_digest"] = encode_domain(migrated.digest)
     next_input_fields["binding"] = migrated.snapshot.to_payload()
-    if frozenset(next_input_fields) != _CURRENT_RECOVERY_INPUT_FIELDS:
+    if frozenset(next_input_fields) != _POST_COMPOSITION_RECOVERY_INPUT_V1_FIELDS:
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     next_fields = dict(fields)
-    next_fields["input"] = {
-        "$dataclass": "recovery_execution_input",
-        "fields": next_input_fields,
-    }
-    data = _rebuild_data("recovery_admission", next_fields)
+    next_fields["input"] = _schema1_dataclass(
+        "recovery_execution_input", next_input_fields
+    )
+    data = _schema1_data("recovery_admission", next_fields)
     value = _decode_enveloped_domain(data, RecoveryAdmissionRecord)
     return _domain_data(value)
 
@@ -560,30 +630,36 @@ def _migrate_session_record(
         wire_id="session_record",
     )
     keys = frozenset(fields)
-    if keys == _CURRENT_SESSION_FIELDS:
+    if keys == _POST_COMPOSITION_SESSION_V1_FIELDS:
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-    if keys != _LEGACY_SESSION_FIELDS:
+    if keys != _PRE_COMPOSITION_SESSION_V1_FIELDS:
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-    hints = get_type_hints(SessionRecord)
-    decoded: dict[str, object] = {}
-    for name in _CURRENT_SESSION_FIELDS - {"agent_digest"}:
-        decoded[name] = _decode_domain(fields[name], hints[name], _CURRENT_CODEC)
-    legacy_digest = _decode_domain(fields["binding_digest"], str, _CURRENT_CODEC)
+    legacy_digest = _decode_domain(
+        fields["binding_digest"], str, _CURRENT_CODEC
+    )
     agent_digest = agents.get(legacy_digest)
     if agent_digest is None:
+        session_id = _decode_domain(fields["session_id"], str, _CURRENT_CODEC)
         raise AIError(
             ErrorCode.STORAGE_VERSION_UNSUPPORTED,
             safe_details={
                 "record": "session",
                 "reason": "binding_evidence_unavailable",
-                "session_id": decoded.get("session_id"),
+                "session_id": session_id,
             },
         )
-    decoded["agent_digest"] = agent_digest
-    try:
-        value = SessionRecord(**decoded)
-    except (TypeError, ValueError) as error:
-        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
+    current_fields = {
+        key: value
+        for key, value in fields.items()
+        if key != "binding_digest"
+    }
+    current_fields["agent_digest"] = encode_domain(agent_digest)
+    if frozenset(current_fields) != _POST_COMPOSITION_SESSION_V1_FIELDS:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    value = _decode_enveloped_domain(
+        _schema1_data("session_record", current_fields),
+        SessionRecord,
+    )
     if value.tenant_id != repository._tenant_id:
         raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
     return value
@@ -602,9 +678,9 @@ def _migrate_projection_data(
         wire_id="context_projection",
     )
     keys = frozenset(fields)
-    if keys == _CURRENT_PROJECTION_FIELDS:
+    if keys == _POST_COMPOSITION_PROJECTION_V1_FIELDS:
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-    if keys != _LEGACY_PROJECTION_FIELDS:
+    if keys != _PRE_COMPOSITION_PROJECTION_V1_FIELDS:
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     legacy_digest = _decode_domain(fields["binding_digest"], str, _CURRENT_CODEC)
     agent_digest = agents.get(legacy_digest)
@@ -621,7 +697,7 @@ def _migrate_projection_data(
         "items": fields["items"],
         "digest": fields["digest"],
     }
-    data = _rebuild_data("context_projection", current_fields)
+    data = _schema1_data("context_projection", current_fields)
     value = _decode_enveloped_domain(data, ContextProjection)
     return encode_envelope(
         {
@@ -767,19 +843,25 @@ def _nested_dataclass_fields(value: object, wire_id: str) -> Mapping[str, object
     return _persisted_dataclass_fields(value, wire_id)
 
 
-def _rebuild_data(
+def _schema1_dataclass(
+    wire_id: str,
+    fields: Mapping[str, object],
+) -> dict[str, JsonValue]:
+    return {
+        "$dataclass": wire_id,
+        "schema": 1,
+        "fields": dict(fields),
+    }  # type: ignore[return-value]
+
+
+def _schema1_data(
     wire_id: str,
     fields: Mapping[str, object],
 ) -> Mapping[str, JsonValue]:
-    contract = _dataclass_persistence_contract(wire_id, _CURRENT_CODEC)
     return encode_envelope(
         {
             "type": wire_id,
-            "payload": {
-                "$dataclass": wire_id,
-                "schema": contract.current_revision,
-                "fields": dict(fields),
-            },
+            "payload": _schema1_dataclass(wire_id, fields),
         }
     )
 

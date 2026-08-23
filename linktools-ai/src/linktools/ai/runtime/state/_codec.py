@@ -399,7 +399,7 @@ _V1_SCHEMA_FINGERPRINTS: Mapping[str, str] = MappingProxyType(
         "execution_event_append": "2db5fe9712b5b6b99fbdf014e3d34f9d20bdcaf419c1f1c616547962d0de5d8d",
         "execution_history_head": "403fad67908ca97614648aa16b681fcecaa205f9ba0847f77ce5dbf666a86b68",
         "execution_history_seal": "dc5a7181d8ee8e23b75390bae449da48eca31f1286159212bb1960d5aad5a0bd",
-        "execution_record": "c8fbccbc839df165ee7e8e24c7930c078aeda8029f505c55065041b43e9ac681",
+        "execution_record": "4f839ba310cd505bdc8aa2e52151c6a27628acf9fc837a8cb6749ac7459b0fcc",
         "execution_run_seal_head": "458b4c2b6722e27546f0948ff87888a07740355c65809c2aff716a7215bcdb0c",
         "execution_start_claim": "a615f3846374e9f5a3e0391188af3644af2d68da55d73980a9f0208fab9f1746",
         "execution_start_reservation": "4c4f6f6bfd6d2d18761bfc14e41facdbdbab354bb006df5a908c00b0be0dbf3e",
@@ -421,7 +421,7 @@ _V1_SCHEMA_FINGERPRINTS: Mapping[str, str] = MappingProxyType(
         "recovery_admission": "8b1607f342e2d64aeff7947c66514a9c9d5ec8a7609c59c3e4fb0c5c5429b813",
         "recovery_checkpoint": "5e1fb5347b99bfd3fef6dd14e20ec17c65f4ba9dc0ced5cfc2853e3b228b1abc",
         "recovery_conversation_intent": "92dc7357513f07e4724dfe5a6229d4bcbfe34efb984f002538b486d2b0cb4605",
-        "recovery_execution_input": "eb0303dd4cdc6295ab841b881073985a9413bb3983e2bd87c7e14dd8a5089c63",
+        "recovery_execution_input": "bbc3a92b2d5732d2ba9efe1b20d2ad4b95d5623b9e0b150fe8ce2346fd5f8a2e",
         "recovery_idempotency_input": "74aba8491b8849d02b3930b7745ddb03914df19ee75ceee466c1fcc53965089b",
         "recovery_integrity_report": "287e89f61adc722da8d2365c7ddd8ae7fa96eac37c58bd530c8f860cd48d750d",
         "recovery_state": "533697b347535207c474066973e2cd32da55ae8259c5e5610c80a74657ddaa7e",
@@ -1978,6 +1978,19 @@ def _validate_v1_codec_definition() -> None:
         raise RuntimeError("GA v1 dataclass encoder manifest contains an unknown type")
     if not set(_V1_DATACLASS_DECODERS).issubset(dataclass_wire_ids):
         raise RuntimeError("GA v1 dataclass decoder manifest contains an unknown type")
+    task_node_fields = tuple(field.name for field in fields(TaskNode))
+    if task_node_fields != ("node_id", "dependencies", "budget_cost", "_input"):
+        raise RuntimeError("GA v1 task_node source contract changed")
+    for wire_id, target in _V1_WIRE_TYPES:
+        if wire_id in custom_dataclasses or not is_dataclass(target):
+            continue
+        actual = _dataclass_schema_fingerprint(target, _V1_CODEC)
+        contract = _V1_DATACLASS_PERSISTENCE[wire_id]
+        if actual != contract.fingerprints[contract.current_revision]:
+            raise RuntimeError(
+                f"GA v1 current dataclass fingerprint changed without a "
+                f"schema revision: {wire_id}"
+            )
     if enum_value_ids != set(enum_wire_ids):
         raise RuntimeError("GA v1 enum value manifest is incomplete")
     try:
