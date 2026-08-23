@@ -41,13 +41,15 @@ jobs:
               return "$rc"
             fi
           }
-          run_check python .bootstrap/apply_runtime_persistence_compat.py || true
+          if ! grep -q 'class _DataclassPersistenceContract' linktools-ai/src/linktools/ai/runtime/state/_codec.py; then
+            run_check python .bootstrap/apply_runtime_persistence_compat.py || true
+          fi
           if [ ! -f "$STATUS" ]; then run_check python .bootstrap/close_migration_schema_boundary.py || true; fi
           if [ ! -f "$STATUS" ]; then run_check python -m compileall -q linktools-ai/src/linktools/ai || true; fi
           if [ ! -f "$STATUS" ]; then run_check ruff check --select E4,E7,E9,F linktools-ai/src/linktools/ai tests/ai || true; fi
           if [ ! -f "$STATUS" ]; then (cd linktools-ai && python -m scripts.build.persistence) >> "$RESULT" 2>&1; rc=$?; echo "===== persistence exit=$rc =====" >> "$RESULT"; if [ "$rc" -ne 0 ]; then echo "$rc" > "$STATUS"; fi; fi
           if [ ! -f "$STATUS" ]; then (cd linktools-ai && python -m scripts.build.architecture) >> "$RESULT" 2>&1; rc=$?; echo "===== architecture exit=$rc =====" >> "$RESULT"; if [ "$rc" -ne 0 ]; then echo "$rc" > "$STATUS"; fi; fi
-          if [ ! -f "$STATUS" ]; then run_check pytest -q tests/ai || true; fi
+          if [ ! -f "$STATUS" ]; then PYTHONPATH=linktools-ai run_check pytest -q tests/ai || true; fi
           if [ ! -f "$STATUS" ]; then echo 0 > "$STATUS"; fi
           cat "$RESULT"
       - name: Commit implementation and validation evidence
