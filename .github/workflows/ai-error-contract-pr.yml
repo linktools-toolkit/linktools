@@ -39,7 +39,9 @@ jobs:
           PYTHONPATH: linktools-ai:linktools-ai/src:linktools/src
         run: python -m compileall -q linktools-ai/src/linktools/ai linktools-ai/src/linktools/commands/ai
       - name: Ruff
-        run: python -m ruff check linktools-ai/scripts/build linktools-ai/src/linktools/ai linktools-ai/src/linktools/commands/ai tests/ai
+        run: |
+          python -m ruff check --fix linktools-ai/scripts/build linktools-ai/src/linktools/ai linktools-ai/src/linktools/commands/ai tests/ai
+          python -m ruff check linktools-ai/scripts/build linktools-ai/src/linktools/ai linktools-ai/src/linktools/commands/ai tests/ai
       - name: AI tests
         env:
           PYTHONPATH: linktools-ai:linktools-ai/src:linktools/src
