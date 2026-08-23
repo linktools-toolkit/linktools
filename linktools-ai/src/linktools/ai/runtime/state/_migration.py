@@ -1,29 +1,31 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""One-time normalization of reconstructable pre-composition Runtime V1 state.
+"""Normalize reconstructable pre-composition Runtime V1 state exactly once.
 
-Normal Runtime decoding remains exact.  This module recognizes only frozen,
-known V1 shapes written before AgentDefinition/AgentBinding identity was split,
-reconstructs their current exact binding through AgentCompiler, and rewrites
-those records to the single current V1 shape before normal Runtime reads begin.
+The normal Runtime codec remains strict. This module recognizes only frozen
+legacy shapes written before AgentDefinition and AgentBinding identities were
+split, reconstructs the current exact binding, and rewrites those records to
+the single current V1 shape before normal Runtime reads begin.
 """
 
 from __future__ import annotations
 
 import importlib
 from collections.abc import Mapping
-from dataclasses import replace
-from typing import Any, get_type_hints
+from dataclasses import fields as dataclass_fields, replace
+from typing import get_type_hints
 
 from pydantic import BaseModel
 
-from ...agent import AgentBinding, AgentCatalog, AgentCompiler, AgentBindingSnapshot
+from ...agent import AgentBinding, AgentBindingSnapshot, AgentCatalog, AgentCompiler
 from ...capability import RuntimeCapability
 from ...core import JsonValue
 from ...errors import AIError, ErrorCode
 from ...spec import AgentSpec, AgentUsageLimits
 from ._codec import (
     _CURRENT_CODEC,
+    _EXECUTION_V1_FIELDS,
+    _RECOVERY_EXECUTION_V1_FIELDS,
     _decode_domain,
     _decode_enveloped_domain,
     encode_domain,
@@ -35,7 +37,6 @@ from ._contracts import (
     ContextProjection,
     ExecutionRecord,
     RecoveryAdmissionRecord,
-    RecoveryExecutionInput,
     SessionRecord,
 )
 from ._plan import RuntimeDomain
@@ -46,14 +47,14 @@ from ._repositories import (
     _domain_data,
 )
 from ._root import RuntimeState
-from ._store import RecordQuery, StateStore, StoredRecord
+from ._store import RecordQuery, StateStore, StateTransaction, StoredRecord, sequence_key
 
 _PAGE_SIZE = 128
-_CURRENT_BINDING_FIELDS = frozenset(
+_MIGRATION_ID = "agent_identity_v1"
+_LEGACY_BINDING_FIELDS = frozenset(
     {
         "version",
         "agent_spec",
-        "agent_digest",
         "output_type_module",
         "output_type_qualname",
         "output_schema_id",
@@ -63,7 +64,6 @@ _CURRENT_BINDING_FIELDS = frozenset(
         "binding_digest",
     }
 )
-_LEGACY_BINDING_FIELDS = _CURRENT_BINDING_FIELDS - {"agent_digest"}
 _LEGACY_AGENT_SPEC_FIELDS = frozenset(
     {
         "id",
@@ -76,29 +76,20 @@ _LEGACY_AGENT_SPEC_FIELDS = frozenset(
         "usage_limits",
     }
 )
-_LEGACY_SESSION_FIELDS = frozenset(
-    {
-        "session_id",
-        "tenant_id",
-        "owner_principal_id",
-        "binding_digest",
-        "status",
-        "revision",
-        "resource_generation",
-        "cwd",
-        "metadata",
-        "created_at",
-        "updated_at",
-        "closed_at",
-        "active_execution_id",
-        "continuation",
-        "history_quality",
-        "history_id",
-    }
+_CURRENT_SESSION_FIELDS = frozenset(
+    field.name for field in dataclass_fields(SessionRecord)
 )
-_CURRENT_SESSION_FIELDS = (_LEGACY_SESSION_FIELDS - {"binding_digest"}) | {"agent_digest"}
-_LEGACY_PROJECTION_FIELDS = frozenset({"binding_digest", "items", "digest"})
-_CURRENT_PROJECTION_FIELDS = frozenset({"agent_digest", "items", "digest"})
+_LEGACY_SESSION_FIELDS = (
+    _CURRENT_SESSION_FIELDS - {"agent_digest"}
+) | {"binding_digest"}
+_CURRENT_PROJECTION_FIELDS = frozenset(
+    field.name for field in dataclass_fields(ContextProjection)
+)
+_LEGACY_PROJECTION_FIELDS = (
+    _CURRENT_PROJECTION_FIELDS - {"agent_digest"}
+) | {"binding_digest"}
+_CURRENT_RECOVERY_INPUT_FIELDS = _RECOVERY_EXECUTION_V1_FIELDS
+_LEGACY_RECOVERY_INPUT_FIELDS = _CURRENT_RECOVERY_INPUT_FIELDS | {"agent_id"}
 
 
 async def migrate_v1_agent_identity_state(
@@ -108,12 +99,12 @@ async def migrate_v1_agent_identity_state(
     *,
     tenant_id: str,
 ) -> int:
-    """Normalize reconstructable legacy V1 Agent identity records in place.
+    """Normalize known legacy V1 Agent identity shapes in place.
 
-    The operation is idempotent.  Current records are never rewritten.  Known
-    legacy records are accepted only when their exact old shape is present and
-    an exact current AgentBinding can be reconstructed.  Unknown/partial shapes
-    continue to fail closed.
+    Per-domain StateStore sequences are completion markers, so normal startup
+    does not rescan history. Markers are written only after every recognized
+    record has been normalized. A crash before that point is safe because the
+    migration is idempotent and current records are never rewritten.
     """
     if not state.ready:
         raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
@@ -127,47 +118,102 @@ async def migrate_v1_agent_identity_state(
     if not isinstance(recovery, RecoveryCheckpointRepositoryImpl):
         raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
 
+    repositories = {
+        RuntimeDomain.CONVERSATION: sessions,
+        RuntimeDomain.EXECUTION: executions,
+        RuntimeDomain.RECOVERY: recovery,
+    }
+    completed = [
+        await _migration_complete(repository, domain)
+        for domain, repository in repositories.items()
+    ]
+    if all(completed):
+        return 0
+
+    # Validate every old-digest -> current-binding relation before any write.
+    # This prevents a malformed execution from partially migrating its Session.
     legacy_bindings: dict[str, AgentBinding] = {}
+    legacy_agents: dict[str, str] = {}
     execution_records = await _records(executions, "execution")
     recovery_records = await _records(recovery, "recovery_admission")
-
     for record in execution_records:
-        _collect_execution_binding(record, compiler, catalog, legacy_bindings)
+        _collect_execution_binding(
+            record, compiler, catalog, legacy_bindings, legacy_agents
+        )
     for record in recovery_records:
-        _collect_recovery_binding(record, compiler, catalog, legacy_bindings)
+        _collect_recovery_binding(
+            record, compiler, catalog, legacy_bindings, legacy_agents
+        )
 
     migrated = 0
     for record in await _records(sessions, "session"):
-        current = _migrate_session_record(record, sessions, catalog, legacy_bindings)
+        current = _migrate_session_record(record, sessions, legacy_agents)
         if current is not None:
             await _replace_data(sessions.state_store, record, _domain_data(current))
             migrated += 1
 
+    # Projection digests are historical references from StoredStepSnapshot and
+    # execution seals. Replace only the identity field and preserve `digest`.
     for domain in (
         RuntimeDomain.CONVERSATION,
         RuntimeDomain.EXECUTION,
         RuntimeDomain.RECOVERY,
     ):
-        archive = state.steps.read_store(domain)
-        history = archive.transcript_repository
-        records = await _records(history, "context_projection")
-        for record in records:
-            data = _migrate_projection_data(record, legacy_bindings)
+        history = state.steps.read_store(domain).transcript_repository
+        for record in await _records(history, "context_projection"):
+            data = _migrate_projection_data(record, legacy_agents)
             if data is not None:
                 await _replace_data(history._store, record, data)
                 migrated += 1
 
+    # Exact execution/recovery records are migrated last. Their old snapshots
+    # are the evidence used above to migrate Session/projection identity.
     for record in execution_records:
-        data = _migrate_execution_data(record, compiler, catalog, legacy_bindings)
+        data = _migrate_execution_data(
+            record, compiler, catalog, legacy_bindings, legacy_agents
+        )
         if data is not None:
             await _replace_data(executions.state_store, record, data)
             migrated += 1
     for record in recovery_records:
-        data = _migrate_recovery_data(record, compiler, catalog, legacy_bindings)
+        data = _migrate_recovery_data(
+            record, compiler, catalog, legacy_bindings, legacy_agents
+        )
         if data is not None:
             await _replace_data(recovery.state_store, record, data)
             migrated += 1
+
+    for domain, repository in repositories.items():
+        await _mark_migration_complete(repository, domain)
     return migrated
+
+
+async def _migration_complete(repository: object, domain: RuntimeDomain) -> bool:
+    key = _migration_key(repository, domain)
+    value = await repository.state_store.read(
+        lambda transaction: transaction.get_sequence(key)
+    )
+    return value > 0
+
+
+async def _mark_migration_complete(repository: object, domain: RuntimeDomain) -> None:
+    key = _migration_key(repository, domain)
+
+    async def mutate(transaction: StateTransaction) -> None:
+        if await transaction.get_sequence(key) == 0:
+            await transaction.next_sequence(key)
+
+    await repository.state_store.mutate(mutate)
+
+
+def _migration_key(repository: object, domain: RuntimeDomain) -> bytes:
+    return sequence_key(
+        repository._namespace,
+        repository._tenant_id,
+        domain.value,
+        "migration",
+        _MIGRATION_ID,
+    )
 
 
 async def _records(repository: object, kind: str) -> tuple[StoredRecord, ...]:
@@ -235,70 +281,100 @@ def _domain_fields(
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     if set(payload) != {"$dataclass", "fields"} or payload.get("$dataclass") != wire_id:
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-    fields = payload.get("fields")
-    if not isinstance(fields, Mapping):
+    raw_fields = payload.get("fields")
+    if not isinstance(raw_fields, Mapping):
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-    return fields
+    return raw_fields
 
 
 def _collect_execution_binding(
     record: StoredRecord,
     compiler: AgentCompiler,
     catalog: AgentCatalog,
-    mappings: dict[str, AgentBinding],
+    bindings: dict[str, AgentBinding],
+    agents: dict[str, str],
 ) -> None:
     fields = _domain_fields(
         record.data,
         type_name="execution_record",
         wire_id="execution_record",
     )
-    binding = fields.get("binding")
+    if frozenset(fields) != _EXECUTION_V1_FIELDS:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    binding = fields["binding"]
     if _is_current_binding(binding):
+        _decode_enveloped_domain(record.data, ExecutionRecord)
         return
     if binding is None:
         raise AIError(
             ErrorCode.STORAGE_VERSION_UNSUPPORTED,
             safe_details={"record": "execution", "reason": "missing_exact_binding"},
         )
-    migrated = _migrate_legacy_binding(binding, compiler)
-    _remember_binding(mappings, migrated[0], migrated[1], catalog)
+    legacy_digest, migrated = _migrate_legacy_binding(binding, compiler)
+    if _decode_domain(fields["binding_digest"], str, _CURRENT_CODEC) != legacy_digest:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    _remember_binding(bindings, agents, legacy_digest, migrated, catalog)
 
 
 def _collect_recovery_binding(
     record: StoredRecord,
     compiler: AgentCompiler,
     catalog: AgentCatalog,
-    mappings: dict[str, AgentBinding],
+    bindings: dict[str, AgentBinding],
+    agents: dict[str, str],
 ) -> None:
     fields = _domain_fields(
         record.data,
         type_name="recovery_admission",
         wire_id="recovery_admission",
     )
-    raw_input = fields.get("input")
-    input_fields = _nested_dataclass_fields(raw_input, "recovery_execution_input")
+    input_fields = _nested_dataclass_fields(
+        fields.get("input"), "recovery_execution_input"
+    )
+    keys = frozenset(input_fields)
     binding = input_fields.get("binding")
-    if _is_current_binding(binding):
+    if keys == _CURRENT_RECOVERY_INPUT_FIELDS:
+        if not _is_current_binding(binding):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        _decode_enveloped_domain(record.data, RecoveryAdmissionRecord)
         return
+    if keys != _LEGACY_RECOVERY_INPUT_FIELDS:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     if binding is None:
         raise AIError(
             ErrorCode.STORAGE_VERSION_UNSUPPORTED,
-            safe_details={"record": "recovery_admission", "reason": "missing_exact_binding"},
+            safe_details={
+                "record": "recovery_admission",
+                "reason": "missing_exact_binding",
+            },
         )
-    migrated = _migrate_legacy_binding(binding, compiler)
-    _remember_binding(mappings, migrated[0], migrated[1], catalog)
+    if _is_current_binding(binding):
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    legacy_digest, migrated = _migrate_legacy_binding(binding, compiler)
+    if _decode_domain(input_fields["binding_digest"], str, _CURRENT_CODEC) != legacy_digest:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    agent_id = _decode_domain(input_fields["agent_id"], str, _CURRENT_CODEC)
+    if agent_id != migrated.definition.spec.id:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    _remember_binding(bindings, agents, legacy_digest, migrated, catalog)
 
 
 def _remember_binding(
-    mappings: dict[str, AgentBinding],
+    bindings: dict[str, AgentBinding],
+    agents: dict[str, str],
     legacy_digest: str,
     binding: AgentBinding,
     catalog: AgentCatalog,
 ) -> None:
-    previous = mappings.get(legacy_digest)
+    previous = bindings.get(legacy_digest)
     if previous is not None and previous.snapshot != binding.snapshot:
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-    mappings[legacy_digest] = binding
+    agent_digest = binding.definition.digest
+    previous_agent = agents.get(legacy_digest)
+    if previous_agent is not None and previous_agent != agent_digest:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    bindings[legacy_digest] = binding
+    agents[legacy_digest] = agent_digest
     catalog.register_definition(binding.definition)
     catalog.register_binding(binding)
 
@@ -307,23 +383,26 @@ def _migrate_execution_data(
     record: StoredRecord,
     compiler: AgentCompiler,
     catalog: AgentCatalog,
-    mappings: dict[str, AgentBinding],
+    bindings: dict[str, AgentBinding],
+    agents: dict[str, str],
 ) -> Mapping[str, JsonValue] | None:
     fields = _domain_fields(
         record.data,
         type_name="execution_record",
         wire_id="execution_record",
     )
-    binding = fields.get("binding")
+    if frozenset(fields) != _EXECUTION_V1_FIELDS:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    binding = fields["binding"]
     if _is_current_binding(binding):
         _decode_enveloped_domain(record.data, ExecutionRecord)
         return None
     if binding is None:
         raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
     legacy_digest, migrated = _migrate_legacy_binding(binding, compiler)
-    _remember_binding(mappings, legacy_digest, migrated, catalog)
-    if _decode_domain(fields.get("binding_digest"), str, _CURRENT_CODEC) != legacy_digest:
+    if _decode_domain(fields["binding_digest"], str, _CURRENT_CODEC) != legacy_digest:
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    _remember_binding(bindings, agents, legacy_digest, migrated, catalog)
     current_fields = dict(fields)
     current_fields["binding_digest"] = encode_domain(migrated.digest)
     current_fields["binding"] = migrated.snapshot.to_payload()
@@ -336,31 +415,49 @@ def _migrate_recovery_data(
     record: StoredRecord,
     compiler: AgentCompiler,
     catalog: AgentCatalog,
-    mappings: dict[str, AgentBinding],
+    bindings: dict[str, AgentBinding],
+    agents: dict[str, str],
 ) -> Mapping[str, JsonValue] | None:
     fields = _domain_fields(
         record.data,
         type_name="recovery_admission",
         wire_id="recovery_admission",
     )
-    raw_input = fields.get("input")
-    input_fields = _nested_dataclass_fields(raw_input, "recovery_execution_input")
+    input_fields = _nested_dataclass_fields(
+        fields.get("input"), "recovery_execution_input"
+    )
+    keys = frozenset(input_fields)
     binding = input_fields.get("binding")
-    if _is_current_binding(binding):
+    if keys == _CURRENT_RECOVERY_INPUT_FIELDS:
+        if not _is_current_binding(binding):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         _decode_enveloped_domain(record.data, RecoveryAdmissionRecord)
         return None
+    if keys != _LEGACY_RECOVERY_INPUT_FIELDS:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     if binding is None:
         raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
-    legacy_digest, migrated = _migrate_legacy_binding(binding, compiler)
-    _remember_binding(mappings, legacy_digest, migrated, catalog)
-    if _decode_domain(input_fields.get("binding_digest"), str, _CURRENT_CODEC) != legacy_digest:
+    if _is_current_binding(binding):
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-    next_input_fields = dict(input_fields)
+    legacy_digest, migrated = _migrate_legacy_binding(binding, compiler)
+    if _decode_domain(input_fields["binding_digest"], str, _CURRENT_CODEC) != legacy_digest:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    agent_id = _decode_domain(input_fields["agent_id"], str, _CURRENT_CODEC)
+    if agent_id != migrated.definition.spec.id:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    _remember_binding(bindings, agents, legacy_digest, migrated, catalog)
+    next_input_fields = {
+        key: value for key, value in input_fields.items() if key != "agent_id"
+    }
     next_input_fields["binding_digest"] = encode_domain(migrated.digest)
     next_input_fields["binding"] = migrated.snapshot.to_payload()
-    next_input = {"$dataclass": "recovery_execution_input", "fields": next_input_fields}
+    if frozenset(next_input_fields) != _CURRENT_RECOVERY_INPUT_FIELDS:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     next_fields = dict(fields)
-    next_fields["input"] = next_input
+    next_fields["input"] = {
+        "$dataclass": "recovery_execution_input",
+        "fields": next_input_fields,
+    }
     data = _rebuild_data("recovery_admission", next_fields)
     value = _decode_enveloped_domain(data, RecoveryAdmissionRecord)
     return _domain_data(value)
@@ -369,8 +466,7 @@ def _migrate_recovery_data(
 def _migrate_session_record(
     record: StoredRecord,
     repository: SessionRepositoryImpl,
-    catalog: AgentCatalog,
-    mappings: Mapping[str, AgentBinding],
+    agents: Mapping[str, str],
 ) -> SessionRecord | None:
     fields = _domain_fields(
         record.data,
@@ -388,27 +484,16 @@ def _migrate_session_record(
     for name in _CURRENT_SESSION_FIELDS - {"agent_digest"}:
         decoded[name] = _decode_domain(fields[name], hints[name], _CURRENT_CODEC)
     legacy_digest = _decode_domain(fields["binding_digest"], str, _CURRENT_CODEC)
-    if not isinstance(legacy_digest, str):
-        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-    migrated = mappings.get(legacy_digest)
-    if migrated is not None:
-        agent_digest = migrated.definition.digest
-    else:
-        if decoded.get("continuation") is not None or decoded.get("active_execution_id") is not None:
-            raise AIError(
-                ErrorCode.STORAGE_VERSION_UNSUPPORTED,
-                safe_details={"record": "session", "reason": "binding_evidence_unavailable"},
-            )
-        metadata = decoded.get("metadata")
-        if not isinstance(metadata, Mapping):
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        agent_id = metadata.get("linktools.ai.agent_id")
-        if not isinstance(agent_id, str) or not agent_id.strip():
-            raise AIError(
-                ErrorCode.AGENT_DEFINITION_UNAVAILABLE,
-                safe_details={"session_id": decoded.get("session_id")},
-            )
-        agent_digest = catalog.root_definition(agent_id).digest
+    agent_digest = agents.get(legacy_digest)
+    if agent_digest is None:
+        raise AIError(
+            ErrorCode.STORAGE_VERSION_UNSUPPORTED,
+            safe_details={
+                "record": "session",
+                "reason": "binding_evidence_unavailable",
+                "session_id": decoded.get("session_id"),
+            },
+        )
     decoded["agent_digest"] = agent_digest
     try:
         value = SessionRecord(**decoded)
@@ -421,7 +506,7 @@ def _migrate_session_record(
 
 def _migrate_projection_data(
     record: StoredRecord,
-    mappings: Mapping[str, AgentBinding],
+    agents: Mapping[str, str],
 ) -> Mapping[str, JsonValue] | None:
     fields = _domain_fields(
         record.data,
@@ -435,14 +520,17 @@ def _migrate_projection_data(
     if keys != _LEGACY_PROJECTION_FIELDS:
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     legacy_digest = _decode_domain(fields["binding_digest"], str, _CURRENT_CODEC)
-    binding = mappings.get(legacy_digest)
-    if binding is None:
+    agent_digest = agents.get(legacy_digest)
+    if agent_digest is None:
         raise AIError(
             ErrorCode.STORAGE_VERSION_UNSUPPORTED,
-            safe_details={"record": "context_projection", "reason": "binding_evidence_unavailable"},
+            safe_details={
+                "record": "context_projection",
+                "reason": "binding_evidence_unavailable",
+            },
         )
     current_fields = {
-        "agent_digest": encode_domain(binding.definition.digest),
+        "agent_digest": encode_domain(agent_digest),
         "items": fields["items"],
         "digest": fields["digest"],
     }
@@ -496,23 +584,23 @@ def _migrate_legacy_binding(
 def _legacy_agent_spec(value: object) -> AgentSpec:
     if not isinstance(value, Mapping) or frozenset(value) != _LEGACY_AGENT_SPEC_FIELDS:
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-    metadata = value.get("metadata")
-    if not isinstance(metadata, Mapping):
+    if not isinstance(value.get("metadata"), Mapping):
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     instructions = value.get("instructions")
     allow_tools = value.get("allow_tools")
     if not isinstance(instructions, list) or not isinstance(allow_tools, list):
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-    limits = _usage_limits(value.get("usage_limits"))
     try:
         return AgentSpec(
             id=_string(value.get("id")),
             revision=_positive_int(value.get("revision")),
             model=_string(value.get("model")),
             system_prompt=_string(value.get("system_prompt"), allow_empty=True),
-            instructions=tuple(_string(item, allow_empty=True) for item in instructions),
+            instructions=tuple(
+                _string(item, allow_empty=True) for item in instructions
+            ),
             allow_tools=tuple(_string(item) for item in allow_tools),
-            usage_limits=limits,
+            usage_limits=_usage_limits(value.get("usage_limits")),
         )
     except (TypeError, ValueError) as error:
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
@@ -565,13 +653,16 @@ def _nested_dataclass_fields(value: object, wire_id: str) -> Mapping[str, object
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     if set(value) != {"$dataclass", "fields"} or value.get("$dataclass") != wire_id:
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-    fields = value.get("fields")
-    if not isinstance(fields, Mapping):
+    raw_fields = value.get("fields")
+    if not isinstance(raw_fields, Mapping):
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-    return fields
+    return raw_fields
 
 
-def _rebuild_data(wire_id: str, fields: Mapping[str, object]) -> Mapping[str, JsonValue]:
+def _rebuild_data(
+    wire_id: str,
+    fields: Mapping[str, object],
+) -> Mapping[str, JsonValue]:
     return encode_envelope(
         {
             "type": wire_id,
@@ -581,14 +672,19 @@ def _rebuild_data(wire_id: str, fields: Mapping[str, object]) -> Mapping[str, Js
 
 
 def _is_current_binding(value: object) -> bool:
-    if not isinstance(value, Mapping) or frozenset(value) != _CURRENT_BINDING_FIELDS:
+    if not isinstance(value, Mapping):
         return False
-    AgentBindingSnapshot.from_payload(value)
+    try:
+        AgentBindingSnapshot.from_payload(value)
+    except AIError:
+        return False
     return True
 
 
 def _json_mapping(value: object) -> Mapping[str, JsonValue]:
-    if not isinstance(value, Mapping) or any(not isinstance(key, str) for key in value):
+    if not isinstance(value, Mapping) or any(
+        not isinstance(key, str) for key in value
+    ):
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     return value  # type: ignore[return-value]
 
@@ -607,7 +703,9 @@ def _positive_int(value: object) -> int:
 
 def _digest(value: object) -> str:
     text = _string(value)
-    if len(text) != 64 or any(character not in "0123456789abcdef" for character in text):
+    if len(text) != 64 or any(
+        character not in "0123456789abcdef" for character in text
+    ):
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     return text
 
