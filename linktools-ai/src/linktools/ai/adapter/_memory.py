@@ -387,11 +387,11 @@ def _operation_input(operation: "MemoryOperation | None", namespace_digest: str,
 
 
 def _memory_id(namespace_digest: str, logical_path: str) -> str:
-    return hashlib.sha256(f"{namespace_digest}\0{logical_path}".encode("utf-8")).hexdigest()
+    return hashlib.sha256(f"{namespace_digest}\0{logical_path}".encode()).hexdigest()
 
 
 def _operation_id(namespace_digest: str, operation_id: str) -> str:
-    return hashlib.sha256(f"{namespace_digest}\0{operation_id}".encode("utf-8")).hexdigest()
+    return hashlib.sha256(f"{namespace_digest}\0{operation_id}".encode()).hexdigest()
 
 
 def _version(revision: int) -> str:
@@ -415,7 +415,7 @@ def _decode_mutation(value: str) -> MemoryMutation:
     try:
         raw = json.loads(value)
         if not isinstance(raw, dict):
-            raise ValueError
+            raise ValueError  # noqa: TRY004
         return MemoryMutation(None if raw.get("version") is None else str(raw["version"]), False, bool(raw["existed"]))
     except (TypeError, ValueError, json.JSONDecodeError) as error:
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error

@@ -14,7 +14,12 @@ from ..asset import AssetRef, AssetRepository
 from ..core import Principal, ResourceRef, canonical_sha256
 from ..errors import AIError, ErrorCode
 from ..spec import MCPServerSpec
-from ._contract import CapabilityBinding, CapabilityMaterializationContext, CapabilityRefResolution, validate_fingerprint
+from ._contract import (
+    CapabilityBinding,
+    CapabilityMaterializationContext,
+    CapabilityRefResolution,
+    validate_fingerprint,
+)
 
 
 class MCPRuntime(Protocol):
@@ -75,7 +80,7 @@ class MCPServerCapabilityBinding:
             execution_root=str(context.execution_root),
         )
         if len(toolsets) != len(selected) or len({toolset.id for toolset in toolsets}) != len(toolsets):
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
         return tuple(
             MCP(
                 local=toolset.prefixed(f"mcp__{mcp_server_namespace(server.id)}__"),
@@ -179,8 +184,8 @@ def _resolution_payload(resolution: CapabilityRefResolution) -> dict[str, object
 
 
 __all__ = [
-    "MCPRuntime",
     "MCPCapabilityProvider",
+    "MCPRuntime",
     "MCPServerCapabilityBinding",
     "bind_mcp_capability",
     "mcp_server_namespace",

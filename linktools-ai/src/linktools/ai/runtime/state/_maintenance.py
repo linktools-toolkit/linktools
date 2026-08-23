@@ -3,8 +3,8 @@
 """Offline Runtime storage validation and object mark-and-sweep."""
 
 from collections.abc import Awaitable, Callable, Mapping, Sequence
-from contextlib import AsyncExitStack
-from typing import AsyncContextManager, Protocol
+from contextlib import AbstractAsyncContextManager, AsyncExitStack
+from typing import Protocol
 
 from linktools.core import environ
 
@@ -40,7 +40,7 @@ class ObjectRouter(Protocol):
 
 
 class OfflineExclusiveStorage(Protocol):
-    def offline_exclusivity(self) -> AsyncContextManager[None]: ...
+    def offline_exclusivity(self) -> AbstractAsyncContextManager[None]: ...
 
 
 class RuntimeStorageInspection:

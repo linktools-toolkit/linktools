@@ -26,7 +26,13 @@ from ..core import (
 from ..errors import AIError, ErrorCode
 from ..observe import RunSnapshot
 from ..storage import ObjectRef
-from ..task import CancelGraphRequest, TaskGraphHandle, TaskGraphRequest, TaskGraphResult, TaskGraphView
+from ..task import (
+    CancelGraphRequest,
+    TaskGraphHandle,
+    TaskGraphRequest,
+    TaskGraphResult,
+    TaskGraphView,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -107,6 +113,44 @@ class ExecutionResult:
     output_schema_revision: int | None
     output_schema_fingerprint: str | None
     usage: UsageMetrics
+    error_code: "str | None" = None
+    safe_error_details: "Mapping[str, JsonValue]" = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        details = dict(self.safe_error_details)
+        object.__setattr__(self, "safe_error_details", details)
+        if self.status is ExecutionStatus.SUCCEEDED:
+            if self.error_code is not None or details:
+                raise ValueError("successful execution result cannot carry an error")
+            return
+        if self.status is ExecutionStatus.CANCELLED:
+            if self.error_code != ErrorCode.EXECUTION_CANCELLED.value:
+                raise ValueError("cancelled execution result requires EXECUTION_CANCELLED")
+            if _has_output_contract(self):
+                raise ValueError("cancelled execution result cannot carry output")
+            return
+        if self.status is ExecutionStatus.FAILED:
+            if self.error_code is None:
+                raise ValueError("failed execution result requires an error code")
+            try:
+                code = ErrorCode(self.error_code)
+            except ValueError as error:
+                raise ValueError("failed execution result contains an unknown error code") from error
+            if code is ErrorCode.EXECUTION_CANCELLED:
+                raise ValueError("failed execution result cannot carry EXECUTION_CANCELLED")
+            if _has_output_contract(self):
+                raise ValueError("failed execution result cannot carry output")
+            return
+        raise ValueError("execution result requires a terminal status")
+
+
+def _has_output_contract(result: ExecutionResult) -> bool:
+    return (
+        result.output is not None
+        or result.output_schema_id is not None
+        or result.output_schema_revision is not None
+        or result.output_schema_fingerprint is not None
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -570,17 +614,59 @@ class BudgetService(Protocol):
 
 
 __all__ = [
-    "ApprovalDecisionRequest", "ApprovalDecisionResult", "ApprovalService", "ApprovalView",
-    "ExternalSupplyRequest", "ExternalSupplyResult", "ExternalService",
-    "ArtifactDownload", "ArtifactService", "ArtifactView", "BudgetService", "CancelExecutionRequest",
-    "BudgetReservation", "BudgetReservationRequest", "BudgetSettlement", "BudgetSettlementRequest",
-    "CancelExecutionResult", "CancelGraphRequest", "CloseSessionRequest", "CompareEvaluationRequest",
-    "CreateSessionRequest", "EvaluationComparison", "EvaluationHandle", "EvaluationService",
-    "EvaluationView", "EventService", "ExecutionEvent", "ExecutionStreamEvent", "ExecutionHandle",
-    "ExecutionRequest", "ExecutionResult", "ExecutionService", "ExecutionView",
-    "ExecutionHistoryItem", "ExecutionHistoryReader", "SessionHistoryItem", "SessionHistoryReader",
-    "ForkExecutionRequest", "ForkSessionRequest", "ListSessionRequest", "LoadedSession", "Page",
-    "ReplayEvaluationRequest", "ResumeSessionRequest", "RetryExecutionRequest", "RunEvaluationRequest",
-    "SessionService", "SessionView", "TaskService", "ExecutionTraceItem", "TranscriptItem", "UpdateSessionRequest",
-    "WorkflowGateway", "WorkflowQueryResult", "WorkflowUpdateResult",
+    "ApprovalDecisionRequest",
+    "ApprovalDecisionResult",
+    "ApprovalService",
+    "ApprovalView",
+    "ArtifactDownload",
+    "ArtifactService",
+    "ArtifactView",
+    "BudgetReservation",
+    "BudgetReservationRequest",
+    "BudgetService",
+    "BudgetSettlement",
+    "BudgetSettlementRequest",
+    "CancelExecutionRequest",
+    "CancelExecutionResult",
+    "CancelGraphRequest",
+    "CloseSessionRequest",
+    "CompareEvaluationRequest",
+    "CreateSessionRequest",
+    "EvaluationComparison",
+    "EvaluationHandle",
+    "EvaluationService",
+    "EvaluationView",
+    "EventService",
+    "ExecutionEvent",
+    "ExecutionHandle",
+    "ExecutionHistoryItem",
+    "ExecutionHistoryReader",
+    "ExecutionRequest",
+    "ExecutionResult",
+    "ExecutionService",
+    "ExecutionStreamEvent",
+    "ExecutionTraceItem",
+    "ExecutionView",
+    "ExternalService",
+    "ExternalSupplyRequest",
+    "ExternalSupplyResult",
+    "ForkExecutionRequest",
+    "ForkSessionRequest",
+    "ListSessionRequest",
+    "LoadedSession",
+    "Page",
+    "ReplayEvaluationRequest",
+    "ResumeSessionRequest",
+    "RetryExecutionRequest",
+    "RunEvaluationRequest",
+    "SessionHistoryItem",
+    "SessionHistoryReader",
+    "SessionService",
+    "SessionView",
+    "TaskService",
+    "TranscriptItem",
+    "UpdateSessionRequest",
+    "WorkflowGateway",
+    "WorkflowQueryResult",
+    "WorkflowUpdateResult",
 ]

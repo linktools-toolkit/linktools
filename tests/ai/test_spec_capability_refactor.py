@@ -5,10 +5,11 @@
 import json
 
 import pytest
-from pydantic_ai.tools import ToolDefinition
-
-from linktools.ai.agent import select_platform_tool_names
-from linktools.ai.agent._capabilities import PLAN_SAFE_METADATA_KEY, tool_allowed_in_planning
+from linktools.ai.agent import select_platform_tool_names, tool_name_allowed
+from linktools.ai.agent._capabilities import (
+    PLAN_SAFE_METADATA_KEY,
+    tool_allowed_in_planning,
+)
 from linktools.ai.asset import AssetRef
 from linktools.ai.capability._skill import (
     SkillCatalogSnapshot,
@@ -19,11 +20,13 @@ from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.spec import (
     AgentSpec,
     AgentSpecCodec,
+    AgentUsageLimits,
     MCPServerSpec,
     MCPServerSpecCodec,
     SkillSpec,
     SkillSpecCodec,
 )
+from pydantic_ai.tools import ToolDefinition
 
 
 def test_platform_tool_selection_keeps_planning_outside_allow_tools() -> None:
@@ -44,6 +47,14 @@ def test_platform_tool_selection_keeps_planning_outside_allow_tools() -> None:
         memory_scope=None,
         subagent_available=True,
     ) == ("delegate_task",)
+
+
+def test_platform_tool_selection_honors_wildcard_allow_tools() -> None:
+    assert tool_name_allowed("read_memory", ("*",))
+    assert select_platform_tool_names(
+        allow_tools=("*",),
+        memory_scope="memory",
+    ) == ("delete_memory", "read_memory", "search_memory", "write_memory")
 
 
 def test_planning_gate_requires_framework_filesystem_provenance() -> None:
@@ -157,14 +168,61 @@ def test_asset_spec_codecs_reject_type_coercion(codec: object, payload: dict[str
 
 
 def test_spec_constructors_reject_mismatched_runtime_types() -> None:
-    with pytest.raises(ValueError):
+    with pytest.raises(TypeError):
+        AgentUsageLimits(model_requests=True)
+    with pytest.raises(TypeError):
+        AgentSpec(1, 1, "default")
+    with pytest.raises(TypeError):
+        AgentSpec("agent", True, "default")
+    with pytest.raises(TypeError):
+        AgentSpec("agent", 1, 1)
+    with pytest.raises(TypeError):
         AgentSpec("agent", 1, "default", instructions="not-an-array")
-    with pytest.raises(ValueError):
+    with pytest.raises(TypeError):
+        AgentSpec("agent", 1, "default", instructions=(1,))
+    with pytest.raises(TypeError):
+        AgentSpec("agent", 1, "default", metadata=[])
+    with pytest.raises(TypeError):
         AgentSpec("agent", 1, "default", usage_limits=object())
-    with pytest.raises(ValueError):
+    with pytest.raises(TypeError):
+        SkillSpec(1, 1, "content")
+    with pytest.raises(TypeError):
         SkillSpec("skill", True, "content")
-    with pytest.raises(ValueError):
+    with pytest.raises(TypeError):
+        SkillSpec("skill", 1, 1)
+    with pytest.raises(TypeError):
+        MCPServerSpec(1, 1, "echo")
+    with pytest.raises(TypeError):
+        MCPServerSpec("mcp", True, "echo")
+    with pytest.raises(TypeError):
+        MCPServerSpec("mcp", 1, 1)
+    with pytest.raises(TypeError):
         MCPServerSpec("mcp", 1, "echo", args="not-an-array")
+    with pytest.raises(TypeError):
+        MCPServerSpec("mcp", 1, "echo", args=(1,))
+
+
+def test_spec_constructors_reject_invalid_values() -> None:
+    with pytest.raises(ValueError):
+        AgentUsageLimits()
+    with pytest.raises(ValueError):
+        AgentUsageLimits(model_requests=0)
+    with pytest.raises(ValueError):
+        AgentSpec("", 1, "default")
+    with pytest.raises(ValueError):
+        AgentSpec("agent", 0, "default")
+    with pytest.raises(ValueError):
+        AgentSpec("agent", 1, "")
+    with pytest.raises(ValueError):
+        SkillSpec("", 1, "content")
+    with pytest.raises(ValueError):
+        SkillSpec("skill", 0, "content")
+    with pytest.raises(ValueError):
+        MCPServerSpec("", 1, "echo")
+    with pytest.raises(ValueError):
+        MCPServerSpec("mcp", 0, "echo")
+    with pytest.raises(ValueError):
+        MCPServerSpec("mcp", 1, "")
 
 
 def test_skill_catalog_snapshot_is_sorted_and_immutable() -> None:

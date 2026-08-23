@@ -17,7 +17,13 @@ except ModuleNotFoundError:
     _acp = None
     _acp_schema = None
 
-from .core import ExecutionDeltaType, ExecutionEventType, JsonValue, Principal, validate_memory_scope
+from .core import (
+    ExecutionDeltaType,
+    ExecutionEventType,
+    JsonValue,
+    Principal,
+    validate_memory_scope,
+)
 from .errors import AIError
 from .runtime import CancelExecutionRequest, ListSessionRequest, Runtime
 from .workspace import Workspace, open_workspace_runtime

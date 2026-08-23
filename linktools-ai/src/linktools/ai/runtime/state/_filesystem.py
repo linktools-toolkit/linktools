@@ -42,8 +42,8 @@ from ._store import (
     OperationQuery,
     OperationScanCursor,
     RecordQuery,
-    RecordScanCursor,
     RecordReplacement,
+    RecordScanCursor,
     StateCallback,
     StateGroupCallback,
     StateStorageGroup,
@@ -303,15 +303,12 @@ class _FilesystemCache:
         path = self._root / "operations" / "streams" / stream[:2] / stream / f"{sequence:020d}.ref"
         if not path.is_file():
             return None
-        try:
-            _require_layout_path(
-                path,
-                self._root,
-                f"operations/streams/{stream[:2]}/{stream}/{sequence:020d}.ref",
-            )
-            key = _read_operation_ref(path)
-        except AIError:
-            raise
+        _require_layout_path(
+            path,
+            self._root,
+            f"operations/streams/{stream[:2]}/{stream}/{sequence:020d}.ref",
+        )
+        key = _read_operation_ref(path)
         operation = self.get_operation(key)
         if (
             operation is None
@@ -1016,9 +1013,9 @@ class FilesystemStateStorageGroup:
             cancellation = cancellation_error
             try:
                 await asyncio.shield(physical)
-            except BaseException as commit_error:
+            except BaseException as commit_error:  # noqa: BLE001
                 error = commit_error
-        except BaseException as commit_error:
+        except BaseException as commit_error:  # noqa: BLE001
             error = commit_error
         if error is not None:
             outcome = await _await_thread(lambda: self._reconcile_sync(base, target))
@@ -1061,7 +1058,7 @@ class FilesystemStateStorageGroup:
         try:
             self._recover_sync()
             generation = self._read_generation()
-        except BaseException:
+        except BaseException:  # noqa: BLE001
             return "unknown"
         if generation == target:
             return "committed"
@@ -1393,9 +1390,9 @@ class FilesystemStateStore:
             cancellation = error
             try:
                 await asyncio.shield(physical)
-            except BaseException as commit_error:
+            except BaseException as commit_error:  # noqa: BLE001
                 physical_error = commit_error
-        except BaseException as error:
+        except BaseException as error:  # noqa: BLE001
             physical_error = error
 
         if physical_error is not None:
@@ -1462,7 +1459,7 @@ class FilesystemStateStore:
                 lambda value: _write_text(self._root / "generation", str(value)),
             )
             generation = self._generation()
-        except Exception:
+        except Exception:  # noqa: BLE001
             return "unknown"
         if generation == target:
             return "committed"
@@ -2441,7 +2438,7 @@ def _json_bytes(value: Mapping[str, object]) -> bytes:
 def _read_json(path: Path) -> Mapping[str, object]:
     value = json.loads(path.read_text(encoding="utf-8"))
     if not isinstance(value, Mapping):
-        raise ValueError("JSON root must be an object")
+        raise ValueError("JSON root must be an object")  # noqa: TRY004
     return value
 
 

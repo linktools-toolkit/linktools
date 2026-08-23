@@ -34,12 +34,12 @@ def _json_value(value: object, *, reading: bool) -> JsonValue:
             if not isinstance(key, str):
                 if reading:
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                raise ValueError("model message persistence requires string object keys")
+                raise TypeError("model message persistence requires string object keys")
             result[key] = _json_value(item, reading=reading)
         return result
     if reading:
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-    raise ValueError("model message persistence contains a non-JSON value")
+    raise TypeError("model message persistence contains a non-JSON value")
 
 
 def encode_model_messages(messages: Sequence[ModelMessage]) -> bytes:

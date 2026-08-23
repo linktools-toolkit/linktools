@@ -941,9 +941,7 @@ def column_type_matches(
         return False
     if isinstance(expected_type, JSON) and not _json_compatible(expected_type, actual_type):
         return False
-    if _type_family(expected_type) == "integer" and not _integer_compatible(dialect_name, expected_type, actual_type):
-        return False
-    return True
+    return not (_type_family(expected_type) == "integer" and not _integer_compatible(dialect_name, expected_type, actual_type))
 
 
 def _type_family(value: object) -> str:

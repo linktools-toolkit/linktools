@@ -107,7 +107,7 @@ class HmacCursorSigner:
                 raise ValueError("signature")
             value = json.loads(raw.decode("utf-8"))
             if not isinstance(value, dict) or not isinstance(value.get("include_deleted"), bool):
-                raise ValueError("cursor fields")
+                raise ValueError("cursor fields")  # noqa: TRY004
             payload = CursorPayload(
                 int(value["cursor_version"]),
                 str(value["tenant_id"]),

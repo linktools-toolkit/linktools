@@ -60,7 +60,7 @@ async def run_durable_commit(
         operation_error = error
         value, task_error = await _settle_task(task)
         operation_error = task_error
-    except BaseException as error:
+    except BaseException as error:  # noqa: BLE001
         operation_error = error
 
     if operation_error is None:
@@ -95,7 +95,7 @@ async def run_durable_commit(
             error=error,
             cancelled=cancellation_requested,
         )
-    except BaseException as error:
+    except BaseException as error:  # noqa: BLE001
         return DurableCommitResult(
             DurableCommitState.UNRESOLVED,
             error=error,
@@ -129,7 +129,7 @@ async def _settle_task(
             continue
     try:
         return task.result(), None
-    except BaseException as error:
+    except BaseException as error:  # noqa: BLE001
         return None, error
 
 

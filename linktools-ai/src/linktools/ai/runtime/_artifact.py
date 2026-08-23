@@ -28,12 +28,12 @@ from ..core import (
     canonical_sha256,
 )
 from ..errors import AIError, ErrorCode
+from .service_api import ArtifactDownload, ArtifactView
 from .state._contracts import (
+    ArtifactState,
     OperationLedgerInput,
     OperationLedgerRecord,
-    ArtifactState,
 )
-from .service_api import ArtifactDownload, ArtifactView
 
 _logger = environ.get_logger("ai.runtime.artifact")
 
@@ -108,7 +108,7 @@ def _decode_grant(token: str) -> dict[str, str | int]:
     padding = "=" * (-len(token) % 4)
     value = json.loads(base64.urlsafe_b64decode((token + padding).encode("ascii")).decode("utf-8"))
     if not isinstance(value, dict):
-        raise ValueError("grant payload must be an object")
+        raise ValueError("grant payload must be an object")  # noqa: TRY004
     return value
 
 

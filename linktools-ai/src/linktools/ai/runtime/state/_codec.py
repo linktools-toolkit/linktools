@@ -1812,21 +1812,21 @@ def _optional_string(value: object) -> str | None:
     if value is None:
         return None
     if not isinstance(value, str):
-        raise ValueError("value must be a string or null")
+        raise ValueError("value must be a string or null")  # noqa: TRY004
     return value
 
 
 def _integer(value: Mapping[str, object], key: str) -> int:
     result = value[key]
     if isinstance(result, bool) or not isinstance(result, int):
-        raise ValueError(f"{key} must be an integer")
+        raise ValueError(f"{key} must be an integer")  # noqa: TRY004
     return result
 
 
 def _bool(value: Mapping[str, object], key: str) -> bool:
     result = value[key]
     if not isinstance(result, bool):
-        raise ValueError(f"{key} must be a boolean")
+        raise ValueError(f"{key} must be a boolean")  # noqa: TRY004
     return result
 
 
@@ -1844,7 +1844,7 @@ def _optional_digest(value: object) -> bytes | None:
     if value is None:
         return None
     if not isinstance(value, str):
-        raise ValueError("digest must be a string or null")
+        raise ValueError("digest must be a string or null")  # noqa: TRY004
     return _digest_wire(value)
 
 
@@ -1852,7 +1852,7 @@ def _optional_datetime(value: object) -> datetime | None:
     if value is None:
         return None
     if not isinstance(value, str):
-        raise ValueError("timestamp must be a string or null")
+        raise ValueError("timestamp must be a string or null")  # noqa: TRY004
     result = datetime.fromisoformat(value)
     if result.tzinfo is None:
         raise ValueError("timestamp must be timezone-aware")
@@ -1947,13 +1947,13 @@ _validate_v1_codec_definition()
 
 
 __all__ = [
-    "CanonicalEnvelope",
     "CURRENT_DATA_VERSION",
-    "canonical_digest",
-    "decode_domain",
+    "CanonicalEnvelope",
     "_decode_enveloped_domain",
     "_decode_step_envelope",
+    "canonical_digest",
     "decode_alias",
+    "decode_domain",
     "decode_envelope",
     "decode_fact",
     "decode_operation",

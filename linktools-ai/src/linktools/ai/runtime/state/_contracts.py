@@ -405,7 +405,7 @@ class ExecutionRecord:
 
     def __post_init__(self) -> None:
         if not isinstance(self.planning, bool) or not isinstance(self.thinking, bool):
-            raise ValueError("execution modes must be boolean")
+            raise TypeError("execution modes must be boolean")
         if self.binding is None:
             if self.planning or self.thinking:
                 raise ValueError("legacy execution without binding cannot enable modes")
@@ -845,9 +845,9 @@ class RecoveryExecutionInput:
         if isinstance(prompt, str):
             object.__setattr__(self, "user_prompt", StoredPayload.inline_text(prompt))
         elif not isinstance(prompt, StoredPayload):
-            raise ValueError("recovery prompt payload is invalid")
+            raise TypeError("recovery prompt payload is invalid")
         if not isinstance(self.planning, bool) or not isinstance(self.thinking, bool):
-            raise ValueError("recovery execution modes must be boolean")
+            raise TypeError("recovery execution modes must be boolean")
         if self.binding is None:
             if self.planning or self.thinking:
                 raise ValueError("legacy recovery input without binding cannot enable modes")
@@ -860,7 +860,7 @@ class RecoveryExecutionInput:
     def prompt_text(self) -> str:
         value = self.user_prompt.decode()
         if not isinstance(value, str):
-            raise ValueError("recovery prompt payload is not text")
+            raise ValueError("recovery prompt payload is not text")  # noqa: TRY004
         return value
 
 
@@ -1464,15 +1464,16 @@ class RecoveryState:
 
 
 __all__ = [
+    "AgentAttemptClaim",
     "ApprovalRecord",
     "ApprovalRepository",
     "ArtifactRecord",
     "ArtifactRepository",
     "ArtifactState",
+    "ContextProjection",
     "ConversationCursor",
     "ConversationHistoryRecord",
     "ConversationHistoryRepository",
-    "ContextProjection",
     "ConversationState",
     "EvaluationRecord",
     "EvaluationRepository",
@@ -1486,7 +1487,6 @@ __all__ = [
     "ExecutionRepository",
     "ExecutionRunSealHead",
     "ExecutionStartClaim",
-    "AgentAttemptClaim",
     "ExecutionStartReservation",
     "ExecutionStartReservationResult",
     "ExecutionStartUnknownCommit",
@@ -1495,17 +1495,21 @@ __all__ = [
     "ExecutionTerminalCommitResult",
     "ExternalCallRecord",
     "ExternalCallRepository",
+    "HistoryQuality",
     "IdempotencyRecord",
     "IdempotencyRepository",
     "IdempotencyTerminalUpdate",
+    "InlineContextBlock",
+    "LoadedContextMessage",
+    "LoadedModelContext",
     "MemoryRecord",
     "MemoryRepository",
     "MemoryState",
     "OperationLedgerRepository",
     "OperationTerminalUpdate",
-    "RecoveryCheckpoint",
-    "RecoveryAdmissionRecord",
     "RecoveryActiveRecord",
+    "RecoveryAdmissionRecord",
+    "RecoveryCheckpoint",
     "RecoveryCheckpointRepository",
     "RecoveryCheckpointState",
     "RecoveryConversationIntent",
@@ -1517,12 +1521,14 @@ __all__ = [
     "RecoveryTerminalHandoff",
     "RecoveryTerminalOutcome",
     "ResultRecord",
-    "InlineContextBlock",
-    "HistoryQuality",
-    "LoadedContextMessage",
-    "LoadedModelContext",
     "RuntimePayloadRef",
+    "RuntimeRepository",
+    "SessionRecord",
+    "SessionRepository",
     "StoredStepSnapshot",
+    "TaskRepository",
+    "TaskState",
+    "ToolOperationAdmission",
     "TranscriptChunk",
     "TranscriptHeadRecord",
     "TranscriptOrigin",
@@ -1530,10 +1536,4 @@ __all__ = [
     "TranscriptSeekDimension",
     "TranscriptSeekRecord",
     "TranscriptSpanRef",
-    "RuntimeRepository",
-    "SessionRecord",
-    "SessionRepository",
-    "TaskRepository",
-    "TaskState",
-    "ToolOperationAdmission",
 ]

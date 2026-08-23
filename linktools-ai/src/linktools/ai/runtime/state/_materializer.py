@@ -36,8 +36,8 @@ from ._contracts import (
     TaskState,
 )
 from ._filesystem import FilesystemStateStorageGroup, FilesystemStateStore
-from ._memory import MemoryStateStorageGroup, MemoryStateStore
 from ._maintenance import RuntimeStorageMaintenance
+from ._memory import MemoryStateStorageGroup, MemoryStateStore
 from ._plan import (
     RuntimeDomain,
     RuntimeRetentionMode,
@@ -189,7 +189,7 @@ async def materialize_runtime_state(
             cleanups.append(group.close)
 
         for store in stores.values():
-            if isinstance(store, MemoryStateStore) or isinstance(store, FilesystemStateStore):
+            if isinstance(store, (MemoryStateStore, FilesystemStateStore)):
                 await store.initialize()
 
         for key, domains in sql_groups.items():
@@ -310,13 +310,13 @@ async def materialize_runtime_state(
             metrics=StorageMetrics(),
             close_actions=tuple(actions),
         )
-    except BaseException as primary:
+    except BaseException:
         for cleanup in reversed(cleanups):
             try:
                 await cleanup()
             except BaseException:
-                _logger.error("runtime materialization cleanup failed", exc_info=True)
-        raise primary
+                _logger.exception("runtime materialization cleanup failed")
+        raise
 
 
 def _states(bundles: Mapping[RuntimeDomain, Mapping[str, object]]) -> object:

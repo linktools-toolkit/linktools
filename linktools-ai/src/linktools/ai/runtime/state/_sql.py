@@ -24,8 +24,8 @@ from ._store import (
     OperationQuery,
     OperationScanCursor,
     RecordQuery,
-    RecordScanCursor,
     RecordReplacement,
+    RecordScanCursor,
     StateCallback,
     StateGroupCallback,
     StateStorageGroup,
@@ -237,11 +237,6 @@ class SqlStateStore:
             raise AIError(ErrorCode.STORAGE_CLOSED)
         await self._storage_group.initialize()
         self._initialized = True
-        _logger.debug(
-            "SQL StateStore initialized: dialect=%s tables=%s",
-            self.context.dialect.name,
-            len(self._metadata.tables),
-        )
 
     async def close(self) -> None:
         if self._closed:
@@ -250,7 +245,6 @@ class SqlStateStore:
         self._initialized = False
         if self._owns_group:
             await self._storage_group.close()
-        _logger.debug("SQL StateStore closed")
 
     async def read(self, fn: StateCallback[ValueT]) -> ValueT:
         self._ensure_ready()

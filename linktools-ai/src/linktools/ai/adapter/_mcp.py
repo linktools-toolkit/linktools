@@ -35,10 +35,15 @@ class PydanticMCPRuntime(MCPRuntime):
             raise AIError(ErrorCode.AUTHORIZATION_DENIED)
         values = []
         for server in servers:
-            client = Client(StdioTransport(server.command, list(server.args), cwd=str(Path(execution_root).expanduser().resolve())))
+            client = Client(
+                StdioTransport(
+                    server.command,
+                    list(server.args),
+                    cwd=str(Path(execution_root).expanduser().resolve()),
+                )
+            )
             values.append(MCPToolset(client, id=f"mcp:{server.id}"))
-        if len(values) != len(servers):
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         return tuple(values)
+
 
 __all__ = ["PydanticMCPRuntime"]

@@ -30,8 +30,7 @@ def test_names_and_module_imports_are_clean() -> None:
     assert check_files(root) == ()
     for path in sorted(root.rglob("*.py")):
         name = "linktools.ai." + ".".join(path.relative_to(root).with_suffix("").parts)
-        if name.endswith(".__init__"):
-            name = name[:-9]
+        name = name.removesuffix(".__init__")
         importlib.import_module(name)
 
 
@@ -386,7 +385,7 @@ def test_runtime_step_contract_matrix_is_current() -> None:
         assert entry["status"] in {"PENDING", "PASS"}
         assert entry["finding_mapping"]
         for test in entry["tests"]:
-            path_text, separator, test_name = test.partition("::")
+            path_text, separator, _test_name = test.partition("::")
             assert separator
             path = Path(path_text)
             assert path.is_file(), test

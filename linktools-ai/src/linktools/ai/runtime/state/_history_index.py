@@ -14,8 +14,8 @@ from ._contracts import (
 
 __all__ = [
     "build_fork_index_node_from_roots",
-    "resolve_history_range_lazy",
     "resolve_history_item_range_lazy",
+    "resolve_history_range_lazy",
 ]
 
 

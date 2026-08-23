@@ -18,18 +18,18 @@ from linktools.ai.asset import (
     AssetTypeBinding,
     AssetTypeRegistry,
     AssetVariantBinding,
+    DirectoryAssetBackend,
     DirectoryLayout,
     InMemoryAssetBackend,
-    DirectoryAssetBackend,
     SingleFileLayout,
 )
 from linktools.ai.core import JsonValue
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.spec import (
-    builtin_asset_bindings,
     SkillMarkdownSpecAdapter,
     SkillMarkdownSpecCodec,
     SkillSpec,
+    builtin_asset_bindings,
 )
 from linktools.ai.storage import (
     StorageEntryRevision,
@@ -204,7 +204,7 @@ async def test_repository_discovers_directory_scope_and_hides_descendants() -> N
     assert all(item.path != "child/AGENT.md" or not item.is_entry for item in (await resolved.scope.list()).items)
     with pytest.raises(AIError) as error:
         await repository.resolve(AssetRef("subagent", "team/foo/child"))
-    assert error.value.code is ErrorCode.STORAGE_NOT_FOUND
+    assert error.value.code is ErrorCode.ASSET_NOT_FOUND
 
 
 @pytest.mark.asyncio
@@ -419,7 +419,7 @@ def test_skill_markdown_codec_and_adapter_contract() -> None:
     with pytest.raises(AIError) as error:
         codec.encode(SkillSpec("bar", 1, content))
     assert error.value.code is ErrorCode.ASSET_CONTENT_MISMATCH
-    with pytest.raises(ValueError):
+    with pytest.raises(TypeError):
         SkillSpec("foo", True, content)
 
 

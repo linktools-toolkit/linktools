@@ -5,7 +5,6 @@
 from datetime import datetime, timezone
 
 import pytest
-
 from linktools.ai.core import ExecutionLineageKind, ExecutionStatus
 from linktools.ai.runtime.state._contracts import (
     ExecutionRecord,

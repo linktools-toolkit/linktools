@@ -17,8 +17,8 @@ from linktools.core import environ
 from ..core import JsonValue, Page, canonical_json_bytes, canonical_sha256
 from ..errors import AIError, ErrorCode
 from ..storage import (
-    StorageDeleteResult,
     StorageChange,
+    StorageDeleteResult,
     StorageEntryRevision,
     StorageEntryStatus,
     StorageOperation,
@@ -291,7 +291,7 @@ class AssetRepository:
         first = await self._probe(ref, binding)
         self._raise_for_owner(first, ref)
         if len(first.candidates) == 0:
-            raise AIError(ErrorCode.STORAGE_NOT_FOUND)
+            raise AIError(ErrorCode.ASSET_NOT_FOUND)
         if len(first.candidates) > 1:
             self._raise_layout_conflict(ref, first.candidates)
         candidate = first.candidates[0]
@@ -846,7 +846,7 @@ class AssetRepository:
         if len(probe.owner_variants) > 1:
             self._raise_layout_conflict(ref, tuple(_CandidatePlaceholder(name) for name in probe.owner_variants))
         raise AIError(
-            ErrorCode.ASSET_LAYOUT_CONFLICT if for_write else ErrorCode.STORAGE_NOT_FOUND,
+            ErrorCode.ASSET_LAYOUT_CONFLICT if for_write else ErrorCode.ASSET_NOT_FOUND,
             safe_details={"owner_id_digest": canonical_sha256(probe.owner_id or "")},
         )
 

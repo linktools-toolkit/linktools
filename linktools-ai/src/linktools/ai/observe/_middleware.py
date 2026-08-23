@@ -56,7 +56,7 @@ class MiddlewarePipeline:
                 await middleware.on_error(context, error)
             except asyncio.CancelledError:
                 raise
-            except Exception as failure:
+            except Exception as failure:  # noqa: BLE001
                 self._handle_failure(middleware, "on_error", failure)
 
     async def after_run(self, context: RunContext) -> None:
@@ -78,7 +78,7 @@ class MiddlewarePipeline:
         for middleware in reversed(self._middleware):
             try:
                 await self._dispatch(middleware, stage, context)
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001
                 self._handle_failure(middleware, stage, exc)
 
     def _handle_failure(

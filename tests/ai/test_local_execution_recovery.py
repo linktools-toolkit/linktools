@@ -189,7 +189,7 @@ async def test_local_worker_failure_is_consumed_and_observable() -> None:
 
     failure = backend.worker_failure("execution", tenant_id="tenant")
     assert failure is not None
-    assert failure.code is ErrorCode.STORAGE_INTEGRITY_ERROR
+    assert failure.code is ErrorCode.INTERNAL_ERROR
 
 
 @pytest.mark.asyncio

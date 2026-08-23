@@ -5,7 +5,12 @@
 import inspect
 
 from linktools.ai.model import ModelRegistry
-from linktools.ai.runtime.state import RuntimeDomain, RuntimeState, RuntimeStatePlan, RuntimeStateRoute
+from linktools.ai.runtime.state import (
+    RuntimeDomain,
+    RuntimeState,
+    RuntimeStatePlan,
+    RuntimeStateRoute,
+)
 
 
 def test_model_binding_fingerprint_excludes_secret_material() -> None:

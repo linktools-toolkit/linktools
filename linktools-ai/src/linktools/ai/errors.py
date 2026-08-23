@@ -4,15 +4,74 @@
 
 import hashlib
 import json
+import math
 from collections.abc import Mapping
 from dataclasses import dataclass
 from enum import StrEnum
+from typing import TypeAlias
+
 from linktools.errors import Error
+
+_SafeJsonValue: TypeAlias = (
+    None
+    | bool
+    | int
+    | float
+    | str
+    | list["_SafeJsonValue"]
+    | dict[str, "_SafeJsonValue"]
+)
 
 
 def _cause_digest(value: Mapping[str, str]) -> str:
     raw = json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+def _safe_json_mapping(
+    value: "Mapping[str, _SafeJsonValue] | None",
+) -> "dict[str, _SafeJsonValue]":
+    if value is None:
+        return {}
+    normalized = _safe_json_value(value, set())
+    if not isinstance(normalized, dict):
+        raise TypeError("safe error details must be a mapping")
+    return normalized
+
+
+def _safe_json_value(value: object, seen: set[int]) -> _SafeJsonValue:
+    if value is None or isinstance(value, (bool, int, str)):
+        return value
+    if isinstance(value, float):
+        if not math.isfinite(value):
+            raise ValueError("safe error details require finite JSON numbers")
+        return value
+    if isinstance(value, list):
+        identity = id(value)
+        if identity in seen:
+            raise ValueError("safe error details cannot contain cycles")
+        seen.add(identity)
+        try:
+            return [_safe_json_value(item, seen) for item in value]
+        finally:
+            seen.remove(identity)
+    if isinstance(value, Mapping):
+        identity = id(value)
+        if identity in seen:
+            raise ValueError("safe error details cannot contain cycles")
+        seen.add(identity)
+        try:
+            normalized: dict[str, _SafeJsonValue] = {}
+            for key, item in value.items():
+                if not isinstance(key, str):
+                    raise TypeError("safe error detail keys must be strings")
+                normalized[key] = _safe_json_value(item, seen)
+            return normalized
+        finally:
+            seen.remove(identity)
+    raise TypeError(
+        f"safe error details contain unsupported value: {type(value).__name__}"
+    )
 
 
 class ErrorCode(StrEnum):
@@ -26,6 +85,7 @@ class ErrorCode(StrEnum):
     ASSET_CONFIG_TYPE_INVALID = "ASSET_CONFIG_TYPE_INVALID"
     ASSET_CONTENT_MISMATCH = "ASSET_CONTENT_MISMATCH"
     ASSET_CURSOR_INVALID = "ASSET_CURSOR_INVALID"
+    ASSET_NOT_FOUND = "ASSET_NOT_FOUND"
     CURSOR_INVALID = "CURSOR_INVALID"
     ASSET_ENV_MISSING = "ASSET_ENV_MISSING"
     ASSET_PATH_OUTSIDE_ROOT = "ASSET_PATH_OUTSIDE_ROOT"
@@ -42,6 +102,7 @@ class ErrorCode(StrEnum):
     CAPABILITY_RESOLUTION_INVALID = "CAPABILITY_RESOLUTION_INVALID"
     CAPABILITY_POLICY_CONFLICT = "CAPABILITY_POLICY_CONFLICT"
     IDEMPOTENCY_CONFLICT = "IDEMPOTENCY_CONFLICT"
+    INTERNAL_ERROR = "INTERNAL_ERROR"
     OUTPUT_CONTRACT_INVALID = "OUTPUT_CONTRACT_INVALID"
     RUNTIME_DEPENDENCY_NOT_READY = "RUNTIME_DEPENDENCY_NOT_READY"
     SERVICE_NOT_READY = "SERVICE_NOT_READY"
@@ -57,6 +118,7 @@ class ErrorCode(StrEnum):
     STORAGE_REVISION_NOTIFY_FAILED = "STORAGE_REVISION_NOTIFY_FAILED"
     STORAGE_READ_ONLY = "STORAGE_READ_ONLY"
     STORAGE_NOT_FOUND = "STORAGE_NOT_FOUND"
+    STORAGE_PATH_INVALID = "STORAGE_PATH_INVALID"
     STORAGE_VERSION_UNSUPPORTED = "STORAGE_VERSION_UNSUPPORTED"
     STORAGE_CAPABILITY_MISSING = "STORAGE_CAPABILITY_MISSING"
     STORAGE_CONFLICT = "STORAGE_CONFLICT"
@@ -80,6 +142,7 @@ class ErrorCode(StrEnum):
     TASK_NOT_READY = "TASK_NOT_READY"
     TASK_NODE_FAILED = "TASK_NODE_FAILED"
     TASK_DEPENDENCY_FAILED = "TASK_DEPENDENCY_FAILED"
+    TASK_WAIT_TIMEOUT = "TASK_WAIT_TIMEOUT"
     LINKTOOLS_AI_RELEASE_MISMATCH = "LINKTOOLS_AI_RELEASE_MISMATCH"
     HTTP_ROUTE_NOT_FOUND = "HTTP_ROUTE_NOT_FOUND"
     MIDDLEWARE_FAILED = "MIDDLEWARE_FAILED"
@@ -87,6 +150,13 @@ class ErrorCode(StrEnum):
     MODEL_CONNECTION_NOT_FOUND = "MODEL_CONNECTION_NOT_FOUND"
     MODEL_CONNECTION_CONFLICT = "MODEL_CONNECTION_CONFLICT"
     MODEL_CONNECTION_UNSUPPORTED = "MODEL_CONNECTION_UNSUPPORTED"
+    MODEL_API_ERROR = "MODEL_API_ERROR"
+    MODEL_REQUEST_REJECTED = "MODEL_REQUEST_REJECTED"
+    MODEL_RATE_LIMITED = "MODEL_RATE_LIMITED"
+    MODEL_TIMEOUT = "MODEL_TIMEOUT"
+    MODEL_UNAVAILABLE = "MODEL_UNAVAILABLE"
+    MODEL_RESPONSE_INVALID = "MODEL_RESPONSE_INVALID"
+    MODEL_CONTENT_FILTERED = "MODEL_CONTENT_FILTERED"
     SESSION_ACTIVE_EXECUTIONS = "SESSION_ACTIVE_EXECUTIONS"
     SESSION_CLEANUP_REQUIRED = "SESSION_CLEANUP_REQUIRED"
     LOCAL_SKILL_CONFLICT = "LOCAL_SKILL_CONFLICT"
@@ -104,6 +174,9 @@ class ErrorCode(StrEnum):
     EXECUTION_RESULT_CONFLICT = "EXECUTION_RESULT_CONFLICT"
     EXECUTION_FAILED = "EXECUTION_FAILED"
     EXECUTION_CANCELLED = "EXECUTION_CANCELLED"
+    EXECUTION_CONCURRENCY_LIMIT_EXCEEDED = "EXECUTION_CONCURRENCY_LIMIT_EXCEEDED"
+    EXECUTION_NOT_READY = "EXECUTION_NOT_READY"
+    EXECUTION_WAIT_TIMEOUT = "EXECUTION_WAIT_TIMEOUT"
     EXECUTION_START_UNKNOWN = "EXECUTION_START_UNKNOWN"
     EXECUTION_START_PERSISTENCE_FAILED = "EXECUTION_START_PERSISTENCE_FAILED"
     EXECUTION_HISTORY_UNAVAILABLE = "EXECUTION_HISTORY_UNAVAILABLE"
@@ -116,6 +189,8 @@ class ErrorCode(StrEnum):
     TOOL_OPERATION_CONFLICT = "TOOL_OPERATION_CONFLICT"
     TOOL_EFFECT_UNKNOWN = "TOOL_EFFECT_UNKNOWN"
     TOOL_RESULT_CONFLICT = "TOOL_RESULT_CONFLICT"
+    TOOL_RETRY_REQUIRED = "TOOL_RETRY_REQUIRED"
+    TOOL_EXECUTION_FAILED = "TOOL_EXECUTION_FAILED"
     TOO_MANY_PENDING_OPERATIONS = "TOO_MANY_PENDING_OPERATIONS"
     TASK_GRAPH_CYCLE = "TASK_GRAPH_CYCLE"
     TASK_GRAPH_DEADLOCK = "TASK_GRAPH_DEADLOCK"
@@ -134,7 +209,7 @@ class SafeError:
     category: str
     retryable: bool
     operation_id: str
-    safe_details: "Mapping[str, object]"
+    safe_details: "Mapping[str, _SafeJsonValue]"
     cause_digest: str
 
 
@@ -149,7 +224,7 @@ class AIError(Error):
         category: "str | None" = None,
         retryable: "bool | None" = None,
         operation_id: "str | None" = None,
-        safe_details: "Mapping[str, object] | None" = None,
+        safe_details: "Mapping[str, _SafeJsonValue] | None" = None,
     ) -> None:
         super().__init__(message or code.value)
         self.code = code
@@ -165,12 +240,19 @@ class AIError(Error):
                 ErrorCode.STORAGE_DEPENDENCY_NOT_READY,
                 ErrorCode.SESSION_ACTIVE_EXECUTIONS,
                 ErrorCode.SESSION_CLEANUP_REQUIRED,
+                ErrorCode.MODEL_RATE_LIMITED,
+                ErrorCode.MODEL_TIMEOUT,
+                ErrorCode.MODEL_UNAVAILABLE,
+                ErrorCode.EXECUTION_CONCURRENCY_LIMIT_EXCEEDED,
+                ErrorCode.EXECUTION_NOT_READY,
+                ErrorCode.EXECUTION_WAIT_TIMEOUT,
+                ErrorCode.TASK_WAIT_TIMEOUT,
             }
             if retryable is None
             else retryable
         )
         self.operation_id = operation_id
-        self.safe_details = dict(safe_details or {})
+        self.safe_details = _safe_json_mapping(safe_details)
 
     def to_safe_error(self, *, operation_id: str) -> SafeError:
         return SafeError(
@@ -200,7 +282,7 @@ class StorageCorruptionError(StorageError):
 
 class InvalidStoragePathError(StorageError):
     def __init__(self, message: str) -> None:
-        super().__init__(message, ErrorCode.STORAGE_INTEGRITY_ERROR)
+        super().__init__(message, ErrorCode.STORAGE_PATH_INVALID)
 
 
 class AssetError(AIError):
@@ -215,7 +297,7 @@ class AssetConflictError(AssetError):
 
 class AssetNotFoundError(AssetError):
     def __init__(self, message: str) -> None:
-        super().__init__(message, ErrorCode.STORAGE_NOT_FOUND)
+        super().__init__(message, ErrorCode.ASSET_NOT_FOUND)
 
 
 class AssetParseError(AssetError):

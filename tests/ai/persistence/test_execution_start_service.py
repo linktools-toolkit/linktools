@@ -4,18 +4,23 @@
 """Execution service start-claim race coverage."""
 
 import asyncio
+from dataclasses import replace
 from types import SimpleNamespace
 
 import pytest
-from dataclasses import replace
-from linktools.ai.core import ExecutionStatus, Page, Principal, TenantAuthorizationPolicy
 from linktools.ai.agent import AgentBindingSnapshot
-from linktools.ai.spec import AgentSpec
+from linktools.ai.core import (
+    ExecutionStatus,
+    Page,
+    Principal,
+    TenantAuthorizationPolicy,
+)
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.migrate import provision_database
 from linktools.ai.runtime import ExecutionRequest, RuntimeDomain, RuntimeState
-from linktools.ai.runtime.state import ExecutionRecord
 from linktools.ai.runtime._execution import CancelEffectOutcome, DefaultExecutionService
+from linktools.ai.runtime.state import ExecutionRecord
+from linktools.ai.spec import AgentSpec
 from sqlalchemy.ext.asyncio import create_async_engine
 
 

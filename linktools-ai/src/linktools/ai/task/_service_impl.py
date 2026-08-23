@@ -157,16 +157,23 @@ class DefaultTaskService(TaskApi):
                         await self._request_graph_release(graph_id, tenant_id)
                     return result
                 raise
-            except Exception:
+            except Exception as error:
                 if created:
                     await self._abort_plan(request)
-                current = await self._record_failure(operation, tenant_id, ErrorCode.STORAGE_UNAVAILABLE.value)
+                current = await self._record_failure(
+                    operation,
+                    tenant_id,
+                    ErrorCode.INTERNAL_ERROR.value,
+                )
                 if current.status is OperationStatus.SUCCEEDED:
                     result = await self._replay_result(graph_id, tenant_id)
                     if release_terminal and _terminal(result.status):
                         await self._request_graph_release(graph_id, tenant_id)
                     return result
-                raise
+                raise AIError(
+                    ErrorCode.INTERNAL_ERROR,
+                    safe_details={"phase": "task_graph_start"},
+                ) from error
             current = await self._record_success(operation, tenant_id, view)
             if current.status is not OperationStatus.SUCCEEDED:
                 raise AIError(ErrorCode.STORAGE_CONFLICT)
@@ -223,7 +230,7 @@ class DefaultTaskService(TaskApi):
             try:
                 return await asyncio.wait_for(poll(), timeout_seconds)
             except asyncio.TimeoutError as error:
-                raise AIError(ErrorCode.STORAGE_UNAVAILABLE, "task graph wait timed out") from error
+                raise AIError(ErrorCode.TASK_WAIT_TIMEOUT) from error
 
     async def cancel_graph(self, graph_id: str, request: CancelGraphRequest) -> TaskGraphView:
         async with self._graph_consumer(graph_id, request.principal.tenant_id):
@@ -247,22 +254,22 @@ class DefaultTaskService(TaskApi):
                     request_digest,
                 )
             )
-            caller_cancellation: "asyncio.CancelledError | None" = None
-            finalizer_error: "BaseException | None" = None
-            result: "TaskGraphView | None" = None
+            caller_cancellation: asyncio.CancelledError | None = None
+            finalizer_error: BaseException | None = None
+            result: TaskGraphView | None = None
             while not finalizer.done():
                 try:
                     result = await asyncio.shield(finalizer)
                 except asyncio.CancelledError as error:
                     caller_cancellation = caller_cancellation or error
                     continue
-                except BaseException as error:
+                except BaseException as error:  # noqa: BLE001
                     finalizer_error = error
                     break
             if finalizer.done() and result is None:
                 try:
                     result = finalizer.result()
-                except BaseException as error:
+                except BaseException as error:  # noqa: BLE001
                     finalizer_error = error
             if caller_cancellation is not None:
                 if finalizer_error is not None:
@@ -309,11 +316,14 @@ class DefaultTaskService(TaskApi):
                 self._handoff_condition.notify_all()
             if cleanup_owner:
                 cleanup_succeeded = False
+                cleanup_error: BaseException | None = None
                 try:
                     await self._release_terminal(graph_id, tenant_id=tenant_id)
                     cleanup_succeeded = True
-                except BaseException:
-                    _logger.error("task graph transient handoff cleanup failed: graph=%s", graph_id, exc_info=environ.debug)
+                except BaseException as error:
+                    cleanup_error = error
+                    if isinstance(error, Exception):
+                        _logger.error("task graph transient handoff cleanup failed: graph=%s", graph_id, exc_info=environ.debug)
                 async with self._handoff_condition:
                     if self._handoff_states.get(key) is state:
                         if cleanup_succeeded and state.active_consumers == 0:
@@ -322,6 +332,8 @@ class DefaultTaskService(TaskApi):
                             state.release_in_progress = False
                             state.release_requested = True
                     self._handoff_condition.notify_all()
+                if cleanup_error is not None and not isinstance(cleanup_error, Exception):
+                    raise cleanup_error
 
     async def _request_graph_release(self, graph_id: str, tenant_id: str) -> None:
         async with self._handoff_condition:
@@ -434,7 +446,7 @@ class DefaultTaskService(TaskApi):
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                 if not _terminal(view.status):
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            except BaseException as error:
+            except BaseException as error:  # noqa: BLE001
                 return await self._settle_cancel_error(operation, graph_id, request, error)
         elif operation.status in {OperationStatus.RUNNING, OperationStatus.EFFECT_UNKNOWN}:
             if not _terminal(view.status):
@@ -466,7 +478,10 @@ class DefaultTaskService(TaskApi):
             await self._record_effect_unknown(operation, tenant_id)
             if isinstance(error, AIError):
                 raise error
-            raise AIError(ErrorCode.STORAGE_UNAVAILABLE) from reload_error
+            raise AIError(
+                ErrorCode.INTERNAL_ERROR,
+                safe_details={"phase": "task_cancel_readback"},
+            ) from reload_error
         if view is None:
             await self._record_failure(operation, tenant_id, ErrorCode.STORAGE_INTEGRITY_ERROR.value)
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -481,14 +496,17 @@ class DefaultTaskService(TaskApi):
             await self._record_failure(operation, tenant_id, error.code.value)
             raise error
         await self._record_effect_unknown(operation, tenant_id)
-        raise AIError(ErrorCode.STORAGE_UNAVAILABLE) from error
+        raise AIError(
+            ErrorCode.INTERNAL_ERROR,
+            safe_details={"phase": "task_cancel"},
+        ) from error
 
     async def _cleanup_cancelled_graph(self, graph_id: str, request: CancelGraphRequest) -> None:
         if self._launcher is None:
             return
         try:
             await self._launcher.cancel(graph_id, request)
-        except Exception as error:
+        except Exception as error:  # noqa: BLE001
             _logger.warning("task launcher cleanup failed after durable cancel: graph=%s error=%s", graph_id, type(error).__name__)
 
     async def _record_success(self, operation: OperationLedgerRecord, tenant_id: str, view: TaskGraphView, *, expected_status: OperationStatus = OperationStatus.RUNNING) -> OperationLedgerRecord:
@@ -595,8 +613,8 @@ def _stable_operation_error(error_code: "str | None") -> AIError:
         return AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     try:
         return AIError(ErrorCode(error_code))
-    except ValueError:
-        return AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    except ValueError as error:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
 
 
 __all__ = ["DefaultTaskService", "TaskPersistence"]

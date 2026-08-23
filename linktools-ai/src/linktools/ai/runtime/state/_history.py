@@ -1619,7 +1619,7 @@ class TranscriptRepository:
             return
         expected = end - start
         emitted = 0
-        after_sequence: "int | None" = None
+        after_sequence: int | None = None
         if seek_owner_id is not None:
             after_sequence = await self._seek_fact_sequence(seek_owner_id, start)
         while True:

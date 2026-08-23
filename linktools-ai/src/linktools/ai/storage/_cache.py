@@ -44,7 +44,7 @@ async def read_cache(cache: "ContentCache | None", key: ContentCacheKey) -> "byt
         return None
     try:
         return await cache.get(key)
-    except Exception:
+    except Exception:  # noqa: BLE001
         return None
 
 
@@ -58,7 +58,7 @@ async def write_cache(
     try:
         await cache.put(key, content)
         return True
-    except Exception:
+    except Exception:  # noqa: BLE001
         return False
 
 
@@ -70,7 +70,7 @@ async def contains_many(
         return frozenset()
     try:
         return await cache.contains_many(keys)
-    except Exception:
+    except Exception:  # noqa: BLE001
         return frozenset()
 
 
@@ -85,7 +85,7 @@ class InMemoryContentCache:
             raise ValueError("max_size must be non-negative")
         self.max_bytes = max_bytes
         self.max_size = max_size
-        self._items: "OrderedDict[ContentCacheKey, bytes]" = OrderedDict()
+        self._items: OrderedDict[ContentCacheKey, bytes] = OrderedDict()
         self._size = 0
         self._lock = asyncio.Lock()
 
@@ -144,7 +144,7 @@ class FilesystemContentCache:
         self.max_bytes = max_bytes
         self._lock = asyncio.Lock()
         self._indexed = False
-        self._entries: "dict[str, tuple[int, int]]" = {}
+        self._entries: dict[str, tuple[int, int]] = {}
         self._total = 0
         self._clock = 0
 
@@ -270,7 +270,7 @@ class TieredContentCache:
     async def get(self, key: ContentCacheKey) -> "bytes | None":
         try:
             value = await self.l1.get(key)
-        except Exception:
+        except Exception:  # noqa: BLE001
             value = None
         if value is not None:
             return value
@@ -278,12 +278,12 @@ class TieredContentCache:
             return None
         try:
             value = await self.l2.get(key)
-        except Exception:
+        except Exception:  # noqa: BLE001
             return None
         if value is not None:
             try:
                 await self.l1.put(key, value)
-            except Exception:
+            except Exception:  # noqa: BLE001, S110
                 pass
         return value
 
@@ -293,7 +293,7 @@ class TieredContentCache:
                 continue
             try:
                 await cache.put(key, content)
-            except Exception:
+            except Exception:  # noqa: BLE001, S112
                 continue
 
     async def delete(self, key: ContentCacheKey) -> None:
@@ -304,7 +304,7 @@ class TieredContentCache:
                 await cache.delete(key)
             except asyncio.CancelledError:
                 raise
-            except Exception:
+            except Exception:  # noqa: BLE001, S112
                 continue
 
     async def contains_many(
@@ -315,7 +315,7 @@ class TieredContentCache:
             return frozenset()
         try:
             present = await self.l1.contains_many(keys)
-        except Exception:
+        except Exception:  # noqa: BLE001
             present = frozenset()
         if self.l2 is None:
             return present
@@ -323,7 +323,7 @@ class TieredContentCache:
         if missing:
             try:
                 present |= await self.l2.contains_many(missing)
-            except Exception:
+            except Exception:  # noqa: BLE001, S110
                 pass
         return present
 

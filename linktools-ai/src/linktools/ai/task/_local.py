@@ -281,7 +281,14 @@ class LocalTaskGraphLauncher:
         except asyncio.CancelledError:
             raise
         except Exception as error:
-            run.failure = error if isinstance(error, AIError) else AIError(ErrorCode.STORAGE_UNAVAILABLE)
+            run.failure = (
+                error
+                if isinstance(error, AIError)
+                else AIError(
+                    ErrorCode.INTERNAL_ERROR,
+                    safe_details={"phase": "task_scheduler"},
+                )
+            )
             _logger.exception("local task graph scheduler failed: tenant=%s graph=%s", key[0], key[1])
         finally:
             self._close_run(run)
@@ -365,7 +372,7 @@ class LocalTaskGraphLauncher:
             )
         except asyncio.CancelledError:
             raise
-        except Exception as error:
+        except Exception as error:  # noqa: BLE001
             lease = state.lease
             if lease is not None:
                 code = error.code.value if isinstance(error, AIError) else ErrorCode.TASK_NODE_FAILED.value

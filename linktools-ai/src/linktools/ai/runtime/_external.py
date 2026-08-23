@@ -13,8 +13,8 @@ from ..core import (
 )
 from ..errors import AIError, ErrorCode
 from ..storage import ObjectRef
-from .state._contracts import ExternalCallRecord, RecoveryState
 from .service_api import ExternalSupplyRequest, ExternalSupplyResult, WorkflowGateway
+from .state._contracts import ExternalCallRecord, RecoveryState
 
 
 class DefaultExternalService:

@@ -132,7 +132,7 @@ class FilesystemLeaseCoordinator:
         renewed = await asyncio.to_thread(self._renew, lease)
         if not renewed:
             self._active.pop(lease.key, None)
-        return lease if renewed else lease
+        return lease
 
     async def release(self, lease: Lease) -> None:
         if self._active.get(lease.key) != lease:
@@ -230,7 +230,7 @@ class FilesystemWriterLock:
         except asyncio.CancelledError:
             try:
                 await asyncio.shield(acquire_task)
-            except BaseException:
+            except BaseException:  # noqa: BLE001, S110
                 pass
             else:
                 await _await_thread(lock.release)
@@ -283,7 +283,7 @@ class FilesystemMutationLock:
     def acquired(self) -> bool:
         return self._acquired
 
-    async def __aenter__(self) -> "FilesystemMutationLock":
+    async def __aenter__(self) -> "FilesystemMutationLock":  # noqa: PYI034
         try:
             await asyncio.to_thread(self.path.parent.mkdir, parents=True, exist_ok=True)
         except OSError as error:
@@ -349,7 +349,7 @@ class FilesystemMutationLock:
 def _read_record(path: Path) -> 'dict[str, str | int | float]':
     value = json.loads(path.read_text(encoding="utf-8"))
     if not isinstance(value, dict):
-        raise ValueError("invalid lease record")
+        raise ValueError("invalid lease record")  # noqa: TRY004
     return value
 
 
@@ -365,20 +365,19 @@ def _read_fence(path: Path) -> int:
 
 def _next_fence(path: Path) -> int:
     path.parent.mkdir(parents=True, exist_ok=True)
-    with FileLock(str(path) + ".lock"):
-        with path.open("a+", encoding="utf-8") as handle:
-            handle.seek(0)
-            raw = handle.read().strip()
-            fence = 0 if not raw else int(raw)
-            if fence < 0:
-                raise ValueError("invalid lease fence")
-            fence += 1
-            handle.seek(0)
-            handle.truncate()
-            handle.write(str(fence))
-            handle.flush()
-            os.fsync(handle.fileno())
-            return fence
+    with FileLock(str(path) + ".lock"), path.open("a+", encoding="utf-8") as handle:
+        handle.seek(0)
+        raw = handle.read().strip()
+        fence = 0 if not raw else int(raw)
+        if fence < 0:
+            raise ValueError("invalid lease fence")
+        fence += 1
+        handle.seek(0)
+        handle.truncate()
+        handle.write(str(fence))
+        handle.flush()
+        os.fsync(handle.fileno())
+        return fence
 
 
 def _write_fence(path: Path, fence: int) -> None:

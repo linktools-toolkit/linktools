@@ -490,13 +490,13 @@ async def test_local_scheduler_failure_wakes_waiter_with_infrastructure_error() 
             launcher.wait_graph_activity("graph", tenant_id="tenant"),
             timeout=1,
         )
-    assert raised.value.code is ErrorCode.STORAGE_UNAVAILABLE
+    assert raised.value.code is ErrorCode.INTERNAL_ERROR
     with pytest.raises(AIError) as late_raised:
         await asyncio.wait_for(
             launcher.wait_graph_activity("graph", tenant_id="tenant"),
             timeout=1,
         )
-    assert late_raised.value.code is ErrorCode.STORAGE_UNAVAILABLE
+    assert late_raised.value.code is ErrorCode.INTERNAL_ERROR
     assert repository.status is TaskStatus.RUNNING
     assert launcher._graphs
     await launcher.shutdown()
@@ -519,7 +519,7 @@ async def test_local_scheduler_failure_wakes_existing_waiter() -> None:
 
     with pytest.raises(AIError) as raised:
         await asyncio.wait_for(waiter, timeout=1)
-    assert raised.value.code is ErrorCode.STORAGE_UNAVAILABLE
+    assert raised.value.code is ErrorCode.INTERNAL_ERROR
     assert launcher._graphs
     await launcher.shutdown()
 

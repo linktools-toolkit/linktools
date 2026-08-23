@@ -11,6 +11,7 @@ from datetime import datetime, timezone
 
 from linktools.core import environ
 
+from ..core import JsonValue
 from ..errors import AIError, ErrorCode
 from ..storage import (
     MetadataChange,
@@ -28,7 +29,6 @@ from ..storage import (
     VersionSummary,
     normalize_storage_metadata,
 )
-from ..core import JsonValue
 from ._domain import AssetInfo, AssetKey, AssetRoot
 
 _logger = environ.get_logger("ai.asset.backend")
