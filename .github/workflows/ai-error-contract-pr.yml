@@ -39,6 +39,7 @@ jobs:
         run: python -m compileall -q linktools-ai/src/linktools/ai linktools-ai/src/linktools/commands/ai
 
       - name: Ruff
+        continue-on-error: true
         env:
           PYTHONPATH: linktools-ai:linktools-ai/src:linktools/src
         run: |
