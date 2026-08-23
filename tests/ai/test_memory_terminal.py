@@ -6,6 +6,8 @@ from dataclasses import replace
 from datetime import datetime, timezone
 
 import pytest
+from linktools.ai.agent import AgentBindingSnapshot
+from linktools.ai.agent._output import bind_output
 from linktools.ai.core import (
     ExecutionEventType,
     ExecutionLineageKind,
@@ -15,6 +17,7 @@ from linktools.ai.core import (
     StopReason,
     UsageMetrics,
 )
+from linktools.ai.spec import AgentSpec
 from linktools.ai.runtime import RuntimeDomain, RuntimeState
 from linktools.ai.runtime.state._contracts import (
     ExecutionRecord,
@@ -24,6 +27,22 @@ from linktools.ai.runtime.state._contracts import (
     ResultRecord,
 )
 from linktools.ai.storage import ObjectRef, StoredPayload
+
+
+def _binding_snapshot() -> AgentBindingSnapshot:
+    output = bind_output()
+    return AgentBindingSnapshot(
+        version=1,
+        agent_spec=AgentSpec("default", 1, "default"),
+        agent_digest="b" * 64,
+        output_type_module=output.value_type.__module__,
+        output_type_qualname=output.value_type.__qualname__,
+        output_schema_id=output.schema_id,
+        output_schema_revision=output.schema_revision,
+        output_schema_fingerprint=output.schema_fingerprint,
+        local_runtime_capability_descriptors=(),
+        binding_digest="a" * 64,
+    )
 
 
 @pytest.mark.asyncio
@@ -36,7 +55,7 @@ async def test_in_memory_terminal_commit_validates_success_result() -> None:
             "execution",
             "tenant",
             None,
-            "binding",
+            "a" * 64,
             None,
             "execution",
             None,
@@ -50,6 +69,9 @@ async def test_in_memory_terminal_commit_validates_success_result() -> None:
             {},
             now,
             now,
+            False,
+            False,
+            _binding_snapshot(),
         )
         identity = IdempotencyRecord(
             "tenant",
