@@ -20,6 +20,7 @@ from linktools.ai.core import (
     OperationStatus,
     canonical_json_bytes,
 )
+from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.runtime._message import (
     decode_model_messages,
     encode_model_messages,
@@ -436,6 +437,69 @@ def _historical_revision_keys(
     return expected
 
 
+def _decode_historical_fields(
+    wire_id: str,
+    revision: int,
+    raw_fields: Mapping[str, object],
+    target: type[object],
+) -> object:
+    return runtime_codec._decode_dataclass(
+        {
+            "$dataclass": wire_id,
+            "schema": revision,
+            "fields": dict(raw_fields),
+        },
+        target,
+        runtime_codec._CURRENT_CODEC,
+        persisted=True,
+    )
+
+
+def _validate_historical_strictness(
+    wire_id: str,
+    revision: int,
+    raw_fields: Mapping[str, object],
+    target: type[object],
+) -> tuple[str, ...]:
+    malformed: list[tuple[str, dict[str, object]]] = []
+    with_extra = dict(raw_fields)
+    with_extra["__compat_unknown_field__"] = None
+    malformed.append(("extra", with_extra))
+    keys = tuple(sorted(str(key) for key in raw_fields))
+    if keys:
+        missing = dict(raw_fields)
+        missing.pop(keys[0], None)
+        malformed.append(("missing", missing))
+
+    errors: list[str] = []
+    for label, fields_value in malformed:
+        try:
+            _decode_historical_fields(
+                wire_id,
+                revision,
+                fields_value,
+                target,
+            )
+        except AIError as error:
+            if error.code is ErrorCode.STORAGE_INTEGRITY_ERROR:
+                continue
+            errors.append(
+                f"historical schema corruption has wrong error: "
+                f"{wire_id}@{revision}:{label}:{error.code.value}"
+            )
+        except Exception as error:
+            errors.append(
+                f"historical schema corruption escaped codec contract: "
+                f"{wire_id}@{revision}:{label}:{type(error).__name__}"
+            )
+        else:
+            errors.append(
+                f"historical schema corruption was accepted: "
+                f"{wire_id}@{revision}:{label}"
+            )
+    return tuple(errors)
+
+
 def validate_upgrade_fixtures(
     manifest: Mapping[str, JsonValue],
     fixtures: Mapping[str, JsonValue],
@@ -490,15 +554,11 @@ def validate_upgrade_fixtures(
             if dict(upgraded) != dict(expected_fields):
                 errors.append(f"upgrade fixture semantics changed: {key}")
                 continue
-            decoded = runtime_codec._decode_dataclass(
-                {
-                    "$dataclass": wire_id,
-                    "schema": revision,
-                    "fields": dict(raw_fields),
-                },
+            decoded = _decode_historical_fields(
+                wire_id,
+                revision,
+                raw_fields,
                 target,
-                runtime_codec._CURRENT_CODEC,
-                persisted=True,
             )
             rewritten = runtime_codec._encode_persisted_domain(decoded)
         except Exception as error:
@@ -514,6 +574,15 @@ def validate_upgrade_fixtures(
             rewritten_fields
         ) != dict(expected_fields):
             errors.append(f"upgrade fixture rewrite changed: {key}")
+            continue
+        errors.extend(
+            _validate_historical_strictness(
+                wire_id,
+                revision,
+                raw_fields,
+                target,
+            )
+        )
     return tuple(errors)
 
 
