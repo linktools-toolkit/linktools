@@ -304,6 +304,18 @@ def _domain_fields(
     return _persisted_dataclass_fields(payload, wire_id)
 
 
+def _decode_current_record(
+    data: Mapping[str, JsonValue],
+    target: type[object],
+) -> object | None:
+    try:
+        return _decode_enveloped_domain(data, target)
+    except AIError as error:
+        if error.code is ErrorCode.STORAGE_INTEGRITY_ERROR:
+            return None
+        raise
+
+
 def _collect_execution_binding(
     record: StoredRecord,
     compiler: AgentCompiler,
@@ -312,6 +324,15 @@ def _collect_execution_binding(
     agents: dict[str, str],
     targets: dict[str, tuple[str, str]],
 ) -> None:
+    current = _decode_current_record(record.data, ExecutionRecord)
+    if isinstance(current, ExecutionRecord):
+        _remember_execution_target(
+            targets,
+            current.execution_id,
+            current.binding_digest,
+            current.binding.output_schema_fingerprint,
+        )
+        return
     fields = _domain_fields(
         record.data,
         type_name="execution_record",
@@ -321,14 +342,7 @@ def _collect_execution_binding(
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     binding = fields["binding"]
     if _is_current_binding(binding):
-        current = _decode_enveloped_domain(record.data, ExecutionRecord)
-        _remember_execution_target(
-            targets,
-            current.execution_id,
-            current.binding_digest,
-            current.binding.output_schema_fingerprint,
-        )
-        return
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     if binding is None:
         raise AIError(
             ErrorCode.STORAGE_VERSION_UNSUPPORTED,
@@ -368,6 +382,9 @@ def _collect_recovery_binding(
     bindings: dict[str, AgentBinding],
     agents: dict[str, str],
 ) -> None:
+    current = _decode_current_record(record.data, RecoveryAdmissionRecord)
+    if isinstance(current, RecoveryAdmissionRecord):
+        return
     fields = _domain_fields(
         record.data,
         type_name="recovery_admission",
@@ -379,10 +396,7 @@ def _collect_recovery_binding(
     keys = frozenset(input_fields)
     binding = input_fields.get("binding")
     if keys == _CURRENT_RECOVERY_INPUT_FIELDS:
-        if not _is_current_binding(binding):
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        _decode_enveloped_domain(record.data, RecoveryAdmissionRecord)
-        return
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     if keys != _LEGACY_RECOVERY_INPUT_FIELDS:
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     if binding is None:
@@ -449,6 +463,9 @@ def _migrate_execution_data(
     bindings: dict[str, AgentBinding],
     agents: dict[str, str],
 ) -> Mapping[str, JsonValue] | None:
+    current = _decode_current_record(record.data, ExecutionRecord)
+    if isinstance(current, ExecutionRecord):
+        return None
     fields = _domain_fields(
         record.data,
         type_name="execution_record",
@@ -458,8 +475,7 @@ def _migrate_execution_data(
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     binding = fields["binding"]
     if _is_current_binding(binding):
-        _decode_enveloped_domain(record.data, ExecutionRecord)
-        return None
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     if binding is None:
         raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
     legacy_digest, migrated = _migrate_legacy_binding(binding, compiler)
@@ -481,6 +497,9 @@ def _migrate_recovery_data(
     bindings: dict[str, AgentBinding],
     agents: dict[str, str],
 ) -> Mapping[str, JsonValue] | None:
+    current = _decode_current_record(record.data, RecoveryAdmissionRecord)
+    if isinstance(current, RecoveryAdmissionRecord):
+        return None
     fields = _domain_fields(
         record.data,
         type_name="recovery_admission",
@@ -492,10 +511,7 @@ def _migrate_recovery_data(
     keys = frozenset(input_fields)
     binding = input_fields.get("binding")
     if keys == _CURRENT_RECOVERY_INPUT_FIELDS:
-        if not _is_current_binding(binding):
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        _decode_enveloped_domain(record.data, RecoveryAdmissionRecord)
-        return None
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     if keys != _LEGACY_RECOVERY_INPUT_FIELDS:
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     if binding is None:
@@ -531,6 +547,11 @@ def _migrate_session_record(
     repository: SessionRepositoryImpl,
     agents: Mapping[str, str],
 ) -> SessionRecord | None:
+    current = _decode_current_record(record.data, SessionRecord)
+    if isinstance(current, SessionRecord):
+        if current.tenant_id != repository._tenant_id:
+            raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
+        return None
     fields = _domain_fields(
         record.data,
         type_name="session_record",
@@ -538,8 +559,7 @@ def _migrate_session_record(
     )
     keys = frozenset(fields)
     if keys == _CURRENT_SESSION_FIELDS:
-        _decode_enveloped_domain(record.data, SessionRecord)
-        return None
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     if keys != _LEGACY_SESSION_FIELDS:
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     hints = get_type_hints(SessionRecord)
@@ -571,6 +591,9 @@ def _migrate_projection_data(
     record: StoredRecord,
     agents: Mapping[str, str],
 ) -> Mapping[str, JsonValue] | None:
+    current = _decode_current_record(record.data, ContextProjection)
+    if isinstance(current, ContextProjection):
+        return None
     fields = _domain_fields(
         record.data,
         type_name="context_projection",
@@ -578,8 +601,7 @@ def _migrate_projection_data(
     )
     keys = frozenset(fields)
     if keys == _CURRENT_PROJECTION_FIELDS:
-        _decode_enveloped_domain(record.data, ContextProjection)
-        return None
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     if keys != _LEGACY_PROJECTION_FIELDS:
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     legacy_digest = _decode_domain(fields["binding_digest"], str, _CURRENT_CODEC)
@@ -726,16 +748,7 @@ def _persisted_dataclass_fields(
 ) -> Mapping[str, object]:
     if not isinstance(value, Mapping):
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-    keys = set(value)
-    if keys == {"$dataclass", "fields"}:
-        pass
-    elif keys == {"$dataclass", "schema", "fields"}:
-        schema = value.get("schema")
-        if isinstance(schema, bool) or not isinstance(schema, int) or schema < 1:
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        if schema != 1:
-            raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
-    else:
+    if set(value) != {"$dataclass", "fields"}:
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     if value.get("$dataclass") != wire_id:
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)

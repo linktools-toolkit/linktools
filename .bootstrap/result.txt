@@ -1,13 +1,498 @@
-===== python .bootstrap/apply_runtime_persistence_compat.py =====
-Traceback (most recent call last):
-  File "/home/runner/work/linktools/linktools/.bootstrap/apply_runtime_persistence_compat.py", line 110, in <module>
-    main()
-  File "/home/runner/work/linktools/linktools/.bootstrap/apply_runtime_persistence_compat.py", line 100, in main
-    patch_codec()
-  File "/home/runner/work/linktools/linktools/.bootstrap/apply_runtime_persistence_compat.py", line 28, in patch_codec
-    text = replace_once(text, old, new, "dataclass contract")
-           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "/home/runner/work/linktools/linktools/.bootstrap/apply_runtime_persistence_compat.py", line 19, in replace_once
-    raise RuntimeError(f"{label}: expected one match, found {count}")
-RuntimeError: dataclass contract: expected one match, found 0
+===== python .bootstrap/close_migration_schema_boundary.py =====
+semantic migration isolated from future schema revisions
+exit=0
+===== python -m compileall -q linktools-ai/src/linktools/ai =====
+exit=0
+===== ruff check --select E4,E7,E9,F linktools-ai/src/linktools/ai tests/ai =====
+All checks passed!
+exit=0
+===== persistence exit=0 =====
+<frozen runpy>:128: RuntimeWarning: 'scripts.build.architecture' found in sys.modules after import of package 'scripts.build', but prior to execution of 'scripts.build.architecture'; this may result in unpredictable behaviour
+===== architecture exit=0 =====
+===== pytest -q tests/ai =====
+........................................................................ [ 19%]
+........................................................................ [ 38%]
+........................................................................ [ 57%]
+..............FFFFFF..F................................................. [ 76%]
+........................................................................ [ 95%]
+..................                                                       [100%]
+=================================== FAILURES ===================================
+_________ test_migration_rewrites_legacy_session_and_execution_exactly _________
+
+    @pytest.mark.asyncio
+    async def test_migration_rewrites_legacy_session_and_execution_exactly() -> None:
+        state = RuntimeState.in_memory()
+        await state.initialize(namespace="legacy-agent-identity", tenant_id="tenant")
+        compiler, catalog = _compiler_catalog()
+        definition = catalog.root_definition("default")
+        binding = compiler.bind(definition)
+        legacy_digest = "f" * 64
+        session = _session(definition.digest)
+        execution = _execution(binding, session_id="session")
+        sessions = state.conversation.sessions
+        executions = state.execution.executions
+        session_stored = sessions._stored(
+            "session", "session", session, state=session.status.value
+        )
+        session_stored = replace(
+            session_stored,
+            data=_legacy_session_data(session, legacy_digest),
+        )
+        execution_stored = executions._stored(
+            "execution", "execution", execution, state=execution.status.value
+        )
+        execution_stored = replace(
+            execution_stored,
+            data=_legacy_execution_data(execution, binding, legacy_digest),
+        )
+        await sessions.state_store.mutate(lambda tx: tx.insert_record(session_stored))
+        await executions.state_store.mutate(lambda tx: tx.insert_record(execution_stored))
+        try:
+            with pytest.raises(AIError) as before:
+                await sessions.get("session", tenant_id="tenant")
+            assert before.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
+    
+>           changed = await migrate_v1_agent_identity_state(
+                state, catalog, compiler, tenant_id="tenant"
+            )
+
+tests/ai/test_runtime_state_identity_migration.py:194: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+linktools-ai/src/linktools/ai/runtime/state/_migration.py:145: in migrate_v1_agent_identity_state
+    _collect_execution_binding(
+linktools-ai/src/linktools/ai/runtime/state/_migration.py:336: in _collect_execution_binding
+    fields = _domain_fields(
+linktools-ai/src/linktools/ai/runtime/state/_migration.py:304: in _domain_fields
+    return _persisted_dataclass_fields(payload, wire_id)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+value = {'$dataclass': 'execution_record', 'schema': 1, 'fields': {'conversation_step_run_id': None, 'base_execution_id': None, 'planning': False, 'tenant_id': 'tenant', ...}}
+wire_id = 'execution_record'
+
+    def _persisted_dataclass_fields(
+        value: object,
+        wire_id: str,
+    ) -> Mapping[str, object]:
+        if not isinstance(value, Mapping):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        if set(value) != {"$dataclass", "fields"}:
+>           raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+E           linktools.ai.errors.AIError: STORAGE_INTEGRITY_ERROR
+
+linktools-ai/src/linktools/ai/runtime/state/_migration.py:752: AIError
+________ test_migration_rejects_legacy_session_without_binding_evidence ________
+
+    @pytest.mark.asyncio
+    async def test_migration_rejects_legacy_session_without_binding_evidence() -> None:
+        state = RuntimeState.in_memory()
+        await state.initialize(namespace="legacy-unprovable-session", tenant_id="tenant")
+        compiler, catalog = _compiler_catalog()
+        definition = catalog.root_definition("default")
+        session = _session(definition.digest)
+        sessions = state.conversation.sessions
+        stored = sessions._stored("session", "session", session, state=session.status.value)
+        stored = replace(stored, data=_legacy_session_data(session, "e" * 64))
+        await sessions.state_store.mutate(lambda tx: tx.insert_record(stored))
+        try:
+            with pytest.raises(AIError) as error:
+                await migrate_v1_agent_identity_state(
+                    state, catalog, compiler, tenant_id="tenant"
+                )
+>           assert error.value.code is ErrorCode.STORAGE_VERSION_UNSUPPORTED
+E           AssertionError: assert <ErrorCode.STORAGE_INTEGRITY_ERROR: 'STORAGE_INTEGRITY_ERROR'> is <ErrorCode.STORAGE_VERSION_UNSUPPORTED: 'STORAGE_VERSION_UNSUPPORTED'>
+E            +  where <ErrorCode.STORAGE_INTEGRITY_ERROR: 'STORAGE_INTEGRITY_ERROR'> = AIError('STORAGE_INTEGRITY_ERROR').code
+E            +    where AIError('STORAGE_INTEGRITY_ERROR') = <ExceptionInfo AIError('STORAGE_INTEGRITY_ERROR') tblen=5>.value
+E            +  and   <ErrorCode.STORAGE_VERSION_UNSUPPORTED: 'STORAGE_VERSION_UNSUPPORTED'> = ErrorCode.STORAGE_VERSION_UNSUPPORTED
+
+tests/ai/test_runtime_state_identity_migration.py:230: AssertionError
+________ test_migration_rejects_legacy_execution_without_exact_snapshot ________
+
+    @pytest.mark.asyncio
+    async def test_migration_rejects_legacy_execution_without_exact_snapshot() -> None:
+        state = RuntimeState.in_memory()
+        await state.initialize(namespace="legacy-missing-binding", tenant_id="tenant")
+        compiler, catalog = _compiler_catalog()
+        binding = compiler.bind(catalog.root_definition("default"))
+        execution = _execution(binding)
+        executions = state.execution.executions
+        stored = executions._stored(
+            "execution", "execution", execution, state=execution.status.value
+        )
+        data = _domain_data(execution)
+        value = dict(data["value"])
+        payload = dict(value["payload"])
+        fields = dict(payload["fields"])
+        fields["binding"] = None
+        fields["binding_digest"] = encode_domain("d" * 64)
+        payload["fields"] = fields
+        value["payload"] = payload
+        data["value"] = value
+        stored = replace(stored, data=data)
+        await executions.state_store.mutate(lambda tx: tx.insert_record(stored))
+        try:
+            with pytest.raises(AIError) as error:
+                await migrate_v1_agent_identity_state(
+                    state, catalog, compiler, tenant_id="tenant"
+                )
+>           assert error.value.code is ErrorCode.STORAGE_VERSION_UNSUPPORTED
+E           AssertionError: assert <ErrorCode.STORAGE_INTEGRITY_ERROR: 'STORAGE_INTEGRITY_ERROR'> is <ErrorCode.STORAGE_VERSION_UNSUPPORTED: 'STORAGE_VERSION_UNSUPPORTED'>
+E            +  where <ErrorCode.STORAGE_INTEGRITY_ERROR: 'STORAGE_INTEGRITY_ERROR'> = AIError('STORAGE_INTEGRITY_ERROR').code
+E            +    where AIError('STORAGE_INTEGRITY_ERROR') = <ExceptionInfo AIError('STORAGE_INTEGRITY_ERROR') tblen=5>.value
+E            +  and   <ErrorCode.STORAGE_VERSION_UNSUPPORTED: 'STORAGE_VERSION_UNSUPPORTED'> = ErrorCode.STORAGE_VERSION_UNSUPPORTED
+
+tests/ai/test_runtime_state_identity_migration.py:262: AssertionError
+______________ test_migration_rewrites_full_legacy_recovery_shape ______________
+
+    @pytest.mark.asyncio
+    async def test_migration_rewrites_full_legacy_recovery_shape() -> None:
+        state = RuntimeState.in_memory()
+        await state.initialize(namespace="legacy-recovery", tenant_id="tenant")
+        compiler, catalog = _compiler_catalog()
+        definition = catalog.root_definition("default")
+        binding = compiler.bind(definition)
+        legacy_digest = "c" * 64
+        now = datetime.now(timezone.utc)
+        recovery_input = RecoveryExecutionInput(
+            user_prompt="prompt",
+            principal_id="owner",
+            principal_kind="service",
+            session_id=None,
+            memory_scope=None,
+            binding_digest=binding.digest,
+            lineage_kind=ExecutionLineageKind.RUN.value,
+            parent_execution_id=None,
+            root_execution_id="execution",
+            source_execution_id=None,
+            base_execution_id=None,
+            conversation_step_run_id=None,
+            idempotency=RecoveryIdempotencyInput("scope", "key", "request"),
+            planning=False,
+            thinking=False,
+            binding=binding.snapshot,
+        )
+        admission = RecoveryAdmissionRecord("execution", "tenant", recovery_input, now)
+        recovery = state.recovery.checkpoints
+        stored = recovery._stored("recovery_admission", "execution", admission)
+        stored = replace(
+            stored,
+            data=_legacy_recovery_data(admission, binding, legacy_digest),
+        )
+        await recovery.state_store.mutate(lambda tx: tx.insert_record(stored))
+        try:
+>           assert await migrate_v1_agent_identity_state(
+                state, catalog, compiler, tenant_id="tenant"
+            ) == 1
+
+tests/ai/test_runtime_state_identity_migration.py:303: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+linktools-ai/src/linktools/ai/runtime/state/_migration.py:154: in migrate_v1_agent_identity_state
+    _collect_recovery_binding(
+linktools-ai/src/linktools/ai/runtime/state/_migration.py:388: in _collect_recovery_binding
+    fields = _domain_fields(
+linktools-ai/src/linktools/ai/runtime/state/_migration.py:304: in _domain_fields
+    return _persisted_dataclass_fields(payload, wire_id)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+value = {'$dataclass': 'recovery_admission', 'schema': 1, 'fields': {'execution_id': 'execution', 'tenant_id': 'tenant', 'inpu...cf05504782658afcfacb9228a2', 'size': 6, ...}}, ...}}, 'created_at': {'$datetime': '2026-08-23T06:46:57.007125+00:00'}}}
+wire_id = 'recovery_admission'
+
+    def _persisted_dataclass_fields(
+        value: object,
+        wire_id: str,
+    ) -> Mapping[str, object]:
+        if not isinstance(value, Mapping):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        if set(value) != {"$dataclass", "fields"}:
+>           raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+E           linktools.ai.errors.AIError: STORAGE_INTEGRITY_ERROR
+
+linktools-ai/src/linktools/ai/runtime/state/_migration.py:752: AIError
+____________ test_migration_preserves_historical_projection_digest _____________
+
+tmp_path = PosixPath('/tmp/pytest-of-runner/pytest-0/test_migration_preserves_histo0')
+
+    @pytest.mark.asyncio
+    async def test_migration_preserves_historical_projection_digest(tmp_path) -> None:
+        state = RuntimeState.filesystem(tmp_path / "runtime")
+        await state.initialize(namespace="legacy-projection", tenant_id="tenant")
+        compiler, catalog = _compiler_catalog()
+        definition = catalog.root_definition("default")
+        binding = compiler.bind(definition)
+        legacy_digest = "b" * 64
+        execution = _execution(binding)
+        executions = state.execution.executions
+        execution_stored = executions._stored(
+            "execution", "execution", execution, state=execution.status.value
+        )
+        execution_stored = replace(
+            execution_stored,
+            data=_legacy_execution_data(execution, binding, legacy_digest),
+        )
+        await executions.state_store.mutate(lambda tx: tx.insert_record(execution_stored))
+    
+        history = state.steps.read_store(RuntimeDomain.EXECUTION).transcript_repository
+        projection = ContextProjection(definition.digest, (), "historic-projection-digest")
+        await history._store.mutate(
+            lambda tx: history.store_projection(tx, "run", projection)
+        )
+        record = await history._store.read(
+            lambda tx: tx.get_record(history._projection_key("run"))
+        )
+        assert record is not None
+        data = dict(record.data)
+        value = dict(data["value"])
+        payload = dict(value["payload"])
+        fields = dict(payload["fields"])
+        fields["binding_digest"] = encode_domain(legacy_digest)
+        fields.pop("agent_digest")
+        payload["fields"] = fields
+        value["payload"] = payload
+        data["value"] = value
+        replaced = await history._store.mutate(
+            lambda tx: tx.replace_record(
+                replace(record, data=data, storage_version=record.storage_version + 1),
+                expected_storage_version=record.storage_version,
+            )
+        )
+        assert replaced
+        try:
+>           assert await migrate_v1_agent_identity_state(
+                state, catalog, compiler, tenant_id="tenant"
+            ) == 2
+
+tests/ai/test_runtime_state_identity_migration.py:362: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+linktools-ai/src/linktools/ai/runtime/state/_migration.py:145: in migrate_v1_agent_identity_state
+    _collect_execution_binding(
+linktools-ai/src/linktools/ai/runtime/state/_migration.py:336: in _collect_execution_binding
+    fields = _domain_fields(
+linktools-ai/src/linktools/ai/runtime/state/_migration.py:304: in _domain_fields
+    return _persisted_dataclass_fields(payload, wire_id)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+value = {'$dataclass': 'execution_record', 'fields': {'agent_run_sequence': 0, 'base_execution_id': None, 'binding': {'agent_s...279e7f', ...}, 'binding_digest': 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb', ...}, 'schema': 1}
+wire_id = 'execution_record'
+
+    def _persisted_dataclass_fields(
+        value: object,
+        wire_id: str,
+    ) -> Mapping[str, object]:
+        if not isinstance(value, Mapping):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        if set(value) != {"$dataclass", "fields"}:
+>           raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+E           linktools.ai.errors.AIError: STORAGE_INTEGRITY_ERROR
+
+linktools-ai/src/linktools/ai/runtime/state/_migration.py:752: AIError
+_______ test_migration_rewrites_evaluation_from_linked_legacy_execution ________
+
+    @pytest.mark.asyncio
+    async def test_migration_rewrites_evaluation_from_linked_legacy_execution() -> None:
+        state = RuntimeState.in_memory()
+        await state.initialize(namespace="legacy-evaluation", tenant_id="tenant")
+        compiler, catalog = _compiler_catalog()
+        binding = compiler.bind(catalog.root_definition("default"))
+        legacy_digest = "a" * 64
+        execution = _execution(binding)
+        executions = state.execution.executions
+        stored = executions._stored(
+            "execution", "execution", execution, state=execution.status.value
+        )
+        stored = replace(
+            stored,
+            data=_legacy_execution_data(execution, binding, legacy_digest),
+        )
+        await executions.state_store.mutate(lambda tx: tx.insert_record(stored))
+        now = datetime.now(timezone.utc)
+        evaluation = EvaluationRecord(
+            evaluation_id="evaluation",
+            tenant_id="tenant",
+            execution_id="execution",
+            dataset_id="dataset",
+            dataset_revision=1,
+            evaluator_id="default",
+            evaluator_revision=1,
+            binding_digest=legacy_digest,
+            output_schema_fingerprint=binding.snapshot.output_schema_fingerprint,
+            artifact_digest=None,
+            status=EvaluationStatus.SUCCEEDED,
+            revision=0,
+            metrics={},
+            created_at=now,
+            updated_at=now,
+        )
+        await state.evaluation.records.create(evaluation)
+        try:
+>           assert await migrate_v1_agent_identity_state(
+                state, catalog, compiler, tenant_id="tenant"
+            ) == 2
+
+tests/ai/test_runtime_state_identity_migration.py:409: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+linktools-ai/src/linktools/ai/runtime/state/_migration.py:145: in migrate_v1_agent_identity_state
+    _collect_execution_binding(
+linktools-ai/src/linktools/ai/runtime/state/_migration.py:336: in _collect_execution_binding
+    fields = _domain_fields(
+linktools-ai/src/linktools/ai/runtime/state/_migration.py:304: in _domain_fields
+    return _persisted_dataclass_fields(payload, wire_id)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+value = {'$dataclass': 'execution_record', 'schema': 1, 'fields': {'conversation_step_run_id': None, 'base_execution_id': None, 'planning': False, 'tenant_id': 'tenant', ...}}
+wire_id = 'execution_record'
+
+    def _persisted_dataclass_fields(
+        value: object,
+        wire_id: str,
+    ) -> Mapping[str, object]:
+        if not isinstance(value, Mapping):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        if set(value) != {"$dataclass", "fields"}:
+>           raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+E           linktools.ai.errors.AIError: STORAGE_INTEGRITY_ERROR
+
+linktools-ai/src/linktools/ai/runtime/state/_migration.py:752: AIError
+_________ test_open_workspace_runtime_normalizes_legacy_sqlite_session _________
+
+tmp_path = PosixPath('/tmp/pytest-of-runner/pytest-0/test_open_workspace_runtime_no0')
+
+    @pytest.mark.asyncio
+    async def test_open_workspace_runtime_normalizes_legacy_sqlite_session(
+        tmp_path,
+    ) -> None:
+        workspace = Workspace.load(tmp_path)
+        path = workspace.storage_root / "runtime.db"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        engine = create_async_engine(f"sqlite+aiosqlite:///{path}")
+        await provision_runtime_database(engine)
+        await engine.dispose()
+    
+        definition, binding = _legacy_binding()
+        legacy_digest = "f" * 64
+        session_id = workspace.workspace_id
+        now = datetime.now(timezone.utc)
+        session = SessionRecord(
+            session_id=session_id,
+            tenant_id="default",
+            owner_principal_id="runtime",
+            agent_digest=definition.digest,
+            status=SessionStatus.OPEN,
+            revision=0,
+            resource_generation=0,
+            cwd=None,
+            metadata={"linktools.ai.agent_id": "default"},
+            created_at=now,
+            updated_at=now,
+            closed_at=None,
+            active_execution_id=None,
+            continuation=None,
+            history_quality="complete",
+            history_id="history",
+        )
+        execution = ExecutionRecord(
+            execution_id="execution",
+            tenant_id="default",
+            session_id=session_id,
+            binding_digest=binding.digest,
+            parent_execution_id=None,
+            root_execution_id="execution",
+            source_execution_id=None,
+            base_execution_id=None,
+            lineage_kind=ExecutionLineageKind.RUN,
+            status=ExecutionStatus.SUCCEEDED,
+            revision=0,
+            event_sequence=0,
+            agent_run_sequence=0,
+            error_code=None,
+            safe_error_details={},
+            created_at=now,
+            updated_at=now,
+            planning=False,
+            thinking=False,
+            binding=binding.snapshot,
+        )
+    
+        legacy = RuntimeState.sqlite(path)
+        await legacy.initialize(namespace=workspace.workspace_id, tenant_id="default")
+        sessions = legacy.conversation.sessions
+        executions = legacy.execution.executions
+        session_record = sessions._stored(
+            "session", session_id, session, state=session.status.value
+        )
+        session_record = replace(
+            session_record,
+            data=_legacy_session_data(session, legacy_digest),
+        )
+        execution_record = executions._stored(
+            "execution", "execution", execution, state=execution.status.value
+        )
+        execution_record = replace(
+            execution_record,
+            data=_legacy_execution_data(execution, binding, legacy_digest),
+        )
+        await sessions.state_store.mutate(lambda tx: tx.insert_record(session_record))
+        await executions.state_store.mutate(lambda tx: tx.insert_record(execution_record))
+        await legacy.close()
+    
+        reopened = RuntimeState.sqlite(path)
+        models = ModelRegistry.openai(model="gpt-test")
+>       async with open_workspace_runtime(
+            workspace,
+            state=reopened,
+            models=models,
+        ) as runtime:
+
+tests/ai/test_runtime_state_identity_migration_sqlite.py:157: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+/opt/hostedtoolcache/Python/3.11.16/x64/lib/python3.11/contextlib.py:210: in __aenter__
+    return await anext(self.gen)
+           ^^^^^^^^^^^^^^^^^^^^^
+linktools-ai/src/linktools/ai/workspace/_factory.py:373: in open_workspace_runtime
+    runtime_value = await _compose_runtime(workspace, catalog, compiler=compiler, assets=selected_assets, tenant_id=effective_tenant_id, state=selected_runtime)
+                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+linktools-ai/src/linktools/ai/workspace/_factory.py:430: in _compose_runtime
+    return await build_local_runtime(
+linktools-ai/src/linktools/ai/runtime/_factory.py:59: in build_local_runtime
+    migrated = await migrate_v1_agent_identity_state(
+linktools-ai/src/linktools/ai/runtime/state/_migration.py:145: in migrate_v1_agent_identity_state
+    _collect_execution_binding(
+linktools-ai/src/linktools/ai/runtime/state/_migration.py:336: in _collect_execution_binding
+    fields = _domain_fields(
+linktools-ai/src/linktools/ai/runtime/state/_migration.py:304: in _domain_fields
+    return _persisted_dataclass_fields(payload, wire_id)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+value = {'$dataclass': 'execution_record', 'schema': 1, 'fields': {'conversation_step_run_id': None, 'base_execution_id': None, 'planning': False, 'tenant_id': 'default', ...}}
+wire_id = 'execution_record'
+
+    def _persisted_dataclass_fields(
+        value: object,
+        wire_id: str,
+    ) -> Mapping[str, object]:
+        if not isinstance(value, Mapping):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        if set(value) != {"$dataclass", "fields"}:
+>           raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+E           linktools.ai.errors.AIError: STORAGE_INTEGRITY_ERROR
+
+linktools-ai/src/linktools/ai/runtime/state/_migration.py:752: AIError
+=========================== short test summary info ============================
+FAILED tests/ai/test_runtime_state_identity_migration.py::test_migration_rewrites_legacy_session_and_execution_exactly - linktools.ai.errors.AIError: STORAGE_INTEGRITY_ERROR
+FAILED tests/ai/test_runtime_state_identity_migration.py::test_migration_rejects_legacy_session_without_binding_evidence - AssertionError: assert <ErrorCode.STORAGE_INTEGRITY_ERROR: 'STORAGE_INTEGRITY_ERROR'> is <ErrorCode.STORAGE_VERSION_UNSUPPORTED: 'STORAGE_VERSION_UNSUPPORTED'>
+ +  where <ErrorCode.STORAGE_INTEGRITY_ERROR: 'STORAGE_INTEGRITY_ERROR'> = AIError('STORAGE_INTEGRITY_ERROR').code
+ +    where AIError('STORAGE_INTEGRITY_ERROR') = <ExceptionInfo AIError('STORAGE_INTEGRITY_ERROR') tblen=5>.value
+ +  and   <ErrorCode.STORAGE_VERSION_UNSUPPORTED: 'STORAGE_VERSION_UNSUPPORTED'> = ErrorCode.STORAGE_VERSION_UNSUPPORTED
+FAILED tests/ai/test_runtime_state_identity_migration.py::test_migration_rejects_legacy_execution_without_exact_snapshot - AssertionError: assert <ErrorCode.STORAGE_INTEGRITY_ERROR: 'STORAGE_INTEGRITY_ERROR'> is <ErrorCode.STORAGE_VERSION_UNSUPPORTED: 'STORAGE_VERSION_UNSUPPORTED'>
+ +  where <ErrorCode.STORAGE_INTEGRITY_ERROR: 'STORAGE_INTEGRITY_ERROR'> = AIError('STORAGE_INTEGRITY_ERROR').code
+ +    where AIError('STORAGE_INTEGRITY_ERROR') = <ExceptionInfo AIError('STORAGE_INTEGRITY_ERROR') tblen=5>.value
+ +  and   <ErrorCode.STORAGE_VERSION_UNSUPPORTED: 'STORAGE_VERSION_UNSUPPORTED'> = ErrorCode.STORAGE_VERSION_UNSUPPORTED
+FAILED tests/ai/test_runtime_state_identity_migration.py::test_migration_rewrites_full_legacy_recovery_shape - linktools.ai.errors.AIError: STORAGE_INTEGRITY_ERROR
+FAILED tests/ai/test_runtime_state_identity_migration.py::test_migration_preserves_historical_projection_digest - linktools.ai.errors.AIError: STORAGE_INTEGRITY_ERROR
+FAILED tests/ai/test_runtime_state_identity_migration.py::test_migration_rewrites_evaluation_from_linked_legacy_execution - linktools.ai.errors.AIError: STORAGE_INTEGRITY_ERROR
+FAILED tests/ai/test_runtime_state_identity_migration_sqlite.py::test_open_workspace_runtime_normalizes_legacy_sqlite_session - linktools.ai.errors.AIError: STORAGE_INTEGRITY_ERROR
+7 failed, 371 passed in 28.22s
 exit=1
