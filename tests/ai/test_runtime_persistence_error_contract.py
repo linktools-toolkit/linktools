@@ -33,11 +33,7 @@ def _future_schema(data: object) -> object:
     return value
 
 
-def test_legacy_binding_malformed_known_field_remains_integrity_error() -> None:
-    compiler = AgentCompiler(
-        model_resolver=ModelRegistry.openai(model="gpt-test").snapshot(),
-        runtime_fingerprint="a" * 64,
-    )
+def _legacy_binding_payload(compiler: AgentCompiler) -> dict[str, object]:
     binding = compiler.bind(compiler.compile(AgentSpec("default")))
     payload = dict(binding.snapshot.to_payload())
     payload.pop("agent_digest")
@@ -45,7 +41,31 @@ def test_legacy_binding_malformed_known_field_remains_integrity_error() -> None:
     spec["metadata"] = {}
     payload["agent_spec"] = spec
     payload["binding_digest"] = "f" * 64
+    return payload
+
+
+def _compiler() -> AgentCompiler:
+    return AgentCompiler(
+        model_resolver=ModelRegistry.openai(model="gpt-test").snapshot(),
+        runtime_fingerprint="a" * 64,
+    )
+
+
+def test_legacy_binding_malformed_known_field_remains_integrity_error() -> None:
+    compiler = _compiler()
+    payload = _legacy_binding_payload(compiler)
     payload["output_schema_fingerprint"] = "invalid"
+
+    with pytest.raises(AIError) as raised:
+        _migrate_legacy_binding(payload, compiler)
+
+    assert raised.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
+
+
+def test_legacy_binding_malformed_descriptor_remains_integrity_error() -> None:
+    compiler = _compiler()
+    payload = _legacy_binding_payload(compiler)
+    payload["local_runtime_capability_descriptors"] = [None]
 
     with pytest.raises(AIError) as raised:
         _migrate_legacy_binding(payload, compiler)
