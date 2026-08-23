@@ -10,16 +10,13 @@ the single current V1 shape before normal Runtime reads begin.
 
 from __future__ import annotations
 
-import importlib
 from collections.abc import Mapping
 from dataclasses import fields as dataclass_fields, replace
 from typing import get_type_hints
 
-from pydantic import BaseModel
-
 from ...agent import AgentBinding, AgentBindingSnapshot, AgentCatalog, AgentCompiler
 from ...capability import RuntimeCapability
-from ...core import JsonValue
+from ...core import JsonValue, canonical_sha256
 from ...errors import AIError, ErrorCode
 from ...spec import AgentSpec, AgentUsageLimits
 from ._codec import (
@@ -49,6 +46,7 @@ from ._repositories import (
     _domain_data,
 )
 from ._root import RuntimeState
+from ._steps import StateStepArchive
 from ._store import RecordQuery, StateStore, StateTransaction, StoredRecord, sequence_key
 
 _PAGE_SIZE = 128
@@ -171,7 +169,10 @@ async def migrate_v1_agent_identity_state(
         RuntimeDomain.EXECUTION,
         RuntimeDomain.RECOVERY,
     ):
-        history = state.steps.read_store(domain).transcript_repository
+        archive = state.steps.read_store(domain)
+        if not isinstance(archive, StateStepArchive):
+            continue
+        history = archive.transcript_repository
         for record in await _records(history, "context_projection"):
             data = _migrate_projection_data(record, legacy_agents)
             if data is not None:
@@ -629,26 +630,49 @@ def _migrate_legacy_binding(
             for descriptor in descriptors
         )
         definition = compiler.compile(spec, capabilities=capabilities)
-        output_type = _output_type(
-            _string(value.get("output_type_module")),
-            _string(value.get("output_type_qualname")),
+        module_name = _string(value.get("output_type_module"))
+        qualname = _string(value.get("output_type_qualname"))
+        schema_id = _string(value.get("output_schema_id"))
+        schema_revision = _positive_int(value.get("output_schema_revision"))
+        schema_fingerprint = _digest(value.get("output_schema_fingerprint"))
+        output_binding_fingerprint = canonical_sha256(
+            {
+                "schema_id": schema_id,
+                "schema_revision": schema_revision,
+                "schema_fingerprint": schema_fingerprint,
+                "module": module_name,
+                "qualname": qualname,
+            }
         )
-        binding = compiler.bind(definition, output=output_type)
+        binding_digest = canonical_sha256(
+            {
+                "version": 1,
+                "agent_digest": definition.digest,
+                "output_binding_fingerprint": output_binding_fingerprint,
+            }
+        )
+        snapshot = AgentBindingSnapshot(
+            version=1,
+            agent_spec=definition.spec,
+            agent_digest=definition.digest,
+            output_type_module=module_name,
+            output_type_qualname=qualname,
+            output_schema_id=schema_id,
+            output_schema_revision=schema_revision,
+            output_schema_fingerprint=schema_fingerprint,
+            local_runtime_capability_descriptors=(
+                definition.local_runtime_capability_descriptors
+            ),
+            binding_digest=binding_digest,
+        )
+        binding = compiler.restore(snapshot)
     except AIError as error:
         if error.code is ErrorCode.AGENT_DEFINITION_UNAVAILABLE:
             raise
         raise AIError(ErrorCode.AGENT_DEFINITION_UNAVAILABLE) from error
-    snapshot = binding.snapshot
-    if (
-        snapshot.output_type_module != value.get("output_type_module")
-        or snapshot.output_type_qualname != value.get("output_type_qualname")
-        or snapshot.output_schema_id != value.get("output_schema_id")
-        or snapshot.output_schema_revision != value.get("output_schema_revision")
-        or snapshot.output_schema_fingerprint != value.get("output_schema_fingerprint")
-    ):
+    if binding.snapshot != snapshot:
         raise AIError(ErrorCode.AGENT_DEFINITION_UNAVAILABLE)
     return legacy_digest, binding
-
 
 def _legacy_agent_spec(value: object) -> AgentSpec:
     if not isinstance(value, Mapping) or frozenset(value) != _LEGACY_AGENT_SPEC_FIELDS:
@@ -701,20 +725,6 @@ def _usage_limits(value: object) -> AgentUsageLimits | None:
         return AgentUsageLimits(**kwargs)
     except ValueError as error:
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
-
-
-def _output_type(module_name: str, qualname: str) -> type[BaseModel]:
-    if module_name == "__main__" or "<locals>" in qualname:
-        raise AIError(ErrorCode.AGENT_DEFINITION_UNAVAILABLE)
-    try:
-        target: object = importlib.import_module(module_name)
-        for part in qualname.split("."):
-            target = getattr(target, part)
-    except Exception as error:
-        raise AIError(ErrorCode.AGENT_DEFINITION_UNAVAILABLE) from error
-    if not isinstance(target, type) or not issubclass(target, BaseModel):
-        raise AIError(ErrorCode.AGENT_DEFINITION_UNAVAILABLE)
-    return target
 
 
 def _nested_dataclass_fields(value: object, wire_id: str) -> Mapping[str, object]:

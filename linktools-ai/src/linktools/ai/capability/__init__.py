@@ -10,7 +10,11 @@ from ._contract import (
     RuntimeCapability,
     validate_fingerprint,
 )
-from ._mcp import MCPCapabilityProvider, MCPRuntime, mcp_server_selector
+from ._mcp import (
+    MCPCapabilityProvider,
+    MCPRuntime,
+    mcp_server_selector as mcp_server_selector,
+)
 from ._names import SKILL_TOOL_NAMES
 from ._skill import SkillCapabilityProvider
 
@@ -24,6 +28,5 @@ __all__ = [
     "MCPCapabilityProvider",
     "MCPRuntime",
     "SkillCapabilityProvider",
-    "mcp_server_selector",
     "validate_fingerprint",
 ]

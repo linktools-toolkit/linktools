@@ -315,8 +315,8 @@ async def test_migration_rewrites_full_legacy_recovery_shape() -> None:
 
 
 @pytest.mark.asyncio
-async def test_migration_preserves_historical_projection_digest() -> None:
-    state = RuntimeState.in_memory()
+async def test_migration_preserves_historical_projection_digest(tmp_path) -> None:
+    state = RuntimeState.filesystem(tmp_path / "runtime")
     await state.initialize(namespace="legacy-projection", tenant_id="tenant")
     compiler, catalog = _compiler_catalog()
     definition = catalog.root_definition("default")
