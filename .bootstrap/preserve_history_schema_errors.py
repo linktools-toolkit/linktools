@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
+import runpy
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -37,5 +38,13 @@ def main() -> None:
     print("transcript schema error classification preserved")
 
 
+def close_exception_gates() -> None:
+    runpy.run_path(
+        str(ROOT / ".bootstrap/close_persistence_exception_gates.py"),
+        run_name="__main__",
+    )
+
+
 if __name__ == "__main__":
     main()
+    close_exception_gates()
