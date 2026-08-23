@@ -1,10 +1,910 @@
 ===== python -m pip install -q --upgrade pip =====
 ===== python -m pip install -q -e ./linktools -e ./linktools-ai[sqlite,evaluation,temporal] pytest pytest-asyncio ruff =====
 ===== python .bootstrap/patch.py =====
-remaining execution fixtures migrated
-===== python .bootstrap/patch2.py =====
-tests/ai/test_session_admission.py: SessionRecord now pins agent_digest
-Traceback (most recent call last):
-  File "/home/runner/work/linktools/linktools/.bootstrap/patch2.py", line 13, in <module>
-    raise RuntimeError(f'{path_value}: expected one SessionRecord binding field, got {count}')
-RuntimeError: tests/ai/test_session_admission_conformance.py: expected one SessionRecord binding field, got 0
+tests/ai/test_session_admission_conformance.py: SessionRecord migrated to agent_digest
+tests/ai/test_session_history_projection.py: SessionRecord migrated to agent_digest
+===== python -m compileall -q linktools-ai/src/linktools/ai =====
+===== ruff check --select E4,E7,E9,F linktools-ai/src/linktools/ai/agent/__init__.py linktools-ai/src/linktools/ai/agent/_binding.py linktools-ai/src/linktools/ai/agent/_builder.py linktools-ai/src/linktools/ai/agent/_catalog.py linktools-ai/src/linktools/ai/agent/_compiler.py linktools-ai/src/linktools/ai/agent/_definition.py linktools-ai/src/linktools/ai/agent/_executor.py linktools-ai/src/linktools/ai/asset/__init__.py linktools-ai/src/linktools/ai/asset/_repository.py linktools-ai/src/linktools/ai/runtime/_agent.py linktools-ai/src/linktools/ai/runtime/_coordinator.py linktools-ai/src/linktools/ai/runtime/_execution.py linktools-ai/src/linktools/ai/runtime/_factory.py linktools-ai/src/linktools/ai/runtime/_local.py linktools-ai/src/linktools/ai/runtime/_planner.py linktools-ai/src/linktools/ai/runtime/_runtime_service.py linktools-ai/src/linktools/ai/runtime/_session.py linktools-ai/src/linktools/ai/runtime/_subagent.py linktools-ai/src/linktools/ai/runtime/service_api.py linktools-ai/src/linktools/ai/runtime/state/_codec.py linktools-ai/src/linktools/ai/runtime/state/_commands.py linktools-ai/src/linktools/ai/runtime/state/_contracts.py linktools-ai/src/linktools/ai/runtime/state/_history.py linktools-ai/src/linktools/ai/runtime/state/_steps.py linktools-ai/src/linktools/ai/spec/_codec.py linktools-ai/src/linktools/ai/spec/_contract.py linktools-ai/src/linktools/ai/temporal/_gateway.py linktools-ai/src/linktools/ai/temporal/_request.py linktools-ai/src/linktools/ai/temporal/_task_operation.py linktools-ai/src/linktools/ai/workspace/__init__.py linktools-ai/src/linktools/ai/workspace/_factory.py tests/ai/persistence/test_execution_start_service.py tests/ai/test_agent_composition.py tests/ai/test_architecture.py tests/ai/test_asset_repository.py tests/ai/test_contracts.py tests/ai/test_filesystem_mutation_invariants.py tests/ai/test_history_projection_conformance.py tests/ai/test_local_execution_recovery.py tests/ai/test_memory_terminal.py tests/ai/test_recovery_integrity_validator.py tests/ai/test_runtime_binding_contract.py tests/ai/test_runtime_composition_regressions.py tests/ai/test_runtime_storage_io_convergence.py tests/ai/test_runtime_stream_order.py tests/ai/test_session_admission.py tests/ai/test_session_admission_conformance.py tests/ai/test_session_history_projection.py tests/ai/test_step_io_final_fix.py tests/ai/test_workspace_runtime_regressions.py =====
+All checks passed!
+===== python -m scripts.build.architecture =====
+<frozen runpy>:128: RuntimeWarning: 'scripts.build.architecture' found in sys.modules after import of package 'scripts.build', but prior to execution of 'scripts.build.architecture'; this may result in unpredictable behaviour
+===== pytest -q tests/ai --maxfail=30 =====
+........................................................................ [ 20%]
+........................................................................ [ 40%]
+........................................................................ [ 60%]
+..............................................F...F..................... [ 80%]
+..............................FFFFFFFFFFFFFFFFF................F........ [100%]
+=================================== FAILURES ===================================
+______________ test_rejected_admission_terminalizes_pending_start ______________
+
+    @pytest.mark.asyncio
+    async def test_rejected_admission_terminalizes_pending_start() -> None:
+        state = RuntimeState.in_memory()
+        await state.initialize(namespace="session-admission-rejection", tenant_id="tenant")
+        try:
+            await state.conversation.sessions.create(_session())
+            backend = _RejectingBackend(state.execution.executions)
+            service = DefaultExecutionService(
+                state.execution,
+                state._object_store(RuntimeDomain.EXECUTION),
+                TenantAuthorizationPolicy(),
+                sessions=state.conversation.sessions,
+            catalog=_DefinitionCatalog(),
+            compiler=object(),
+                backend=backend,
+                history_reader=_History(),
+            )
+            from linktools.ai.runtime.state import RuntimeStateCommands
+            from linktools.ai.runtime.state._repositories import (
+                ConversationHistoryRepositoryImpl,
+                EventRepositoryImpl,
+                OperationLedgerRepository,
+            )
+    
+            service.bind_terminal_committer(
+                RuntimeStateCommands(
+                    state.execution.executions,
+                    namespace="session-admission-rejection",
+                    events=EventRepositoryImpl(
+                        state.execution.events.state_store,
+                        namespace="session-admission-rejection",
+                        tenant_id="tenant",
+                    ),
+                    operations=OperationLedgerRepository(
+                        state.execution.operations.state_store,
+                        namespace="session-admission-rejection",
+                        tenant_id="tenant",
+                        domain=RuntimeDomain.EXECUTION,
+                    ),
+                    conversation=state.conversation.sessions,
+                    recovery=state.recovery.checkpoints,
+                    conversation_history=ConversationHistoryRepositoryImpl(
+                        state.conversation.histories.state_store,
+                        namespace="session-admission-rejection",
+                        tenant_id="tenant",
+                    ),
+                )
+            )
+            with pytest.raises(AIError) as error:
+>               await service.run_for_session(
+                    "b" * 64,
+                    "session",
+                    ExecutionRequest(
+                        user_prompt="hello",
+                        principal=Principal("owner", "tenant"),
+                        idempotency_key="rejected-start",
+                    ),
+                )
+
+tests/ai/test_session_admission_conformance.py:324: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+linktools-ai/src/linktools/ai/runtime/_execution.py:385: in run_for_session
+    return await self._start(binding_digest, request, session_id=session_id, scope="session.resume")
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+linktools-ai/src/linktools/ai/runtime/_execution.py:468: in _start
+    return await self._start_unlocked(
+linktools-ai/src/linktools/ai/runtime/_execution.py:503: in _start_unlocked
+    binding = self._binding(binding_digest)
+              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+self = <linktools.ai.runtime._execution.DefaultExecutionService object at 0x7f38309a88c0>
+binding_digest = 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb'
+snapshot = None
+
+    def _binding(
+        self,
+        binding_digest: str,
+        snapshot: "AgentBindingSnapshot | None" = None,
+    ) -> AgentBinding:
+        try:
+>           binding = self._catalog.binding(binding_digest)
+                      ^^^^^^^^^^^^^^^^^^^^^
+E           AttributeError: '_DefinitionCatalog' object has no attribute 'binding'
+
+linktools-ai/src/linktools/ai/runtime/_execution.py:262: AttributeError
+____ test_session_history_fork_copies_continuation_without_execution_lookup ____
+
+    @pytest.mark.asyncio
+    async def test_session_history_fork_copies_continuation_without_execution_lookup() -> None:
+        state = RuntimeState.in_memory()
+        await state.initialize(namespace="session-history-fork", tenant_id="tenant")
+        try:
+            await state.conversation.sessions.create(_session())
+            run_id = "session-history-fork-run"
+            await _materialize(state, run_id, ("A",))
+            await _advance(state, None, ConversationCursor(run_id))
+            service = _service(state)
+            principal = Principal("owner", "tenant")
+>           await service.fork(
+                "binding",
+                "session",
+                ForkSessionRequest(principal, "fork", "fork-operation"),
+            )
+
+tests/ai/test_session_history_projection.py:324: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+self = <linktools.ai.runtime._session.DefaultSessionService object at 0x7f38309b98b0>
+agent_digest = 'binding', session_id = 'session'
+request = ForkSessionRequest(principal=Principal(principal_id='owner', tenant_id='tenant', kind='user'), new_session_id='fork', idempotency_key='fork-operation', cwd=None)
+
+    async def fork(self, agent_digest: str, session_id: str, request: ForkSessionRequest) -> SessionView:
+        async with self._session_consumer(session_id, request.principal.tenant_id):
+            source = await self._authorized(session_id, request.principal, AuthorizationAction.SESSION_READ)
+            await self._authorization.authorize(
+                request.principal,
+                AuthorizationAction.SESSION_CREATE,
+                ResourceRef(
+                    ResourceKind.SESSION,
+                    request.new_session_id,
+                    request.principal.tenant_id,
+                    request.principal.principal_id,
+                ),
+            )
+            if source.agent_digest != agent_digest:
+>               raise AIError(ErrorCode.SESSION_BINDING_MISMATCH)
+E               linktools.ai.errors.AIError: SESSION_BINDING_MISMATCH
+
+linktools-ai/src/linktools/ai/runtime/_session.py:435: AIError
+_____________ test_prepare_requires_temporal_activity_run_context ______________
+
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x7f3830605190>
+
+    @pytest.mark.asyncio
+    async def test_prepare_requires_temporal_activity_run_context(monkeypatch) -> None:
+>       state, activity, request = await _runtime_activity(_ReplayRunner())
+                                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+tests/ai/test_temporal_taskgraph_conformance.py:139: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+tests/ai/test_temporal_taskgraph_conformance.py:115: in _runtime_activity
+    request = _request()
+              ^^^^^^^^^^
+tests/ai/test_temporal_taskgraph_conformance.py:62: in _request
+    (TaskNode("node", input={"kind": "test", "binding": _binding().to_payload()}),),
+                                                        ^^^^^^^^^^
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+    def _binding() -> AgentBindingSnapshot:
+>       return AgentBindingSnapshot(
+            version=1,
+            agent_spec=AgentSpec("agent", 1, "model"),
+            output_type_module="builtins",
+            output_type_qualname="str",
+            output_schema_id="test-output",
+            output_schema_revision=1,
+            output_schema_fingerprint="b" * 64,
+            local_runtime_capability_descriptors=(),
+            binding_digest="a" * 64,
+        )
+E       TypeError: AgentBindingSnapshot.__init__() missing 1 required positional argument: 'agent_digest'
+
+tests/ai/test_temporal_taskgraph_conformance.py:45: TypeError
+___________ test_new_workflow_run_does_not_take_foreign_active_lease ___________
+
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x7f3830607fb0>
+
+    @pytest.mark.asyncio
+    async def test_new_workflow_run_does_not_take_foreign_active_lease(monkeypatch) -> None:
+>       state, activity, request = await _runtime_activity(_ReplayRunner())
+                                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+tests/ai/test_temporal_taskgraph_conformance.py:155: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+tests/ai/test_temporal_taskgraph_conformance.py:115: in _runtime_activity
+    request = _request()
+              ^^^^^^^^^^
+tests/ai/test_temporal_taskgraph_conformance.py:62: in _request
+    (TaskNode("node", input={"kind": "test", "binding": _binding().to_payload()}),),
+                                                        ^^^^^^^^^^
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+    def _binding() -> AgentBindingSnapshot:
+>       return AgentBindingSnapshot(
+            version=1,
+            agent_spec=AgentSpec("agent", 1, "model"),
+            output_type_module="builtins",
+            output_type_qualname="str",
+            output_schema_id="test-output",
+            output_schema_revision=1,
+            output_schema_fingerprint="b" * 64,
+            local_runtime_capability_descriptors=(),
+            binding_digest="a" * 64,
+        )
+E       TypeError: AgentBindingSnapshot.__init__() missing 1 required positional argument: 'agent_digest'
+
+tests/ai/test_temporal_taskgraph_conformance.py:45: TypeError
+___________ test_prepare_replays_failed_node_after_reconcile_failure ___________
+
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x7f3830641ca0>
+
+    @pytest.mark.asyncio
+    async def test_prepare_replays_failed_node_after_reconcile_failure(monkeypatch) -> None:
+>       state, activity, request = await _runtime_activity(
+            _ReplayRunner(AIError(ErrorCode.PROMPT_TOO_LARGE))
+        )
+
+tests/ai/test_temporal_taskgraph_conformance.py:178: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+tests/ai/test_temporal_taskgraph_conformance.py:115: in _runtime_activity
+    request = _request()
+              ^^^^^^^^^^
+tests/ai/test_temporal_taskgraph_conformance.py:62: in _request
+    (TaskNode("node", input={"kind": "test", "binding": _binding().to_payload()}),),
+                                                        ^^^^^^^^^^
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+    def _binding() -> AgentBindingSnapshot:
+>       return AgentBindingSnapshot(
+            version=1,
+            agent_spec=AgentSpec("agent", 1, "model"),
+            output_type_module="builtins",
+            output_type_qualname="str",
+            output_schema_id="test-output",
+            output_schema_revision=1,
+            output_schema_fingerprint="b" * 64,
+            local_runtime_capability_descriptors=(),
+            binding_digest="a" * 64,
+        )
+E       TypeError: AgentBindingSnapshot.__init__() missing 1 required positional argument: 'agent_digest'
+
+tests/ai/test_temporal_taskgraph_conformance.py:45: TypeError
+________________ test_prepare_rejects_malformed_failed_terminal ________________
+
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x7f3830641e20>
+
+    @pytest.mark.asyncio
+    async def test_prepare_rejects_malformed_failed_terminal(monkeypatch) -> None:
+>       state, activity, request = await _runtime_activity(
+            _ReplayRunner(AIError(ErrorCode.PROMPT_TOO_LARGE))
+        )
+
+tests/ai/test_temporal_taskgraph_conformance.py:209: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+tests/ai/test_temporal_taskgraph_conformance.py:115: in _runtime_activity
+    request = _request()
+              ^^^^^^^^^^
+tests/ai/test_temporal_taskgraph_conformance.py:62: in _request
+    (TaskNode("node", input={"kind": "test", "binding": _binding().to_payload()}),),
+                                                        ^^^^^^^^^^
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+    def _binding() -> AgentBindingSnapshot:
+>       return AgentBindingSnapshot(
+            version=1,
+            agent_spec=AgentSpec("agent", 1, "model"),
+            output_type_module="builtins",
+            output_type_qualname="str",
+            output_schema_id="test-output",
+            output_schema_revision=1,
+            output_schema_fingerprint="b" * 64,
+            local_runtime_capability_descriptors=(),
+            binding_digest="a" * 64,
+        )
+E       TypeError: AgentBindingSnapshot.__init__() missing 1 required positional argument: 'agent_digest'
+
+tests/ai/test_temporal_taskgraph_conformance.py:45: TypeError
+__________ test_settle_replays_succeeded_node_without_second_complete __________
+
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x7f38306077a0>
+
+    @pytest.mark.asyncio
+    async def test_settle_replays_succeeded_node_without_second_complete(
+        monkeypatch,
+    ) -> None:
+        runner = _ReplayRunner()
+>       state, activity, request = await _runtime_activity(runner)
+                                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+tests/ai/test_temporal_taskgraph_conformance.py:235: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+tests/ai/test_temporal_taskgraph_conformance.py:115: in _runtime_activity
+    request = _request()
+              ^^^^^^^^^^
+tests/ai/test_temporal_taskgraph_conformance.py:62: in _request
+    (TaskNode("node", input={"kind": "test", "binding": _binding().to_payload()}),),
+                                                        ^^^^^^^^^^
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+    def _binding() -> AgentBindingSnapshot:
+>       return AgentBindingSnapshot(
+            version=1,
+            agent_spec=AgentSpec("agent", 1, "model"),
+            output_type_module="builtins",
+            output_type_qualname="str",
+            output_schema_id="test-output",
+            output_schema_revision=1,
+            output_schema_fingerprint="b" * 64,
+            local_runtime_capability_descriptors=(),
+            binding_digest="a" * 64,
+        )
+E       TypeError: AgentBindingSnapshot.__init__() missing 1 required positional argument: 'agent_digest'
+
+tests/ai/test_temporal_taskgraph_conformance.py:45: TypeError
+____________ test_settle_replay_rejects_mismatched_execution_result ____________
+
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x7f38306b5f40>
+
+    @pytest.mark.asyncio
+    async def test_settle_replay_rejects_mismatched_execution_result(monkeypatch) -> None:
+        runner = _ReplayRunner()
+>       state, activity, request = await _runtime_activity(runner)
+                                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+tests/ai/test_temporal_taskgraph_conformance.py:284: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+tests/ai/test_temporal_taskgraph_conformance.py:115: in _runtime_activity
+    request = _request()
+              ^^^^^^^^^^
+tests/ai/test_temporal_taskgraph_conformance.py:62: in _request
+    (TaskNode("node", input={"kind": "test", "binding": _binding().to_payload()}),),
+                                                        ^^^^^^^^^^
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+    def _binding() -> AgentBindingSnapshot:
+>       return AgentBindingSnapshot(
+            version=1,
+            agent_spec=AgentSpec("agent", 1, "model"),
+            output_type_module="builtins",
+            output_type_qualname="str",
+            output_schema_id="test-output",
+            output_schema_revision=1,
+            output_schema_fingerprint="b" * 64,
+            local_runtime_capability_descriptors=(),
+            binding_digest="a" * 64,
+        )
+E       TypeError: AgentBindingSnapshot.__init__() missing 1 required positional argument: 'agent_digest'
+
+tests/ai/test_temporal_taskgraph_conformance.py:45: TypeError
+_____________ test_settle_replays_failed_node_without_second_fail ______________
+
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x7f3830729490>
+
+    @pytest.mark.asyncio
+    async def test_settle_replays_failed_node_without_second_fail(monkeypatch) -> None:
+>       state, activity, request = await _runtime_activity(_ReplayRunner())
+                                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+tests/ai/test_temporal_taskgraph_conformance.py:320: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+tests/ai/test_temporal_taskgraph_conformance.py:115: in _runtime_activity
+    request = _request()
+              ^^^^^^^^^^
+tests/ai/test_temporal_taskgraph_conformance.py:62: in _request
+    (TaskNode("node", input={"kind": "test", "binding": _binding().to_payload()}),),
+                                                        ^^^^^^^^^^
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+    def _binding() -> AgentBindingSnapshot:
+>       return AgentBindingSnapshot(
+            version=1,
+            agent_spec=AgentSpec("agent", 1, "model"),
+            output_type_module="builtins",
+            output_type_qualname="str",
+            output_schema_id="test-output",
+            output_schema_revision=1,
+            output_schema_fingerprint="b" * 64,
+            local_runtime_capability_descriptors=(),
+            binding_digest="a" * 64,
+        )
+E       TypeError: AgentBindingSnapshot.__init__() missing 1 required positional argument: 'agent_digest'
+
+tests/ai/test_temporal_taskgraph_conformance.py:45: TypeError
+______ test_terminal_settle_replay_uses_durable_status[SUCCEEDED-FAILED] _______
+
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x7f3830636f30>
+durable_status = <TaskStatus.SUCCEEDED: 'SUCCEEDED'>, child_status = 'FAILED'
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("durable_status", "child_status"),
+        [
+            (TaskStatus.SUCCEEDED, "FAILED"),
+            (TaskStatus.SUCCEEDED, "CANCELLED"),
+            (TaskStatus.FAILED, "SUCCEEDED"),
+            (TaskStatus.CANCELLED, "SUCCEEDED"),
+        ],
+    )
+    async def test_terminal_settle_replay_uses_durable_status(
+        monkeypatch,
+        durable_status: TaskStatus,
+        child_status: str,
+    ) -> None:
+        runner = _ReplayRunner()
+>       state, activity, request = await _runtime_activity(runner)
+                                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+tests/ai/test_temporal_taskgraph_conformance.py:377: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+tests/ai/test_temporal_taskgraph_conformance.py:115: in _runtime_activity
+    request = _request()
+              ^^^^^^^^^^
+tests/ai/test_temporal_taskgraph_conformance.py:62: in _request
+    (TaskNode("node", input={"kind": "test", "binding": _binding().to_payload()}),),
+                                                        ^^^^^^^^^^
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+    def _binding() -> AgentBindingSnapshot:
+>       return AgentBindingSnapshot(
+            version=1,
+            agent_spec=AgentSpec("agent", 1, "model"),
+            output_type_module="builtins",
+            output_type_qualname="str",
+            output_schema_id="test-output",
+            output_schema_revision=1,
+            output_schema_fingerprint="b" * 64,
+            local_runtime_capability_descriptors=(),
+            binding_digest="a" * 64,
+        )
+E       TypeError: AgentBindingSnapshot.__init__() missing 1 required positional argument: 'agent_digest'
+
+tests/ai/test_temporal_taskgraph_conformance.py:45: TypeError
+_____ test_terminal_settle_replay_uses_durable_status[SUCCEEDED-CANCELLED] _____
+
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x7f383068fd70>
+durable_status = <TaskStatus.SUCCEEDED: 'SUCCEEDED'>, child_status = 'CANCELLED'
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("durable_status", "child_status"),
+        [
+            (TaskStatus.SUCCEEDED, "FAILED"),
+            (TaskStatus.SUCCEEDED, "CANCELLED"),
+            (TaskStatus.FAILED, "SUCCEEDED"),
+            (TaskStatus.CANCELLED, "SUCCEEDED"),
+        ],
+    )
+    async def test_terminal_settle_replay_uses_durable_status(
+        monkeypatch,
+        durable_status: TaskStatus,
+        child_status: str,
+    ) -> None:
+        runner = _ReplayRunner()
+>       state, activity, request = await _runtime_activity(runner)
+                                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+tests/ai/test_temporal_taskgraph_conformance.py:377: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+tests/ai/test_temporal_taskgraph_conformance.py:115: in _runtime_activity
+    request = _request()
+              ^^^^^^^^^^
+tests/ai/test_temporal_taskgraph_conformance.py:62: in _request
+    (TaskNode("node", input={"kind": "test", "binding": _binding().to_payload()}),),
+                                                        ^^^^^^^^^^
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+    def _binding() -> AgentBindingSnapshot:
+>       return AgentBindingSnapshot(
+            version=1,
+            agent_spec=AgentSpec("agent", 1, "model"),
+            output_type_module="builtins",
+            output_type_qualname="str",
+            output_schema_id="test-output",
+            output_schema_revision=1,
+            output_schema_fingerprint="b" * 64,
+            local_runtime_capability_descriptors=(),
+            binding_digest="a" * 64,
+        )
+E       TypeError: AgentBindingSnapshot.__init__() missing 1 required positional argument: 'agent_digest'
+
+tests/ai/test_temporal_taskgraph_conformance.py:45: TypeError
+______ test_terminal_settle_replay_uses_durable_status[FAILED-SUCCEEDED] _______
+
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x7f38305ce180>
+durable_status = <TaskStatus.FAILED: 'FAILED'>, child_status = 'SUCCEEDED'
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("durable_status", "child_status"),
+        [
+            (TaskStatus.SUCCEEDED, "FAILED"),
+            (TaskStatus.SUCCEEDED, "CANCELLED"),
+            (TaskStatus.FAILED, "SUCCEEDED"),
+            (TaskStatus.CANCELLED, "SUCCEEDED"),
+        ],
+    )
+    async def test_terminal_settle_replay_uses_durable_status(
+        monkeypatch,
+        durable_status: TaskStatus,
+        child_status: str,
+    ) -> None:
+        runner = _ReplayRunner()
+>       state, activity, request = await _runtime_activity(runner)
+                                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+tests/ai/test_temporal_taskgraph_conformance.py:377: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+tests/ai/test_temporal_taskgraph_conformance.py:115: in _runtime_activity
+    request = _request()
+              ^^^^^^^^^^
+tests/ai/test_temporal_taskgraph_conformance.py:62: in _request
+    (TaskNode("node", input={"kind": "test", "binding": _binding().to_payload()}),),
+                                                        ^^^^^^^^^^
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+    def _binding() -> AgentBindingSnapshot:
+>       return AgentBindingSnapshot(
+            version=1,
+            agent_spec=AgentSpec("agent", 1, "model"),
+            output_type_module="builtins",
+            output_type_qualname="str",
+            output_schema_id="test-output",
+            output_schema_revision=1,
+            output_schema_fingerprint="b" * 64,
+            local_runtime_capability_descriptors=(),
+            binding_digest="a" * 64,
+        )
+E       TypeError: AgentBindingSnapshot.__init__() missing 1 required positional argument: 'agent_digest'
+
+tests/ai/test_temporal_taskgraph_conformance.py:45: TypeError
+_____ test_terminal_settle_replay_uses_durable_status[CANCELLED-SUCCEEDED] _____
+
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x7f38305cd280>
+durable_status = <TaskStatus.CANCELLED: 'CANCELLED'>, child_status = 'SUCCEEDED'
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("durable_status", "child_status"),
+        [
+            (TaskStatus.SUCCEEDED, "FAILED"),
+            (TaskStatus.SUCCEEDED, "CANCELLED"),
+            (TaskStatus.FAILED, "SUCCEEDED"),
+            (TaskStatus.CANCELLED, "SUCCEEDED"),
+        ],
+    )
+    async def test_terminal_settle_replay_uses_durable_status(
+        monkeypatch,
+        durable_status: TaskStatus,
+        child_status: str,
+    ) -> None:
+        runner = _ReplayRunner()
+>       state, activity, request = await _runtime_activity(runner)
+                                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+tests/ai/test_temporal_taskgraph_conformance.py:377: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+tests/ai/test_temporal_taskgraph_conformance.py:115: in _runtime_activity
+    request = _request()
+              ^^^^^^^^^^
+tests/ai/test_temporal_taskgraph_conformance.py:62: in _request
+    (TaskNode("node", input={"kind": "test", "binding": _binding().to_payload()}),),
+                                                        ^^^^^^^^^^
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+    def _binding() -> AgentBindingSnapshot:
+>       return AgentBindingSnapshot(
+            version=1,
+            agent_spec=AgentSpec("agent", 1, "model"),
+            output_type_module="builtins",
+            output_type_qualname="str",
+            output_schema_id="test-output",
+            output_schema_revision=1,
+            output_schema_fingerprint="b" * 64,
+            local_runtime_capability_descriptors=(),
+            binding_digest="a" * 64,
+        )
+E       TypeError: AgentBindingSnapshot.__init__() missing 1 required positional argument: 'agent_digest'
+
+tests/ai/test_temporal_taskgraph_conformance.py:45: TypeError
+_ test_stale_settle_replay_uses_higher_fence_durable_status[SUCCEEDED-FAILED] __
+
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x7f38305e1eb0>
+durable_status = <TaskStatus.SUCCEEDED: 'SUCCEEDED'>, child_status = 'FAILED'
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("durable_status", "child_status"),
+        [
+            (TaskStatus.SUCCEEDED, "FAILED"),
+            (TaskStatus.SUCCEEDED, "CANCELLED"),
+            (TaskStatus.FAILED, "SUCCEEDED"),
+            (TaskStatus.CANCELLED, "SUCCEEDED"),
+        ],
+    )
+    async def test_stale_settle_replay_uses_higher_fence_durable_status(
+        monkeypatch,
+        durable_status: TaskStatus,
+        child_status: str,
+    ) -> None:
+        runner = _ReplayRunner()
+>       state, activity, request = await _runtime_activity(runner)
+                                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+tests/ai/test_temporal_taskgraph_conformance.py:451: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+tests/ai/test_temporal_taskgraph_conformance.py:115: in _runtime_activity
+    request = _request()
+              ^^^^^^^^^^
+tests/ai/test_temporal_taskgraph_conformance.py:62: in _request
+    (TaskNode("node", input={"kind": "test", "binding": _binding().to_payload()}),),
+                                                        ^^^^^^^^^^
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+    def _binding() -> AgentBindingSnapshot:
+>       return AgentBindingSnapshot(
+            version=1,
+            agent_spec=AgentSpec("agent", 1, "model"),
+            output_type_module="builtins",
+            output_type_qualname="str",
+            output_schema_id="test-output",
+            output_schema_revision=1,
+            output_schema_fingerprint="b" * 64,
+            local_runtime_capability_descriptors=(),
+            binding_digest="a" * 64,
+        )
+E       TypeError: AgentBindingSnapshot.__init__() missing 1 required positional argument: 'agent_digest'
+
+tests/ai/test_temporal_taskgraph_conformance.py:45: TypeError
+_ test_stale_settle_replay_uses_higher_fence_durable_status[SUCCEEDED-CANCELLED] _
+
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x7f38305e16a0>
+durable_status = <TaskStatus.SUCCEEDED: 'SUCCEEDED'>, child_status = 'CANCELLED'
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("durable_status", "child_status"),
+        [
+            (TaskStatus.SUCCEEDED, "FAILED"),
+            (TaskStatus.SUCCEEDED, "CANCELLED"),
+            (TaskStatus.FAILED, "SUCCEEDED"),
+            (TaskStatus.CANCELLED, "SUCCEEDED"),
+        ],
+    )
+    async def test_stale_settle_replay_uses_higher_fence_durable_status(
+        monkeypatch,
+        durable_status: TaskStatus,
+        child_status: str,
+    ) -> None:
+        runner = _ReplayRunner()
+>       state, activity, request = await _runtime_activity(runner)
+                                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+tests/ai/test_temporal_taskgraph_conformance.py:451: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+tests/ai/test_temporal_taskgraph_conformance.py:115: in _runtime_activity
+    request = _request()
+              ^^^^^^^^^^
+tests/ai/test_temporal_taskgraph_conformance.py:62: in _request
+    (TaskNode("node", input={"kind": "test", "binding": _binding().to_payload()}),),
+                                                        ^^^^^^^^^^
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+    def _binding() -> AgentBindingSnapshot:
+>       return AgentBindingSnapshot(
+            version=1,
+            agent_spec=AgentSpec("agent", 1, "model"),
+            output_type_module="builtins",
+            output_type_qualname="str",
+            output_schema_id="test-output",
+            output_schema_revision=1,
+            output_schema_fingerprint="b" * 64,
+            local_runtime_capability_descriptors=(),
+            binding_digest="a" * 64,
+        )
+E       TypeError: AgentBindingSnapshot.__init__() missing 1 required positional argument: 'agent_digest'
+
+tests/ai/test_temporal_taskgraph_conformance.py:45: TypeError
+_ test_stale_settle_replay_uses_higher_fence_durable_status[FAILED-SUCCEEDED] __
+
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x7f383067e3c0>
+durable_status = <TaskStatus.FAILED: 'FAILED'>, child_status = 'SUCCEEDED'
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("durable_status", "child_status"),
+        [
+            (TaskStatus.SUCCEEDED, "FAILED"),
+            (TaskStatus.SUCCEEDED, "CANCELLED"),
+            (TaskStatus.FAILED, "SUCCEEDED"),
+            (TaskStatus.CANCELLED, "SUCCEEDED"),
+        ],
+    )
+    async def test_stale_settle_replay_uses_higher_fence_durable_status(
+        monkeypatch,
+        durable_status: TaskStatus,
+        child_status: str,
+    ) -> None:
+        runner = _ReplayRunner()
+>       state, activity, request = await _runtime_activity(runner)
+                                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+tests/ai/test_temporal_taskgraph_conformance.py:451: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+tests/ai/test_temporal_taskgraph_conformance.py:115: in _runtime_activity
+    request = _request()
+              ^^^^^^^^^^
+tests/ai/test_temporal_taskgraph_conformance.py:62: in _request
+    (TaskNode("node", input={"kind": "test", "binding": _binding().to_payload()}),),
+                                                        ^^^^^^^^^^
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+    def _binding() -> AgentBindingSnapshot:
+>       return AgentBindingSnapshot(
+            version=1,
+            agent_spec=AgentSpec("agent", 1, "model"),
+            output_type_module="builtins",
+            output_type_qualname="str",
+            output_schema_id="test-output",
+            output_schema_revision=1,
+            output_schema_fingerprint="b" * 64,
+            local_runtime_capability_descriptors=(),
+            binding_digest="a" * 64,
+        )
+E       TypeError: AgentBindingSnapshot.__init__() missing 1 required positional argument: 'agent_digest'
+
+tests/ai/test_temporal_taskgraph_conformance.py:45: TypeError
+_ test_stale_settle_replay_uses_higher_fence_durable_status[CANCELLED-SUCCEEDED] _
+
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x7f383067c8f0>
+durable_status = <TaskStatus.CANCELLED: 'CANCELLED'>, child_status = 'SUCCEEDED'
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("durable_status", "child_status"),
+        [
+            (TaskStatus.SUCCEEDED, "FAILED"),
+            (TaskStatus.SUCCEEDED, "CANCELLED"),
+            (TaskStatus.FAILED, "SUCCEEDED"),
+            (TaskStatus.CANCELLED, "SUCCEEDED"),
+        ],
+    )
+    async def test_stale_settle_replay_uses_higher_fence_durable_status(
+        monkeypatch,
+        durable_status: TaskStatus,
+        child_status: str,
+    ) -> None:
+        runner = _ReplayRunner()
+>       state, activity, request = await _runtime_activity(runner)
+                                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+tests/ai/test_temporal_taskgraph_conformance.py:451: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+tests/ai/test_temporal_taskgraph_conformance.py:115: in _runtime_activity
+    request = _request()
+              ^^^^^^^^^^
+tests/ai/test_temporal_taskgraph_conformance.py:62: in _request
+    (TaskNode("node", input={"kind": "test", "binding": _binding().to_payload()}),),
+                                                        ^^^^^^^^^^
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+    def _binding() -> AgentBindingSnapshot:
+>       return AgentBindingSnapshot(
+            version=1,
+            agent_spec=AgentSpec("agent", 1, "model"),
+            output_type_module="builtins",
+            output_type_qualname="str",
+            output_schema_id="test-output",
+            output_schema_revision=1,
+            output_schema_fingerprint="b" * 64,
+            local_runtime_capability_descriptors=(),
+            binding_digest="a" * 64,
+        )
+E       TypeError: AgentBindingSnapshot.__init__() missing 1 required positional argument: 'agent_digest'
+
+tests/ai/test_temporal_taskgraph_conformance.py:45: TypeError
+___________ test_stale_settle_replay_keeps_running_newer_fence_stale ___________
+
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x7f383067c7d0>
+
+    @pytest.mark.asyncio
+    async def test_stale_settle_replay_keeps_running_newer_fence_stale(
+        monkeypatch,
+    ) -> None:
+        runner = _ReplayRunner()
+>       state, activity, request = await _runtime_activity(runner)
+                                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+tests/ai/test_temporal_taskgraph_conformance.py:513: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+tests/ai/test_temporal_taskgraph_conformance.py:115: in _runtime_activity
+    request = _request()
+              ^^^^^^^^^^
+tests/ai/test_temporal_taskgraph_conformance.py:62: in _request
+    (TaskNode("node", input={"kind": "test", "binding": _binding().to_payload()}),),
+                                                        ^^^^^^^^^^
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+    def _binding() -> AgentBindingSnapshot:
+>       return AgentBindingSnapshot(
+            version=1,
+            agent_spec=AgentSpec("agent", 1, "model"),
+            output_type_module="builtins",
+            output_type_qualname="str",
+            output_schema_id="test-output",
+            output_schema_revision=1,
+            output_schema_fingerprint="b" * 64,
+            local_runtime_capability_descriptors=(),
+            binding_digest="a" * 64,
+        )
+E       TypeError: AgentBindingSnapshot.__init__() missing 1 required positional argument: 'agent_digest'
+
+tests/ai/test_temporal_taskgraph_conformance.py:45: TypeError
+____________ test_stale_settle_replay_rejects_blocked_durable_node _____________
+
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x7f383067ed20>
+
+    @pytest.mark.asyncio
+    async def test_stale_settle_replay_rejects_blocked_durable_node(monkeypatch) -> None:
+        runner = _ReplayRunner()
+>       state, activity, request = await _runtime_activity(runner)
+                                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+tests/ai/test_temporal_taskgraph_conformance.py:571: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+tests/ai/test_temporal_taskgraph_conformance.py:115: in _runtime_activity
+    request = _request()
+              ^^^^^^^^^^
+tests/ai/test_temporal_taskgraph_conformance.py:62: in _request
+    (TaskNode("node", input={"kind": "test", "binding": _binding().to_payload()}),),
+                                                        ^^^^^^^^^^
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+    def _binding() -> AgentBindingSnapshot:
+>       return AgentBindingSnapshot(
+            version=1,
+            agent_spec=AgentSpec("agent", 1, "model"),
+            output_type_module="builtins",
+            output_type_qualname="str",
+            output_schema_id="test-output",
+            output_schema_revision=1,
+            output_schema_fingerprint="b" * 64,
+            local_runtime_capability_descriptors=(),
+            binding_digest="a" * 64,
+        )
+E       TypeError: AgentBindingSnapshot.__init__() missing 1 required positional argument: 'agent_digest'
+
+tests/ai/test_temporal_taskgraph_conformance.py:45: TypeError
+___________ test_stored_snapshot_is_durable_authority_across_reopen ____________
+
+tmp_path = PosixPath('/tmp/pytest-of-runner/pytest-0/test_stored_snapshot_is_durabl0')
+
+    @pytest.mark.asyncio
+    async def test_stored_snapshot_is_durable_authority_across_reopen(
+        tmp_path: Path,
+    ) -> None:
+        now = datetime.now(timezone.utc)
+>       execution = ExecutionRecord(
+            execution_id="execution",
+            tenant_id="tenant",
+            session_id=None,
+            binding_digest="binding",
+            parent_execution_id=None,
+            root_execution_id="execution",
+            source_execution_id=None,
+            base_execution_id=None,
+            lineage_kind=ExecutionLineageKind.RUN,
+            status=ExecutionStatus.STARTED,
+            revision=0,
+            event_sequence=0,
+            agent_run_sequence=1,
+            error_code=None,
+            safe_error_details={},
+            created_at=now,
+            updated_at=now,
+        )
+E       TypeError: ExecutionRecord.__init__() missing 3 required positional arguments: 'planning', 'thinking', and 'binding'
+
+tests/ai/test_v1_final_closure.py:348: TypeError
+=========================== short test summary info ============================
+FAILED tests/ai/test_session_admission_conformance.py::test_rejected_admission_terminalizes_pending_start - AttributeError: '_DefinitionCatalog' object has no attribute 'binding'
+FAILED tests/ai/test_session_history_projection.py::test_session_history_fork_copies_continuation_without_execution_lookup - linktools.ai.errors.AIError: SESSION_BINDING_MISMATCH
+FAILED tests/ai/test_temporal_taskgraph_conformance.py::test_prepare_requires_temporal_activity_run_context - TypeError: AgentBindingSnapshot.__init__() missing 1 required positional argument: 'agent_digest'
+FAILED tests/ai/test_temporal_taskgraph_conformance.py::test_new_workflow_run_does_not_take_foreign_active_lease - TypeError: AgentBindingSnapshot.__init__() missing 1 required positional argument: 'agent_digest'
+FAILED tests/ai/test_temporal_taskgraph_conformance.py::test_prepare_replays_failed_node_after_reconcile_failure - TypeError: AgentBindingSnapshot.__init__() missing 1 required positional argument: 'agent_digest'
+FAILED tests/ai/test_temporal_taskgraph_conformance.py::test_prepare_rejects_malformed_failed_terminal - TypeError: AgentBindingSnapshot.__init__() missing 1 required positional argument: 'agent_digest'
+FAILED tests/ai/test_temporal_taskgraph_conformance.py::test_settle_replays_succeeded_node_without_second_complete - TypeError: AgentBindingSnapshot.__init__() missing 1 required positional argument: 'agent_digest'
+FAILED tests/ai/test_temporal_taskgraph_conformance.py::test_settle_replay_rejects_mismatched_execution_result - TypeError: AgentBindingSnapshot.__init__() missing 1 required positional argument: 'agent_digest'
+FAILED tests/ai/test_temporal_taskgraph_conformance.py::test_settle_replays_failed_node_without_second_fail - TypeError: AgentBindingSnapshot.__init__() missing 1 required positional argument: 'agent_digest'
+FAILED tests/ai/test_temporal_taskgraph_conformance.py::test_terminal_settle_replay_uses_durable_status[SUCCEEDED-FAILED] - TypeError: AgentBindingSnapshot.__init__() missing 1 required positional argument: 'agent_digest'
+FAILED tests/ai/test_temporal_taskgraph_conformance.py::test_terminal_settle_replay_uses_durable_status[SUCCEEDED-CANCELLED] - TypeError: AgentBindingSnapshot.__init__() missing 1 required positional argument: 'agent_digest'
+FAILED tests/ai/test_temporal_taskgraph_conformance.py::test_terminal_settle_replay_uses_durable_status[FAILED-SUCCEEDED] - TypeError: AgentBindingSnapshot.__init__() missing 1 required positional argument: 'agent_digest'
+FAILED tests/ai/test_temporal_taskgraph_conformance.py::test_terminal_settle_replay_uses_durable_status[CANCELLED-SUCCEEDED] - TypeError: AgentBindingSnapshot.__init__() missing 1 required positional argument: 'agent_digest'
+FAILED tests/ai/test_temporal_taskgraph_conformance.py::test_stale_settle_replay_uses_higher_fence_durable_status[SUCCEEDED-FAILED] - TypeError: AgentBindingSnapshot.__init__() missing 1 required positional argument: 'agent_digest'
+FAILED tests/ai/test_temporal_taskgraph_conformance.py::test_stale_settle_replay_uses_higher_fence_durable_status[SUCCEEDED-CANCELLED] - TypeError: AgentBindingSnapshot.__init__() missing 1 required positional argument: 'agent_digest'
+FAILED tests/ai/test_temporal_taskgraph_conformance.py::test_stale_settle_replay_uses_higher_fence_durable_status[FAILED-SUCCEEDED] - TypeError: AgentBindingSnapshot.__init__() missing 1 required positional argument: 'agent_digest'
+FAILED tests/ai/test_temporal_taskgraph_conformance.py::test_stale_settle_replay_uses_higher_fence_durable_status[CANCELLED-SUCCEEDED] - TypeError: AgentBindingSnapshot.__init__() missing 1 required positional argument: 'agent_digest'
+FAILED tests/ai/test_temporal_taskgraph_conformance.py::test_stale_settle_replay_keeps_running_newer_fence_stale - TypeError: AgentBindingSnapshot.__init__() missing 1 required positional argument: 'agent_digest'
+FAILED tests/ai/test_temporal_taskgraph_conformance.py::test_stale_settle_replay_rejects_blocked_durable_node - TypeError: AgentBindingSnapshot.__init__() missing 1 required positional argument: 'agent_digest'
+FAILED tests/ai/test_v1_final_closure.py::test_stored_snapshot_is_durable_authority_across_reopen - TypeError: ExecutionRecord.__init__() missing 3 required positional arguments: 'planning', 'thinking', and 'binding'
+20 failed, 340 passed in 31.11s
