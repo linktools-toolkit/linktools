@@ -17,7 +17,7 @@ def build_pydantic_agent(
     *,
     model: Model,
 ) -> "Agent[None, object]":
-    output_type: "type[BaseModel] | TextOutput" = definition.output_type
+    output_type: type[BaseModel] | TextOutput = definition.output_type
     if output_type is AssistantTextOutput:
         output_type = TextOutput(_assistant_text_output)
     return cast(

@@ -13,7 +13,13 @@ from ..errors import AIError, ErrorCode
 from ..runtime import RuntimeObjectKeyFactory, RuntimeTaskNodeRunner
 from ..runtime.state import TaskState
 from ..storage import ObjectStore
-from ..task import TaskDependencyResult, TaskGraphRequest, TaskLease, TaskNode, TaskNodeView
+from ..task import (
+    TaskDependencyResult,
+    TaskGraphRequest,
+    TaskLease,
+    TaskNode,
+    TaskNodeView,
+)
 from ._request import put_execution_request, read_task_request
 from .workflow import ExecutionWorkflowInput, ExecutionWorkflowResult, TaskWorkflowInput
 
@@ -285,9 +291,7 @@ class _RuntimeTaskOperation:
         _validate_node_view(current, node, request.graph_id)
         if current.status is TaskStatus.SUCCEEDED:
             await self._validate_execution_result(current, principal)
-        elif current.status is TaskStatus.BLOCKED:
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        elif current.status not in {TaskStatus.FAILED, TaskStatus.CANCELLED}:
+        elif current.status is TaskStatus.BLOCKED or current.status not in {TaskStatus.FAILED, TaskStatus.CANCELLED}:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         await self._repository.reconcile_graph(
             request.graph_id,

@@ -5,7 +5,7 @@
 import asyncio
 import secrets
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
-from typing import Protocol, TypeGuard
+from typing import Protocol
 
 from linktools.core import environ
 from pydantic import BaseModel
@@ -155,7 +155,7 @@ class Runtime:
         self._local_coordinator = local_coordinator
         self._closed = False
         self._close_lock = asyncio.Lock()
-        self._close_task: "asyncio.Task[None] | None" = None
+        self._close_task: asyncio.Task[None] | None = None
 
     @property
     def tenant_id(self) -> str:

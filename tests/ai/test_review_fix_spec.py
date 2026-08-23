@@ -4,7 +4,6 @@
 
 
 import pytest
-
 from linktools.ai.runtime.state import RuntimeState
 
 

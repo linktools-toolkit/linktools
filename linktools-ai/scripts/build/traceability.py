@@ -24,7 +24,7 @@ def validate_matrix(
     source = Path(source_root)
     package_root = source.parents[2]
     _tests = Path(test_root)
-    errors: "list[str]" = []
+    errors: list[str] = []
     requirements = matrix.get("requirements", {})
     if not isinstance(requirements, dict) or not requirements:
         return ("matrix has no requirements",)

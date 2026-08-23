@@ -20,14 +20,19 @@ from ._contracts import (
     RecoveryState,
     TaskState,
 )
-from ._plan import RuntimeDomain, RuntimeRetentionMode, RuntimeStatePlan, RuntimeStateRoute
+from ._plan import (
+    RuntimeDomain,
+    RuntimeRetentionMode,
+    RuntimeStatePlan,
+    RuntimeStateRoute,
+)
 
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncEngine
 
+    from ._maintenance import RuntimeStorageMaintenance
     from ._materializer import _MaterializedRuntimeState, _RuntimeObjectRouter
     from ._retention import RuntimeRetentionController
-    from ._maintenance import RuntimeStorageMaintenance
     from ._steps import RuntimeStepStore
 
 
@@ -48,7 +53,7 @@ class RuntimeState:
         self._external_object_store = object_store
         self._lifecycle = _RuntimeStateLifecycle.NEW
         self._lock = asyncio.Lock()
-        self._close_task: "asyncio.Task[None] | None" = None
+        self._close_task: asyncio.Task[None] | None = None
         self._close_cursor = 0
         self._close_actions: tuple[Callable[[], Awaitable[None]], ...] = ()
         self._namespace: str | None = None
@@ -60,10 +65,10 @@ class RuntimeState:
         self._task: TaskState | None = None
         self._evaluation: EvaluationState | None = None
         self._recovery: RecoveryState | None = None
-        self._objects: "_RuntimeObjectRouter | None" = None
-        self._steps: "RuntimeStepStore | None" = None
-        self._retention: "RuntimeRetentionController | None" = None
-        self._maintenance: "RuntimeStorageMaintenance | None" = None
+        self._objects: _RuntimeObjectRouter | None = None
+        self._steps: RuntimeStepStore | None = None
+        self._retention: RuntimeRetentionController | None = None
+        self._maintenance: RuntimeStorageMaintenance | None = None
         self._metrics: StorageMetrics | None = None
         self._handoff_contract_digest: str | None = None
 

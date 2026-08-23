@@ -51,11 +51,9 @@ from .service_api import (
 )
 from .state._contracts import (
     ConversationCursor,
-    ConversationHistoryRecord,
     ConversationState,
     ExecutionRecord,
     ExecutionRepository,
-    HistoryQuality,
     OperationLedgerInput,
     OperationLedgerRecord,
     SessionRecord,

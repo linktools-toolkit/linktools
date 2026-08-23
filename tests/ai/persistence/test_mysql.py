@@ -3,7 +3,6 @@
 """External SQL routes reject unsupported in-memory ownership."""
 
 import pytest
-
 from linktools.ai.runtime.state import RuntimeStateRoute
 
 

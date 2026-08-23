@@ -136,7 +136,7 @@ class ExecutionWorkflowResult:
 
 class ExecutionWorkflow:
     def __init__(self) -> None:
-        self._state: "ExecutionWorkflowState | None" = None
+        self._state: ExecutionWorkflowState | None = None
 
     async def run(
         self,

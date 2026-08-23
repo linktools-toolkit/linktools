@@ -6,8 +6,6 @@ from datetime import datetime, timezone
 from types import SimpleNamespace
 
 import pytest
-from pydantic import BaseModel
-
 from linktools.ai.agent import AgentBindingSnapshot
 from linktools.ai.agent._output import bind_output, restore_output
 from linktools.ai.core import (
@@ -28,6 +26,7 @@ from linktools.ai.runtime.state._contracts import (
     RecoveryIdempotencyInput,
 )
 from linktools.ai.spec import AgentSpec
+from pydantic import BaseModel
 
 
 class _DenyAuthorization:

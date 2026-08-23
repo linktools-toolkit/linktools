@@ -36,8 +36,8 @@ from ._contracts import (
     TaskState,
 )
 from ._filesystem import FilesystemStateStorageGroup, FilesystemStateStore
-from ._memory import MemoryStateStorageGroup, MemoryStateStore
 from ._maintenance import RuntimeStorageMaintenance
+from ._memory import MemoryStateStorageGroup, MemoryStateStore
 from ._plan import (
     RuntimeDomain,
     RuntimeRetentionMode,

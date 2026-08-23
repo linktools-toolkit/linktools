@@ -30,8 +30,7 @@ def test_names_and_module_imports_are_clean() -> None:
     assert check_files(root) == ()
     for path in sorted(root.rglob("*.py")):
         name = "linktools.ai." + ".".join(path.relative_to(root).with_suffix("").parts)
-        if name.endswith(".__init__"):
-            name = name[:-9]
+        name = name.removesuffix(".__init__")
         importlib.import_module(name)
 
 

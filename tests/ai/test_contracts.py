@@ -8,7 +8,6 @@ from dataclasses import fields
 from datetime import datetime, timezone
 
 import pytest
-
 from linktools.ai.agent import AgentBindingSnapshot
 from linktools.ai.agent._output import bind_output
 from linktools.ai.asset import AssetRef
@@ -32,6 +31,7 @@ from linktools.ai.observe import (
 from linktools.ai.runtime import ExecutionRequest
 from linktools.ai.runtime._tool import ToolOperationRecord
 from linktools.ai.runtime.state import RuntimeStatePlan
+from linktools.ai.runtime.state._codec import decode_domain, encode_domain
 from linktools.ai.runtime.state._contracts import (
     RecoveryCheckpoint,
     RecoveryCheckpointState,
@@ -39,7 +39,6 @@ from linktools.ai.runtime.state._contracts import (
     RecoveryHandoffPhase,
     RecoveryIdempotencyInput,
 )
-from linktools.ai.runtime.state._codec import decode_domain, encode_domain
 from linktools.ai.spec import AgentSpec
 from linktools.ai.storage import InMemoryObjectStore, StoredPayload
 from linktools.ai.task import TaskGraph, TaskGraphLimits, TaskLease, TaskNode
@@ -515,7 +514,6 @@ async def test_workflow_gateway_persists_v1_execution_request() -> None:
             workflow_id: str,
         ):
             started.append((workflow, request, workflow_id))
-            return None
 
         async def start_task_graph(self, request, *, workflow_id: str):
             return None

@@ -5,9 +5,13 @@
 import asyncio
 
 import pytest
-
-from linktools.ai.runtime.state import RuntimeDomain, RuntimeState, RuntimeStatePlan, RuntimeStateRoute
 from linktools.ai.migrate import provision_database
+from linktools.ai.runtime.state import (
+    RuntimeDomain,
+    RuntimeState,
+    RuntimeStatePlan,
+    RuntimeStateRoute,
+)
 from sqlalchemy.ext.asyncio import create_async_engine
 
 

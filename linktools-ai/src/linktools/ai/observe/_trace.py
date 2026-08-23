@@ -23,7 +23,7 @@ class TraceRecorder(Protocol):
 
 class InMemoryTraceRecorder:
     def __init__(self) -> None:
-        self._items: "dict[str, list[RecordedTraceItem]]" = {}
+        self._items: dict[str, list[RecordedTraceItem]] = {}
 
     async def append(self, item: RecordedTraceItem) -> RecordedTraceItem:
         items = self._items.setdefault(item.execution_id, [])

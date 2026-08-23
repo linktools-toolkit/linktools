@@ -7,13 +7,12 @@ from dataclasses import replace
 from datetime import datetime, timezone
 
 import pytest
-from sqlalchemy.ext.asyncio import create_async_engine
-
 from linktools.ai.core import SessionStatus
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.migrate import provision_database
 from linktools.ai.runtime import RuntimeState
 from linktools.ai.runtime.state._contracts import ConversationCursor, SessionRecord
+from sqlalchemy.ext.asyncio import create_async_engine
 
 
 def _session() -> SessionRecord:

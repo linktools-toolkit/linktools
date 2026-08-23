@@ -13,7 +13,12 @@ from ..capability import (
     RuntimeCapability,
     validate_fingerprint,
 )
-from ..core import JsonValue, canonical_sha256, validate_agent_id, validate_capability_provider
+from ..core import (
+    JsonValue,
+    canonical_sha256,
+    validate_agent_id,
+    validate_capability_provider,
+)
 from ..errors import AIError, ErrorCode
 from ..model import ModelResolver
 from ..spec import AgentSpec

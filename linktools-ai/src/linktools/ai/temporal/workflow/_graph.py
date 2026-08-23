@@ -167,7 +167,7 @@ class TaskWorkflow:
         self._cancelled = False
         self._graph_id = ""
         self._active_children: list[_ChildWorkflowHandle] = []
-        self._active_node_tasks: set["asyncio.Task[TaskNodeView]"] = set()
+        self._active_node_tasks: set[asyncio.Task[TaskNodeView]] = set()
 
     async def run(self, request: TaskWorkflowInput) -> TaskWorkflowResult:
         self._graph_id = request.graph_id
@@ -374,7 +374,7 @@ class TaskWorkflow:
         child: _ChildWorkflowHandle,
     ) -> "TaskNodeView | tuple[TaskLease, ExecutionWorkflowResult]":
         child_task = asyncio.create_task(child.result())
-        renew_task: "asyncio.Task[TaskLease | TaskNodeView] | None" = None
+        renew_task: asyncio.Task[TaskLease | TaskNodeView] | None = None
         try:
             current_lease = lease
             while True:

@@ -68,8 +68,8 @@ def principal_identity_payload(principal: Principal) -> dict[str, str]:
 
 
 __all__ = [
-    "canonical_sha256",
     "canonical_identity_digest",
+    "canonical_sha256",
     "deterministic_id",
     "idempotency_key_digest",
     "principal_identity_payload",

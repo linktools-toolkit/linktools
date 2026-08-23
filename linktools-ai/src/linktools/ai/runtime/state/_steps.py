@@ -2799,9 +2799,7 @@ class RuntimeStepStore(StepStore):
                                     token=terminal_attempt_token,
                                 )
                                 installed.append(run_id)
-                            elif seal.execution_id != execution_id:
-                                raise AIError(ErrorCode.STORAGE_CONFLICT)
-                            elif seal.token != terminal_attempt_token:
+                            elif seal.execution_id != execution_id or seal.token != terminal_attempt_token:
                                 raise AIError(ErrorCode.STORAGE_CONFLICT)
                             captured_seal = seal
                             run = self._staging.get_run_local(run_id)
@@ -3004,7 +3002,7 @@ class RuntimeStepStore(StepStore):
         """CAPTURE: snapshot staged state under the run lock with no durable I/O."""
         await self._ensure_business()
         while True:
-            completion: "asyncio.Future[None] | None" = None
+            completion: asyncio.Future[None] | None = None
             async with self._history_lock.hold(step_run_id):
                 existing = self._durability_flights.get(step_run_id)
                 if existing is not None:
@@ -3371,8 +3369,8 @@ class RuntimeStepStore(StepStore):
         for run_id in dict.fromkeys(candidate_step_run_ids):
             while True:
                 completion: asyncio.Future[None] | None = None
-                seal_owner: "str | None" = None
-                seal_token: "str | None" = None
+                seal_owner: str | None = None
+                seal_token: str | None = None
                 async with self._history_lock.hold(run_id):
                     existing = self._durability_flights.get(run_id)
                     if existing is not None:

@@ -1947,13 +1947,13 @@ _validate_v1_codec_definition()
 
 
 __all__ = [
-    "CanonicalEnvelope",
     "CURRENT_DATA_VERSION",
-    "canonical_digest",
-    "decode_domain",
+    "CanonicalEnvelope",
     "_decode_enveloped_domain",
     "_decode_step_envelope",
+    "canonical_digest",
     "decode_alias",
+    "decode_domain",
     "decode_envelope",
     "decode_fact",
     "decode_operation",

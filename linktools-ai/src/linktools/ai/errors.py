@@ -12,7 +12,6 @@ from typing import TypeAlias
 
 from linktools.errors import Error
 
-
 _SafeJsonValue: TypeAlias = (
     None
     | bool

@@ -5,7 +5,6 @@
 from types import SimpleNamespace
 
 import pytest
-
 from linktools.ai.core import SessionStatus
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.runtime import Runtime, SessionView

@@ -31,9 +31,9 @@ from ..storage import (
     StorageRevision,
     StoredPayload,
     VersionSummary,
+    build_object_sql_metadata,
     create_sql_storage_context,
     dialect_for_name,
-    build_object_sql_metadata,
     payload_fits_inline,
     sql_audit_columns,
     sql_audit_indexes,
@@ -55,7 +55,7 @@ _RETRY_LIMIT = 8
 
 
 def build_asset_sql_metadata(*, metadata: "MetaData | None" = None) -> "MetaData":
-    from sqlalchemy import BigInteger, Column, JSON, MetaData, Table
+    from sqlalchemy import JSON, BigInteger, Column, MetaData, Table
 
     if metadata is None:
         metadata = MetaData()

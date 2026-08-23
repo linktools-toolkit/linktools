@@ -254,9 +254,9 @@ class DefaultTaskService(TaskApi):
                     request_digest,
                 )
             )
-            caller_cancellation: "asyncio.CancelledError | None" = None
-            finalizer_error: "BaseException | None" = None
-            result: "TaskGraphView | None" = None
+            caller_cancellation: asyncio.CancelledError | None = None
+            finalizer_error: BaseException | None = None
+            result: TaskGraphView | None = None
             while not finalizer.done():
                 try:
                     result = await asyncio.shield(finalizer)

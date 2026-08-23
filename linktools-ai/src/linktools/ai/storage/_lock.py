@@ -365,20 +365,19 @@ def _read_fence(path: Path) -> int:
 
 def _next_fence(path: Path) -> int:
     path.parent.mkdir(parents=True, exist_ok=True)
-    with FileLock(str(path) + ".lock"):
-        with path.open("a+", encoding="utf-8") as handle:
-            handle.seek(0)
-            raw = handle.read().strip()
-            fence = 0 if not raw else int(raw)
-            if fence < 0:
-                raise ValueError("invalid lease fence")
-            fence += 1
-            handle.seek(0)
-            handle.truncate()
-            handle.write(str(fence))
-            handle.flush()
-            os.fsync(handle.fileno())
-            return fence
+    with FileLock(str(path) + ".lock"), path.open("a+", encoding="utf-8") as handle:
+        handle.seek(0)
+        raw = handle.read().strip()
+        fence = 0 if not raw else int(raw)
+        if fence < 0:
+            raise ValueError("invalid lease fence")
+        fence += 1
+        handle.seek(0)
+        handle.truncate()
+        handle.write(str(fence))
+        handle.flush()
+        os.fsync(handle.fileno())
+        return fence
 
 
 def _write_fence(path: Path, fence: int) -> None:

@@ -85,7 +85,7 @@ class InMemoryContentCache:
             raise ValueError("max_size must be non-negative")
         self.max_bytes = max_bytes
         self.max_size = max_size
-        self._items: "OrderedDict[ContentCacheKey, bytes]" = OrderedDict()
+        self._items: OrderedDict[ContentCacheKey, bytes] = OrderedDict()
         self._size = 0
         self._lock = asyncio.Lock()
 
@@ -144,7 +144,7 @@ class FilesystemContentCache:
         self.max_bytes = max_bytes
         self._lock = asyncio.Lock()
         self._indexed = False
-        self._entries: "dict[str, tuple[int, int]]" = {}
+        self._entries: dict[str, tuple[int, int]] = {}
         self._total = 0
         self._clock = 0
 

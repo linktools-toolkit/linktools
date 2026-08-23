@@ -9,8 +9,8 @@ from datetime import datetime
 from enum import StrEnum
 from typing import Generic, Protocol, TypeVar, runtime_checkable
 
-from ..errors import AIError, ErrorCode
 from ..core import JsonValue
+from ..errors import AIError, ErrorCode
 
 KeyT = TypeVar("KeyT", bound=Hashable)
 ValueT = TypeVar("ValueT")
@@ -328,7 +328,7 @@ __all__ = [
     "StorageRevision",
     "StorageStatReader",
     "StorageWriter",
-    "normalize_storage_metadata",
     "VersionSummary",
     "VersionedStorage",
+    "normalize_storage_metadata",
 ]

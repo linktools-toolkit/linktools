@@ -7,9 +7,9 @@ import subprocess
 import sys
 from pathlib import Path
 
+from linktools.cli.argparse import ConfigAction
 from linktools.commands.ai.acp import command as acp_command
 from linktools.commands.ai.run import command as run_command
-from linktools.cli.argparse import ConfigAction
 
 
 def test_ai_run_exposes_model_configuration_but_not_asset_storage() -> None:

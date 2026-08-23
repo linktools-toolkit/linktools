@@ -3,10 +3,9 @@
 """Regression coverage for durable RuntimeCapability type identity."""
 
 import pytest
-from pydantic_ai.capabilities import AbstractCapability
-
 from linktools.ai.capability import RuntimeCapability
 from linktools.ai.errors import AIError, ErrorCode
+from pydantic_ai.capabilities import AbstractCapability
 
 
 class _OtherCapability(AbstractCapability[None]):

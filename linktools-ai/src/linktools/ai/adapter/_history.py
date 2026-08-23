@@ -12,7 +12,6 @@ from typing import Protocol, runtime_checkable
 from linktools.core import environ
 from pydantic_ai.messages import ModelRequest, ModelResponse
 from pydantic_ai_harness.step_persistence import (
-    ContinuableSnapshot,
     RunRecord,
     StepEvent,
     StepStore,
@@ -37,13 +36,13 @@ from ..runtime.service_api import (
     TranscriptItem,
 )
 from ..runtime.state import (
+    SESSION_HISTORY_VIEW_V1,
     ExecutionReadModelBuild,
     ExecutionReadModelRepository,
     ExecutionRecord,
     ExecutionRepository,
     LoadedContextMessage,
     RuntimeDomain,
-    SESSION_HISTORY_VIEW_V1,
     TranscriptMessageRef,
     project_execution_transcript_message,
     project_session_history_message,
@@ -193,7 +192,7 @@ class StepExecutionHistoryReader:
                 str(next_offset) if next_offset < model.trace_count else None,
             )
         entries = await self._history_tree(record, tenant_id)
-        projected: "list[tuple[tuple[object, ...], ExecutionTraceItem]]" = []
+        projected: list[tuple[tuple[object, ...], ExecutionTraceItem]] = []
         for item, depth in entries:
             for segment_sequence, events in await self._segment_events(item, tenant_id):
                 for ordinal, event in enumerate(events):

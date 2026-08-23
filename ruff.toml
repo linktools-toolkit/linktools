@@ -1,0 +1,3 @@
+[lint.per-file-ignores]
+"linktools-ai/**/*.py" = ["EXE001", "UP009"]
+"tests/ai/**/*.py" = ["EXE001", "UP009"]

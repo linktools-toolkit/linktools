@@ -17,7 +17,7 @@ _logger = environ.get_logger("ai.model.registry")
 
 class ModelRegistry:
     def __init__(self) -> None:
-        self._bindings: "dict[str, ModelBinding]" = {}
+        self._bindings: dict[str, ModelBinding] = {}
         self._revision = 0
         self._lock = RLock()
 

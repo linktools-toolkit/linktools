@@ -28,7 +28,13 @@ from ..task import (
     TaskNode,
     TaskNodeRunResult,
 )
-from .service_api import CancelExecutionRequest, ExecutionRequest, ExecutionResult, ExecutionService, WorkflowGateway
+from .service_api import (
+    CancelExecutionRequest,
+    ExecutionRequest,
+    ExecutionResult,
+    ExecutionService,
+    WorkflowGateway,
+)
 
 _logger = environ.get_logger("ai.runtime.planner")
 _AGENT_TASK_FIELDS = frozenset(
@@ -196,7 +202,7 @@ class RuntimeTaskNodeRunner:
                 raise cancellation from error
             try:
                 await _cancel_execution(self._execution, handle.execution_id, principal, graph_id, node.node_id)
-            except BaseException as cleanup_error:  # noqa: BLE001
+            except BaseException as cleanup_error:
                 raise cancellation from cleanup_error
             raise cancellation
         wait_task = asyncio.create_task(self._execution.wait(handle.execution_id, principal=principal))

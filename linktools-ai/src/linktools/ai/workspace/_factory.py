@@ -45,11 +45,21 @@ from ..capability import (
     mcp_server_selector,
     validate_fingerprint,
 )
-from ..core import HmacCursorSigner, TenantAuthorizationPolicy, canonical_sha256, validate_tenant_id
+from ..core import (
+    HmacCursorSigner,
+    TenantAuthorizationPolicy,
+    canonical_sha256,
+    validate_tenant_id,
+)
 from ..errors import AIError, ErrorCode
 from ..model import ModelRegistry, ModelResolver
 from ..runtime import Runtime, RuntimeState, build_local_runtime
-from ..runtime.state import ExecutionReadModelRepository, RuntimeDomain, RuntimeStatePlan, RuntimeStateRoute
+from ..runtime.state import (
+    ExecutionReadModelRepository,
+    RuntimeDomain,
+    RuntimeStatePlan,
+    RuntimeStateRoute,
+)
 from ..spec import AgentSpec, builtin_asset_bindings
 from ..storage import ObjectStore, StorageLayer, StorageOverlay
 from ._root import Workspace
@@ -500,7 +510,7 @@ def _build_catalog(
 
 
 def _grant_key(workspace: Workspace) -> bytes:
-    return hashlib.sha256(f"workspace:{workspace.workspace_id}".encode("utf-8")).digest()
+    return hashlib.sha256(f"workspace:{workspace.workspace_id}".encode()).digest()
 
 
 __all__ = ["open_workspace_runtime"]

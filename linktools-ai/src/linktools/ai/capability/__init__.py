@@ -20,9 +20,9 @@ __all__ = [
     "CapabilityMaterializationContext",
     "CapabilityProvider",
     "CapabilityRefResolution",
-    "RuntimeCapability",
     "MCPCapabilityProvider",
     "MCPRuntime",
+    "RuntimeCapability",
     "SkillCapabilityProvider",
     "validate_fingerprint",
 ]

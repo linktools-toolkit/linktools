@@ -28,12 +28,12 @@ from ..core import (
     canonical_sha256,
 )
 from ..errors import AIError, ErrorCode
+from .service_api import ArtifactDownload, ArtifactView
 from .state._contracts import (
+    ArtifactState,
     OperationLedgerInput,
     OperationLedgerRecord,
-    ArtifactState,
 )
-from .service_api import ArtifactDownload, ArtifactView
 
 _logger = environ.get_logger("ai.runtime.artifact")
 

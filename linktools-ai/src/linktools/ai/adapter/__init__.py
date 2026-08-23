@@ -7,6 +7,7 @@ from ._identity import StaticPrincipalProvider
 from ._memory import RuntimeMemoryStore
 from ._nats import NatsPublisher
 from ._provider import ProviderClient
+
 __all__ = [
     "NatsPublisher",
     "ProviderClient",

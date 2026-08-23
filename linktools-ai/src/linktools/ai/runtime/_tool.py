@@ -237,7 +237,7 @@ class RuntimeToolOperationBridge:
         self._recovery_step_run_id = recovery_step_run_id
         self._terminal_commands = terminal_commands
         self._step_store = step_store
-        self._decisions: dict[tuple[str, str], "ToolOperationDecision"] = {}
+        self._decisions: dict[tuple[str, str], ToolOperationDecision] = {}
         self._admitted_operations: dict[str, ToolOperationRecord] = {}
         self._lease_seconds = 60
 
@@ -746,9 +746,9 @@ def _decision_type(
 __all__ = [
     "AllowAllToolPolicy",
     "RuntimeToolOperationBridge",
-    "ToolOperationAdmission",
     "ToolAuthorization",
     "ToolDescriptor",
+    "ToolOperationAdmission",
     "ToolOperationRecord",
     "ToolPolicy",
     "ToolStateRepository",

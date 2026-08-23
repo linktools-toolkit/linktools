@@ -967,9 +967,9 @@ __all__ = [
     "ObjectStore",
     "ObjectStoreInspection",
     "ObjectStoreMaintenance",
-    "runtime_object_key",
     "SqlObjectStore",
     "TransientObjectStore",
     "build_object_sql_metadata",
     "read_object",
+    "runtime_object_key",
 ]

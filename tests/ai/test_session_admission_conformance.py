@@ -5,9 +5,10 @@
 import asyncio
 from dataclasses import replace
 from datetime import datetime, timezone
+from types import SimpleNamespace
 
 import pytest
-from types import SimpleNamespace
+from linktools.ai.agent import AgentBindingSnapshot
 from linktools.ai.core import (
     ExecutionStatus,
     Page,
@@ -17,13 +18,12 @@ from linktools.ai.core import (
     TenantAuthorizationPolicy,
 )
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.agent import AgentBindingSnapshot
-from linktools.ai.spec import AgentSpec
 from linktools.ai.migrate import provision_database
 from linktools.ai.runtime import ExecutionRequest, RuntimeState
 from linktools.ai.runtime._execution import CancelEffectOutcome, DefaultExecutionService
 from linktools.ai.runtime.state import RuntimeDomain
 from linktools.ai.runtime.state._contracts import ConversationCursor, SessionRecord
+from linktools.ai.spec import AgentSpec
 from sqlalchemy.ext.asyncio import create_async_engine
 
 

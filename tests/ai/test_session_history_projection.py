@@ -5,19 +5,6 @@
 from datetime import datetime, timezone
 
 import pytest
-from pydantic_ai.messages import (
-    ModelRequest,
-    ModelResponse,
-    RetryPromptPart,
-    SystemPromptPart,
-    TextContent,
-    TextPart,
-    ToolCallPart,
-    ToolReturnPart,
-    UserPromptPart,
-)
-from pydantic_ai_harness.step_persistence import ContinuableSnapshot, RunRecord
-
 from linktools.ai.adapter import StepSessionHistoryReader
 from linktools.ai.core import (
     HmacCursorSigner,
@@ -36,6 +23,18 @@ from linktools.ai.runtime import (
 )
 from linktools.ai.runtime.state import RuntimeDomain
 from linktools.ai.runtime.state._contracts import ConversationCursor, SessionRecord
+from pydantic_ai.messages import (
+    ModelRequest,
+    ModelResponse,
+    RetryPromptPart,
+    SystemPromptPart,
+    TextContent,
+    TextPart,
+    ToolCallPart,
+    ToolReturnPart,
+    UserPromptPart,
+)
+from pydantic_ai_harness.step_persistence import ContinuableSnapshot, RunRecord
 from sqlalchemy.ext.asyncio import create_async_engine
 
 

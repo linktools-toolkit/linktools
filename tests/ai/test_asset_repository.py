@@ -18,18 +18,18 @@ from linktools.ai.asset import (
     AssetTypeBinding,
     AssetTypeRegistry,
     AssetVariantBinding,
+    DirectoryAssetBackend,
     DirectoryLayout,
     InMemoryAssetBackend,
-    DirectoryAssetBackend,
     SingleFileLayout,
 )
 from linktools.ai.core import JsonValue
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.spec import (
-    builtin_asset_bindings,
     SkillMarkdownSpecAdapter,
     SkillMarkdownSpecCodec,
     SkillSpec,
+    builtin_asset_bindings,
 )
 from linktools.ai.storage import (
     StorageEntryRevision,

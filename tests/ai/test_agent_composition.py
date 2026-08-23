@@ -6,9 +6,6 @@ from contextlib import asynccontextmanager
 from types import SimpleNamespace
 
 import pytest
-from pydantic_ai.capabilities import AbstractCapability
-
-import linktools.ai as ai
 from linktools.ai.agent import (
     AgentBindingSnapshot,
     AgentDefinition,
@@ -31,6 +28,9 @@ from linktools.ai.runtime._session import DefaultSessionService
 from linktools.ai.runtime.state import RecoveryCheckpointState
 from linktools.ai.spec import AgentSpec
 from linktools.ai.workspace import trusted_workspace_principal
+from pydantic_ai.capabilities import AbstractCapability
+
+from linktools import ai
 
 
 class _DurableCapability(AbstractCapability[None]):
@@ -292,7 +292,6 @@ async def test_recovery_handoff_schema_must_match_restored_definition() -> None:
 
     async def _get_execution(*args: object, **kwargs: object) -> None:
         del args, kwargs
-        return None
 
     checkpoints.list_recoverable_page = _list_recoverable_page
     state = SimpleNamespace(

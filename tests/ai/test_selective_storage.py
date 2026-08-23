@@ -6,9 +6,13 @@ import inspect
 import json
 
 import pytest
-
 from linktools.ai import Runtime
-from linktools.ai.runtime.state import RuntimeDomain, RuntimeState, RuntimeStatePlan, RuntimeStateRoute
+from linktools.ai.runtime.state import (
+    RuntimeDomain,
+    RuntimeState,
+    RuntimeStatePlan,
+    RuntimeStateRoute,
+)
 from linktools.ai.workspace import open_workspace_runtime
 
 

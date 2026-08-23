@@ -27,7 +27,7 @@ from pydantic_ai_harness.planning import Planning
 from pydantic_ai_harness.step_persistence import StepPersistence, StepStore
 
 from ..capability import SKILL_TOOL_NAMES
-from ..core import JsonValue, canonical_sha256
+from ..core import JsonValue
 from ..errors import AIError, ErrorCode
 
 _logger = environ.get_logger("ai.agent.capabilities")
@@ -851,18 +851,18 @@ def select_platform_tool_names(
 
 
 __all__ = [
-    "AgentRunScope",
     "MEMORY_READ_TOOL_NAMES",
     "MEMORY_TOOL_NAMES",
-    "PLAN_SAFE_METADATA_KEY",
     "PLANNING_TOOL_NAMES",
+    "PLAN_SAFE_METADATA_KEY",
     "SUBAGENT_TOOL_NAMES",
-    "SubagentDelegate",
-    "ToolOperationBridge",
-    "ToolOperationDecision",
     "WORKSPACE_FILESYSTEM_READ_TOOL_NAMES",
     "WORKSPACE_FILESYSTEM_TOOL_NAMES",
     "WORKSPACE_SHELL_TOOL_NAMES",
+    "AgentRunScope",
+    "SubagentDelegate",
+    "ToolOperationBridge",
+    "ToolOperationDecision",
     "compose_platform_capabilities",
     "select_platform_tool_names",
     "tool_allowed_in_planning",

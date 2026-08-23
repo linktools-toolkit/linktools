@@ -42,7 +42,13 @@ from pydantic_ai_harness.memory import SearchableMemoryStore
 from pydantic_ai_harness.step_persistence import StepStore
 
 from ..capability import CapabilityMaterializationContext
-from ..core import ExecutionDeltaType, ExecutionEventType, JsonValue, UsageMetrics, canonical_sha256
+from ..core import (
+    ExecutionDeltaType,
+    ExecutionEventType,
+    JsonValue,
+    UsageMetrics,
+    canonical_sha256,
+)
 from ..errors import AIError, ErrorCode
 from ..spec import AgentUsageLimits
 from ._builder import build_pydantic_agent
@@ -217,7 +223,7 @@ class AgentExecutor:
                 safe_details={"field": "thinking", "reason": "model_not_supported"},
             )
         agent = build_pydantic_agent(definition, model=model)
-        materialized: "list[PydanticAgentCapability[None]]" = []
+        materialized: list[PydanticAgentCapability[None]] = []
         for binding in definition.effective_capabilities:
             materialized.extend(await binding.materialize(capability_context))
         trusted_tool_classes = _trusted_tool_classes(
@@ -561,8 +567,8 @@ def _usage_details(value: RunUsage) -> dict[str, int]:
 
 
 __all__ = [
-    "AgentExecutionResult",
     "AgentEmission",
+    "AgentExecutionResult",
     "AgentExecutor",
     "DurableBoundary",
     "EventSink",

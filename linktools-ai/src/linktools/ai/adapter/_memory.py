@@ -387,11 +387,11 @@ def _operation_input(operation: "MemoryOperation | None", namespace_digest: str,
 
 
 def _memory_id(namespace_digest: str, logical_path: str) -> str:
-    return hashlib.sha256(f"{namespace_digest}\0{logical_path}".encode("utf-8")).hexdigest()
+    return hashlib.sha256(f"{namespace_digest}\0{logical_path}".encode()).hexdigest()
 
 
 def _operation_id(namespace_digest: str, operation_id: str) -> str:
-    return hashlib.sha256(f"{namespace_digest}\0{operation_id}".encode("utf-8")).hexdigest()
+    return hashlib.sha256(f"{namespace_digest}\0{operation_id}".encode()).hexdigest()
 
 
 def _version(revision: int) -> str:
