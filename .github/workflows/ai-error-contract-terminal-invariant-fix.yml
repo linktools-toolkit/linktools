@@ -71,6 +71,7 @@ jobs:
             'pydantic-ai-harness[skills,dynamic-workflow]>=0.13.0' \
             'PyYAML>=6,<7' pytest pytest-asyncio 'sqlalchemy[asyncio]==2.0.51' \
             'aiosqlite==0.22.1' rich requests packaging
+          python -m pip install -e ./linktools --no-deps
 
       - name: Verify terminal invariant regression
         env:
