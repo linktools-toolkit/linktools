@@ -2059,7 +2059,7 @@ class LocalExecutionBackend:
                             )
                         except asyncio.CancelledError:
                             raise
-                        except Exception as readback_error:
+                        except Exception as readback_error:  # noqa: BLE001
                             raise _secondary_execution_error(readback_error, error) from error
                         if persisted is not None and persisted.status in {
                             ExecutionStatus.SUCCEEDED,
@@ -2067,10 +2067,9 @@ class LocalExecutionBackend:
                             ExecutionStatus.CANCELLED,
                         }:
                             operation_result = _execution_operation_result(persisted.status)
-                            _logger.error(
+                            _logger.exception(
                                 "terminal finalization failed after durable execution terminal: execution=%s",
                                 execution_id,
-                                exc_info=True,
                             )
                             return
                         raise _secondary_execution_error(commit_error, error) from error

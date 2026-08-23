@@ -1,15 +1,9 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 """Stable error classification and propagation contracts."""
 
 from datetime import datetime, timezone
 
 import httpx
 import pytest
-from openai import APIError as OpenAIAPIError
-from pydantic_ai.exceptions import ModelHTTPError, RunCancelled
-from pydantic_ai.usage import RunUsage, UsageLimits
-
 from linktools.ai.agent._executor import _execution_error
 from linktools.ai.core import ExecutionStatus, ToolOperationStatus, UsageMetrics
 from linktools.ai.errors import AIError, ErrorCode
@@ -19,6 +13,9 @@ from linktools.ai.runtime._execution import _terminal_error
 from linktools.ai.runtime._local import _secondary_execution_error
 from linktools.ai.runtime._tool import RuntimeToolOperationBridge, ToolOperationRecord
 from linktools.ai.storage import InMemoryObjectStore, PayloadPolicy
+from openai import APIError as OpenAIAPIError
+from pydantic_ai.exceptions import ModelHTTPError, RunCancelled
+from pydantic_ai.usage import RunUsage, UsageLimits
 
 
 def _map(error: Exception) -> AIError:
@@ -176,7 +173,7 @@ def test_persisted_cancelled_execution_requires_explicit_cancel_code() -> None:
     class PersistedExecution:
         status = ExecutionStatus.CANCELLED
         error_code = None
-        safe_error_details: dict[str, object] = {}
+        safe_error_details: tuple[tuple[str, object], ...] = ()
 
     with pytest.raises(AIError) as error:
         _terminal_error(PersistedExecution())  # type: ignore[arg-type]

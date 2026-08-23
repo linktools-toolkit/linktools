@@ -1,5 +1,3 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 """Required error-contract matrix coverage."""
 
 import json
@@ -7,15 +5,6 @@ from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
 import pytest
-from pydantic_ai.exceptions import (
-    ConcurrencyLimitExceeded,
-    ContentFilterError,
-    ModelAPIError,
-    UnexpectedModelBehavior,
-)
-from pydantic_ai.messages import FunctionToolResultEvent, RetryPromptPart
-from pydantic_ai.usage import RunUsage, UsageLimits
-
 from linktools.ai.agent._executor import DurableBoundary, _execution_error, _map_event
 from linktools.ai.core import (
     ExecutionStatus,
@@ -33,10 +22,24 @@ from linktools.ai.runtime import DefaultExecutionService, ExecutionResult
 from linktools.ai.runtime._planner import _execution_failure
 from linktools.ai.runtime._subagent import _subagent_result
 from linktools.ai.storage import StoragePath
-from linktools.ai.task import DefaultTaskService, TaskGraph, TaskLease, TaskNode, TaskNodeView
+from linktools.ai.task import (
+    DefaultTaskService,
+    TaskGraph,
+    TaskLease,
+    TaskNode,
+    TaskNodeView,
+)
 from linktools.ai.temporal._task_operation import _RuntimeTaskOperation
 from linktools.cli import CommandError
 from linktools.commands.ai.run import _emit_result
+from pydantic_ai.exceptions import (
+    ConcurrencyLimitExceeded,
+    ContentFilterError,
+    ModelAPIError,
+    UnexpectedModelBehavior,
+)
+from pydantic_ai.messages import FunctionToolResultEvent, RetryPromptPart
+from pydantic_ai.usage import RunUsage, UsageLimits
 
 
 def _map(error: Exception) -> AIError:

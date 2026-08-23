@@ -11,7 +11,13 @@ from types import SimpleNamespace
 import linktools.ai.temporal._activity as temporal_activity
 import pytest
 from linktools.ai.agent import AgentBindingSnapshot
-from linktools.ai.core import ExecutionStatus, Principal, TaskStatus, UsageMetrics, canonical_sha256
+from linktools.ai.core import (
+    ExecutionStatus,
+    Principal,
+    TaskStatus,
+    UsageMetrics,
+    canonical_sha256,
+)
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.runtime import (
     ExecutionRequest,
