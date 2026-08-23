@@ -30,7 +30,20 @@ jobs:
             linktools-cntr/src
 
   diagnostic-ruff:
+    name: diagnostic-ruff (${{ matrix.scope }})
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - scope: scripts
+            path: scripts/check/ai
+          - scope: package
+            path: linktools-ai/src/linktools/ai
+          - scope: commands
+            path: linktools-ai/src/linktools/commands/ai
+          - scope: tests
+            path: tests/ai
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -39,15 +52,25 @@ jobs:
       - name: Install Ruff
         run: python -m pip install 'ruff>=0.16,<0.17'
       - name: Run Ruff
-        run: |
-          ruff check --no-cache \
-            scripts/check/ai \
-            linktools-ai/src/linktools/ai \
-            linktools-ai/src/linktools/commands/ai \
-            tests/ai
+        run: ruff check --no-cache "${{ matrix.path }}"
 
   diagnostic-pytest:
+    name: diagnostic-pytest (${{ matrix.scope }})
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - scope: core
+            path: tests/core
+          - scope: cli
+            path: tests/cli
+          - scope: common
+            path: tests/common
+          - scope: cntr
+            path: tests/cntr
+          - scope: ai
+            path: tests/ai
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -59,7 +82,7 @@ jobs:
           python -m pip install -U -r requirements.txt
           python manage.py install --editable
       - name: Run pytest
-        run: python -m pytest -q -p no:cacheprovider tests
+        run: python -m pytest -q -p no:cacheprovider "${{ matrix.path }}"
 
   python310:
     runs-on: ubuntu-latest
