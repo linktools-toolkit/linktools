@@ -341,7 +341,10 @@ class StoragePath:
             not isinstance(raw, str)
             or not raw
             or len(raw) > 512
-            or any(_STORAGE_ID.fullmatch(part) is None for part in parts)
+            or any(
+                part in {".", ".."} or _STORAGE_ID.fullmatch(part) is None
+                for part in parts
+            )
         ):
             raise InvalidStoragePathError(f"invalid storage path: {raw!r}")
         return cls(raw)
