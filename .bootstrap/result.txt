@@ -1,16 +1,1315 @@
 ===== python -m pip install -q --upgrade pip =====
 ===== python -m pip install -q -e ./linktools -e ./linktools-ai[sqlite,evaluation,temporal] pytest pytest-asyncio ruff =====
 ===== python .bootstrap/patch.py =====
-runtime state canonical V1 binding codec applied
-fingerprint context_projection: 8f77d052bed206e72f13faab7fcb3471cf11358c3b8ac65ffd96d5c13e229bc2 -> c88e1bb049f0aa9cf13f09b08509eccf65872d2b357d6233f91cc28f8dacc197
-fingerprint execution_event: c7d10fa9a15092e7e29c503b938f12358b836ee0d578bd5faff0f0951d3bedf8 -> 0c977a9bc5de198667dc34640acd192fe54a986227d886ffb1dea596a851c957
-fingerprint session_record: d29d8d76c025ee18d7e93f2315e699618470e096b728e23673f28cad61961ca2 -> 6c9801789a78c9e8d1f0d8f638a7a0cfbe515cb3489cd10cfb9a0c5177037682
-workspace heterogeneous binding annotation retained
+history exact binding fixture completed
 ===== python .bootstrap/patch2.py =====
-Traceback (most recent call last):
-  File "/home/runner/work/linktools/linktools/.bootstrap/patch2.py", line 46, in <module>
-    text = once(text, '        binding_digest="binding",\n', '        binding_digest="a" * 64,\n', 'history execution digest')
-           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "/home/runner/work/linktools/linktools/.bootstrap/patch2.py", line 7, in once
-    raise RuntimeError(f'{label}: expected one match, got {count}')
-RuntimeError: history execution digest: expected one match, got 3
+local/recovery/public surface fixtures migrated
+===== python -m compileall -q linktools-ai/src/linktools/ai =====
+===== ruff check --select E4,E7,E9,F linktools-ai/src/linktools/ai/agent/__init__.py linktools-ai/src/linktools/ai/agent/_binding.py linktools-ai/src/linktools/ai/agent/_builder.py linktools-ai/src/linktools/ai/agent/_catalog.py linktools-ai/src/linktools/ai/agent/_compiler.py linktools-ai/src/linktools/ai/agent/_definition.py linktools-ai/src/linktools/ai/agent/_executor.py linktools-ai/src/linktools/ai/asset/__init__.py linktools-ai/src/linktools/ai/asset/_repository.py linktools-ai/src/linktools/ai/runtime/_agent.py linktools-ai/src/linktools/ai/runtime/_coordinator.py linktools-ai/src/linktools/ai/runtime/_execution.py linktools-ai/src/linktools/ai/runtime/_factory.py linktools-ai/src/linktools/ai/runtime/_local.py linktools-ai/src/linktools/ai/runtime/_planner.py linktools-ai/src/linktools/ai/runtime/_runtime_service.py linktools-ai/src/linktools/ai/runtime/_session.py linktools-ai/src/linktools/ai/runtime/_subagent.py linktools-ai/src/linktools/ai/runtime/service_api.py linktools-ai/src/linktools/ai/runtime/state/_codec.py linktools-ai/src/linktools/ai/runtime/state/_commands.py linktools-ai/src/linktools/ai/runtime/state/_contracts.py linktools-ai/src/linktools/ai/runtime/state/_history.py linktools-ai/src/linktools/ai/runtime/state/_steps.py linktools-ai/src/linktools/ai/spec/_codec.py linktools-ai/src/linktools/ai/spec/_contract.py linktools-ai/src/linktools/ai/temporal/_gateway.py linktools-ai/src/linktools/ai/temporal/_request.py linktools-ai/src/linktools/ai/temporal/_task_operation.py linktools-ai/src/linktools/ai/workspace/__init__.py linktools-ai/src/linktools/ai/workspace/_factory.py tests/ai/persistence/test_execution_start_service.py tests/ai/test_agent_composition.py tests/ai/test_architecture.py tests/ai/test_asset_repository.py tests/ai/test_contracts.py tests/ai/test_filesystem_mutation_invariants.py tests/ai/test_history_projection_conformance.py tests/ai/test_local_execution_recovery.py tests/ai/test_recovery_integrity_validator.py tests/ai/test_runtime_binding_contract.py tests/ai/test_runtime_composition_regressions.py tests/ai/test_runtime_storage_io_convergence.py tests/ai/test_workspace_runtime_regressions.py =====
+All checks passed!
+===== python -m scripts.build.architecture =====
+<frozen runpy>:128: RuntimeWarning: 'scripts.build.architecture' found in sys.modules after import of package 'scripts.build', but prior to execution of 'scripts.build.architecture'; this may result in unpredictable behaviour
+===== pytest -q tests/ai --maxfail=30 =====
+........................................................................ [ 20%]
+........................................................................ [ 40%]
+.................................F...................................... [ 60%]
+......................FFFFFFFF.FFFFFF...FFFFFFFFFFFFFF.................. [ 80%]
+F
+=================================== FAILURES ===================================
+___________ test_in_memory_terminal_commit_validates_success_result ____________
+
+    @pytest.mark.asyncio
+    async def test_in_memory_terminal_commit_validates_success_result() -> None:
+        state = RuntimeState.in_memory()
+        await state.initialize(namespace="memory-terminal", tenant_id="tenant")
+        try:
+            now = datetime.now(timezone.utc)
+>           execution = ExecutionRecord(
+                "execution",
+                "tenant",
+                None,
+                "binding",
+                None,
+                "execution",
+                None,
+                None,
+                ExecutionLineageKind.RUN,
+                ExecutionStatus.STARTED,
+                1,
+                1,
+                1,
+                None,
+                {},
+                now,
+                now,
+            )
+E           TypeError: ExecutionRecord.__init__() missing 3 required positional arguments: 'planning', 'thinking', and 'binding'
+
+tests/ai/test_memory_terminal.py:35: TypeError
+_________ test_cancel_batches_pending_audit_in_one_filesystem_mutation _________
+
+tmp_path = PosixPath('/tmp/pytest-of-runner/pytest-0/test_cancel_batches_pending_au0')
+
+    @pytest.mark.asyncio
+    async def test_cancel_batches_pending_audit_in_one_filesystem_mutation(tmp_path: Path) -> None:
+        state = RuntimeState.filesystem(tmp_path / "runtime")
+        await state.initialize(namespace="stream-order", tenant_id="tenant")
+        try:
+            now = datetime.now(timezone.utc)
+>           execution = _execution()
+                        ^^^^^^^^^^^^
+
+tests/ai/test_runtime_stream_order.py:161: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+status = <ExecutionStatus.STARTED: 'STARTED'>, revision = 0, event_sequence = 0
+
+    def _execution(
+        *,
+        status: ExecutionStatus = ExecutionStatus.STARTED,
+        revision: int = 0,
+        event_sequence: int = 0,
+    ) -> ExecutionRecord:
+        now = datetime.now(timezone.utc)
+>       return ExecutionRecord(
+            execution_id="execution",
+            tenant_id="tenant",
+            session_id=None,
+            binding_digest="binding",
+            parent_execution_id=None,
+            root_execution_id="execution",
+            source_execution_id=None,
+            base_execution_id=None,
+            lineage_kind=ExecutionLineageKind.RUN,
+            status=status,
+            revision=revision,
+            event_sequence=event_sequence,
+            agent_run_sequence=0,
+            error_code=None,
+            safe_error_details={},
+            created_at=now,
+            updated_at=now,
+        )
+E       TypeError: ExecutionRecord.__init__() missing 3 required positional arguments: 'planning', 'thinking', and 'binding'
+
+tests/ai/test_runtime_stream_order.py:47: TypeError
+_____________ test_cancel_terminal_race_is_conflict_not_integrity ______________
+
+    @pytest.mark.asyncio
+    async def test_cancel_terminal_race_is_conflict_not_integrity() -> None:
+>       terminal = _execution(status=ExecutionStatus.SUCCEEDED, revision=1, event_sequence=1)
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+tests/ai/test_runtime_stream_order.py:199: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+status = <ExecutionStatus.SUCCEEDED: 'SUCCEEDED'>, revision = 1
+event_sequence = 1
+
+    def _execution(
+        *,
+        status: ExecutionStatus = ExecutionStatus.STARTED,
+        revision: int = 0,
+        event_sequence: int = 0,
+    ) -> ExecutionRecord:
+        now = datetime.now(timezone.utc)
+>       return ExecutionRecord(
+            execution_id="execution",
+            tenant_id="tenant",
+            session_id=None,
+            binding_digest="binding",
+            parent_execution_id=None,
+            root_execution_id="execution",
+            source_execution_id=None,
+            base_execution_id=None,
+            lineage_kind=ExecutionLineageKind.RUN,
+            status=status,
+            revision=revision,
+            event_sequence=event_sequence,
+            agent_run_sequence=0,
+            error_code=None,
+            safe_error_details={},
+            created_at=now,
+            updated_at=now,
+        )
+E       TypeError: ExecutionRecord.__init__() missing 3 required positional arguments: 'planning', 'thinking', and 'binding'
+
+tests/ai/test_runtime_stream_order.py:47: TypeError
+__________ test_cancel_local_bookkeeping_survives_caller_cancellation __________
+
+    @pytest.mark.asyncio
+    async def test_cancel_local_bookkeeping_survives_caller_cancellation() -> None:
+        broker = LiveExecutionEventBroker()
+        broker.register_local_producer("execution", 0)
+        broker.publish_event(
+            "execution",
+            ExecutionEventType.TOOL_CALL_STARTED,
+            {"call_id": "call", "tool_name": "tool"},
+            durable_sequence=None,
+        )
+        pending = ExecutionEventAppend(
+            ExecutionEventType.TOOL_CALL_STARTED,
+            {"call_id": "call", "tool_name": "tool"},
+        )
+>       committed = _execution(status=ExecutionStatus.CANCELLING, revision=2, event_sequence=2)
+                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+tests/ai/test_runtime_stream_order.py:262: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+status = <ExecutionStatus.CANCELLING: 'CANCELLING'>, revision = 2
+event_sequence = 2
+
+    def _execution(
+        *,
+        status: ExecutionStatus = ExecutionStatus.STARTED,
+        revision: int = 0,
+        event_sequence: int = 0,
+    ) -> ExecutionRecord:
+        now = datetime.now(timezone.utc)
+>       return ExecutionRecord(
+            execution_id="execution",
+            tenant_id="tenant",
+            session_id=None,
+            binding_digest="binding",
+            parent_execution_id=None,
+            root_execution_id="execution",
+            source_execution_id=None,
+            base_execution_id=None,
+            lineage_kind=ExecutionLineageKind.RUN,
+            status=status,
+            revision=revision,
+            event_sequence=event_sequence,
+            agent_run_sequence=0,
+            error_code=None,
+            safe_error_details={},
+            created_at=now,
+            updated_at=now,
+        )
+E       TypeError: ExecutionRecord.__init__() missing 3 required positional arguments: 'planning', 'thinking', and 'binding'
+
+tests/ai/test_runtime_stream_order.py:47: TypeError
+_________ test_terminal_local_bookkeeping_survives_caller_cancellation _________
+
+    @pytest.mark.asyncio
+    async def test_terminal_local_bookkeeping_survives_caller_cancellation() -> None:
+        broker = LiveExecutionEventBroker()
+        broker.register_local_producer("execution", 0)
+        broker.publish_event(
+            "execution",
+            ExecutionEventType.ASSISTANT_PART_COMPLETED,
+            {"part": "text"},
+            durable_sequence=None,
+        )
+        pending = ExecutionEventAppend(ExecutionEventType.ASSISTANT_PART_COMPLETED, {"part": "text"})
+>       current = _execution()
+                  ^^^^^^^^^^^^
+
+tests/ai/test_runtime_stream_order.py:326: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+status = <ExecutionStatus.STARTED: 'STARTED'>, revision = 0, event_sequence = 0
+
+    def _execution(
+        *,
+        status: ExecutionStatus = ExecutionStatus.STARTED,
+        revision: int = 0,
+        event_sequence: int = 0,
+    ) -> ExecutionRecord:
+        now = datetime.now(timezone.utc)
+>       return ExecutionRecord(
+            execution_id="execution",
+            tenant_id="tenant",
+            session_id=None,
+            binding_digest="binding",
+            parent_execution_id=None,
+            root_execution_id="execution",
+            source_execution_id=None,
+            base_execution_id=None,
+            lineage_kind=ExecutionLineageKind.RUN,
+            status=status,
+            revision=revision,
+            event_sequence=event_sequence,
+            agent_run_sequence=0,
+            error_code=None,
+            safe_error_details={},
+            created_at=now,
+            updated_at=now,
+        )
+E       TypeError: ExecutionRecord.__init__() missing 3 required positional arguments: 'planning', 'thinking', and 'binding'
+
+tests/ai/test_runtime_stream_order.py:47: TypeError
+___________ test_second_subscriber_pins_buffer_during_durable_prefix ___________
+
+    @pytest.mark.asyncio
+    async def test_second_subscriber_pins_buffer_during_durable_prefix() -> None:
+        broker = LiveExecutionEventBroker()
+        broker.register_local_producer("execution", 1)
+        base = ExecutionEvent("execution", 1, ExecutionEventType.EXECUTION_STARTED, {})
+        events = _EventReader({0: (base,)})
+        events.started = asyncio.Event()
+        events.release = asyncio.Event()
+        service = _service(
+>           _execution(status=ExecutionStatus.SUCCEEDED, revision=2, event_sequence=2),
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+            events,
+            broker,
+        )
+
+tests/ai/test_runtime_stream_order.py:401: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+status = <ExecutionStatus.SUCCEEDED: 'SUCCEEDED'>, revision = 2
+event_sequence = 2
+
+    def _execution(
+        *,
+        status: ExecutionStatus = ExecutionStatus.STARTED,
+        revision: int = 0,
+        event_sequence: int = 0,
+    ) -> ExecutionRecord:
+        now = datetime.now(timezone.utc)
+>       return ExecutionRecord(
+            execution_id="execution",
+            tenant_id="tenant",
+            session_id=None,
+            binding_digest="binding",
+            parent_execution_id=None,
+            root_execution_id="execution",
+            source_execution_id=None,
+            base_execution_id=None,
+            lineage_kind=ExecutionLineageKind.RUN,
+            status=status,
+            revision=revision,
+            event_sequence=event_sequence,
+            agent_run_sequence=0,
+            error_code=None,
+            safe_error_details={},
+            created_at=now,
+            updated_at=now,
+        )
+E       TypeError: ExecutionRecord.__init__() missing 3 required positional arguments: 'planning', 'thinking', and 'binding'
+
+tests/ai/test_runtime_stream_order.py:47: TypeError
+__________ test_local_completion_without_terminal_is_integrity_error ___________
+
+    @pytest.mark.asyncio
+    async def test_local_completion_without_terminal_is_integrity_error() -> None:
+        broker = LiveExecutionEventBroker()
+        broker.register_local_producer("execution", 0)
+>       service = _service(_execution(), _EventReader({}), broker)
+                           ^^^^^^^^^^^^
+
+tests/ai/test_runtime_stream_order.py:433: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+status = <ExecutionStatus.STARTED: 'STARTED'>, revision = 0, event_sequence = 0
+
+    def _execution(
+        *,
+        status: ExecutionStatus = ExecutionStatus.STARTED,
+        revision: int = 0,
+        event_sequence: int = 0,
+    ) -> ExecutionRecord:
+        now = datetime.now(timezone.utc)
+>       return ExecutionRecord(
+            execution_id="execution",
+            tenant_id="tenant",
+            session_id=None,
+            binding_digest="binding",
+            parent_execution_id=None,
+            root_execution_id="execution",
+            source_execution_id=None,
+            base_execution_id=None,
+            lineage_kind=ExecutionLineageKind.RUN,
+            status=status,
+            revision=revision,
+            event_sequence=event_sequence,
+            agent_run_sequence=0,
+            error_code=None,
+            safe_error_details={},
+            created_at=now,
+            updated_at=now,
+        )
+E       TypeError: ExecutionRecord.__init__() missing 3 required positional arguments: 'planning', 'thinking', and 'binding'
+
+tests/ai/test_runtime_stream_order.py:47: TypeError
+_________ test_durable_stream_stops_when_terminal_cursor_already_seen __________
+
+    @pytest.mark.asyncio
+    async def test_durable_stream_stops_when_terminal_cursor_already_seen() -> None:
+        broker = LiveExecutionEventBroker()
+        service = _service(
+>           _execution(status=ExecutionStatus.SUCCEEDED, revision=2, event_sequence=2),
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+            _EventReader({}),
+            broker,
+        )
+
+tests/ai/test_runtime_stream_order.py:454: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+status = <ExecutionStatus.SUCCEEDED: 'SUCCEEDED'>, revision = 2
+event_sequence = 2
+
+    def _execution(
+        *,
+        status: ExecutionStatus = ExecutionStatus.STARTED,
+        revision: int = 0,
+        event_sequence: int = 0,
+    ) -> ExecutionRecord:
+        now = datetime.now(timezone.utc)
+>       return ExecutionRecord(
+            execution_id="execution",
+            tenant_id="tenant",
+            session_id=None,
+            binding_digest="binding",
+            parent_execution_id=None,
+            root_execution_id="execution",
+            source_execution_id=None,
+            base_execution_id=None,
+            lineage_kind=ExecutionLineageKind.RUN,
+            status=status,
+            revision=revision,
+            event_sequence=event_sequence,
+            agent_run_sequence=0,
+            error_code=None,
+            safe_error_details={},
+            created_at=now,
+            updated_at=now,
+        )
+E       TypeError: ExecutionRecord.__init__() missing 3 required positional arguments: 'planning', 'thinking', and 'binding'
+
+tests/ai/test_runtime_stream_order.py:47: TypeError
+___________ test_local_stream_skips_already_seen_terminal_and_stops ____________
+
+    @pytest.mark.asyncio
+    async def test_local_stream_skips_already_seen_terminal_and_stops() -> None:
+        broker = LiveExecutionEventBroker()
+        lease = broker.prepare_local_producer("execution")
+        broker.register_local_producer("execution", 0)
+        live = broker.claim_local_producer(lease)
+        broker.publish_event(
+            "execution",
+            ExecutionEventType.EXECUTION_SUCCEEDED,
+            {},
+            durable_sequence=1,
+        )
+        broker.complete("execution")
+        service = _service(
+>           _execution(status=ExecutionStatus.SUCCEEDED, revision=1, event_sequence=1),
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+            _EventReader({}),
+            broker,
+        )
+
+tests/ai/test_runtime_stream_order.py:484: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+status = <ExecutionStatus.SUCCEEDED: 'SUCCEEDED'>, revision = 1
+event_sequence = 1
+
+    def _execution(
+        *,
+        status: ExecutionStatus = ExecutionStatus.STARTED,
+        revision: int = 0,
+        event_sequence: int = 0,
+    ) -> ExecutionRecord:
+        now = datetime.now(timezone.utc)
+>       return ExecutionRecord(
+            execution_id="execution",
+            tenant_id="tenant",
+            session_id=None,
+            binding_digest="binding",
+            parent_execution_id=None,
+            root_execution_id="execution",
+            source_execution_id=None,
+            base_execution_id=None,
+            lineage_kind=ExecutionLineageKind.RUN,
+            status=status,
+            revision=revision,
+            event_sequence=event_sequence,
+            agent_run_sequence=0,
+            error_code=None,
+            safe_error_details={},
+            created_at=now,
+            updated_at=now,
+        )
+E       TypeError: ExecutionRecord.__init__() missing 3 required positional arguments: 'planning', 'thinking', and 'binding'
+
+tests/ai/test_runtime_stream_order.py:47: TypeError
+______ test_reconnect_aligns_to_confirmed_cursor_before_replaying_deltas _______
+
+    @pytest.mark.asyncio
+    async def test_reconnect_aligns_to_confirmed_cursor_before_replaying_deltas() -> None:
+        broker = LiveExecutionEventBroker()
+        lease = broker.prepare_local_producer("execution")
+        broker.register_local_producer("execution", 1)
+        broker.claim_local_producer(lease)
+        broker.publish(
+            ExecutionDelta("execution", ExecutionDeltaType.ASSISTANT_TEXT_DELTA, "before")
+        )
+        broker.publish_event(
+            "execution",
+            ExecutionEventType.TOOL_CALL_STARTED,
+            {"call_id": "call", "tool_name": "tool"},
+            durable_sequence=None,
+        )
+        broker.publish(
+            ExecutionDelta("execution", ExecutionDeltaType.ASSISTANT_TEXT_DELTA, "after")
+        )
+>       service = _service(_execution(revision=1, event_sequence=1), _EventReader({}), broker)
+                           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+tests/ai/test_runtime_stream_order.py:536: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+status = <ExecutionStatus.STARTED: 'STARTED'>, revision = 1, event_sequence = 1
+
+    def _execution(
+        *,
+        status: ExecutionStatus = ExecutionStatus.STARTED,
+        revision: int = 0,
+        event_sequence: int = 0,
+    ) -> ExecutionRecord:
+        now = datetime.now(timezone.utc)
+>       return ExecutionRecord(
+            execution_id="execution",
+            tenant_id="tenant",
+            session_id=None,
+            binding_digest="binding",
+            parent_execution_id=None,
+            root_execution_id="execution",
+            source_execution_id=None,
+            base_execution_id=None,
+            lineage_kind=ExecutionLineageKind.RUN,
+            status=status,
+            revision=revision,
+            event_sequence=event_sequence,
+            agent_run_sequence=0,
+            error_code=None,
+            safe_error_details={},
+            created_at=now,
+            updated_at=now,
+        )
+E       TypeError: ExecutionRecord.__init__() missing 3 required positional arguments: 'planning', 'thinking', and 'binding'
+
+tests/ai/test_runtime_stream_order.py:47: TypeError
+_________ test_reconnect_after_terminal_cursor_does_not_replay_deltas __________
+
+    @pytest.mark.asyncio
+    async def test_reconnect_after_terminal_cursor_does_not_replay_deltas() -> None:
+        broker = LiveExecutionEventBroker()
+        lease = broker.prepare_local_producer("execution")
+        broker.register_local_producer("execution", 1)
+        broker.claim_local_producer(lease)
+        broker.publish(
+            ExecutionDelta("execution", ExecutionDeltaType.ASSISTANT_TEXT_DELTA, "before")
+        )
+        broker.publish_event(
+            "execution",
+            ExecutionEventType.TOOL_CALL_STARTED,
+            {"call_id": "call", "tool_name": "tool"},
+            durable_sequence=2,
+        )
+        broker.publish(
+            ExecutionDelta("execution", ExecutionDeltaType.ASSISTANT_TEXT_DELTA, "after")
+        )
+        broker.publish_event(
+            "execution",
+            ExecutionEventType.EXECUTION_SUCCEEDED,
+            {},
+            durable_sequence=3,
+        )
+        broker.complete("execution")
+        service = _service(
+>           _execution(status=ExecutionStatus.SUCCEEDED, revision=3, event_sequence=3),
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+            _EventReader({}),
+            broker,
+        )
+
+tests/ai/test_runtime_stream_order.py:593: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+status = <ExecutionStatus.SUCCEEDED: 'SUCCEEDED'>, revision = 3
+event_sequence = 3
+
+    def _execution(
+        *,
+        status: ExecutionStatus = ExecutionStatus.STARTED,
+        revision: int = 0,
+        event_sequence: int = 0,
+    ) -> ExecutionRecord:
+        now = datetime.now(timezone.utc)
+>       return ExecutionRecord(
+            execution_id="execution",
+            tenant_id="tenant",
+            session_id=None,
+            binding_digest="binding",
+            parent_execution_id=None,
+            root_execution_id="execution",
+            source_execution_id=None,
+            base_execution_id=None,
+            lineage_kind=ExecutionLineageKind.RUN,
+            status=status,
+            revision=revision,
+            event_sequence=event_sequence,
+            agent_run_sequence=0,
+            error_code=None,
+            safe_error_details={},
+            created_at=now,
+            updated_at=now,
+        )
+E       TypeError: ExecutionRecord.__init__() missing 3 required positional arguments: 'planning', 'thinking', and 'binding'
+
+tests/ai/test_runtime_stream_order.py:47: TypeError
+___________________ test_durable_stream_rejects_sequence_gap ___________________
+
+    @pytest.mark.asyncio
+    async def test_durable_stream_rejects_sequence_gap() -> None:
+        broker = LiveExecutionEventBroker()
+        gap = ExecutionEvent(
+            "execution",
+            2,
+            ExecutionEventType.EXECUTION_SUCCEEDED,
+            {},
+        )
+        service = _service(
+>           _execution(status=ExecutionStatus.SUCCEEDED, revision=2, event_sequence=2),
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+            _EventReader({0: (gap,)}),
+            broker,
+        )
+
+tests/ai/test_runtime_stream_order.py:619: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+status = <ExecutionStatus.SUCCEEDED: 'SUCCEEDED'>, revision = 2
+event_sequence = 2
+
+    def _execution(
+        *,
+        status: ExecutionStatus = ExecutionStatus.STARTED,
+        revision: int = 0,
+        event_sequence: int = 0,
+    ) -> ExecutionRecord:
+        now = datetime.now(timezone.utc)
+>       return ExecutionRecord(
+            execution_id="execution",
+            tenant_id="tenant",
+            session_id=None,
+            binding_digest="binding",
+            parent_execution_id=None,
+            root_execution_id="execution",
+            source_execution_id=None,
+            base_execution_id=None,
+            lineage_kind=ExecutionLineageKind.RUN,
+            status=status,
+            revision=revision,
+            event_sequence=event_sequence,
+            agent_run_sequence=0,
+            error_code=None,
+            safe_error_details={},
+            created_at=now,
+            updated_at=now,
+        )
+E       TypeError: ExecutionRecord.__init__() missing 3 required positional arguments: 'planning', 'thinking', and 'binding'
+
+tests/ai/test_runtime_stream_order.py:47: TypeError
+___________ test_concurrent_cancel_winner_is_conflict_not_integrity ____________
+
+    @pytest.mark.asyncio
+    async def test_concurrent_cancel_winner_is_conflict_not_integrity() -> None:
+>       winner = _execution(
+            status=ExecutionStatus.CANCELLING,
+            revision=1,
+            event_sequence=1,
+        )
+
+tests/ai/test_runtime_stream_order.py:631: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+status = <ExecutionStatus.CANCELLING: 'CANCELLING'>, revision = 1
+event_sequence = 1
+
+    def _execution(
+        *,
+        status: ExecutionStatus = ExecutionStatus.STARTED,
+        revision: int = 0,
+        event_sequence: int = 0,
+    ) -> ExecutionRecord:
+        now = datetime.now(timezone.utc)
+>       return ExecutionRecord(
+            execution_id="execution",
+            tenant_id="tenant",
+            session_id=None,
+            binding_digest="binding",
+            parent_execution_id=None,
+            root_execution_id="execution",
+            source_execution_id=None,
+            base_execution_id=None,
+            lineage_kind=ExecutionLineageKind.RUN,
+            status=status,
+            revision=revision,
+            event_sequence=event_sequence,
+            agent_run_sequence=0,
+            error_code=None,
+            safe_error_details={},
+            created_at=now,
+            updated_at=now,
+        )
+E       TypeError: ExecutionRecord.__init__() missing 3 required positional arguments: 'planning', 'thinking', and 'binding'
+
+tests/ai/test_runtime_stream_order.py:47: TypeError
+___________ test_revision_only_cancel_race_is_conflict_not_integrity ___________
+
+    @pytest.mark.asyncio
+    async def test_revision_only_cancel_race_is_conflict_not_integrity() -> None:
+>       advanced = _execution(
+            status=ExecutionStatus.STARTED,
+            revision=1,
+            event_sequence=0,
+        )
+
+tests/ai/test_runtime_stream_order.py:691: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+status = <ExecutionStatus.STARTED: 'STARTED'>, revision = 1, event_sequence = 0
+
+    def _execution(
+        *,
+        status: ExecutionStatus = ExecutionStatus.STARTED,
+        revision: int = 0,
+        event_sequence: int = 0,
+    ) -> ExecutionRecord:
+        now = datetime.now(timezone.utc)
+>       return ExecutionRecord(
+            execution_id="execution",
+            tenant_id="tenant",
+            session_id=None,
+            binding_digest="binding",
+            parent_execution_id=None,
+            root_execution_id="execution",
+            source_execution_id=None,
+            base_execution_id=None,
+            lineage_kind=ExecutionLineageKind.RUN,
+            status=status,
+            revision=revision,
+            event_sequence=event_sequence,
+            agent_run_sequence=0,
+            error_code=None,
+            safe_error_details={},
+            created_at=now,
+            updated_at=now,
+        )
+E       TypeError: ExecutionRecord.__init__() missing 3 required positional arguments: 'planning', 'thinking', and 'binding'
+
+tests/ai/test_runtime_stream_order.py:47: TypeError
+_____ test_cancel_readback_accepts_own_suffix_after_revision_only_advance ______
+
+    @pytest.mark.asyncio
+    async def test_cancel_readback_accepts_own_suffix_after_revision_only_advance() -> None:
+>       advanced = _execution(
+            status=ExecutionStatus.CANCELLING,
+            revision=2,
+            event_sequence=1,
+        )
+
+tests/ai/test_runtime_stream_order.py:741: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+status = <ExecutionStatus.CANCELLING: 'CANCELLING'>, revision = 2
+event_sequence = 1
+
+    def _execution(
+        *,
+        status: ExecutionStatus = ExecutionStatus.STARTED,
+        revision: int = 0,
+        event_sequence: int = 0,
+    ) -> ExecutionRecord:
+        now = datetime.now(timezone.utc)
+>       return ExecutionRecord(
+            execution_id="execution",
+            tenant_id="tenant",
+            session_id=None,
+            binding_digest="binding",
+            parent_execution_id=None,
+            root_execution_id="execution",
+            source_execution_id=None,
+            base_execution_id=None,
+            lineage_kind=ExecutionLineageKind.RUN,
+            status=status,
+            revision=revision,
+            event_sequence=event_sequence,
+            agent_run_sequence=0,
+            error_code=None,
+            safe_error_details={},
+            created_at=now,
+            updated_at=now,
+        )
+E       TypeError: ExecutionRecord.__init__() missing 3 required positional arguments: 'planning', 'thinking', and 'binding'
+
+tests/ai/test_runtime_stream_order.py:47: TypeError
+____________________ test_memory_session_admission_contract ____________________
+
+    @pytest.mark.asyncio
+    async def test_memory_session_admission_contract() -> None:
+>       await _assert_admission_contract(RuntimeState.in_memory())
+
+tests/ai/test_session_admission.py:136: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+tests/ai/test_session_admission.py:41: in _assert_admission_contract
+    await state.conversation.sessions.create(_session())
+                                             ^^^^^^^^^^
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+    def _session() -> SessionRecord:
+        now = datetime.now(timezone.utc)
+>       return SessionRecord(
+            session_id="session",
+            tenant_id="tenant",
+            owner_principal_id="owner",
+            binding_digest="binding",
+            status=SessionStatus.OPEN,
+            revision=0,
+            resource_generation=0,
+            cwd=None,
+            metadata={},
+            created_at=now,
+            updated_at=now,
+            closed_at=None,
+            active_execution_id=None,
+        )
+E       TypeError: SessionRecord.__init__() got an unexpected keyword argument 'binding_digest'
+
+tests/ai/test_session_admission.py:21: TypeError
+_____________________ test_sql_session_admission_contract ______________________
+
+tmp_path = PosixPath('/tmp/pytest-of-runner/pytest-0/test_sql_session_admission_con0')
+
+    @pytest.mark.asyncio
+    async def test_sql_session_admission_contract(tmp_path) -> None:
+        engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'runtime.db'}")
+        await provision_database(engine)
+        try:
+>           await _assert_admission_contract(RuntimeState.sql(engine))
+
+tests/ai/test_session_admission.py:144: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+tests/ai/test_session_admission.py:41: in _assert_admission_contract
+    await state.conversation.sessions.create(_session())
+                                             ^^^^^^^^^^
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+    def _session() -> SessionRecord:
+        now = datetime.now(timezone.utc)
+>       return SessionRecord(
+            session_id="session",
+            tenant_id="tenant",
+            owner_principal_id="owner",
+            binding_digest="binding",
+            status=SessionStatus.OPEN,
+            revision=0,
+            resource_generation=0,
+            cwd=None,
+            metadata={},
+            created_at=now,
+            updated_at=now,
+            closed_at=None,
+            active_execution_id=None,
+        )
+E       TypeError: SessionRecord.__init__() got an unexpected keyword argument 'binding_digest'
+
+tests/ai/test_session_admission.py:21: TypeError
+____________________ test_memory_admission_is_single_owner _____________________
+
+    @pytest.mark.asyncio
+    async def test_memory_admission_is_single_owner() -> None:
+        state = RuntimeState.in_memory()
+        await state.initialize(namespace="admission-race", tenant_id="tenant")
+        try:
+>           await state.conversation.sessions.create(_session())
+                                                     ^^^^^^^^^^
+
+tests/ai/test_session_admission.py:154: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+    def _session() -> SessionRecord:
+        now = datetime.now(timezone.utc)
+>       return SessionRecord(
+            session_id="session",
+            tenant_id="tenant",
+            owner_principal_id="owner",
+            binding_digest="binding",
+            status=SessionStatus.OPEN,
+            revision=0,
+            resource_generation=0,
+            cwd=None,
+            metadata={},
+            created_at=now,
+            updated_at=now,
+            closed_at=None,
+            active_execution_id=None,
+        )
+E       TypeError: SessionRecord.__init__() got an unexpected keyword argument 'binding_digest'
+
+tests/ai/test_session_admission.py:21: TypeError
+___________ test_memory_admission_is_atomic_and_cas_preserves_token ____________
+
+    @pytest.mark.asyncio
+    async def test_memory_admission_is_atomic_and_cas_preserves_token() -> None:
+        state = RuntimeState.in_memory()
+        await state.initialize(namespace="session-admission-memory", tenant_id="tenant")
+        try:
+>           await state.conversation.sessions.create(_session())
+                                                     ^^^^^^^^^^
+
+tests/ai/test_session_admission_conformance.py:67: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+    def _session() -> SessionRecord:
+        now = datetime.now(timezone.utc)
+>       return SessionRecord(
+            session_id="session",
+            tenant_id="tenant",
+            owner_principal_id="owner",
+            binding_digest="b" * 64,
+            status=SessionStatus.OPEN,
+            revision=0,
+            resource_generation=0,
+            cwd=None,
+            metadata={},
+            created_at=now,
+            updated_at=now,
+            closed_at=None,
+            active_execution_id=None,
+        )
+E       TypeError: SessionRecord.__init__() got an unexpected keyword argument 'binding_digest'
+
+tests/ai/test_session_admission_conformance.py:32: TypeError
+____________ test_sql_admission_is_atomic_and_token_survives_reopen ____________
+
+tmp_path = PosixPath('/tmp/pytest-of-runner/pytest-0/test_sql_admission_is_atomic_a0')
+
+    @pytest.mark.asyncio
+    async def test_sql_admission_is_atomic_and_token_survives_reopen(tmp_path) -> None:
+        engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'runtime.db'}")
+        await provision_database(engine)
+        state = RuntimeState.sql(engine)
+        await state.initialize(namespace="session-admission-sql", tenant_id="tenant")
+>       await state.conversation.sessions.create(_session())
+                                                 ^^^^^^^^^^
+
+tests/ai/test_session_admission_conformance.py:118: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+    def _session() -> SessionRecord:
+        now = datetime.now(timezone.utc)
+>       return SessionRecord(
+            session_id="session",
+            tenant_id="tenant",
+            owner_principal_id="owner",
+            binding_digest="b" * 64,
+            status=SessionStatus.OPEN,
+            revision=0,
+            resource_generation=0,
+            cwd=None,
+            metadata={},
+            created_at=now,
+            updated_at=now,
+            closed_at=None,
+            active_execution_id=None,
+        )
+E       TypeError: SessionRecord.__init__() got an unexpected keyword argument 'binding_digest'
+
+tests/ai/test_session_admission_conformance.py:32: TypeError
+________ test_closing_session_can_commit_owned_continuation_then_close _________
+
+    @pytest.mark.asyncio
+    async def test_closing_session_can_commit_owned_continuation_then_close() -> None:
+        state = RuntimeState.in_memory()
+        await state.initialize(namespace="session-admission-close", tenant_id="tenant")
+        try:
+>           await state.conversation.sessions.create(_session())
+                                                     ^^^^^^^^^^
+
+tests/ai/test_session_admission_conformance.py:158: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+    def _session() -> SessionRecord:
+        now = datetime.now(timezone.utc)
+>       return SessionRecord(
+            session_id="session",
+            tenant_id="tenant",
+            owner_principal_id="owner",
+            binding_digest="b" * 64,
+            status=SessionStatus.OPEN,
+            revision=0,
+            resource_generation=0,
+            cwd=None,
+            metadata={},
+            created_at=now,
+            updated_at=now,
+            closed_at=None,
+            active_execution_id=None,
+        )
+E       TypeError: SessionRecord.__init__() got an unexpected keyword argument 'binding_digest'
+
+tests/ai/test_session_admission_conformance.py:32: TypeError
+______________ test_rejected_admission_terminalizes_pending_start ______________
+
+    @pytest.mark.asyncio
+    async def test_rejected_admission_terminalizes_pending_start() -> None:
+        state = RuntimeState.in_memory()
+        await state.initialize(namespace="session-admission-rejection", tenant_id="tenant")
+        try:
+>           await state.conversation.sessions.create(_session())
+                                                     ^^^^^^^^^^
+
+tests/ai/test_session_admission_conformance.py:280: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+    def _session() -> SessionRecord:
+        now = datetime.now(timezone.utc)
+>       return SessionRecord(
+            session_id="session",
+            tenant_id="tenant",
+            owner_principal_id="owner",
+            binding_digest="b" * 64,
+            status=SessionStatus.OPEN,
+            revision=0,
+            resource_generation=0,
+            cwd=None,
+            metadata={},
+            created_at=now,
+            updated_at=now,
+            closed_at=None,
+            active_execution_id=None,
+        )
+E       TypeError: SessionRecord.__init__() got an unexpected keyword argument 'binding_digest'
+
+tests/ai/test_session_admission_conformance.py:32: TypeError
+________ test_empty_and_committed_session_history_use_continuation_only ________
+
+    @pytest.mark.asyncio
+    async def test_empty_and_committed_session_history_use_continuation_only() -> None:
+        state = RuntimeState.in_memory()
+        await state.initialize(namespace="session-history", tenant_id="tenant")
+        try:
+>           await state.conversation.sessions.create(_session())
+                                                     ^^^^^^^^^^
+
+tests/ai/test_session_history_projection.py:164: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+session_id = 'session'
+
+    def _session(session_id: str = "session") -> SessionRecord:
+        now = datetime.now(timezone.utc)
+>       return SessionRecord(
+            session_id=session_id,
+            tenant_id="tenant",
+            owner_principal_id="owner",
+            binding_digest="binding",
+            status=SessionStatus.OPEN,
+            revision=0,
+            resource_generation=0,
+            cwd=None,
+            metadata={},
+            created_at=now,
+            updated_at=now,
+            closed_at=None,
+            active_execution_id=None,
+        )
+E       TypeError: SessionRecord.__init__() got an unexpected keyword argument 'binding_digest'
+
+tests/ai/test_session_history_projection.py:44: TypeError
+__________ test_session_history_cursor_binds_to_current_continuation ___________
+
+    @pytest.mark.asyncio
+    async def test_session_history_cursor_binds_to_current_continuation() -> None:
+        state = RuntimeState.in_memory()
+        await state.initialize(namespace="session-history-cursor", tenant_id="tenant")
+        try:
+>           await state.conversation.sessions.create(_session())
+                                                     ^^^^^^^^^^
+
+tests/ai/test_session_history_projection.py:203: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+session_id = 'session'
+
+    def _session(session_id: str = "session") -> SessionRecord:
+        now = datetime.now(timezone.utc)
+>       return SessionRecord(
+            session_id=session_id,
+            tenant_id="tenant",
+            owner_principal_id="owner",
+            binding_digest="binding",
+            status=SessionStatus.OPEN,
+            revision=0,
+            resource_generation=0,
+            cwd=None,
+            metadata={},
+            created_at=now,
+            updated_at=now,
+            closed_at=None,
+            active_execution_id=None,
+        )
+E       TypeError: SessionRecord.__init__() got an unexpected keyword argument 'binding_digest'
+
+tests/ai/test_session_history_projection.py:44: TypeError
+______ test_session_history_uses_projection_v1_mapping_and_empty_strings _______
+
+    @pytest.mark.asyncio
+    async def test_session_history_uses_projection_v1_mapping_and_empty_strings() -> None:
+        state = RuntimeState.in_memory()
+        await state.initialize(namespace="session-history-projection", tenant_id="tenant")
+        try:
+>           await state.conversation.sessions.create(_session())
+                                                     ^^^^^^^^^^
+
+tests/ai/test_session_history_projection.py:235: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+session_id = 'session'
+
+    def _session(session_id: str = "session") -> SessionRecord:
+        now = datetime.now(timezone.utc)
+>       return SessionRecord(
+            session_id=session_id,
+            tenant_id="tenant",
+            owner_principal_id="owner",
+            binding_digest="binding",
+            status=SessionStatus.OPEN,
+            revision=0,
+            resource_generation=0,
+            cwd=None,
+            metadata={},
+            created_at=now,
+            updated_at=now,
+            closed_at=None,
+            active_execution_id=None,
+        )
+E       TypeError: SessionRecord.__init__() got an unexpected keyword argument 'binding_digest'
+
+tests/ai/test_session_history_projection.py:44: TypeError
+____ test_session_history_fork_copies_continuation_without_execution_lookup ____
+
+    @pytest.mark.asyncio
+    async def test_session_history_fork_copies_continuation_without_execution_lookup() -> None:
+        state = RuntimeState.in_memory()
+        await state.initialize(namespace="session-history-fork", tenant_id="tenant")
+        try:
+>           await state.conversation.sessions.create(_session())
+                                                     ^^^^^^^^^^
+
+tests/ai/test_session_history_projection.py:318: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+session_id = 'session'
+
+    def _session(session_id: str = "session") -> SessionRecord:
+        now = datetime.now(timezone.utc)
+>       return SessionRecord(
+            session_id=session_id,
+            tenant_id="tenant",
+            owner_principal_id="owner",
+            binding_digest="binding",
+            status=SessionStatus.OPEN,
+            revision=0,
+            resource_generation=0,
+            cwd=None,
+            metadata={},
+            created_at=now,
+            updated_at=now,
+            closed_at=None,
+            active_execution_id=None,
+        )
+E       TypeError: SessionRecord.__init__() got an unexpected keyword argument 'binding_digest'
+
+tests/ai/test_session_history_projection.py:44: TypeError
+___________ test_session_history_reports_missing_committed_snapshot ____________
+
+    @pytest.mark.asyncio
+    async def test_session_history_reports_missing_committed_snapshot() -> None:
+        state = RuntimeState.in_memory()
+        await state.initialize(namespace="session-history-missing", tenant_id="tenant")
+        try:
+>           await state.conversation.sessions.create(_session())
+                                                     ^^^^^^^^^^
+
+tests/ai/test_session_history_projection.py:342: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+session_id = 'session'
+
+    def _session(session_id: str = "session") -> SessionRecord:
+        now = datetime.now(timezone.utc)
+>       return SessionRecord(
+            session_id=session_id,
+            tenant_id="tenant",
+            owner_principal_id="owner",
+            binding_digest="binding",
+            status=SessionStatus.OPEN,
+            revision=0,
+            resource_generation=0,
+            cwd=None,
+            metadata={},
+            created_at=now,
+            updated_at=now,
+            closed_at=None,
+            active_execution_id=None,
+        )
+E       TypeError: SessionRecord.__init__() got an unexpected keyword argument 'binding_digest'
+
+tests/ai/test_session_history_projection.py:44: TypeError
+__________ test_durable_session_history_survives_runtime_state_reopen __________
+
+tmp_path = PosixPath('/tmp/pytest-of-runner/pytest-0/test_durable_session_history_s0')
+
+    @pytest.mark.asyncio
+    async def test_durable_session_history_survives_runtime_state_reopen(tmp_path) -> None:
+        state = RuntimeState.filesystem(tmp_path / "runtime")
+        await state.initialize(namespace="session-history-durable", tenant_id="tenant")
+        run_id = "session-history-durable-run"
+>       await state.conversation.sessions.create(_session())
+                                                 ^^^^^^^^^^
+
+tests/ai/test_session_history_projection.py:359: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+session_id = 'session'
+
+    def _session(session_id: str = "session") -> SessionRecord:
+        now = datetime.now(timezone.utc)
+>       return SessionRecord(
+            session_id=session_id,
+            tenant_id="tenant",
+            owner_principal_id="owner",
+            binding_digest="binding",
+            status=SessionStatus.OPEN,
+            revision=0,
+            resource_generation=0,
+            cwd=None,
+            metadata={},
+            created_at=now,
+            updated_at=now,
+            closed_at=None,
+            active_execution_id=None,
+        )
+E       TypeError: SessionRecord.__init__() got an unexpected keyword argument 'binding_digest'
+
+tests/ai/test_session_history_projection.py:44: TypeError
+____________ test_sql_session_history_survives_runtime_state_reopen ____________
+
+tmp_path = PosixPath('/tmp/pytest-of-runner/pytest-0/test_sql_session_history_survi0')
+
+    @pytest.mark.asyncio
+    async def test_sql_session_history_survives_runtime_state_reopen(tmp_path) -> None:
+        engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'runtime.db'}")
+        await provision_database(engine)
+        state = RuntimeState.sql(engine)
+        await state.initialize(namespace="session-history-sql", tenant_id="tenant")
+        try:
+>           await state.conversation.sessions.create(_session())
+                                                     ^^^^^^^^^^
+
+tests/ai/test_session_history_projection.py:387: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+session_id = 'session'
+
+    def _session(session_id: str = "session") -> SessionRecord:
+        now = datetime.now(timezone.utc)
+>       return SessionRecord(
+            session_id=session_id,
+            tenant_id="tenant",
+            owner_principal_id="owner",
+            binding_digest="binding",
+            status=SessionStatus.OPEN,
+            revision=0,
+            resource_generation=0,
+            cwd=None,
+            metadata={},
+            created_at=now,
+            updated_at=now,
+            closed_at=None,
+            active_execution_id=None,
+        )
+E       TypeError: SessionRecord.__init__() got an unexpected keyword argument 'binding_digest'
+
+tests/ai/test_session_history_projection.py:44: TypeError
+__________________ test_step_events_wait_for_a_safe_snapshot ___________________
+
+tmp_path = PosixPath('/tmp/pytest-of-runner/pytest-0/test_step_events_wait_for_a_sa0')
+
+    @pytest.mark.asyncio
+    async def test_step_events_wait_for_a_safe_snapshot(tmp_path: Path) -> None:
+        state = RuntimeState.filesystem(tmp_path / "runtime")
+        await state.initialize(namespace="step-io", tenant_id="tenant")
+        try:
+>           await state.execution.executions.create(_execution())
+                                                    ^^^^^^^^^^^^
+
+tests/ai/test_step_io_final_fix.py:67: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+    def _execution() -> ExecutionRecord:
+        now = datetime.now(timezone.utc)
+>       return ExecutionRecord(
+            execution_id="execution",
+            tenant_id="tenant",
+            session_id=None,
+            binding_digest="binding",
+            parent_execution_id=None,
+            root_execution_id="execution",
+            source_execution_id=None,
+            base_execution_id=None,
+            lineage_kind=ExecutionLineageKind.RUN,
+            status=ExecutionStatus.STARTED,
+            revision=0,
+            event_sequence=0,
+            agent_run_sequence=1,
+            error_code=None,
+            safe_error_details={},
+            created_at=now,
+            updated_at=now,
+        )
+E       TypeError: ExecutionRecord.__init__() missing 3 required positional arguments: 'planning', 'thinking', and 'binding'
+
+tests/ai/test_step_io_final_fix.py:41: TypeError
+=========================== short test summary info ============================
+FAILED tests/ai/test_memory_terminal.py::test_in_memory_terminal_commit_validates_success_result - TypeError: ExecutionRecord.__init__() missing 3 required positional arguments: 'planning', 'thinking', and 'binding'
+FAILED tests/ai/test_runtime_stream_order.py::test_cancel_batches_pending_audit_in_one_filesystem_mutation - TypeError: ExecutionRecord.__init__() missing 3 required positional arguments: 'planning', 'thinking', and 'binding'
+FAILED tests/ai/test_runtime_stream_order.py::test_cancel_terminal_race_is_conflict_not_integrity - TypeError: ExecutionRecord.__init__() missing 3 required positional arguments: 'planning', 'thinking', and 'binding'
+FAILED tests/ai/test_runtime_stream_order.py::test_cancel_local_bookkeeping_survives_caller_cancellation - TypeError: ExecutionRecord.__init__() missing 3 required positional arguments: 'planning', 'thinking', and 'binding'
+FAILED tests/ai/test_runtime_stream_order.py::test_terminal_local_bookkeeping_survives_caller_cancellation - TypeError: ExecutionRecord.__init__() missing 3 required positional arguments: 'planning', 'thinking', and 'binding'
+FAILED tests/ai/test_runtime_stream_order.py::test_second_subscriber_pins_buffer_during_durable_prefix - TypeError: ExecutionRecord.__init__() missing 3 required positional arguments: 'planning', 'thinking', and 'binding'
+FAILED tests/ai/test_runtime_stream_order.py::test_local_completion_without_terminal_is_integrity_error - TypeError: ExecutionRecord.__init__() missing 3 required positional arguments: 'planning', 'thinking', and 'binding'
+FAILED tests/ai/test_runtime_stream_order.py::test_durable_stream_stops_when_terminal_cursor_already_seen - TypeError: ExecutionRecord.__init__() missing 3 required positional arguments: 'planning', 'thinking', and 'binding'
+FAILED tests/ai/test_runtime_stream_order.py::test_local_stream_skips_already_seen_terminal_and_stops - TypeError: ExecutionRecord.__init__() missing 3 required positional arguments: 'planning', 'thinking', and 'binding'
+FAILED tests/ai/test_runtime_stream_order.py::test_reconnect_aligns_to_confirmed_cursor_before_replaying_deltas - TypeError: ExecutionRecord.__init__() missing 3 required positional arguments: 'planning', 'thinking', and 'binding'
+FAILED tests/ai/test_runtime_stream_order.py::test_reconnect_after_terminal_cursor_does_not_replay_deltas - TypeError: ExecutionRecord.__init__() missing 3 required positional arguments: 'planning', 'thinking', and 'binding'
+FAILED tests/ai/test_runtime_stream_order.py::test_durable_stream_rejects_sequence_gap - TypeError: ExecutionRecord.__init__() missing 3 required positional arguments: 'planning', 'thinking', and 'binding'
+FAILED tests/ai/test_runtime_stream_order.py::test_concurrent_cancel_winner_is_conflict_not_integrity - TypeError: ExecutionRecord.__init__() missing 3 required positional arguments: 'planning', 'thinking', and 'binding'
+FAILED tests/ai/test_runtime_stream_order.py::test_revision_only_cancel_race_is_conflict_not_integrity - TypeError: ExecutionRecord.__init__() missing 3 required positional arguments: 'planning', 'thinking', and 'binding'
+FAILED tests/ai/test_runtime_stream_order.py::test_cancel_readback_accepts_own_suffix_after_revision_only_advance - TypeError: ExecutionRecord.__init__() missing 3 required positional arguments: 'planning', 'thinking', and 'binding'
+FAILED tests/ai/test_session_admission.py::test_memory_session_admission_contract - TypeError: SessionRecord.__init__() got an unexpected keyword argument 'binding_digest'
+FAILED tests/ai/test_session_admission.py::test_sql_session_admission_contract - TypeError: SessionRecord.__init__() got an unexpected keyword argument 'binding_digest'
+FAILED tests/ai/test_session_admission.py::test_memory_admission_is_single_owner - TypeError: SessionRecord.__init__() got an unexpected keyword argument 'binding_digest'
+FAILED tests/ai/test_session_admission_conformance.py::test_memory_admission_is_atomic_and_cas_preserves_token - TypeError: SessionRecord.__init__() got an unexpected keyword argument 'binding_digest'
+FAILED tests/ai/test_session_admission_conformance.py::test_sql_admission_is_atomic_and_token_survives_reopen - TypeError: SessionRecord.__init__() got an unexpected keyword argument 'binding_digest'
+FAILED tests/ai/test_session_admission_conformance.py::test_closing_session_can_commit_owned_continuation_then_close - TypeError: SessionRecord.__init__() got an unexpected keyword argument 'binding_digest'
+FAILED tests/ai/test_session_admission_conformance.py::test_rejected_admission_terminalizes_pending_start - TypeError: SessionRecord.__init__() got an unexpected keyword argument 'binding_digest'
+FAILED tests/ai/test_session_history_projection.py::test_empty_and_committed_session_history_use_continuation_only - TypeError: SessionRecord.__init__() got an unexpected keyword argument 'binding_digest'
+FAILED tests/ai/test_session_history_projection.py::test_session_history_cursor_binds_to_current_continuation - TypeError: SessionRecord.__init__() got an unexpected keyword argument 'binding_digest'
+FAILED tests/ai/test_session_history_projection.py::test_session_history_uses_projection_v1_mapping_and_empty_strings - TypeError: SessionRecord.__init__() got an unexpected keyword argument 'binding_digest'
+FAILED tests/ai/test_session_history_projection.py::test_session_history_fork_copies_continuation_without_execution_lookup - TypeError: SessionRecord.__init__() got an unexpected keyword argument 'binding_digest'
+FAILED tests/ai/test_session_history_projection.py::test_session_history_reports_missing_committed_snapshot - TypeError: SessionRecord.__init__() got an unexpected keyword argument 'binding_digest'
+FAILED tests/ai/test_session_history_projection.py::test_durable_session_history_survives_runtime_state_reopen - TypeError: SessionRecord.__init__() got an unexpected keyword argument 'binding_digest'
+FAILED tests/ai/test_session_history_projection.py::test_sql_session_history_survives_runtime_state_reopen - TypeError: SessionRecord.__init__() got an unexpected keyword argument 'binding_digest'
+FAILED tests/ai/test_step_io_final_fix.py::test_step_events_wait_for_a_safe_snapshot - TypeError: ExecutionRecord.__init__() missing 3 required positional arguments: 'planning', 'thinking', and 'binding'
+!!!!!!!!!!!!!!!!!!!!!!!!!! stopping after 30 failures !!!!!!!!!!!!!!!!!!!!!!!!!!
+30 failed, 259 passed in 21.04s

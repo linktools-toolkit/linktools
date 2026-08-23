@@ -9,12 +9,42 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from linktools.ai.agent import AgentBindingSnapshot
+from linktools.ai.agent._output import bind_output
 from linktools.ai.core import ExecutionLineageKind, ExecutionStatus, Principal
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.runtime import ExecutionRequest
 from linktools.ai.runtime._execution import CancelEffectOutcome
 from linktools.ai.runtime._local import LocalExecutionBackend
 from linktools.ai.runtime.state import ExecutionRecord
+from linktools.ai.spec import AgentSpec
+
+
+def _binding_snapshot() -> AgentBindingSnapshot:
+    output = bind_output()
+    return AgentBindingSnapshot(
+        version=1,
+        agent_spec=AgentSpec("default", 1, "default"),
+        agent_digest="b" * 64,
+        output_type_module=output.value_type.__module__,
+        output_type_qualname=output.value_type.__qualname__,
+        output_schema_id=output.schema_id,
+        output_schema_revision=output.schema_revision,
+        output_schema_fingerprint=output.schema_fingerprint,
+        local_runtime_capability_descriptors=(),
+        binding_digest="a" * 64,
+    )
+
+
+def _binding() -> object:
+    snapshot = _binding_snapshot()
+    definition = SimpleNamespace(
+        digest=snapshot.agent_digest,
+        spec=SimpleNamespace(id="default", allow_tools=()),
+    )
+    return SimpleNamespace(
+        digest=snapshot.binding_digest, snapshot=snapshot, definition=definition
+    )
 
 
 class _Executions:
@@ -80,6 +110,9 @@ def _record() -> ExecutionRecord:
         safe_error_details={},
         created_at=now,
         updated_at=now,
+        planning=False,
+        thinking=False,
+        binding=_binding_snapshot(),
     )
 
 
@@ -87,15 +120,10 @@ def _backend(error: Exception) -> LocalExecutionBackend:
     record = _record()
     backend = object.__new__(LocalExecutionBackend)
     backend._execution = _ExecutionState(record)
+    binding = _binding()
     backend._catalog = SimpleNamespace(
         root_ids=("default",),
-        definition=lambda digest: SimpleNamespace(
-            digest=digest,
-            spec=SimpleNamespace(
-                id="default",
-                allow_tools=(),
-            ),
-        )
+        binding=lambda digest: binding,
     )
     backend._recovery_enabled = False
     backend._namespace = "test"

@@ -329,6 +329,7 @@ def test_package_public_surface_and_optional_dependency_isolation() -> None:
         "Sandbox",
         "Workspace",
         "WorkspacePolicy",
+        "build_workspace_assets",
         "open_workspace_runtime",
         "trusted_workspace_principal",
     ]

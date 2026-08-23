@@ -8,6 +8,8 @@ from pathlib import Path
 
 import pytest
 from linktools.ai.adapter import StepExecutionHistoryReader
+from linktools.ai.agent import AgentBindingSnapshot
+from linktools.ai.agent._output import bind_output
 from linktools.ai.core import (
     ExecutionLineageKind,
     ExecutionStatus,
@@ -37,6 +39,7 @@ from linktools.ai.runtime.state import (
     TranscriptMessageRef,
 )
 from linktools.ai.runtime.state._steps import LockOrderError, _RunHistoryLock
+from linktools.ai.spec import AgentSpec
 from linktools.ai.runtime.state._store import (
     partition_digest,
     record_key_digest,
@@ -57,13 +60,29 @@ from pydantic_ai_harness.step_persistence import (
 from sqlalchemy.ext.asyncio import create_async_engine
 
 
+def _binding() -> AgentBindingSnapshot:
+    output = bind_output()
+    return AgentBindingSnapshot(
+        version=1,
+        agent_spec=AgentSpec("default", 1, "default"),
+        agent_digest="b" * 64,
+        output_type_module=output.value_type.__module__,
+        output_type_qualname=output.value_type.__qualname__,
+        output_schema_id=output.schema_id,
+        output_schema_revision=output.schema_revision,
+        output_schema_fingerprint=output.schema_fingerprint,
+        local_runtime_capability_descriptors=(),
+        binding_digest="a" * 64,
+    )
+
+
 def _record(status: ExecutionStatus, sequence: int) -> ExecutionRecord:
     now = datetime.now(timezone.utc)
     return ExecutionRecord(
         execution_id="execution",
         tenant_id="tenant",
         session_id=None,
-        binding_digest="binding",
+        binding_digest="a" * 64,
         parent_execution_id=None,
         root_execution_id="execution",
         source_execution_id=None,
@@ -77,6 +96,9 @@ def _record(status: ExecutionStatus, sequence: int) -> ExecutionRecord:
         safe_error_details={},
         created_at=now,
         updated_at=now,
+        planning=False,
+        thinking=False,
+        binding=_binding(),
     )
 
 
@@ -264,7 +286,7 @@ async def test_terminal_prepare_accepts_an_unprojected_execution_run(
         terminal_plan = await state.steps.prepare_execution_terminal_seal(
             execution_id="execution",
             run_ids=(run_id,),
-            binding_digest="binding",
+            binding_digest="a" * 64,
         )
 
         projection = terminal_plan.projections[0]
@@ -371,7 +393,7 @@ async def test_terminal_commit_cancellation_still_finalizes_after_durable_commit
 
     backend._commit_execution_terminal_checkpoint_locked = commit
     current = _record(ExecutionStatus.SUCCEEDED, 1)
-    plan = ExecutionTerminalSealPlan("execution", "binding", (), ())
+    plan = ExecutionTerminalSealPlan("execution", "a" * 64, (), ())
     task = asyncio.create_task(
         backend._commit_execution_terminal_checkpoint(
             current,
@@ -652,7 +674,7 @@ async def test_terminal_seal_reuses_durable_projection_after_staging_release(
         terminal_plan = await state.steps.prepare_execution_terminal_seal(
             execution_id="execution",
             run_ids=(run_id,),
-            binding_digest="binding",
+            binding_digest="a" * 64,
         )
         assert terminal_plan.projections[0].projection_digest != "empty"
         archive = state.steps.read_store(RuntimeDomain.EXECUTION)
