@@ -1,0 +1,806 @@
+diff --git a/linktools-ai/scripts/build/traceability.py b/linktools-ai/scripts/build/traceability.py
+index f93cf77..4937eb5 100644
+--- a/linktools-ai/scripts/build/traceability.py
++++ b/linktools-ai/scripts/build/traceability.py
+@@ -41,7 +41,7 @@ def validate_matrix(
+             if not (source / implementation).exists() and not (package_root / implementation).exists():
+                 errors.append(f"{requirement_id}: missing implementation {implementation}")
+         for test_id in linked_tests if isinstance(linked_tests, list) else ():
+-            if not isinstance(test_id, str) or not (test_id.startswith("T-") or test_id.startswith("MT-")):
++            if not isinstance(test_id, str) or not (test_id.startswith(("T-", "MT-"))):
+                 errors.append(f"{requirement_id}: invalid test id {test_id}")
+     return tuple(errors)
+ 
+diff --git a/linktools-ai/src/linktools/ai/asset/_filesystem.py b/linktools-ai/src/linktools/ai/asset/_filesystem.py
+index 7ffb437..b6b42db 100644
+--- a/linktools-ai/src/linktools/ai/asset/_filesystem.py
++++ b/linktools-ai/src/linktools/ai/asset/_filesystem.py
+@@ -327,7 +327,7 @@ class FilesystemAssetBackend:
+                 self._revision = next_revision
+                 try:
+                     await self._write_state()
+-                except BaseException as error:
++                except BaseException as error:  # noqa: BLE001
+                     self._restore(before)
+                     _raise_filesystem_error(error)
+                 _logger.debug(
+@@ -407,7 +407,7 @@ class FilesystemAssetBackend:
+                 self._revision = next_revision
+                 try:
+                     await self._write_state()
+-                except BaseException as error:
++                except BaseException as error:  # noqa: BLE001
+                     self._restore(before)
+                     _raise_filesystem_error(error)
+                 _logger.debug(
+diff --git a/linktools-ai/src/linktools/ai/capability/__init__.py b/linktools-ai/src/linktools/ai/capability/__init__.py
+--- a/linktools-ai/src/linktools/ai/capability/__init__.py
++++ b/linktools-ai/src/linktools/ai/capability/__init__.py
+@@ -10,7 +10,7 @@ from ._contract import (
+     RuntimeCapability,
+     validate_fingerprint,
+ )
+-from ._mcp import MCPCapabilityProvider, MCPRuntime, mcp_server_selector
++from ._mcp import MCPCapabilityProvider, MCPRuntime, mcp_server_selector as mcp_server_selector
+ from ._names import SKILL_TOOL_NAMES
+ from ._skill import SkillCapabilityProvider
+ 
+diff --git a/linktools-ai/src/linktools/ai/observe/_middleware.py b/linktools-ai/src/linktools/ai/observe/_middleware.py
+index f9c02a8..bdf7679 100644
+--- a/linktools-ai/src/linktools/ai/observe/_middleware.py
++++ b/linktools-ai/src/linktools/ai/observe/_middleware.py
+@@ -56,7 +56,7 @@ class MiddlewarePipeline:
+                 await middleware.on_error(context, error)
+             except asyncio.CancelledError:
+                 raise
+-            except Exception as failure:
++            except Exception as failure:  # noqa: BLE001
+                 self._handle_failure(middleware, "on_error", failure)
+ 
+     async def after_run(self, context: RunObservationContext, result: ExecutionResult) -> None:
+@@ -78,7 +78,7 @@ class MiddlewarePipeline:
+             try:
+                 await middleware.after_run(context, result)
+             except asyncio.CancelledError:
+                 raise
+-            except Exception as failure:
++            except Exception as failure:  # noqa: BLE001
+                 self._handle_failure(middleware, "after_run", failure)
+ 
+     def _handle_failure(self, middleware: RunMiddleware, phase: str, error: Exception) -> None:
+diff --git a/linktools-ai/src/linktools/ai/runtime/_execution.py b/linktools-ai/src/linktools/ai/runtime/_execution.py
+index 880eda9..a6a70e1 100644
+--- a/linktools-ai/src/linktools/ai/runtime/_execution.py
++++ b/linktools-ai/src/linktools/ai/runtime/_execution.py
+@@ -1348,11 +1348,10 @@ class DefaultExecutionService(ExecutionService):
+                         next_record=_operation_failure(current, error_code),
+                     )
+             except Exception:
+-                _logger.error(
++                _logger.exception(
+                     "execution cancellation ledger update failed: execution=%s operation=%s",
+                     execution_id,
+                     operation.operation_id,
+-                    exc_info=True,
+                 )
+             raise
+         return CancelExecutionResult(execution_id, True)
+diff --git a/linktools-ai/src/linktools/ai/runtime/_local.py b/linktools-ai/src/linktools/ai/runtime/_local.py
+index 00ac781..af211c8 100644
+--- a/linktools-ai/src/linktools/ai/runtime/_local.py
++++ b/linktools-ai/src/linktools/ai/runtime/_local.py
+@@ -822,20 +822,19 @@ class LocalExecutionBackend:
+                 )
+             await self._finish_checkpoint(checkpoint)
+             return
+-        if execution is not None:
+-            if (
+-                execution.binding_digest != recovery_input.binding_digest
+-                or execution.parent_execution_id != recovery_input.parent_execution_id
+-                or execution.root_execution_id != recovery_input.root_execution_id
+-                or execution.source_execution_id != recovery_input.source_execution_id
+-                or execution.base_execution_id != recovery_input.base_execution_id
+-                or execution.conversation_step_run_id != recovery_input.conversation_step_run_id
+-                or execution.lineage_kind.value != recovery_input.lineage_kind
+-                or execution.planning is not recovery_input.planning
+-                or execution.thinking is not recovery_input.thinking
+-                or execution.binding != recovery_input.binding
+-            ):
+-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
++        if execution is not None and (
++            execution.binding_digest != recovery_input.binding_digest
++            or execution.parent_execution_id != recovery_input.parent_execution_id
++            or execution.root_execution_id != recovery_input.root_execution_id
++            or execution.source_execution_id != recovery_input.source_execution_id
++            or execution.base_execution_id != recovery_input.base_execution_id
++            or execution.conversation_step_run_id != recovery_input.conversation_step_run_id
++            or execution.lineage_kind.value != recovery_input.lineage_kind
++            or execution.planning is not recovery_input.planning
++            or execution.thinking is not recovery_input.thinking
++            or execution.binding != recovery_input.binding
++        ):
++            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+         if execution is None:
+             execution = await self._create_recovery_execution(checkpoint)
+-        if checkpoint.state in {
+-            RecoveryCheckpointState.ADMITTED,
+-            RecoveryCheckpointState.ACTIVE,
+-            RecoveryCheckpointState.WAITING,
+-        }:
+-            if not await self._reconcile_session_recovery(execution):
+-                return
++        if checkpoint.state in {
++            RecoveryCheckpointState.ADMITTED,
++            RecoveryCheckpointState.ACTIVE,
++            RecoveryCheckpointState.WAITING,
++        } and not await self._reconcile_session_recovery(execution):
++            return
+         if (
+             checkpoint.state is RecoveryCheckpointState.ADMITTED
+             and execution.status is ExecutionStatus.PENDING_START
+@@ -2080,11 +2079,10 @@ class LocalExecutionBackend:
+                 if persisted is None:
+                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                 operation_result = _execution_operation_result(persisted.status)
+-                _logger.error(
++                _logger.exception(
+                     "local execution failed: execution=%s",
+                     execution_id,
+-                    exc_info=True,
+                 )
+                 return
+             await self._commit_success(
+@@ -2115,11 +2113,10 @@ class LocalExecutionBackend:
+                 operation_result = _execution_operation_result(persisted.status)
+             raise
+         except Exception:
+-            _logger.error(
++            _logger.exception(
+                 "local execution infrastructure failure: execution=%s",
+                 execution_id,
+-                exc_info=True,
+             )
+             raise
+         finally:
+             self._metrics.operation("execution", "runtime", operation_result, operation_started_at)
+diff --git a/linktools-ai/src/linktools/ai/runtime/_planner.py b/linktools-ai/src/linktools/ai/runtime/_planner.py
+index 6e74b7f..572f2cb 100644
+--- a/linktools-ai/src/linktools/ai/runtime/_planner.py
++++ b/linktools-ai/src/linktools/ai/runtime/_planner.py
+@@ -204,7 +204,7 @@ class RuntimeTaskNodeRunner(TaskNodeRunner):
+                         cleanup_error.code.value,
+                     )
+                 )
+-                raise cancellation
++                raise
+             try:
+                 await _cancel_execution(self._execution, handle.execution_id, principal, graph_id, node.node_id)
+             except BaseException as cleanup_error:
+@@ -219,7 +219,7 @@ class RuntimeTaskNodeRunner(TaskNodeRunner):
+                 wait_task.cancel()
+                 await asyncio.gather(wait_task, return_exceptions=True)
+             if cleanup_error is not None:
+                 raise cancellation from cleanup_error
+-            raise cancellation
++            raise
+         return await self.result(handle.execution_id, principal=principal)
+ 
+     async def result(
+diff --git a/linktools-ai/src/linktools/ai/runtime/_subagent.py b/linktools-ai/src/linktools/ai/runtime/_subagent.py
+index 937e0cb..3336775 100644
+--- a/linktools-ai/src/linktools/ai/runtime/_subagent.py
++++ b/linktools-ai/src/linktools/ai/runtime/_subagent.py
+@@ -113,7 +113,7 @@ class SubagentDispatcher:
+             parent_execution_id=parent_execution_id,
+             root_execution_id=root_execution_id,
+         )
+         try:
+             result = await self._execution.wait(child.execution_id, principal=principal)
+-        except BaseException as primary:
++        except BaseException as primary:  # noqa: BLE001
+             cleanup = asyncio.create_task(
+                 self.cancel_child(
+                     child.execution_id,
+@@ -127,24 +127,22 @@ class SubagentDispatcher:
+             except asyncio.CancelledError as cancellation:
+                 try:
+                     await cleanup
+-                except BaseException as cleanup_error:
+-                    _logger.error(
++                except BaseException as cleanup_error:  # noqa: BLE001
++                    _logger.exception(
+                         "subagent child cleanup failed after cancellation: execution=%s",
+                         child.execution_id,
+-                        exc_info=True,
+                     )
+                     raise cancellation from cleanup_error
+-                raise cancellation
+-            except BaseException as cleanup_error:
+-                _logger.error(
++                raise
++            except BaseException as cleanup_error:  # noqa: BLE001
++                _logger.exception(
+                     "subagent child cleanup failed: execution=%s",
+                     child.execution_id,
+-                    exc_info=True,
+                 )
+                 if isinstance(primary, asyncio.CancelledError):
+                     raise primary from cleanup_error
+                 raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED) from primary
+-            raise primary
++            raise
+         return _subagent_result(result)
+ 
+     async def cancel_children(self, parent_execution_id: str, principal: Principal) -> None:
+@@ -192,7 +190,7 @@ class SubagentDispatcher:
+             if task.done() and task.cancelled():
+                 raise
+             cancellation = error
+             try:
+                 result = await task
+-            except BaseException as cleanup_error:
++            except BaseException as cleanup_error:  # noqa: BLE001
+                 raise cancellation from cleanup_error
+         except Exception as error:
+             raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED) from error
+diff --git a/linktools-ai/src/linktools/ai/runtime/state/_commands.py b/linktools-ai/src/linktools/ai/runtime/state/_commands.py
+index 53e8443..b1c2500 100644
+--- a/linktools-ai/src/linktools/ai/runtime/state/_commands.py
++++ b/linktools-ai/src/linktools/ai/runtime/state/_commands.py
+@@ -2504,7 +2504,7 @@ def terminalize_tool_operation_command(
+             "result_digest": result_digest,
+             "error_code": error_code,
+         },
+-        events=list(
++        events=[
+             _event(
+                 "tool_operation",
+                 operation.tool_operation_id,
+@@ -2517,8 +2517,8 @@ def terminalize_tool_operation_command(
+                     "result_digest": result_digest,
+                     "error_code": error_code,
+                 },
+-            )
+-        ),
++            )
++        ],
+         facts=[
+             _fact(
+                 "tool_operation",
+diff --git a/linktools-ai/src/linktools/ai/runtime/state/_durability.py b/linktools-ai/src/linktools/ai/runtime/state/_durability.py
+index 667eab2..4784110 100644
+--- a/linktools-ai/src/linktools/ai/runtime/state/_durability.py
++++ b/linktools-ai/src/linktools/ai/runtime/state/_durability.py
+@@ -60,7 +60,7 @@ async def durable_write(operation: Callable[[], Awaitable[ValueT]]) -> ValueT:
+         return task.result()
+     try:
+         return await asyncio.shield(task)
+-    except BaseException as primary:
++    except BaseException as primary:  # noqa: BLE001
+         try:
+             await asyncio.shield(task)
+         except BaseException as outcome:
+@@ -95,7 +95,7 @@ async def durable_cleanup(operation: Callable[[], Awaitable[None]]) -> None:
+         return
+     try:
+         await asyncio.shield(task)
+-    except BaseException:
++    except BaseException:  # noqa: BLE001
+         try:
+             await asyncio.shield(task)
+         except BaseException as outcome:
+@@ -129,7 +129,7 @@ async def settle_task(task: asyncio.Task[object]) -> "BaseException | None":
+     try:
+         await asyncio.shield(task)
+         return None
+-    except BaseException as outcome:
++    except BaseException as outcome:  # noqa: BLE001
+         return outcome
+ 
+ 
+diff --git a/linktools-ai/src/linktools/ai/runtime/state/_filesystem.py b/linktools-ai/src/linktools/ai/runtime/state/_filesystem.py
+index 9cae3ea..193e6dc 100644
+--- a/linktools-ai/src/linktools/ai/runtime/state/_filesystem.py
++++ b/linktools-ai/src/linktools/ai/runtime/state/_filesystem.py
+@@ -304,14 +304,11 @@ class FilesystemRuntimeStorage:
+         path = self._root / "operations" / "streams" / stream[:2] / stream / f"{sequence:020d}.ref"
+         if not path.is_file():
+             return None
+-        try:
+-            _require_layout_path(
+-                path,
+-                self._root,
+-                f"operations/streams/{stream[:2]}/{stream}/{sequence:020d}.ref",
+-            )
+-            key = _read_operation_ref(path)
+-        except AIError:
+-            raise
++        _require_layout_path(
++            path,
++            self._root,
++            f"operations/streams/{stream[:2]}/{stream}/{sequence:020d}.ref",
++        )
++        key = _read_operation_ref(path)
+         operation = self.get_operation(key)
+         if (
+             operation is None
+@@ -1016,9 +1013,9 @@ class FilesystemRuntimeStorage:
+         assert snapshot is not None
+         try:
+             await asyncio.shield(task)
+-        except asyncio.CancelledError as cancellation:
++        except asyncio.CancelledError as cancellation:  # noqa: BLE001
+             try:
+                 await task
+-            except BaseException as error:
++            except BaseException as error:  # noqa: BLE001
+                 async with self._transaction_lock:
+                     state = self._shared.get(identity)
+                     if state is not None and state.commit_task is task:
+@@ -1061,7 +1058,7 @@ class FilesystemRuntimeStorage:
+             async with self._transaction_lock:
+                 if self._shared.get(identity) is state and state.commit_task is task:
+                     _mark_commit_ambiguous(state, snapshot, error)
+-        except BaseException as error:
++        except BaseException as error:  # noqa: BLE001
+             async with self._transaction_lock:
+                 if self._shared.get(identity) is state and state.commit_task is task:
+                     _mark_commit_ambiguous(state, snapshot, error)
+@@ -1393,9 +1390,9 @@ class FilesystemRuntimeStorage:
+         assert snapshot is not None
+         try:
+             await asyncio.shield(task)
+-        except asyncio.CancelledError as cancellation:
++        except asyncio.CancelledError as cancellation:  # noqa: BLE001
+             try:
+                 await task
+-            except BaseException as error:
++            except BaseException as error:  # noqa: BLE001
+                 async with self._transaction_lock:
+                     state = self._shared.get(identity)
+                     if state is not None and state.commit_task is task:
+@@ -1462,7 +1459,7 @@ class FilesystemRuntimeStorage:
+                 shared.release_on_end = True
+                 shared.release_requested = True
+         try:
+             await backend.release(scope)
+-        except Exception:
++        except Exception:  # noqa: BLE001
+             async with self._transaction_lock:
+                 shared = self._shared.get(identity)
+                 if shared is not None and shared.scope is scope:
+diff --git a/linktools-ai/src/linktools/ai/runtime/state/_maintenance.py b/linktools-ai/src/linktools/ai/runtime/state/_maintenance.py
+index 9d87b8f..cdf5e60 100644
+--- a/linktools-ai/src/linktools/ai/runtime/state/_maintenance.py
++++ b/linktools-ai/src/linktools/ai/runtime/state/_maintenance.py
+@@ -3,8 +3,8 @@
+ """Offline Runtime storage validation and object mark-and-sweep."""
+ 
+ from collections.abc import Awaitable, Callable, Mapping, Sequence
+-from contextlib import AsyncExitStack
+-from typing import AsyncContextManager, Protocol
++from contextlib import AbstractAsyncContextManager, AsyncExitStack
++from typing import Protocol
+ 
+ from linktools.core import environ
+ 
+@@ -76,7 +76,7 @@ class RuntimeStorageMaintenance:
+         *,
+         stores: Mapping[RuntimeDomain, StateStore],
+         objects: Mapping[RuntimeDomain, ObjectStoreMaintenance],
+-        transaction: Callable[[], AsyncContextManager[None]],
++        transaction: Callable[[], AbstractAsyncContextManager[None]],
+     ) -> None:
+         self._stores = dict(stores)
+         self._objects = dict(objects)
+diff --git a/linktools-ai/src/linktools/ai/runtime/state/_materializer.py b/linktools-ai/src/linktools/ai/runtime/state/_materializer.py
+index 2cd2d2a..a70b775 100644
+--- a/linktools-ai/src/linktools/ai/runtime/state/_materializer.py
++++ b/linktools-ai/src/linktools/ai/runtime/state/_materializer.py
+@@ -189,10 +189,7 @@ def _close_once(
+         tasks.append(value.close)
+     elif isinstance(value, SqlStorageContext):
+         tasks.append(value.close)
+-    elif isinstance(value, SqlObjectStore):
+-        tasks.append(value.close)
+-    elif isinstance(value, SqlStepStore):
+-        tasks.append(value.close)
+-    elif isinstance(value, SqlAssetBackend):
++    elif isinstance(value, (SqlObjectStore, SqlStepStore, SqlAssetBackend)):
+         tasks.append(value.close)
+ 
+ 
+@@ -311,12 +308,12 @@ async def materialize_runtime_state(
+             close_actions=tuple(actions),
+         )
+-    except BaseException as primary:
++    except BaseException as primary:  # noqa: BLE001
+         for cleanup in reversed(cleanups):
+             try:
+                 await cleanup()
+-            except BaseException:
+-                _logger.error("runtime materialization cleanup failed", exc_info=True)
+-        raise primary
++            except BaseException:  # noqa: BLE001
++                _logger.exception("runtime materialization cleanup failed")
++        raise
+ 
+ 
+ def _states(bundles: Mapping[RuntimeDomain, Mapping[str, object]]) -> object:
+diff --git a/linktools-ai/src/linktools/ai/runtime/state/_memory.py b/linktools-ai/src/linktools/ai/runtime/state/_memory.py
+index 26f7309..86c3d51 100644
+--- a/linktools-ai/src/linktools/ai/runtime/state/_memory.py
++++ b/linktools-ai/src/linktools/ai/runtime/state/_memory.py
+@@ -217,7 +217,7 @@ def _state_failure(error: AIError) -> AIError:
+     return AIError(error.code, safe_details=error.safe_details)
+ 
+ 
+-class _MemoryOverlay(Generic[KeyT, MapValueT], MutableMapping[KeyT, MapValueT]):
++class _MemoryOverlay(Generic[KeyT, MapValueT], MutableMapping[KeyT, MapValueT]):  # noqa: PYI059
+     def __init__(self, base: Mapping[KeyT, MapValueT], tombstones: "set[KeyT] | None" = None) -> None:
+         self._base = dict(base)
+         self._overlay: dict[KeyT, MapValueT] = {}
+diff --git a/linktools-ai/src/linktools/ai/runtime/state/_plan.py b/linktools-ai/src/linktools/ai/runtime/state/_plan.py
+index 799cbd1..cb59c4f 100644
+--- a/linktools-ai/src/linktools/ai/runtime/state/_plan.py
++++ b/linktools-ai/src/linktools/ai/runtime/state/_plan.py
+@@ -216,7 +216,7 @@ def _validate_filesystem_transaction_roots(routes: "tuple[RuntimeStateRoute, ...
+             raise AIError(ErrorCode.STORAGE_TRANSACTION_UNSUPPORTED)
+         grouped.setdefault(route.transaction_root, []).append(route.path)
+     active_roots: list[Path] = []
+-    for root, paths in grouped.items():
++    for paths in grouped.values():
+         for path in paths:
+             resolved = path.expanduser().resolve()
+             if any(
+diff --git a/linktools-ai/src/linktools/ai/runtime/state/_store.py b/linktools-ai/src/linktools/ai/runtime/state/_store.py
+index 41430c4..cd784c3 100644
+--- a/linktools-ai/src/linktools/ai/runtime/state/_store.py
++++ b/linktools-ai/src/linktools/ai/runtime/state/_store.py
+@@ -437,13 +437,12 @@ class StoredRecord:
+         ):
+             if value is not None:
+                 _require_digest(value, name)
+-        if self.kind is not None:
+-            if (
+-                not isinstance(self.kind, str)
+-                or not 0 < len(self.kind) <= 32
+-                or self.kind != self.kind.strip()
+-                or any(character.isspace() for character in self.kind)
+-            ):
+-                raise ValueError("kind is invalid")
++        if self.kind is not None and (
++            not isinstance(self.kind, str)
++            or not 0 < len(self.kind) <= 32
++            or self.kind != self.kind.strip()
++            or any(character.isspace() for character in self.kind)
++        ):
++            raise ValueError("kind is invalid")
+ 
+ 
+ @dataclass(frozen=True, slots=True)
+diff --git a/linktools-ai/src/linktools/ai/storage/_cache.py b/linktools-ai/src/linktools/ai/storage/_cache.py
+index 9384efc..d0c819c 100644
+--- a/linktools-ai/src/linktools/ai/storage/_cache.py
++++ b/linktools-ai/src/linktools/ai/storage/_cache.py
+@@ -44,7 +44,7 @@ class StorageOverlay:
+     async def _close_cache(self) -> None:
+         try:
+             await self._cache.close()
+-        except Exception:
++        except Exception:  # noqa: BLE001
+             pass
+ 
+     def _record_cache_failure(self, operation: str, error: Exception) -> None:
+@@ -58,7 +58,7 @@ class StorageOverlay:
+     async def _cache_entry(self, key: StoragePath, *, expected_generation: int) -> StorageEntry | None:
+         try:
+             entry = await self._cache.get_entry(key)
+-        except Exception as error:
++        except Exception as error:  # noqa: BLE001
+             self._record_cache_failure("get", error)
+             return None
+         if entry is None:
+@@ -70,7 +70,7 @@ class StorageOverlay:
+         try:
+             cached_revision = await self._cache.current_revision()
+             backend_revision = await self._cache_backend_revision()
+-        except Exception as error:
++        except Exception as error:  # noqa: BLE001
+             self._record_cache_failure("revision", error)
+             return None
+         if cached_revision < backend_revision:
+@@ -270,7 +270,7 @@ class StorageOverlay:
+                 try:
+                     await self._cache.apply((change,), expected_revision=None)
+-                except Exception as error:
++                except Exception as error:  # noqa: BLE001
+                     self._record_cache_failure("write", error)
+         return entry
+ 
+@@ -278,22 +278,22 @@ class StorageOverlay:
+         for key, entry in zip(requested, entries):
+             try:
+                 canonical_key = StoragePath.parse(key)
+-            except Exception:
++            except Exception:  # noqa: BLE001
+                 pass
+             else:
+                 try:
+                     await self._cache.apply((StorageChange(canonical_key, entry.data, "write"),), expected_revision=None)
+-                except Exception as error:
++                except Exception as error:  # noqa: BLE001
+                     self._record_cache_failure("write", error)
+         return entries
+ 
+     async def _invalidate_cache(self, keys: "Iterable[StoragePath]") -> None:
+         for key in keys:
+             try:
+                 canonical_key = StoragePath.parse(key)
+-            except Exception:
++            except Exception:  # noqa: BLE001
+                 continue
+             try:
+                 await self._cache.apply((StorageChange(canonical_key, b"", "delete"),), expected_revision=None)
+             except asyncio.CancelledError:
+                 raise
+-            except Exception as error:
++            except Exception as error:  # noqa: BLE001
+                 self._record_cache_failure("delete", error)
+                 continue
+ 
+@@ -315,7 +315,7 @@ class StorageOverlay:
+         try:
+             await self._cache.apply((StorageChange(key, data, "write"),), expected_revision=None)
+-        except Exception as error:
++        except Exception as error:  # noqa: BLE001
+             self._record_cache_failure("write", error)
+ 
+     async def _clear_cache(self) -> None:
+@@ -323,7 +323,7 @@ class StorageOverlay:
+         try:
+             await self._cache.clear()
+-        except Exception:
++        except Exception:  # noqa: BLE001
+             pass
+diff --git a/linktools-ai/src/linktools/ai/storage/_composition.py b/linktools-ai/src/linktools/ai/storage/_composition.py
+index 1884308..737684c 100644
+--- a/linktools-ai/src/linktools/ai/storage/_composition.py
++++ b/linktools-ai/src/linktools/ai/storage/_composition.py
+@@ -340,7 +340,7 @@ class StorageOverlay:
+                 "overlay reset entry contains data",
+             )
+         try:
+             canonical = StorageEntry(canonical.key, canonical.data, canonical.revision, canonical.tombstone, canonical.reset)
+-        except Exception as error:
++        except Exception as error:  # noqa: BLE001
+             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
+         return canonical
+ 
+@@ -400,7 +400,7 @@ class StorageOverlay:
+         try:
+             current = StorageRevision.from_value(await self._cache.current_revision())
+             cached_generation = self._cache_generation
+-        except Exception as error:
++        except Exception as error:  # noqa: BLE001
+             self._cache_available = False
+             self._record_cache_failure("revision", error)
+             return None
+@@ -466,7 +466,7 @@ class StorageOverlay:
+                     effective_cache_generation,
+                     live_metadata,
+                 )
+-            except Exception as error:
++            except Exception as error:  # noqa: BLE001
+                 self._cache_available = False
+                 self._record_cache_failure("read", error)
+                 return None
+@@ -516,7 +516,7 @@ class StorageOverlay:
+                 async with self._cache_lock:
+                     cache_revision = await self._cache.current_revision()
+                     await self._cache.initialize()
+-        except Exception as error:
++        except Exception as error:  # noqa: BLE001
+             self._cache_available = False
+             self._record_cache_failure("initialize", error)
+             return
+@@ -607,7 +607,7 @@ class StorageOverlay:
+         try:
+             current = await self._cache.current_revision()
+             await self._cache.apply(changes, expected_revision=current)
+-        except Exception as error:
++        except Exception as error:  # noqa: BLE001
+             self._cache_available = False
+             self._record_cache_failure("write", error)
+ 
+diff --git a/linktools-ai/src/linktools/ai/storage/_dialects.py b/linktools-ai/src/linktools/ai/storage/_dialects.py
+index 42e8510..f4e7c82 100644
+--- a/linktools-ai/src/linktools/ai/storage/_dialects.py
++++ b/linktools-ai/src/linktools/ai/storage/_dialects.py
+@@ -941,7 +941,4 @@ def _sqlite_supports_returning() -> bool:
+     version = getattr(sqlite3, "sqlite_version_info", (0, 0, 0))
+     try:
+         normalized = tuple(int(part) for part in version[:3])
+     except (TypeError, ValueError):
+         return False
+-    if len(normalized) < 3:
+-        return False
+-    return normalized >= (3, 35, 0)
++    return len(normalized) >= 3 and normalized >= (3, 35, 0)
+diff --git a/linktools-ai/src/linktools/ai/storage/_lock.py b/linktools-ai/src/linktools/ai/storage/_lock.py
+index 254b6b4..7a6876c 100644
+--- a/linktools-ai/src/linktools/ai/storage/_lock.py
++++ b/linktools-ai/src/linktools/ai/storage/_lock.py
+@@ -120,7 +120,7 @@ class FilesystemLeaseCoordinator:
+                     return lease
+                 if time.monotonic() >= deadline:
+                     raise TimeoutError(f"timed out acquiring lease: {key}")
+                 await asyncio.sleep(0.01)
+-        except BaseException:
++        except BaseException:  # noqa: BLE001
+             await self._locks.release(key)
+             raise
+ 
+@@ -132,7 +132,7 @@ class FilesystemLeaseCoordinator:
+         renewed = await asyncio.to_thread(self._renew, lease)
+         if not renewed:
+             self._active.pop(lease.key, None)
+-        return lease if renewed else lease
++        return lease
+ 
+     async def release(self, lease: Lease) -> None:
+         if self._active.get(lease.key) != lease:
+@@ -225,11 +225,11 @@ class FilesystemLeaseCoordinator:
+         try:
+             return await asyncio.shield(task)
+-        except BaseException:
++        except BaseException:  # noqa: BLE001
+             try:
+                 await asyncio.shield(task)
+-            except BaseException:
++            except BaseException:  # noqa: BLE001, S110
+                 pass
+             await self.release(lease)
+             raise
+@@ -283,7 +283,7 @@ class FilesystemMutationLock:
+         self._lease: Lease | None = None
+ 
+-    async def __aenter__(self) -> "FilesystemMutationLock":
++    async def __aenter__(self) -> "FilesystemMutationLock":  # noqa: PYI034
+         self._lease = await self._coordinator.acquire(self._key)
+         return self
+ 
+diff --git a/linktools-ai/src/linktools/ai/storage/_object.py b/linktools-ai/src/linktools/ai/storage/_object.py
+index f13b747..5425536 100644
+--- a/linktools-ai/src/linktools/ai/storage/_object.py
++++ b/linktools-ai/src/linktools/ai/storage/_object.py
+@@ -9,12 +9,12 @@ import shutil
+ import tempfile
+ from collections.abc import AsyncIterator, Callable, Mapping
+-from contextlib import asynccontextmanager
++from contextlib import AbstractAsyncContextManager, asynccontextmanager
+ from dataclasses import dataclass
+ from pathlib import Path
+ from typing import (
+     TYPE_CHECKING,
+-    AsyncContextManager,
+     BinaryIO,
+     Protocol,
+     TypeVar,
+@@ -1169,7 +1169,7 @@ class SqlObjectStore(ObjectStore):
+     @property
+-    def _session_factory(self) -> AsyncContextManager["AsyncSession"]:
++    def _session_factory(self) -> AbstractAsyncContextManager["AsyncSession"]:
+         return self._context.session()
+ 
+     @property
+diff --git a/linktools-ai/src/linktools/ai/task/_local.py b/linktools-ai/src/linktools/ai/task/_local.py
+index 397737e..92ae5b4 100644
+--- a/linktools-ai/src/linktools/ai/task/_local.py
++++ b/linktools-ai/src/linktools/ai/task/_local.py
+@@ -372,7 +372,7 @@ class LocalTaskGraphLauncher(TaskGraphLauncher):
+                     terminalized += 1
+                     continue
+                 try:
+                     result = await self._runner.run(node, graph_id=graph_id, principal=principal, dependency_results=dependency_results)
+-                except Exception as error:
++                except Exception as error:  # noqa: BLE001
+                     failure = error if isinstance(error, AIError) else AIError(ErrorCode.INTERNAL_ERROR)
+                     self._service.complete_node(
+                         graph_id,
+diff --git a/linktools-ai/src/linktools/ai/task/_service_impl.py b/linktools-ai/src/linktools/ai/task/_service_impl.py
+index 1fb70f9..f900865 100644
+--- a/linktools-ai/src/linktools/ai/task/_service_impl.py
++++ b/linktools-ai/src/linktools/ai/task/_service_impl.py
+@@ -263,13 +263,13 @@ class DefaultTaskService(TaskService):
+                 await task
+             except asyncio.CancelledError:
+                 pass
+-            except BaseException as outcome:
++            except BaseException as outcome:  # noqa: BLE001
+                 await _record_cancel_recovery_required(self, graph_id, principal, outcome)
+                 raise
+         else:
+             task.cancel()
+             try:
+                 await task
+-            except BaseException as outcome:
++            except BaseException as outcome:  # noqa: BLE001
+                 if not isinstance(outcome, asyncio.CancelledError):
+                     await _record_cancel_recovery_required(self, graph_id, principal, outcome)
+@@ -446,7 +446,7 @@ async def _run_node_task(
+             else:
+                 task.cancel()
+             try:
+                 await asyncio.shield(task)
+-            except BaseException as outcome:
++            except BaseException as outcome:  # noqa: BLE001
+                 cleanup_failure = outcome
+         terminal = await _terminalize_node_cancellation(
+             service,
+@@ -506,7 +506,7 @@ async def _run_graph(service: DefaultTaskService, graph_id: str, principal: Principal) -> None:
+             await launcher.cancel(graph_id)
+-        except Exception as error:
++        except Exception as error:  # noqa: BLE001
+             _logger.error(
+                 "task launcher cancellation failed: graph=%s type=%s",
+                 graph_id,
+diff --git a/linktools-ai/src/linktools/ai/temporal/_task_operation.py b/linktools-ai/src/linktools/ai/temporal/_task_operation.py
+index 6aa07cc..2a50999 100644
+--- a/linktools-ai/src/linktools/ai/temporal/_task_operation.py
++++ b/linktools-ai/src/linktools/ai/temporal/_task_operation.py
+@@ -75,9 +75,8 @@ class TemporalTaskOperationRunner:
+             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+ 
+         owner = _task_owner(request, node_id, workflow_run_id)
+-        if current.status is TaskStatus.RUNNING:
+-            if current.owner != owner and _lease_is_active(current):
+-                return current
++        if current.status is TaskStatus.RUNNING and current.owner != owner and _lease_is_active(current):
++            return current
+         lease = await self._acquire_lease(current, request, owner)
+         try:
+             binding_digest, execution_request = await self._runner.prepare(
+diff --git a/ruff.toml b/ruff.toml
+index df74717..34be384 100644
+--- a/ruff.toml
++++ b/ruff.toml
+@@ -1,3 +1,7 @@
++[lint]
++# Serialized and persisted value-shape validation intentionally uses ValueError before boundary normalization.
++ignore = ["TRY004"]
++
+ [lint.per-file-ignores]
+ "linktools-ai/**/*.py" = ["EXE001", "UP009"]
+ "tests/ai/**/*.py" = ["EXE001", "UP009"]
+diff --git a/tests/ai/test_architecture.py b/tests/ai/test_architecture.py
+index 03ac17c..42e0584 100644
+--- a/tests/ai/test_architecture.py
++++ b/tests/ai/test_architecture.py
+@@ -385,7 +385,7 @@ def test_architecture_evidence_traceability() -> None:
+     }
+     for package, module, function_name, test_name, requirement_id in owners:
++    for package, module, function_name, _test_name, requirement_id in owners:
+         code_file = PACKAGE_ROOT / "src" / "linktools" / "ai" / package / f"{module}.py"
+         tests = "\n".join(path.read_text() for path in sorted(TEST_ROOT.rglob("test_*.py")))
+         assert function_name in code_file.read_text(), f"missing implementation: {package}.{module}.{function_name}"
+diff --git a/tests/ai/test_review_fix_spec.py b/tests/ai/test_review_fix_spec.py
+index 4bfcde5..baeff77 100644
+--- a/tests/ai/test_review_fix_spec.py
++++ b/tests/ai/test_review_fix_spec.py
+@@ -3,6 +3,7 @@
+ """Focused RuntimeState and transaction invariant evidence."""
+ 
+ import pytest
++from linktools.ai.errors import AIError, ErrorCode
+ from linktools.ai.runtime.state import RuntimeState
+ 
+ 
+@@ -25,5 +26,6 @@ async def test_runtime_state_close_is_idempotent_and_single_use(tmp_path) -> None:
+     await state.close()
+     await state.close()
+     assert state.ready is False
+-    with pytest.raises(Exception):
++    with pytest.raises(AIError) as error:
+         await state.initialize(namespace="review", tenant_id="tenant")
++    assert error.value.code is ErrorCode.RUNTIME_DEPENDENCY_NOT_READY
