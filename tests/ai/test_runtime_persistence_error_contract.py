@@ -16,7 +16,11 @@ from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.model import ModelRegistry
 from linktools.ai.runtime import RuntimeDomain, RuntimeState
 from linktools.ai.runtime._tool import ToolOperationRecord
-from linktools.ai.runtime.state._codec import _encode_persisted_domain, encode_envelope
+from linktools.ai.runtime.state._codec import (
+    _decode_enveloped_domain,
+    _encode_persisted_domain,
+    encode_envelope,
+)
 from linktools.ai.runtime.state._contracts import (
     RuntimePayloadRef,
     TranscriptChunk,
@@ -114,6 +118,44 @@ def _record(kind: str, value: object) -> StoredRecord:
     )
 
 
+def _task_node() -> TaskNodeView:
+    return TaskNodeView(
+        "graph",
+        "node",
+        (),
+        TaskStatus.PENDING,
+        None,
+        0,
+        None,
+        None,
+        None,
+        None,
+    )
+
+
+def _transcript_chunk_data() -> dict[str, object]:
+    raw = b"[]"
+    chunk = TranscriptChunk(
+        "owner",
+        0,
+        1,
+        TranscriptOrigin.RAW,
+        "raw",
+        hashlib.sha256(raw).hexdigest(),
+        len(raw),
+        RuntimePayloadRef(
+            StoredPayload.inline_bytes(raw),
+            RuntimeDomain.EXECUTION,
+        ),
+    )
+    return encode_envelope(
+        {
+            "type": "transcript_chunk",
+            "payload": _encode_persisted_domain(chunk),
+        }
+    )
+
+
 def test_legacy_binding_malformed_known_field_remains_integrity_error() -> None:
     compiler = _compiler()
     payload = _legacy_binding_payload(compiler)
@@ -145,6 +187,16 @@ def test_legacy_binding_future_version_remains_unsupported() -> None:
         _migrate_legacy_binding(payload, compiler)
 
     assert raised.value.code is ErrorCode.STORAGE_VERSION_UNSUPPORTED
+
+
+def test_persisted_explicit_null_schema_is_integrity_error() -> None:
+    data = copy.deepcopy(_transcript_chunk_data())
+    data["value"]["payload"]["schema"] = None
+
+    with pytest.raises(AIError) as raised:
+        _decode_enveloped_domain(data, TranscriptChunk)
+
+    assert raised.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
 
 
 def test_maintenance_accepts_current_raw_state_formats() -> None:
@@ -182,18 +234,6 @@ def test_maintenance_accepts_current_raw_state_formats() -> None:
 
 def test_maintenance_accepts_lease_projected_records() -> None:
     now = datetime.now(timezone.utc)
-    task_node = TaskNodeView(
-        "graph",
-        "node",
-        (),
-        TaskStatus.PENDING,
-        None,
-        0,
-        None,
-        None,
-        None,
-        None,
-    )
     tool_operation = ToolOperationRecord(
         "operation",
         "tenant",
@@ -214,18 +254,40 @@ def test_maintenance_accepts_lease_projected_records() -> None:
     )
 
     references: dict[int, set[str]] = {}
-    _inspection()._collect_references(
+    inspection = _inspection()
+    inspection._collect_references(
+        RuntimeDomain.TASK,
+        (_record("task_node", _task_node()),),
+        (),
+        (),
+        references,
+    )
+    inspection._collect_references(
         RuntimeDomain.RECOVERY,
-        (
-            _record("task_node", task_node),
-            _record("tool_operation", tool_operation),
-        ),
+        (_record("tool_operation", tool_operation),),
         (),
         (),
         references,
     )
 
     assert references == {}
+
+
+def test_maintenance_preserves_future_lease_projected_schema() -> None:
+    record = _record("task_node", _task_node())
+    data = _future_schema(record.data)
+    data["value"]["payload"]["fields"]["owner"] = None
+
+    with pytest.raises(AIError) as raised:
+        _inspection()._collect_references(
+            RuntimeDomain.TASK,
+            (replace(record, data=data),),
+            (),
+            (),
+            {},
+        )
+
+    assert raised.value.code is ErrorCode.STORAGE_VERSION_UNSUPPORTED
 
 
 def test_maintenance_rejects_future_read_model_version() -> None:
@@ -243,26 +305,6 @@ def test_maintenance_rejects_future_read_model_version() -> None:
 
 
 def test_maintenance_rejects_future_persisted_schema() -> None:
-    raw = b"[]"
-    chunk = TranscriptChunk(
-        "owner",
-        0,
-        1,
-        TranscriptOrigin.RAW,
-        "raw",
-        hashlib.sha256(raw).hexdigest(),
-        len(raw),
-        RuntimePayloadRef(
-            StoredPayload.inline_bytes(raw),
-            RuntimeDomain.EXECUTION,
-        ),
-    )
-    chunk_data = encode_envelope(
-        {
-            "type": "transcript_chunk",
-            "payload": _encode_persisted_domain(chunk),
-        }
-    )
     fact = StoredFact(
         b"s" * 32,
         1,
@@ -270,7 +312,7 @@ def test_maintenance_rejects_future_persisted_schema() -> None:
         "transcript_chunk",
         None,
         "raw",
-        _future_schema(chunk_data),
+        _future_schema(_transcript_chunk_data()),
     )
 
     with pytest.raises(AIError) as raised:
@@ -329,26 +371,6 @@ async def test_transcript_decoders_preserve_future_schema_unsupported(
             )
         assert raised.value.code is ErrorCode.STORAGE_VERSION_UNSUPPORTED
 
-        raw = b"[]"
-        chunk = TranscriptChunk(
-            "owner",
-            0,
-            1,
-            TranscriptOrigin.RAW,
-            "raw",
-            hashlib.sha256(raw).hexdigest(),
-            len(raw),
-            RuntimePayloadRef(
-                StoredPayload.inline_bytes(raw),
-                RuntimeDomain.EXECUTION,
-            ),
-        )
-        chunk_data = encode_envelope(
-            {
-                "type": "transcript_chunk",
-                "payload": _encode_persisted_domain(chunk),
-            }
-        )
         fact = StoredFact(
             b"s" * 32,
             1,
@@ -356,7 +378,7 @@ async def test_transcript_decoders_preserve_future_schema_unsupported(
             "transcript_chunk",
             None,
             "raw",
-            _future_schema(chunk_data),
+            _future_schema(_transcript_chunk_data()),
         )
         with pytest.raises(AIError) as raised:
             history.decode_chunk(fact)
