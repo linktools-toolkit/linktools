@@ -28,10 +28,7 @@ _GRAPH_FIELDS = frozenset({"graph_id", "nodes"})
 _NODE_FIELDS = frozenset({"node_id", "dependencies", "input", "budget_cost"})
 _PRINCIPAL_FIELDS = frozenset({"principal_id", "tenant_id", "kind"})
 _LIMIT_FIELDS = frozenset({"max_concurrency", "max_depth", "max_nodes", "max_budget"})
-_EXECUTION_LEGACY_V1_FIELDS = frozenset(
-    {"version", "user_prompt", "principal", "idempotency_key", "memory_scope"}
-)
-_EXECUTION_CURRENT_V1_FIELDS = frozenset(
+_EXECUTION_V1_FIELDS = frozenset(
     {
         "version",
         "user_prompt",
@@ -40,7 +37,6 @@ _EXECUTION_CURRENT_V1_FIELDS = frozenset(
         "memory_scope",
         "planning",
         "thinking",
-        "binding_digest",
         "binding",
     }
 )
@@ -120,20 +116,9 @@ async def put_execution_request(
     key_factory: RuntimeObjectKeyFactory,
     request: ExecutionRequest,
     *,
-    binding_digest: str,
-    binding: Mapping[str, JsonValue] | AgentBindingSnapshot,
+    binding: AgentBindingSnapshot,
 ) -> str:
-    if _DIGEST.fullmatch(binding_digest) is None:
-        raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
-    try:
-        snapshot = (
-            binding
-            if isinstance(binding, AgentBindingSnapshot)
-            else AgentBindingSnapshot.from_payload(binding)
-        )
-    except AIError as error:
-        raise AIError(ErrorCode.REQUEST_FIELD_INVALID) from error
-    if snapshot.binding_digest != binding_digest:
+    if not isinstance(binding, AgentBindingSnapshot):
         raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
     payload: dict[str, JsonValue] = {
         "version": 1,
@@ -143,8 +128,7 @@ async def put_execution_request(
         "memory_scope": request.memory_scope,
         "planning": request.planning,
         "thinking": request.thinking,
-        "binding_digest": binding_digest,
-        "binding": snapshot.to_payload(),
+        "binding": binding.to_payload(),
     }
     reference = await put_runtime_object(
         store,
@@ -157,7 +141,7 @@ async def put_execution_request(
         "execution request persisted: tenant=%s request_ref=%s binding=%s",
         request.principal.tenant_id,
         reference.key,
-        binding_digest,
+        binding.binding_digest,
     )
     return reference.key
 
@@ -169,7 +153,7 @@ async def read_execution_request(
     tenant_id: str,
     request_ref: str,
 ) -> ExecutionRequest:
-    request, _binding_digest, _binding = await _read_execution_transport(
+    request, _binding = await _read_execution_transport(
         store,
         key_factory,
         tenant_id=tenant_id,
@@ -183,25 +167,16 @@ async def load_execution_request(
     *,
     namespace: str,
     state: ExecutionWorkflowState,
-) -> tuple[ExecutionRequest, AgentBindingSnapshot | None]:
+) -> tuple[ExecutionRequest, AgentBindingSnapshot]:
     if not isinstance(namespace, str) or not namespace.strip():
         raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
-    request, binding_digest, binding = await _read_execution_transport(
+    request, binding = await _read_execution_transport(
         store,
         RuntimeObjectKeyFactory(namespace),
         tenant_id=state.tenant_id,
         request_ref=state.request_ref,
     )
-    if request.principal.tenant_id != state.tenant_id:
-        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-    if binding is None:
-        if (
-            binding_digest is not None
-            or request.planning is not False
-            or request.thinking is not False
-        ):
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-    elif binding_digest != state.binding_digest:
+    if request.principal.tenant_id != state.tenant_id or binding.binding_digest != state.binding_digest:
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     _logger.debug(
         "execution request loaded: execution=%s request_ref=%s",
@@ -217,7 +192,7 @@ async def _read_execution_transport(
     *,
     tenant_id: str,
     request_ref: str,
-) -> tuple[ExecutionRequest, str | None, AgentBindingSnapshot | None]:
+) -> tuple[ExecutionRequest, AgentBindingSnapshot]:
     payload = await _read_payload(
         store,
         key_factory,
@@ -226,10 +201,10 @@ async def _read_execution_transport(
     )
     try:
         value = _load_canonical(payload)
-        request, binding_digest, binding = _execution_request_from_payload(value)
+        request, binding = _execution_request_from_payload(value)
         if request.principal.tenant_id != tenant_id:
             raise ValueError("execution request tenant does not match its object key")
-        return request, binding_digest, binding
+        return request, binding
     except AIError as error:
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
     except (KeyError, TypeError, ValueError, json.JSONDecodeError) as error:
@@ -339,28 +314,14 @@ def _task_node_from_payload(value: object) -> TaskNode:
 
 def _execution_request_from_payload(
     value: Mapping[str, object],
-) -> tuple[ExecutionRequest, str | None, AgentBindingSnapshot | None]:
-    if value.get("version") != 1 or isinstance(value.get("version"), bool):
-        raise ValueError("request version is invalid")
-    fields = frozenset(value)
-    if fields == _EXECUTION_LEGACY_V1_FIELDS:
-        payload = _mapping(value, _EXECUTION_LEGACY_V1_FIELDS)
-        planning = False
-        thinking = False
-        binding_digest = None
-        binding = None
-    elif fields == _EXECUTION_CURRENT_V1_FIELDS:
-        payload = _mapping(value, _EXECUTION_CURRENT_V1_FIELDS)
-        planning = payload["planning"]
-        thinking = payload["thinking"]
-        if not isinstance(planning, bool) or not isinstance(thinking, bool):
-            raise ValueError("execution mode fields are invalid")
-        binding_digest = _require_digest(payload["binding_digest"])
-        binding = AgentBindingSnapshot.from_payload(payload["binding"])
-        if binding.binding_digest != binding_digest:
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-    else:
-        raise ValueError("request payload fields are invalid")
+) -> tuple[ExecutionRequest, AgentBindingSnapshot]:
+    payload = _mapping(value, _EXECUTION_V1_FIELDS)
+    _require_version(payload["version"], 1)
+    planning = payload["planning"]
+    thinking = payload["thinking"]
+    if not isinstance(planning, bool) or not isinstance(thinking, bool):
+        raise ValueError("execution mode fields are invalid")
+    binding = AgentBindingSnapshot.from_payload(payload["binding"])
     memory_scope = payload["memory_scope"]
     if memory_scope is not None and not isinstance(memory_scope, str):
         raise ValueError("execution memory scope is invalid")
@@ -372,7 +333,7 @@ def _execution_request_from_payload(
         planning,
         thinking,
     )
-    return request, binding_digest, binding
+    return request, binding
 
 
 def _principal_from_payload(value: object) -> Principal:
@@ -393,13 +354,6 @@ def _require_string(value: object) -> str:
     if not isinstance(value, str) or not value:
         raise ValueError("request string field is invalid")
     return value
-
-
-def _require_digest(value: object) -> str:
-    result = _require_string(value)
-    if _DIGEST.fullmatch(result) is None:
-        raise ValueError("request digest field is invalid")
-    return result
 
 
 def _require_positive_int(value: object) -> int:

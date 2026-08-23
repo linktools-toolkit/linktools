@@ -10,6 +10,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
+from linktools.ai.agent import AgentBindingSnapshot
+from linktools.ai.agent._output import bind_output
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.migrate import build_sql_schema_metadata, provision_database
 from linktools.ai.runtime.state import RuntimeState
@@ -23,6 +25,7 @@ from linktools.ai.runtime.state._contracts import (
 from linktools.ai.runtime.state._filesystem import FilesystemStateStore
 from linktools.ai.runtime.state._materializer import materialize_runtime_state
 from linktools.ai.runtime.state._plan import RuntimeStatePlan, RuntimeStateRoute
+from linktools.ai.spec import AgentSpec
 from linktools.ai.storage import (
     FilesystemJournal,
     FilesystemWriterLock,
@@ -38,6 +41,22 @@ from sqlalchemy.ext.asyncio import create_async_engine
 from sqlalchemy.schema import CreateTable
 
 pytestmark = pytest.mark.asyncio
+
+
+def _binding_snapshot() -> AgentBindingSnapshot:
+    output = bind_output()
+    return AgentBindingSnapshot(
+        version=1,
+        agent_spec=AgentSpec("agent", 1, "default"),
+        agent_digest="d" * 64,
+        output_type_module=output.value_type.__module__,
+        output_type_qualname=output.value_type.__qualname__,
+        output_schema_id=output.schema_id,
+        output_schema_revision=output.schema_revision,
+        output_schema_fingerprint=output.schema_fingerprint,
+        local_runtime_capability_descriptors=(),
+        binding_digest="a" * 64,
+    )
 
 
 async def test_mysql_audit_columns_match_stg_contract() -> None:
@@ -348,7 +367,6 @@ async def test_sql_recovery_checkpoint_compare_and_swap_uses_split_records(
             principal_kind="local_trusted",
             session_id=None,
             memory_scope=None,
-            agent_id="agent",
             binding_digest="a" * 64,
             lineage_kind="RUN",
             parent_execution_id=None,
@@ -361,6 +379,9 @@ async def test_sql_recovery_checkpoint_compare_and_swap_uses_split_records(
                 idempotency_key_digest="b" * 64,
                 request_digest="c" * 64,
             ),
+            planning=False,
+            thinking=False,
+            binding=_binding_snapshot(),
         ),
         step_run_id=None,
         agent_run_sequence=0,

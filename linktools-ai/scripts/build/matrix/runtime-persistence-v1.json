@@ -1,0 +1,603 @@
+{
+  "dataclasses": {
+    "agent_attempt_claim": {
+      "legacy_revision": 1,
+      "revisions": {
+        "1": "6c70466a08d20f57baf058d8da2a7d2ab3cd738494e45d82111e791fc8beaac2"
+      }
+    },
+    "approval_record": {
+      "legacy_revision": 1,
+      "revisions": {
+        "1": "14d31c99c7e60edebe193b1349c54e5c9a342829c4a8538651d7e9b1249a158d"
+      }
+    },
+    "artifact_record": {
+      "legacy_revision": 1,
+      "revisions": {
+        "1": "9e8c5e9b10ebe4d75605a7dafcb11c7b442694485c5aae21138cb81339992a93"
+      }
+    },
+    "context_projection": {
+      "legacy_revision": 1,
+      "revisions": {
+        "1": "c88e1bb049f0aa9cf13f09b08509eccf65872d2b357d6233f91cc28f8dacc197"
+      }
+    },
+    "conversation_cursor": {
+      "legacy_revision": 1,
+      "revisions": {
+        "1": "85bc775ad1c18bebf3a9b54ca634d874350f906c36f61c0f1254bff1b3b18888"
+      }
+    },
+    "conversation_history": {
+      "legacy_revision": 1,
+      "revisions": {
+        "1": "e02add0b6455024f22d2599fa4479a5f4ee89fb4af399e70e9e6dfee119eae76"
+      }
+    },
+    "conversation_history_index_node": {
+      "legacy_revision": 1,
+      "revisions": {
+        "1": "0db81616aa96a4e8a78f818334ddbd1b42f3023acb4e1209de8057f76a729729"
+      }
+    },
+    "conversation_history_segment": {
+      "legacy_revision": 1,
+      "revisions": {
+        "1": "62cc29ba7ddb357641b4de91f9168a70ce4f518043444482ee16fefe57a336a5"
+      }
+    },
+    "evaluation_record": {
+      "legacy_revision": 1,
+      "revisions": {
+        "1": "67ac6e9191111abc33d611d2bfd628a4190fa6794c28b8f15f8b878ba46ad345"
+      }
+    },
+    "execution_cancel_request_commit": {
+      "legacy_revision": 1,
+      "revisions": {
+        "1": "1a5f2667e2909eb1a94b0446483ea19cc105131a67d606854bb6e3d11541fa7a"
+      }
+    },
+    "execution_event": {
+      "legacy_revision": 1,
+      "revisions": {
+        "1": "0c977a9bc5de198667dc34640acd192fe54a986227d886ffb1dea596a851c957"
+      }
+    },
+    "execution_event_append": {
+      "legacy_revision": 1,
+      "revisions": {
+        "1": "2db5fe9712b5b6b99fbdf014e3d34f9d20bdcaf419c1f1c616547962d0de5d8d"
+      }
+    },
+    "execution_history_head": {
+      "legacy_revision": 1,
+      "revisions": {
+        "1": "403fad67908ca97614648aa16b681fcecaa205f9ba0847f77ce5dbf666a86b68"
+      }
+    },
+    "execution_history_seal": {
+      "legacy_revision": 1,
+      "revisions": {
+        "1": "dc5a7181d8ee8e23b75390bae449da48eca31f1286159212bb1960d5aad5a0bd"
+      }
+    },
+    "execution_record": {
+      "legacy_revision": 1,
+      "revisions": {
+        "1": "4f839ba310cd505bdc8aa2e52151c6a27628acf9fc837a8cb6749ac7459b0fcc"
+      }
+    },
+    "execution_run_seal_head": {
+      "legacy_revision": 1,
+      "revisions": {
+        "1": "458b4c2b6722e27546f0948ff87888a07740355c65809c2aff716a7215bcdb0c"
+      }
+    },
+    "execution_start_claim": {
+      "legacy_revision": 1,
+      "revisions": {
+        "1": "a615f3846374e9f5a3e0391188af3644af2d68da55d73980a9f0208fab9f1746"
+      }
+    },
+    "execution_start_reservation": {
+      "legacy_revision": 1,
+      "revisions": {
+        "1": "4c4f6f6bfd6d2d18761bfc14e41facdbdbab354bb006df5a908c00b0be0dbf3e"
+      }
+    },
+    "execution_start_reservation_result": {
+      "legacy_revision": 1,
+      "revisions": {
+        "1": "58e496a28617436532bf22056a34259134d724d9b8c56748e55b7091f8504c7f"
+      }
+    },
+    "execution_start_unknown_commit": {
+      "legacy_revision": 1,
+      "revisions": {
+        "1": "e1e7da1699fdfe2f637225b40a25133205e46c454a56933a68080fc70edfedbf"
+      }
+    },
+    "execution_terminal_commit": {
+      "legacy_revision": 1,
+      "revisions": {
+        "1": "9c9412849f0762ea748066b50f0cfd0d31f2a47dd3155ade8b39dfbca126db51"
+      }
+    },
+    "execution_terminal_commit_result": {
+      "legacy_revision": 1,
+      "revisions": {
+        "1": "4f76947b8c1255a05d0328a7dc9282755a8a7b06ef7f9e5b5cf00e556fd60b1a"
+      }
+    },
+    "external_call_record": {
+      "legacy_revision": 1,
+      "revisions": {
+        "1": "5ebc4362a741d84203885179353de1947ac443212af17f8858008207776fcf1b"
+      }
+    },
+    "idempotency_record": {
+      "legacy_revision": 1,
+      "revisions": {
+        "1": "86071c1bbbd2ed8496e981471f27c4cb3ac68afbdb3d39c645d975403ead58fa"
+      }
+    },
+    "inline_context_block": {
+      "legacy_revision": 1,
+      "revisions": {
+        "1": "e473a751b3324cc5408e9264a1e55de9600bb0a312f0f3b7b7f8fc47afd593a6"
+      }
+    },
+    "loaded_context_message": {
+      "legacy_revision": 1,
+      "revisions": {
+        "1": "14215094b9ec79d9c889e336cf558661635f53590fd60a245de8d34f90007272"
+      }
+    },
+    "loaded_model_context": {
+      "legacy_revision": 1,
+      "revisions": {
+        "1": "676b20054fe7f2e9912d9e7f746e58c65ea9baa4c17d26d269f79862667ec8ec"
+      }
+    },
+    "memory_record": {
+      "legacy_revision": 1,
+      "revisions": {
+        "1": "75b1e858f839ea2cf2fe861c1754cfbc123171a0a1b3a85dd00bc127b8766a58"
+      }
+    },
+    "object_ref": {
+      "legacy_revision": 1,
+      "revisions": {
+        "1": "802ac36862e30f34a601e1db02eaeba787489f66fcce226ee3b81c4ffff55e25"
+      }
+    },
+    "operation_ledger_input": {
+      "legacy_revision": 1,
+      "revisions": {
+        "1": "3f6ebe50100e1235cb5715e45ef05f7e4bdaa79a3ffe5bcc7e79f23eeefdd757"
+      }
+    },
+    "operation_ledger_record": {
+      "legacy_revision": 1,
+      "revisions": {
+        "1": "dd220a701845fc3c1af57f1465733f4caad444dacdad198fc86dc0fdccb926c1"
+      }
+    },
+    "principal": {
+      "legacy_revision": 1,
+      "revisions": {
+        "1": "8ec0c3ae89b05258a228bd01e7941a0d43d35d001f874bf2f8ddd366ef0de78f"
+      }
+    },
+    "recovery_active": {
+      "legacy_revision": 1,
+      "revisions": {
+        "1": "28b8227b09c406d537425b6928b1bbf33008d8c1ef046d3e14c5055ecb3ed664"
+      }
+    },
+    "recovery_admission": {
+      "legacy_revision": 1,
+      "revisions": {
+        "1": "8b1607f342e2d64aeff7947c66514a9c9d5ec8a7609c59c3e4fb0c5c5429b813"
+      }
+    },
+    "recovery_checkpoint": {
+      "legacy_revision": 1,
+      "revisions": {
+        "1": "5e1fb5347b99bfd3fef6dd14e20ec17c65f4ba9dc0ced5cfc2853e3b228b1abc"
+      }
+    },
+    "recovery_conversation_intent": {
+      "legacy_revision": 1,
+      "revisions": {
+        "1": "92dc7357513f07e4724dfe5a6229d4bcbfe34efb984f002538b486d2b0cb4605"
+      }
+    },
+    "recovery_execution_input": {
+      "legacy_revision": 1,
+      "revisions": {
+        "1": "bbc3a92b2d5732d2ba9efe1b20d2ad4b95d5623b9e0b150fe8ce2346fd5f8a2e"
+      }
+    },
+    "recovery_idempotency_input": {
+      "legacy_revision": 1,
+      "revisions": {
+        "1": "74aba8491b8849d02b3930b7745ddb03914df19ee75ceee466c1fcc53965089b"
+      }
+    },
+    "recovery_integrity_report": {
+      "legacy_revision": 1,
+      "revisions": {
+        "1": "287e89f61adc722da8d2365c7ddd8ae7fa96eac37c58bd530c8f860cd48d750d"
+      }
+    },
+    "recovery_state": {
+      "legacy_revision": 1,
+      "revisions": {
+        "1": "533697b347535207c474066973e2cd32da55ae8259c5e5610c80a74657ddaa7e"
+      }
+    },
+    "recovery_terminal_handoff": {
+      "legacy_revision": 1,
+      "revisions": {
+        "1": "dc9cc606232780c624a2b3026e1a2f42e9290dc842749e3fa17e5fdbfb2b8a04"
+      }
+    },
+    "recovery_terminal_outcome": {
+      "legacy_revision": 1,
+      "revisions": {
+        "1": "70249559979a766098cb25acd5977b40665f56dd563b02d4a1892694978fe9ba"
+      }
+    },
+    "resource_ref": {
+      "legacy_revision": 1,
+      "revisions": {
+        "1": "bb37a07e4b78ebe2552774733eb90fc5aa488fd1e262604c578ca87347aaec0d"
+      }
+    },
+    "result_record": {
+      "legacy_revision": 1,
+      "revisions": {
+        "1": "88ba85b7804e77022de1c625ecba090bbeaee815ec355f4dc8787cef95992afe"
+      }
+    },
+    "run_record": {
+      "legacy_revision": 1,
+      "revisions": {
+        "1": "07005d406627ef2a843fc41601c6149336d52d4a5a3b81635fdd1ba58f5c1e9f"
+      }
+    },
+    "runtime_payload_ref": {
+      "legacy_revision": 1,
+      "revisions": {
+        "1": "e681eb4a80417ccdae9ece1f4679dd0601a02dfc5cb89989e2c021c70f63a20e"
+      }
+    },
+    "session_fork_result": {
+      "legacy_revision": 1,
+      "revisions": {
+        "1": "b3a7401efb44d7d9671cc1505dc52d7cb2e04edf2e05d19da2a7f371e201e91b"
+      }
+    },
+    "session_record": {
+      "legacy_revision": 1,
+      "revisions": {
+        "1": "6c9801789a78c9e8d1f0d8f638a7a0cfbe515cb3489cd10cfb9a0c5177037682"
+      }
+    },
+    "step_event": {
+      "legacy_revision": 1,
+      "revisions": {
+        "1": "c970e92b12e5b3f0fa72afac8e955061c98927dec5805e2acce6e39fc82828e5"
+      }
+    },
+    "stored_payload": {
+      "legacy_revision": 1,
+      "revisions": {
+        "1": "f893cfe67f1722ed1605f28758a868307ef6c253e610a9d2d1853ba422aba7f7"
+      }
+    },
+    "stored_step_snapshot": {
+      "legacy_revision": 1,
+      "revisions": {
+        "1": "b054107b4077a2cf9e948aadb63dae4ae50b8bc73fe72c5908610c332ee70886"
+      }
+    },
+    "task_graph": {
+      "legacy_revision": 1,
+      "revisions": {
+        "1": "6f40954f940848ff244e524865e1a99641a0e9e753f9c0717802bba685595496"
+      }
+    },
+    "task_graph_limits": {
+      "legacy_revision": 1,
+      "revisions": {
+        "1": "2fb7edd03491fffa44c89ea2d13dec396cb0ce345d98832184ac4b720a654585"
+      }
+    },
+    "task_graph_view": {
+      "legacy_revision": 1,
+      "revisions": {
+        "1": "319d351683d8358140409c091ed104559fdf87be156e64e1a5c8ba21d4165fce"
+      }
+    },
+    "task_lease": {
+      "legacy_revision": 1,
+      "revisions": {
+        "1": "b82387e9b2458764179dce21711ccbb184fd5476b3c56de8ae18c8a510657ce1"
+      }
+    },
+    "task_node": {
+      "legacy_revision": 1,
+      "revisions": {
+        "1": "ef43d8cf7d1481b5b50543619d19bf0992bc2ccb2cb8f655c0dffa93e51303a1"
+      }
+    },
+    "task_node_view": {
+      "legacy_revision": 1,
+      "revisions": {
+        "1": "b50443b36f48b177407471ae984f36be27ed944d852647ba2408a954a0e3750b"
+      }
+    },
+    "task_terminal": {
+      "legacy_revision": 1,
+      "revisions": {
+        "1": "fd0d78bd5136f775f0787310fceb2f9ab145423af6071da76ab5effb1b27b211"
+      }
+    },
+    "tool_effect": {
+      "legacy_revision": 1,
+      "revisions": {
+        "1": "2cc6f38e2379596e811db4d877b69bf99bbb83bc0291879116174d8e81683b5f"
+      }
+    },
+    "tool_operation": {
+      "legacy_revision": 1,
+      "revisions": {
+        "1": "7e3639943ad64c296f47b97fe79b3c699d7e1da9487eec4083411d3cd7c7eba7"
+      }
+    },
+    "tool_operation_admission": {
+      "legacy_revision": 1,
+      "revisions": {
+        "1": "86aae6aa8d2bdca393eac38824a00f40e401a1cec8da5bed6d27f4ba254e2642"
+      }
+    },
+    "transcript_chunk": {
+      "legacy_revision": 1,
+      "revisions": {
+        "1": "40b078307e74dc2e3cc0f166aec7c0235fc1354714b3bc05e3458a9b835de1f4"
+      }
+    },
+    "transcript_head": {
+      "legacy_revision": 1,
+      "revisions": {
+        "1": "d8a905a8ed9b406a85b5248d27c96ae325264e80b70f397fbf7c56967b2cdddc"
+      }
+    },
+    "transcript_message_ref": {
+      "legacy_revision": 1,
+      "revisions": {
+        "1": "b7c6c85b153a6da85e5e93d99a20eee1482bd705506aa512e4a41625056fff28"
+      }
+    },
+    "transcript_seek": {
+      "legacy_revision": 1,
+      "revisions": {
+        "1": "faa2c40bb57e757a9291b3d1c124c5a30989fc4fa90e43bbadad25d740c5cbe8"
+      }
+    },
+    "transcript_span_ref": {
+      "legacy_revision": 1,
+      "revisions": {
+        "1": "163f19705426e2c34f8a4e00ed80340a9dd737b450e17b47b4624356fd25e9ff"
+      }
+    },
+    "usage_metrics": {
+      "legacy_revision": 1,
+      "revisions": {
+        "1": "6b537d6b25be39549ab8e1440d13b431c28f734f3f857fabebe67075a9134b00"
+      }
+    }
+  },
+  "enums": {
+    "approval_decision": [
+      "APPROVE",
+      "DENY"
+    ],
+    "approval_status": [
+      "APPROVED",
+      "CANCELLED",
+      "DENIED",
+      "EXPIRED",
+      "PENDING"
+    ],
+    "evaluation_status": [
+      "CANCELLED",
+      "FAILED",
+      "PENDING",
+      "RUNNING",
+      "SUCCEEDED"
+    ],
+    "execution_event_type": [
+      "APPROVAL_DECIDED",
+      "APPROVAL_REQUESTED",
+      "ASSISTANT_PART_COMPLETED",
+      "CANCEL_REQUESTED",
+      "EXECUTION_CANCELLED",
+      "EXECUTION_CREATED",
+      "EXECUTION_FAILED",
+      "EXECUTION_STARTED",
+      "EXECUTION_START_UNKNOWN",
+      "EXECUTION_SUCCEEDED",
+      "EXTERNAL_REQUESTED",
+      "EXTERNAL_SUPPLIED",
+      "TOOL_CALL_FINISHED",
+      "TOOL_CALL_STARTED"
+    ],
+    "execution_history_state": [
+      "open",
+      "sealed"
+    ],
+    "execution_lineage_kind": [
+      "FORK",
+      "RETRY",
+      "RUN",
+      "SESSION_RESUME",
+      "SUBAGENT"
+    ],
+    "execution_status": [
+      "CANCELLED",
+      "CANCELLING",
+      "FAILED",
+      "FINALIZING",
+      "PENDING_START",
+      "STARTED",
+      "START_UNKNOWN",
+      "SUCCEEDED",
+      "WAITING_APPROVAL",
+      "WAITING_EXTERNAL"
+    ],
+    "external_call_status": [
+      "CANCELLED",
+      "EXPIRED",
+      "PENDING",
+      "SUPPLIED"
+    ],
+    "history_quality": [
+      "complete",
+      "conservative"
+    ],
+    "idempotency_status": [
+      "CANCELLED",
+      "COMPLETED",
+      "FAILED",
+      "RESERVED",
+      "STARTED",
+      "START_UNKNOWN"
+    ],
+    "operation_kind": [
+      "APPROVAL",
+      "BUDGET",
+      "DOWNLOAD_GRANT",
+      "EVENT",
+      "EXECUTION_CANCEL",
+      "EXECUTION_START",
+      "EXTERNAL",
+      "MEMORY_DELETE",
+      "MEMORY_WRITE",
+      "MODEL",
+      "RESULT",
+      "SESSION_CLOSE",
+      "SESSION_CREATE",
+      "SESSION_FORK",
+      "SESSION_UPDATE",
+      "TASK_CANCEL",
+      "TASK_NODE",
+      "TOOL"
+    ],
+    "operation_status": [
+      "CANCELLED",
+      "COMPACTED",
+      "EFFECT_UNKNOWN",
+      "FAILED",
+      "PENDING",
+      "RUNNING",
+      "SUCCEEDED"
+    ],
+    "recovery_checkpoint_state": [
+      "active",
+      "admitted",
+      "completed",
+      "handoff",
+      "waiting"
+    ],
+    "recovery_handoff_phase": [
+      "completed",
+      "conversation_resolved",
+      "execution_committed",
+      "none",
+      "prepared"
+    ],
+    "resource_kind": [
+      "APPROVAL",
+      "ARTIFACT",
+      "DOWNLOAD_GRANT",
+      "EVALUATION",
+      "EXECUTION",
+      "EXTERNAL_CALL",
+      "MEMORY",
+      "SESSION",
+      "TASK_GRAPH",
+      "TOOL_OPERATION"
+    ],
+    "runtime_domain": [
+      "artifact",
+      "conversation",
+      "evaluation",
+      "execution",
+      "memory",
+      "recovery",
+      "task"
+    ],
+    "session_status": [
+      "CLEANUP_REQUIRED",
+      "CLOSED",
+      "CLOSING",
+      "OPEN"
+    ],
+    "stop_reason": [
+      "CANCELLED",
+      "END_TURN",
+      "ERROR",
+      "OUTPUT_VALIDATION_FAILED",
+      "REFUSAL",
+      "TURN_LIMIT"
+    ],
+    "task_status": [
+      "BLOCKED",
+      "CANCELLED",
+      "FAILED",
+      "PENDING",
+      "READY",
+      "RUNNING",
+      "SUCCEEDED"
+    ],
+    "tool_operation_status": [
+      "CANCELLED",
+      "CLAIMED",
+      "COMPLETED",
+      "EFFECT_UNKNOWN",
+      "FAILED",
+      "PENDING"
+    ],
+    "transcript_origin": [
+      "raw",
+      "unknown"
+    ],
+    "transcript_owner_domain": [
+      "conversation",
+      "execution",
+      "recovery"
+    ],
+    "transcript_seek_dimension": [
+      "execution_transcript_item",
+      "message",
+      "session_history_item"
+    ]
+  },
+  "external": {
+    "agent_binding_snapshot": {
+      "owner": "agent",
+      "version": 1
+    },
+    "model_message": {
+      "fixture": "runtime_model_messages_v1.json",
+      "owner": "pydantic-ai"
+    }
+  },
+  "wire_version": 1
+}

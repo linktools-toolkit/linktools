@@ -16,12 +16,7 @@ from typing import Protocol
 
 from linktools.core import environ
 
-from ..agent import (
-    AgentBindingSnapshot,
-    AgentCompiler,
-    AgentDefinition,
-    AgentDefinitionCatalog,
-)
+from ..agent import AgentBinding, AgentBindingSnapshot, AgentCatalog, AgentCompiler
 from ..core import (
     AuthorizationAction,
     AuthorizationPolicy,
@@ -198,7 +193,7 @@ class DefaultExecutionService:
         authorization: AuthorizationPolicy,
         *,
         sessions: SessionRepository,
-        catalog: AgentDefinitionCatalog,
+        catalog: AgentCatalog,
         compiler: AgentCompiler,
         backend: "ExecutionBackend | None" = None,
         operation_ids: "Callable[[], str] | None" = None,
@@ -259,35 +254,34 @@ class DefaultExecutionService:
             raise RuntimeError("local execution waiter is already bound")
         self._local_waiter = waiter
 
-    def _definition(
+    def _binding(
         self,
         binding_digest: str,
-        binding: "AgentBindingSnapshot | None" = None,
-    ) -> AgentDefinition:
+        snapshot: "AgentBindingSnapshot | None" = None,
+    ) -> AgentBinding:
         try:
-            definition = self._catalog.definition(binding_digest)
+            binding = self._catalog.binding(binding_digest)
         except AIError as error:
-            if error.code is not ErrorCode.AGENT_DEFINITION_UNAVAILABLE or binding is None:
+            if error.code is not ErrorCode.AGENT_DEFINITION_UNAVAILABLE or snapshot is None:
                 raise
-            if binding.binding_digest != binding_digest:
+            if snapshot.binding_digest != binding_digest:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
-            definition = self._catalog.register(self._compiler.restore(binding))
-        if binding is not None and definition.binding_snapshot != binding:
+            binding = self._catalog.register_binding(self._compiler.restore(snapshot))
+        if snapshot is not None and binding.snapshot != snapshot:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        return definition
+        return binding
 
     def _validate_replayed_execution(
         self,
         execution: ExecutionRecord,
-        definition: AgentDefinition,
+        binding: AgentBinding,
         request: ExecutionRequest,
     ) -> None:
         if (
-            execution.binding_digest != definition.digest
+            execution.binding_digest != binding.digest
             or execution.planning is not request.planning
             or execution.thinking is not request.thinking
-            or execution.binding is None
-            or execution.binding != definition.binding_snapshot
+            or execution.binding != binding.snapshot
         ):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
 
@@ -509,12 +503,14 @@ class DefaultExecutionService:
             raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
         if request.idempotency_key is None:
             raise AIError(ErrorCode.IDEMPOTENCY_KEY_INVALID)
-        definition = self._definition(binding_digest)
+        binding = self._binding(binding_digest)
         conversation_run_id = conversation_step_run_id
         if session_id is not None and source_execution_id is None:
             session = await self._sessions.get(session_id, tenant_id=request.principal.tenant_id)
             if session is None:
                 raise AIError(ErrorCode.SESSION_NOT_FOUND)
+            if session.agent_digest != binding.definition.digest:
+                raise AIError(ErrorCode.SESSION_BINDING_MISMATCH)
             conversation_run_id = None if session.continuation is None else session.continuation.step_run_id
             base_execution_id = None
             lineage_kind = ExecutionLineageKind.SESSION_RESUME
@@ -536,7 +532,7 @@ class DefaultExecutionService:
             if existing.status is IdempotencyStatus.RESERVED:
                 pending = await self._state.executions.get(existing.resource_id, tenant_id=request.principal.tenant_id)
                 if pending is not None:
-                    self._validate_replayed_execution(pending, definition, request)
+                    self._validate_replayed_execution(pending, binding, request)
                 if pending is not None and pending.status is ExecutionStatus.STARTED:
                     await self._launch_started(
                         request,
@@ -564,7 +560,7 @@ class DefaultExecutionService:
             started = await self._state.executions.get(existing.resource_id, tenant_id=request.principal.tenant_id)
             if started is None:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            self._validate_replayed_execution(started, definition, request)
+            self._validate_replayed_execution(started, binding, request)
             if existing.status is IdempotencyStatus.COMPLETED:
                 if started.status not in {ExecutionStatus.SUCCEEDED, ExecutionStatus.FAILED, ExecutionStatus.CANCELLED}:
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -604,7 +600,7 @@ class DefaultExecutionService:
             conversation_step_run_id=conversation_run_id,
             planning=request.planning,
             thinking=request.thinking,
-            binding=definition.binding_snapshot,
+            binding=binding.snapshot,
         )
         reservation = await self._state.executions.reserve_start(
             ExecutionStartReservation(
@@ -628,7 +624,7 @@ class DefaultExecutionService:
         if not reservation.created:
             if reservation.idempotency.request_digest != request_digest:
                 raise AIError(ErrorCode.IDEMPOTENCY_CONFLICT)
-            self._validate_replayed_execution(reservation.execution, definition, request)
+            self._validate_replayed_execution(reservation.execution, binding, request)
             if reservation.execution.status is ExecutionStatus.PENDING_START and reservation.idempotency.status is IdempotencyStatus.RESERVED:
                 await self._prepare_and_launch(
                     request,
@@ -1048,8 +1044,8 @@ class DefaultExecutionService:
         previous = await self._load_authorized(execution_id, request.principal, AuthorizationAction.EXECUTION_READ)
         if previous.binding_digest != binding_digest:
             raise AIError(ErrorCode.RUNTIME_SERVICE_MISMATCH)
-        definition = self._definition(previous.binding_digest, previous.binding)
-        if definition.digest != binding_digest:
+        binding = self._binding(previous.binding_digest, previous.binding)
+        if binding.digest != binding_digest:
             raise AIError(ErrorCode.RUNTIME_SERVICE_MISMATCH)
         retry_request = ExecutionRequest(
             user_prompt=request.user_prompt,
@@ -1076,8 +1072,8 @@ class DefaultExecutionService:
         previous = await self._load_authorized(execution_id, request.principal, AuthorizationAction.EXECUTION_READ)
         if previous.binding_digest != binding_digest:
             raise AIError(ErrorCode.RUNTIME_SERVICE_MISMATCH)
-        definition = self._definition(previous.binding_digest, previous.binding)
-        if definition.digest != binding_digest:
+        binding = self._binding(previous.binding_digest, previous.binding)
+        if binding.digest != binding_digest:
             raise AIError(ErrorCode.RUNTIME_SERVICE_MISMATCH)
         fork_request = ExecutionRequest(
             user_prompt=request.user_prompt,

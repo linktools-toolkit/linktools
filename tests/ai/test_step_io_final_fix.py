@@ -6,7 +6,10 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
+from linktools.ai.agent import AgentBindingSnapshot
+from linktools.ai.agent._output import bind_output
 from linktools.ai.core import ExecutionDeltaType, ExecutionLineageKind, ExecutionStatus
+from linktools.ai.spec import AgentSpec
 from linktools.ai.runtime import RuntimeDomain, RuntimeState
 from linktools.ai.runtime._event import ExecutionDelta, LiveExecutionEventBroker
 from linktools.ai.runtime.state import (
@@ -36,13 +39,29 @@ def _run() -> RunRecord:
     )
 
 
+def _binding_snapshot() -> AgentBindingSnapshot:
+    output = bind_output()
+    return AgentBindingSnapshot(
+        version=1,
+        agent_spec=AgentSpec("agent", 1, "default"),
+        agent_digest="b" * 64,
+        output_type_module=output.value_type.__module__,
+        output_type_qualname=output.value_type.__qualname__,
+        output_schema_id=output.schema_id,
+        output_schema_revision=output.schema_revision,
+        output_schema_fingerprint=output.schema_fingerprint,
+        local_runtime_capability_descriptors=(),
+        binding_digest="a" * 64,
+    )
+
+
 def _execution() -> ExecutionRecord:
     now = datetime.now(timezone.utc)
     return ExecutionRecord(
         execution_id="execution",
         tenant_id="tenant",
         session_id=None,
-        binding_digest="binding",
+        binding_digest="a" * 64,
         parent_execution_id=None,
         root_execution_id="execution",
         source_execution_id=None,
@@ -56,6 +75,9 @@ def _execution() -> ExecutionRecord:
         safe_error_details={},
         created_at=now,
         updated_at=now,
+        planning=False,
+        thinking=False,
+        binding=_binding_snapshot(),
     )
 
 

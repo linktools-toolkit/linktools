@@ -1130,7 +1130,7 @@ class StateStepArchive(StepStore):
             projection = self._history.project_context(
                 owner_id,
                 snapshot.messages,
-                binding_digest=projection_binding,
+                agent_digest=projection_binding,
                 origins=origins,
                 sources=sources,
             )
@@ -1329,7 +1329,7 @@ class StateStepArchive(StepStore):
         if any(not isinstance(snapshot, PreparedStepSnapshot) for snapshot in values):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         if binding_digest is not None and any(
-            snapshot.projection.binding_digest != binding_digest
+            snapshot.projection.agent_digest != binding_digest
             for snapshot in values
         ):
             raise AIError(ErrorCode.SESSION_BINDING_MISMATCH)
@@ -1991,14 +1991,14 @@ class StateStepArchive(StepStore):
         history_id: str,
         *,
         tenant_id: str,
-        binding_digest: str | None = None,
+        agent_digest: str | None = None,
     ) -> tuple[object, ...]:
         require_no_run_history_lock("StateStepArchive.load_session_model_context")
         return (
             await self._history.load_session_model_context(
                 history_id,
                 tenant_id=tenant_id,
-                binding_digest=binding_digest,
+                agent_digest=agent_digest,
             )
         ).model_messages()
 
@@ -2007,7 +2007,7 @@ class StateStepArchive(StepStore):
         *,
         run_id: str,
         snapshot: ContinuableSnapshot,
-        binding_digest: str | None = None,
+        agent_digest: str | None = None,
     ) -> bool:
         require_no_run_history_lock(
             "StateStepArchive.verify_snapshot_projection"
@@ -2021,11 +2021,11 @@ class StateStepArchive(StepStore):
         projection = await self._history.load_projection(run_id)
         if projection is None or projection.digest != stored.projection_digest:
             return False
-        if binding_digest is not None and projection.binding_digest != binding_digest:
+        if agent_digest is not None and projection.agent_digest != agent_digest:
             return False
         context = await self._history.load_model_context(
             run_id,
-            binding_digest=binding_digest,
+            agent_digest=agent_digest,
         )
         return (
             stored.run_id == snapshot.run_id

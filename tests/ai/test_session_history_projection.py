@@ -44,7 +44,7 @@ def _session(session_id: str = "session") -> SessionRecord:
         session_id=session_id,
         tenant_id="tenant",
         owner_principal_id="owner",
-        binding_digest="binding",
+        agent_digest="a" * 64,
         status=SessionStatus.OPEN,
         revision=0,
         resource_generation=0,
@@ -321,7 +321,7 @@ async def test_session_history_fork_copies_continuation_without_execution_lookup
         service = _service(state)
         principal = Principal("owner", "tenant")
         await service.fork(
-            "binding",
+            "a" * 64,
             "session",
             ForkSessionRequest(principal, "fork", "fork-operation"),
         )

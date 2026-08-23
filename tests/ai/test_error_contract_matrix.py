@@ -277,8 +277,10 @@ class _FailedAgent:
         *,
         session_id: str,
         memory_scope: str,
+        planning: bool,
+        thinking: bool,
     ) -> ExecutionResult:
-        del prompt, session_id, memory_scope
+        del prompt, session_id, memory_scope, planning, thinking
         return self._result
 
     def stream(self, *args: object, **kwargs: object) -> object:
@@ -290,8 +292,7 @@ class _FailedRuntime:
     def __init__(self, result: ExecutionResult) -> None:
         self._agent = _FailedAgent(result)
 
-    def agent(self, *, planning: bool, thinking: bool) -> _FailedAgent:
-        del planning, thinking
+    def agent(self) -> _FailedAgent:
         return self._agent
 
 

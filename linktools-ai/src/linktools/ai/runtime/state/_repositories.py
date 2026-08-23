@@ -48,7 +48,7 @@ from ...task import (
 from .._tool import ToolOperationRecord
 from ._codec import (
     _decode_enveloped_domain,
-    encode_domain,
+    _encode_persisted_domain,
     encode_envelope,
     wire_type_id,
 )
@@ -1132,7 +1132,7 @@ class SessionRepositoryImpl(_ResourceRepository[SessionRecord]):
             or existing_target.history_id != result.target_history_id
             or existing_target.tenant_id != self._tenant_id
             or existing_target.owner_principal_id != target.owner_principal_id
-            or existing_target.binding_digest != target.binding_digest
+            or existing_target.agent_digest != target.agent_digest
             or child.session_id != result.target_session_id
             or child.tenant_id != self._tenant_id
             or child.parent_history_id != result.source_history_id
@@ -4620,7 +4620,7 @@ def _empty_conversation_transcript_head(
 
 
 def _domain_data(value: object) -> dict[str, object]:
-    payload = encode_domain(value)
+    payload = _encode_persisted_domain(value)
     if isinstance(value, (TaskNodeView, ToolOperationRecord)) and isinstance(payload, Mapping):
         fields = payload.get("fields")
         if isinstance(fields, Mapping):

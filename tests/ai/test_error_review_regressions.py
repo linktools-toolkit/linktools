@@ -10,15 +10,34 @@ from types import SimpleNamespace
 
 import pytest
 import linktools.ai.agent._capabilities as capabilities_module
+from linktools.ai.agent import AgentBindingSnapshot
 from linktools.ai.agent._capabilities import AgentRunScope
 from linktools.ai.agent._executor import AgentExecutor
+from linktools.ai.agent._output import bind_output
 from linktools.ai.core import ExecutionLineageKind, ExecutionStatus, OperationStatus
 from linktools.ai.errors import ErrorCode
 from linktools.ai.runtime._execution import CancelEffectOutcome, DefaultExecutionService
 from linktools.ai.runtime.service_api import CancelExecutionRequest
 from linktools.ai.runtime.state import ExecutionRecord
+from linktools.ai.spec import AgentSpec
 from linktools.ai.workspace import trusted_workspace_principal
 from pydantic_ai_harness.compaction import DeduplicateFileReads
+
+
+def _binding_snapshot() -> AgentBindingSnapshot:
+    output = bind_output()
+    return AgentBindingSnapshot(
+        version=1,
+        agent_spec=AgentSpec("agent", 1, "default"),
+        agent_digest="b" * 64,
+        output_type_module=output.value_type.__module__,
+        output_type_qualname=output.value_type.__qualname__,
+        output_schema_id=output.schema_id,
+        output_schema_revision=output.schema_revision,
+        output_schema_fingerprint=output.schema_fingerprint,
+        local_runtime_capability_descriptors=(),
+        binding_digest="a" * 64,
+    )
 
 
 @pytest.mark.asyncio
@@ -70,11 +89,13 @@ async def test_agent_executor_cancellation_is_not_replaced_by_usage_sink_failure
         del _event
 
     executor._execute = cancelled  # type: ignore[method-assign]
-    definition = SimpleNamespace(spec=SimpleNamespace(usage_limits=None))
+    binding = SimpleNamespace(
+        definition=SimpleNamespace(spec=SimpleNamespace(usage_limits=None))
+    )
 
     with pytest.raises(asyncio.CancelledError):
         await executor.execute(
-            definition,  # type: ignore[arg-type]
+            binding,  # type: ignore[arg-type]
             "prompt",
             [],
             "conversation",
@@ -109,6 +130,9 @@ async def test_confirmed_cancel_persists_canonical_terminal_error() -> None:
         safe_error_details={},
         created_at=now,
         updated_at=now,
+        planning=False,
+        thinking=False,
+        binding=_binding_snapshot(),
     )
     cancelling = replace(
         execution,

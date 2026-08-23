@@ -26,8 +26,8 @@ from pydantic_ai_harness.step_persistence import (
 
 from ..agent import (
     MEMORY_TOOL_NAMES,
-    AgentDefinition,
-    AgentDefinitionCatalog,
+    AgentBinding,
+    AgentCatalog,
     AgentExecutor,
     DurableBoundary,
     LiveDelta,
@@ -209,7 +209,7 @@ class LocalExecutionBackend:
         namespace: str,
         steps: StepStore,
         executor: AgentExecutor,
-        catalog: AgentDefinitionCatalog,
+        catalog: AgentCatalog,
         *,
         tenant_id: str,
         execution_root: Path,
@@ -301,14 +301,11 @@ class LocalExecutionBackend:
                 execution.tenant_id,
             )
             raise AIError(ErrorCode.AUTHORIZATION_DENIED)
-        definition = self._catalog.definition(execution.binding_digest)
+        binding = self._catalog.binding(execution.binding_digest)
         if (
             request.planning is not execution.planning
             or request.thinking is not execution.thinking
-            or (
-                execution.binding is not None
-                and execution.binding != definition.binding_snapshot
-            )
+            or execution.binding != binding.snapshot
         ):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
 
@@ -379,10 +376,10 @@ class LocalExecutionBackend:
         identity: ExecutionStartIdentity,
     ) -> ExecutionRecord:
         await self._validate_start(request, execution)
-        if execution.status is not ExecutionStatus.PENDING_START or execution.binding is None:
+        if execution.status is not ExecutionStatus.PENDING_START:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        definition = self._catalog.definition(execution.binding_digest)
-        if execution.binding != definition.binding_snapshot:
+        binding = self._catalog.binding(execution.binding_digest)
+        if execution.binding != binding.snapshot:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         now = datetime.now(timezone.utc)
         recovery_input = RecoveryExecutionInput(
@@ -391,7 +388,6 @@ class LocalExecutionBackend:
             principal_kind=request.principal.kind,
             session_id=execution.session_id,
             memory_scope=execution.memory_scope,
-            agent_id=definition.spec.id,
             binding_digest=execution.binding_digest,
             lineage_kind=execution.lineage_kind.value,
             parent_execution_id=execution.parent_execution_id,
@@ -1849,9 +1845,10 @@ class LocalExecutionBackend:
                     expected_revision=current.revision,
                     expected_agent_run_sequence=current.agent_run_sequence,
                 )
-            definition = self._catalog.definition(current.binding_digest)
-            if current.binding is not None and current.binding != definition.binding_snapshot:
+            binding = self._catalog.binding(current.binding_digest)
+            if current.binding != binding.snapshot:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            definition = binding.definition
             run_id = (
                 checkpoint.step_run_id
                 if checkpoint is not None and checkpoint.step_run_id is not None
@@ -1942,13 +1939,13 @@ class LocalExecutionBackend:
                 loaded_context = await self._steps.load_loaded_model_context(
                     RuntimeDomain.RECOVERY,
                     recovery_history_run_id,
-                    binding_digest=current.binding_digest,
+                    agent_digest=binding.definition.digest,
                 )
             elif history_id is not None:
                 loaded_context = await self._steps.load_loaded_model_context(
                     RuntimeDomain.CONVERSATION,
                     history_id,
-                    binding_digest=current.binding_digest,
+                    agent_digest=binding.definition.digest,
                 )
             if recovery_history_run_id is not None or history_id is not None:
                 history = list(loaded_context.model_messages())
@@ -1997,7 +1994,7 @@ class LocalExecutionBackend:
                 )
             try:
                 result = await self._executor.execute(
-                    definition,
+                    binding,
                     request.user_prompt,
                     history,
                     conversation_id,
@@ -2085,7 +2082,7 @@ class LocalExecutionBackend:
                 return
             await self._commit_success(
                 current,
-                definition,
+                binding,
                 result.output,
                 result.usage,
                 run_id,
@@ -2162,7 +2159,7 @@ class LocalExecutionBackend:
                         (
                             await recovery_archive.load_loaded_model_context(
                                 owner_id=recovery_run_id,
-                                binding_digest=execution.binding_digest,
+                                agent_digest=execution.binding.agent_digest,
                             )
                         ).model_messages()
                     )
@@ -2275,7 +2272,7 @@ class LocalExecutionBackend:
     async def _commit_success(
         self,
         execution: ExecutionRecord,
-        definition: AgentDefinition,
+        binding: AgentBinding,
         output: JsonValue,
         usage: UsageMetrics,
         run_id: str,
@@ -2309,7 +2306,7 @@ class LocalExecutionBackend:
                 output_payload,
                 None,
                 StopReason.END_TURN,
-                definition=definition,
+                binding=binding,
                 run_id=run_id,
                 usage=usage,
             )
@@ -2346,7 +2343,7 @@ class LocalExecutionBackend:
             output_payload,
             None,
             StopReason.END_TURN,
-            definition=definition,
+            binding=binding,
             run_id=run_id,
             usage=usage,
             expected_cursor=expected_cursor,
@@ -2478,7 +2475,7 @@ class LocalExecutionBackend:
                     next_cursor=next_cursor,
                     step_run=run,
                     snapshot=snapshot,
-                    binding_digest=execution.binding_digest,
+                    agent_digest=execution.binding.agent_digest,
                 )
             except AIError as error:
                 if error.code is not ErrorCode.STORAGE_COMMIT_UNKNOWN:
@@ -2564,7 +2561,7 @@ class LocalExecutionBackend:
         error_code: str | None,
         stop_reason: StopReason,
         *,
-        definition: AgentDefinition | None = None,
+        binding: AgentBinding | None = None,
         run_id: str | None = None,
         usage: UsageMetrics | None = None,
         safe_error_details: Mapping[str, JsonValue] | None = None,
@@ -2592,11 +2589,11 @@ class LocalExecutionBackend:
         schema_revision: int | None = None
         schema_fingerprint: str | None = None
         if status is ExecutionStatus.SUCCEEDED:
-            if definition is None or output is None:
+            if binding is None or output is None:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            schema_id = definition.output_binding.schema_id
-            schema_revision = definition.output_binding.schema_revision
-            schema_fingerprint = definition.output_schema_fingerprint
+            schema_id = binding.output_binding.schema_id
+            schema_revision = binding.output_binding.schema_revision
+            schema_fingerprint = binding.output_schema_fingerprint
         elif output is not None:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         if self._recovery_enabled:
@@ -2622,7 +2619,7 @@ class LocalExecutionBackend:
                     output=output,
                     error_code=error_code,
                     stop_reason=stop_reason,
-                    definition=definition,
+                    binding=binding,
                     run_id=run_id,
                     usage=captured_usage,
                     safe_error_details=safe_error_details,
@@ -2828,7 +2825,7 @@ class LocalExecutionBackend:
         output: StoredPayload | None,
         error_code: str | None,
         stop_reason: StopReason,
-        definition: AgentDefinition | None,
+        binding: AgentBinding | None,
         run_id: str | None,
         usage: UsageMetrics,
         safe_error_details: Mapping[str, JsonValue] | None,
@@ -2857,11 +2854,11 @@ class LocalExecutionBackend:
         schema_revision: int | None = None
         schema_fingerprint: str | None = None
         if status is ExecutionStatus.SUCCEEDED:
-            if definition is None or output is None:
+            if binding is None or output is None:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            schema_id = definition.output_binding.schema_id
-            schema_revision = definition.output_binding.schema_revision
-            schema_fingerprint = definition.output_schema_fingerprint
+            schema_id = binding.output_binding.schema_id
+            schema_revision = binding.output_binding.schema_revision
+            schema_fingerprint = binding.output_schema_fingerprint
         elif output is not None:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         terminal = _terminal_record(

@@ -1,0 +1,52 @@
+{
+  "execution_terminal_commit@1:idempotency_terminal_update": {
+    "error_code": "terminal-error",
+    "expected_status": {
+      "$enum": "idempotency_status",
+      "value": "STARTED"
+    },
+    "idempotency_key_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "next_status": {
+      "$enum": "idempotency_status",
+      "value": "COMPLETED"
+    },
+    "request_digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "result_digest": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+    "scope": "scope"
+  },
+  "execution_terminal_commit@1:operation_terminal_update": {
+    "error_code": "terminal-error",
+    "expected_status": {
+      "$enum": "operation_status",
+      "value": "RUNNING"
+    },
+    "next_status": {
+      "$enum": "operation_status",
+      "value": "SUCCEEDED"
+    },
+    "operation_id": "operation",
+    "result_digest": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+    "result_ref": "result"
+  },
+  "task_node@1": {
+    "$dataclass": "task_node",
+    "fields": {
+      "budget_cost": 2,
+      "dependencies": {
+        "$tuple": [
+          "dependency"
+        ]
+      },
+      "input": {
+        "$mapping": [
+          [
+            "key",
+            "value"
+          ]
+        ]
+      },
+      "node_id": "node"
+    },
+    "schema": 1
+  }
+}

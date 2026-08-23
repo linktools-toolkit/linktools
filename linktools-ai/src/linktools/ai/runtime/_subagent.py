@@ -7,7 +7,7 @@ import asyncio
 from linktools.core import environ
 from pydantic_ai.exceptions import ModelRetry
 
-from ..agent import AgentDefinitionCatalog, SubagentDelegate
+from ..agent import AgentCatalog, AgentCompiler, SubagentDelegate
 from ..core import ExecutionStatus, JsonValue, Principal, canonical_sha256
 from ..errors import AIError, ErrorCode
 from ._execution import DefaultExecutionService
@@ -21,10 +21,12 @@ class SubagentDispatcher:
 
     def __init__(
         self,
-        catalog: AgentDefinitionCatalog,
+        catalog: AgentCatalog,
+        compiler: AgentCompiler,
         execution: DefaultExecutionService,
     ) -> None:
         self._catalog = catalog
+        self._compiler = compiler
         self._execution = execution
 
     def delegate_for(
@@ -82,11 +84,12 @@ class SubagentDispatcher:
         if agent_id not in allowed_agent_ids:
             raise ModelRetry("requested subagent Agent is unavailable")
         try:
-            definition = self._catalog.subagent_definition(agent_id)
+            definition = self._catalog.root_definition(agent_id)
         except AIError as error:
             if error.code is ErrorCode.AGENT_DEFINITION_UNAVAILABLE:
                 raise ModelRetry("requested subagent Agent is unavailable") from error
             raise
+        binding = self._catalog.register_binding(self._compiler.bind(definition))
         idempotency_key = "subagent:" + canonical_sha256(
             {
                 "version": 1,
@@ -106,7 +109,7 @@ class SubagentDispatcher:
             thinking=thinking,
         )
         child = await self._execution.start_subagent(
-            definition.digest,
+            binding.digest,
             request,
             parent_execution_id=parent_execution_id,
             root_execution_id=root_execution_id,

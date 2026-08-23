@@ -78,6 +78,7 @@ def _binding_snapshot(
     return AgentBindingSnapshot(
         version=1,
         agent_spec=spec,
+        agent_digest="b" * 64,
         output_type_module=output.value_type.__module__,
         output_type_qualname=output.value_type.__qualname__,
         output_schema_id=output.schema_id,
@@ -133,14 +134,14 @@ def test_runtime_state_plan_rejects_an_invalid_domain() -> None:
 
 def test_recovery_checkpoint_enforces_attempt_sequence_invariants() -> None:
     now = datetime.now(timezone.utc)
+    snapshot = _binding_snapshot(digest="c" * 64)
     recovery_input = RecoveryExecutionInput(
         user_prompt="prompt",
         principal_id="principal",
         principal_kind="user",
         session_id=None,
         memory_scope=None,
-        agent_id="default",
-        binding_digest="binding",
+        binding_digest=snapshot.binding_digest,
         lineage_kind="RUN",
         parent_execution_id=None,
         root_execution_id="execution",
@@ -148,6 +149,9 @@ def test_recovery_checkpoint_enforces_attempt_sequence_invariants() -> None:
         base_execution_id=None,
         conversation_step_run_id=None,
         idempotency=RecoveryIdempotencyInput("scope", "key", "request"),
+        planning=False,
+        thinking=False,
+        binding=snapshot,
     )
 
     def checkpoint(
@@ -548,8 +552,7 @@ async def test_workflow_gateway_persists_v1_execution_request() -> None:
     await gateway.start_execution(
         "execution",
         local,
-        binding_digest=snapshot.binding_digest,
-        binding=snapshot.to_payload(),
+        binding=snapshot,
     )
     assert len(started) == 1
     workflow, request, workflow_id = started[0]

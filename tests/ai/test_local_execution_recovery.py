@@ -9,12 +9,42 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from linktools.ai.agent import AgentBindingSnapshot
+from linktools.ai.agent._output import bind_output
 from linktools.ai.core import ExecutionLineageKind, ExecutionStatus, Principal
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.runtime import ExecutionRequest
-from linktools.ai.runtime._execution import CancelEffectOutcome
+from linktools.ai.runtime._execution import CancelEffectOutcome, ExecutionStartIdentity
 from linktools.ai.runtime._local import LocalExecutionBackend
 from linktools.ai.runtime.state import ExecutionRecord
+from linktools.ai.spec import AgentSpec
+
+
+def _binding_snapshot() -> AgentBindingSnapshot:
+    output = bind_output()
+    return AgentBindingSnapshot(
+        version=1,
+        agent_spec=AgentSpec("default", 1, "default"),
+        agent_digest="b" * 64,
+        output_type_module=output.value_type.__module__,
+        output_type_qualname=output.value_type.__qualname__,
+        output_schema_id=output.schema_id,
+        output_schema_revision=output.schema_revision,
+        output_schema_fingerprint=output.schema_fingerprint,
+        local_runtime_capability_descriptors=(),
+        binding_digest="a" * 64,
+    )
+
+
+def _binding() -> object:
+    snapshot = _binding_snapshot()
+    definition = SimpleNamespace(
+        digest=snapshot.agent_digest,
+        spec=SimpleNamespace(id="default", allow_tools=()),
+    )
+    return SimpleNamespace(
+        digest=snapshot.binding_digest, snapshot=snapshot, definition=definition
+    )
 
 
 class _Executions:
@@ -47,6 +77,9 @@ class _ExecutionState:
 
 
 class _Metrics:
+    def count(self, metric: str, **labels: str) -> None:
+        del metric, labels
+
     def operation(self, domain: str, target: str, result: str, started_at: float) -> None:
         del domain, target, result, started_at
 
@@ -58,6 +91,24 @@ class _Executor:
     async def execute(self, *args: object, **kwargs: object) -> object:
         del args, kwargs
         raise self.error
+
+
+class _StartCommands:
+    def __init__(self, execution: ExecutionRecord) -> None:
+        self.execution = execution
+        self.recovery_checkpoint = None
+
+    async def commit_start_attempt_checkpoint(
+        self,
+        claim: object,
+        *,
+        recovery_checkpoint: object,
+        session_id: str | None,
+        expected_cursor: object,
+    ) -> ExecutionRecord:
+        del claim, session_id, expected_cursor
+        self.recovery_checkpoint = recovery_checkpoint
+        return replace(self.execution, status=ExecutionStatus.STARTED)
 
 
 def _record() -> ExecutionRecord:
@@ -80,6 +131,9 @@ def _record() -> ExecutionRecord:
         safe_error_details={},
         created_at=now,
         updated_at=now,
+        planning=False,
+        thinking=False,
+        binding=_binding_snapshot(),
     )
 
 
@@ -87,15 +141,10 @@ def _backend(error: Exception) -> LocalExecutionBackend:
     record = _record()
     backend = object.__new__(LocalExecutionBackend)
     backend._execution = _ExecutionState(record)
+    binding = _binding()
     backend._catalog = SimpleNamespace(
         root_ids=("default",),
-        definition=lambda digest: SimpleNamespace(
-            digest=digest,
-            spec=SimpleNamespace(
-                id="default",
-                allow_tools=(),
-            ),
-        )
+        binding=lambda digest: binding,
     )
     backend._recovery_enabled = False
     backend._namespace = "test"
@@ -116,6 +165,28 @@ def _backend(error: Exception) -> LocalExecutionBackend:
 async def _empty_history(execution: ExecutionRecord) -> list[object]:
     del execution
     return []
+
+
+@pytest.mark.asyncio
+async def test_prepare_start_persists_binding_identity_in_recovery_input() -> None:
+    backend = _backend(ValueError("unused"))
+    execution = replace(_record(), status=ExecutionStatus.PENDING_START)
+    commands = _StartCommands(execution)
+    backend._accepting = True
+    backend._recovery_enabled = True
+    backend._runtime_commands = commands
+
+    started = await backend.prepare_start(
+        ExecutionRequest("prompt", Principal("owner", "tenant"), "idempotency"),
+        execution,
+        ExecutionStartIdentity("scope", "key", "request"),
+    )
+
+    assert started.status is ExecutionStatus.STARTED
+    checkpoint = commands.recovery_checkpoint
+    assert checkpoint is not None
+    assert checkpoint.input.binding_digest == execution.binding_digest
+    assert checkpoint.input.binding == execution.binding
 
 
 @pytest.mark.asyncio

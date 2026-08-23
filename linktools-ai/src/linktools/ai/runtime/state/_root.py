@@ -115,6 +115,20 @@ class RuntimeState:
         return self._lifecycle is _RuntimeStateLifecycle.READY
 
     @property
+    def namespace(self) -> str:
+        self._require_ready()
+        if self._namespace is None:
+            raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+        return self._namespace
+
+    @property
+    def tenant_id(self) -> str:
+        self._require_ready()
+        if self._tenant_id is None:
+            raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+        return self._tenant_id
+
+    @property
     def handoff_contract_digest(self) -> str:
         self._require_ready()
         if self._handoff_contract_digest is None:

@@ -94,14 +94,14 @@ class _SessionTranscriptStore(Protocol):
         history_id: str,
         *,
         tenant_id: str,
-        binding_digest: str | None = None,
+        agent_digest: str | None = None,
     ) -> tuple[object, ...]: ...
 
     async def load_model_context(
         self,
         *,
         run_id: str,
-        binding_digest: str,
+        agent_digest: str,
     ) -> tuple[object, ...]: ...
 
     async def latest_snapshot(
@@ -133,7 +133,7 @@ class _SessionHandoffState:
 
 
 class DefaultSessionService:
-    """Enforce session ownership, binding immutability, and revision CAS."""
+    """Enforce session ownership, Agent identity immutability, and revision CAS."""
 
     def __init__(
         self,
@@ -160,7 +160,7 @@ class DefaultSessionService:
         self._handoff_states: dict[tuple[str, str], _SessionHandoffState] = {}
         self._handoff_condition = asyncio.Condition()
 
-    async def create(self, binding_digest: str, request: CreateSessionRequest) -> SessionView:
+    async def create(self, agent_digest: str, request: CreateSessionRequest) -> SessionView:
         resource = ResourceRef(
             ResourceKind.SESSION, request.session_id, request.principal.tenant_id, request.principal.principal_id
         )
@@ -171,7 +171,7 @@ class DefaultSessionService:
                 "tenant_id": request.principal.tenant_id,
                 "principal_id": request.principal.principal_id,
                 "session_id": request.session_id,
-                "binding": binding_digest,
+                "agent_digest": agent_digest,
                 "cwd": request.cwd,
                 "metadata": dict(request.metadata),
             }
@@ -181,7 +181,7 @@ class DefaultSessionService:
             session_id=request.session_id,
             tenant_id=request.principal.tenant_id,
             owner_principal_id=request.principal.principal_id,
-            binding_digest=binding_digest,
+            agent_digest=agent_digest,
             status=SessionStatus.OPEN,
             revision=0,
             resource_generation=0,
@@ -296,11 +296,11 @@ class DefaultSessionService:
                 return await self._transcript_store.load_session_model_context(
                     record.history_id,
                     tenant_id=record.tenant_id,
-                    binding_digest=record.binding_digest,
+                    agent_digest=record.agent_digest,
                 )
             return await self._transcript_store.load_model_context(
                 run_id=record.continuation.step_run_id,
-                binding_digest=record.binding_digest,
+                agent_digest=record.agent_digest,
             )
 
     async def _iter_session_messages(
@@ -333,20 +333,40 @@ class DefaultSessionService:
     ) -> AsyncIterator[object]:
         return self._iter_session_messages(session_id, principal=principal)
 
-    async def resume(self, binding_digest: str, session_id: str, request: ResumeSessionRequest) -> ExecutionHandle:
-        return await self._resume(binding_digest, session_id, request, launch_gate=None)
+    async def resume(
+        self,
+        agent_digest: str,
+        binding_digest: str,
+        session_id: str,
+        request: ResumeSessionRequest,
+    ) -> ExecutionHandle:
+        return await self._resume(
+            agent_digest,
+            binding_digest,
+            session_id,
+            request,
+            launch_gate=None,
+        )
 
     async def _resume_with_launch_gate(
         self,
+        agent_digest: str,
         binding_digest: str,
         session_id: str,
         request: ResumeSessionRequest,
         gate: _LaunchGate,
     ) -> ExecutionHandle:
-        return await self._resume(binding_digest, session_id, request, launch_gate=gate)
+        return await self._resume(
+            agent_digest,
+            binding_digest,
+            session_id,
+            request,
+            launch_gate=gate,
+        )
 
     async def _resume(
         self,
+        agent_digest: str,
         binding_digest: str,
         session_id: str,
         request: ResumeSessionRequest,
@@ -354,14 +374,20 @@ class DefaultSessionService:
         launch_gate: _LaunchGate | None,
     ) -> ExecutionHandle:
         async with self._session_consumer(session_id, request.principal.tenant_id):
-            record = await self._authorized(session_id, request.principal, AuthorizationAction.SESSION_READ)
+            record = await self._authorized(
+                session_id, request.principal, AuthorizationAction.SESSION_READ
+            )
             record = await self._reconcile_terminal_admission(record)
             await self._authorization.authorize(
                 request.principal,
                 AuthorizationAction.EXECUTION_RUN,
-                ResourceRef(ResourceKind.EXECUTION, session_id, request.principal.tenant_id),
+                ResourceRef(
+                    ResourceKind.EXECUTION,
+                    session_id,
+                    request.principal.tenant_id,
+                ),
             )
-            if record.binding_digest != binding_digest:
+            if record.agent_digest != agent_digest:
                 raise AIError(ErrorCode.SESSION_BINDING_MISMATCH)
             execution_request = ExecutionRequest(
                 user_prompt=request.user_prompt,
@@ -392,7 +418,7 @@ class DefaultSessionService:
             except AttributeError as error:
                 raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY) from error
 
-    async def fork(self, binding_digest: str, session_id: str, request: ForkSessionRequest) -> SessionView:
+    async def fork(self, agent_digest: str, session_id: str, request: ForkSessionRequest) -> SessionView:
         async with self._session_consumer(session_id, request.principal.tenant_id):
             source = await self._authorized(session_id, request.principal, AuthorizationAction.SESSION_READ)
             await self._authorization.authorize(
@@ -405,7 +431,7 @@ class DefaultSessionService:
                     request.principal.principal_id,
                 ),
             )
-            if source.binding_digest != binding_digest:
+            if source.agent_digest != agent_digest:
                 raise AIError(ErrorCode.SESSION_BINDING_MISMATCH)
             digest = canonical_sha256(
                 {
@@ -414,7 +440,7 @@ class DefaultSessionService:
                     "principal_id": request.principal.principal_id,
                     "source": session_id,
                     "target": request.new_session_id,
-                    "binding": source.binding_digest,
+                    "agent_digest": source.agent_digest,
                     "cwd": request.cwd,
                 }
             )
@@ -423,7 +449,7 @@ class DefaultSessionService:
                 session_id=request.new_session_id,
                 tenant_id=source.tenant_id,
                 owner_principal_id=source.owner_principal_id,
-                binding_digest=source.binding_digest,
+                agent_digest=source.agent_digest,
                 status=SessionStatus.OPEN,
                 revision=0,
                 resource_generation=0,
@@ -454,13 +480,13 @@ class DefaultSessionService:
             _logger.debug("session forked: source=%s target=%s", session_id, target.session_id)
             return await self._view(target, request.principal)
 
-    async def update(self, binding_digest: str, session_id: str, request: UpdateSessionRequest) -> SessionView:
+    async def update(self, agent_digest: str, session_id: str, request: UpdateSessionRequest) -> SessionView:
         async with self._session_consumer(session_id, request.principal.tenant_id):
-            return await self._update(binding_digest, session_id, request)
+            return await self._update(agent_digest, session_id, request)
 
-    async def _update(self, binding_digest: str, session_id: str, request: UpdateSessionRequest) -> SessionView:
+    async def _update(self, agent_digest: str, session_id: str, request: UpdateSessionRequest) -> SessionView:
         current = await self._authorized(session_id, request.principal, AuthorizationAction.SESSION_UPDATE)
-        if current.binding_digest != binding_digest:
+        if current.agent_digest != agent_digest:
             raise AIError(ErrorCode.SESSION_BINDING_MISMATCH)
         if any(
             key.startswith("linktools.ai.") and current.metadata.get(key) != value
@@ -852,7 +878,7 @@ class DefaultSessionService:
         active = () if active_execution is None else (active_execution.execution_id,)
         return SessionView(
             record.session_id,
-            record.binding_digest,
+            record.agent_digest,
             record.status,
             record.revision,
             record.resource_generation,

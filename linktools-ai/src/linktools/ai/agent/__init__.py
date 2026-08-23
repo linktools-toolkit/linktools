@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """Agent definition compilation and execution."""
 
-from ._binding import AgentBindingSnapshot
+from ._binding import AgentBinding, AgentBindingSnapshot
 from ._builder import build_pydantic_agent
 from ._capabilities import (
     MEMORY_TOOL_NAMES,
@@ -17,7 +17,7 @@ from ._capabilities import (
     select_platform_tool_names,
     tool_name_allowed,
 )
-from ._catalog import AgentDefinitionCatalog
+from ._catalog import AgentCatalog
 from ._compiler import AgentCompiler
 from ._definition import AgentDefinition
 from ._executor import (
@@ -30,26 +30,27 @@ from ._executor import (
 )
 
 __all__ = [
-    "MEMORY_TOOL_NAMES",
-    "PLANNING_TOOL_NAMES",
-    "SUBAGENT_TOOL_NAMES",
-    "WORKSPACE_FILESYSTEM_READ_TOOL_NAMES",
-    "WORKSPACE_FILESYSTEM_TOOL_NAMES",
-    "WORKSPACE_SHELL_TOOL_NAMES",
+    "AgentBinding",
     "AgentBindingSnapshot",
+    "AgentCatalog",
     "AgentCompiler",
+    "build_pydantic_agent",
     "AgentDefinition",
-    "AgentDefinitionCatalog",
     "AgentExecutionResult",
     "AgentExecutor",
     "DurableBoundary",
     "EventSink",
     "LiveDelta",
+    "UsageSink",
+    "MEMORY_TOOL_NAMES",
+    "PLANNING_TOOL_NAMES",
+    "SUBAGENT_TOOL_NAMES",
     "SubagentDelegate",
     "ToolOperationBridge",
     "ToolOperationDecision",
-    "UsageSink",
-    "build_pydantic_agent",
+    "WORKSPACE_FILESYSTEM_READ_TOOL_NAMES",
+    "WORKSPACE_FILESYSTEM_TOOL_NAMES",
+    "WORKSPACE_SHELL_TOOL_NAMES",
     "select_platform_tool_names",
     "tool_name_allowed",
 ]

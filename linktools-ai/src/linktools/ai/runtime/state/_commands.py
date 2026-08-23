@@ -892,7 +892,7 @@ class RuntimeStateCommands:
             prepared_conversation = await self._conversation_steps.prepare_snapshots(
                 conversation_run,
                 (conversation_snapshot,),
-                binding_digest=commit.execution.binding_digest,
+                binding_digest=commit.execution.binding.agent_digest,
             )
         prepared_recovery = ()
         if (
@@ -903,7 +903,7 @@ class RuntimeStateCommands:
             prepared_recovery = await self._recovery_steps.prepare_snapshots(
                 recovery_run,
                 (recovery_snapshot,),
-                binding_digest=commit.execution.binding_digest,
+                binding_digest=commit.execution.binding.agent_digest,
             )
         prepared_execution: PreparedStepSnapshotBatch | tuple[()] = ()
         if (
@@ -915,7 +915,7 @@ class RuntimeStateCommands:
             prepared_execution = await self._execution_steps.prepare_snapshots(
                 execution_run,
                 execution_snapshots,
-                binding_digest=commit.execution.binding_digest,
+                binding_digest=commit.execution.binding.agent_digest,
             )
         seal = _execution_history_seal(
             commit,
@@ -975,7 +975,7 @@ class RuntimeStateCommands:
                             group.transaction(self._conversation_steps.state_store),
                             conversation_run,
                             prepared_conversation[0],
-                            binding_digest=commit.execution.binding_digest,
+                            binding_digest=commit.execution.binding.agent_digest,
                         )
                         session = await self._conversation.get_in_transaction(
                             conversation_transaction,
@@ -1181,7 +1181,7 @@ class RuntimeStateCommands:
                     group.transaction(self._conversation_steps.state_store),
                     conversation_run,
                     prepared_conversation[0],
-                    binding_digest=commit.execution.binding_digest,
+                    binding_digest=commit.execution.binding.agent_digest,
                 )
                 session = await self._conversation.get_in_transaction(
                     conversation_transaction,
@@ -1222,7 +1222,7 @@ class RuntimeStateCommands:
                             next_cursor=next_cursor,
                             run=conversation_run,
                             snapshot=conversation_snapshot,
-                            binding_digest=commit.execution.binding_digest,
+                            binding_digest=commit.execution.binding.agent_digest,
                         ):
                             break
             else:
@@ -1459,7 +1459,7 @@ class RuntimeStateCommands:
                     execution_id=commit.execution.execution_id,
                     events=execution_events,
                     snapshots=execution_snapshots,
-                    binding_digest=commit.execution.binding_digest,
+                    binding_digest=commit.execution.binding.agent_digest,
                 )
             terminal_stores = [self._execution.state_store]
             if recovery_state_merged:
@@ -2148,7 +2148,7 @@ class RuntimeStateCommands:
             if execution_snapshots and not await self._execution_steps.verify_snapshot_projection(
                 run_id=execution_run.run_id,
                 snapshot=execution_snapshots[-1],
-                binding_digest=commit.execution.binding_digest,
+                binding_digest=commit.execution.binding.agent_digest,
             ):
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         return True
@@ -2266,7 +2266,7 @@ class ExecutionStateCommands:
             prepared_snapshots = await self._steps.prepare_snapshots(
                 step_run,
                 snapshots,
-                binding_digest=commit.execution.binding_digest,
+                binding_digest=commit.execution.binding.agent_digest,
             )
         history_seal = _execution_history_seal(
             commit,
@@ -2313,7 +2313,7 @@ class ExecutionStateCommands:
                         if isinstance(prepared_snapshots, PreparedStepSnapshotBatch)
                         else ()
                     ),
-                    binding_digest=commit.execution.binding_digest,
+                    binding_digest=commit.execution.binding.agent_digest,
                     execution_id=commit.execution.execution_id,
                     history_head_guard=(head, head_record),
                 )

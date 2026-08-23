@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-from __future__ import annotations
-
 """Runtime persistence contracts and immutable records.
 
 This module contains no backend, filesystem, database, or workflow code.  It
 is the single semantic boundary shared by the local and SQL implementations.
 """
+
+from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
@@ -253,7 +253,7 @@ ContextProjectionItem = TranscriptSpanRef | InlineContextBlock
 
 @dataclass(frozen=True, slots=True)
 class ContextProjection:
-    binding_digest: str
+    agent_digest: str
     items: tuple[ContextProjectionItem, ...]
     digest: str
 
@@ -308,7 +308,7 @@ class SessionRecord:
     session_id: str
     tenant_id: str
     owner_principal_id: str
-    binding_digest: str
+    agent_digest: str
     status: SessionStatus
     revision: int
     resource_generation: int
@@ -396,20 +396,17 @@ class ExecutionRecord:
     safe_error_details: Mapping[str, JsonValue]
     created_at: datetime
     updated_at: datetime
+    planning: bool
+    thinking: bool
+    binding: AgentBindingSnapshot
     memory_scope: str | None = None
     conversation_step_run_id: str | None = None
     result: ResultRecord | None = None
-    planning: bool = False
-    thinking: bool = False
-    binding: AgentBindingSnapshot | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.planning, bool) or not isinstance(self.thinking, bool):
             raise TypeError("execution modes must be boolean")
-        if self.binding is None:
-            if self.planning or self.thinking:
-                raise ValueError("legacy execution without binding cannot enable modes")
-        elif self.binding.binding_digest != self.binding_digest:
+        if not isinstance(self.binding, AgentBindingSnapshot) or self.binding.binding_digest != self.binding_digest:
             raise ValueError("execution binding snapshot does not match binding digest")
 
 
@@ -827,7 +824,6 @@ class RecoveryExecutionInput:
     principal_kind: str
     session_id: str | None
     memory_scope: str | None
-    agent_id: str
     binding_digest: str
     lineage_kind: str
     parent_execution_id: str | None
@@ -836,9 +832,9 @@ class RecoveryExecutionInput:
     base_execution_id: str | None
     conversation_step_run_id: str | None
     idempotency: RecoveryIdempotencyInput
-    planning: bool = False
-    thinking: bool = False
-    binding: AgentBindingSnapshot | None = None
+    planning: bool
+    thinking: bool
+    binding: AgentBindingSnapshot
 
     def __post_init__(self) -> None:
         prompt = self.user_prompt
@@ -848,13 +844,7 @@ class RecoveryExecutionInput:
             raise TypeError("recovery prompt payload is invalid")
         if not isinstance(self.planning, bool) or not isinstance(self.thinking, bool):
             raise TypeError("recovery execution modes must be boolean")
-        if self.binding is None:
-            if self.planning or self.thinking:
-                raise ValueError("legacy recovery input without binding cannot enable modes")
-        elif (
-            self.binding.binding_digest != self.binding_digest
-            or self.binding.agent_spec.id != self.agent_id
-        ):
+        if not isinstance(self.binding, AgentBindingSnapshot) or self.binding.binding_digest != self.binding_digest:
             raise ValueError("recovery binding snapshot does not match execution identity")
 
     def prompt_text(self) -> str:

@@ -6,12 +6,11 @@ from contextlib import asynccontextmanager
 from types import SimpleNamespace
 
 import pytest
-from linktools.ai.agent import (
-    AgentBindingSnapshot,
-    AgentDefinition,
-    AgentDefinitionCatalog,
-)
-from linktools.ai.agent._output import bind_output
+from pydantic import BaseModel
+from pydantic_ai.capabilities import AbstractCapability
+
+import linktools.ai as ai
+from linktools.ai.agent import AgentBindingSnapshot
 from linktools.ai.capability import RuntimeCapability
 from linktools.ai.core import SessionStatus
 from linktools.ai.errors import AIError, ErrorCode
@@ -23,14 +22,15 @@ from linktools.ai.runtime import (
     Runtime,
     SessionView,
 )
-from linktools.ai.runtime._factory import _restore_recovery_definitions
+from linktools.ai.runtime._factory import _restore_recovery_bindings
 from linktools.ai.runtime._session import DefaultSessionService
 from linktools.ai.runtime.state import RecoveryCheckpointState
 from linktools.ai.spec import AgentSpec
 from linktools.ai.workspace import trusted_workspace_principal
-from pydantic_ai.capabilities import AbstractCapability
 
-from linktools import ai
+
+class CompositionStructuredOutput(BaseModel):
+    value: str
 
 
 class _DurableCapability(AbstractCapability[None]):
@@ -78,6 +78,7 @@ def test_agent_binding_snapshot_is_deeply_immutable() -> None:
     snapshot = AgentBindingSnapshot(
         version=1,
         agent_spec=AgentSpec("agent", 1, "model"),
+        agent_digest="c" * 64,
         output_type_module="example.output",
         output_type_qualname="Output",
         output_schema_id="output",
@@ -100,51 +101,15 @@ def test_agent_binding_snapshot_is_deeply_immutable() -> None:
     assert persisted == [{"config": {"items": ["first"]}}]
 
 
-def test_catalog_uses_durable_semantics_for_restored_capability_instances() -> None:
-    digest = "a" * 64
-    spec = AgentSpec("agent", 1, "model")
-    output = bind_output()
-    first_capability = RuntimeCapability.from_spec(
-        "local",
-        _DurableCapability,
-        config={},
-    )
-    restored_capability = RuntimeCapability.from_spec(
-        "local",
-        _DurableCapability,
-        config={},
-    )
-    assert first_capability.capability is not restored_capability.capability
+def test_agent_definition_no_longer_owns_output_binding() -> None:
+    from dataclasses import fields
+    from linktools.ai.agent import AgentDefinition
 
-    def definition(capability: RuntimeCapability) -> AgentDefinition:
-        descriptor = capability.descriptor
-        assert descriptor is not None
-        snapshot = AgentBindingSnapshot(
-            version=1,
-            agent_spec=spec,
-            output_type_module=output.value_type.__module__,
-            output_type_qualname=output.value_type.__qualname__,
-            output_schema_id=output.schema_id,
-            output_schema_revision=output.schema_revision,
-            output_schema_fingerprint=output.schema_fingerprint,
-            local_runtime_capability_descriptors=(descriptor,),
-            binding_digest=digest,
-        )
-        return AgentDefinition(
-            digest,
-            spec,
-            SimpleNamespace(fingerprint="b" * 64),
-            output,
-            (capability,),
-            snapshot,
-        )
-
-    first = definition(first_capability)
-    restored = definition(restored_capability)
-    catalog = AgentDefinitionCatalog({})
-    assert catalog.register(first) is first
-    assert catalog.register(restored) is first
-
+    names = {field.name for field in fields(AgentDefinition)}
+    assert "digest" in names
+    assert "spec" in names
+    assert "output_binding" not in names
+    assert "binding_snapshot" not in names
 
 class _SessionService:
     def __init__(self, binding_digest: str) -> None:
@@ -180,24 +145,7 @@ class _CaptureSessionExecution:
 
 
 @pytest.mark.asyncio
-async def test_runtime_session_definition_reports_binding_mismatch() -> None:
-    runtime = object.__new__(Runtime)
-    runtime.session = _SessionService("b" * 64)
-    runtime._catalog = SimpleNamespace(definition=lambda digest: digest)
-    preferred = SimpleNamespace(digest="a" * 64)
-
-    with pytest.raises(AIError) as error:
-        await runtime._session_definition(
-            "session",
-            trusted_workspace_principal("tenant"),
-            preferred=preferred,
-        )
-
-    assert error.value.code is ErrorCode.SESSION_BINDING_MISMATCH
-
-
-@pytest.mark.asyncio
-async def test_runtime_existing_session_reports_binding_mismatch() -> None:
+async def test_runtime_existing_session_reports_agent_mismatch() -> None:
     runtime = object.__new__(Runtime)
     runtime.session = _SessionService("b" * 64)
     definition = SimpleNamespace(
@@ -229,7 +177,7 @@ async def test_session_resume_preserves_execution_modes() -> None:
 
     async def _authorized(session_id: str, principal: object, action: object) -> object:
         del session_id, principal, action
-        return SimpleNamespace(binding_digest="a" * 64)
+        return SimpleNamespace(agent_digest="a" * 64)
 
     async def _reconcile(record: object) -> object:
         return record
@@ -240,6 +188,7 @@ async def test_session_resume_preserves_execution_modes() -> None:
 
     await service.resume(
         "a" * 64,
+        "b" * 64,
         "session",
         ResumeSessionRequest(
             principal=trusted_workspace_principal("tenant"),
@@ -256,18 +205,14 @@ async def test_session_resume_preserves_execution_modes() -> None:
 
 
 @pytest.mark.asyncio
-async def test_recovery_handoff_schema_must_match_restored_definition() -> None:
-    digest = "a" * 64
-    snapshot = SimpleNamespace(
-        binding_digest=digest,
-        agent_spec=SimpleNamespace(id="agent"),
-    )
+async def test_recovery_handoff_schema_must_match_restored_binding() -> None:
+    binding_digest = "a" * 64
+    snapshot = SimpleNamespace(binding_digest=binding_digest)
     recovery_input = SimpleNamespace(
-        binding_digest=digest,
+        binding_digest=binding_digest,
         planning=False,
         thinking=False,
         binding=snapshot,
-        agent_id="agent",
     )
     checkpoint = SimpleNamespace(
         execution_id="execution",
@@ -282,9 +227,6 @@ async def test_recovery_handoff_schema_must_match_restored_definition() -> None:
             )
         ),
     )
-    checkpoints = SimpleNamespace(
-        list_recoverable_page=lambda **kwargs: None,
-    )
 
     async def _list_recoverable_page(**kwargs: object) -> object:
         del kwargs
@@ -292,16 +234,20 @@ async def test_recovery_handoff_schema_must_match_restored_definition() -> None:
 
     async def _get_execution(*args: object, **kwargs: object) -> None:
         del args, kwargs
+        return None
 
-    checkpoints.list_recoverable_page = _list_recoverable_page
     state = SimpleNamespace(
-        recovery=SimpleNamespace(checkpoints=checkpoints),
+        recovery=SimpleNamespace(
+            checkpoints=SimpleNamespace(list_recoverable_page=_list_recoverable_page)
+        ),
         execution=SimpleNamespace(
             executions=SimpleNamespace(get=_get_execution),
         ),
     )
-    definition = SimpleNamespace(
-        spec=SimpleNamespace(id="agent"),
+    definition = SimpleNamespace(digest="d" * 64)
+    binding = SimpleNamespace(
+        digest=binding_digest,
+        definition=definition,
         output_binding=SimpleNamespace(
             schema_id="expected",
             schema_revision=1,
@@ -309,14 +255,13 @@ async def test_recovery_handoff_schema_must_match_restored_definition() -> None:
         ),
     )
     catalog = SimpleNamespace(
-        register=lambda value: value,
+        register_definition=lambda value: value,
+        register_binding=lambda value: value,
     )
-    compiler = SimpleNamespace(
-        restore=lambda value: definition,
-    )
+    compiler = SimpleNamespace(restore=lambda value: binding)
 
     with pytest.raises(AIError) as error:
-        await _restore_recovery_definitions(
+        await _restore_recovery_bindings(
             catalog,
             compiler,
             state,
@@ -324,3 +269,49 @@ async def test_recovery_handoff_schema_must_match_restored_definition() -> None:
         )
 
     assert error.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
+
+
+@pytest.mark.asyncio
+async def test_agent_and_binding_identity_split_acceptance(tmp_path) -> None:
+    from linktools.ai.model import ModelRegistry
+    from linktools.ai.workspace import Workspace, open_workspace_runtime
+
+    workspace = Workspace.load(tmp_path)
+    models = ModelRegistry.openai(model="gpt-test")
+    async with open_workspace_runtime(workspace, models=models) as runtime:
+        base = runtime.agent()
+        text_binding = runtime._bind_agent(base._agent_digest)
+        structured_binding = runtime._bind_agent(
+            base._agent_digest,
+            output=CompositionStructuredOutput,
+        )
+
+        assert text_binding.definition.digest == structured_binding.definition.digest
+        assert text_binding.digest != structured_binding.digest
+        assert runtime._bind_agent(base._agent_digest).digest == text_binding.digest
+
+        local_capability = RuntimeCapability.from_spec(
+            "local-identity",
+            _DurableCapability,
+            config={"mode": "strict"},
+            revision=1,
+        )
+        local = runtime.agent(capabilities=(local_capability,))
+        local_binding = runtime._bind_agent(local._agent_digest)
+        assert local._agent_digest != base._agent_digest
+        assert local_binding.digest != text_binding.digest
+
+        session = await base.create_session("identity-session")
+        assert session.agent_digest == base._agent_digest
+        await runtime._ensure_session(
+            runtime._definition(base._agent_digest),
+            session.session_id,
+            runtime.default_principal,
+        )
+        with pytest.raises(AIError) as error:
+            await runtime._ensure_session(
+                runtime._definition(local._agent_digest),
+                session.session_id,
+                runtime.default_principal,
+            )
+        assert error.value.code is ErrorCode.SESSION_BINDING_MISMATCH

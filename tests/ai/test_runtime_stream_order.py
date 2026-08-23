@@ -6,6 +6,8 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from linktools.ai.agent import AgentBindingSnapshot
+from linktools.ai.agent._output import bind_output
 from linktools.ai.core import (
     ExecutionDeltaType,
     ExecutionEventType,
@@ -17,6 +19,7 @@ from linktools.ai.core import (
     UsageMetrics,
 )
 from linktools.ai.errors import AIError, ErrorCode
+from linktools.ai.spec import AgentSpec
 from linktools.ai.runtime import RuntimeState
 from linktools.ai.runtime._event import (
     DefaultEventService,
@@ -37,6 +40,22 @@ from linktools.ai.runtime.state._contracts import (
 )
 
 
+def _binding_snapshot() -> AgentBindingSnapshot:
+    output = bind_output()
+    return AgentBindingSnapshot(
+        version=1,
+        agent_spec=AgentSpec("default", 1, "default"),
+        agent_digest="b" * 64,
+        output_type_module=output.value_type.__module__,
+        output_type_qualname=output.value_type.__qualname__,
+        output_schema_id=output.schema_id,
+        output_schema_revision=output.schema_revision,
+        output_schema_fingerprint=output.schema_fingerprint,
+        local_runtime_capability_descriptors=(),
+        binding_digest="a" * 64,
+    )
+
+
 def _execution(
     *,
     status: ExecutionStatus = ExecutionStatus.STARTED,
@@ -48,7 +67,7 @@ def _execution(
         execution_id="execution",
         tenant_id="tenant",
         session_id=None,
-        binding_digest="binding",
+        binding_digest="a" * 64,
         parent_execution_id=None,
         root_execution_id="execution",
         source_execution_id=None,
@@ -62,6 +81,9 @@ def _execution(
         safe_error_details={},
         created_at=now,
         updated_at=now,
+        planning=False,
+        thinking=False,
+        binding=_binding_snapshot(),
     )
 
 

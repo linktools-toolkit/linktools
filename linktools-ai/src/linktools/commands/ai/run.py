@@ -122,9 +122,15 @@ async def _emit_result(
     planning: bool,
     thinking: bool,
 ) -> int:
-    agent = runtime.agent(planning=planning, thinking=thinking)
+    agent = runtime.agent()
     if as_json:
-        result = await agent.run(prompt, session_id=session_id, memory_scope=memory_scope)
+        result = await agent.run(
+            prompt,
+            session_id=session_id,
+            memory_scope=memory_scope,
+            planning=planning,
+            thinking=thinking,
+        )
         payload = _result_payload(result)
         print(json.dumps(payload, ensure_ascii=False, sort_keys=True))
         if result.status is not ExecutionStatus.SUCCEEDED:
@@ -141,7 +147,13 @@ async def _emit_result(
     terminal_status = "UNKNOWN"
     terminal_error_code: object = None
     terminal_safe_details: object = {}
-    async for event in agent.stream(prompt, session_id=session_id, memory_scope=memory_scope):
+    async for event in agent.stream(
+        prompt,
+        session_id=session_id,
+        memory_scope=memory_scope,
+        planning=planning,
+        thinking=thinking,
+    ):
         execution_id = event.execution_id
         if event.event_type is ExecutionDeltaType.ASSISTANT_TEXT_DELTA:
             text = event.payload.get("text") if isinstance(event.payload, dict) else None

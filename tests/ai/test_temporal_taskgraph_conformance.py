@@ -52,6 +52,7 @@ def _binding() -> AgentBindingSnapshot:
     return AgentBindingSnapshot(
         version=1,
         agent_spec=AgentSpec("agent", 1, "model"),
+        agent_digest="c" * 64,
         output_type_module="builtins",
         output_type_qualname="str",
         output_schema_id="test-output",

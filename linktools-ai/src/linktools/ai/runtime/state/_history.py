@@ -18,6 +18,7 @@ from .._message import decode_model_messages, encode_model_messages
 from ..service_api import SessionHistoryItem
 from ._codec import (
     _decode_enveloped_domain,
+    _encode_persisted_domain,
     encode_domain,
     encode_envelope,
 )
@@ -156,7 +157,7 @@ class _ContextProjector:
         owner_id: str,
         messages: Sequence[ModelMessage],
         *,
-        binding_digest: str,
+        agent_digest: str,
         origins: Sequence[TranscriptOrigin] = (),
         sources: Sequence[TranscriptMessageRef | None] = (),
     ) -> ContextProjection:
@@ -210,18 +211,18 @@ class _ContextProjector:
                     )
                 )
             index = end
-        digest = self._digest(binding_digest, items)
-        return ContextProjection(binding_digest, tuple(items), digest)
+        digest = self._digest(agent_digest, items)
+        return ContextProjection(agent_digest, tuple(items), digest)
 
     def _digest(
         self,
-        binding_digest: str,
+        agent_digest: str,
         items: Sequence[TranscriptSpanRef | InlineContextBlock],
     ) -> str:
         return hashlib.sha256(
             canonical_json_bytes(
                 {
-                    "binding_digest": binding_digest,
+                    "agent_digest": agent_digest,
                     "items": encode_domain(tuple(items)),
                 }
             )
@@ -320,7 +321,9 @@ class TranscriptRepository:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         try:
             head = _decode_enveloped_domain(record.data, TranscriptHeadRecord)
-        except (TypeError, ValueError, AIError) as error:
+        except AIError:
+            raise
+        except (TypeError, ValueError) as error:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
         if head.owner_domain is not self._owner_domain:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -345,7 +348,7 @@ class TranscriptRepository:
             0,
             None,
             encode_envelope(
-                {"type": "transcript_head", "payload": encode_domain(head)}
+                {"type": "transcript_head", "payload": _encode_persisted_domain(head)}
             ),
         )
 
@@ -521,7 +524,7 @@ class TranscriptRepository:
         upgraded = replace(
             head_record,
             data=encode_envelope(
-                {"type": "transcript_head", "payload": encode_domain(next_head)}
+                {"type": "transcript_head", "payload": _encode_persisted_domain(next_head)}
             ),
             storage_version=head_record.storage_version + 1,
         )
@@ -547,7 +550,7 @@ class TranscriptRepository:
                     encode_envelope(
                         {
                             "type": "transcript_chunk",
-                            "payload": encode_domain(chunk),
+                            "payload": _encode_persisted_domain(chunk),
                         }
                     ),
                 )
@@ -664,7 +667,7 @@ class TranscriptRepository:
                                 encode_envelope(
                                     {
                                         "type": "transcript_seek",
-                                        "payload": encode_domain(seek),
+                                        "payload": _encode_persisted_domain(seek),
                                     }
                                 ),
                             )
@@ -688,7 +691,9 @@ class TranscriptRepository:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         try:
             return _decode_enveloped_domain(record.data, TranscriptSeekRecord)
-        except (TypeError, ValueError, AIError) as error:
+        except AIError:
+            raise
+        except (TypeError, ValueError) as error:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
 
     async def prepare_projection(
@@ -737,8 +742,8 @@ class TranscriptRepository:
             changed = True
         if not changed:
             return projection
-        digest = self._projector._digest(projection.binding_digest, items)
-        return ContextProjection(projection.binding_digest, tuple(items), digest)
+        digest = self._projector._digest(projection.agent_digest, items)
+        return ContextProjection(projection.agent_digest, tuple(items), digest)
 
     def history_stream(self, history_id: str) -> bytes:
         return stream_digest(
@@ -920,16 +925,16 @@ class TranscriptRepository:
         history_id: str,
         *,
         tenant_id: str,
-        binding_digest: str | None = None,
+        agent_digest: str | None = None,
     ) -> LoadedModelContext:
         require_no_run_history_lock("TranscriptRepository.load_session_model_context")
         projection = await self.load_projection(history_id)
         if projection is not None:
-            if binding_digest is not None and projection.binding_digest != binding_digest:
+            if agent_digest is not None and projection.agent_digest != agent_digest:
                 raise AIError(ErrorCode.SESSION_BINDING_MISMATCH)
             return await self.load_model_context(
                 history_id,
-                binding_digest=binding_digest,
+                agent_digest=agent_digest,
             )
         head = await self.get_head(history_id)
         if head is None:
@@ -1024,7 +1029,7 @@ class TranscriptRepository:
             encode_envelope(
                 {
                     "type": "context_projection",
-                    "payload": encode_domain(projection),
+                    "payload": _encode_persisted_domain(projection),
                 }
             ),
         )
@@ -1116,7 +1121,7 @@ class TranscriptRepository:
         self,
         owner_id: str,
         *,
-        binding_digest: str | None = None,
+        agent_digest: str | None = None,
     ) -> LoadedModelContext:
         require_no_run_history_lock("TranscriptRepository.load_model_context")
         projection = await self.load_projection(owner_id)
@@ -1127,7 +1132,7 @@ class TranscriptRepository:
             if head.message_count:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             return LoadedModelContext(())
-        if binding_digest is not None and projection.binding_digest != binding_digest:
+        if agent_digest is not None and projection.agent_digest != agent_digest:
             _logger.info(
                 "context projection binding mismatch: domain=%s owner=%s",
                 self._runtime_domain.value,
@@ -1659,14 +1664,14 @@ class TranscriptRepository:
         owner_id: str,
         messages: Sequence[ModelMessage],
         *,
-        binding_digest: str,
+        agent_digest: str,
         origins: Sequence[TranscriptOrigin] = (),
         sources: Sequence[TranscriptMessageRef | None] = (),
     ) -> ContextProjection:
         return self._projector.project(
             owner_id,
             messages,
-            binding_digest=binding_digest,
+            agent_digest=agent_digest,
             origins=origins,
             sources=sources,
         )
@@ -1690,8 +1695,10 @@ class TranscriptRepository:
     def decode_chunk(self, fact: StoredFact) -> TranscriptChunk:
         try:
             return _decode_enveloped_domain(fact.data, TranscriptChunk)
-        except AIError as error:
-            raise ValueError("transcript chunk payload is invalid") from error
+        except AIError:
+            raise
+        except (TypeError, ValueError) as error:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
 
     def _owner_key(self, owner_id: str) -> bytes:
         return self._head_key(owner_id)

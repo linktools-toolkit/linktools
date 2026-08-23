@@ -16,7 +16,6 @@ from linktools.ai.asset import (
     AssetRepository,
     AssetStore,
     AssetTypeBinding,
-    AssetTypeRegistry,
     AssetVariantBinding,
     DirectoryAssetBackend,
     DirectoryLayout,
@@ -43,12 +42,7 @@ def build_asset_repository(
     *,
     extra_bindings: tuple[AssetTypeBinding[object], ...] = (),
 ) -> AssetRepository:
-    registry = AssetTypeRegistry()
-    for binding in builtin_asset_bindings():
-        registry.register(binding)
-    for binding in extra_bindings:
-        registry.register(binding)
-    return AssetRepository(store, registry.freeze())
+    return AssetRepository(store, (*builtin_asset_bindings(), *extra_bindings))
 
 
 @dataclass(frozen=True, slots=True)
@@ -180,9 +174,7 @@ async def _repo() -> tuple[AssetStore, AssetRepository]:
     backend = InMemoryAssetBackend()
     store = AssetStore(StorageOverlay(backend, writer=backend))
     await store.initialize()
-    registry = AssetTypeRegistry()
-    registry.register(_binding())
-    return store, AssetRepository(store, registry.freeze())
+    return store, AssetRepository(store, (_binding(),))
 
 
 @pytest.mark.asyncio
@@ -247,9 +239,7 @@ async def test_ancestor_probe_reports_multiple_directory_variants() -> None:
     backend = InMemoryAssetBackend()
     store = AssetStore(StorageOverlay(backend, writer=backend))
     await store.initialize()
-    registry = AssetTypeRegistry()
-    registry.register(_multi_directory_binding())
-    repository = AssetRepository(store, registry.freeze())
+    repository = AssetRepository(store, (_multi_directory_binding(),))
     await store.put(AssetKey("multi", "foo/AGENT.md"), b"agent")
     await store.put(AssetKey("multi", "foo/SKILL.md"), b"skill")
 
@@ -273,9 +263,7 @@ async def test_ancestor_probe_reuses_directory_stat_when_completing_variants() -
 
     store = _CountingStore()
     await store.initialize()
-    registry = AssetTypeRegistry()
-    registry.register(_binding())
-    repository = AssetRepository(store, registry.freeze())
+    repository = AssetRepository(store, (_binding(),))
     await store.put(AssetKey("subagent", "foo.md"), b"legacy")
     await store.put(AssetKey("subagent", "foo/AGENT.md"), b"directory")
 
@@ -320,26 +308,24 @@ async def test_repository_rejects_descendant_takeover_and_scope_paths() -> None:
     assert error.value.code is ErrorCode.ASSET_PATH_ABSOLUTE
 
 
-def test_registry_freeze_rejects_overlapping_single_file_layouts() -> None:
-    registry = AssetTypeRegistry()
+def test_repository_rejects_overlapping_single_file_layouts() -> None:
+    store = AssetStore(StorageOverlay(InMemoryAssetBackend()))
     with pytest.raises(AIError) as error:
-        registry.register(
-            AssetTypeBinding(
-                "sample",
-                _Value,
-                (
-                    AssetVariantBinding("short", SingleFileLayout(".md"), _Codec(), "short", 1),
-                    AssetVariantBinding("long", SingleFileLayout(".agent.md"), _Codec(), "long", 1),
+        AssetRepository(
+            store,
+            (
+                AssetTypeBinding(
+                    "sample",
+                    _Value,
+                    (
+                        AssetVariantBinding("short", SingleFileLayout(".md"), _Codec(), "short", 1),
+                        AssetVariantBinding("long", SingleFileLayout(".agent.md"), _Codec(), "long", 1),
+                    ),
+                    "short",
                 ),
-                "short",
-            )
+            ),
         )
     assert error.value.code is ErrorCode.ASSET_CODEC_CONFLICT
-    frozen = AssetTypeRegistry()
-    frozen.register(_binding())
-    frozen.freeze()
-    with pytest.raises(AIError):
-        frozen.register(_binding())
 
 
 @pytest.mark.parametrize("layout", (object(), _SingleLayout(".md"), _DirectoryLayout("AGENT.md")))
@@ -359,17 +345,20 @@ def test_registry_rejects_non_concrete_value_types(value_type: object) -> None:
         )
 
 
-def test_registry_accepts_concrete_protocol_subclass_value_type() -> None:
-    registry = AssetTypeRegistry()
-    registry.register(
-        AssetTypeBinding(
-            "concrete-protocol",
-            _ConcreteProtocolValue,
-            (AssetVariantBinding("file", SingleFileLayout(""), _Codec(), "concrete-protocol", 1),),
-            "file",
-        )
+def test_repository_accepts_concrete_protocol_subclass_value_type() -> None:
+    store = AssetStore(StorageOverlay(InMemoryAssetBackend()))
+    repository = AssetRepository(
+        store,
+        (
+            AssetTypeBinding(
+                "concrete-protocol",
+                _ConcreteProtocolValue,
+                (AssetVariantBinding("file", SingleFileLayout(""), _ConcreteProtocolCodec(), "concrete-protocol", 1),),
+                "file",
+            ),
+        ),
     )
-    assert "concrete-protocol" in registry.freeze().kinds
+    assert repository.kinds == ("concrete-protocol",)
 
 
 @pytest.mark.asyncio
@@ -377,24 +366,25 @@ async def test_concrete_protocol_subclass_keeps_typed_runtime_exact_type() -> No
     backend = InMemoryAssetBackend()
     store = AssetStore(StorageOverlay(backend, writer=backend))
     await store.initialize()
-    registry = AssetTypeRegistry()
-    registry.register(
-        AssetTypeBinding(
-            "concrete-protocol-runtime",
-            _ConcreteProtocolValue,
-            (
-                AssetVariantBinding(
-                    "file",
-                    SingleFileLayout(""),
-                    _ConcreteProtocolCodec(),
-                    "concrete-protocol-runtime",
-                    1,
+    repository = AssetRepository(
+        store,
+        (
+            AssetTypeBinding(
+                "concrete-protocol-runtime",
+                _ConcreteProtocolValue,
+                (
+                    AssetVariantBinding(
+                        "file",
+                        SingleFileLayout(""),
+                        _ConcreteProtocolCodec(),
+                        "concrete-protocol-runtime",
+                        1,
+                    ),
                 ),
+                "file",
             ),
-            "file",
-        )
+        ),
     )
-    repository = AssetRepository(store, registry.freeze())
     ref = AssetRef("concrete-protocol-runtime", "value")
     value = _ConcreteProtocolValue("ok")
     written = await repository.put(ref, value)
@@ -471,24 +461,23 @@ async def test_repository_type_identity_and_codec_errors_have_no_write_side_effe
     assert error.value.code is ErrorCode.ASSET_CONTENT_MISMATCH
     assert await store.get(AssetKey("subagent", "identity/AGENT.md")) is None
 
-    registry = AssetTypeRegistry()
-    registry.register(
-        AssetTypeBinding(
-            "wrong",
-            _Value,
-            (AssetVariantBinding("wrong", SingleFileLayout(""), _WrongTypeCodec(), "wrong", 1),),
-            "wrong",
-        )
+    extra = AssetRepository(
+        store,
+        (
+            AssetTypeBinding(
+                "wrong",
+                _Value,
+                (AssetVariantBinding("wrong", SingleFileLayout(""), _WrongTypeCodec(), "wrong", 1),),
+                "wrong",
+            ),
+            AssetTypeBinding(
+                "broken",
+                _Value,
+                (AssetVariantBinding("broken", SingleFileLayout(""), _BrokenCodec(), "broken", 1),),
+                "broken",
+            ),
+        ),
     )
-    registry.register(
-        AssetTypeBinding(
-            "broken",
-            _Value,
-            (AssetVariantBinding("broken", SingleFileLayout(""), _BrokenCodec(), "broken", 1),),
-            "broken",
-        )
-    )
-    extra = AssetRepository(store, registry.freeze())
     await store.put(AssetKey("wrong", "item"), b"item")
     with pytest.raises(AIError) as error:
         await extra.resolve(AssetRef("wrong", "item"))
@@ -504,9 +493,7 @@ async def test_repository_compensates_post_write_layout_conflict() -> None:
     backend = InMemoryAssetBackend()
     store = _RaceStore(backend)
     await store.initialize()
-    registry = AssetTypeRegistry()
-    registry.register(_binding())
-    repository = AssetRepository(store, registry.freeze())
+    repository = AssetRepository(store, (_binding(),))
     with pytest.raises(AIError) as error:
         await repository.put(AssetRef("subagent", "foo"), _Value("foo", "foo"))
     assert error.value.code is ErrorCode.STORAGE_CONFLICT
@@ -519,9 +506,7 @@ async def test_repository_surfaces_recovery_required_when_compensation_fails() -
     backend = InMemoryAssetBackend()
     store = _RecoveryRaceStore(backend)
     await store.initialize()
-    registry = AssetTypeRegistry()
-    registry.register(_binding())
-    repository = AssetRepository(store, registry.freeze())
+    repository = AssetRepository(store, (_binding(),))
     with pytest.raises(AIError) as error:
         await repository.put(AssetRef("subagent", "foo"), _Value("foo", "foo"))
     assert error.value.code is ErrorCode.ASSET_RECOVERY_REQUIRED
@@ -536,9 +521,7 @@ async def test_local_directory_backend_can_be_used_as_a_read_only_logical_layer(
     backend = DirectoryAssetBackend(str(root))
     store = AssetStore(StorageOverlay(backend))
     await store.initialize()
-    registry = AssetTypeRegistry()
-    registry.register(_binding())
-    repository = AssetRepository(store, registry.freeze())
+    repository = AssetRepository(store, (_binding(),))
     resolved = await repository.resolve(AssetRef("subagent", "foo"))
     assert resolved.spec.id == "foo"
     assert await resolved.scope.get("AGENT.md") == b"foo"
