@@ -16,62 +16,13 @@ jobs:
       - uses: actions/checkout@v4
         with:
           ref: ${{ github.event.pull_request.head.ref }}
-
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-
       - name: Apply exact patches
         run: |
           python linktools-ai/scripts/build/_error_contract_closure.py
-          python - <<'PY'
-          from pathlib import Path
-
-          path = Path("tests/ai/test_local_execution_recovery.py")
-          text = path.read_text()
-          old = "assert failure.code is ErrorCode.STORAGE_INTEGRITY_ERROR"
-          new = "assert failure.code is ErrorCode.INTERNAL_ERROR"
-          if text.count(old) != 1:
-              raise SystemExit("expected one local worker error assertion")
-          path.write_text(text.replace(old, new))
-
-          path = Path("linktools-ai/src/linktools/ai/asset/_repository.py")
-          text = path.read_text()
-          old = "ErrorCode.ASSET_LAYOUT_CONFLICT if for_write else ErrorCode.STORAGE_NOT_FOUND"
-          new = "ErrorCode.ASSET_LAYOUT_CONFLICT if for_write else ErrorCode.ASSET_NOT_FOUND"
-          if text.count(old) != 1:
-              raise SystemExit("expected one asset owner read error mapping")
-          path.write_text(text.replace(old, new))
-
-          path = Path("tests/ai/test_temporal_taskgraph_conformance.py")
-          text = path.read_text()
-          old = "from linktools.ai.core import Principal, TaskStatus, canonical_sha256"
-          new = "from linktools.ai.core import ExecutionStatus, Principal, TaskStatus, UsageMetrics, canonical_sha256"
-          if text.count(old) != 1:
-              raise SystemExit("expected temporal core import")
-          text = text.replace(old, new)
-          old = "    ExecutionRequest,\n    RuntimeObjectKeyFactory,"
-          new = "    ExecutionRequest,\n    ExecutionResult,\n    RuntimeObjectKeyFactory,"
-          if text.count(old) != 1:
-              raise SystemExit("expected temporal runtime import")
-          text = text.replace(old, new)
-          old = "        self.result_digest = canonical_sha256({\"output\": \"value\"})\n        self.result_calls = 0\n"
-          new = "        self.result_digest = canonical_sha256({\"output\": \"value\"})\n        self.result_calls = 0\n        self.terminal_status = ExecutionStatus.FAILED\n"
-          if text.count(old) != 1:
-              raise SystemExit("expected replay runner state")
-          text = text.replace(old, new)
-          old = "    async def result(\n        self,\n        execution_id: str,\n        *,\n        principal: Principal,\n    ) -> TaskNodeRunResult:\n"
-          new = "    async def terminal_result(\n        self,\n        execution_id: str,\n        *,\n        principal: Principal,\n    ) -> ExecutionResult:\n        del principal\n        error_code = (\n            ErrorCode.EXECUTION_CANCELLED\n            if self.terminal_status is ExecutionStatus.CANCELLED\n            else ErrorCode.EXECUTION_FAILED\n        )\n        return ExecutionResult(\n            execution_id,\n            self.terminal_status,\n            None,\n            None,\n            None,\n            None,\n            UsageMetrics(),\n            error_code.value,\n        )\n\n    async def result(\n        self,\n        execution_id: str,\n        *,\n        principal: Principal,\n    ) -> TaskNodeRunResult:\n"
-          if text.count(old) != 1:
-              raise SystemExit("expected replay runner result method")
-          text = text.replace(old, new)
-          old = "    runner = _ReplayRunner()\n    state, activity, request = await _runtime_activity(runner)\n    original_list_nodes = state.task.tasks.list_nodes\n"
-          new = "    runner = _ReplayRunner()\n    if child_status in {\"FAILED\", \"CANCELLED\"}:\n        runner.terminal_status = ExecutionStatus(child_status)\n    state, activity, request = await _runtime_activity(runner)\n    original_list_nodes = state.task.tasks.list_nodes\n"
-          if text.count(old) != 1:
-              raise SystemExit("expected stale settle runner setup")
-          path.write_text(text.replace(old, new))
-          PY
-
+          python linktools-ai/scripts/build/_error_contract_followup.py
       - name: Install verification dependencies
         run: |
           python -m pip install --upgrade pip
@@ -81,43 +32,19 @@ jobs:
             'PyYAML>=6,<7' pytest pytest-asyncio 'sqlalchemy[asyncio]==2.0.51' \
             'aiosqlite==0.22.1' ruff rich requests packaging tomlkit
           python manage.py install --editable linktools linktools-ai
-
       - name: Compile
         env:
           PYTHONPATH: linktools-ai:linktools-ai/src:linktools/src
         run: python -m compileall -q linktools-ai/src/linktools/ai linktools-ai/src/linktools/commands/ai
-
-      - name: Ruff
+      - name: Ruff diagnostics
         continue-on-error: true
         env:
           PYTHONPATH: linktools-ai:linktools-ai/src:linktools/src
-        run: |
-          set -o pipefail
-          python -m ruff check linktools-ai/scripts/build linktools-ai/src/linktools/ai linktools-ai/src/linktools/commands/ai tests/ai 2>&1 | tee /tmp/ruff.txt
-
-      - name: Upload Ruff diagnostics
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: ai-error-contract-ruff
-          path: /tmp/ruff.txt
-          if-no-files-found: ignore
-
+        run: python -m ruff check linktools-ai/scripts/build linktools-ai/src/linktools/ai linktools-ai/src/linktools/commands/ai tests/ai
       - name: AI tests
         env:
           PYTHONPATH: linktools-ai:linktools-ai/src:linktools/src
-        run: |
-          set -o pipefail
-          python -m pytest -q tests/ai 2>&1 | tee /tmp/pytest.txt
-
-      - name: Upload pytest diagnostics
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: ai-error-contract-pytest
-          path: /tmp/pytest.txt
-          if-no-files-found: ignore
-
+        run: python -m pytest -q tests/ai
       - name: Commit verified patches
         run: |
           git config user.name github-actions[bot]
@@ -134,5 +61,5 @@ jobs:
                   tests/ai/test_local_execution_recovery.py \
                   tests/ai/test_temporal_taskgraph_conformance.py
           git diff --cached --check
-          git commit -m 'fix(ai): close remaining error propagation gaps'
+          git commit -m 'fix(ai): preserve domain errors across execution boundaries'
           git push origin HEAD:fix/ai-error-contract-closure
