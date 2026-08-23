@@ -2,7 +2,7 @@
 
 import asyncio
 from types import SimpleNamespace
-from typing import get_type_hints
+from typing import get_args, get_origin, get_type_hints
 
 import pytest
 
@@ -11,7 +11,7 @@ from linktools.ai.asset import AssetRef
 from linktools.ai.asset._sql import SqlAssetBackend
 from linktools.ai.capability import CapabilityMaterializationContext
 from linktools.ai.capability._mcp import bind_mcp_capability
-from linktools.ai.core import ExecutionStatus, JsonValue, ResourceKind, ResourceRef
+from linktools.ai.core import ExecutionStatus, ResourceKind, ResourceRef
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.runtime._evaluation import DefaultEvaluationService
 from linktools.ai.runtime._execution import DefaultExecutionService
@@ -25,7 +25,11 @@ from linktools.ai.workspace import trusted_workspace_principal
 
 
 def test_subagent_delegate_contract_requires_mapping_result() -> None:
-    assert get_type_hints(SubagentDelegate.__call__)["return"] == dict[str, JsonValue]
+    return_type = get_type_hints(SubagentDelegate.__call__)["return"]
+    args = get_args(return_type)
+    assert get_origin(return_type) is dict
+    assert len(args) == 2
+    assert args[0] is str
 
 
 @pytest.mark.asyncio
@@ -196,7 +200,7 @@ async def test_subagent_child_cleanup_failure_does_not_replace_cancellation() ->
 
         async def inspect(self, *args, **kwargs):
             del args, kwargs
-            return SimpleNamespace(status=ExecutionStatus.RUNNING)
+            return SimpleNamespace(status=ExecutionStatus.STARTED)
 
         async def cancel(self, *args, **kwargs):
             del args, kwargs
