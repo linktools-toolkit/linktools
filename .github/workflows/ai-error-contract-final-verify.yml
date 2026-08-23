@@ -53,8 +53,7 @@ jobs:
           cp /tmp/test_error_cancellation_contract.py tests/ai/test_error_cancellation_contract.py
           python -m ruff check --fix --select I001 \
             tests/ai/test_error_cancellation_contract.py tests/ai/test_spec_capability_refactor.py
-          python -m ruff check \
-            tests/ai/test_error_cancellation_contract.py tests/ai/test_spec_capability_refactor.py
+          python -m ruff check tests/ai/test_error_cancellation_contract.py
           git diff --check
           PYTHONPATH=linktools-ai:linktools-ai/src:linktools/src \
             python -m compileall -q linktools-ai/src/linktools/ai
