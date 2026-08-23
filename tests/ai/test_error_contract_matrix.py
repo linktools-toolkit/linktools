@@ -37,7 +37,6 @@ from linktools.ai.runtime._planner import _execution_failure
 from linktools.ai.runtime._subagent import _subagent_result
 from linktools.ai.runtime.state import (
     ExecutionRecord,
-    ExecutionTerminalCommit,
     RecoveryCheckpoint,
     RecoveryCheckpointState,
     RecoveryHandoffPhase,
@@ -351,7 +350,7 @@ class _FailureTerminalBackend(LocalExecutionBackend):
     async def _commit_execution_terminal_checkpoint(
         self,
         current: ExecutionRecord,
-        commit: ExecutionTerminalCommit,
+        commit: object,
         **kwargs: object,
     ) -> object:
         del current
@@ -384,8 +383,9 @@ async def test_failed_run_without_snapshot_commits_failed_terminal() -> None:
         usage=UsageMetrics(),
         safe_error_details={"status_code": 429},
     )
-    assert backend.captured_commit.execution.status is ExecutionStatus.FAILED
-    assert backend.captured_commit.execution.error_code == ErrorCode.MODEL_RATE_LIMITED.value
+    terminal = getattr(backend.captured_commit, "execution")
+    assert terminal.status is ExecutionStatus.FAILED
+    assert terminal.error_code == ErrorCode.MODEL_RATE_LIMITED.value
     assert backend.captured_recovery_run is None
     assert backend.captured_recovery_snapshot is None
 
