@@ -189,6 +189,11 @@ async def migrate_v1_agent_identity_state(
         raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
     if not isinstance(evaluations, EvaluationRepositoryImpl):
         raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+    if any(
+        repository._tenant_id != tenant_id
+        for repository in (sessions, executions, recovery, evaluations)
+    ):
+        raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
 
     repositories = {
         RuntimeDomain.CONVERSATION: sessions,
@@ -218,10 +223,16 @@ async def migrate_v1_agent_identity_state(
             legacy_bindings,
             legacy_agents,
             execution_targets,
+            tenant_id=tenant_id,
         )
     for record in recovery_records:
         _collect_recovery_binding(
-            record, compiler, catalog, legacy_bindings, legacy_agents
+            record,
+            compiler,
+            catalog,
+            legacy_bindings,
+            legacy_agents,
+            tenant_id=tenant_id,
         )
 
     migrated = 0
@@ -254,7 +265,11 @@ async def migrate_v1_agent_identity_state(
     # digests are intentionally not rewritten because the original request is
     # not fully reconstructable.
     for record in await _records(evaluations, "evaluation"):
-        data = _migrate_evaluation_data(record, execution_targets)
+        data = _migrate_evaluation_data(
+            record,
+            execution_targets,
+            tenant_id=tenant_id,
+        )
         if data is not None:
             await _replace_data(evaluations.state_store, record, data)
             migrated += 1
@@ -392,9 +407,13 @@ def _collect_execution_binding(
     bindings: dict[str, AgentBinding],
     agents: dict[str, str],
     targets: dict[str, tuple[str, str]],
+    *,
+    tenant_id: str,
 ) -> None:
     current = _decode_current_record(record.data, ExecutionRecord)
     if isinstance(current, ExecutionRecord):
+        if current.tenant_id != tenant_id:
+            raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
         _remember_execution_target(
             targets,
             current.execution_id,
@@ -409,6 +428,8 @@ def _collect_execution_binding(
     )
     if frozenset(fields) != _POST_COMPOSITION_EXECUTION_V1_FIELDS:
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    if _decode_domain(fields["tenant_id"], str, _CURRENT_CODEC) != tenant_id:
+        raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
     binding = fields["binding"]
     if _is_current_binding(binding):
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -444,15 +465,20 @@ def _remember_execution_target(
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     targets[execution_id] = target
 
+
 def _collect_recovery_binding(
     record: StoredRecord,
     compiler: AgentCompiler,
     catalog: AgentCatalog,
     bindings: dict[str, AgentBinding],
     agents: dict[str, str],
+    *,
+    tenant_id: str,
 ) -> None:
     current = _decode_current_record(record.data, RecoveryAdmissionRecord)
     if isinstance(current, RecoveryAdmissionRecord):
+        if current.tenant_id != tenant_id:
+            raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
         return
     fields = _domain_fields(
         record.data,
@@ -461,6 +487,8 @@ def _collect_recovery_binding(
     )
     if frozenset(fields) != _POST_COMPOSITION_RECOVERY_ADMISSION_V1_FIELDS:
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    if _decode_domain(fields["tenant_id"], str, _CURRENT_CODEC) != tenant_id:
+        raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
     input_fields = _nested_dataclass_fields(
         fields.get("input"), "recovery_execution_input"
     )
@@ -512,8 +540,12 @@ def _remember_binding(
 def _migrate_evaluation_data(
     record: StoredRecord,
     targets: Mapping[str, tuple[str, str]],
+    *,
+    tenant_id: str,
 ) -> Mapping[str, JsonValue] | None:
     value = _decode_enveloped_domain(record.data, EvaluationRecord)
+    if value.tenant_id != tenant_id:
+        raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
     target = targets.get(value.execution_id)
     if target is None:
         # The linked Execution may have been retained elsewhere or already
@@ -634,6 +666,8 @@ def _migrate_session_record(
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     if keys != _PRE_COMPOSITION_SESSION_V1_FIELDS:
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    if _decode_domain(fields["tenant_id"], str, _CURRENT_CODEC) != repository._tenant_id:
+        raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
     legacy_digest = _decode_domain(
         fields["binding_digest"], str, _CURRENT_CODEC
     )
@@ -773,6 +807,7 @@ def _migrate_legacy_binding(
     if binding.snapshot != snapshot:
         raise AIError(ErrorCode.AGENT_DEFINITION_UNAVAILABLE)
     return legacy_digest, binding
+
 
 def _legacy_agent_spec(value: object) -> AgentSpec:
     if not isinstance(value, Mapping) or frozenset(value) != _LEGACY_AGENT_SPEC_FIELDS:
