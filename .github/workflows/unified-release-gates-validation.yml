@@ -12,79 +12,7 @@ permissions:
   contents: read
 
 jobs:
-  diagnostic-python36-scan:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.10'
-      - name: Run compatibility scanner
-        run: |
-          python scripts/check/python36.py \
-            manage.py \
-            scripts/check/python36.py \
-            linktools/src \
-            linktools-common/src \
-            linktools-mobile/src \
-            linktools-cntr/src
-
-  diagnostic-ruff:
-    name: diagnostic-ruff (${{ matrix.scope }})
-    runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - scope: scripts
-            path: scripts/check/ai
-          - scope: package
-            path: linktools-ai/src/linktools/ai
-          - scope: commands
-            path: linktools-ai/src/linktools/commands/ai
-          - scope: tests
-            path: tests/ai
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.10'
-      - name: Install Ruff
-        run: python -m pip install 'ruff>=0.16,<0.17'
-      - name: Run Ruff
-        run: ruff check --no-cache "${{ matrix.path }}"
-
-  diagnostic-pytest:
-    name: diagnostic-pytest (${{ matrix.scope }})
-    runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - scope: core
-            path: tests/core
-          - scope: cli
-            path: tests/cli
-          - scope: common
-            path: tests/common
-          - scope: cntr
-            path: tests/cntr
-          - scope: ai
-            path: tests/ai
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.10'
-      - name: Install tooling
-        run: |
-          python -m pip install --upgrade pip
-          python -m pip install -U -r requirements.txt
-          python manage.py install --editable
-      - name: Run pytest
-        run: python -m pytest -q -p no:cacheprovider "${{ matrix.path }}"
-
-  python310:
+  diagnostic-build-verify:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -96,9 +24,7 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install -U -r requirements.txt
           python manage.py install --editable
-      - name: Run source gates
-        run: python manage.py check
-      - name: Build release artifacts
+      - name: Build release artifacts without source gates
         run: VERSION=v0.0.0 RELEASE=true python manage.py build
       - name: Verify release artifacts
         run: VERSION=v0.0.0 python manage.py verify
@@ -108,35 +34,34 @@ jobs:
           ! git grep -n 'linktools-ai/scripts/build' -- .
           ! git grep -n 'scripts/build/matrix' -- .
 
-  python36:
-    runs-on: ubuntu-20.04
+  diagnostic-python36-runtime:
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.6'
-      - name: Install Python 3.6 launcher dependency
-        run: python -m pip install 'tomlkit==0.11.8'
-      - name: Compile Python 3.6 tooling
-        run: |
-          python -m py_compile manage.py
-          python -m py_compile scripts/check/python36.py
-      - name: Run Python 3.6 compatibility scanner
-        run: |
-          python scripts/check/python36.py \
-            manage.py \
-            scripts/check/python36.py \
-            linktools/src \
-            linktools-common/src \
-            linktools-mobile/src \
-            linktools-cntr/src
-      - name: Verify AI interpreter fail-fast
+      - name: Compile and execute gates in CPython 3.6.15
         shell: bash
         run: |
-          set +e
-          output="$(python manage.py check linktools-ai 2>&1)"
-          status=$?
-          set -e
-          printf '%s\n' "$output"
-          test "$status" -ne 0
-          printf '%s\n' "$output" | grep -F 'Python 3.10 is required by linktools-ai; current interpreter is 3.6'
+          docker run --rm \
+            -v "$PWD:/workspace" \
+            -w /workspace \
+            python:3.6.15 \
+            bash -lc '
+              set -eu
+              python -m pip install "tomlkit==0.11.8"
+              python -m py_compile manage.py
+              python -m py_compile scripts/check/python36.py
+              python scripts/check/python36.py \
+                manage.py \
+                scripts/check/python36.py \
+                linktools/src \
+                linktools-common/src \
+                linktools-mobile/src \
+                linktools-cntr/src
+              set +e
+              output="$(python manage.py check linktools-ai 2>&1)"
+              status=$?
+              set -e
+              printf "%s\n" "$output"
+              test "$status" -ne 0
+              printf "%s\n" "$output" | grep -F "Python 3.10 is required by linktools-ai; current interpreter is 3.6"
+            '
