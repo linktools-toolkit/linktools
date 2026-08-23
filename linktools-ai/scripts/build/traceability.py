@@ -41,7 +41,7 @@ def validate_matrix(
             if not (source / implementation).exists() and not (package_root / implementation).exists():
                 errors.append(f"{requirement_id}: missing implementation {implementation}")
         for test_id in linked_tests if isinstance(linked_tests, list) else ():
-            if not isinstance(test_id, str) or not (test_id.startswith("T-") or test_id.startswith("MT-")):
+            if not isinstance(test_id, str) or not (test_id.startswith(("T-", "MT-"))):
                 errors.append(f"{requirement_id}: invalid test id {test_id}")
     return tuple(errors)
 

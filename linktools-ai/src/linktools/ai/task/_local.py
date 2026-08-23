@@ -372,7 +372,7 @@ class LocalTaskGraphLauncher:
             )
         except asyncio.CancelledError:
             raise
-        except Exception as error:
+        except Exception as error:  # noqa: BLE001
             lease = state.lease
             if lease is not None:
                 code = error.code.value if isinstance(error, AIError) else ErrorCode.TASK_NODE_FAILED.value

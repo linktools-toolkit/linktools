@@ -385,7 +385,7 @@ def test_runtime_step_contract_matrix_is_current() -> None:
         assert entry["status"] in {"PENDING", "PASS"}
         assert entry["finding_mapping"]
         for test in entry["tests"]:
-            path_text, separator, test_name = test.partition("::")
+            path_text, separator, _test_name = test.partition("::")
             assert separator
             path = Path(path_text)
             assert path.is_file(), test

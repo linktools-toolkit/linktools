@@ -128,23 +128,21 @@ class SubagentDispatcher:
                 try:
                     await cleanup
                 except BaseException as cleanup_error:
-                    _logger.error(
+                    _logger.exception(
                         "subagent child cleanup failed after cancellation: execution=%s",
                         child.execution_id,
-                        exc_info=True,
                     )
                     raise cancellation from cleanup_error
-                raise cancellation
+                raise
             except BaseException as cleanup_error:
-                _logger.error(
+                _logger.exception(
                     "subagent child cleanup failed: execution=%s",
                     child.execution_id,
-                    exc_info=True,
                 )
                 if isinstance(primary, asyncio.CancelledError):
                     raise primary from cleanup_error
                 raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED) from primary
-            raise primary
+            raise
         return _subagent_result(result)
 
     async def cancel_children(self, parent_execution_id: str, principal: Principal) -> None:

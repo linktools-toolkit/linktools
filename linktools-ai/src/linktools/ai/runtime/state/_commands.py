@@ -2504,7 +2504,7 @@ def _execution_history_seal(
     current_events: Sequence[StepEvent],
     current_batch: PreparedStepSnapshotBatch | None,
 ) -> ExecutionHistorySealRecord:
-    heads = list(
+    heads = [
         ExecutionRunSealHead(
             projection.run.run_id,
             projection.target_event_offset,
@@ -2513,7 +2513,7 @@ def _execution_history_seal(
             projection.projection_digest,
         )
         for projection in projections
-    )
+    ]
     if not projections and current_run is not None:
         heads.append(
             ExecutionRunSealHead(

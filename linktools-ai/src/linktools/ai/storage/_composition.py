@@ -340,7 +340,7 @@ class StorageOverlay(Generic[KeyT, ValueT, InfoT]):
             return await self._get_from_state(key, refreshed, retried=True)
         try:
             self._validate_value(key, value, info)
-        except Exception:
+        except Exception:  # noqa: BLE001
             self._views[owner].invalidate()
             if retried:
                 _logger.error(
@@ -400,7 +400,7 @@ class StorageOverlay(Generic[KeyT, ValueT, InfoT]):
             value = raw
             try:
                 self._validate_value(key, value, info)
-            except Exception:
+            except Exception:  # noqa: BLE001
                 raced.add(state.owners[key])
                 continue
             values[key] = value
@@ -466,7 +466,7 @@ class StorageOverlay(Generic[KeyT, ValueT, InfoT]):
             return value
         except asyncio.CancelledError:
             raise
-        except Exception:
+        except Exception:  # noqa: BLE001
             _logger.warning(
                 "storage cache entry failed validation: key=%s",
                 key,
@@ -516,7 +516,7 @@ class StorageOverlay(Generic[KeyT, ValueT, InfoT]):
             await self.cache.delete(cache_key)
         except asyncio.CancelledError:
             raise
-        except Exception:
+        except Exception:  # noqa: BLE001
             _logger.debug("failed to delete corrupted storage cache entry: key=%s", cache_key)
 
     async def list_info(self) -> 'tuple[InfoT, ...]':
@@ -607,7 +607,7 @@ class StorageOverlay(Generic[KeyT, ValueT, InfoT]):
                 value = raw
                 try:
                     self._validate_value(key, value, state.entries[key])
-                except Exception:
+                except Exception:  # noqa: BLE001
                     failed += 1
                     continue
                 await write_cache(

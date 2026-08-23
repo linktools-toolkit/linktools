@@ -216,7 +216,7 @@ class RuntimeStatePlan:
             if not relative.parts or relative.parts[0] in {".state-groups"} or relative.parts[0].startswith(".txn-"):
                 raise ValueError("filesystem route points at a reserved transaction path")
             grouped.setdefault(route.transaction_root, []).append(route.path)
-        for root, paths in grouped.items():
+        for paths in grouped.values():
             for index, left in enumerate(sorted(paths)):
                 for right in sorted(paths)[index + 1 :]:
                     if left in right.parents or right in left.parents:

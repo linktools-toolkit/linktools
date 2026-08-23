@@ -204,7 +204,7 @@ class RuntimeTaskNodeRunner:
                 await _cancel_execution(self._execution, handle.execution_id, principal, graph_id, node.node_id)
             except BaseException as cleanup_error:
                 raise cancellation from cleanup_error
-            raise cancellation
+            raise
         wait_task = asyncio.create_task(self._execution.wait(handle.execution_id, principal=principal))
         try:
             await asyncio.shield(wait_task)
@@ -219,7 +219,7 @@ class RuntimeTaskNodeRunner:
                 await asyncio.gather(wait_task, return_exceptions=True)
             if cleanup_error is not None:
                 raise cancellation from cleanup_error
-            raise cancellation
+            raise
         return await self.result(handle.execution_id, principal=principal)
 
 

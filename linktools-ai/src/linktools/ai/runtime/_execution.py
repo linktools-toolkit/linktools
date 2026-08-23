@@ -1348,11 +1348,10 @@ class DefaultExecutionService:
                         next_record=_operation_failure(current, error_code),
                     )
             except Exception:
-                _logger.error(
+                _logger.exception(
                     "execution cancellation ledger update failed: execution=%s operation=%s",
                     execution_id,
                     operation.operation_id,
-                    exc_info=True,
                 )
             raise
         return CancelExecutionResult(execution_id, True)

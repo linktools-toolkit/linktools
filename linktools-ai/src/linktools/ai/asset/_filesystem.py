@@ -327,7 +327,7 @@ class FilesystemAssetBackend:
                 self._revision = next_revision
                 try:
                     await self._write_state()
-                except BaseException as error:
+                except BaseException as error:  # noqa: BLE001
                     self._restore(before)
                     _raise_filesystem_error(error)
                 _logger.debug(
@@ -407,7 +407,7 @@ class FilesystemAssetBackend:
                 self._revision = next_revision
                 try:
                     await self._write_state()
-                except BaseException as error:
+                except BaseException as error:  # noqa: BLE001
                     self._restore(before)
                     _raise_filesystem_error(error)
                 _logger.debug(

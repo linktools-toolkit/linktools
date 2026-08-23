@@ -75,9 +75,8 @@ class _RuntimeTaskOperation:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
 
         owner = _task_owner(request, node_id, workflow_run_id)
-        if current.status is TaskStatus.RUNNING:
-            if current.owner != owner and _lease_is_active(current):
-                return current
+        if current.status is TaskStatus.RUNNING and current.owner != owner and _lease_is_active(current):
+            return current
         lease = await self._acquire_lease(current, request, owner)
         try:
             binding_digest, execution_request = await self._runner.prepare(

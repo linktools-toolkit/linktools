@@ -437,14 +437,13 @@ class RecordQuery:
         ):
             if value is not None:
                 _require_digest(value, name)
-        if self.kind is not None:
-            if (
-                not isinstance(self.kind, str)
-                or not 0 < len(self.kind) <= 32
-                or self.kind in {".", ".."}
-                or any(character in self.kind for character in "/\\")
-            ):
-                raise ValueError("record kind contains a path separator")
+        if self.kind is not None and (
+            not isinstance(self.kind, str)
+            or not 0 < len(self.kind) <= 32
+            or self.kind in {".", ".."}
+            or any(character in self.kind for character in "/\\")
+        ):
+            raise ValueError("record kind contains a path separator")
         if (self.after_sort_key is None) != (self.after_key_digest is None):
             raise ValueError("record cursor requires both sort key and key digest")
         if self.after_sort_key is not None:

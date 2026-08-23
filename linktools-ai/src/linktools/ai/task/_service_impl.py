@@ -263,13 +263,13 @@ class DefaultTaskService(TaskApi):
                 except asyncio.CancelledError as error:
                     caller_cancellation = caller_cancellation or error
                     continue
-                except BaseException as error:
+                except BaseException as error:  # noqa: BLE001
                     finalizer_error = error
                     break
             if finalizer.done() and result is None:
                 try:
                     result = finalizer.result()
-                except BaseException as error:
+                except BaseException as error:  # noqa: BLE001
                     finalizer_error = error
             if caller_cancellation is not None:
                 if finalizer_error is not None:
@@ -446,7 +446,7 @@ class DefaultTaskService(TaskApi):
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                 if not _terminal(view.status):
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            except BaseException as error:
+            except BaseException as error:  # noqa: BLE001
                 return await self._settle_cancel_error(operation, graph_id, request, error)
         elif operation.status in {OperationStatus.RUNNING, OperationStatus.EFFECT_UNKNOWN}:
             if not _terminal(view.status):
@@ -506,7 +506,7 @@ class DefaultTaskService(TaskApi):
             return
         try:
             await self._launcher.cancel(graph_id, request)
-        except Exception as error:
+        except Exception as error:  # noqa: BLE001
             _logger.warning("task launcher cleanup failed after durable cancel: graph=%s error=%s", graph_id, type(error).__name__)
 
     async def _record_success(self, operation: OperationLedgerRecord, tenant_id: str, view: TaskGraphView, *, expected_status: OperationStatus = OperationStatus.RUNNING) -> OperationLedgerRecord:

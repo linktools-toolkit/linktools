@@ -132,7 +132,7 @@ class FilesystemLeaseCoordinator:
         renewed = await asyncio.to_thread(self._renew, lease)
         if not renewed:
             self._active.pop(lease.key, None)
-        return lease if renewed else lease
+        return lease
 
     async def release(self, lease: Lease) -> None:
         if self._active.get(lease.key) != lease:
@@ -230,7 +230,7 @@ class FilesystemWriterLock:
         except asyncio.CancelledError:
             try:
                 await asyncio.shield(acquire_task)
-            except BaseException:
+            except BaseException:  # noqa: BLE001, S110
                 pass
             else:
                 await _await_thread(lock.release)
@@ -283,7 +283,7 @@ class FilesystemMutationLock:
     def acquired(self) -> bool:
         return self._acquired
 
-    async def __aenter__(self) -> "FilesystemMutationLock":
+    async def __aenter__(self) -> "FilesystemMutationLock":  # noqa: PYI034
         try:
             await asyncio.to_thread(self.path.parent.mkdir, parents=True, exist_ok=True)
         except OSError as error:

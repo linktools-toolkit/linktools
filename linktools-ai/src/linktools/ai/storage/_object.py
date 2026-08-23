@@ -9,12 +9,11 @@ import os
 import shutil
 import tempfile
 from collections.abc import AsyncIterator, Callable, Mapping
-from contextlib import asynccontextmanager
+from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import (
     TYPE_CHECKING,
-    AsyncContextManager,
     BinaryIO,
     Protocol,
     TypeVar,
@@ -113,7 +112,7 @@ class ObjectStoreInspection(Protocol):
 class ObjectStoreMaintenance(ObjectStoreInspection, Protocol):
     async def delete_object(self, key: str, *, expected_digest: str) -> bool: ...
 
-    def offline_exclusivity(self) -> AsyncContextManager[None]: ...
+    def offline_exclusivity(self) -> AbstractAsyncContextManager[None]: ...
 
 
 class InMemoryObjectStore:
@@ -232,7 +231,7 @@ class _ScopedObjectStore:
     async def validate_integrity(self) -> None:
         await self._parent.validate_integrity()
 
-    def offline_exclusivity(self) -> AsyncContextManager[None]:
+    def offline_exclusivity(self) -> AbstractAsyncContextManager[None]:
         return self._parent.offline_exclusivity()
 
     async def _list_objects(self) -> AsyncIterator[ObjectStat]:

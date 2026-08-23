@@ -822,29 +822,27 @@ class LocalExecutionBackend:
                 )
             await self._finish_checkpoint(checkpoint)
             return
-        if execution is not None:
-            if (
-                execution.binding_digest != recovery_input.binding_digest
-                or execution.parent_execution_id != recovery_input.parent_execution_id
-                or execution.root_execution_id != recovery_input.root_execution_id
-                or execution.source_execution_id != recovery_input.source_execution_id
-                or execution.base_execution_id != recovery_input.base_execution_id
-                or execution.conversation_step_run_id != recovery_input.conversation_step_run_id
-                or execution.lineage_kind.value != recovery_input.lineage_kind
-                or execution.planning is not recovery_input.planning
-                or execution.thinking is not recovery_input.thinking
-                or execution.binding != recovery_input.binding
-            ):
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        if execution is not None and (
+            execution.binding_digest != recovery_input.binding_digest
+            or execution.parent_execution_id != recovery_input.parent_execution_id
+            or execution.root_execution_id != recovery_input.root_execution_id
+            or execution.source_execution_id != recovery_input.source_execution_id
+            or execution.base_execution_id != recovery_input.base_execution_id
+            or execution.conversation_step_run_id != recovery_input.conversation_step_run_id
+            or execution.lineage_kind.value != recovery_input.lineage_kind
+            or execution.planning is not recovery_input.planning
+            or execution.thinking is not recovery_input.thinking
+            or execution.binding != recovery_input.binding
+        ):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         if execution is None:
             execution = await self._create_recovery_execution(checkpoint)
         if checkpoint.state in {
             RecoveryCheckpointState.ADMITTED,
             RecoveryCheckpointState.ACTIVE,
             RecoveryCheckpointState.WAITING,
-        }:
-            if not await self._reconcile_session_recovery(execution):
-                return
+        } and not await self._reconcile_session_recovery(execution):
+            return
         if (
             checkpoint.state is RecoveryCheckpointState.ADMITTED
             and execution.status is ExecutionStatus.PENDING_START
@@ -2080,10 +2078,9 @@ class LocalExecutionBackend:
                 if persisted is None:
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                 operation_result = _execution_operation_result(persisted.status)
-                _logger.error(
+                _logger.exception(
                     "local execution failed: execution=%s",
                     execution_id,
-                    exc_info=True,
                 )
                 return
             await self._commit_success(
@@ -2115,10 +2112,9 @@ class LocalExecutionBackend:
                 operation_result = _execution_operation_result(persisted.status)
             raise
         except Exception:
-            _logger.error(
+            _logger.exception(
                 "local execution infrastructure failure: execution=%s",
                 execution_id,
-                exc_info=True,
             )
             raise
         finally:
