@@ -56,7 +56,8 @@ jobs:
             run_check python .bootstrap/simplify_binding_persistence_codec.py || true
           fi
           if [ ! -f "$STATUS" ] && ! grep -q '_POST_COMPOSITION_EXECUTION_V1_FIELDS' linktools-ai/src/linktools/ai/runtime/state/_migration.py; then
-            run_check python .bootstrap/freeze_identity_migration_schema1.py || true
+            run_check python .bootstrap/fix_freeze_stale_check.py || true
+            if [ ! -f "$STATUS" ]; then run_check python .bootstrap/freeze_identity_migration_schema1.py || true; fi
           fi
           if [ ! -f "$STATUS" ] && ! grep -q 'current dataclass fingerprint changed without a schema revision' linktools-ai/src/linktools/ai/runtime/state/_codec.py; then
             run_check python .bootstrap/complete_binding_codec_simplification.py || true
