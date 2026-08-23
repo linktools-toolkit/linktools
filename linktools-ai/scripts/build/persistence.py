@@ -6,6 +6,8 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
+import subprocess
 from collections.abc import Mapping
 from datetime import datetime, timezone
 from pathlib import Path
@@ -151,6 +153,75 @@ def validate_external_fixtures(
         return ("model_message V1 fixture decodes to different semantics",)
     return ()
 
+
+def _git(
+    repository: Path,
+    *arguments: str,
+) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        ("git", "-C", str(repository), *arguments),
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+
+def load_git_baseline(
+    manifest: str | Path,
+    *,
+    base_ref: str | None = None,
+) -> dict[str, JsonValue] | None:
+    """Load the manifest at the immutable branch/release comparison point.
+
+    Feature branches compare against their merge-base with ``origin/master``.
+    A master checkout compares against its first parent.  Repositories without
+    Git history, including source distributions, simply skip this extra gate.
+    """
+    path = Path(manifest).resolve()
+    repository = Path(__file__).resolve().parents[3]
+    if not (repository / ".git").exists():
+        return None
+    try:
+        relative = path.relative_to(repository.resolve()).as_posix()
+    except ValueError:
+        return None
+
+    ref = base_ref or os.environ.get(
+        "LINKTOOLS_PERSISTENCE_BASE_REF", "origin/master"
+    )
+    verified = _git(repository, "rev-parse", "--verify", f"{ref}^{{commit}}")
+    if verified.returncode != 0:
+        return None
+    head = _git(repository, "rev-parse", "HEAD")
+    base = _git(repository, "merge-base", "HEAD", ref)
+    if head.returncode != 0 or base.returncode != 0:
+        return None
+    head_sha = head.stdout.strip()
+    base_sha = base.stdout.strip()
+    if not head_sha or not base_sha:
+        return None
+    if head_sha == base_sha:
+        parent = _git(repository, "rev-parse", "HEAD^")
+        if parent.returncode != 0 or not parent.stdout.strip():
+            return None
+        base_sha = parent.stdout.strip()
+
+    historical = _git(repository, "show", f"{base_sha}:{relative}")
+    if historical.returncode != 0:
+        return None
+    try:
+        value = json.loads(historical.stdout)
+    except json.JSONDecodeError as error:
+        raise ValueError(
+            f"historical runtime persistence manifest is invalid at {base_sha}"
+        ) from error
+    if not isinstance(value, dict):
+        raise ValueError(
+            f"historical runtime persistence manifest is not an object at {base_sha}"
+        )
+    return cast("dict[str, JsonValue]", value)
+
+
 def _default_manifest() -> Path:
     return Path(__file__).with_name("matrix") / "runtime-persistence-v1.json"
 
@@ -159,14 +230,24 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--manifest", type=Path, default=_default_manifest())
     parser.add_argument("--baseline", type=Path)
+    parser.add_argument("--baseline-ref")
     args = parser.parse_args()
     candidate = load_manifest(args.manifest)
     errors = list(validate_runtime_persistence_manifest(candidate))
-    errors.extend(
-        validate_external_fixtures(candidate, args.manifest.parent)
-    )
+    errors.extend(validate_external_fixtures(candidate, args.manifest.parent))
     if args.baseline is not None:
-        errors.extend(validate_append_only(load_manifest(args.baseline), candidate))
+        baseline = load_manifest(args.baseline)
+    else:
+        try:
+            baseline = load_git_baseline(
+                args.manifest,
+                base_ref=args.baseline_ref,
+            )
+        except ValueError as error:
+            errors.append(str(error))
+            baseline = None
+    if baseline is not None:
+        errors.extend(validate_append_only(baseline, candidate))
     for error in errors:
         print(error)
     return 1 if errors else 0
@@ -177,6 +258,7 @@ if __name__ == "__main__":
 
 
 __all__ = [
+    "load_git_baseline",
     "load_manifest",
     "validate_append_only",
     "validate_external_fixtures",
