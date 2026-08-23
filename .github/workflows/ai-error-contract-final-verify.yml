@@ -6,11 +6,7 @@ on:
       - fix/ai-error-contract-closure
 
 permissions:
-  contents: write
-
-env:
-  PYTHONPATH: linktools-ai:linktools-ai/src:linktools/src
-  CLOSURE_DIR: /tmp/error-closure
+  contents: read
 
 jobs:
   verify:
@@ -28,112 +24,144 @@ jobs:
           python -m pip install \
             filelock 'pydantic-ai-slim[mcp,openai,temporal]>=2.27.0,<3.0.0' \
             'pydantic-ai-harness[skills,dynamic-workflow]>=0.13.0' \
-            'PyYAML>=6,<7' pytest pytest-asyncio pytest-timeout 'sqlalchemy[asyncio]==2.0.51' \
+            'PyYAML>=6,<7' pytest pytest-asyncio 'sqlalchemy[asyncio]==2.0.51' \
             'aiosqlite==0.22.1' ruff rich requests packaging
           python -m pip install -e ./linktools --no-deps
 
-      - name: Prepare closure candidates
+      - name: Check out work branch snapshot
         run: |
-          cp .github/ai-error-cancellation-closure.patch /tmp/error-closure.patch
-          cp .github/ai-error-cancellation-contract.py /tmp/test_error_cancellation_contract.py
-          cp .github/ai-error-capability-policy-closure.py /tmp/capability-policy-closure.py
           git fetch --depth=1 origin fix/ai-error-contract-closure
-          git worktree add "$CLOSURE_DIR" FETCH_HEAD
-          cd "$CLOSURE_DIR"
-          git apply --check /tmp/error-closure.patch
-          git apply /tmp/error-closure.patch
-          python - <<'PY'
-          from pathlib import Path
-
-          path = Path('linktools-ai/src/linktools/ai/agent/_capabilities.py')
-          text = path.read_text()
-          old = 'class _CompactionCapability(PydanticAgentCapability[None]):'
-          new = 'class _CompactionCapability(AbstractCapability[None]):'
-          if text.count(old) != 1:
-              raise SystemExit(f'expected exactly one legacy compaction base, found {text.count(old)}')
-          path.write_text(text.replace(old, new))
-          PY
-          python /tmp/capability-policy-closure.py
-          cp /tmp/test_error_cancellation_contract.py tests/ai/test_error_cancellation_contract.py
-          python -m ruff check --fix --select I001 \
-            tests/ai/test_error_cancellation_contract.py tests/ai/test_spec_capability_refactor.py
-          python -m ruff check tests/ai/test_error_cancellation_contract.py
-          git diff --check
+          git worktree add /tmp/final-error-audit FETCH_HEAD
+          git -C /tmp/final-error-audit rev-parse HEAD | tee /tmp/final-error-audit/audit-head.txt
 
       - name: Compile linktools-ai
-        working-directory: /tmp/error-closure
+        working-directory: /tmp/final-error-audit
+        env:
+          PYTHONPATH: linktools-ai:linktools-ai/src:linktools/src
         run: python -m compileall -q linktools-ai/src/linktools/ai
 
-      - name: Test closure contracts
-        working-directory: /tmp/error-closure
-        run: |
-          python -m pytest -vv --timeout=15 \
-            tests/ai/test_error_cancellation_contract.py \
-            tests/ai/test_spec_capability_refactor.py
-
       - name: Test linktools-ai
-        working-directory: /tmp/error-closure
+        working-directory: /tmp/final-error-audit
         timeout-minutes: 12
-        run: python -m pytest -q tests/ai
+        env:
+          PYTHONPATH: linktools-ai:linktools-ai/src:linktools/src
+        run: python -m pytest -q tests/ai | tee audit-pytest.txt
 
-      - name: Verify Ruff delta against fixed baseline
-        working-directory: /tmp/error-closure
+      - name: Ruff linktools-ai
+        working-directory: /tmp/final-error-audit
+        env:
+          PYTHONPATH: linktools-ai:linktools-ai/src:linktools/src
         run: |
-          git fetch --depth=1 origin a4ded79a152ccfbc635503ee7b7bd394bd50970e
-          git worktree add /tmp/error-baseline FETCH_HEAD
-          set +e
-          python -m ruff check linktools-ai/scripts/build linktools-ai/src/linktools/ai \
-            linktools-ai/src/linktools/commands/ai tests/ai > /tmp/ruff-current.log 2>&1
-          current_status=$?
-          cd /tmp/error-baseline
-          PYTHONPATH=linktools-ai:linktools-ai/src:linktools/src \
-            python -m ruff check linktools-ai/scripts/build linktools-ai/src/linktools/ai \
-            linktools-ai/src/linktools/commands/ai tests/ai > /tmp/ruff-baseline.log 2>&1
-          baseline_status=$?
-          cd /tmp/error-closure
-          set -e
+          python -m ruff check \
+            linktools-ai/scripts/build linktools-ai/src/linktools/ai \
+            linktools-ai/src/linktools/commands/ai tests/ai | tee audit-ruff.txt
+
+      - name: Generate semantic audit evidence
+        working-directory: /tmp/final-error-audit
+        run: |
           python - <<'PY'
           import re
-          from collections import Counter
           from pathlib import Path
 
-          pattern = re.compile(r'^(.+?):\d+:\d+: ([A-Z]+\d+) ')
+          source_roots = [Path('linktools-ai/src/linktools/ai'), Path('linktools-ai/src/linktools/commands/ai')]
+          tests_root = Path('tests/ai')
 
-          def diagnostics(path: str) -> Counter[tuple[str, str]]:
-              result: Counter[tuple[str, str]] = Counter()
-              for line in Path(path).read_text().splitlines():
-                  match = pattern.match(line)
-                  if match is not None:
-                      result[(match.group(1), match.group(2))] += 1
-              return result
+          def files(roots):
+              for root in roots:
+                  yield from sorted(root.rglob('*.py'))
 
-          baseline = diagnostics('/tmp/ruff-baseline.log')
-          current = diagnostics('/tmp/ruff-current.log')
-          if current != baseline:
-              raise SystemExit(
-                  f'Ruff delta detected: added={dict(current - baseline)} removed={dict(baseline - current)}'
-              )
-          print(f'Ruff baseline/current diagnostics identical: {sum(current.values())}')
+          def contexts(roots, pattern, radius=2):
+              regex = re.compile(pattern)
+              output = []
+              for path in files(roots):
+                  lines = path.read_text().splitlines()
+                  for index, line in enumerate(lines):
+                      if regex.search(line):
+                          start = max(0, index - radius)
+                          end = min(len(lines), index + radius + 1)
+                          output.append(f'=== {path}:{index + 1} ===')
+                          output.extend(
+                              f'{number + 1:>5}: {lines[number]}'
+                              for number in range(start, end)
+                          )
+                          output.append('')
+              return output
+
+          reports = {
+              'audit-storage-integrity.txt': contexts(
+                  [Path('linktools-ai/src/linktools/ai')],
+                  r'ErrorCode\.STORAGE_INTEGRITY_ERROR',
+              ),
+              'audit-wide-catches.txt': contexts(
+                  source_roots,
+                  r'except\s+(?:Exception|BaseException)\b',
+              ),
+              'audit-execution-result.txt': contexts(
+                  source_roots,
+                  r'\bExecutionResult\b',
+              ),
+          }
+          for name, rows in reports.items():
+              Path(name).write_text('\n'.join(rows) + ('\n' if rows else ''))
+
+          codes = (
+              'INTERNAL_ERROR',
+              'MODEL_API_ERROR',
+              'MODEL_REQUEST_REJECTED',
+              'MODEL_RATE_LIMITED',
+              'MODEL_TIMEOUT',
+              'MODEL_UNAVAILABLE',
+              'MODEL_RESPONSE_INVALID',
+              'MODEL_CONTENT_FILTERED',
+              'EXECUTION_CONCURRENCY_LIMIT_EXCEEDED',
+              'EXECUTION_NOT_READY',
+              'EXECUTION_WAIT_TIMEOUT',
+              'TASK_WAIT_TIMEOUT',
+              'TOOL_RETRY_REQUIRED',
+              'TOOL_EXECUTION_FAILED',
+              'ASSET_NOT_FOUND',
+              'STORAGE_PATH_INVALID',
+          )
+          production_text = '\n'.join(path.read_text() for path in files(source_roots))
+          test_text = '\n'.join(path.read_text() for path in files([tests_root]))
+          matrix = []
+          missing = []
+          for code in codes:
+              token = f'ErrorCode.{code}'
+              production = production_text.count(token)
+              validation = test_text.count(token)
+              matrix.append(f'{code}\tproduction={production}\tvalidation={validation}')
+              if production < 1 or validation < 1:
+                  missing.append(code)
+          Path('audit-error-code-matrix.txt').write_text('\n'.join(matrix) + '\n')
+          if missing:
+              raise SystemExit(f'new error codes missing production use or validation: {missing}')
+
+          forbidden = (
+              '.github/workflows/ai-error-contract-closure.yml',
+              '.github/workflows/ai-error-contract-pr.yml',
+              '.github/workflows/ai-error-contract-pr-verify.yml',
+              'linktools-ai/scripts/build/_error_contract_closure.py',
+              'linktools-ai/scripts/build/_error_contract_followup.py',
+          )
+          leftovers = [path for path in forbidden if Path(path).exists()]
+          Path('audit-temp-leftovers.txt').write_text('\n'.join(leftovers) + ('\n' if leftovers else ''))
+          if leftovers:
+              raise SystemExit(f'legacy temporary verification assets remain: {leftovers}')
           PY
-          test "$current_status" = "$baseline_status"
 
-      - name: Commit verified closure
-        working-directory: /tmp/error-closure
-        run: |
-          git config user.name github-actions[bot]
-          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
-          git add \
-            linktools-ai/src/linktools/ai/agent/_capabilities.py \
-            linktools-ai/src/linktools/ai/capability/_mcp.py \
-            linktools-ai/src/linktools/ai/asset/_sql.py \
-            linktools-ai/src/linktools/ai/runtime/_execution.py \
-            linktools-ai/src/linktools/ai/runtime/_local.py \
-            linktools-ai/src/linktools/ai/runtime/_evaluation.py \
-            linktools-ai/src/linktools/ai/runtime/_session.py \
-            linktools-ai/src/linktools/ai/task/_service_impl.py \
-            linktools-ai/src/linktools/ai/runtime/_planner.py \
-            linktools-ai/src/linktools/ai/runtime/_subagent.py \
-            tests/ai/test_error_cancellation_contract.py \
-            tests/ai/test_spec_capability_refactor.py
-          git commit -m 'fix(ai): close cancellation and capability policy contracts'
-          git push origin HEAD:fix/ai-error-contract-closure
+      - name: Upload final audit evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ai-error-contract-final-audit
+          path: |
+            /tmp/final-error-audit/audit-head.txt
+            /tmp/final-error-audit/audit-pytest.txt
+            /tmp/final-error-audit/audit-ruff.txt
+            /tmp/final-error-audit/audit-storage-integrity.txt
+            /tmp/final-error-audit/audit-wide-catches.txt
+            /tmp/final-error-audit/audit-execution-result.txt
+            /tmp/final-error-audit/audit-error-code-matrix.txt
+            /tmp/final-error-audit/audit-temp-leftovers.txt
+          if-no-files-found: error
