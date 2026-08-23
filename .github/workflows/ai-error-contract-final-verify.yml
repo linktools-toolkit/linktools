@@ -28,10 +28,11 @@ jobs:
             'aiosqlite==0.22.1' ruff rich requests packaging
           python -m pip install -e ./linktools --no-deps
 
-      - name: Apply and verify cancellation closure
+      - name: Apply and verify closure candidates
         run: |
           cp .github/ai-error-cancellation-closure.patch /tmp/error-closure.patch
           cp .github/ai-error-cancellation-contract.py /tmp/test_error_cancellation_contract.py
+          cp .github/ai-error-capability-policy-closure.py /tmp/capability-policy-closure.py
           git fetch --depth=1 origin fix/ai-error-contract-closure
           git worktree add /tmp/error-closure FETCH_HEAD
           cd /tmp/error-closure
@@ -48,9 +49,12 @@ jobs:
               raise SystemExit(f'expected exactly one legacy compaction base, found {text.count(old)}')
           path.write_text(text.replace(old, new))
           PY
+          python /tmp/capability-policy-closure.py
           cp /tmp/test_error_cancellation_contract.py tests/ai/test_error_cancellation_contract.py
-          python -m ruff check --fix --select I001 tests/ai/test_error_cancellation_contract.py
-          python -m ruff check tests/ai/test_error_cancellation_contract.py
+          python -m ruff check --fix --select I001 \
+            tests/ai/test_error_cancellation_contract.py tests/ai/test_spec_capability_refactor.py
+          python -m ruff check \
+            tests/ai/test_error_cancellation_contract.py tests/ai/test_spec_capability_refactor.py
           git diff --check
           PYTHONPATH=linktools-ai:linktools-ai/src:linktools/src \
             python -m compileall -q linktools-ai/src/linktools/ai
@@ -109,6 +113,7 @@ jobs:
             linktools-ai/src/linktools/ai/task/_service_impl.py \
             linktools-ai/src/linktools/ai/runtime/_planner.py \
             linktools-ai/src/linktools/ai/runtime/_subagent.py \
-            tests/ai/test_error_cancellation_contract.py
-          git commit -m 'fix(ai): preserve cancellation across cleanup boundaries'
+            tests/ai/test_error_cancellation_contract.py \
+            tests/ai/test_spec_capability_refactor.py
+          git commit -m 'fix(ai): close cancellation and capability policy contracts'
           git push origin HEAD:fix/ai-error-contract-closure
