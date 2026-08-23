@@ -58,6 +58,7 @@ jobs:
                   linktools-ai/src/linktools/ai/runtime/_local.py \
                   linktools-ai/src/linktools/ai/runtime/_tool.py \
                   linktools-ai/src/linktools/ai/task/_local.py \
+                  tests/ai/test_asset_repository.py \
                   tests/ai/test_closure_fix.py \
                   tests/ai/test_error_contract.py
           git diff --cached --check
