@@ -396,12 +396,12 @@ class ExecutionRecord:
     safe_error_details: Mapping[str, JsonValue]
     created_at: datetime
     updated_at: datetime
-    memory_scope: str | None = None
-    conversation_step_run_id: str | None = None
-    result: ResultRecord | None = None
     planning: bool
     thinking: bool
     binding: AgentBindingSnapshot
+    memory_scope: str | None = None
+    conversation_step_run_id: str | None = None
+    result: ResultRecord | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.planning, bool) or not isinstance(self.thinking, bool):
