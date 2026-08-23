@@ -1603,16 +1603,18 @@ def _decode_dataclass(
     if not isinstance(value, Mapping):
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     keys = frozenset(value)
+    explicit_revision_present = False
+    explicit_revision: object | None = None
     if persisted:
         if keys == frozenset({"$dataclass", "fields"}):
-            explicit_revision: object | None = None
+            pass
         elif keys == frozenset({"$dataclass", "schema", "fields"}):
-            explicit_revision = value.get("schema")
+            explicit_revision_present = True
+            explicit_revision = value["schema"]
         else:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     else:
         _require_exact_keys(value, frozenset({"$dataclass", "fields"}))
-        explicit_revision = None
 
     wire_id = value.get("$dataclass")
     if not isinstance(wire_id, str):
@@ -1628,7 +1630,7 @@ def _decode_dataclass(
 
     if persisted:
         contract = _dataclass_persistence_contract(wire_id, codec)
-        if explicit_revision is None:
+        if not explicit_revision_present:
             revision = contract.legacy_revision
             if revision is None:
                 raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
