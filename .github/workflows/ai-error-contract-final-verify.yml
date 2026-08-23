@@ -66,6 +66,49 @@ jobs:
           echo "status=$status" >> "$GITHUB_OUTPUT"
           exit "$status"
 
+      - name: Prepare branch-only Ruff fixes
+        if: always()
+        run: |
+          git fetch --depth=1 origin fix/ai-error-contract-closure
+          git worktree add /tmp/lintfix FETCH_HEAD
+          cd /tmp/lintfix
+          sed -i '1,2d' tests/ai/test_error_contract.py
+          sed -i '1,2d' tests/ai/test_error_contract_matrix.py
+          python -m ruff check --fix --select I001 \
+            tests/ai/test_error_contract.py \
+            tests/ai/test_error_contract_matrix.py \
+            tests/ai/test_temporal_taskgraph_conformance.py
+          python - <<'PY'
+          from pathlib import Path
+
+          path = Path('tests/ai/test_error_contract.py')
+          text = path.read_text()
+          old = '        safe_error_details: dict[str, object] = {}\n'
+          new = '        safe_error_details: tuple[tuple[str, object], ...] = ()\n'
+          if text.count(old) != 1:
+              raise SystemExit('unexpected test_error_contract safe_error_details shape')
+          path.write_text(text.replace(old, new, 1))
+
+          path = Path('linktools-ai/src/linktools/ai/runtime/_local.py')
+          text = path.read_text()
+          old = '                        except Exception as readback_error:\n'
+          new = '                        except Exception as readback_error:  # noqa: BLE001\n'
+          if text.count(old) != 1:
+              raise SystemExit('unexpected readback exception boundary shape')
+          text = text.replace(old, new, 1)
+          old = '''                            _logger.error(\n                                "terminal finalization failed after durable execution terminal: execution=%s",\n                                execution_id,\n                                exc_info=True,\n                            )\n'''
+          new = '''                            _logger.exception(\n                                "terminal finalization failed after durable execution terminal: execution=%s",\n                                execution_id,\n                            )\n'''
+          if text.count(old) != 1:
+              raise SystemExit('unexpected terminal finalization logging shape')
+          path.write_text(text.replace(old, new, 1))
+          PY
+          git diff --check
+          git diff -- \
+            linktools-ai/src/linktools/ai/runtime/_local.py \
+            tests/ai/test_error_contract.py \
+            tests/ai/test_error_contract_matrix.py \
+            tests/ai/test_temporal_taskgraph_conformance.py > /tmp/branch-ruff-fix.patch
+
       - name: Upload Ruff diagnostics
         if: always()
         uses: actions/upload-artifact@v4
@@ -74,6 +117,7 @@ jobs:
           path: |
             ruff.log
             ruff-baseline.log
+            /tmp/branch-ruff-fix.patch
           if-no-files-found: error
 
       - name: Enforce Ruff result
