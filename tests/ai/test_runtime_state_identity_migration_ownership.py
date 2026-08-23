@@ -1,16 +1,17 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Tenant ownership coverage for one-time Runtime identity migration."""
+"""Ownership coverage for Runtime composition and identity migration."""
 
 from datetime import datetime, timezone
 
 import pytest
 
-from linktools.ai.agent import AgentCatalog, AgentCompiler
+from linktools.ai.agent import AgentBinding, AgentCatalog, AgentCompiler
 from linktools.ai.core import EvaluationStatus, ExecutionLineageKind, ExecutionStatus
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.model import ModelRegistry
 from linktools.ai.runtime import RuntimeState
+from linktools.ai.runtime._factory import _require_state_identity
 from linktools.ai.runtime.state._contracts import (
     EvaluationRecord,
     ExecutionRecord,
@@ -31,7 +32,7 @@ def _compiler_catalog() -> tuple[AgentCompiler, AgentCatalog]:
     return compiler, AgentCatalog({"default": definition})
 
 
-def _execution(binding: object, *, tenant_id: str) -> ExecutionRecord:
+def _execution(binding: AgentBinding, *, tenant_id: str) -> ExecutionRecord:
     now = datetime.now(timezone.utc)
     return ExecutionRecord(
         execution_id="execution",
@@ -57,7 +58,7 @@ def _execution(binding: object, *, tenant_id: str) -> ExecutionRecord:
     )
 
 
-def _recovery(binding: object, *, tenant_id: str) -> RecoveryAdmissionRecord:
+def _recovery(binding: AgentBinding, *, tenant_id: str) -> RecoveryAdmissionRecord:
     now = datetime.now(timezone.utc)
     recovery_input = RecoveryExecutionInput(
         user_prompt="prompt",
@@ -80,7 +81,7 @@ def _recovery(binding: object, *, tenant_id: str) -> RecoveryAdmissionRecord:
     return RecoveryAdmissionRecord("execution", tenant_id, recovery_input, now)
 
 
-def _evaluation(binding: object, *, tenant_id: str) -> EvaluationRecord:
+def _evaluation(binding: AgentBinding, *, tenant_id: str) -> EvaluationRecord:
     now = datetime.now(timezone.utc)
     return EvaluationRecord(
         evaluation_id="evaluation",
@@ -99,6 +100,33 @@ def _evaluation(binding: object, *, tenant_id: str) -> EvaluationRecord:
         created_at=now,
         updated_at=now,
     )
+
+
+@pytest.mark.asyncio
+async def test_runtime_factory_rejects_state_identity_mismatch() -> None:
+    state = RuntimeState.in_memory()
+    await state.initialize(namespace="runtime-owner", tenant_id="tenant")
+    try:
+        assert state.namespace == "runtime-owner"
+        assert state.tenant_id == "tenant"
+        _require_state_identity(
+            state,
+            namespace="runtime-owner",
+            tenant_id="tenant",
+        )
+        for namespace, tenant_id in (
+            ("other-runtime", "tenant"),
+            ("runtime-owner", "other-tenant"),
+        ):
+            with pytest.raises(AIError) as raised:
+                _require_state_identity(
+                    state,
+                    namespace=namespace,
+                    tenant_id=tenant_id,
+                )
+            assert raised.value.code is ErrorCode.STORAGE_OWNER_MISMATCH
+    finally:
+        await state.close()
 
 
 @pytest.mark.asyncio
@@ -123,7 +151,10 @@ async def test_migration_rejects_runtime_tenant_mismatch() -> None:
 @pytest.mark.parametrize("record_kind", ["execution", "recovery", "evaluation"])
 async def test_migration_rejects_embedded_tenant_mismatch(record_kind: str) -> None:
     state = RuntimeState.in_memory()
-    await state.initialize(namespace=f"migration-record-owner-{record_kind}", tenant_id="tenant")
+    await state.initialize(
+        namespace=f"migration-record-owner-{record_kind}",
+        tenant_id="tenant",
+    )
     compiler, catalog = _compiler_catalog()
     binding = compiler.bind(catalog.root_definition("default"))
 
