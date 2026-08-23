@@ -1,29 +1,13 @@
 ===== python .bootstrap/apply_runtime_persistence_compat.py =====
-runtime persistence compatibility implementation applied
-exit=0
-===== python -m compileall -q linktools-ai/src/linktools/ai =====
-exit=0
-===== ruff check --select E4,E7,E9,F linktools-ai/src/linktools/ai tests/ai =====
-All checks passed!
-exit=0
-===== persistence exit=0 =====
-<frozen runpy>:128: RuntimeWarning: 'scripts.build.architecture' found in sys.modules after import of package 'scripts.build', but prior to execution of 'scripts.build.architecture'; this may result in unpredictable behaviour
-===== architecture exit=0 =====
-===== pytest -q tests/ai =====
-
-==================================== ERRORS ====================================
-________________ ERROR collecting tests/ai/test_architecture.py ________________
-ImportError while importing test module '/home/runner/work/linktools/linktools/tests/ai/test_architecture.py'.
-Hint: make sure your test modules/packages have valid Python names.
-Traceback:
-/opt/hostedtoolcache/Python/3.11.16/x64/lib/python3.11/importlib/__init__.py:126: in import_module
-    return _bootstrap._gcd_import(name[level:], package, level)
-           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-tests/ai/test_architecture.py:14: in <module>
-    from scripts.build.architecture import ArchitecturePolicyChecker, build_report
-E   ModuleNotFoundError: No module named 'scripts.build'
-=========================== short test summary info ============================
-ERROR tests/ai/test_architecture.py
-!!!!!!!!!!!!!!!!!!!! Interrupted: 1 error during collection !!!!!!!!!!!!!!!!!!!!
-1 error in 3.74s
-exit=2
+Traceback (most recent call last):
+  File "/home/runner/work/linktools/linktools/.bootstrap/apply_runtime_persistence_compat.py", line 110, in <module>
+    main()
+  File "/home/runner/work/linktools/linktools/.bootstrap/apply_runtime_persistence_compat.py", line 100, in main
+    patch_codec()
+  File "/home/runner/work/linktools/linktools/.bootstrap/apply_runtime_persistence_compat.py", line 28, in patch_codec
+    text = replace_once(text, old, new, "dataclass contract")
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/runner/work/linktools/linktools/.bootstrap/apply_runtime_persistence_compat.py", line 19, in replace_once
+    raise RuntimeError(f"{label}: expected one match, found {count}")
+RuntimeError: dataclass contract: expected one match, found 0
+exit=1
