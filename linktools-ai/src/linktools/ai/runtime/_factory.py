@@ -39,6 +39,16 @@ from .state._migration import migrate_v1_agent_identity_state
 _logger = environ.get_logger("ai.runtime.factory")
 
 
+def _require_state_identity(
+    state: RuntimeState,
+    *,
+    namespace: str,
+    tenant_id: str,
+) -> None:
+    if state.namespace != namespace or state.tenant_id != tenant_id:
+        raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
+
+
 async def build_local_runtime(
     *,
     state: RuntimeState,
@@ -56,6 +66,7 @@ async def build_local_runtime(
 ) -> Runtime:
     if not state.ready or not assets.ready:
         raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+    _require_state_identity(state, namespace=namespace, tenant_id=tenant_id)
     migrated = await migrate_v1_agent_identity_state(
         state, catalog, compiler, tenant_id=tenant_id
     )
