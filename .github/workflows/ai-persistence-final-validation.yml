@@ -5,6 +5,10 @@ on:
     branches:
       - refactor/ai-agent-runtime-asset-composition-impl
 
+concurrency:
+  group: ai-persistence-final-validation-${{ github.ref }}
+  cancel-in-progress: true
+
 permissions:
   contents: write
 
