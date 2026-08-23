@@ -7,6 +7,7 @@ on:
 
 permissions:
   contents: read
+  actions: read
 
 jobs:
   verify:
@@ -28,168 +29,69 @@ jobs:
             'aiosqlite==0.22.1' ruff rich requests packaging
           python -m pip install -e ./linktools --no-deps
 
-      - name: Prepare final Ruff candidate
+      - name: Prepare corrected final Ruff candidate
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
+          gh run download 32628953978 \
+            --repo linktools-toolkit/linktools \
+            --name ai-error-contract-ruff-final-candidate \
+            --dir /tmp/ruff-artifact
           git fetch --depth=1 origin fix/ai-error-contract-closure
           git worktree add /tmp/ruff-final FETCH_HEAD
           cd /tmp/ruff-final
+          git apply --check /tmp/ruff-artifact/ruff-final.patch
+          git apply /tmp/ruff-artifact/ruff-final.patch
           python - <<'PY'
           from pathlib import Path
 
-          config = Path('ruff.toml')
-          config.write_text('''[lint]\n# Serialized and persisted value-shape validation intentionally uses ValueError before boundary normalization.\nignore = ["TRY004"]\n\n[lint.per-file-ignores]\n"linktools-ai/**/*.py" = ["EXE001", "UP009"]\n"tests/ai/**/*.py" = ["EXE001", "UP009"]\n''')
-
-          def replace(path: str, old: str, new: str, count: int = 1) -> None:
-              file = Path(path)
-              text = file.read_text()
-              actual = text.count(old)
-              if actual != count:
-                  raise SystemExit(f'{path}: expected {count} occurrences, found {actual}: {old!r}')
-              file.write_text(text.replace(old, new))
-
-          replace(
-              'linktools-ai/src/linktools/ai/capability/__init__.py',
-              '    "validate_fingerprint",\n]',
-              '    "mcp_server_selector",\n    "validate_fingerprint",\n]',
-          )
-
-          for path in (
-              'linktools-ai/src/linktools/ai/runtime/state/_maintenance.py',
-              'linktools-ai/src/linktools/ai/storage/_object.py',
-          ):
-              file = Path(path)
-              text = file.read_text()
-              if path.endswith('_maintenance.py'):
-                  text = text.replace(
-                      'from contextlib import AsyncExitStack\nfrom typing import AsyncContextManager, Protocol\n',
-                      'from contextlib import AbstractAsyncContextManager, AsyncExitStack\nfrom typing import Protocol\n',
-                  )
-              else:
-                  text = text.replace(
-                      'from contextlib import asynccontextmanager\n',
-                      'from contextlib import AbstractAsyncContextManager, asynccontextmanager\n',
-                  ).replace('    AsyncContextManager,\n', '')
-              if 'AsyncContextManager' not in text:
-                  raise SystemExit(f'{path}: AsyncContextManager use unexpectedly absent before replacement')
-              text = text.replace('AsyncContextManager[', 'AbstractAsyncContextManager[')
-              file.write_text(text)
-
-          # G201: preserve the existing exception boundaries while using the logger API that records the active exception.
-          for path in (
-              'linktools-ai/src/linktools/ai/runtime/_execution.py',
-              'linktools-ai/src/linktools/ai/runtime/_local.py',
-              'linktools-ai/src/linktools/ai/runtime/_subagent.py',
-              'linktools-ai/src/linktools/ai/runtime/state/_materializer.py',
-          ):
-              file = Path(path)
-              lines = file.read_text().splitlines()
-              changed = 0
-              index = 0
-              while index < len(lines):
-                  line = lines[index]
-                  if '_logger.error(' not in line:
-                      index += 1
-                      continue
-                  window = '\n'.join(lines[index:index + 8])
-                  if 'exc_info=True' not in window:
-                      index += 1
-                      continue
-                  lines[index] = line.replace('_logger.error(', '_logger.exception(')
-                  if 'exc_info=True' in lines[index]:
-                      lines[index] = lines[index].replace(', exc_info=True', '')
-                  else:
-                      for offset in range(index + 1, min(index + 8, len(lines))):
-                          if lines[offset].strip() == 'exc_info=True,':
-                              del lines[offset]
-                              break
-                      else:
-                          raise SystemExit(f'{path}: could not find exc_info=True for logger call')
-                  changed += 1
-                  index += 1
-              expected = {
-                  'linktools-ai/src/linktools/ai/runtime/_execution.py': 1,
-                  'linktools-ai/src/linktools/ai/runtime/_local.py': 2,
-                  'linktools-ai/src/linktools/ai/runtime/_subagent.py': 2,
-                  'linktools-ai/src/linktools/ai/runtime/state/_materializer.py': 1,
-              }[path]
-              if changed != expected:
-                  raise SystemExit(f'{path}: expected {expected} G201 replacements, got {changed}')
-              file.write_text('\n'.join(lines) + '\n')
-
-          replace(
-              'linktools-ai/src/linktools/ai/runtime/state/_filesystem.py',
-              '''        try:\n            _require_layout_path(\n                path,\n                self._root,\n                f"operations/streams/{stream[:2]}/{stream}/{sequence:020d}.ref",\n            )\n            key = _read_operation_ref(path)\n        except AIError:\n            raise\n''',
-              '''        _require_layout_path(\n            path,\n            self._root,\n            f"operations/streams/{stream[:2]}/{stream}/{sequence:020d}.ref",\n        )\n        key = _read_operation_ref(path)\n''',
-          )
-          replace(
-              'linktools-ai/src/linktools/ai/storage/_lock.py',
-              '        return lease if renewed else lease\n',
-              '        return lease\n',
-          )
-          replace(
-              'tests/ai/test_review_fix_spec.py',
-              'import pytest\nfrom linktools.ai.runtime.state import RuntimeState\n',
-              'import pytest\nfrom linktools.ai.errors import AIError, ErrorCode\nfrom linktools.ai.runtime.state import RuntimeState\n',
-          )
-          replace(
-              'tests/ai/test_review_fix_spec.py',
-              '''    with pytest.raises(Exception):\n        await state.initialize(namespace="review", tenant_id="tenant")\n''',
-              '''    with pytest.raises(AIError) as error:\n        await state.initialize(namespace="review", tenant_id="tenant")\n    assert error.value.code is ErrorCode.RUNTIME_DEPENDENCY_NOT_READY\n''',
-          )
-          replace(
-              'linktools-ai/src/linktools/ai/runtime/_local.py',
-              '''        if execution is not None:\n            if (\n                execution.binding_digest != recovery_input.binding_digest\n                or execution.parent_execution_id != recovery_input.parent_execution_id\n                or execution.root_execution_id != recovery_input.root_execution_id\n                or execution.source_execution_id != recovery_input.source_execution_id\n                or execution.base_execution_id != recovery_input.base_execution_id\n                or execution.conversation_step_run_id != recovery_input.conversation_step_run_id\n                or execution.lineage_kind.value != recovery_input.lineage_kind\n                or execution.planning is not recovery_input.planning\n                or execution.thinking is not recovery_input.thinking\n                or execution.binding != recovery_input.binding\n            ):\n                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)\n''',
-              '''        if execution is not None and (\n            execution.binding_digest != recovery_input.binding_digest\n            or execution.parent_execution_id != recovery_input.parent_execution_id\n            or execution.root_execution_id != recovery_input.root_execution_id\n            or execution.source_execution_id != recovery_input.source_execution_id\n            or execution.base_execution_id != recovery_input.base_execution_id\n            or execution.conversation_step_run_id != recovery_input.conversation_step_run_id\n            or execution.lineage_kind.value != recovery_input.lineage_kind\n            or execution.planning is not recovery_input.planning\n            or execution.thinking is not recovery_input.thinking\n            or execution.binding != recovery_input.binding\n        ):\n            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)\n''',
-          )
-          replace(
-              'linktools-ai/src/linktools/ai/temporal/_task_operation.py',
-              '''        if current.status is TaskStatus.RUNNING:\n            if current.owner != owner and _lease_is_active(current):\n                return current\n''',
-              '''        if current.status is TaskStatus.RUNNING and current.owner != owner and _lease_is_active(current):\n            return current\n''',
-          )
+          path = Path('linktools-ai/src/linktools/ai/capability/__init__.py')
+          text = path.read_text()
+          export = '    "mcp_server_selector",\n'
+          if text.count(export) != 1:
+              raise SystemExit(f'expected one temporary mcp_server_selector export, found {text.count(export)}')
+          text = text.replace(export, '')
+          old = 'from ._mcp import MCPCapabilityProvider, MCPRuntime, mcp_server_selector\n'
+          new = 'from ._mcp import MCPCapabilityProvider, MCPRuntime, mcp_server_selector as mcp_server_selector\n'
+          if text.count(old) != 1:
+              raise SystemExit(f'expected one mcp_server_selector import, found {text.count(old)}')
+          path.write_text(text.replace(old, new))
           PY
-
-          python -m ruff check --add-noqa --select BLE001,S110,S112,PYI034,PYI059 \
-            linktools-ai/scripts/build linktools-ai/src/linktools/ai \
-            linktools-ai/src/linktools/commands/ai tests/ai
-          python -m ruff check --fix --unsafe-fixes \
-            --select C400,PERF102,PIE810,RUF059,SIM101,SIM102,SIM103,TRY201 \
-            linktools-ai/scripts/build linktools-ai/src/linktools/ai \
-            linktools-ai/src/linktools/commands/ai tests/ai
           python -m ruff check --fix \
             linktools-ai/scripts/build linktools-ai/src/linktools/ai \
             linktools-ai/src/linktools/commands/ai tests/ai
           git diff --check
 
-      - name: Ruff final candidate
+      - name: Ruff corrected candidate
         working-directory: /tmp/ruff-final
         env:
           PYTHONPATH: linktools-ai:linktools-ai/src:linktools/src
         run: python -m ruff check linktools-ai/scripts/build linktools-ai/src/linktools/ai linktools-ai/src/linktools/commands/ai tests/ai
 
-      - name: Compile final candidate
+      - name: Compile corrected candidate
         working-directory: /tmp/ruff-final
         env:
           PYTHONPATH: linktools-ai:linktools-ai/src:linktools/src
         run: python -m compileall -q linktools-ai/src/linktools/ai
 
-      - name: Test final candidate
+      - name: Test corrected candidate
         working-directory: /tmp/ruff-final
         timeout-minutes: 12
         env:
           PYTHONPATH: linktools-ai:linktools-ai/src:linktools/src
         run: python -m pytest -q tests/ai
 
-      - name: Capture final candidate patch
+      - name: Capture corrected candidate patch
         working-directory: /tmp/ruff-final
         if: always()
         run: |
           git diff --check
-          git diff > /tmp/ruff-final.patch
+          git diff > /tmp/ruff-final-corrected.patch
 
-      - name: Upload final Ruff candidate
+      - name: Upload corrected final candidate
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: ai-error-contract-ruff-final-candidate
-          path: /tmp/ruff-final.patch
+          name: ai-error-contract-ruff-final-corrected
+          path: /tmp/ruff-final-corrected.patch
           if-no-files-found: error
