@@ -209,7 +209,7 @@ def test_maintenance_accepts_current_raw_state_formats() -> None:
         ExecutionEventType.EXECUTION_CREATED.value,
         None,
         None,
-        {"value": "event"},
+        {"kind": "business", "digest": "value", "size": 1},
     )
     read_model_fact = StoredFact(
         b"r" * 32,
@@ -218,7 +218,7 @@ def test_maintenance_accepts_current_raw_state_formats() -> None:
         "execution_read_trace",
         None,
         None,
-        {"items": [{"value": "trace"}]},
+        {"items": [{"kind": "business", "digest": "value", "size": 1}]},
     )
 
     inspection._collect_references(
@@ -271,6 +271,23 @@ def test_maintenance_accepts_lease_projected_records() -> None:
     )
 
     assert references == {}
+
+
+def test_maintenance_rejects_partial_current_lease_projection() -> None:
+    record = _record("task_node", _task_node())
+    data = copy.deepcopy(record.data)
+    data["value"]["payload"]["fields"]["owner"] = None
+
+    with pytest.raises(AIError) as raised:
+        _inspection()._collect_references(
+            RuntimeDomain.TASK,
+            (replace(record, data=data),),
+            (),
+            (),
+            {},
+        )
+
+    assert raised.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
 
 
 def test_maintenance_preserves_future_lease_projected_schema() -> None:
