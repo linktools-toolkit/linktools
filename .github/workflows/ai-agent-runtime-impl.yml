@@ -41,14 +41,14 @@ jobs:
             "$@" >>"$RESULT" 2>&1 || status=1
             return 0
           }
+          run_check python -m pip install -q --upgrade pip
+          if [[ $status -eq 0 ]]; then run_check python -m pip install -q -e ./linktools -e './linktools-ai[sqlite,evaluation,temporal]' pytest pytest-asyncio ruff; fi
           for script in .bootstrap/patch*.py; do
             [[ -f "$script" ]] || continue
             if [[ $status -eq 0 ]]; then run_check python "$script"; fi
             rm -f "$script"
           done
           if [[ $status -eq 0 ]]; then run_check python -m compileall -q linktools-ai/src/linktools/ai; fi
-          if [[ $status -eq 0 ]]; then run_check python -m pip install -q --upgrade pip; fi
-          if [[ $status -eq 0 ]]; then run_check python -m pip install -q -e ./linktools -e './linktools-ai[sqlite,evaluation,temporal]' pytest pytest-asyncio ruff; fi
           if [[ $status -eq 0 ]]; then
             mapfile -t changed_python < <(
               git diff --name-only a4ded79a152ccfbc635503ee7b7bd394bd50970e -- \
