@@ -1,0 +1,26 @@
+===== python .bootstrap/repair_refine_bootstrap.py =====
+typed codec bootstrap envelope replacement repaired
+exit=0
+===== python .bootstrap/refine_typed_persistence_codec.py =====
+typed Runtime persistence codec boundary applied
+exit=0
+===== python .bootstrap/fix_legacy_identity_fixtures.py =====
+legacy identity fixtures normalized to authentic unversioned V1
+exit=0
+===== python -m compileall -q linktools-ai/src/linktools/ai =====
+exit=0
+===== ruff check --select E4,E7,E9,F linktools-ai/src/linktools/ai tests/ai =====
+All checks passed!
+exit=0
+===== persistence exit=0 =====
+<frozen runpy>:128: RuntimeWarning: 'scripts.build.architecture' found in sys.modules after import of package 'scripts.build', but prior to execution of 'scripts.build.architecture'; this may result in unpredictable behaviour
+===== architecture exit=0 =====
+===== pytest -q tests/ai =====
+........................................................................ [ 19%]
+........................................................................ [ 38%]
+........................................................................ [ 57%]
+........................................................................ [ 76%]
+........................................................................ [ 95%]
+..................                                                       [100%]
+378 passed in 31.02s
+exit=0

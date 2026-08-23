@@ -457,11 +457,11 @@ _V1_SCHEMA_FINGERPRINTS: Mapping[str, str] = MappingProxyType(
 
 
 DataclassEncoder = Callable[
-    [object, "_VersionCodec"],
+    [object, "_VersionCodec", bool],
     Mapping[str, JsonValue],
 ]
 DataclassDecoder = Callable[
-    [Mapping[str, object], "_VersionCodec"],
+    [Mapping[str, object], "_VersionCodec", bool],
     object,
 ]
 DataclassUpgrade = Callable[
@@ -521,6 +521,7 @@ def _encode_v1_exact_binding_record(
     value: object,
     expected_fields: frozenset[str],
     codec: "_VersionCodec",
+    persisted: bool,
 ) -> Mapping[str, JsonValue]:
     actual_fields = frozenset(field.name for field in fields(value))
     if actual_fields != expected_fields:
@@ -538,7 +539,9 @@ def _encode_v1_exact_binding_record(
         name: (
             binding.to_payload()
             if name == "binding"
-            else _encode_domain(attrgetter(name)(value), codec)
+            else _encode_domain(
+                attrgetter(name)(value), codec, persisted=persisted
+            )
         )
         for name in expected_fields
     }
@@ -549,6 +552,7 @@ def _decode_v1_exact_binding_record_fields(
     target: type[object],
     expected_fields: frozenset[str],
     codec: "_VersionCodec",
+    persisted: bool,
 ) -> dict[str, object]:
     _require_exact_keys(raw_fields, expected_fields)
     hints = get_type_hints(target)
@@ -556,7 +560,9 @@ def _decode_v1_exact_binding_record_fields(
         name: (
             AgentBindingSnapshot.from_payload(raw_fields[name])
             if name == "binding"
-            else _decode_domain(raw_fields[name], hints[name], codec)
+            else _decode_domain(
+                raw_fields[name], hints[name], codec, persisted=persisted
+            )
         )
         for name in expected_fields
     }
@@ -565,18 +571,22 @@ def _decode_v1_exact_binding_record_fields(
 def _encode_v1_execution_record(
     value: object,
     codec: "_VersionCodec",
+    persisted: bool,
 ) -> Mapping[str, JsonValue]:
     if not isinstance(value, ExecutionRecord):
         raise TypeError("V1 execution_record encoder received the wrong type")
-    return _encode_v1_exact_binding_record(value, _EXECUTION_V1_FIELDS, codec)
+    return _encode_v1_exact_binding_record(
+        value, _EXECUTION_V1_FIELDS, codec, persisted
+    )
 
 
 def _decode_v1_execution_record(
     raw_fields: Mapping[str, object],
     codec: "_VersionCodec",
+    persisted: bool,
 ) -> ExecutionRecord:
     decoded = _decode_v1_exact_binding_record_fields(
-        raw_fields, ExecutionRecord, _EXECUTION_V1_FIELDS, codec
+        raw_fields, ExecutionRecord, _EXECUTION_V1_FIELDS, codec, persisted
     )
     try:
         return ExecutionRecord(**decoded)
@@ -587,20 +597,22 @@ def _decode_v1_execution_record(
 def _encode_v1_recovery_execution_input(
     value: object,
     codec: "_VersionCodec",
+    persisted: bool,
 ) -> Mapping[str, JsonValue]:
     if not isinstance(value, RecoveryExecutionInput):
         raise TypeError("V1 recovery_execution_input encoder received the wrong type")
     return _encode_v1_exact_binding_record(
-        value, _RECOVERY_EXECUTION_V1_FIELDS, codec
+        value, _RECOVERY_EXECUTION_V1_FIELDS, codec, persisted
     )
 
 
 def _decode_v1_recovery_execution_input(
     raw_fields: Mapping[str, object],
     codec: "_VersionCodec",
+    persisted: bool,
 ) -> RecoveryExecutionInput:
     decoded = _decode_v1_exact_binding_record_fields(
-        raw_fields, RecoveryExecutionInput, _RECOVERY_EXECUTION_V1_FIELDS, codec
+        raw_fields, RecoveryExecutionInput, _RECOVERY_EXECUTION_V1_FIELDS, codec, persisted
     )
     try:
         return RecoveryExecutionInput(**decoded)
@@ -611,20 +623,26 @@ def _decode_v1_recovery_execution_input(
 def _encode_v1_task_node(
     value: object,
     codec: "_VersionCodec",
+    persisted: bool,
 ) -> Mapping[str, JsonValue]:
     if not isinstance(value, TaskNode):
         raise TypeError("V1 task_node encoder received the wrong type")
     return {
-        "node_id": _encode_domain(value.node_id, codec),
-        "dependencies": _encode_domain(value.dependencies, codec),
-        "input": _encode_domain(value.input, codec),
-        "budget_cost": _encode_domain(value.budget_cost, codec),
+        "node_id": _encode_domain(value.node_id, codec, persisted=persisted),
+        "dependencies": _encode_domain(
+            value.dependencies, codec, persisted=persisted
+        ),
+        "input": _encode_domain(value.input, codec, persisted=persisted),
+        "budget_cost": _encode_domain(
+            value.budget_cost, codec, persisted=persisted
+        ),
     }
 
 
 def _decode_v1_task_node(
     raw_fields: Mapping[str, object],
     codec: "_VersionCodec",
+    persisted: bool,
 ) -> TaskNode:
     _require_exact_keys(
         raw_fields,
@@ -638,21 +656,25 @@ def _decode_v1_task_node(
         ),
     )
     return TaskNode(
-        str(_decode_domain(raw_fields["node_id"], str, codec)),
+        str(_decode_domain(raw_fields["node_id"], str, codec, persisted=persisted)),
         tuple(
             _decode_domain(
                 raw_fields["dependencies"],
                 tuple[str, ...],
                 codec,
+                persisted=persisted,
             )
         ),
         input=_decode_domain(
             raw_fields["input"],
             Any,
             codec,
+            persisted=persisted,
         ),
         budget_cost=int(
-            _decode_domain(raw_fields["budget_cost"], int, codec)
+            _decode_domain(
+                raw_fields["budget_cost"], int, codec, persisted=persisted
+            )
         ),
     )
 
@@ -901,34 +923,6 @@ def _dataclass_persistence_contract(
     return contract
 
 
-def _encode_persisted_value(value: JsonValue, codec: _VersionCodec) -> JsonValue:
-    if isinstance(value, list):
-        return [_encode_persisted_value(item, codec) for item in value]
-    if not isinstance(value, Mapping):
-        return value
-    if "$dataclass" in value:
-        _require_exact_keys(value, frozenset({"$dataclass", "fields"}))
-        wire_id = value.get("$dataclass")
-        raw_fields = value.get("fields")
-        if not isinstance(wire_id, str) or not isinstance(raw_fields, Mapping):
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        contract = _dataclass_persistence_contract(wire_id, codec)
-        if codec.domain_types.get(wire_id) is None:
-            raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
-        return {
-            "$dataclass": wire_id,
-            "schema": contract.current_revision,
-            "fields": {
-                str(key): _encode_persisted_value(cast(JsonValue, item), codec)
-                for key, item in raw_fields.items()
-            },
-        }
-    return {
-        str(key): _encode_persisted_value(cast(JsonValue, item), codec)
-        for key, item in value.items()
-    }
-
-
 def _apply_persisted_upgrades(
     raw_fields: Mapping[str, object],
     revision: int,
@@ -944,67 +938,6 @@ def _apply_persisted_upgrades(
         fields_value = dict(upgrade(fields_value, codec))
         current += 1
     return fields_value
-
-
-def _normalize_persisted_dataclass(
-    value: Mapping[str, object],
-    codec: _VersionCodec,
-) -> JsonValue:
-    keys = frozenset(value)
-    if keys == frozenset({"$dataclass", "fields"}):
-        explicit_revision: object | None = None
-    elif keys == frozenset({"$dataclass", "schema", "fields"}):
-        explicit_revision = value.get("schema")
-    else:
-        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-
-    wire_id = value.get("$dataclass")
-    raw_fields = value.get("fields")
-    if not isinstance(wire_id, str) or not isinstance(raw_fields, Mapping):
-        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-    contract = _dataclass_persistence_contract(wire_id, codec)
-    if codec.domain_types.get(wire_id) is None:
-        raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
-
-    if explicit_revision is None:
-        revision = contract.legacy_revision
-        if revision is None:
-            raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
-    else:
-        if (
-            isinstance(explicit_revision, bool)
-            or not isinstance(explicit_revision, int)
-            or explicit_revision < 1
-        ):
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        revision = explicit_revision
-    if revision not in contract.fingerprints:
-        raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
-
-    normalized_fields = {
-        str(key): _normalize_persisted_value(cast(JsonValue, item), codec)
-        for key, item in raw_fields.items()
-    }
-    upgraded = _apply_persisted_upgrades(
-        normalized_fields, revision, contract, codec
-    )
-    return {
-        "$dataclass": wire_id,
-        "fields": cast(dict[str, JsonValue], dict(upgraded)),
-    }
-
-
-def _normalize_persisted_value(value: JsonValue, codec: _VersionCodec) -> JsonValue:
-    if isinstance(value, list):
-        return [_normalize_persisted_value(item, codec) for item in value]
-    if not isinstance(value, Mapping):
-        return value
-    if "$dataclass" in value:
-        return _normalize_persisted_dataclass(value, codec)
-    return {
-        str(key): _normalize_persisted_value(cast(JsonValue, item), codec)
-        for key, item in value.items()
-    }
 
 
 def _runtime_persistence_manifest() -> dict[str, JsonValue]:
@@ -1044,13 +977,7 @@ def encode_envelope(
         raise ValueError("only the frozen current data version may be written")
     if not isinstance(value, Mapping):
         raise TypeError("canonical data value must be a mapping")
-    codec = _VERSION_CODECS.get(version)
-    if codec is None:
-        raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
-    persisted = _encode_persisted_value(dict(value), codec)
-    if not isinstance(persisted, Mapping):
-        raise TypeError("canonical data value must remain a mapping")
-    return {"v": version, "value": dict(persisted)}
+    return {"v": version, "value": dict(value)}
 
 
 def parse_envelope(value: Mapping[str, JsonValue]) -> CanonicalEnvelope:
@@ -1333,7 +1260,12 @@ def _decode_external(value: object, target: type[object], codec: _VersionCodec) 
     raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
 
 
-def _encode_domain(value: object, codec: _VersionCodec) -> JsonValue:
+def _encode_domain(
+    value: object,
+    codec: _VersionCodec,
+    *,
+    persisted: bool = False,
+) -> JsonValue:
     if isinstance(value, Enum):
         wire_id = codec.enum_wire_ids.get(type(value))
         if wire_id is None:
@@ -1375,7 +1307,7 @@ def _encode_domain(value: object, codec: _VersionCodec) -> JsonValue:
             raise TypeError(f"unsupported dataclass type: {type(value).__name__}")
         encoder = codec.dataclass_encoders.get(wire_id)
         if encoder is not None:
-            encoded_fields = encoder(value, codec)
+            encoded_fields = encoder(value, codec, persisted)
         else:
             expected_fingerprint = codec.schema_fingerprints.get(wire_id)
             if expected_fingerprint is None:
@@ -1398,15 +1330,24 @@ def _encode_domain(value: object, codec: _VersionCodec) -> JsonValue:
             if any(field.name.startswith("_") for field in fields(value)):
                 raise TypeError("private dataclass fields require an explicit codec")
             encoded_fields = {
-                field.name: _encode_domain(attrgetter(field.name)(value), codec)
+                field.name: _encode_domain(
+                    attrgetter(field.name)(value), codec, persisted=persisted
+                )
                 for field in fields(value)
             }
         wire: dict[str, JsonValue] = {
             "$dataclass": wire_id,
             "fields": dict(encoded_fields),
         }
+        if persisted:
+            contract = _dataclass_persistence_contract(wire_id, codec)
+            wire = {
+                "$dataclass": wire_id,
+                "schema": contract.current_revision,
+                "fields": dict(encoded_fields),
+            }
         try:
-            _decode_dataclass(wire, type(value), codec)
+            _decode_dataclass(wire, type(value), codec, persisted=persisted)
         except AIError as error:
             if error.code is ErrorCode.STORAGE_VERSION_UNSUPPORTED:
                 raise
@@ -1421,8 +1362,8 @@ def _encode_domain(value: object, codec: _VersionCodec) -> JsonValue:
     if isinstance(value, Mapping):
         encoded_pairs: list[tuple[bytes, JsonValue, JsonValue]] = []
         for key, item in value.items():
-            encoded_key = _encode_domain(key, codec)
-            encoded_item = _encode_domain(item, codec)
+            encoded_key = _encode_domain(key, codec, persisted=persisted)
+            encoded_item = _encode_domain(item, codec, persisted=persisted)
             encoded_pairs.append(
                 (canonical_json_bytes(encoded_key), encoded_key, encoded_item)
             )
@@ -1437,14 +1378,20 @@ def _encode_domain(value: object, codec: _VersionCodec) -> JsonValue:
             ]
         }
     if isinstance(value, tuple):
-        return {"$tuple": [_encode_domain(item, codec) for item in value]}
+        return {
+            "$tuple": [
+                _encode_domain(item, codec, persisted=persisted) for item in value
+            ]
+        }
     if isinstance(value, list):
-        return [_encode_domain(item, codec) for item in value]
+        return [_encode_domain(item, codec, persisted=persisted) for item in value]
     if isinstance(value, frozenset):
         encoded_items = [
             (canonical_json_bytes(encoded_item), encoded_item)
             for item in value
-            for encoded_item in (_encode_domain(item, codec),)
+            for encoded_item in (
+                _encode_domain(item, codec, persisted=persisted),
+            )
         ]
         item_bytes = [item[0] for item in encoded_items]
         if len(item_bytes) != len(set(item_bytes)):
@@ -1457,6 +1404,11 @@ def _encode_domain(value: object, codec: _VersionCodec) -> JsonValue:
 def encode_domain(value: DomainT) -> JsonValue:
     """Encode one domain value into the shared canonical JSON representation."""
     return _encode_domain(value, _CURRENT_CODEC)
+
+
+def _encode_persisted_domain(value: DomainT) -> JsonValue:
+    """Encode one domain value for a Runtime persistence envelope."""
+    return _encode_domain(value, _CURRENT_CODEC, persisted=True)
 
 
 def decode_domain(value: JsonValue, target: type[DomainT]) -> DomainT:
@@ -1483,8 +1435,7 @@ def _decode_enveloped_domain(
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     if payload_transform is not None:
         payload = payload_transform(payload)
-    normalized = _normalize_persisted_value(payload, codec)
-    return _decode_domain(normalized, target, codec)
+    return _decode_domain(payload, target, codec, persisted=True)
 
 
 def iter_runtime_object_refs(
@@ -1510,8 +1461,7 @@ def _iter_enveloped_runtime_object_refs(
     payload = envelope.value.get("payload")
     if payload is None:
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-    normalized = _normalize_persisted_value(payload, codec)
-    yield from _iter_runtime_object_refs(normalized, default_domain, codec)
+    yield from _iter_runtime_object_refs(payload, default_domain, codec)
 
 
 def _iter_runtime_object_refs(
@@ -1533,15 +1483,15 @@ def _iter_runtime_object_refs(
     if isinstance(value, Mapping):
         dataclass_name = value.get("$dataclass")
         if dataclass_name == codec.wire_ids[RuntimePayloadRef]:
-            decoded = _decode_domain(value, RuntimePayloadRef, codec)
+            decoded = _decode_domain(value, RuntimePayloadRef, codec, persisted=True)
             yield from _iter_runtime_object_refs(decoded, domain, codec)
             return
         if dataclass_name == codec.wire_ids[StoredPayload]:
-            decoded = _decode_domain(value, StoredPayload, codec)
+            decoded = _decode_domain(value, StoredPayload, codec, persisted=True)
             yield from _iter_runtime_object_refs(decoded, domain, codec)
             return
         if dataclass_name == codec.wire_ids[ObjectRef]:
-            decoded = _decode_domain(value, ObjectRef, codec)
+            decoded = _decode_domain(value, ObjectRef, codec, persisted=True)
             yield domain, decoded
             return
         if dataclass_name == codec.wire_ids.get(RecoveryTerminalOutcome):
@@ -1595,9 +1545,11 @@ def _decode_domain(
     value: object,
     target: object,
     codec: _VersionCodec,
+    *,
+    persisted: bool = False,
 ) -> object:
     if target is Any or target is object:
-        return _decode_any(value, codec)
+        return _decode_any(value, codec, persisted=persisted)
     origin = get_origin(target)
     arguments = get_args(target)
     if origin is Literal:
@@ -1619,7 +1571,7 @@ def _decode_domain(
             if candidate is type(None):
                 continue
             try:
-                return _decode_domain(value, candidate, codec)
+                return _decode_domain(value, candidate, codec, persisted=persisted)
             except (TypeError, ValueError, KeyError):
                 continue
             except AIError as error:
@@ -1635,18 +1587,21 @@ def _decode_domain(
         item_type = arguments[0] if arguments else Any
         if not isinstance(value, list):
             raise TypeError("list value is invalid")
-        return [_decode_domain(item, item_type, codec) for item in value]
+        return [
+            _decode_domain(item, item_type, codec, persisted=persisted)
+            for item in value
+        ]
     if origin is tuple:
         items = _unwrap_tagged_list(value, "$tuple")
         if arguments and arguments[-1] is Ellipsis:
             return tuple(
-                _decode_domain(item, arguments[0], codec)
+                _decode_domain(item, arguments[0], codec, persisted=persisted)
                 for item in items
             )
         if len(items) != len(arguments):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         return tuple(
-            _decode_domain(item, item_type, codec)
+            _decode_domain(item, item_type, codec, persisted=persisted)
             for item, item_type in zip(items, arguments, strict=True)
         )
     if target is set or origin is set:
@@ -1656,10 +1611,14 @@ def _decode_domain(
         )
     if target is frozenset or origin is frozenset:
         item_type = arguments[0] if arguments else Any
-        return _decode_frozenset_items(value, item_type, codec)
+        return _decode_frozenset_items(
+            value, item_type, codec, persisted=persisted
+        )
     if isinstance(origin, type) and issubclass(origin, Mapping):
         key_type, item_type = arguments if len(arguments) == 2 else (Any, Any)
-        return _decode_mapping_items(value, key_type, item_type, codec)
+        return _decode_mapping_items(
+            value, key_type, item_type, codec, persisted=persisted
+        )
     if target is type(None):
         if value is not None:
             raise TypeError("none value is not null")
@@ -1706,7 +1665,7 @@ def _decode_domain(
     if isinstance(target, type) and target in codec.external_schema_types:
         return _decode_external(value, target, codec)
     if isinstance(target, type) and is_dataclass(target):
-        return _decode_dataclass(value, target, codec)
+        return _decode_dataclass(value, target, codec, persisted=persisted)
     if target is float:
         if not isinstance(value, float):
             raise TypeError("scalar value has the wrong type")
@@ -1715,7 +1674,7 @@ def _decode_domain(
         if not isinstance(value, target) or target is int and isinstance(value, bool):
             raise TypeError("scalar value has the wrong type")
         return value
-    return _decode_any(value, codec)
+    return _decode_any(value, codec, persisted=persisted)
 
 
 def _require_finite_wire_float(value: float) -> float:
@@ -1761,10 +1720,23 @@ def _decode_dataclass(
     value: object,
     target: type,
     codec: _VersionCodec,
+    *,
+    persisted: bool = False,
 ) -> object:
     if not isinstance(value, Mapping):
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-    _require_exact_keys(value, frozenset({"$dataclass", "fields"}))
+    keys = frozenset(value)
+    if persisted:
+        if keys == frozenset({"$dataclass", "fields"}):
+            explicit_revision: object | None = None
+        elif keys == frozenset({"$dataclass", "schema", "fields"}):
+            explicit_revision = value.get("schema")
+        else:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    else:
+        _require_exact_keys(value, frozenset({"$dataclass", "fields"}))
+        explicit_revision = None
+
     wire_id = value.get("$dataclass")
     if not isinstance(wire_id, str):
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -1776,9 +1748,30 @@ def _decode_dataclass(
     raw_fields = value.get("fields")
     if not isinstance(raw_fields, Mapping):
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+
+    if persisted:
+        contract = _dataclass_persistence_contract(wire_id, codec)
+        if explicit_revision is None:
+            revision = contract.legacy_revision
+            if revision is None:
+                raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
+        else:
+            if (
+                isinstance(explicit_revision, bool)
+                or not isinstance(explicit_revision, int)
+                or explicit_revision < 1
+            ):
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            revision = explicit_revision
+        if revision not in contract.fingerprints:
+            raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
+        raw_fields = _apply_persisted_upgrades(
+            raw_fields, revision, contract, codec
+        )
+
     decoder = codec.dataclass_decoders.get(wire_id)
     if decoder is not None:
-        return decoder(raw_fields, codec)
+        return decoder(raw_fields, codec, persisted)
     expected_fingerprint = codec.schema_fingerprints.get(wire_id)
     if expected_fingerprint is None:
         raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
@@ -1798,6 +1791,7 @@ def _decode_dataclass(
             raw_fields[field.name],
             hints.get(field.name, Any),
             codec,
+            persisted=persisted,
         )
     kwargs: dict[str, object] = {}
     post_init_fields: dict[str, object] = {}
@@ -1820,7 +1814,12 @@ def _decode_dataclass(
     return result
 
 
-def _decode_any(value: object, codec: _VersionCodec) -> object:
+def _decode_any(
+    value: object,
+    codec: _VersionCodec,
+    *,
+    persisted: bool = False,
+) -> object:
     if isinstance(value, Mapping):
         matched = set(value.keys()).intersection(_RESERVED_V1_TAGS)
         if len(matched) > 1:
@@ -1844,17 +1843,23 @@ def _decode_any(value: object, codec: _VersionCodec) -> object:
             target = codec.domain_types.get(name)
             if target is None:
                 raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
-            return _decode_dataclass(value, target, codec)
+            return _decode_dataclass(value, target, codec, persisted=persisted)
         if tag == "$mapping":
-            return _decode_mapping_items(value, Any, Any, codec)
+            return _decode_mapping_items(
+                value, Any, Any, codec, persisted=persisted
+            )
         if tag == "$tuple":
             return tuple(
-                _decode_any(item, codec)
+                _decode_any(item, codec, persisted=persisted)
                 for item in _unwrap_tagged_list(value, "$tuple")
             )
-        return _decode_frozenset_items(value, Any, codec)
+        return _decode_frozenset_items(
+            value, Any, codec, persisted=persisted
+        )
     if isinstance(value, list):
-        return [_decode_any(item, codec) for item in value]
+        return [
+            _decode_any(item, codec, persisted=persisted) for item in value
+        ]
     if isinstance(value, float):
         return _require_finite_wire_float(value)
     return value
@@ -1891,12 +1896,16 @@ def _decode_frozenset_items(
     value: object,
     item_type: object,
     codec: _VersionCodec,
+    *,
+    persisted: bool = False,
 ) -> frozenset[object]:
     items = _unwrap_tagged_list(value, "$frozenset")
     decoded_items: list[object] = []
     previous_wire: bytes | None = None
     for item in items:
-        decoded_item = _decode_domain(item, item_type, codec)
+        decoded_item = _decode_domain(
+            item, item_type, codec, persisted=persisted
+        )
         item_wire = _canonical_wire_bytes(item)
         if previous_wire is not None and previous_wire >= item_wire:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -1916,6 +1925,8 @@ def _decode_mapping_items(
     key_type: object,
     item_type: object,
     codec: _VersionCodec,
+    *,
+    persisted: bool = False,
 ) -> dict[object, object]:
     pairs = _unwrap_tagged_list(value, "$mapping")
     result: dict[object, object] = {}
@@ -1927,14 +1938,18 @@ def _decode_mapping_items(
         if previous_wire is not None and previous_wire >= key_wire:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         previous_wire = key_wire
-        decoded_key = _decode_domain(pair[0], key_type, codec)
+        decoded_key = _decode_domain(
+            pair[0], key_type, codec, persisted=persisted
+        )
         try:
             hash(decoded_key)
         except TypeError as error:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
         if decoded_key in result:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        result[decoded_key] = _decode_domain(pair[1], item_type, codec)
+        result[decoded_key] = _decode_domain(
+            pair[1], item_type, codec, persisted=persisted
+        )
     return result
 
 
@@ -2002,7 +2017,7 @@ def _encode_step_envelope(value: object) -> dict[str, JsonValue]:
     return encode_envelope(
         {
             "type": wire_type_id(value),
-            "payload": encode_domain(value),
+            "payload": _encode_persisted_domain(value),
         }
     )
 
@@ -2031,8 +2046,7 @@ def _decode_step_envelope(value: Mapping[str, JsonValue]) -> object:
     payload = envelope.value["payload"]
     if payload is None:
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-    normalized = _normalize_persisted_value(payload, codec)
-    return _decode_domain(normalized, target, codec)
+    return _decode_domain(payload, target, codec, persisted=True)
 
 
 def _validate_v1_codec_definition() -> None:

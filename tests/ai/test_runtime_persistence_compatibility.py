@@ -15,6 +15,7 @@ from linktools.ai.runtime.state._codec import (
     _apply_persisted_upgrades,
     _decode_enveloped_domain,
     _decode_step_envelope,
+    _encode_persisted_domain,
     _encode_step_envelope,
     _runtime_persistence_manifest,
     decode_domain,
@@ -63,7 +64,10 @@ def test_semantic_encoding_remains_unversioned_and_byte_stable() -> None:
 def test_persistence_envelope_tags_dataclass_schema_without_changing_wire_major() -> None:
     cursor = ConversationCursor("run", None, 0)
     envelope = encode_envelope(
-        {"type": wire_type_id(cursor), "payload": encode_domain(cursor)}
+        {
+            "type": wire_type_id(cursor),
+            "payload": _encode_persisted_domain(cursor),
+        }
     )
     assert envelope["v"] == 1
     payload = envelope["value"]["payload"]
@@ -84,7 +88,9 @@ def test_unknown_schema_is_unsupported_but_malformed_known_schema_is_integrity()
     envelope = encode_envelope(
         {
             "type": "conversation_cursor",
-            "payload": encode_domain(ConversationCursor("run", None, 0)),
+            "payload": _encode_persisted_domain(
+                ConversationCursor("run", None, 0)
+            ),
         }
     )
     future = copy.deepcopy(envelope)

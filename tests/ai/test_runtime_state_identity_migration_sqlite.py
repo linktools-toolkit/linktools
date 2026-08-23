@@ -65,6 +65,7 @@ def _legacy_execution_data(
     data = _domain_data(record)
     value = dict(data["value"])
     payload = dict(value["payload"])
+    payload.pop("schema", None)
     fields = dict(payload["fields"])
     fields["binding_digest"] = encode_domain(legacy_digest)
     fields["binding"] = _legacy_snapshot(binding, legacy_digest)

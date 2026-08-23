@@ -48,7 +48,7 @@ from ...task import (
 from .._tool import ToolOperationRecord
 from ._codec import (
     _decode_enveloped_domain,
-    encode_domain,
+    _encode_persisted_domain,
     encode_envelope,
     wire_type_id,
 )
@@ -4620,7 +4620,7 @@ def _empty_conversation_transcript_head(
 
 
 def _domain_data(value: object) -> dict[str, object]:
-    payload = encode_domain(value)
+    payload = _encode_persisted_domain(value)
     if isinstance(value, (TaskNodeView, ToolOperationRecord)) and isinstance(payload, Mapping):
         fields = payload.get("fields")
         if isinstance(fields, Mapping):

@@ -23,8 +23,10 @@ from ._codec import (
     _CURRENT_CODEC,
     _EXECUTION_V1_FIELDS,
     _RECOVERY_EXECUTION_V1_FIELDS,
+    _dataclass_persistence_contract,
     _decode_domain,
     _decode_enveloped_domain,
+    _encode_persisted_domain,
     encode_domain,
     encode_envelope,
     parse_envelope,
@@ -622,7 +624,10 @@ def _migrate_projection_data(
     data = _rebuild_data("context_projection", current_fields)
     value = _decode_enveloped_domain(data, ContextProjection)
     return encode_envelope(
-        {"type": wire_type_id(value), "payload": encode_domain(value)}
+        {
+            "type": wire_type_id(value),
+            "payload": _encode_persisted_domain(value),
+        }
     )
 
 
@@ -766,10 +771,15 @@ def _rebuild_data(
     wire_id: str,
     fields: Mapping[str, object],
 ) -> Mapping[str, JsonValue]:
+    contract = _dataclass_persistence_contract(wire_id, _CURRENT_CODEC)
     return encode_envelope(
         {
             "type": wire_id,
-            "payload": {"$dataclass": wire_id, "fields": dict(fields)},
+            "payload": {
+                "$dataclass": wire_id,
+                "schema": contract.current_revision,
+                "fields": dict(fields),
+            },
         }
     )
 

@@ -183,7 +183,6 @@ def patch_codec() -> None:
     text = replace_once(text, old, new, "persisted encode entry")
 
     text = text.replace(
-        text,
         '''    normalized = _normalize_persisted_value(payload, codec)\n    return _decode_domain(normalized, target, codec)\n''',
         '''    return _decode_domain(payload, target, codec, persisted=True)\n''',
         1,

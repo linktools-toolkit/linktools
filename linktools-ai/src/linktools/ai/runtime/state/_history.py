@@ -18,6 +18,7 @@ from .._message import decode_model_messages, encode_model_messages
 from ..service_api import SessionHistoryItem
 from ._codec import (
     _decode_enveloped_domain,
+    _encode_persisted_domain,
     encode_domain,
     encode_envelope,
 )
@@ -345,7 +346,7 @@ class TranscriptRepository:
             0,
             None,
             encode_envelope(
-                {"type": "transcript_head", "payload": encode_domain(head)}
+                {"type": "transcript_head", "payload": _encode_persisted_domain(head)}
             ),
         )
 
@@ -521,7 +522,7 @@ class TranscriptRepository:
         upgraded = replace(
             head_record,
             data=encode_envelope(
-                {"type": "transcript_head", "payload": encode_domain(next_head)}
+                {"type": "transcript_head", "payload": _encode_persisted_domain(next_head)}
             ),
             storage_version=head_record.storage_version + 1,
         )
@@ -547,7 +548,7 @@ class TranscriptRepository:
                     encode_envelope(
                         {
                             "type": "transcript_chunk",
-                            "payload": encode_domain(chunk),
+                            "payload": _encode_persisted_domain(chunk),
                         }
                     ),
                 )
@@ -664,7 +665,7 @@ class TranscriptRepository:
                                 encode_envelope(
                                     {
                                         "type": "transcript_seek",
-                                        "payload": encode_domain(seek),
+                                        "payload": _encode_persisted_domain(seek),
                                     }
                                 ),
                             )
@@ -1024,7 +1025,7 @@ class TranscriptRepository:
             encode_envelope(
                 {
                     "type": "context_projection",
-                    "payload": encode_domain(projection),
+                    "payload": _encode_persisted_domain(projection),
                 }
             ),
         )
