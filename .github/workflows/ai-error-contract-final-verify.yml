@@ -38,6 +38,22 @@ jobs:
           PYTHONPATH: linktools-ai:linktools-ai/src:linktools/src
         run: python -m pytest -q tests/ai
 
+      - name: Check out fixed baseline
+        uses: actions/checkout@v4
+        with:
+          ref: a4ded79a152ccfbc635503ee7b7bd394bd50970e
+          path: baseline
+
+      - name: Baseline Ruff diagnostics
+        continue-on-error: true
+        run: |
+          set +e
+          cd baseline
+          PYTHONPATH=linktools-ai:linktools-ai/src:linktools/src python -m ruff check \
+            linktools-ai/scripts/build linktools-ai/src/linktools/ai \
+            linktools-ai/src/linktools/commands/ai tests/ai > ../ruff-baseline.log 2>&1
+          exit $?
+
       - name: Ruff diagnostics
         id: ruff
         continue-on-error: true
@@ -54,8 +70,10 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: ai-error-contract-ruff
-          path: ruff.log
+          name: ai-error-contract-ruff-compare
+          path: |
+            ruff.log
+            ruff-baseline.log
           if-no-files-found: error
 
       - name: Enforce Ruff result
