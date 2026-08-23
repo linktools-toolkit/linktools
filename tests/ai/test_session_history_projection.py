@@ -322,7 +322,7 @@ async def test_session_history_fork_copies_continuation_without_execution_lookup
         service = _service(state)
         principal = Principal("owner", "tenant")
         await service.fork(
-            "binding",
+            "a" * 64,
             "session",
             ForkSessionRequest(principal, "fork", "fork-operation"),
         )
