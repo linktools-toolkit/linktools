@@ -21,81 +21,72 @@ jobs:
       - name: Install verification dependencies
         run: |
           python -m pip install --upgrade pip
-          python -m pip install ruff
+          python -m pip install \
+            filelock 'pydantic-ai-slim[mcp,openai,temporal]>=2.27.0,<3.0.0' \
+            'pydantic-ai-harness[skills,dynamic-workflow]>=0.13.0' \
+            'PyYAML>=6,<7' pytest pytest-asyncio 'sqlalchemy[asyncio]==2.0.51' \
+            'aiosqlite==0.22.1' ruff rich requests packaging
+          python -m pip install -e ./linktools --no-deps
 
-      - name: Compare Ruff diagnostics with fixed baseline
+      - name: Prepare safe Ruff cleanup candidate
         run: |
           git fetch --depth=1 origin fix/ai-error-contract-closure
-          git worktree add /tmp/ruff-current FETCH_HEAD
-          git fetch --depth=1 origin a4ded79a152ccfbc635503ee7b7bd394bd50970e
-          git worktree add /tmp/ruff-baseline FETCH_HEAD
-
-          set +e
-          cd /tmp/ruff-current
+          git worktree add /tmp/ruff-cleanup FETCH_HEAD
+          cd /tmp/ruff-cleanup
+          cat > ruff.toml <<'EOF'
+          [lint.per-file-ignores]
+          "linktools-ai/**/*.py" = ["EXE001", "UP009"]
+          "tests/ai/**/*.py" = ["EXE001", "UP009"]
+          EOF
+          python -m ruff check --fix \
+            linktools-ai/scripts/build linktools-ai/src/linktools/ai \
+            linktools-ai/src/linktools/commands/ai tests/ai || true
+          git diff --check
+          git diff -- . ':(exclude).github/workflows/ai-error-contract-final-verify.yml' > /tmp/ruff-safe-fix.patch
           python -m ruff check \
             linktools-ai/scripts/build linktools-ai/src/linktools/ai \
             linktools-ai/src/linktools/commands/ai tests/ai \
-            --output-format=json > /tmp/ruff-current.json
-          current_status=$?
-          cd /tmp/ruff-baseline
-          python -m ruff check \
-            linktools-ai/scripts/build linktools-ai/src/linktools/ai \
-            linktools-ai/src/linktools/commands/ai tests/ai \
-            --output-format=json > /tmp/ruff-baseline.json
-          baseline_status=$?
-          set -e
+            --output-format=json > /tmp/ruff-after-safe.json || true
 
+      - name: Compile safe cleanup candidate
+        working-directory: /tmp/ruff-cleanup
+        env:
+          PYTHONPATH: linktools-ai:linktools-ai/src:linktools/src
+        run: python -m compileall -q linktools-ai/src/linktools/ai
+
+      - name: Test safe cleanup candidate
+        working-directory: /tmp/ruff-cleanup
+        timeout-minutes: 12
+        env:
+          PYTHONPATH: linktools-ai:linktools-ai/src:linktools/src
+        run: python -m pytest -q tests/ai
+
+      - name: Summarize remaining diagnostics
+        run: |
           python - <<'PY'
           import json
           from collections import Counter
           from pathlib import Path
 
-          current = json.loads(Path('/tmp/ruff-current.json').read_text())
-          baseline = json.loads(Path('/tmp/ruff-baseline.json').read_text())
-
-          def key(item):
-              filename = item['filename']
-              marker = '/linktools/'
-              if marker in filename:
-                  filename = filename.split(marker, 1)[1]
-              return filename, item['code'], item['message']
-
-          current_counter = Counter(map(key, current))
-          baseline_counter = Counter(map(key, baseline))
-          added = current_counter - baseline_counter
-          removed = baseline_counter - current_counter
-
-          report = [
-              f'current_status={int(bool(current))}',
-              f'baseline_status={int(bool(baseline))}',
-              f'current_count={len(current)}',
-              f'baseline_count={len(baseline)}',
-              f'added_count={sum(added.values())}',
-              f'removed_count={sum(removed.values())}',
-              '',
-              '[added]',
-          ]
-          for (filename, code, message), count in sorted(added.items()):
-              report.append(f'{count}\t{code}\t{filename}\t{message}')
-          report.extend(['', '[removed]'])
-          for (filename, code, message), count in sorted(removed.items()):
-              report.append(f'{count}\t{code}\t{filename}\t{message}')
-          Path('/tmp/ruff-diff.txt').write_text('\n'.join(report) + '\n')
-          print('\n'.join(report[:80]))
+          data = json.loads(Path('/tmp/ruff-after-safe.json').read_text())
+          by_rule = Counter(item['code'] for item in data)
+          by_file = Counter(item['filename'].removeprefix('/tmp/ruff-cleanup/') for item in data)
+          rows = [f'remaining={len(data)}', '', '[rules]']
+          rows.extend(f'{count}\t{rule}' for rule, count in sorted(by_rule.items()))
+          rows.extend(['', '[files]'])
+          rows.extend(f'{count}\t{path}' for path, count in by_file.most_common())
+          Path('/tmp/ruff-after-safe-summary.txt').write_text('\n'.join(rows) + '\n')
+          print('\n'.join(rows[:120]))
           PY
 
-          printf '%s\n' "$current_status" > /tmp/ruff-current.status
-          printf '%s\n' "$baseline_status" > /tmp/ruff-baseline.status
-
-      - name: Upload Ruff comparison
+      - name: Upload safe cleanup candidate
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: ai-error-contract-ruff-comparison
+          name: ai-error-contract-ruff-safe-cleanup
           path: |
-            /tmp/ruff-current.json
-            /tmp/ruff-baseline.json
-            /tmp/ruff-current.status
-            /tmp/ruff-baseline.status
-            /tmp/ruff-diff.txt
+            /tmp/ruff-safe-fix.patch
+            /tmp/ruff-after-safe.json
+            /tmp/ruff-after-safe-summary.txt
+            /tmp/ruff-cleanup/ruff.toml
           if-no-files-found: error
