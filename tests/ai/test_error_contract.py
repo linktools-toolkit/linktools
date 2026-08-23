@@ -4,7 +4,9 @@
 
 from datetime import datetime, timezone
 
+import httpx
 import pytest
+from openai import APIError as OpenAIAPIError
 from pydantic_ai.exceptions import ModelHTTPError, RunCancelled
 from pydantic_ai.usage import RunUsage, UsageLimits
 
@@ -12,6 +14,8 @@ from linktools.ai.agent._executor import _execution_error
 from linktools.ai.core import ExecutionStatus, ToolOperationStatus, UsageMetrics
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.runtime import ExecutionResult
+from linktools.ai.runtime._evaluation import _stable_error
+from linktools.ai.runtime._local import _secondary_execution_error
 from linktools.ai.runtime._tool import RuntimeToolOperationBridge, ToolOperationRecord
 from linktools.ai.storage import InMemoryObjectStore, PayloadPolicy
 
@@ -66,6 +70,19 @@ def test_unknown_agent_exception_is_internal_not_storage() -> None:
     mapped = _map(RuntimeError("boom"))
     assert mapped.code is ErrorCode.INTERNAL_ERROR
     assert mapped.safe_details == {"phase": "agent_execution"}
+
+
+def test_raw_openai_api_error_stays_in_model_domain_without_payload_leak() -> None:
+    request = httpx.Request("POST", "https://example.invalid/v1/chat/completions")
+    mapped = _map(
+        OpenAIAPIError(
+            "provider secret",
+            request=request,
+            body={"secret": "provider body must not escape"},
+        )
+    )
+    assert mapped.code is ErrorCode.MODEL_API_ERROR
+    assert mapped.safe_details == {}
 
 
 def test_execution_result_enforces_terminal_error_contract() -> None:
@@ -135,8 +152,49 @@ def test_execution_result_enforces_terminal_error_contract() -> None:
 def test_ai_error_rejects_non_json_safe_details() -> None:
     with pytest.raises(TypeError):
         AIError(ErrorCode.INTERNAL_ERROR, safe_details={"bad": object()})
+    with pytest.raises(TypeError):
+        AIError(ErrorCode.INTERNAL_ERROR, safe_details={1: "bad"})  # type: ignore[dict-item]
     with pytest.raises(ValueError):
         AIError(ErrorCode.INTERNAL_ERROR, safe_details={"bad": float("nan")})
+    cycle: list[object] = []
+    cycle.append(cycle)
+    with pytest.raises(ValueError):
+        AIError(ErrorCode.INTERNAL_ERROR, safe_details={"bad": cycle})
+
+
+def test_ai_error_copies_nested_safe_details() -> None:
+    source = {"nested": [{"value": 1}]}
+    error = AIError(ErrorCode.INTERNAL_ERROR, safe_details=source)
+    source["nested"][0]["value"] = 2
+    assert error.safe_details == {"nested": [{"value": 1}]}
+
+
+def test_secondary_terminal_error_preserves_primary_contract() -> None:
+    primary = AIError(
+        ErrorCode.MODEL_REQUEST_REJECTED,
+        safe_details={"status_code": 400},
+    )
+    secondary = AIError(
+        ErrorCode.STORAGE_UNAVAILABLE,
+        retryable=True,
+        operation_id="terminal-write",
+        safe_details={"phase": "commit"},
+    )
+    combined = _secondary_execution_error(secondary, primary)
+    assert combined.code is ErrorCode.STORAGE_UNAVAILABLE
+    assert combined.retryable is True
+    assert combined.operation_id == "terminal-write"
+    assert combined.safe_details == {
+        "phase": "commit",
+        "primary_error_code": ErrorCode.MODEL_REQUEST_REJECTED.value,
+        "primary_safe_error_details": {"status_code": 400},
+    }
+
+
+def test_persisted_evaluation_error_rejects_missing_or_unknown_code() -> None:
+    assert _stable_error(None).code is ErrorCode.STORAGE_INTEGRITY_ERROR
+    assert _stable_error("UNKNOWN").code is ErrorCode.STORAGE_INTEGRITY_ERROR
+    assert _stable_error(ErrorCode.MODEL_TIMEOUT.value).code is ErrorCode.MODEL_TIMEOUT
 
 
 def _tool_bridge() -> RuntimeToolOperationBridge:
@@ -199,17 +257,24 @@ async def test_tool_error_codec_preserves_ai_error_code_and_safe_details() -> No
 
 
 @pytest.mark.asyncio
-async def test_tool_error_codec_maps_unknown_runtime_error_to_internal() -> None:
+async def test_tool_error_codec_maps_generic_failure_without_message_leak() -> None:
     bridge = _tool_bridge()
     code, payload = await bridge._error_payload(RuntimeError("provider secret"))
-    assert code == ErrorCode.INTERNAL_ERROR.value
+    assert code == ErrorCode.TOOL_EXECUTION_FAILED.value
     decoded = await bridge._decode_error(
         _failed_tool_record(error_code=code, error_payload=payload)
     )
     assert isinstance(decoded, AIError)
-    assert decoded.code is ErrorCode.INTERNAL_ERROR
+    assert decoded.code is ErrorCode.TOOL_EXECUTION_FAILED
     assert decoded.safe_details["phase"] == "tool_execution"
     assert "provider secret" not in str(decoded.safe_details)
+
+    second_code, second_payload = await bridge._error_payload(RuntimeError("other secret"))
+    second = await bridge._decode_error(
+        _failed_tool_record(error_code=second_code, error_payload=second_payload)
+    )
+    assert isinstance(second, AIError)
+    assert second.safe_details["error_digest"] == decoded.safe_details["error_digest"]
 
 
 @pytest.mark.asyncio

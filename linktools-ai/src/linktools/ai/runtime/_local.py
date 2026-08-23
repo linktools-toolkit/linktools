@@ -696,7 +696,7 @@ class LocalExecutionBackend:
             failure = _WorkerFailure(error.code, dict(error.safe_details))
         else:
             failure = _WorkerFailure(
-                ErrorCode.STORAGE_INTEGRITY_ERROR,
+                ErrorCode.INTERNAL_ERROR,
                 {"phase": "local_execution_worker"},
             )
         details = dict(failure.safe_details)
@@ -2047,7 +2047,33 @@ class LocalExecutionBackend:
                     ExecutionStatus.FAILED,
                     ExecutionStatus.CANCELLED,
                 }:
-                    await self._commit_failure(current, error, run_id=run_id)
+                    try:
+                        await self._commit_failure(current, error, run_id=run_id)
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception as commit_error:
+                        try:
+                            persisted = await self._execution.executions.get(
+                                execution_id,
+                                tenant_id=original.tenant_id,
+                            )
+                        except asyncio.CancelledError:
+                            raise
+                        except Exception as readback_error:
+                            raise _secondary_execution_error(readback_error, error) from error
+                        if persisted is not None and persisted.status in {
+                            ExecutionStatus.SUCCEEDED,
+                            ExecutionStatus.FAILED,
+                            ExecutionStatus.CANCELLED,
+                        }:
+                            operation_result = _execution_operation_result(persisted.status)
+                            _logger.error(
+                                "terminal finalization failed after durable execution terminal: execution=%s",
+                                execution_id,
+                                exc_info=True,
+                            )
+                            return
+                        raise _secondary_execution_error(commit_error, error) from error
                 persisted = await self._execution.executions.get(
                     execution_id,
                     tenant_id=original.tenant_id,
@@ -2522,14 +2548,15 @@ class LocalExecutionBackend:
         )
 
     async def _commit_failure(self, execution: ExecutionRecord, error: Exception, *, run_id: str | None = None) -> None:
-        code = ErrorCode.OUTPUT_VALIDATION_FAILED if isinstance(error, ValidationError) else error.code if isinstance(error, AIError) else ErrorCode.EXECUTION_FAILED
-        details = error.safe_details if isinstance(error, AIError) else {}
+        code = _execution_error_code(error)
+        details = _execution_error_details(error)
+        cancelled = code is ErrorCode.EXECUTION_CANCELLED
         await self._commit_terminal(
             execution,
-            ExecutionStatus.FAILED,
+            ExecutionStatus.CANCELLED if cancelled else ExecutionStatus.FAILED,
             None,
             code.value,
-            StopReason.ERROR,
+            StopReason.CANCELLED if cancelled else StopReason.ERROR,
             run_id=run_id,
             safe_error_details=details,
         )
@@ -2815,11 +2842,16 @@ class LocalExecutionBackend:
         recovery_run = None
         recovery_snapshot = None
         if run_id is not None and status is not ExecutionStatus.SUCCEEDED:
-            recovery_run = await self._steps.get_run(run_id=run_id)
-            recovery_snapshot = await self._steps.latest_snapshot(
+            candidate_run = await self._steps.get_run(run_id=run_id)
+            candidate_snapshot = await self._steps.latest_snapshot(
                 run_id=run_id,
                 include_interrupted=True,
             )
+            if candidate_snapshot is not None:
+                if candidate_run is None:
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                recovery_run = candidate_run
+                recovery_snapshot = candidate_snapshot
         await self.verify_terminal_projection(
             current,
             status,
@@ -3183,6 +3215,42 @@ def _admission_matches(existing: RecoveryCheckpoint, candidate: RecoveryCheckpoi
         and existing.terminal_handoff is None
         and existing.handoff_contract_digest is None
         and existing.pending_operation_id is None
+    )
+
+
+def _execution_error_code(error: Exception) -> ErrorCode:
+    if isinstance(error, ValidationError):
+        return ErrorCode.OUTPUT_VALIDATION_FAILED
+    if isinstance(error, AIError):
+        return error.code
+    return ErrorCode.INTERNAL_ERROR
+
+
+def _execution_error_details(error: Exception) -> dict[str, JsonValue]:
+    return dict(error.safe_details) if isinstance(error, AIError) else {}
+
+
+def _secondary_execution_error(error: Exception, primary: Exception) -> AIError:
+    primary_details: dict[str, JsonValue] = {
+        "primary_error_code": _execution_error_code(primary).value,
+        "primary_safe_error_details": _execution_error_details(primary),
+    }
+    if isinstance(error, AIError):
+        details = dict(error.safe_details)
+        details.update(primary_details)
+        return AIError(
+            error.code,
+            category=error.category,
+            retryable=error.retryable,
+            operation_id=error.operation_id,
+            safe_details=details,
+        )
+    return AIError(
+        ErrorCode.INTERNAL_ERROR,
+        safe_details={
+            "phase": "execution_terminal_commit",
+            **primary_details,
+        },
     )
 
 

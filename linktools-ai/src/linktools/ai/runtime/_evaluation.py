@@ -130,7 +130,7 @@ class DefaultEvaluationService:
             if existing.request_digest != request_digest:
                 raise AIError(ErrorCode.IDEMPOTENCY_CONFLICT)
             if existing.status is IdempotencyStatus.FAILED:
-                raise _stable_error(existing.error_code, ErrorCode.STORAGE_UNAVAILABLE)
+                raise _stable_error(existing.error_code)
             if existing.runtime_domain is not RuntimeDomain.EVALUATION or existing.resource_kind is not ResourceKind.EVALUATION:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             evaluation_id = existing.resource_id
@@ -400,11 +400,14 @@ class DefaultEvaluationService:
         return record
 
 
-def _stable_error(error_code: str | None, fallback: ErrorCode) -> AIError:
+def _stable_error(error_code: str | None) -> AIError:
+    if error_code is None:
+        return AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     try:
-        return AIError(fallback if error_code is None else ErrorCode(error_code))
+        code = ErrorCode(error_code)
     except ValueError:
-        return AIError(fallback)
+        return AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    return AIError(code)
 
 
 __all__ = ["DefaultEvaluationService", "validate_compare_request"]

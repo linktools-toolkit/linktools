@@ -204,7 +204,7 @@ async def test_repository_discovers_directory_scope_and_hides_descendants() -> N
     assert all(item.path != "child/AGENT.md" or not item.is_entry for item in (await resolved.scope.list()).items)
     with pytest.raises(AIError) as error:
         await repository.resolve(AssetRef("subagent", "team/foo/child"))
-    assert error.value.code is ErrorCode.STORAGE_NOT_FOUND
+    assert error.value.code is ErrorCode.ASSET_NOT_FOUND
 
 
 @pytest.mark.asyncio

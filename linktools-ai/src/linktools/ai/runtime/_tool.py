@@ -595,11 +595,11 @@ class RuntimeToolOperationBridge:
                     "safe_details": dict(error.safe_details),
                 }
             )
-        digest = hashlib.sha256(f"{type(error).__name__}:{error}".encode()).hexdigest()
-        return ErrorCode.INTERNAL_ERROR.value, await self._json_payload(
+        digest = hashlib.sha256(type(error).__qualname__.encode("utf-8")).hexdigest()
+        return ErrorCode.TOOL_EXECUTION_FAILED.value, await self._json_payload(
             {
                 "kind": "error",
-                "code": ErrorCode.INTERNAL_ERROR.value,
+                "code": ErrorCode.TOOL_EXECUTION_FAILED.value,
                 "safe_details": {
                     "error_digest": digest,
                     "phase": "tool_execution",

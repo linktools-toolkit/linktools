@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Protocol, cast
 
 from linktools.core import environ
+from openai import APIError as OpenAIAPIError
 from pydantic import ValidationError
 from pydantic_ai import AgentRunResultEvent, ModelSettings
 from pydantic_ai.capabilities import AbstractCapability
@@ -488,6 +489,8 @@ def _execution_error(
             retryable=False,
             safe_details={"model_name": error.model_name},
         )
+    if isinstance(error, OpenAIAPIError):
+        return AIError(ErrorCode.MODEL_API_ERROR, retryable=False)
     if isinstance(error, UnexpectedModelBehavior):
         return AIError(ErrorCode.MODEL_RESPONSE_INVALID, retryable=False)
     if isinstance(error, ValidationError):
