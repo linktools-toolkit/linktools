@@ -1,0 +1,273 @@
+--- a/linktools-ai/src/linktools/ai/capability/_mcp.py
++++ b/linktools-ai/src/linktools/ai/capability/_mcp.py
+@@ -75,7 +75,7 @@
+             execution_root=str(context.execution_root),
+         )
+         if len(toolsets) != len(selected) or len({toolset.id for toolset in toolsets}) != len(toolsets):
+-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
++            raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
+         return tuple(
+             MCP(
+                 local=toolset.prefixed(f"mcp__{mcp_server_namespace(server.id)}__"),
+--- a/linktools-ai/src/linktools/ai/asset/_sql.py
++++ b/linktools-ai/src/linktools/ai/asset/_sql.py
+@@ -355,7 +355,7 @@
+             return await self._apply_once_transaction(changes, expected_revision)
+         except AIError:
+             raise
+-        except BaseException as error:
++        except Exception as error:
+             raise AIError(ErrorCode.STORAGE_UNAVAILABLE) from error
+ 
+     async def _apply_once_transaction(
+--- a/linktools-ai/src/linktools/ai/runtime/_execution.py
++++ b/linktools-ai/src/linktools/ai/runtime/_execution.py
+@@ -345,11 +345,13 @@
+     async def _run_handoff_cleanup(self, execution_id: str, tenant_id: str, state: _ExecutionHandoffState) -> None:
+         try:
+             await self._release_terminal(execution_id, tenant_id=tenant_id)
+-        except BaseException:
++        except BaseException as error:
+             async with self._handoff_condition:
+                 state.release_in_progress = False
+                 state.release_requested = True
+                 self._handoff_condition.notify_all()
++            if not isinstance(error, Exception):
++                raise
+             _logger.error("execution handoff cleanup failed: execution=%s", execution_id, exc_info=environ.debug)
+             return
+         async with self._handoff_condition:
+@@ -830,7 +832,7 @@
+         try:
+             if self._backend is not None:
+                 await self._backend.abort_start(terminal)
+-        except BaseException:
++        except Exception:
+             _logger.error(
+                 "pending start cleanup failed: execution=%s",
+                 terminal.execution_id,
+@@ -1315,7 +1317,7 @@
+             if prepared_before_claim:
+                 try:
+                     await self._backend.abort_start(terminal)
+-                except BaseException:
++                except Exception:
+                     _logger.error(
+                         "pending cancellation cleanup failed: execution=%s",
+                         execution_id,
+--- a/linktools-ai/src/linktools/ai/runtime/_local.py
++++ b/linktools-ai/src/linktools/ai/runtime/_local.py
+@@ -3150,7 +3150,7 @@
+                 tenant_id=execution.tenant_id,
+                 execution_id=execution.execution_id,
+             )
+-        except BaseException:
++        except Exception:
+             _logger.error(
+                 "session admission release failed after terminal: execution=%s",
+                 execution.execution_id,
+--- a/linktools-ai/src/linktools/ai/runtime/_evaluation.py
++++ b/linktools-ai/src/linktools/ai/runtime/_evaluation.py
+@@ -363,11 +363,14 @@
+                 self._handoff_condition.notify_all()
+             if cleanup_owner:
+                 cleanup_succeeded = False
++                cleanup_error: BaseException | None = None
+                 try:
+                     await self._release_terminal(evaluation_id, tenant_id=tenant_id)
+                     cleanup_succeeded = True
+-                except BaseException:
+-                    _logger.error("evaluation transient handoff cleanup failed: evaluation=%s", evaluation_id, exc_info=environ.debug)
++                except BaseException as error:
++                    cleanup_error = error
++                    if isinstance(error, Exception):
++                        _logger.error("evaluation transient handoff cleanup failed: evaluation=%s", evaluation_id, exc_info=environ.debug)
+                 async with self._handoff_condition:
+                     if self._handoff_states.get(key) is state:
+                         if cleanup_succeeded and state.active_consumers == 0:
+@@ -376,6 +379,8 @@
+                             state.release_in_progress = False
+                             state.release_requested = True
+                     self._handoff_condition.notify_all()
++                if cleanup_error is not None and not isinstance(cleanup_error, Exception):
++                    raise cleanup_error
+ 
+     async def _request_evaluation_release(self, evaluation_id: str, tenant_id: str) -> None:
+         key = (tenant_id, evaluation_id)
+--- a/linktools-ai/src/linktools/ai/runtime/_session.py
++++ b/linktools-ai/src/linktools/ai/runtime/_session.py
+@@ -782,13 +782,18 @@
+                 self._handoff_condition.notify_all()
+             if cleanup_owner:
+                 cleanup_succeeded = False
++                cleanup_error: BaseException | None = None
+                 try:
+                     await self._release_terminal(session_id, tenant_id=tenant_id, continuation=state.continuation)
+                     cleanup_succeeded = True
+-                except BaseException:
+-                    _logger.error(
+-                        "session transient handoff cleanup failed: session=%s", session_id, exc_info=environ.debug
+-                    )
++                except BaseException as error:
++                    cleanup_error = error
++                    if isinstance(error, Exception):
++                        _logger.error(
++                            "session transient handoff cleanup failed: session=%s",
++                            session_id,
++                            exc_info=environ.debug,
++                        )
+                 async with self._handoff_condition:
+                     if self._handoff_states.get(key) is state:
+                         if cleanup_succeeded and state.active_consumers == 0:
+@@ -797,6 +802,8 @@
+                             state.release_in_progress = False
+                             state.release_requested = True
+                     self._handoff_condition.notify_all()
++                if cleanup_error is not None and not isinstance(cleanup_error, Exception):
++                    raise cleanup_error
+ 
+     async def _request_session_release(
+         self, session_id: str, tenant_id: str, continuation: ConversationCursor | None
+--- a/linktools-ai/src/linktools/ai/task/_service_impl.py
++++ b/linktools-ai/src/linktools/ai/task/_service_impl.py
+@@ -316,11 +316,14 @@
+                 self._handoff_condition.notify_all()
+             if cleanup_owner:
+                 cleanup_succeeded = False
++                cleanup_error: BaseException | None = None
+                 try:
+                     await self._release_terminal(graph_id, tenant_id=tenant_id)
+                     cleanup_succeeded = True
+-                except BaseException:
+-                    _logger.error("task graph transient handoff cleanup failed: graph=%s", graph_id, exc_info=environ.debug)
++                except BaseException as error:
++                    cleanup_error = error
++                    if isinstance(error, Exception):
++                        _logger.error("task graph transient handoff cleanup failed: graph=%s", graph_id, exc_info=environ.debug)
+                 async with self._handoff_condition:
+                     if self._handoff_states.get(key) is state:
+                         if cleanup_succeeded and state.active_consumers == 0:
+@@ -329,6 +332,8 @@
+                             state.release_in_progress = False
+                             state.release_requested = True
+                     self._handoff_condition.notify_all()
++                if cleanup_error is not None and not isinstance(cleanup_error, Exception):
++                    raise cleanup_error
+ 
+     async def _request_graph_release(self, graph_id: str, tenant_id: str) -> None:
+         async with self._handoff_condition:
+--- a/linktools-ai/src/linktools/ai/runtime/_planner.py
++++ b/linktools-ai/src/linktools/ai/runtime/_planner.py
+@@ -193,17 +193,26 @@
+                     node.node_id,
+                     type(error).__name__,
+                 )
+-                raise cancellation
+-            await _cancel_execution(self._execution, handle.execution_id, principal, graph_id, node.node_id)
++                raise cancellation from error
++            try:
++                await _cancel_execution(self._execution, handle.execution_id, principal, graph_id, node.node_id)
++            except BaseException as cleanup_error:  # noqa: BLE001
++                raise cancellation from cleanup_error
+             raise cancellation
+         wait_task = asyncio.create_task(self._execution.wait(handle.execution_id, principal=principal))
+         try:
+             await asyncio.shield(wait_task)
+         except asyncio.CancelledError as cancellation:
+-            await _cancel_execution(self._execution, handle.execution_id, principal, graph_id, node.node_id)
++            cleanup_error: BaseException | None = None
++            try:
++                await _cancel_execution(self._execution, handle.execution_id, principal, graph_id, node.node_id)
++            except BaseException as error:  # noqa: BLE001
++                cleanup_error = error
+             if not wait_task.done():
+                 wait_task.cancel()
+                 await asyncio.gather(wait_task, return_exceptions=True)
++            if cleanup_error is not None:
++                raise cancellation from cleanup_error
+             raise cancellation
+         return await self.result(handle.execution_id, principal=principal)
+ 
+--- a/linktools-ai/src/linktools/ai/runtime/_subagent.py
++++ b/linktools-ai/src/linktools/ai/runtime/_subagent.py
+@@ -42,7 +42,12 @@
+         if len(allowed) != len(allowed_agent_ids):
+             raise AIError(ErrorCode.CAPABILITY_CONFLICT)
+ 
+-        async def dispatch(agent_id: str, user_prompt: str, *, tool_call_id: str) -> JsonValue:
++        async def dispatch(
++            agent_id: str,
++            user_prompt: str,
++            *,
++            tool_call_id: str,
++        ) -> "dict[str, JsonValue]":
+             return await self.dispatch(
+                 parent_execution_id=parent_execution_id,
+                 root_execution_id=root_execution_id,
+@@ -119,23 +124,25 @@
+             )
+             try:
+                 await asyncio.shield(cleanup)
+-            except asyncio.CancelledError:
++            except asyncio.CancelledError as cancellation:
+                 try:
+                     await cleanup
+-                except BaseException:
++                except BaseException as cleanup_error:
+                     _logger.error(
+                         "subagent child cleanup failed after cancellation: execution=%s",
+                         child.execution_id,
+                         exc_info=True,
+                     )
+-                    raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED) from primary
+-                raise primary
+-            except BaseException:
++                    raise cancellation from cleanup_error
++                raise cancellation
++            except BaseException as cleanup_error:
+                 _logger.error(
+                     "subagent child cleanup failed: execution=%s",
+                     child.execution_id,
+                     exc_info=True,
+                 )
++                if isinstance(primary, asyncio.CancelledError):
++                    raise primary from cleanup_error
+                 raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED) from primary
+             raise primary
+         return _subagent_result(result)
+@@ -180,16 +187,18 @@
+             self._execution.cancel(execution_id, request),
+             name=f"ai-subagent-cancel-{execution_id}",
+         )
+-        cancelled = False
++        cancellation: asyncio.CancelledError | None = None
+         try:
+             result = await asyncio.shield(task)
+-        except asyncio.CancelledError:
+-            cancelled = True
++        except asyncio.CancelledError as error:
++            if task.done() and task.cancelled():
++                raise
++            cancellation = error
+             try:
+                 result = await task
+-            except BaseException as error:
+-                raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED) from error
+-        except BaseException as error:
++            except BaseException as cleanup_error:
++                raise cancellation from cleanup_error
++        except Exception as error:
+             raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED) from error
+         if not result.cancelled:
+             current = await self._execution.inspect(execution_id, principal=principal)
+@@ -198,8 +207,8 @@
+         current = await self._execution.inspect(execution_id, principal=principal)
+         if current.status not in {ExecutionStatus.SUCCEEDED, ExecutionStatus.FAILED, ExecutionStatus.CANCELLED}:
+             raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
+-        if cancelled:
+-            raise asyncio.CancelledError
++        if cancellation is not None:
++            raise cancellation
+ 
+ 
+ def _subagent_result(result: ExecutionResult) -> "dict[str, JsonValue]":
