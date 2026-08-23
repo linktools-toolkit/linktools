@@ -48,7 +48,8 @@ jobs:
             run_check python .bootstrap/close_migration_schema_boundary.py || true
           fi
           if [ ! -f "$STATUS" ] && grep -q 'def _encode_persisted_value' linktools-ai/src/linktools/ai/runtime/state/_codec.py; then
-            run_check python .bootstrap/refine_typed_persistence_codec.py || true
+            run_check python .bootstrap/fix_refine_script.py || true
+            if [ ! -f "$STATUS" ]; then run_check python .bootstrap/refine_typed_persistence_codec.py || true; fi
           fi
           if [ ! -f "$STATUS" ]; then run_check python .bootstrap/fix_legacy_identity_fixtures.py || true; fi
           if [ ! -f "$STATUS" ]; then run_check python -m compileall -q linktools-ai/src/linktools/ai || true; fi
