@@ -1,139 +1,17 @@
 ===== python -m pip install -q --upgrade pip =====
 ===== python -m pip install -q -e ./linktools -e ./linktools-ai[sqlite,evaluation,temporal] pytest pytest-asyncio ruff =====
-===== python .bootstrap/patch2.py =====
-AssetRepository owns its immutable binding index directly
-final composition residue audit passed
-ExecutionEventRecord declaration unchanged from baseline
+===== python .bootstrap/patch3.py =====
+identity acceptance test now uses an importable concrete output model
 ===== python -m compileall -q linktools-ai/src/linktools/ai =====
 ===== ruff check --select E4,E7,E9,F linktools-ai/src/linktools/ai/agent/__init__.py linktools-ai/src/linktools/ai/agent/_binding.py linktools-ai/src/linktools/ai/agent/_builder.py linktools-ai/src/linktools/ai/agent/_catalog.py linktools-ai/src/linktools/ai/agent/_compiler.py linktools-ai/src/linktools/ai/agent/_definition.py linktools-ai/src/linktools/ai/agent/_executor.py linktools-ai/src/linktools/ai/asset/__init__.py linktools-ai/src/linktools/ai/asset/_logical.py linktools-ai/src/linktools/ai/asset/_repository.py linktools-ai/src/linktools/ai/runtime/_agent.py linktools-ai/src/linktools/ai/runtime/_coordinator.py linktools-ai/src/linktools/ai/runtime/_execution.py linktools-ai/src/linktools/ai/runtime/_factory.py linktools-ai/src/linktools/ai/runtime/_local.py linktools-ai/src/linktools/ai/runtime/_planner.py linktools-ai/src/linktools/ai/runtime/_runtime_service.py linktools-ai/src/linktools/ai/runtime/_session.py linktools-ai/src/linktools/ai/runtime/_subagent.py linktools-ai/src/linktools/ai/runtime/service_api.py linktools-ai/src/linktools/ai/runtime/state/_codec.py linktools-ai/src/linktools/ai/runtime/state/_commands.py linktools-ai/src/linktools/ai/runtime/state/_contracts.py linktools-ai/src/linktools/ai/runtime/state/_history.py linktools-ai/src/linktools/ai/runtime/state/_steps.py linktools-ai/src/linktools/ai/spec/_codec.py linktools-ai/src/linktools/ai/spec/_contract.py linktools-ai/src/linktools/ai/temporal/_gateway.py linktools-ai/src/linktools/ai/temporal/_request.py linktools-ai/src/linktools/ai/temporal/_task_operation.py linktools-ai/src/linktools/ai/workspace/__init__.py linktools-ai/src/linktools/ai/workspace/_factory.py linktools-ai/src/linktools/commands/ai/run.py tests/ai/persistence/test_execution_start_service.py tests/ai/test_agent_composition.py tests/ai/test_architecture.py tests/ai/test_asset_repository.py tests/ai/test_contracts.py tests/ai/test_filesystem_mutation_invariants.py tests/ai/test_history_projection_conformance.py tests/ai/test_local_execution_recovery.py tests/ai/test_memory_terminal.py tests/ai/test_recovery_integrity_validator.py tests/ai/test_runtime_binding_contract.py tests/ai/test_runtime_composition_regressions.py tests/ai/test_runtime_storage_io_convergence.py tests/ai/test_runtime_stream_order.py tests/ai/test_session_admission.py tests/ai/test_session_admission_conformance.py tests/ai/test_session_history_projection.py tests/ai/test_step_io_final_fix.py tests/ai/test_temporal_taskgraph_conformance.py tests/ai/test_v1_final_closure.py tests/ai/test_workspace_runtime_regressions.py =====
 All checks passed!
 ===== python -m scripts.build.architecture =====
 <frozen runpy>:128: RuntimeWarning: 'scripts.build.architecture' found in sys.modules after import of package 'scripts.build', but prior to execution of 'scripts.build.architecture'; this may result in unpredictable behaviour
 ===== pytest -q tests/ai --maxfail=30 =====
-......................F................................................. [ 19%]
+........................................................................ [ 19%]
 ........................................................................ [ 39%]
 ........................................................................ [ 59%]
 ........................................................................ [ 79%]
 ........................................................................ [ 99%]
 .                                                                        [100%]
-=================================== FAILURES ===================================
-_______________ test_agent_and_binding_identity_split_acceptance _______________
-
-output = <class 'pydantic.main.BaseModel'>
-
-    def bind_output(output: "type[BaseModel] | None" = None) -> OutputBinding:
-        """Freeze one importable Python output model into an effective Agent definition."""
-        selected = AssistantTextOutput if output is None else output
-        if not isinstance(selected, type) or not issubclass(selected, BaseModel):
-            raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID)
-        _validate_importable_type(selected)
-        try:
->           schema = selected.model_json_schema()
-                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-
-linktools-ai/src/linktools/ai/agent/_output.py:90: 
-_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
-/opt/hostedtoolcache/Python/3.12.14/x64/lib/python3.12/site-packages/pydantic/main.py:591: in model_json_schema
-    return model_json_schema(
-_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
-
-cls = <class 'pydantic.main.BaseModel'>, by_alias = True
-ref_template = '#/$defs/{model}', union_format = 'any_of'
-schema_generator = <class 'pydantic.json_schema.GenerateJsonSchema'>
-mode = 'validation'
-
-    def model_json_schema(
-        cls: type[BaseModel] | type[PydanticDataclass],
-        by_alias: bool = True,
-        ref_template: str = DEFAULT_REF_TEMPLATE,
-        union_format: Literal['any_of', 'primitive_type_array'] = 'any_of',
-        schema_generator: type[GenerateJsonSchema] = GenerateJsonSchema,
-        mode: JsonSchemaMode = 'validation',
-    ) -> dict[str, Any]:
-        """Utility function to generate a JSON Schema for a model.
-    
-        Args:
-            cls: The model class to generate a JSON Schema for.
-            by_alias: If `True` (the default), fields will be serialized according to their alias.
-                If `False`, fields will be serialized according to their attribute name.
-            ref_template: The template to use for generating JSON Schema references.
-            union_format: The format to use when combining schemas from unions together. Can be one of:
-    
-                - `'any_of'`: Use the [`anyOf`](https://json-schema.org/understanding-json-schema/reference/combining#anyOf)
-                  keyword to combine schemas (the default).
-                - `'primitive_type_array'`: Use the [`type`](https://json-schema.org/understanding-json-schema/reference/type)
-                  keyword as an array of strings, containing each type of the combination. If any of the schemas is not a primitive
-                  type (`string`, `boolean`, `null`, `integer` or `number`) or contains constraints/metadata, falls back to
-                  `any_of`.
-            schema_generator: The class to use for generating the JSON Schema.
-            mode: The mode to use for generating the JSON Schema. It can be one of the following:
-    
-                - 'validation': Generate a JSON Schema for validating data.
-                - 'serialization': Generate a JSON Schema for serializing data.
-    
-        Returns:
-            The generated JSON Schema.
-        """
-        from .main import BaseModel
-    
-        schema_generator_instance = schema_generator(
-            by_alias=by_alias, ref_template=ref_template, union_format=union_format
-        )
-    
-        if isinstance(cls.__pydantic_core_schema__, _mock_val_ser.MockCoreSchema):
-            cls.__pydantic_core_schema__.rebuild()
-    
-        if cls is BaseModel:
->           raise AttributeError('model_json_schema() must be called on a subclass of BaseModel, not BaseModel itself.')
-E           AttributeError: model_json_schema() must be called on a subclass of BaseModel, not BaseModel itself.
-
-/opt/hostedtoolcache/Python/3.12.14/x64/lib/python3.12/site-packages/pydantic/json_schema.py:2560: AttributeError
-
-The above exception was the direct cause of the following exception:
-
-tmp_path = PosixPath('/tmp/pytest-of-runner/pytest-0/test_agent_and_binding_identit0')
-
-    @pytest.mark.asyncio
-    async def test_agent_and_binding_identity_split_acceptance(tmp_path) -> None:
-        from pydantic import BaseModel
-        from linktools.ai.model import ModelRegistry
-        from linktools.ai.workspace import Workspace, open_workspace_runtime
-    
-        workspace = Workspace.load(tmp_path)
-        models = ModelRegistry.openai(model="gpt-test")
-        async with open_workspace_runtime(workspace, models=models) as runtime:
-            base = runtime.agent()
-            text_binding = runtime._bind_agent(base._agent_digest)
->           structured_binding = runtime._bind_agent(
-                base._agent_digest,
-                output=BaseModel,
-            )
-
-tests/ai/test_agent_composition.py:280: 
-_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
-linktools-ai/src/linktools/ai/runtime/_runtime_service.py:199: in _bind_agent
-    return self._catalog.register_binding(self._compiler.bind(definition, output=output))
-                                          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-linktools-ai/src/linktools/ai/agent/_compiler.py:136: in bind
-    output_binding = bind_output(output)
-                     ^^^^^^^^^^^^^^^^^^^
-_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
-
-output = <class 'pydantic.main.BaseModel'>
-
-    def bind_output(output: "type[BaseModel] | None" = None) -> OutputBinding:
-        """Freeze one importable Python output model into an effective Agent definition."""
-        selected = AssistantTextOutput if output is None else output
-        if not isinstance(selected, type) or not issubclass(selected, BaseModel):
-            raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID)
-        _validate_importable_type(selected)
-        try:
-            schema = selected.model_json_schema()
-        except Exception as error:
->           raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID) from error
-E           linktools.ai.errors.AIError: OUTPUT_CONTRACT_INVALID
-
-linktools-ai/src/linktools/ai/agent/_output.py:92: AIError
-=========================== short test summary info ============================
-FAILED tests/ai/test_agent_composition.py::test_agent_and_binding_identity_split_acceptance - linktools.ai.errors.AIError: OUTPUT_CONTRACT_INVALID
-1 failed, 360 passed in 29.38s
+361 passed in 25.82s

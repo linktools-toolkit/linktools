@@ -6,6 +6,7 @@ from contextlib import asynccontextmanager
 from types import SimpleNamespace
 
 import pytest
+from pydantic import BaseModel
 from pydantic_ai.capabilities import AbstractCapability
 
 import linktools.ai as ai
@@ -26,6 +27,10 @@ from linktools.ai.runtime._session import DefaultSessionService
 from linktools.ai.runtime.state import RecoveryCheckpointState
 from linktools.ai.spec import AgentSpec
 from linktools.ai.workspace import trusted_workspace_principal
+
+
+class CompositionStructuredOutput(BaseModel):
+    value: str
 
 
 class _DurableCapability(AbstractCapability[None]):
@@ -268,7 +273,6 @@ async def test_recovery_handoff_schema_must_match_restored_binding() -> None:
 
 @pytest.mark.asyncio
 async def test_agent_and_binding_identity_split_acceptance(tmp_path) -> None:
-    from pydantic import BaseModel
     from linktools.ai.model import ModelRegistry
     from linktools.ai.workspace import Workspace, open_workspace_runtime
 
@@ -279,7 +283,7 @@ async def test_agent_and_binding_identity_split_acceptance(tmp_path) -> None:
         text_binding = runtime._bind_agent(base._agent_digest)
         structured_binding = runtime._bind_agent(
             base._agent_digest,
-            output=BaseModel,
+            output=CompositionStructuredOutput,
         )
 
         assert text_binding.definition.digest == structured_binding.definition.digest
