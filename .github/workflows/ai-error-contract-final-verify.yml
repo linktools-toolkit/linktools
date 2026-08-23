@@ -66,7 +66,7 @@ jobs:
           echo "status=$status" >> "$GITHUB_OUTPUT"
           exit "$status"
 
-      - name: Prepare branch-only Ruff fixes
+      - name: Validate branch-only Ruff fixes
         if: always()
         run: |
           git fetch --depth=1 origin fix/ai-error-contract-closure
@@ -103,6 +103,16 @@ jobs:
           path.write_text(text.replace(old, new, 1))
           PY
           git diff --check
+          PYTHONPATH=linktools-ai:linktools-ai/src:linktools/src python -m pytest -q \
+            tests/ai/test_error_contract.py \
+            tests/ai/test_error_contract_matrix.py \
+            tests/ai/test_temporal_taskgraph_conformance.py \
+            tests/ai/test_local_execution_recovery.py
+          set +e
+          PYTHONPATH=linktools-ai:linktools-ai/src:linktools/src python -m ruff check \
+            linktools-ai/scripts/build linktools-ai/src/linktools/ai \
+            linktools-ai/src/linktools/commands/ai tests/ai > /tmp/ruff-fixed.log 2>&1
+          set -e
           git diff -- \
             linktools-ai/src/linktools/ai/runtime/_local.py \
             tests/ai/test_error_contract.py \
@@ -117,6 +127,7 @@ jobs:
           path: |
             ruff.log
             ruff-baseline.log
+            /tmp/ruff-fixed.log
             /tmp/branch-ruff-fix.patch
           if-no-files-found: error
 
