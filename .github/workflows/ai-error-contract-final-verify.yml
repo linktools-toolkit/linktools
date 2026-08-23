@@ -37,6 +37,17 @@ jobs:
           cd /tmp/error-closure
           git apply --check /tmp/error-closure.patch
           git apply /tmp/error-closure.patch
+          python - <<'PY'
+          from pathlib import Path
+
+          path = Path('linktools-ai/src/linktools/ai/agent/_capabilities.py')
+          text = path.read_text()
+          old = 'class _CompactionCapability(PydanticAgentCapability[None]):'
+          new = 'class _CompactionCapability(AbstractCapability[None]):'
+          if text.count(old) != 1:
+              raise SystemExit(f'expected exactly one legacy compaction base, found {text.count(old)}')
+          path.write_text(text.replace(old, new))
+          PY
           cp /tmp/test_error_cancellation_contract.py tests/ai/test_error_cancellation_contract.py
           python -m ruff check --fix --select I001 tests/ai/test_error_cancellation_contract.py
           python -m ruff check tests/ai/test_error_cancellation_contract.py
@@ -88,6 +99,7 @@ jobs:
           git config user.name github-actions[bot]
           git config user.email 41898282+github-actions[bot]@users.noreply.github.com
           git add \
+            linktools-ai/src/linktools/ai/agent/_capabilities.py \
             linktools-ai/src/linktools/ai/capability/_mcp.py \
             linktools-ai/src/linktools/ai/asset/_sql.py \
             linktools-ai/src/linktools/ai/runtime/_execution.py \
