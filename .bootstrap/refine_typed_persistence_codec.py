@@ -182,11 +182,11 @@ def patch_codec() -> None:
     new = '''def encode_domain(value: DomainT) -> JsonValue:\n    """Encode one domain value into the shared canonical JSON representation."""\n    return _encode_domain(value, _CURRENT_CODEC)\n\n\ndef _encode_persisted_domain(value: DomainT) -> JsonValue:\n    """Encode one domain value for a Runtime persistence envelope."""\n    return _encode_domain(value, _CURRENT_CODEC, persisted=True)\n\n\ndef decode_domain(value: JsonValue, target: type[DomainT]) -> DomainT:\n'''
     text = replace_once(text, old, new, "persisted encode entry")
 
-    text = replace_once(
+    text = text.replace(
         text,
         '''    normalized = _normalize_persisted_value(payload, codec)\n    return _decode_domain(normalized, target, codec)\n''',
         '''    return _decode_domain(payload, target, codec, persisted=True)\n''',
-        "typed envelope decode",
+        1,
     )
     text = replace_once(
         text,
