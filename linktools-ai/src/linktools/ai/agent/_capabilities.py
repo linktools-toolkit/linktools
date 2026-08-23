@@ -472,7 +472,13 @@ class AgentRunScope:
 
 
 class SubagentDelegate(Protocol):
-    async def __call__(self, agent_id: str, user_prompt: str, *, tool_call_id: str) -> JsonValue: ...
+    async def __call__(
+        self,
+        agent_id: str,
+        user_prompt: str,
+        *,
+        tool_call_id: str,
+    ) -> "dict[str, JsonValue]": ...
 
 
 async def compose_platform_capabilities(
@@ -483,218 +489,205 @@ async def compose_platform_capabilities(
 ) -> "tuple[PydanticAgentCapability[None], ...]":
     del model_factory, parent_model
     _validate_compaction_target(scope.context_target_tokens)
-    _validate_trusted_tool_classes(scope.trusted_tool_classes)
-    _validate_trusted_mcp_selectors(scope.trusted_mcp_selectors)
-    capabilities: list[PydanticAgentCapability[None]] = [
+    capabilities: list[PydanticAgentCapability[None]] = []
+    capabilities.append(
         _RuntimeStepPersistence(
+            store=scope.step_store,
+            conversation_id=scope.conversation_id,
+            run_id=scope.step_run_id,
             tool_operations=scope.tool_operations or _MissingToolOperationBridge(),
             planning=scope.planning,
             trusted_tool_classes=scope.trusted_tool_classes,
             trusted_mcp_selectors=scope.trusted_mcp_selectors,
-            store=scope.step_store,
-            agent_name=scope.agent_name,
-            run_id=scope.step_run_id,
-            parent_run_id=scope.parent_step_run_id,
-            metadata={
-                "capability_scope": "parent",
-                "agent_name": scope.agent_name,
-                **({} if scope.history_id is None else {"history_id": scope.history_id}),
-                **({} if scope.segment_sequence is None else {"segment_sequence": str(scope.segment_sequence)}),
-            },
         )
-    ]
-    selected = frozenset(scope.platform_tool_names)
-    selected_memory = tuple(name for name in MEMORY_TOOL_NAMES if name in selected)
-    if selected_memory:
-        if scope.memory_store is None or scope.memory_scope is None:
-            raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+    )
+    if scope.context_target_tokens is not None:
         capabilities.append(
-            _SelectedMemory(
-                store=scope.memory_store,
-                namespace=scope.memory_scope,
-                agent_name="memory",
-                inject_memory=False,
-                guidance=_memory_guidance(selected_memory),
-                selected_tool_names=selected_memory,
-                id=_MEMORY_CAPABILITY_ID,
+            _CompactionCapability(
+                scope.context_target_tokens,
+                step_store=scope.step_store,
+                conversation_id=scope.conversation_id,
+                step_run_id=scope.step_run_id,
             )
         )
-    if any(name in selected for name in PLANNING_TOOL_NAMES):
-        capabilities.append(Planning(id=_PLANNING_CAPABILITY_ID))
-    if "delegate_task" in selected:
-        if scope.subagent_delegate is None:
-            raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+    if scope.memory_store is not None:
+        capabilities.append(_MemoryCapability(scope.memory_store))
+    if scope.planning:
+        capabilities.append(_PlanningCapability())
+    if scope.subagent_delegate is not None:
         capabilities.append(_SubagentCapability(scope.subagent_delegate))
-    capabilities.append(_build_compaction(scope.context_target_tokens))
-    _logger.debug(
-        "platform capabilities composed: agent=%s step=%s tools=%s count=%s memory_scope_digest=%s",
-        scope.agent_name,
-        scope.step_run_id,
-        scope.platform_tool_names,
-        len(capabilities),
-        None if scope.memory_scope is None else canonical_sha256(scope.memory_scope),
-    )
     return tuple(capabilities)
 
 
-@dataclass
-class _SelectedMemory(Memory[None]):
-    selected_tool_names: "tuple[str, ...]" = ()
+class _CompactionCapability(PydanticAgentCapability[None]):
+    def __init__(
+        self,
+        target_tokens: int,
+        *,
+        step_store: StepStore,
+        conversation_id: "str | None",
+        step_run_id: str,
+    ) -> None:
+        self._target_tokens = target_tokens
+        self._step_store = step_store
+        self._conversation_id = conversation_id
+        self._step_run_id = step_run_id
 
-    def get_toolset(self) -> "AbstractToolset[None] | None":
-        toolset = super().get_toolset()
-        return None if toolset is None else toolset.filtered(
-            lambda _ctx, definition: definition.name in self.selected_tool_names
+    async def before_run(self, ctx: RunContext[None]) -> None:
+        if ctx.message_history:
+            return
+        if self._conversation_id is None:
+            return
+        try:
+            run = await self._step_store.load_run(self._step_run_id)
+            if run is None or not run.messages:
+                return
+            ctx.message_history[:] = list(run.messages)
+        except BaseException:
+            ctx.message_history[:] = []
+            raise
+
+    async def get_model(self, ctx: RunContext[None], model: Model) -> Model:
+        del ctx
+        return model
+
+    async def get_instructions(
+        self,
+        ctx: RunContext[None],
+        instructions: tuple[str, ...],
+    ) -> tuple[str, ...]:
+        del ctx
+        return instructions
+
+    async def get_toolsets(
+        self,
+        ctx: RunContext[None],
+        toolsets: tuple[AbstractToolset[None], ...],
+    ) -> tuple[AbstractToolset[None], ...]:
+        del ctx
+        return toolsets
+
+    async def get_history_processors(self, ctx: RunContext[None]) -> tuple:
+        del ctx
+        compactors = (
+            ClearToolResults(self._target_tokens),
+            DeduplicateFileReads(self._target_tokens),
+            TieredCompaction(
+                medium=SummarizingCompaction(
+                    self._target_tokens,
+                    token_counter=_approximate_message_tokens,
+                    summary_fn=_deterministic_summary,
+                ),
+                large=ClearToolResults(self._target_tokens),
+            ),
         )
 
+        async def process(messages):
+            current = messages
+            for compactor in compactors:
+                current = await compactor.process(current)
+            return current
 
-def tool_name_allowed(name: str, allow_tools: "tuple[str, ...]") -> bool:
-    return "*" in allow_tools or name in allow_tools
-
-
-def tool_is_control(
-    tool_def: ToolDefinition,
-    *,
-    trusted_tool_classes: "tuple[tuple[str, str], ...]",
-) -> bool:
-    return _tool_class(tool_def, trusted_tool_classes) == "control"
+        return (process,)
 
 
-def tool_allowed_in_planning(
-    tool_def: ToolDefinition,
-    *,
-    trusted_tool_classes: "tuple[tuple[str, str], ...]",
-    trusted_mcp_selectors: "tuple[str, ...]",
-) -> bool:
-    tool_class = _tool_class(tool_def, trusted_tool_classes)
-    if tool_class == "control":
-        return True
-    if tool_class in {"filesystem.write", "shell", "memory.write"}:
-        return False
-    if tool_class in {"filesystem.read", "memory.read"}:
-        return True
-    _validate_trusted_mcp_selectors(trusted_mcp_selectors)
-    capability_id = tool_def.capability_id
-    if capability_id in trusted_mcp_selectors:
-        if not tool_def.name.startswith(f"{capability_id}__"):
-            raise AIError(ErrorCode.CAPABILITY_POLICY_CONFLICT)
-        return False
-    metadata = tool_def.metadata or {}
-    value = metadata.get(PLAN_SAFE_METADATA_KEY)
-    if value is None:
-        return False
-    if not isinstance(value, bool):
-        raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
-    return value
+class _MemoryCapability(AbstractCapability[None]):
+    def __init__(self, store: SearchableMemoryStore) -> None:
+        self._memory = Memory(store)
+
+    async def before_run(self, ctx: RunContext[None]) -> None:
+        del ctx
+
+    async def get_model(self, ctx: RunContext[None], model: Model) -> Model:
+        del ctx
+        return model
+
+    async def get_instructions(
+        self,
+        ctx: RunContext[None],
+        instructions: tuple[str, ...],
+    ) -> tuple[str, ...]:
+        del ctx
+        return instructions
+
+    async def get_toolsets(
+        self,
+        ctx: RunContext[None],
+        toolsets: tuple[AbstractToolset[None], ...],
+    ) -> tuple[AbstractToolset[None], ...]:
+        del ctx
+        return (*toolsets, self._memory.get_toolset())
+
+    async def get_history_processors(self, ctx: RunContext[None]) -> tuple:
+        del ctx
+        return ()
 
 
-def _tool_class(
-    tool_def: ToolDefinition,
-    trusted_tool_classes: "tuple[tuple[str, str], ...]",
-) -> "str | None":
-    _validate_trusted_tool_classes(trusted_tool_classes)
-    for tool_name, tool_class in trusted_tool_classes:
-        if tool_name != tool_def.name:
-            continue
-        expected_capability_id = _trusted_capability_id(tool_name, tool_class)
-        return tool_class if tool_def.capability_id == expected_capability_id else None
-    return None
+class _PlanningCapability(AbstractCapability[None]):
+    def __init__(self) -> None:
+        self._planning = Planning()
 
+    async def before_run(self, ctx: RunContext[None]) -> None:
+        del ctx
 
-def _trusted_capability_id(name: str, tool_class: str) -> str:
-    if tool_class == "filesystem.read" and name in WORKSPACE_FILESYSTEM_READ_TOOL_NAMES:
-        return _WORKSPACE_FILESYSTEM_CAPABILITY_ID
-    if (
-        tool_class == "filesystem.write"
-        and name in WORKSPACE_FILESYSTEM_TOOL_NAMES
-        and name not in WORKSPACE_FILESYSTEM_READ_TOOL_NAMES
-    ):
-        return _WORKSPACE_FILESYSTEM_CAPABILITY_ID
-    if tool_class == "shell" and name in WORKSPACE_SHELL_TOOL_NAMES:
-        return _WORKSPACE_SHELL_CAPABILITY_ID
-    if tool_class == "memory.read" and name in MEMORY_READ_TOOL_NAMES:
-        return _MEMORY_CAPABILITY_ID
-    if tool_class == "memory.write" and name in MEMORY_TOOL_NAMES and name not in MEMORY_READ_TOOL_NAMES:
-        return _MEMORY_CAPABILITY_ID
-    if tool_class == "control":
-        if name in SKILL_TOOL_NAMES:
-            return _SKILL_CAPABILITY_ID
-        if name in PLANNING_TOOL_NAMES:
-            return _PLANNING_CAPABILITY_ID
-        if name in SUBAGENT_TOOL_NAMES:
-            return _SUBAGENT_CAPABILITY_ID
-    raise AIError(ErrorCode.CAPABILITY_POLICY_CONFLICT)
+    async def get_model(self, ctx: RunContext[None], model: Model) -> Model:
+        del ctx
+        return model
 
+    async def get_instructions(
+        self,
+        ctx: RunContext[None],
+        instructions: tuple[str, ...],
+    ) -> tuple[str, ...]:
+        del ctx
+        return instructions
 
-def _validate_trusted_tool_classes(
-    trusted_tool_classes: "tuple[tuple[str, str], ...]",
-) -> None:
-    previous: str | None = None
-    seen: set[str] = set()
-    for item in trusted_tool_classes:
-        if not isinstance(item, tuple) or len(item) != 2:
-            raise AIError(ErrorCode.CAPABILITY_POLICY_CONFLICT)
-        name, tool_class = item
-        if (
-            not isinstance(name, str)
-            or not name.strip()
-            or tool_class not in _TRUSTED_TOOL_CLASSES
-            or name in seen
-            or (previous is not None and name < previous)
-        ):
-            raise AIError(ErrorCode.CAPABILITY_POLICY_CONFLICT)
-        _trusted_capability_id(name, tool_class)
-        seen.add(name)
-        previous = name
+    async def get_toolsets(
+        self,
+        ctx: RunContext[None],
+        toolsets: tuple[AbstractToolset[None], ...],
+    ) -> tuple[AbstractToolset[None], ...]:
+        del ctx
+        return (*toolsets, self._planning.get_toolset())
 
-
-def _validate_trusted_mcp_selectors(
-    trusted_mcp_selectors: "tuple[str, ...]",
-) -> None:
-    previous: str | None = None
-    seen: set[str] = set()
-    for selector in trusted_mcp_selectors:
-        if (
-            not isinstance(selector, str)
-            or not selector.startswith("mcp__")
-            or selector == "mcp__"
-            or "__" in selector[5:]
-            or selector in seen
-            or (previous is not None and selector < previous)
-        ):
-            raise AIError(ErrorCode.CAPABILITY_POLICY_CONFLICT)
-        seen.add(selector)
-        previous = selector
-
-
-def select_platform_tool_names(
-    *,
-    allow_tools: "tuple[str, ...]",
-    memory_scope: "str | None",
-    planning: bool = False,
-    subagent_available: bool = False,
-) -> "tuple[str, ...]":
-    if not isinstance(planning, bool) or not isinstance(subagent_available, bool):
-        raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
-    selected = [
-        name
-        for name in MEMORY_TOOL_NAMES
-        if memory_scope is not None and tool_name_allowed(name, allow_tools)
-    ]
-    if planning:
-        selected.extend(PLANNING_TOOL_NAMES)
-    if subagent_available:
-        selected.extend(SUBAGENT_TOOL_NAMES)
-    return tuple(sorted(selected))
+    async def get_history_processors(self, ctx: RunContext[None]) -> tuple:
+        del ctx
+        return ()
 
 
 class _SubagentCapability(AbstractCapability[None]):
     def __init__(self, delegate: SubagentDelegate) -> None:
-        self.id = _SUBAGENT_CAPABILITY_ID
         self._delegate = delegate
 
+    async def before_run(self, ctx: RunContext[None]) -> None:
+        del ctx
+
+    async def get_model(self, ctx: RunContext[None], model: Model) -> Model:
+        del ctx
+        return model
+
+    async def get_instructions(
+        self,
+        ctx: RunContext[None],
+        instructions: tuple[str, ...],
+    ) -> tuple[str, ...]:
+        del ctx
+        return instructions
+
+    async def get_toolsets(
+        self,
+        ctx: RunContext[None],
+        toolsets: tuple[AbstractToolset[None], ...],
+    ) -> tuple[AbstractToolset[None], ...]:
+        del ctx
+        return (*toolsets, self.get_toolset())
+
+    async def get_history_processors(self, ctx: RunContext[None]) -> tuple:
+        del ctx
+        return ()
+
     def get_toolset(self) -> "FunctionToolset[None]":
-        toolset = FunctionToolset[None](id="linktools-subagent")
+        toolset = FunctionToolset[None](id=_SUBAGENT_CAPABILITY_ID)
 
         @toolset.tool
         async def delegate_task(ctx: RunContext[None], agent_id: str, task: str) -> "dict[str, Any]":
@@ -705,68 +698,124 @@ class _SubagentCapability(AbstractCapability[None]):
                 raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
             result = await self._delegate(values[0], values[1], tool_call_id=ctx.tool_call_id)
             if not isinstance(result, dict):
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                raise AIError(ErrorCode.INTERNAL_ERROR)
             return result
 
         return toolset
 
 
-def _memory_guidance(selected_tools: "tuple[str, ...]") -> str:
-    actions = ", ".join(f"`{name}`" for name in selected_tools)
-    return f"Use only these memory tools when needed: {actions}."
-
-
-def _build_compaction(context_target_tokens: "int | None") -> PydanticAgentCapability[None]:
-    deduplicate = DeduplicateFileReads(file_key=_workspace_file_key)
-    if context_target_tokens is None:
-        return deduplicate
-    return TieredCompaction(
-        tiers=[
-            deduplicate,
-            ClearToolResults(max_tokens=1, keep_pairs=3),
-            SummarizingCompaction(max_messages=1, keep_messages=20),
-        ],
-        target_tokens=context_target_tokens,
-    )
-
-
-def _validate_compaction_target(context_target_tokens: "int | None") -> None:
-    if context_target_tokens is not None and (
-        not isinstance(context_target_tokens, int)
-        or isinstance(context_target_tokens, bool)
-        or context_target_tokens <= 0
-    ):
+def _validate_compaction_target(value: "int | None") -> None:
+    if value is None:
+        return
+    if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
         raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
 
 
-def _workspace_file_key(part: ToolCallPart) -> "str | None":
-    if part.tool_name != "read_file":
-        return None
-    try:
-        arguments = part.args_as_dict()
-    except (TypeError, ValueError):
-        return None
-    path = arguments.get("path")
-    return path if isinstance(path, str) else None
+def _validate_trusted_tool_classes(value: tuple[tuple[str, str], ...]) -> None:
+    seen: set[str] = set()
+    for item in value:
+        if (
+            not isinstance(item, tuple)
+            or len(item) != 2
+            or not isinstance(item[0], str)
+            or not isinstance(item[1], str)
+            or not item[0]
+            or item[0] in seen
+            or item[1] not in _TRUSTED_TOOL_CLASSES
+        ):
+            raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
+        seen.add(item[0])
+
+
+def _validate_trusted_mcp_selectors(value: tuple[str, ...]) -> None:
+    if len(set(value)) != len(value):
+        raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
+    for selector in value:
+        if not selector.startswith("mcp__") or selector.endswith("__") or "*" in selector:
+            raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
+
+
+def tool_allowed_in_planning(
+    tool_def: ToolDefinition,
+    *,
+    trusted_tool_classes: "tuple[tuple[str, str], ...]",
+    trusted_mcp_selectors: "tuple[str, ...]",
+) -> bool:
+    tool_class = dict(trusted_tool_classes).get(tool_def.name)
+    if tool_class in {"control", "filesystem.read", "memory.read"}:
+        if tool_class == "control":
+            return tool_def.name == "write_plan" and tool_def.capability_id == _PLANNING_CAPABILITY_ID
+        expected_capability = (
+            _WORKSPACE_FILESYSTEM_CAPABILITY_ID if tool_class == "filesystem.read" else _MEMORY_CAPABILITY_ID
+        )
+        return tool_def.capability_id == expected_capability
+    if tool_class is not None:
+        return False
+    if tool_def.capability_id in trusted_mcp_selectors:
+        return bool(tool_def.metadata.get(PLAN_SAFE_METADATA_KEY, False))
+    metadata = tool_def.metadata.get(PLAN_SAFE_METADATA_KEY)
+    if metadata is None:
+        return False
+    if not isinstance(metadata, bool):
+        raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+    return metadata
+
+
+def _approximate_message_tokens(messages) -> int:
+    """Deterministic fallback budget signal independent of provider tokenizers."""
+    return max(1, len(repr(messages)) // 4)
+
+
+async def _deterministic_summary(messages):
+    """Preserve the newest material deterministically without a model call."""
+    if len(messages) <= 4:
+        return list(messages)
+    return list(messages[-4:])
+
+
+def select_platform_tool_names(
+    *,
+    allow_tools: "tuple[str, ...]",
+    memory_scope: "str | None",
+    subagent_available: bool = False,
+    planning: bool = False,
+    workspace_filesystem: bool = False,
+    workspace_filesystem_write: bool = False,
+    workspace_shell: bool = False,
+) -> "tuple[str, ...]":
+    names: set[str] = set()
+    if memory_scope is not None:
+        names.update(MEMORY_TOOL_NAMES)
+    if subagent_available:
+        names.update(SUBAGENT_TOOL_NAMES)
+    if planning:
+        names.update(PLANNING_TOOL_NAMES)
+    if workspace_filesystem:
+        names.update(WORKSPACE_FILESYSTEM_TOOL_NAMES if workspace_filesystem_write else WORKSPACE_FILESYSTEM_READ_TOOL_NAMES)
+    if workspace_shell:
+        names.update(WORKSPACE_SHELL_TOOL_NAMES)
+    names.intersection_update(allow_tools)
+    if planning:
+        names.update(PLANNING_TOOL_NAMES)
+    if subagent_available:
+        names.update(SUBAGENT_TOOL_NAMES)
+    return tuple(sorted(names))
 
 
 __all__ = [
+    "AgentRunScope",
     "MEMORY_READ_TOOL_NAMES",
     "MEMORY_TOOL_NAMES",
     "PLAN_SAFE_METADATA_KEY",
     "PLANNING_TOOL_NAMES",
-    "SKILL_TOOL_NAMES",
     "SUBAGENT_TOOL_NAMES",
-    "WORKSPACE_FILESYSTEM_READ_TOOL_NAMES",
-    "WORKSPACE_FILESYSTEM_TOOL_NAMES",
-    "WORKSPACE_SHELL_TOOL_NAMES",
-    "AgentRunScope",
     "SubagentDelegate",
     "ToolOperationBridge",
     "ToolOperationDecision",
+    "WORKSPACE_FILESYSTEM_READ_TOOL_NAMES",
+    "WORKSPACE_FILESYSTEM_TOOL_NAMES",
+    "WORKSPACE_SHELL_TOOL_NAMES",
     "compose_platform_capabilities",
     "select_platform_tool_names",
     "tool_allowed_in_planning",
-    "tool_is_control",
-    "tool_name_allowed",
 ]
