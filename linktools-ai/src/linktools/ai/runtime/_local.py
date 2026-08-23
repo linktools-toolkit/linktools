@@ -388,7 +388,7 @@ class LocalExecutionBackend:
             principal_kind=request.principal.kind,
             session_id=execution.session_id,
             memory_scope=execution.memory_scope,
-            agent_digest=execution.binding.agent_digest,
+            binding_digest=execution.binding_digest,
             lineage_kind=execution.lineage_kind.value,
             parent_execution_id=execution.parent_execution_id,
             root_execution_id=execution.root_execution_id,
@@ -1333,6 +1333,11 @@ class LocalExecutionBackend:
             if latest.active_execution_id != checkpoint.execution_id or latest.continuation != intent.expected_cursor:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             raise
+        _logger.info(
+            "session conversation committed: execution=%s run=%s",
+            execution.execution_id,
+            source_run_id,
+        )
 
     async def _advance_handoff(self, checkpoint: RecoveryCheckpoint, phase: RecoveryHandoffPhase) -> RecoveryCheckpoint:
         if checkpoint.terminal_handoff is None or checkpoint.handoff_contract_digest is None:
