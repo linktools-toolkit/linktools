@@ -10,6 +10,7 @@ from pathlib import Path
 import pytest
 
 from linktools.ai.agent import AgentCompiler
+from linktools.ai.core import ExecutionEventType
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.model import ModelRegistry
 from linktools.ai.runtime import RuntimeDomain, RuntimeState
@@ -21,8 +22,9 @@ from linktools.ai.runtime.state._contracts import (
     TranscriptSeekDimension,
     TranscriptSeekRecord,
 )
+from linktools.ai.runtime.state._maintenance import RuntimeStorageInspection
 from linktools.ai.runtime.state._migration import _migrate_legacy_binding
-from linktools.ai.runtime.state._store import StoredFact
+from linktools.ai.runtime.state._store import StoredFact, StoredRecord
 from linktools.ai.spec import AgentSpec
 from linktools.ai.storage import StoredPayload
 
@@ -48,6 +50,46 @@ def _compiler() -> AgentCompiler:
     return AgentCompiler(
         model_resolver=ModelRegistry.openai(model="gpt-test").snapshot(),
         runtime_fingerprint="a" * 64,
+    )
+
+
+class _NoObjects:
+    def object_store(self, domain: RuntimeDomain) -> object:
+        raise AssertionError(f"unexpected object reference in {domain.value}")
+
+
+def _inspection() -> RuntimeStorageInspection:
+    return RuntimeStorageInspection(
+        {},
+        _NoObjects(),
+        durable_domains=frozenset(),
+    )
+
+
+def _read_model_record(*, version: int = 1) -> StoredRecord:
+    return StoredRecord(
+        b"k" * 32,
+        b"p" * 32,
+        None,
+        None,
+        "execution_read_model",
+        "execution",
+        "COMPLETE",
+        0,
+        None,
+        0,
+        None,
+        {
+            "execution_id": "execution",
+            "tenant_id": "tenant",
+            "source_digest": "source",
+            "model_version": version,
+            "status": "COMPLETE",
+            "trace_count": 0,
+            "history_count": 0,
+            "transcript_count": 0,
+            "revision": 1,
+        },
     )
 
 
@@ -80,6 +122,96 @@ def test_legacy_binding_future_version_remains_unsupported() -> None:
 
     with pytest.raises(AIError) as raised:
         _migrate_legacy_binding(payload, compiler)
+
+    assert raised.value.code is ErrorCode.STORAGE_VERSION_UNSUPPORTED
+
+
+def test_maintenance_accepts_current_raw_state_formats() -> None:
+    inspection = _inspection()
+    references: dict[int, set[str]] = {}
+    event = StoredFact(
+        b"s" * 32,
+        1,
+        b"o" * 32,
+        ExecutionEventType.CREATED.value,
+        None,
+        None,
+        {"value": "event"},
+    )
+    read_model_fact = StoredFact(
+        b"r" * 32,
+        1,
+        b"o" * 32,
+        "execution_read_trace",
+        None,
+        None,
+        {"items": [{"value": "trace"}]},
+    )
+
+    inspection._collect_references(
+        RuntimeDomain.EXECUTION,
+        (_read_model_record(),),
+        (event, read_model_fact),
+        (),
+        references,
+    )
+
+    assert references == {}
+
+
+def test_maintenance_rejects_future_read_model_version() -> None:
+    inspection = _inspection()
+    with pytest.raises(AIError) as raised:
+        inspection._collect_references(
+            RuntimeDomain.EXECUTION,
+            (_read_model_record(version=2),),
+            (),
+            (),
+            {},
+        )
+
+    assert raised.value.code is ErrorCode.STORAGE_VERSION_UNSUPPORTED
+
+
+def test_maintenance_rejects_future_persisted_schema() -> None:
+    raw = b"[]"
+    chunk = TranscriptChunk(
+        "owner",
+        0,
+        1,
+        TranscriptOrigin.RAW,
+        "raw",
+        hashlib.sha256(raw).hexdigest(),
+        len(raw),
+        RuntimePayloadRef(
+            StoredPayload.inline_bytes(raw),
+            RuntimeDomain.EXECUTION,
+        ),
+    )
+    chunk_data = encode_envelope(
+        {
+            "type": "transcript_chunk",
+            "payload": _encode_persisted_domain(chunk),
+        }
+    )
+    fact = StoredFact(
+        b"s" * 32,
+        1,
+        b"o" * 32,
+        "transcript_chunk",
+        None,
+        "raw",
+        _future_schema(chunk_data),
+    )
+
+    with pytest.raises(AIError) as raised:
+        _inspection()._collect_references(
+            RuntimeDomain.EXECUTION,
+            (),
+            (fact,),
+            (),
+            {},
+        )
 
     assert raised.value.code is ErrorCode.STORAGE_VERSION_UNSUPPORTED
 
