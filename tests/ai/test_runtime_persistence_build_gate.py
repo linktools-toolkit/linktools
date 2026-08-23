@@ -65,6 +65,67 @@ def test_missing_target_ref_fails_closed(
         persistence._baseline_commit(Path("."), base_ref="origin/master")
 
 
+def test_missing_baseline_path_is_valid_first_introduction(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    baseline = "a" * 40
+    relative = "matrix/new-contract.json"
+    monkeypatch.setattr(
+        persistence,
+        "_repository_path",
+        lambda _path: (Path("."), relative),
+    )
+    monkeypatch.setattr(
+        persistence,
+        "_baseline_commit",
+        lambda _repository, *, base_ref: baseline,
+    )
+
+    def fake_git(_repository: Path, *args: str):
+        assert args == (
+            "ls-tree",
+            "--full-tree",
+            baseline,
+            "--",
+            relative,
+        )
+        return _result(0)
+
+    monkeypatch.setattr(persistence, "_git", fake_git)
+    assert persistence.load_git_json_baseline("candidate.json") is None
+
+
+def test_existing_baseline_path_read_failure_fails_closed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    baseline = "a" * 40
+    relative = "matrix/runtime-persistence-v1.json"
+    monkeypatch.setattr(
+        persistence,
+        "_repository_path",
+        lambda _path: (Path("."), relative),
+    )
+    monkeypatch.setattr(
+        persistence,
+        "_baseline_commit",
+        lambda _repository, *, base_ref: baseline,
+    )
+
+    def fake_git(_repository: Path, *args: str):
+        if args[0] == "ls-tree":
+            return _result(
+                0,
+                f"100644 blob {'b' * 40}\t{relative}\n",
+            )
+        if args[0] == "show":
+            return _result(128)
+        raise AssertionError(f"unexpected git call: {args}")
+
+    monkeypatch.setattr(persistence, "_git", fake_git)
+    with pytest.raises(ValueError, match="baseline file is unreadable"):
+        persistence.load_git_json_baseline("candidate.json")
+
+
 def test_checked_in_runtime_persistence_gate(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
