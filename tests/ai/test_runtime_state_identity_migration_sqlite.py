@@ -165,4 +165,4 @@ async def test_open_workspace_runtime_normalizes_legacy_sqlite_session(
             principal=runtime.default_principal,
         )
         assert loaded is not None
-        assert loaded.agent_digest == runtime.agent()._agent_digest
+        assert loaded.agent_digest == definition.digest
