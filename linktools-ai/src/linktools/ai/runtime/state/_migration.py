@@ -720,17 +720,17 @@ def _migrate_legacy_binding(
     descriptors = value.get("local_runtime_capability_descriptors")
     if not isinstance(descriptors, list):
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    module_name = _string(value.get("output_type_module"))
+    qualname = _string(value.get("output_type_qualname"))
+    schema_id = _string(value.get("output_schema_id"))
+    schema_revision = _positive_int(value.get("output_schema_revision"))
+    schema_fingerprint = _digest(value.get("output_schema_fingerprint"))
     try:
         capabilities = tuple(
             RuntimeCapability.restore(_json_mapping(descriptor))
             for descriptor in descriptors
         )
         definition = compiler.compile(spec, capabilities=capabilities)
-        module_name = _string(value.get("output_type_module"))
-        qualname = _string(value.get("output_type_qualname"))
-        schema_id = _string(value.get("output_schema_id"))
-        schema_revision = _positive_int(value.get("output_schema_revision"))
-        schema_fingerprint = _digest(value.get("output_schema_fingerprint"))
         output_binding_fingerprint = canonical_sha256(
             {
                 "schema_id": schema_id,
