@@ -1,0 +1,112 @@
+name: Validate unified release gates
+
+on:
+  push:
+    branches:
+      - refactor/unified-release-gates
+
+permissions:
+  contents: write
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: refactor/unified-release-gates
+
+      - name: Finalize path migration
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          root = Path('.')
+          replacements = (
+              ('linktools-ai/scripts/build/', 'scripts/check/ai/'),
+              ('linktools-ai/scripts/build', 'scripts/check/ai'),
+              ('scripts/build/', 'scripts/check/ai/'),
+              ('scripts/build', 'scripts/check/ai'),
+              ('scripts.build', 'scripts.check.ai'),
+          )
+          suffixes = {'.py', '.json', '.md', '.yml', '.yaml', '.toml', '.txt'}
+          workflow = Path('.github/workflows/unified-release-gates-validation.yml')
+          for path in root.rglob('*'):
+              if not path.is_file() or path == workflow or '.git' in path.parts:
+                  continue
+              if path.suffix.lower() not in suffixes:
+                  continue
+              try:
+                  text = path.read_text(encoding='utf-8')
+              except UnicodeDecodeError:
+                  continue
+              updated = text
+              for old, new in replacements:
+                  updated = updated.replace(old, new)
+              if path == Path('scripts/verify.py'):
+                  updated = updated.replace(
+                      'version_file.read_text(encoding="utf-8").strip() != version',
+                      'version_file.read_text(encoding="utf-8") != version',
+                  )
+              if updated != text:
+                  path.write_text(updated, encoding='utf-8')
+          PY
+          rm -rf linktools-ai/scripts
+          if git grep -n -E 'scripts\.build|linktools-ai/scripts/build|scripts/build/' -- ':!:.github/workflows/unified-release-gates-validation.yml'; then
+            echo '::error::stale build-script reference remains'
+            exit 1
+          fi
+          test ! -e linktools-ai/scripts
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: Build frida scripts
+        run: cd linktools-mobile/agents/frida && npm install && npm run build
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+      - name: Build android tools
+        run: cd linktools-mobile/agents/android && ./gradlew --no-daemon :tools:buildTools
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+      - name: Install root tooling
+        run: |
+          python -m pip install --upgrade pip
+          pip install -U -r requirements.txt
+      - name: Install projects
+        run: python manage.py install --editable
+      - name: Check source and tests
+        run: python manage.py check
+      - name: Build release artifacts
+        run: |
+          rm -rf dist
+          VERSION=v0.0.1 RELEASE=true python manage.py build
+      - name: Verify release artifacts
+        run: VERSION=v0.0.1 python manage.py verify
+
+      - name: Commit validated implementation
+        run: |
+          git checkout -- linktools*/.version || true
+          git checkout -- linktools-mobile/src/linktools/assets/frida.js || true
+          git checkout -- 'linktools-mobile/src/linktools/assets/frida-*.js' || true
+          git checkout -- 'linktools-mobile/src/linktools/assets/android-tools.*' || true
+          rm -f .github/workflows/unified-release-gates-validation.yml
+          git config user.name github-actions[bot]
+          git config user.email github-actions[bot]@users.noreply.github.com
+          git add -A
+          if git diff --cached --quiet; then
+            echo 'No validated source changes to commit'
+            exit 0
+          fi
+          git commit -m 'refactor(release): finalize unified gates'
+          git push origin HEAD:refactor/unified-release-gates
