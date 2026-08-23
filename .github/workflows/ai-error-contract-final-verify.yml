@@ -6,7 +6,7 @@ on:
       - fix/ai-error-contract-closure
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   verify:
@@ -18,65 +18,94 @@ jobs:
         with:
           python-version: '3.12'
 
-      - name: Install Ruff
+      - name: Install verification dependencies
         run: |
           python -m pip install --upgrade pip
-          python -m pip install ruff
+          python -m pip install \
+            filelock 'pydantic-ai-slim[mcp,openai,temporal]>=2.27.0,<3.0.0' \
+            'pydantic-ai-harness[skills,dynamic-workflow]>=0.13.0' \
+            'PyYAML>=6,<7' pytest pytest-asyncio 'sqlalchemy[asyncio]==2.0.51' \
+            'aiosqlite==0.22.1' ruff rich requests packaging
+          python -m pip install -e ./linktools --no-deps
 
-      - name: Check out work branch snapshot
+      - name: Prepare strict Ruff candidate
         run: |
           git fetch --depth=1 origin fix/ai-error-contract-closure
-          git worktree add /tmp/ruff-isolated FETCH_HEAD
-          git -C /tmp/ruff-isolated rev-parse HEAD
+          git worktree add /tmp/ruff-strict FETCH_HEAD
+          cd /tmp/ruff-strict
+          rm -f ruff.toml
+          python - <<'PY'
+          import re
+          from pathlib import Path
 
-      - name: Scan Ruff without repository ignores
-        id: ruff
-        continue-on-error: true
-        working-directory: /tmp/ruff-isolated
+          roots = (
+              Path('linktools-ai/scripts/build'),
+              Path('linktools-ai/src/linktools/ai'),
+              Path('linktools-ai/src/linktools/commands/ai'),
+              Path('tests/ai'),
+          )
+          coding = re.compile(r'^#.*coding[:=]\s*[-\w.]+')
+          for root in roots:
+              for path in root.rglob('*.py'):
+                  lines = path.read_text().splitlines(keepends=True)
+                  changed = False
+                  if lines and lines[0].startswith('#!'):
+                      lines.pop(0)
+                      changed = True
+                  if lines and coding.match(lines[0]):
+                      lines.pop(0)
+                      changed = True
+                  if changed:
+                      path.write_text(''.join(lines))
+          PY
+          git diff --check
+
+      - name: Verify only audited TRY004 remains
+        working-directory: /tmp/ruff-strict
         run: |
           set +e
           python -m ruff check --isolated \
             linktools-ai/scripts/build linktools-ai/src/linktools/ai \
             linktools-ai/src/linktools/commands/ai tests/ai \
-            --output-format=json > /tmp/ruff-isolated.json
+            --output-format=json > /tmp/ruff-strict.json
           status=$?
-          echo "status=$status" >> "$GITHUB_OUTPUT"
-          exit "$status"
-
-      - name: Summarize isolated Ruff diagnostics
-        if: always()
-        run: |
+          set -e
           python - <<'PY'
           import json
           from collections import Counter
           from pathlib import Path
 
-          path = Path('/tmp/ruff-isolated.json')
-          diagnostics = json.loads(path.read_text()) if path.exists() else []
-          by_rule = Counter(item['code'] for item in diagnostics)
-          by_file = Counter(
-              item['filename'].split('/ruff-isolated/', 1)[-1]
-              for item in diagnostics
-          )
-          lines = [
-              f'count={len(diagnostics)}',
-              f'status=${{{{ steps.ruff.outputs.status }}}}',
-              '',
-              '[rules]',
-          ]
-          lines.extend(f'{count}\t{rule}' for rule, count in sorted(by_rule.items(), key=lambda item: (-item[1], item[0])))
-          lines.extend(['', '[files]'])
-          lines.extend(f'{count}\t{filename}' for filename, count in sorted(by_file.items(), key=lambda item: (-item[1], item[0])))
-          Path('/tmp/ruff-isolated-summary.txt').write_text('\n'.join(lines) + '\n')
-          print('\n'.join(lines[:120]))
+          diagnostics = json.loads(Path('/tmp/ruff-strict.json').read_text())
+          rules = Counter(item['code'] for item in diagnostics)
+          print(f'remaining={len(diagnostics)} rules={dict(rules)}')
+          if not diagnostics:
+              raise SystemExit('expected audited TRY004 diagnostics before semantic cleanup')
+          if set(rules) != {'TRY004'}:
+              raise SystemExit(f'unexpected strict Ruff diagnostics remain: {dict(rules)}')
+          if status := 0:
+              raise SystemExit(status)
           PY
+          test "$status" -ne 0
 
-      - name: Upload isolated Ruff diagnostics
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: ai-error-contract-ruff-isolated
-          path: |
-            /tmp/ruff-isolated.json
-            /tmp/ruff-isolated-summary.txt
-          if-no-files-found: error
+      - name: Compile strict candidate
+        working-directory: /tmp/ruff-strict
+        env:
+          PYTHONPATH: linktools-ai:linktools-ai/src:linktools/src
+        run: python -m compileall -q linktools-ai/src/linktools/ai
+
+      - name: Test strict candidate
+        working-directory: /tmp/ruff-strict
+        timeout-minutes: 12
+        env:
+          PYTHONPATH: linktools-ai:linktools-ai/src:linktools/src
+        run: python -m pytest -q tests/ai
+
+      - name: Commit strict Ruff cleanup
+        working-directory: /tmp/ruff-strict
+        run: |
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add -A ruff.toml linktools-ai/scripts/build linktools-ai/src/linktools/ai \
+            linktools-ai/src/linktools/commands/ai tests/ai
+          git commit -m 'style(ai): remove Ruff blanket ignores'
+          git push origin HEAD:fix/ai-error-contract-closure
