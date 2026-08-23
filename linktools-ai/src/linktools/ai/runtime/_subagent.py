@@ -42,7 +42,12 @@ class SubagentDispatcher:
         if len(allowed) != len(allowed_agent_ids):
             raise AIError(ErrorCode.CAPABILITY_CONFLICT)
 
-        async def dispatch(agent_id: str, user_prompt: str, *, tool_call_id: str) -> JsonValue:
+        async def dispatch(
+            agent_id: str,
+            user_prompt: str,
+            *,
+            tool_call_id: str,
+        ) -> "dict[str, JsonValue]":
             return await self.dispatch(
                 parent_execution_id=parent_execution_id,
                 root_execution_id=root_execution_id,
@@ -119,23 +124,25 @@ class SubagentDispatcher:
             )
             try:
                 await asyncio.shield(cleanup)
-            except asyncio.CancelledError:
+            except asyncio.CancelledError as cancellation:
                 try:
                     await cleanup
-                except BaseException:
+                except BaseException as cleanup_error:
                     _logger.error(
                         "subagent child cleanup failed after cancellation: execution=%s",
                         child.execution_id,
                         exc_info=True,
                     )
-                    raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED) from primary
-                raise primary
-            except BaseException:
+                    raise cancellation from cleanup_error
+                raise cancellation
+            except BaseException as cleanup_error:
                 _logger.error(
                     "subagent child cleanup failed: execution=%s",
                     child.execution_id,
                     exc_info=True,
                 )
+                if isinstance(primary, asyncio.CancelledError):
+                    raise primary from cleanup_error
                 raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED) from primary
             raise primary
         return _subagent_result(result)
@@ -180,16 +187,18 @@ class SubagentDispatcher:
             self._execution.cancel(execution_id, request),
             name=f"ai-subagent-cancel-{execution_id}",
         )
-        cancelled = False
+        cancellation: asyncio.CancelledError | None = None
         try:
             result = await asyncio.shield(task)
-        except asyncio.CancelledError:
-            cancelled = True
+        except asyncio.CancelledError as error:
+            if task.done() and task.cancelled():
+                raise
+            cancellation = error
             try:
                 result = await task
-            except BaseException as error:
-                raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED) from error
-        except BaseException as error:
+            except BaseException as cleanup_error:
+                raise cancellation from cleanup_error
+        except Exception as error:
             raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED) from error
         if not result.cancelled:
             current = await self._execution.inspect(execution_id, principal=principal)
@@ -198,8 +207,8 @@ class SubagentDispatcher:
         current = await self._execution.inspect(execution_id, principal=principal)
         if current.status not in {ExecutionStatus.SUCCEEDED, ExecutionStatus.FAILED, ExecutionStatus.CANCELLED}:
             raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
-        if cancelled:
-            raise asyncio.CancelledError
+        if cancellation is not None:
+            raise cancellation
 
 
 def _subagent_result(result: ExecutionResult) -> "dict[str, JsonValue]":

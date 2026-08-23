@@ -75,7 +75,7 @@ class MCPServerCapabilityBinding:
             execution_root=str(context.execution_root),
         )
         if len(toolsets) != len(selected) or len({toolset.id for toolset in toolsets}) != len(toolsets):
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
         return tuple(
             MCP(
                 local=toolset.prefixed(f"mcp__{mcp_server_namespace(server.id)}__"),

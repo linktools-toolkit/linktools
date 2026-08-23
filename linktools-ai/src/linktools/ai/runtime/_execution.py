@@ -345,11 +345,13 @@ class DefaultExecutionService:
     async def _run_handoff_cleanup(self, execution_id: str, tenant_id: str, state: _ExecutionHandoffState) -> None:
         try:
             await self._release_terminal(execution_id, tenant_id=tenant_id)
-        except BaseException:
+        except BaseException as error:
             async with self._handoff_condition:
                 state.release_in_progress = False
                 state.release_requested = True
                 self._handoff_condition.notify_all()
+            if not isinstance(error, Exception):
+                raise
             _logger.error("execution handoff cleanup failed: execution=%s", execution_id, exc_info=environ.debug)
             return
         async with self._handoff_condition:
@@ -830,7 +832,7 @@ class DefaultExecutionService:
         try:
             if self._backend is not None:
                 await self._backend.abort_start(terminal)
-        except BaseException:
+        except Exception:
             _logger.error(
                 "pending start cleanup failed: execution=%s",
                 terminal.execution_id,
@@ -1315,7 +1317,7 @@ class DefaultExecutionService:
             if prepared_before_claim:
                 try:
                     await self._backend.abort_start(terminal)
-                except BaseException:
+                except Exception:
                     _logger.error(
                         "pending cancellation cleanup failed: execution=%s",
                         execution_id,

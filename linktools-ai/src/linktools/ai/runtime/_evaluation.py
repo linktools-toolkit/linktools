@@ -363,11 +363,14 @@ class DefaultEvaluationService:
                 self._handoff_condition.notify_all()
             if cleanup_owner:
                 cleanup_succeeded = False
+                cleanup_error: BaseException | None = None
                 try:
                     await self._release_terminal(evaluation_id, tenant_id=tenant_id)
                     cleanup_succeeded = True
-                except BaseException:
-                    _logger.error("evaluation transient handoff cleanup failed: evaluation=%s", evaluation_id, exc_info=environ.debug)
+                except BaseException as error:
+                    cleanup_error = error
+                    if isinstance(error, Exception):
+                        _logger.error("evaluation transient handoff cleanup failed: evaluation=%s", evaluation_id, exc_info=environ.debug)
                 async with self._handoff_condition:
                     if self._handoff_states.get(key) is state:
                         if cleanup_succeeded and state.active_consumers == 0:
@@ -376,6 +379,8 @@ class DefaultEvaluationService:
                             state.release_in_progress = False
                             state.release_requested = True
                     self._handoff_condition.notify_all()
+                if cleanup_error is not None and not isinstance(cleanup_error, Exception):
+                    raise cleanup_error
 
     async def _request_evaluation_release(self, evaluation_id: str, tenant_id: str) -> None:
         key = (tenant_id, evaluation_id)

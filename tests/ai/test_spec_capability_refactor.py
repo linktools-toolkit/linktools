@@ -5,10 +5,11 @@
 import json
 
 import pytest
-from pydantic_ai.tools import ToolDefinition
-
-from linktools.ai.agent import select_platform_tool_names
-from linktools.ai.agent._capabilities import PLAN_SAFE_METADATA_KEY, tool_allowed_in_planning
+from linktools.ai.agent import select_platform_tool_names, tool_name_allowed
+from linktools.ai.agent._capabilities import (
+    PLAN_SAFE_METADATA_KEY,
+    tool_allowed_in_planning,
+)
 from linktools.ai.asset import AssetRef
 from linktools.ai.capability._skill import (
     SkillCatalogSnapshot,
@@ -24,6 +25,7 @@ from linktools.ai.spec import (
     SkillSpec,
     SkillSpecCodec,
 )
+from pydantic_ai.tools import ToolDefinition
 
 
 def test_platform_tool_selection_keeps_planning_outside_allow_tools() -> None:
@@ -44,6 +46,14 @@ def test_platform_tool_selection_keeps_planning_outside_allow_tools() -> None:
         memory_scope=None,
         subagent_available=True,
     ) == ("delegate_task",)
+
+
+def test_platform_tool_selection_honors_wildcard_allow_tools() -> None:
+    assert tool_name_allowed("read_memory", ("*",))
+    assert select_platform_tool_names(
+        allow_tools=("*",),
+        memory_scope="memory",
+    ) == ("delete_memory", "read_memory", "search_memory", "write_memory")
 
 
 def test_planning_gate_requires_framework_filesystem_provenance() -> None:

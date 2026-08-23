@@ -355,7 +355,7 @@ class SqlAssetBackend:
             return await self._apply_once_transaction(changes, expected_revision)
         except AIError:
             raise
-        except BaseException as error:
+        except Exception as error:
             raise AIError(ErrorCode.STORAGE_UNAVAILABLE) from error
 
     async def _apply_once_transaction(

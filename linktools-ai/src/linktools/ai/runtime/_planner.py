@@ -193,17 +193,26 @@ class RuntimeTaskNodeRunner:
                     node.node_id,
                     type(error).__name__,
                 )
-                raise cancellation
-            await _cancel_execution(self._execution, handle.execution_id, principal, graph_id, node.node_id)
+                raise cancellation from error
+            try:
+                await _cancel_execution(self._execution, handle.execution_id, principal, graph_id, node.node_id)
+            except BaseException as cleanup_error:  # noqa: BLE001
+                raise cancellation from cleanup_error
             raise cancellation
         wait_task = asyncio.create_task(self._execution.wait(handle.execution_id, principal=principal))
         try:
             await asyncio.shield(wait_task)
         except asyncio.CancelledError as cancellation:
-            await _cancel_execution(self._execution, handle.execution_id, principal, graph_id, node.node_id)
+            cleanup_error: BaseException | None = None
+            try:
+                await _cancel_execution(self._execution, handle.execution_id, principal, graph_id, node.node_id)
+            except BaseException as error:  # noqa: BLE001
+                cleanup_error = error
             if not wait_task.done():
                 wait_task.cancel()
                 await asyncio.gather(wait_task, return_exceptions=True)
+            if cleanup_error is not None:
+                raise cancellation from cleanup_error
             raise cancellation
         return await self.result(handle.execution_id, principal=principal)
 

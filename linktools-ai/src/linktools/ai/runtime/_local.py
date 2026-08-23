@@ -3150,7 +3150,7 @@ class LocalExecutionBackend:
                 tenant_id=execution.tenant_id,
                 execution_id=execution.execution_id,
             )
-        except BaseException:
+        except Exception:
             _logger.error(
                 "session admission release failed after terminal: execution=%s",
                 execution.execution_id,
