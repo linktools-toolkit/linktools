@@ -41,7 +41,7 @@ jobs:
       - name: Ruff
         env:
           PYTHONPATH: linktools-ai:linktools-ai/src:linktools/src
-        run: python -m ruff check linktools-ai/src/linktools/ai linktools-ai/src/linktools/commands/ai tests/ai
+        run: python -m ruff check linktools-ai/scripts/build linktools-ai/src/linktools/ai linktools-ai/src/linktools/commands/ai tests/ai
 
       - name: AI tests
         env:
@@ -52,10 +52,14 @@ jobs:
         run: |
           git config user.name github-actions[bot]
           git config user.email github-actions[bot]@users.noreply.github.com
-          git add linktools-ai/src/linktools/ai/runtime/_local.py \
+          git add linktools-ai/src/linktools/ai/agent/_executor.py \
+                  linktools-ai/src/linktools/ai/asset/_repository.py \
+                  linktools-ai/src/linktools/ai/runtime/_evaluation.py \
+                  linktools-ai/src/linktools/ai/runtime/_local.py \
                   linktools-ai/src/linktools/ai/runtime/_tool.py \
-                  linktools-ai/src/linktools/ai/temporal/_task_operation.py \
-                  linktools-ai/src/linktools/commands/ai/run.py
+                  linktools-ai/src/linktools/ai/task/_local.py \
+                  tests/ai/test_closure_fix.py \
+                  tests/ai/test_error_contract.py
           git diff --cached --check
           git commit -m 'fix(ai): close remaining error propagation gaps'
           git push origin HEAD:fix/ai-error-contract-closure
