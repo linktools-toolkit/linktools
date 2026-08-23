@@ -59,8 +59,31 @@ jobs:
           mkdir -p /tmp/merge-conflicts
           git diff --name-only --diff-filter=U > /tmp/merge-conflicts/conflicts.txt
 
-          if git show origin/automation/merge-master-into-ai-composition:.merge-resolutions.tar.gz.b64 >/tmp/merge-resolutions.tar.gz.b64 2>/dev/null; then
+          resolution_parts="$(
+            git ls-tree -r --name-only origin/automation/merge-master-into-ai-composition \
+              | grep '^\.merge-resolutions\.b64\.part-' \
+              | sort
+          )"
+          if [ -n "$resolution_parts" ]; then
+            part_count="$(printf '%s\n' "$resolution_parts" | sed '/^$/d' | wc -l | tr -d ' ')"
+            if [ "$part_count" != "7" ]; then
+              echo "expected 7 resolution parts, found $part_count" >&2
+              exit 2
+            fi
+
+            : > /tmp/merge-resolutions.tar.gz.b64
+            while IFS= read -r part; do
+              [ -n "$part" ] || continue
+              git show "origin/automation/merge-master-into-ai-composition:$part" \
+                >> /tmp/merge-resolutions.tar.gz.b64
+            done <<< "$resolution_parts"
+
+            echo "f27c2dbe9ebec4ee877b9471633c2b46a98eeca2a676659cb90fbdd70bc97a25  /tmp/merge-resolutions.tar.gz.b64" \
+              | sha256sum -c -
             base64 -d /tmp/merge-resolutions.tar.gz.b64 >/tmp/merge-resolutions.tar.gz
+            echo "168f299a0389212b2a44a7e71f759c3b3fdc5c705602359674009d39a4506435  /tmp/merge-resolutions.tar.gz" \
+              | sha256sum -c -
+
             tar -xzf /tmp/merge-resolutions.tar.gz -C .
             git add -A
             if [ -n "$(git diff --name-only --diff-filter=U)" ]; then
