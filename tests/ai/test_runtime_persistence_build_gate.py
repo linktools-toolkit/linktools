@@ -65,6 +65,32 @@ def test_missing_target_ref_fails_closed(
         persistence._baseline_commit(Path("."), base_ref="origin/master")
 
 
+def test_missing_git_repository_fails_closed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repository = tmp_path / "repo"
+    script = repository / "linktools-ai/scripts/build/persistence.py"
+    candidate = repository / "linktools-ai/scripts/build/matrix/runtime.json"
+    monkeypatch.setattr(persistence, "__file__", str(script))
+
+    with pytest.raises(ValueError, match="Git repository is unavailable"):
+        persistence._repository_path(candidate)
+
+
+def test_contract_path_outside_repository_fails_closed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repository = tmp_path / "repo"
+    (repository / ".git").mkdir(parents=True)
+    script = repository / "linktools-ai/scripts/build/persistence.py"
+    monkeypatch.setattr(persistence, "__file__", str(script))
+
+    with pytest.raises(ValueError, match="contract path is outside repository"):
+        persistence._repository_path(tmp_path / "outside.json")
+
+
 def test_missing_baseline_path_is_valid_first_introduction(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
