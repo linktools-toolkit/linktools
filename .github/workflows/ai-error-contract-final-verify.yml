@@ -6,7 +6,7 @@ on:
       - fix/ai-error-contract-closure
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   verify:
@@ -28,7 +28,7 @@ jobs:
             'aiosqlite==0.22.1' ruff rich requests packaging
           python -m pip install -e ./linktools --no-deps
 
-      - name: Prepare safe Ruff cleanup candidate
+      - name: Prepare safe Ruff cleanup
         run: |
           git fetch --depth=1 origin fix/ai-error-contract-closure
           git worktree add /tmp/ruff-cleanup FETCH_HEAD
@@ -42,51 +42,26 @@ jobs:
             linktools-ai/scripts/build linktools-ai/src/linktools/ai \
             linktools-ai/src/linktools/commands/ai tests/ai || true
           git diff --check
-          git diff -- . ':(exclude).github/workflows/ai-error-contract-final-verify.yml' > /tmp/ruff-safe-fix.patch
-          python -m ruff check \
-            linktools-ai/scripts/build linktools-ai/src/linktools/ai \
-            linktools-ai/src/linktools/commands/ai tests/ai \
-            --output-format=json > /tmp/ruff-after-safe.json || true
 
-      - name: Compile safe cleanup candidate
+      - name: Compile safe cleanup
         working-directory: /tmp/ruff-cleanup
         env:
           PYTHONPATH: linktools-ai:linktools-ai/src:linktools/src
         run: python -m compileall -q linktools-ai/src/linktools/ai
 
-      - name: Test safe cleanup candidate
+      - name: Test safe cleanup
         working-directory: /tmp/ruff-cleanup
         timeout-minutes: 12
         env:
           PYTHONPATH: linktools-ai:linktools-ai/src:linktools/src
         run: python -m pytest -q tests/ai
 
-      - name: Summarize remaining diagnostics
+      - name: Commit safe cleanup
+        working-directory: /tmp/ruff-cleanup
         run: |
-          python - <<'PY'
-          import json
-          from collections import Counter
-          from pathlib import Path
-
-          data = json.loads(Path('/tmp/ruff-after-safe.json').read_text())
-          by_rule = Counter(item['code'] for item in data)
-          by_file = Counter(item['filename'].removeprefix('/tmp/ruff-cleanup/') for item in data)
-          rows = [f'remaining={len(data)}', '', '[rules]']
-          rows.extend(f'{count}\t{rule}' for rule, count in sorted(by_rule.items()))
-          rows.extend(['', '[files]'])
-          rows.extend(f'{count}\t{path}' for path, count in by_file.most_common())
-          Path('/tmp/ruff-after-safe-summary.txt').write_text('\n'.join(rows) + '\n')
-          print('\n'.join(rows[:120]))
-          PY
-
-      - name: Upload safe cleanup candidate
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: ai-error-contract-ruff-safe-cleanup
-          path: |
-            /tmp/ruff-safe-fix.patch
-            /tmp/ruff-after-safe.json
-            /tmp/ruff-after-safe-summary.txt
-            /tmp/ruff-cleanup/ruff.toml
-          if-no-files-found: error
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add ruff.toml linktools-ai/scripts/build linktools-ai/src/linktools/ai \
+            linktools-ai/src/linktools/commands/ai tests/ai
+          git commit -m 'style(ai): align and apply Ruff safe fixes'
+          git push origin HEAD:fix/ai-error-contract-closure
