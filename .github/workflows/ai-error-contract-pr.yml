@@ -22,7 +22,9 @@ jobs:
           python-version: '3.12'
 
       - name: Apply exact patches
-        run: python linktools-ai/scripts/build/_error_contract_closure.py
+        run: |
+          python linktools-ai/scripts/build/_error_contract_closure.py
+          sed -i '/operation_result = _execution_operation_result(persisted.status)/d' linktools-ai/src/linktools/ai/runtime/_local.py
 
       - name: Install verification dependencies
         run: |
