@@ -9,7 +9,9 @@ from pathlib import Path
 
 import pytest
 
+from linktools.ai.agent import AgentCompiler
 from linktools.ai.errors import AIError, ErrorCode
+from linktools.ai.model import ModelRegistry
 from linktools.ai.runtime import RuntimeDomain, RuntimeState
 from linktools.ai.runtime.state._codec import _encode_persisted_domain, encode_envelope
 from linktools.ai.runtime.state._contracts import (
@@ -19,7 +21,9 @@ from linktools.ai.runtime.state._contracts import (
     TranscriptSeekDimension,
     TranscriptSeekRecord,
 )
+from linktools.ai.runtime.state._migration import _migrate_legacy_binding
 from linktools.ai.runtime.state._store import StoredFact
+from linktools.ai.spec import AgentSpec
 from linktools.ai.storage import StoredPayload
 
 
@@ -27,6 +31,26 @@ def _future_schema(data: object) -> object:
     value = copy.deepcopy(data)
     value["value"]["payload"]["schema"] = 99
     return value
+
+
+def test_legacy_binding_malformed_known_field_remains_integrity_error() -> None:
+    compiler = AgentCompiler(
+        model_resolver=ModelRegistry.openai(model="gpt-test").snapshot(),
+        runtime_fingerprint="a" * 64,
+    )
+    binding = compiler.bind(compiler.compile(AgentSpec("default")))
+    payload = dict(binding.snapshot.to_payload())
+    payload.pop("agent_digest")
+    spec = dict(payload["agent_spec"])
+    spec["metadata"] = {}
+    payload["agent_spec"] = spec
+    payload["binding_digest"] = "f" * 64
+    payload["output_schema_fingerprint"] = "invalid"
+
+    with pytest.raises(AIError) as raised:
+        _migrate_legacy_binding(payload, compiler)
+
+    assert raised.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
 
 
 @pytest.mark.asyncio
