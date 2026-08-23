@@ -21,168 +21,87 @@ jobs:
         with:
           python-version: '3.12'
 
-      - name: Apply exact local-runtime repair
+      - name: Apply complete error-contract repair
         run: |
+          python linktools-ai/scripts/build/_error_contract_closure.py
           python - <<'PY'
           from pathlib import Path
 
-          path = Path('linktools-ai/src/linktools/ai/runtime/_local.py')
+          path = Path('linktools-ai/src/linktools/ai/agent/_executor.py')
           text = path.read_text()
 
-          def replace_once(old: str, new: str) -> None:
-              global text
-              count = text.count(old)
-              if count != 1:
-                  raise SystemExit(f'expected one replacement, found {count}')
-              text = text.replace(old, new)
+          old = '''from openai import APIError as OpenAIAPIError
+from pydantic import ValidationError
+'''
+          new = '''from openai import APIError as OpenAIAPIError
+from openai import APIStatusError as OpenAIAPIStatusError
+from pydantic import ValidationError
+'''
+          if text.count(old) != 1:
+              raise SystemExit('executor OpenAI import patch no longer matches exactly')
+          text = text.replace(old, new)
 
-          replace_once(
-              '''        if isinstance(error, AIError):
-            failure = _WorkerFailure(error.code, dict(error.safe_details))
+          old = '''    if isinstance(error, OpenAIAPIError):
+        return AIError(ErrorCode.MODEL_API_ERROR, retryable=False)
+    if isinstance(error, UnexpectedModelBehavior):
+'''
+          new = '''    if isinstance(error, OpenAIAPIStatusError):
+        status_code = error.status_code
+        details: dict[str, JsonValue] = {"status_code": status_code}
+        if status_code == 408:
+            code = ErrorCode.MODEL_TIMEOUT
+        elif status_code == 429:
+            code = ErrorCode.MODEL_RATE_LIMITED
+        elif status_code >= 500:
+            code = ErrorCode.MODEL_UNAVAILABLE
+        elif 400 <= status_code < 500:
+            code = ErrorCode.MODEL_REQUEST_REJECTED
         else:
-            failure = _WorkerFailure(
-                ErrorCode.STORAGE_INTEGRITY_ERROR,
-                {"phase": "local_execution_worker"},
-            )
-''',
-              '''        if isinstance(error, AIError):
-            failure = _WorkerFailure(error.code, dict(error.safe_details))
-        else:
-            failure = _WorkerFailure(
-                ErrorCode.INTERNAL_ERROR,
-                {"phase": "local_execution_worker"},
-            )
-''',
-          )
-          replace_once(
-              '''                if current is not None and current.status not in {
-                    ExecutionStatus.SUCCEEDED,
-                    ExecutionStatus.FAILED,
-                    ExecutionStatus.CANCELLED,
-                }:
-                    await self._commit_failure(current, error, run_id=run_id)
-                persisted = await self._execution.executions.get(
-                    execution_id,
-                    tenant_id=original.tenant_id,
-                )
-''',
-              '''                if current is not None and current.status not in {
-                    ExecutionStatus.SUCCEEDED,
-                    ExecutionStatus.FAILED,
-                    ExecutionStatus.CANCELLED,
-                }:
-                    try:
-                        await self._commit_failure(current, error, run_id=run_id)
-                    except BaseException as commit_error:
-                        if isinstance(commit_error, asyncio.CancelledError):
-                            raise
-                        persisted = await self._execution.executions.get(
-                            execution_id,
-                            tenant_id=original.tenant_id,
-                        )
-                        if persisted is not None and persisted.status in {
-                            ExecutionStatus.SUCCEEDED,
-                            ExecutionStatus.FAILED,
-                            ExecutionStatus.CANCELLED,
-                        }:
-                            operation_result = _execution_operation_result(persisted.status)
-                            _logger.error(
-                                "terminal finalization failed after durable execution terminal: execution=%s",
-                                execution_id,
-                                exc_info=True,
-                            )
-                            return
-                        primary_code = _execution_error_code(error)
-                        if isinstance(commit_error, AIError):
-                            details = dict(commit_error.safe_details)
-                            details["primary_error_code"] = primary_code.value
-                            raise AIError(
-                                commit_error.code,
-                                safe_details=details,
-                            ) from error
-                        raise AIError(
-                            ErrorCode.INTERNAL_ERROR,
-                            safe_details={
-                                "phase": "execution_terminal_commit",
-                                "primary_error_code": primary_code.value,
-                            },
-                        ) from error
-                persisted = await self._execution.executions.get(
-                    execution_id,
-                    tenant_id=original.tenant_id,
-                )
-''',
-          )
-          replace_once(
-              '''    async def _commit_failure(self, execution: ExecutionRecord, error: Exception, *, run_id: str | None = None) -> None:
-        code = ErrorCode.OUTPUT_VALIDATION_FAILED if isinstance(error, ValidationError) else error.code if isinstance(error, AIError) else ErrorCode.EXECUTION_FAILED
-        details = error.safe_details if isinstance(error, AIError) else {}
-        await self._commit_terminal(
-            execution,
-            ExecutionStatus.FAILED,
-            None,
-            code.value,
-            StopReason.ERROR,
-            run_id=run_id,
-            safe_error_details=details,
+            code = ErrorCode.MODEL_API_ERROR
+        return AIError(code, safe_details=details)
+    if isinstance(error, OpenAIAPIError):
+        return AIError(ErrorCode.MODEL_API_ERROR, retryable=False)
+    if isinstance(error, UnexpectedModelBehavior):
+'''
+          if text.count(old) != 1:
+              raise SystemExit('executor OpenAI status patch no longer matches exactly')
+          path.write_text(text.replace(old, new))
+
+          path = Path('tests/ai/test_error_contract.py')
+          text = path.read_text()
+          old = '''from openai import APIError as OpenAIAPIError
+from pydantic_ai.exceptions import ModelHTTPError, RunCancelled
+'''
+          new = '''from openai import APIError as OpenAIAPIError
+from openai import APIStatusError as OpenAIAPIStatusError
+from pydantic_ai.exceptions import ModelHTTPError, RunCancelled
+'''
+          if text.count(old) != 1:
+              raise SystemExit('test OpenAI import patch no longer matches exactly')
+          text = text.replace(old, new)
+
+          marker = '''def test_execution_result_enforces_terminal_error_contract() -> None:
+'''
+          test = '''def test_raw_openai_status_error_uses_structured_status_without_payload_leak() -> None:
+    request = httpx.Request("POST", "https://example.invalid/v1/chat/completions")
+    response = httpx.Response(400, request=request)
+    mapped = _map(
+        OpenAIAPIStatusError(
+            "provider secret",
+            response=response,
+            body={"secret": "provider body must not escape"},
         )
-''',
-              '''    async def _commit_failure(self, execution: ExecutionRecord, error: Exception, *, run_id: str | None = None) -> None:
-        code = _execution_error_code(error)
-        details = error.safe_details if isinstance(error, AIError) else {}
-        cancelled = code is ErrorCode.EXECUTION_CANCELLED
-        await self._commit_terminal(
-            execution,
-            ExecutionStatus.CANCELLED if cancelled else ExecutionStatus.FAILED,
-            None,
-            code.value,
-            StopReason.CANCELLED if cancelled else StopReason.ERROR,
-            run_id=run_id,
-            safe_error_details=details,
-        )
-''',
-          )
-          replace_once(
-              '''        recovery_run = None
-        recovery_snapshot = None
-        if run_id is not None and status is not ExecutionStatus.SUCCEEDED:
-            recovery_run = await self._steps.get_run(run_id=run_id)
-            recovery_snapshot = await self._steps.latest_snapshot(
-                run_id=run_id,
-                include_interrupted=True,
-            )
-''',
-              '''        recovery_run = None
-        recovery_snapshot = None
-        if run_id is not None and status is not ExecutionStatus.SUCCEEDED:
-            candidate_run = await self._steps.get_run(run_id=run_id)
-            candidate_snapshot = await self._steps.latest_snapshot(
-                run_id=run_id,
-                include_interrupted=True,
-            )
-            if candidate_snapshot is not None:
-                if candidate_run is None:
-                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                recovery_run = candidate_run
-                recovery_snapshot = candidate_snapshot
-''',
-          )
-          replace_once(
-              '''def _is_infrastructure_error(error: Exception) -> bool:
-''',
-              '''def _execution_error_code(error: Exception) -> ErrorCode:
-    if isinstance(error, ValidationError):
-        return ErrorCode.OUTPUT_VALIDATION_FAILED
-    if isinstance(error, AIError):
-        return error.code
-    return ErrorCode.INTERNAL_ERROR
+    )
+    assert mapped.code is ErrorCode.MODEL_REQUEST_REJECTED
+    assert mapped.safe_details == {"status_code": 400}
 
 
-def _is_infrastructure_error(error: Exception) -> bool:
-''',
-          )
-          path.write_text(text)
+'''
+          if text.count(marker) != 1:
+              raise SystemExit('test insertion marker no longer matches exactly')
+          path.write_text(text.replace(marker, test + marker))
           PY
+          rm linktools-ai/scripts/build/_error_contract_closure.py
 
       - name: Install verification dependencies
         run: |
@@ -201,7 +120,7 @@ def _is_infrastructure_error(error: Exception) -> bool:
       - name: Ruff
         env:
           PYTHONPATH: linktools-ai:linktools-ai/src:linktools/src
-        run: python -m ruff check linktools-ai/scripts/build linktools-ai/src/linktools/ai linktools-ai/src/linktools/commands/ai tests/ai
+        run: python -m ruff check linktools-ai/src/linktools/ai linktools-ai/src/linktools/commands/ai tests/ai
 
       - name: AI tests
         env:
@@ -212,7 +131,7 @@ def _is_infrastructure_error(error: Exception) -> bool:
         run: |
           git config user.name github-actions[bot]
           git config user.email github-actions[bot]@users.noreply.github.com
-          git add linktools-ai/src/linktools/ai/runtime/_local.py
+          git add -A -- linktools-ai/src/linktools/ai tests/ai linktools-ai/scripts/build/_error_contract_closure.py
           git diff --cached --check
-          git commit -m 'fix(ai): close local execution error masking'
+          git commit -m 'fix(ai): close error contract boundaries'
           git push origin HEAD:fix/ai-error-contract-closure
