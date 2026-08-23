@@ -5,6 +5,7 @@
 import copy
 import hashlib
 from dataclasses import replace
+from pathlib import Path
 
 import pytest
 
@@ -29,8 +30,10 @@ def _future_schema(data: object) -> object:
 
 
 @pytest.mark.asyncio
-async def test_transcript_decoders_preserve_future_schema_unsupported() -> None:
-    state = RuntimeState.in_memory()
+async def test_transcript_decoders_preserve_future_schema_unsupported(
+    tmp_path: Path,
+) -> None:
+    state = RuntimeState.filesystem(tmp_path / "runtime")
     await state.initialize(namespace="future-transcript-schema", tenant_id="tenant")
     try:
         history = state.steps.read_store(
