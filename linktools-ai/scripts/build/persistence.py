@@ -643,10 +643,25 @@ def load_git_json_baseline(
         return None
     repository, relative = resolved
     baseline = _baseline_commit(repository, base_ref=base_ref)
+    listed = _git(
+        repository,
+        "ls-tree",
+        "--full-tree",
+        baseline,
+        "--",
+        relative,
+    )
+    if listed.returncode != 0:
+        raise ValueError(
+            f"persistence baseline tree is unreadable at {baseline}: {relative}"
+        )
+    if not listed.stdout.strip():
+        return None
     historical = _git(repository, "show", f"{baseline}:{relative}")
     if historical.returncode != 0:
-        # A missing path is legitimate only when this contract is first introduced.
-        return None
+        raise ValueError(
+            f"persistence baseline file is unreadable at {baseline}: {relative}"
+        )
     try:
         return json.loads(historical.stdout)
     except json.JSONDecodeError as error:
