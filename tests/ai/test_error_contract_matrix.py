@@ -2,6 +2,8 @@
 # -*- coding: utf-8 -*-
 """Required error-contract matrix coverage."""
 
+import json
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
 import pytest
@@ -16,17 +18,35 @@ from pydantic_ai.usage import RunUsage, UsageLimits
 
 from linktools.ai.agent._executor import DurableBoundary, _execution_error, _map_event
 from linktools.ai.core import (
+    ExecutionLineageKind,
     ExecutionStatus,
+    JsonValue,
     Principal,
     ResourceKind,
     ResourceRef,
+    StopReason,
     StructuredRedactor,
     TaskStatus,
+    UsageMetrics,
 )
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.model import ModelRegistry
-from linktools.ai.runtime import DefaultExecutionService
-from linktools.ai.task import DefaultTaskService
+from linktools.ai.runtime import DefaultExecutionService, ExecutionResult
+from linktools.ai.runtime._local import LocalExecutionBackend
+from linktools.ai.runtime._planner import _execution_failure
+from linktools.ai.runtime._subagent import _subagent_result
+from linktools.ai.runtime.state import (
+    ExecutionRecord,
+    ExecutionTerminalCommit,
+    RecoveryCheckpoint,
+    RecoveryCheckpointState,
+    RecoveryHandoffPhase,
+)
+from linktools.ai.storage import StoragePath
+from linktools.ai.task import DefaultTaskService, TaskGraph, TaskLease, TaskNode, TaskNodeView
+from linktools.ai.temporal._task_operation import _RuntimeTaskOperation
+from linktools.cli import CommandError
+from linktools.commands.ai.run import _emit_result
 
 
 def _map(error: Exception) -> AIError:
@@ -34,6 +54,67 @@ def _map(error: Exception) -> AIError:
         error,
         usage_limits=UsageLimits(),
         run_usage=RunUsage(),
+    )
+
+
+def _failed_result(
+    execution_id: str = "execution",
+    *,
+    code: ErrorCode = ErrorCode.MODEL_RATE_LIMITED,
+    details: "dict[str, JsonValue] | None" = None,
+) -> ExecutionResult:
+    return ExecutionResult(
+        execution_id,
+        ExecutionStatus.FAILED,
+        None,
+        None,
+        None,
+        None,
+        UsageMetrics(),
+        code.value,
+        details or {"provider": "test"},
+    )
+
+
+def _started_execution() -> ExecutionRecord:
+    now = datetime.now(timezone.utc)
+    return ExecutionRecord(
+        "execution",
+        "tenant",
+        None,
+        "binding",
+        None,
+        "execution",
+        None,
+        None,
+        ExecutionLineageKind.RUN,
+        ExecutionStatus.STARTED,
+        0,
+        0,
+        1,
+        None,
+        {},
+        now,
+        now,
+    )
+
+
+def _active_checkpoint() -> RecoveryCheckpoint:
+    now = datetime.now(timezone.utc)
+    return RecoveryCheckpoint(
+        "execution",
+        "tenant",
+        SimpleNamespace(),
+        "run",
+        1,
+        RecoveryCheckpointState.ACTIVE,
+        RecoveryHandoffPhase.NONE,
+        None,
+        None,
+        None,
+        0,
+        now,
+        now,
     )
 
 
@@ -94,6 +175,28 @@ def test_tool_retry_event_uses_stable_retry_code() -> None:
     )
     assert isinstance(emission, DurableBoundary)
     assert emission.payload["safe_error_code"] == ErrorCode.TOOL_RETRY_REQUIRED.value
+
+
+def test_local_task_child_error_contract_is_preserved() -> None:
+    failure = _execution_failure(
+        _failed_result(details={"status_code": 429})
+    )
+    assert failure.code is ErrorCode.MODEL_RATE_LIMITED
+    assert failure.safe_details == {"status_code": 429}
+
+
+def test_subagent_result_preserves_child_error_contract() -> None:
+    payload = _subagent_result(
+        _failed_result(details={"status_code": 429})
+    )
+    assert payload["error_code"] == ErrorCode.MODEL_RATE_LIMITED.value
+    assert payload["safe_error_details"] == {"status_code": 429}
+
+
+def test_invalid_storage_path_has_stable_code() -> None:
+    with pytest.raises(AIError) as error:
+        StoragePath.parse("../outside")
+    assert error.value.code is ErrorCode.STORAGE_PATH_INVALID
 
 
 @pytest.mark.parametrize(
@@ -209,3 +312,276 @@ async def test_task_wait_timeout_has_stable_code() -> None:
             timeout_seconds=0.01,
         )
     assert error.value.code is ErrorCode.TASK_WAIT_TIMEOUT
+
+
+class _FailureSteps:
+    def __init__(self, snapshot: object | None) -> None:
+        self._snapshot = snapshot
+
+    async def get_run(self, *, run_id: str) -> object | None:
+        del run_id
+        return None
+
+    async def latest_snapshot(
+        self,
+        *,
+        run_id: str,
+        include_interrupted: bool = False,
+    ) -> object | None:
+        del run_id, include_interrupted
+        return self._snapshot
+
+
+class _FailureTerminalBackend(LocalExecutionBackend):
+    def _validate_recovery_identity(
+        self,
+        current: ExecutionRecord,
+        recovery_input: object,
+    ) -> None:
+        del current, recovery_input
+
+    async def verify_terminal_projection(
+        self,
+        execution: ExecutionRecord,
+        status: ExecutionStatus,
+        run_id: str | None,
+    ) -> None:
+        del execution, status, run_id
+
+    async def _commit_execution_terminal_checkpoint(
+        self,
+        current: ExecutionRecord,
+        commit: ExecutionTerminalCommit,
+        **kwargs: object,
+    ) -> object:
+        del current
+        self.captured_commit = commit
+        self.captured_recovery_run = kwargs.get("recovery_run")
+        self.captured_recovery_snapshot = kwargs.get("recovery_snapshot")
+        return SimpleNamespace()
+
+
+def _failure_backend(snapshot: object | None) -> _FailureTerminalBackend:
+    backend = object.__new__(_FailureTerminalBackend)
+    backend._steps = _FailureSteps(snapshot)
+    backend._pending_audit_events = {}
+    backend._terminal_events = {}
+    return backend
+
+
+@pytest.mark.asyncio
+async def test_failed_run_without_snapshot_commits_failed_terminal() -> None:
+    backend = _failure_backend(None)
+    await backend._commit_same_group_recovery_terminal(
+        _started_execution(),
+        _active_checkpoint(),
+        status=ExecutionStatus.FAILED,
+        output=None,
+        error_code=ErrorCode.MODEL_RATE_LIMITED.value,
+        stop_reason=StopReason.ERROR,
+        definition=None,
+        run_id="run",
+        usage=UsageMetrics(),
+        safe_error_details={"status_code": 429},
+    )
+    assert backend.captured_commit.execution.status is ExecutionStatus.FAILED
+    assert backend.captured_commit.execution.error_code == ErrorCode.MODEL_RATE_LIMITED.value
+    assert backend.captured_recovery_run is None
+    assert backend.captured_recovery_snapshot is None
+
+
+@pytest.mark.asyncio
+async def test_snapshot_without_run_is_storage_integrity_error() -> None:
+    backend = _failure_backend(SimpleNamespace(state="interrupted"))
+    with pytest.raises(AIError) as error:
+        await backend._commit_same_group_recovery_terminal(
+            _started_execution(),
+            _active_checkpoint(),
+            status=ExecutionStatus.FAILED,
+            output=None,
+            error_code=ErrorCode.MODEL_RATE_LIMITED.value,
+            stop_reason=StopReason.ERROR,
+            definition=None,
+            run_id="run",
+            usage=UsageMetrics(),
+            safe_error_details={"status_code": 429},
+        )
+    assert error.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
+
+
+class _FailedAgent:
+    def __init__(self, result: ExecutionResult) -> None:
+        self._result = result
+
+    async def run(
+        self,
+        prompt: str,
+        *,
+        session_id: str,
+        memory_scope: str,
+    ) -> ExecutionResult:
+        del prompt, session_id, memory_scope
+        return self._result
+
+    def stream(self, *args: object, **kwargs: object) -> object:
+        del args, kwargs
+        raise AssertionError("JSON result path must not scan execution events")
+
+
+class _FailedRuntime:
+    def __init__(self, result: ExecutionResult) -> None:
+        self._agent = _FailedAgent(result)
+
+    def agent(self, *, planning: bool, thinking: bool) -> _FailedAgent:
+        del planning, thinking
+        return self._agent
+
+
+@pytest.mark.asyncio
+async def test_cli_json_failed_result_uses_result_contract_without_event_scan(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    runtime = _FailedRuntime(
+        _failed_result(details={"status_code": 429})
+    )
+    with pytest.raises(CommandError):
+        await _emit_result(
+            runtime,  # type: ignore[arg-type]
+            "prompt",
+            "session",
+            "memory",
+            True,
+            False,
+            False,
+        )
+    payload = json.loads(capsys.readouterr().out.strip())
+    assert payload["error_code"] == ErrorCode.MODEL_RATE_LIMITED.value
+    assert payload["safe_error_details"] == {"status_code": 429}
+
+
+class _TemporalRunner:
+    def __init__(self, result: ExecutionResult) -> None:
+        self._result = result
+
+    async def terminal_result(
+        self,
+        execution_id: str,
+        *,
+        principal: Principal,
+    ) -> ExecutionResult:
+        del principal
+        assert execution_id == self._result.execution_id
+        return self._result
+
+
+class _TemporalRepository:
+    def __init__(self, view: TaskNodeView) -> None:
+        self.view = view
+        self.failed_code: str | None = None
+
+    async def fail(
+        self,
+        lease: TaskLease,
+        *,
+        tenant_id: str,
+        error_code: str,
+        error_digest: str,
+    ) -> object:
+        assert tenant_id == lease.tenant_id
+        assert error_digest
+        self.failed_code = error_code
+        self.view = TaskNodeView(
+            self.view.graph_id,
+            self.view.node_id,
+            self.view.dependencies,
+            TaskStatus.FAILED,
+            self.view.owner,
+            self.view.fence,
+            self.view.lease_expires_at,
+            None,
+            error_code,
+            error_digest,
+        )
+        return self.view
+
+    async def reconcile_graph(
+        self,
+        graph_id: str,
+        *,
+        tenant_id: str,
+    ) -> object:
+        del graph_id, tenant_id
+        return SimpleNamespace(status=TaskStatus.FAILED)
+
+
+class _TemporalOperation(_RuntimeTaskOperation):
+    def __init__(
+        self,
+        runner: _TemporalRunner,
+        repository: _TemporalRepository,
+        stored: object,
+    ) -> None:
+        self._runner = runner
+        self._repository = repository
+        self._stored = stored
+
+    async def _load_request(self, request: object) -> object:
+        del request
+        return self._stored
+
+    async def _read_node(
+        self,
+        request: object,
+        node: TaskNode,
+        *,
+        reconcile: bool,
+    ) -> TaskNodeView:
+        del request, node, reconcile
+        return self._repository.view
+
+
+@pytest.mark.asyncio
+async def test_temporal_task_child_error_contract_is_preserved() -> None:
+    principal = Principal("principal", "tenant", "service")
+    node = TaskNode("node", (), input={})
+    graph = TaskGraph("graph", (node,))
+    lease = TaskLease(
+        "graph",
+        "node",
+        "tenant",
+        "worker",
+        1,
+        datetime.now(timezone.utc) + timedelta(minutes=1),
+    )
+    repository = _TemporalRepository(
+        TaskNodeView(
+            "graph",
+            "node",
+            (),
+            TaskStatus.RUNNING,
+            "worker",
+            1,
+            lease.lease_expires_at,
+            None,
+            None,
+            None,
+        )
+    )
+    operation = _TemporalOperation(
+        _TemporalRunner(
+            _failed_result(
+                "graph:node",
+                details={"status_code": 429},
+            )
+        ),
+        repository,
+        SimpleNamespace(graph=graph, principal=principal),
+    )
+    updated = await operation.settle(
+        SimpleNamespace(graph_id="graph", tenant_id="tenant"),  # type: ignore[arg-type]
+        lease,
+        SimpleNamespace(execution_id="graph:node", status="FAILED"),  # type: ignore[arg-type]
+    )
+    assert repository.failed_code == ErrorCode.MODEL_RATE_LIMITED.value
+    assert updated.status is TaskStatus.FAILED
+    assert updated.error_code == ErrorCode.MODEL_RATE_LIMITED.value
