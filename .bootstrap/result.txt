@@ -1,29 +1,1445 @@
 ===== python .bootstrap/patch.py =====
-agent composition tests migrated to final identity model
-===== python .bootstrap/patch2.py =====
-runtime composition regressions migrated to mandatory exact binding
-===== python .bootstrap/patch3.py =====
-recovery integrity tests migrated to mandatory snapshot
+stale agent composition import removed
 ===== python -m compileall -q linktools-ai/src/linktools/ai =====
 ===== python -m pip install -q --upgrade pip =====
 ===== python -m pip install -q -e ./linktools -e ./linktools-ai[sqlite,evaluation,temporal] pytest pytest-asyncio ruff =====
 ===== ruff check --select E4,E7,E9,F linktools-ai/src/linktools/ai/agent/__init__.py linktools-ai/src/linktools/ai/agent/_binding.py linktools-ai/src/linktools/ai/agent/_builder.py linktools-ai/src/linktools/ai/agent/_catalog.py linktools-ai/src/linktools/ai/agent/_compiler.py linktools-ai/src/linktools/ai/agent/_definition.py linktools-ai/src/linktools/ai/agent/_executor.py linktools-ai/src/linktools/ai/asset/__init__.py linktools-ai/src/linktools/ai/asset/_repository.py linktools-ai/src/linktools/ai/runtime/_agent.py linktools-ai/src/linktools/ai/runtime/_coordinator.py linktools-ai/src/linktools/ai/runtime/_execution.py linktools-ai/src/linktools/ai/runtime/_factory.py linktools-ai/src/linktools/ai/runtime/_local.py linktools-ai/src/linktools/ai/runtime/_planner.py linktools-ai/src/linktools/ai/runtime/_runtime_service.py linktools-ai/src/linktools/ai/runtime/_session.py linktools-ai/src/linktools/ai/runtime/_subagent.py linktools-ai/src/linktools/ai/runtime/service_api.py linktools-ai/src/linktools/ai/runtime/state/_commands.py linktools-ai/src/linktools/ai/runtime/state/_contracts.py linktools-ai/src/linktools/ai/runtime/state/_history.py linktools-ai/src/linktools/ai/runtime/state/_steps.py linktools-ai/src/linktools/ai/spec/_codec.py linktools-ai/src/linktools/ai/spec/_contract.py linktools-ai/src/linktools/ai/temporal/_gateway.py linktools-ai/src/linktools/ai/temporal/_request.py linktools-ai/src/linktools/ai/temporal/_task_operation.py linktools-ai/src/linktools/ai/workspace/__init__.py linktools-ai/src/linktools/ai/workspace/_factory.py tests/ai/test_agent_composition.py tests/ai/test_asset_repository.py tests/ai/test_contracts.py tests/ai/test_recovery_integrity_validator.py tests/ai/test_runtime_binding_contract.py tests/ai/test_runtime_composition_regressions.py tests/ai/test_workspace_runtime_regressions.py =====
-F401 [*] `linktools.ai.agent._output.bind_output` imported but unused
-  --> tests/ai/test_agent_composition.py:13:40
-   |
-11 | import linktools.ai as ai
-12 | from linktools.ai.agent import AgentBindingSnapshot
-13 | from linktools.ai.agent._output import bind_output
-   |                                        ^^^^^^^^^^^
-14 | from linktools.ai.capability import RuntimeCapability
-15 | from linktools.ai.core import SessionStatus
-   |
-help: Remove unused import: `linktools.ai.agent._output.bind_output`
-   |
-12 | from linktools.ai.agent import AgentBindingSnapshot
-   - from linktools.ai.agent._output import bind_output
-13 | from linktools.ai.capability import RuntimeCapability
-   |
+All checks passed!
+===== python -m scripts.build.architecture =====
+<frozen runpy>:128: RuntimeWarning: 'scripts.build.architecture' found in sys.modules after import of package 'scripts.build', but prior to execution of 'scripts.build.architecture'; this may result in unpredictable behaviour
+===== pytest -q tests/ai --maxfail=30 =====
+..FFF..F................FF.........F.................................... [ 20%]
+............................................F........................... [ 40%]
+FFFF.F....FFFFFFFFFFF....FF..FFFF
+=================================== FAILURES ===================================
+______________ test_execution_start_claim_has_one_launcher_winner ______________
 
-Found 1 error.
-[*] 1 fixable with the `--fix` option.
+    @pytest.mark.asyncio
+    async def test_execution_start_claim_has_one_launcher_winner() -> None:
+        state = RuntimeState.in_memory()
+        await state.initialize(namespace="service-start", tenant_id="tenant")
+        launcher = _Launcher(state.execution.executions)
+        service = DefaultExecutionService(
+            state.execution,
+            state._object_store(RuntimeDomain.EXECUTION),
+            TenantAuthorizationPolicy(),
+            sessions=state.conversation.sessions,
+            catalog=_DefinitionCatalog(),
+            compiler=object(),
+            backend=launcher,
+            operation_ids=iter(("execution-a", "execution-b")).__next__,
+            history_reader=_History(),
+        )
+        request = ExecutionRequest(
+            user_prompt="hello",
+            principal=Principal("owner", "tenant"),
+            idempotency_key="same",
+            memory_scope="test",
+        )
+>       first, second = await asyncio.gather(service.run("a" * 64, request), service.run("a" * 64, request))
+                        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+tests/ai/persistence/test_execution_start_service.py:113: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+linktools-ai/src/linktools/ai/runtime/_execution.py:380: in run
+    return await self._start(binding_digest, request, scope="execution.run")
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+linktools-ai/src/linktools/ai/runtime/_execution.py:454: in _start
+    return await self._start_unlocked(
+linktools-ai/src/linktools/ai/runtime/_execution.py:503: in _start_unlocked
+    binding = self._binding(binding_digest)
+              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+self = <linktools.ai.runtime._execution.DefaultExecutionService object at 0x7fdfbc4452b0>
+binding_digest = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
+snapshot = None
+
+    def _binding(
+        self,
+        binding_digest: str,
+        snapshot: "AgentBindingSnapshot | None" = None,
+    ) -> AgentBinding:
+        try:
+>           binding = self._catalog.binding(binding_digest)
+                      ^^^^^^^^^^^^^^^^^^^^^
+E           AttributeError: '_DefinitionCatalog' object has no attribute 'binding'
+
+linktools-ai/src/linktools/ai/runtime/_execution.py:262: AttributeError
+_____________ test_sql_execution_start_keeps_attempt_sequence_zero _____________
+
+tmp_path = PosixPath('/tmp/pytest-of-runner/pytest-0/test_sql_execution_start_keeps0')
+
+    @pytest.mark.asyncio
+    async def test_sql_execution_start_keeps_attempt_sequence_zero(tmp_path) -> None:
+        engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'runtime.db'}")
+        await provision_database(engine)
+        state = RuntimeState.sql(engine)
+        await state.initialize(namespace="sql-start", tenant_id="tenant")
+        try:
+            service = DefaultExecutionService(
+                state.execution,
+                state._object_store(RuntimeDomain.EXECUTION),
+                TenantAuthorizationPolicy(),
+                sessions=state.conversation.sessions,
+            catalog=_DefinitionCatalog(),
+            compiler=object(),
+                backend=_Launcher(state.execution.executions),
+                history_reader=_History(),
+            )
+            request = ExecutionRequest(
+                "hello",
+                Principal("owner", "tenant"),
+                "sql-start-key",
+            )
+>           handle = await service.run("b" * 64, request)
+                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+tests/ai/persistence/test_execution_start_service.py:158: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+linktools-ai/src/linktools/ai/runtime/_execution.py:380: in run
+    return await self._start(binding_digest, request, scope="execution.run")
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+linktools-ai/src/linktools/ai/runtime/_execution.py:454: in _start
+    return await self._start_unlocked(
+linktools-ai/src/linktools/ai/runtime/_execution.py:503: in _start_unlocked
+    binding = self._binding(binding_digest)
+              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+self = <linktools.ai.runtime._execution.DefaultExecutionService object at 0x7fdfbbf0f7a0>
+binding_digest = 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb'
+snapshot = None
+
+    def _binding(
+        self,
+        binding_digest: str,
+        snapshot: "AgentBindingSnapshot | None" = None,
+    ) -> AgentBinding:
+        try:
+>           binding = self._catalog.binding(binding_digest)
+                      ^^^^^^^^^^^^^^^^^^^^^
+E           AttributeError: '_DefinitionCatalog' object has no attribute 'binding'
+
+linktools-ai/src/linktools/ai/runtime/_execution.py:262: AttributeError
+_________ test_filesystem_execution_start_keeps_attempt_sequence_zero __________
+
+tmp_path = PosixPath('/tmp/pytest-of-runner/pytest-0/test_filesystem_execution_star0')
+
+    @pytest.mark.asyncio
+    async def test_filesystem_execution_start_keeps_attempt_sequence_zero(tmp_path) -> None:
+        state = RuntimeState.filesystem(tmp_path / "runtime")
+        await state.initialize(namespace="filesystem-start", tenant_id="tenant")
+        try:
+            service = DefaultExecutionService(
+                state.execution,
+                state._object_store(RuntimeDomain.EXECUTION),
+                TenantAuthorizationPolicy(),
+                sessions=state.conversation.sessions,
+            catalog=_DefinitionCatalog(),
+            compiler=object(),
+                backend=_Launcher(state.execution.executions),
+                history_reader=_History(),
+            )
+>           handle = await service.run(
+                "c" * 64,
+                ExecutionRequest(
+                    "hello",
+                    Principal("owner", "tenant"),
+                    "filesystem-start-key",
+                ),
+            )
+
+tests/ai/persistence/test_execution_start_service.py:182: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+linktools-ai/src/linktools/ai/runtime/_execution.py:380: in run
+    return await self._start(binding_digest, request, scope="execution.run")
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+linktools-ai/src/linktools/ai/runtime/_execution.py:454: in _start
+    return await self._start_unlocked(
+linktools-ai/src/linktools/ai/runtime/_execution.py:503: in _start_unlocked
+    binding = self._binding(binding_digest)
+              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+self = <linktools.ai.runtime._execution.DefaultExecutionService object at 0x7fdfbbf0dd60>
+binding_digest = 'cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc'
+snapshot = None
+
+    def _binding(
+        self,
+        binding_digest: str,
+        snapshot: "AgentBindingSnapshot | None" = None,
+    ) -> AgentBinding:
+        try:
+>           binding = self._catalog.binding(binding_digest)
+                      ^^^^^^^^^^^^^^^^^^^^^
+E           AttributeError: '_DefinitionCatalog' object has no attribute 'binding'
+
+linktools-ai/src/linktools/ai/runtime/_execution.py:262: AttributeError
+__________ test_execution_memory_scope_can_be_disabled_but_not_blank ___________
+
+    @pytest.mark.asyncio
+    async def test_execution_memory_scope_can_be_disabled_but_not_blank() -> None:
+        state = RuntimeState.in_memory()
+        await state.initialize(namespace="memory-namespace-validation", tenant_id="tenant")
+        try:
+            service = DefaultExecutionService(
+                state.execution,
+                state._object_store(RuntimeDomain.EXECUTION),
+                TenantAuthorizationPolicy(),
+                sessions=state.conversation.sessions,
+            catalog=_DefinitionCatalog(),
+            compiler=object(),
+                backend=_Launcher(state.execution.executions),
+                history_reader=_History(),
+            )
+            principal = Principal("owner", "tenant")
+>           handle = await service.run(
+                "a" * 64,
+                ExecutionRequest("without memory", principal, "without-memory", memory_scope=None),
+            )
+
+tests/ai/persistence/test_execution_start_service.py:277: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+linktools-ai/src/linktools/ai/runtime/_execution.py:380: in run
+    return await self._start(binding_digest, request, scope="execution.run")
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+linktools-ai/src/linktools/ai/runtime/_execution.py:454: in _start
+    return await self._start_unlocked(
+linktools-ai/src/linktools/ai/runtime/_execution.py:503: in _start_unlocked
+    binding = self._binding(binding_digest)
+              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+self = <linktools.ai.runtime._execution.DefaultExecutionService object at 0x7fdfbc2f9400>
+binding_digest = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
+snapshot = None
+
+    def _binding(
+        self,
+        binding_digest: str,
+        snapshot: "AgentBindingSnapshot | None" = None,
+    ) -> AgentBinding:
+        try:
+>           binding = self._catalog.binding(binding_digest)
+                      ^^^^^^^^^^^^^^^^^^^^^
+E           AttributeError: '_DefinitionCatalog' object has no attribute 'binding'
+
+linktools-ai/src/linktools/ai/runtime/_execution.py:262: AttributeError
+___________________ test_source_graph_is_acyclic_and_static ____________________
+
+    def test_source_graph_is_acyclic_and_static() -> None:
+        report = build_report("linktools-ai/src/linktools/ai")
+        assert report["scc"] == []
+        assert report["package_scc"] == []
+        assert report["dynamic_imports"] == []
+>       assert ArchitecturePolicyChecker().check("linktools-ai/src/linktools/ai").passed
+E       AssertionError: assert False
+E        +  where False = ArchitectureCheckResult(passed=False, errors=('public untyped annotation: linktools-ai/src/linktools/ai/workspace/_fac...sql', 'linktools.ai.runtime.state._steps', 'linktools.ai.runtime.state._store', 'linktools.ai.runtime.state._views']}}).passed
+E        +    where ArchitectureCheckResult(passed=False, errors=('public untyped annotation: linktools-ai/src/linktools/ai/workspace/_fac...sql', 'linktools.ai.runtime.state._steps', 'linktools.ai.runtime.state._store', 'linktools.ai.runtime.state._views']}}) = check('linktools-ai/src/linktools/ai')
+E        +      where check = <scripts.build.architecture.ArchitecturePolicyChecker object at 0x7fdfbbf97e00>.check
+E        +        where <scripts.build.architecture.ArchitecturePolicyChecker object at 0x7fdfbbf97e00> = ArchitecturePolicyChecker()
+
+tests/ai/test_architecture.py:24: AssertionError
+___________________ test_names_and_module_imports_are_clean ____________________
+
+    def test_names_and_module_imports_are_clean() -> None:
+        root = Path("linktools-ai/src/linktools/ai")
+        assert check_names(root) == ()
+>       assert check_files(root) == ()
+E       AssertionError: assert ('public unty...y:79:object',) == ()
+E         
+E         Left contains one more item: 'public untyped annotation: linktools-ai/src/linktools/ai/workspace/_factory.py:79:object'
+E         
+E         Full diff:
+E         - ()
+E         + (
+E         +     'public untyped annotation: '
+E         +     'linktools-ai/src/linktools/ai/workspace/_factory.py:79:object',
+E         + )
+
+tests/ai/test_architecture.py:30: AssertionError
+________ test_package_public_surface_and_optional_dependency_isolation _________
+
+    def test_package_public_surface_and_optional_dependency_isolation() -> None:
+        from linktools.ai import adapter, asset, capability, model, runtime, workspace
+        from linktools.ai.runtime import state as runtime_state
+    
+        command_modules = tuple(
+            importlib.import_module(f"linktools.commands.ai.{name}")
+            for name in ("acp", "run")
+        )
+        assert adapter and asset and capability and model and runtime and workspace
+        assert all(command_modules)
+        assert adapter.__all__ == [
+            "NatsPublisher",
+            "ProviderClient",
+            "PydanticMCPRuntime",
+            "RuntimeMemoryStore",
+            "StaticPrincipalProvider",
+            "StepExecutionHistoryReader",
+            "StepSessionHistoryReader",
+        ]
+        assert model.__all__ == ["ModelBinding", "ModelRegistry", "ModelResolver"]
+        assert {
+            "DefaultApprovalService",
+            "DefaultArtifactService",
+            "DefaultEvaluationService",
+            "DefaultEventService",
+            "DefaultExecutionService",
+            "DefaultSessionService",
+            "DefaultTaskService",
+            "RuntimeObjectKeyFactory",
+            "RuntimeTaskNodeRunner",
+            "put_runtime_object",
+            "read_runtime_object",
+        } <= set(runtime.__all__)
+        assert {
+            "ExecutionRecord",
+            "ExecutionRepository",
+            "MemoryRecord",
+            "MemoryState",
+            "RecoveryCheckpointState",
+            "RecoveryHandoffPhase",
+            "build_runtime_sql_metadata",
+        } <= set(runtime_state.__all__)
+        assert {
+            "CapabilityBinding",
+            "CapabilityMaterializationContext",
+            "CapabilityProvider",
+            "CapabilityRefResolution",
+            "MCPCapabilityProvider",
+            "MCPRuntime",
+            "RuntimeCapability",
+            "SKILL_TOOL_NAMES",
+            "SkillCapabilityProvider",
+            "validate_fingerprint",
+        } == set(capability.__all__)
+>       assert workspace.__all__ == [
+            "DisabledSandbox",
+            "Sandbox",
+            "Workspace",
+            "WorkspacePolicy",
+            "open_workspace_runtime",
+            "trusted_workspace_principal",
+        ]
+E       AssertionError: assert ['DisabledSan...runtime', ...] == ['DisabledSan...ce_principal']
+E         
+E         At index 4 diff: 'build_workspace_assets' != 'open_workspace_runtime'
+E         Left contains one more item: 'trusted_workspace_principal'
+E         
+E         Full diff:
+E           [
+E               'DisabledSandbox',
+E               'Sandbox',
+E               'Workspace',
+E               'WorkspacePolicy',
+E         +     'build_workspace_assets',
+E               'open_workspace_runtime',
+E               'trusted_workspace_principal',
+E           ]
+
+tests/ai/test_architecture.py:327: AssertionError
+______________ test_nested_event_mutation_persists_after_restart _______________
+
+tmp_path = PosixPath('/tmp/pytest-of-runner/pytest-0/test_nested_event_mutation_per0')
+
+    @pytest.mark.asyncio
+    async def test_nested_event_mutation_persists_after_restart(tmp_path: Path) -> None:
+        root = tmp_path / "runtime"
+        state = RuntimeState.filesystem(root)
+        await state.initialize(namespace="nested-event", tenant_id="tenant")
+        now = datetime.now(timezone.utc)
+>       execution = ExecutionRecord(
+            "execution", "tenant", None, "binding", None, "execution", None, None,
+            ExecutionLineageKind.RUN, ExecutionStatus.STARTED, 0, 0, 0, None, {}, now, now,
+        )
+E       TypeError: ExecutionRecord.__init__() missing 3 required positional arguments: 'planning', 'thinking', and 'binding'
+
+tests/ai/test_filesystem_mutation_invariants.py:73: TypeError
+________________ test_history_head_requires_open_for_mutations _________________
+
+    @pytest.mark.asyncio
+    async def test_history_head_requires_open_for_mutations() -> None:
+        state = RuntimeState.in_memory()
+        await state.initialize(namespace="history-head", tenant_id="tenant")
+        repository = state.execution.executions
+        store = repository.state_store
+        try:
+>           await repository.create_with_history_head(_record(ExecutionStatus.STARTED, 1))
+                                                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+tests/ai/test_history_projection_conformance.py:90: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+status = <ExecutionStatus.STARTED: 'STARTED'>, sequence = 1
+
+    def _record(status: ExecutionStatus, sequence: int) -> ExecutionRecord:
+        now = datetime.now(timezone.utc)
+>       return ExecutionRecord(
+            execution_id="execution",
+            tenant_id="tenant",
+            session_id=None,
+            binding_digest="binding",
+            parent_execution_id=None,
+            root_execution_id="execution",
+            source_execution_id=None,
+            base_execution_id=None,
+            lineage_kind=ExecutionLineageKind.RUN,
+            status=status,
+            revision=0,
+            event_sequence=0,
+            agent_run_sequence=sequence,
+            error_code=None,
+            safe_error_details={},
+            created_at=now,
+            updated_at=now,
+        )
+E       TypeError: ExecutionRecord.__init__() missing 3 required positional arguments: 'planning', 'thinking', and 'binding'
+
+tests/ai/test_history_projection_conformance.py:62: TypeError
+_________ test_execution_projection_paths_reject_a_sealed_history_head _________
+
+tmp_path = PosixPath('/tmp/pytest-of-runner/pytest-0/test_execution_projection_path0')
+
+    @pytest.mark.asyncio
+    async def test_execution_projection_paths_reject_a_sealed_history_head(
+        tmp_path: Path,
+    ) -> None:
+        state = RuntimeState.filesystem(tmp_path / "runtime")
+        await state.initialize(namespace="history-fence", tenant_id="tenant")
+        try:
+>           await state.execution.executions.create(_record(ExecutionStatus.STARTED, 1))
+                                                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+tests/ai/test_history_projection_conformance.py:141: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+status = <ExecutionStatus.STARTED: 'STARTED'>, sequence = 1
+
+    def _record(status: ExecutionStatus, sequence: int) -> ExecutionRecord:
+        now = datetime.now(timezone.utc)
+>       return ExecutionRecord(
+            execution_id="execution",
+            tenant_id="tenant",
+            session_id=None,
+            binding_digest="binding",
+            parent_execution_id=None,
+            root_execution_id="execution",
+            source_execution_id=None,
+            base_execution_id=None,
+            lineage_kind=ExecutionLineageKind.RUN,
+            status=status,
+            revision=0,
+            event_sequence=0,
+            agent_run_sequence=sequence,
+            error_code=None,
+            safe_error_details={},
+            created_at=now,
+            updated_at=now,
+        )
+E       TypeError: ExecutionRecord.__init__() missing 3 required positional arguments: 'planning', 'thinking', and 'binding'
+
+tests/ai/test_history_projection_conformance.py:62: TypeError
+__________ test_terminal_prepare_accepts_an_unprojected_execution_run __________
+
+tmp_path = PosixPath('/tmp/pytest-of-runner/pytest-0/test_terminal_prepare_accepts_0')
+
+    @pytest.mark.asyncio
+    async def test_terminal_prepare_accepts_an_unprojected_execution_run(
+        tmp_path: Path,
+    ) -> None:
+        state = RuntimeState.filesystem(tmp_path / "runtime")
+        await state.initialize(namespace="history-unprojected", tenant_id="tenant")
+        terminal_plan = None
+        try:
+>           await state.execution.executions.create(_record(ExecutionStatus.STARTED, 1))
+                                                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+tests/ai/test_history_projection_conformance.py:238: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+status = <ExecutionStatus.STARTED: 'STARTED'>, sequence = 1
+
+    def _record(status: ExecutionStatus, sequence: int) -> ExecutionRecord:
+        now = datetime.now(timezone.utc)
+>       return ExecutionRecord(
+            execution_id="execution",
+            tenant_id="tenant",
+            session_id=None,
+            binding_digest="binding",
+            parent_execution_id=None,
+            root_execution_id="execution",
+            source_execution_id=None,
+            base_execution_id=None,
+            lineage_kind=ExecutionLineageKind.RUN,
+            status=status,
+            revision=0,
+            event_sequence=0,
+            agent_run_sequence=sequence,
+            error_code=None,
+            safe_error_details={},
+            created_at=now,
+            updated_at=now,
+        )
+E       TypeError: ExecutionRecord.__init__() missing 3 required positional arguments: 'planning', 'thinking', and 'binding'
+
+tests/ai/test_history_projection_conformance.py:62: TypeError
+________ test_conversation_head_replacement_preserves_physical_identity ________
+
+tmp_path = PosixPath('/tmp/pytest-of-runner/pytest-0/test_conversation_head_replace0')
+
+    @pytest.mark.asyncio
+    async def test_conversation_head_replacement_preserves_physical_identity(
+        tmp_path: Path,
+    ) -> None:
+        path = tmp_path / "runtime.db"
+        provisioning_engine = create_async_engine(f"sqlite+aiosqlite:///{path}")
+        await provision_database(provisioning_engine)
+        await provisioning_engine.dispose()
+        state = RuntimeState.sqlite(path)
+        await state.initialize(namespace="conversation-head", tenant_id="tenant")
+        try:
+            await state.conversation.histories.create(
+                ConversationHistoryRecord(
+                    history_id="history",
+                    session_id="session",
+                    tenant_id="tenant",
+                    parent_history_id=None,
+                    prefix_index_head_id=None,
+                    inherited_message_count=0,
+                    inherited_history_item_count=0,
+                )
+            )
+            now = datetime.now(timezone.utc)
+            run = RunRecord(
+                run_id="run",
+                conversation_id="conversation",
+                parent_run_id=None,
+                agent_name="default",
+                metadata={"history_id": "history"},
+                started_at=now,
+            )
+>           await state.steps.read_store(RuntimeDomain.CONVERSATION).materialize_snapshot(
+                run,
+                ContinuableSnapshot(
+                    run_id="run",
+                    step_index=1,
+                    messages=[ModelRequest(parts=[UserPromptPart(content="hello")])],
+                    conversation_id="conversation",
+                    parent_run_id=None,
+                    agent_name="default",
+                    timestamp=now,
+                ),
+            )
+
+tests/ai/test_history_projection_conformance.py:314: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+linktools-ai/src/linktools/ai/runtime/state/_steps.py:1586: in materialize_snapshot
+    await self._store.mutate(
+linktools-ai/src/linktools/ai/runtime/state/_sql.py:267: in mutate
+    return await self._storage_group.mutate((self,), lambda group: fn(group.transaction(self)))
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+linktools-ai/src/linktools/ai/runtime/state/_sql.py:161: in mutate
+    return await self._context.run_mutation(
+linktools-ai/src/linktools/ai/storage/_database.py:89: in run_mutation
+    result = await callback(session)
+             ^^^^^^^^^^^^^^^^^^^^^^^
+linktools-ai/src/linktools/ai/runtime/state/_sql.py:155: in execute
+    return await fn(group_transaction)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+linktools-ai/src/linktools/ai/runtime/state/_steps.py:1630: in _materialize_snapshot_in_transaction
+    await self._history.store_projection(
+linktools-ai/src/linktools/ai/runtime/state/_history.py:1027: in store_projection
+    "payload": encode_domain(projection),
+               ^^^^^^^^^^^^^^^^^^^^^^^^^
+linktools-ai/src/linktools/ai/runtime/state/_codec.py:1324: in encode_domain
+    return _encode_domain(value, _CURRENT_CODEC)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+value = ContextProjection(agent_digest='run', items=(TranscriptSpanRef(source_domain=<RuntimeDomain.CONVERSATION: 'conversation'>, owner_id='history', start=0, end=1),), digest='c16c0e8cfc6c52c58291e8f7a7d5f90489a17ee79dd6b8166139b9a416588152')
+codec = _VersionCodec(version=1, wire_ids=mappingproxy({<class 'linktools.ai.runtime.state._contracts.ApprovalRecord'>: 'appro...dantic_ai.messages.ModelRequest', <class 'pydantic_ai.messages.ModelResponse'>: 'pydantic_ai.messages.ModelResponse'}))
+
+    def _encode_domain(value: object, codec: _VersionCodec) -> JsonValue:
+        if isinstance(value, Enum):
+            wire_id = codec.enum_wire_ids.get(type(value))
+            if wire_id is None:
+                raise TypeError(f"unsupported enum type: {type(value).__name__}")
+            allowed = codec.enum_values.get(wire_id)
+            if allowed is None:
+                raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
+            try:
+                frozen = value.value in allowed
+            except TypeError:
+                frozen = False
+            if not frozen:
+                raise AIError(
+                    ErrorCode.STORAGE_VERSION_UNSUPPORTED,
+                    "current enum cannot be written as GA v1",
+                )
+            return {"$enum": wire_id, "value": value.value}
+        if value is None or isinstance(value, str):
+            return value
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, int):
+            return value
+        if isinstance(value, float):
+            if not math.isfinite(value):
+                raise ValueError("GA v1 wire requires finite floats")
+            return value
+        if isinstance(value, datetime):
+            if value.tzinfo is None:
+                raise ValueError("domain timestamp must be timezone-aware")
+            return {"$datetime": value.isoformat()}
+        if isinstance(value, bytes):
+            return {"$bytes": base64.b64encode(value).decode("ascii")}
+        if type(value) in codec.external_schema_types:
+            return _encode_external(value, codec)
+        if is_dataclass(value):
+            wire_id = codec.wire_ids.get(type(value))
+            if wire_id is None:
+                raise TypeError(f"unsupported dataclass type: {type(value).__name__}")
+            encoder = codec.dataclass_encoders.get(wire_id)
+            if encoder is not None:
+                encoded_fields = encoder(value, codec)
+            else:
+                expected_fingerprint = codec.schema_fingerprints.get(wire_id)
+                if expected_fingerprint is None:
+                    raise AIError(
+                        ErrorCode.STORAGE_VERSION_UNSUPPORTED,
+                        "current dataclass schema cannot be written as GA v1",
+                    )
+                try:
+                    actual_fingerprint = _dataclass_schema_fingerprint(type(value), codec)
+                except (TypeError, ValueError) as error:
+                    raise AIError(
+                        ErrorCode.STORAGE_VERSION_UNSUPPORTED,
+                        "current dataclass schema cannot be written as GA v1",
+                    ) from error
+                if actual_fingerprint != expected_fingerprint:
+>                   raise AIError(
+                        ErrorCode.STORAGE_VERSION_UNSUPPORTED,
+                        "current dataclass schema cannot be written as GA v1",
+                    )
+E                   linktools.ai.errors.AIError: current dataclass schema cannot be written as GA v1
+
+linktools-ai/src/linktools/ai/runtime/state/_codec.py:1259: AIError
+____ test_terminal_commit_cancellation_still_finalizes_after_durable_commit ____
+
+    @pytest.mark.asyncio
+    async def test_terminal_commit_cancellation_still_finalizes_after_durable_commit() -> None:
+        class Lifecycle:
+            def __init__(self) -> None:
+                self.finalized = asyncio.Event()
+    
+            async def finalize_execution_terminal_seal(self, plan: object) -> None:
+                del plan
+                self.finalized.set()
+    
+        lifecycle = Lifecycle()
+        backend = object.__new__(LocalExecutionBackend)
+        backend._step_reads = {
+            RuntimeDomain.EXECUTION: object.__new__(StateStepArchive),
+        }
+        backend._step_lifecycle = lifecycle
+        started = asyncio.Event()
+    
+        async def commit(*args: object, **kwargs: object) -> object:
+            del args, kwargs
+            started.set()
+            await asyncio.sleep(0.01)
+            return object()
+    
+        backend._commit_execution_terminal_checkpoint_locked = commit
+>       current = _record(ExecutionStatus.SUCCEEDED, 1)
+                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+tests/ai/test_history_projection_conformance.py:373: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+status = <ExecutionStatus.SUCCEEDED: 'SUCCEEDED'>, sequence = 1
+
+    def _record(status: ExecutionStatus, sequence: int) -> ExecutionRecord:
+        now = datetime.now(timezone.utc)
+>       return ExecutionRecord(
+            execution_id="execution",
+            tenant_id="tenant",
+            session_id=None,
+            binding_digest="binding",
+            parent_execution_id=None,
+            root_execution_id="execution",
+            source_execution_id=None,
+            base_execution_id=None,
+            lineage_kind=ExecutionLineageKind.RUN,
+            status=status,
+            revision=0,
+            event_sequence=0,
+            agent_run_sequence=sequence,
+            error_code=None,
+            safe_error_details={},
+            created_at=now,
+            updated_at=now,
+        )
+E       TypeError: ExecutionRecord.__init__() missing 3 required positional arguments: 'planning', 'thinking', and 'binding'
+
+tests/ai/test_history_projection_conformance.py:62: TypeError
+_________ test_in_memory_raw_refs_fail_fast_even_when_snapshots_exist __________
+
+    @pytest.mark.asyncio
+    async def test_in_memory_raw_refs_fail_fast_even_when_snapshots_exist() -> None:
+        state = RuntimeState.in_memory()
+        await state.initialize(namespace="history-in-memory-refs", tenant_id="tenant")
+        try:
+>           await state.execution.executions.create(_record(ExecutionStatus.STARTED, 1))
+                                                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+tests/ai/test_history_projection_conformance.py:572: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+status = <ExecutionStatus.STARTED: 'STARTED'>, sequence = 1
+
+    def _record(status: ExecutionStatus, sequence: int) -> ExecutionRecord:
+        now = datetime.now(timezone.utc)
+>       return ExecutionRecord(
+            execution_id="execution",
+            tenant_id="tenant",
+            session_id=None,
+            binding_digest="binding",
+            parent_execution_id=None,
+            root_execution_id="execution",
+            source_execution_id=None,
+            base_execution_id=None,
+            lineage_kind=ExecutionLineageKind.RUN,
+            status=status,
+            revision=0,
+            event_sequence=0,
+            agent_run_sequence=sequence,
+            error_code=None,
+            safe_error_details={},
+            created_at=now,
+            updated_at=now,
+        )
+E       TypeError: ExecutionRecord.__init__() missing 3 required positional arguments: 'planning', 'thinking', and 'binding'
+
+tests/ai/test_history_projection_conformance.py:62: TypeError
+_____________ test_terminal_reader_pages_from_execution_read_model _____________
+
+tmp_path = PosixPath('/tmp/pytest-of-runner/pytest-0/test_terminal_reader_pages_fro0')
+
+    @pytest.mark.asyncio
+    async def test_terminal_reader_pages_from_execution_read_model(tmp_path: Path) -> None:
+        state = RuntimeState.filesystem(tmp_path / "runtime")
+        await state.initialize(namespace="history", tenant_id="tenant")
+        try:
+>           await state.execution.executions.create(_record(ExecutionStatus.SUCCEEDED, 1))
+                                                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+tests/ai/test_history_projection_conformance.py:599: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+status = <ExecutionStatus.SUCCEEDED: 'SUCCEEDED'>, sequence = 1
+
+    def _record(status: ExecutionStatus, sequence: int) -> ExecutionRecord:
+        now = datetime.now(timezone.utc)
+>       return ExecutionRecord(
+            execution_id="execution",
+            tenant_id="tenant",
+            session_id=None,
+            binding_digest="binding",
+            parent_execution_id=None,
+            root_execution_id="execution",
+            source_execution_id=None,
+            base_execution_id=None,
+            lineage_kind=ExecutionLineageKind.RUN,
+            status=status,
+            revision=0,
+            event_sequence=0,
+            agent_run_sequence=sequence,
+            error_code=None,
+            safe_error_details={},
+            created_at=now,
+            updated_at=now,
+        )
+E       TypeError: ExecutionRecord.__init__() missing 3 required positional arguments: 'planning', 'thinking', and 'binding'
+
+tests/ai/test_history_projection_conformance.py:62: TypeError
+______ test_terminal_seal_reuses_durable_projection_after_staging_release ______
+
+tmp_path = PosixPath('/tmp/pytest-of-runner/pytest-0/test_terminal_seal_reuses_dura0')
+
+    @pytest.mark.asyncio
+    async def test_terminal_seal_reuses_durable_projection_after_staging_release(
+        tmp_path: Path,
+    ) -> None:
+        state = RuntimeState.filesystem(tmp_path / "runtime")
+        await state.initialize(namespace="history", tenant_id="tenant")
+        try:
+>           await state.execution.executions.create(_record(ExecutionStatus.SUCCEEDED, 1))
+                                                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+tests/ai/test_history_projection_conformance.py:643: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+status = <ExecutionStatus.SUCCEEDED: 'SUCCEEDED'>, sequence = 1
+
+    def _record(status: ExecutionStatus, sequence: int) -> ExecutionRecord:
+        now = datetime.now(timezone.utc)
+>       return ExecutionRecord(
+            execution_id="execution",
+            tenant_id="tenant",
+            session_id=None,
+            binding_digest="binding",
+            parent_execution_id=None,
+            root_execution_id="execution",
+            source_execution_id=None,
+            base_execution_id=None,
+            lineage_kind=ExecutionLineageKind.RUN,
+            status=status,
+            revision=0,
+            event_sequence=0,
+            agent_run_sequence=sequence,
+            error_code=None,
+            safe_error_details={},
+            created_at=now,
+            updated_at=now,
+        )
+E       TypeError: ExecutionRecord.__init__() missing 3 required positional arguments: 'planning', 'thinking', and 'binding'
+
+tests/ai/test_history_projection_conformance.py:62: TypeError
+_____________ test_read_model_rejects_a_different_complete_source ______________
+
+    @pytest.mark.asyncio
+    async def test_read_model_rejects_a_different_complete_source() -> None:
+        state = RuntimeState.in_memory()
+        await state.initialize(namespace="read-model-digest", tenant_id="tenant")
+        try:
+>           await state.execution.executions.create(_record(ExecutionStatus.FAILED, 0))
+                                                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+tests/ai/test_history_projection_conformance.py:681: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+status = <ExecutionStatus.FAILED: 'FAILED'>, sequence = 0
+
+    def _record(status: ExecutionStatus, sequence: int) -> ExecutionRecord:
+        now = datetime.now(timezone.utc)
+>       return ExecutionRecord(
+            execution_id="execution",
+            tenant_id="tenant",
+            session_id=None,
+            binding_digest="binding",
+            parent_execution_id=None,
+            root_execution_id="execution",
+            source_execution_id=None,
+            base_execution_id=None,
+            lineage_kind=ExecutionLineageKind.RUN,
+            status=status,
+            revision=0,
+            event_sequence=0,
+            agent_run_sequence=sequence,
+            error_code=None,
+            safe_error_details={},
+            created_at=now,
+            updated_at=now,
+        )
+E       TypeError: ExecutionRecord.__init__() missing 3 required positional arguments: 'planning', 'thinking', and 'binding'
+
+tests/ai/test_history_projection_conformance.py:62: TypeError
+__________________ test_read_model_accepts_current_v1_record ___________________
+
+    @pytest.mark.asyncio
+    async def test_read_model_accepts_current_v1_record() -> None:
+        state = RuntimeState.in_memory()
+        await state.initialize(namespace="read-model-v1", tenant_id="tenant")
+        try:
+>           await state.execution.executions.create(_record(ExecutionStatus.FAILED, 0))
+                                                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+tests/ai/test_history_projection_conformance.py:749: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+status = <ExecutionStatus.FAILED: 'FAILED'>, sequence = 0
+
+    def _record(status: ExecutionStatus, sequence: int) -> ExecutionRecord:
+        now = datetime.now(timezone.utc)
+>       return ExecutionRecord(
+            execution_id="execution",
+            tenant_id="tenant",
+            session_id=None,
+            binding_digest="binding",
+            parent_execution_id=None,
+            root_execution_id="execution",
+            source_execution_id=None,
+            base_execution_id=None,
+            lineage_kind=ExecutionLineageKind.RUN,
+            status=status,
+            revision=0,
+            event_sequence=0,
+            agent_run_sequence=sequence,
+            error_code=None,
+            safe_error_details={},
+            created_at=now,
+            updated_at=now,
+        )
+E       TypeError: ExecutionRecord.__init__() missing 3 required positional arguments: 'planning', 'thinking', and 'binding'
+
+tests/ai/test_history_projection_conformance.py:62: TypeError
+______________ test_failed_claimed_attempt_without_run_is_skipped ______________
+
+    @pytest.mark.asyncio
+    async def test_failed_claimed_attempt_without_run_is_skipped() -> None:
+        state = RuntimeState.in_memory()
+        await state.initialize(namespace="history", tenant_id="tenant")
+        try:
+>           await state.execution.executions.create(_record(ExecutionStatus.FAILED, 1))
+                                                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+tests/ai/test_history_projection_conformance.py:846: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+status = <ExecutionStatus.FAILED: 'FAILED'>, sequence = 1
+
+    def _record(status: ExecutionStatus, sequence: int) -> ExecutionRecord:
+        now = datetime.now(timezone.utc)
+>       return ExecutionRecord(
+            execution_id="execution",
+            tenant_id="tenant",
+            session_id=None,
+            binding_digest="binding",
+            parent_execution_id=None,
+            root_execution_id="execution",
+            source_execution_id=None,
+            base_execution_id=None,
+            lineage_kind=ExecutionLineageKind.RUN,
+            status=status,
+            revision=0,
+            event_sequence=0,
+            agent_run_sequence=sequence,
+            error_code=None,
+            safe_error_details={},
+            created_at=now,
+            updated_at=now,
+        )
+E       TypeError: ExecutionRecord.__init__() missing 3 required positional arguments: 'planning', 'thinking', and 'binding'
+
+tests/ai/test_history_projection_conformance.py:62: TypeError
+_________________ test_history_skips_missing_non_final_attempt _________________
+
+    @pytest.mark.asyncio
+    async def test_history_skips_missing_non_final_attempt() -> None:
+        state = RuntimeState.in_memory()
+        await state.initialize(namespace="history", tenant_id="tenant")
+        try:
+>           await state.execution.executions.create(_record(ExecutionStatus.FAILED, 2))
+                                                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+tests/ai/test_history_projection_conformance.py:865: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+status = <ExecutionStatus.FAILED: 'FAILED'>, sequence = 2
+
+    def _record(status: ExecutionStatus, sequence: int) -> ExecutionRecord:
+        now = datetime.now(timezone.utc)
+>       return ExecutionRecord(
+            execution_id="execution",
+            tenant_id="tenant",
+            session_id=None,
+            binding_digest="binding",
+            parent_execution_id=None,
+            root_execution_id="execution",
+            source_execution_id=None,
+            base_execution_id=None,
+            lineage_kind=ExecutionLineageKind.RUN,
+            status=status,
+            revision=0,
+            event_sequence=0,
+            agent_run_sequence=sequence,
+            error_code=None,
+            safe_error_details={},
+            created_at=now,
+            updated_at=now,
+        )
+E       TypeError: ExecutionRecord.__init__() missing 3 required positional arguments: 'planning', 'thinking', and 'binding'
+
+tests/ai/test_history_projection_conformance.py:62: TypeError
+______ test_successful_execution_requires_final_history_evidence[history] ______
+
+method_name = 'history'
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("method_name", ("history", "trace", "transcript"))
+    async def test_successful_execution_requires_final_history_evidence(method_name: str) -> None:
+        state = RuntimeState.in_memory()
+        await state.initialize(namespace="history", tenant_id="tenant")
+        try:
+>           await state.execution.executions.create(_record(ExecutionStatus.SUCCEEDED, 1))
+                                                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+tests/ai/test_history_projection_conformance.py:887: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+status = <ExecutionStatus.SUCCEEDED: 'SUCCEEDED'>, sequence = 1
+
+    def _record(status: ExecutionStatus, sequence: int) -> ExecutionRecord:
+        now = datetime.now(timezone.utc)
+>       return ExecutionRecord(
+            execution_id="execution",
+            tenant_id="tenant",
+            session_id=None,
+            binding_digest="binding",
+            parent_execution_id=None,
+            root_execution_id="execution",
+            source_execution_id=None,
+            base_execution_id=None,
+            lineage_kind=ExecutionLineageKind.RUN,
+            status=status,
+            revision=0,
+            event_sequence=0,
+            agent_run_sequence=sequence,
+            error_code=None,
+            safe_error_details={},
+            created_at=now,
+            updated_at=now,
+        )
+E       TypeError: ExecutionRecord.__init__() missing 3 required positional arguments: 'planning', 'thinking', and 'binding'
+
+tests/ai/test_history_projection_conformance.py:62: TypeError
+_______ test_successful_execution_requires_final_history_evidence[trace] _______
+
+method_name = 'trace'
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("method_name", ("history", "trace", "transcript"))
+    async def test_successful_execution_requires_final_history_evidence(method_name: str) -> None:
+        state = RuntimeState.in_memory()
+        await state.initialize(namespace="history", tenant_id="tenant")
+        try:
+>           await state.execution.executions.create(_record(ExecutionStatus.SUCCEEDED, 1))
+                                                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+tests/ai/test_history_projection_conformance.py:887: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+status = <ExecutionStatus.SUCCEEDED: 'SUCCEEDED'>, sequence = 1
+
+    def _record(status: ExecutionStatus, sequence: int) -> ExecutionRecord:
+        now = datetime.now(timezone.utc)
+>       return ExecutionRecord(
+            execution_id="execution",
+            tenant_id="tenant",
+            session_id=None,
+            binding_digest="binding",
+            parent_execution_id=None,
+            root_execution_id="execution",
+            source_execution_id=None,
+            base_execution_id=None,
+            lineage_kind=ExecutionLineageKind.RUN,
+            status=status,
+            revision=0,
+            event_sequence=0,
+            agent_run_sequence=sequence,
+            error_code=None,
+            safe_error_details={},
+            created_at=now,
+            updated_at=now,
+        )
+E       TypeError: ExecutionRecord.__init__() missing 3 required positional arguments: 'planning', 'thinking', and 'binding'
+
+tests/ai/test_history_projection_conformance.py:62: TypeError
+____ test_successful_execution_requires_final_history_evidence[transcript] _____
+
+method_name = 'transcript'
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("method_name", ("history", "trace", "transcript"))
+    async def test_successful_execution_requires_final_history_evidence(method_name: str) -> None:
+        state = RuntimeState.in_memory()
+        await state.initialize(namespace="history", tenant_id="tenant")
+        try:
+>           await state.execution.executions.create(_record(ExecutionStatus.SUCCEEDED, 1))
+                                                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+tests/ai/test_history_projection_conformance.py:887: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+status = <ExecutionStatus.SUCCEEDED: 'SUCCEEDED'>, sequence = 1
+
+    def _record(status: ExecutionStatus, sequence: int) -> ExecutionRecord:
+        now = datetime.now(timezone.utc)
+>       return ExecutionRecord(
+            execution_id="execution",
+            tenant_id="tenant",
+            session_id=None,
+            binding_digest="binding",
+            parent_execution_id=None,
+            root_execution_id="execution",
+            source_execution_id=None,
+            base_execution_id=None,
+            lineage_kind=ExecutionLineageKind.RUN,
+            status=status,
+            revision=0,
+            event_sequence=0,
+            agent_run_sequence=sequence,
+            error_code=None,
+            safe_error_details={},
+            created_at=now,
+            updated_at=now,
+        )
+E       TypeError: ExecutionRecord.__init__() missing 3 required positional arguments: 'planning', 'thinking', and 'binding'
+
+tests/ai/test_history_projection_conformance.py:62: TypeError
+_____ test_successful_history_preserves_user_prompt_and_projects_all_views _____
+
+    @pytest.mark.asyncio
+    async def test_successful_history_preserves_user_prompt_and_projects_all_views() -> None:
+        state = RuntimeState.in_memory()
+        await state.initialize(namespace="history", tenant_id="tenant")
+        try:
+            prompt = '  {"question":"你好\\nworld","x":1}  '
+>           await state.execution.executions.create(_record(ExecutionStatus.SUCCEEDED, 1))
+                                                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+tests/ai/test_history_projection_conformance.py:905: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+status = <ExecutionStatus.SUCCEEDED: 'SUCCEEDED'>, sequence = 1
+
+    def _record(status: ExecutionStatus, sequence: int) -> ExecutionRecord:
+        now = datetime.now(timezone.utc)
+>       return ExecutionRecord(
+            execution_id="execution",
+            tenant_id="tenant",
+            session_id=None,
+            binding_digest="binding",
+            parent_execution_id=None,
+            root_execution_id="execution",
+            source_execution_id=None,
+            base_execution_id=None,
+            lineage_kind=ExecutionLineageKind.RUN,
+            status=status,
+            revision=0,
+            event_sequence=0,
+            agent_run_sequence=sequence,
+            error_code=None,
+            safe_error_details={},
+            created_at=now,
+            updated_at=now,
+        )
+E       TypeError: ExecutionRecord.__init__() missing 3 required positional arguments: 'planning', 'thinking', and 'binding'
+
+tests/ai/test_history_projection_conformance.py:62: TypeError
+_________ test_local_business_failure_commits_failed_without_escaping __________
+
+    @pytest.mark.asyncio
+    async def test_local_business_failure_commits_failed_without_escaping() -> None:
+>       backend = _backend(ValueError("model output failed"))
+                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+tests/ai/test_local_execution_recovery.py:123: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+tests/ai/test_local_execution_recovery.py:87: in _backend
+    record = _record()
+             ^^^^^^^^^
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+    def _record() -> ExecutionRecord:
+        now = datetime.now(timezone.utc)
+>       return ExecutionRecord(
+            execution_id="execution",
+            tenant_id="tenant",
+            session_id=None,
+            binding_digest="a" * 64,
+            parent_execution_id=None,
+            root_execution_id="execution",
+            source_execution_id=None,
+            base_execution_id=None,
+            lineage_kind=ExecutionLineageKind.RUN,
+            status=ExecutionStatus.STARTED,
+            revision=0,
+            event_sequence=0,
+            agent_run_sequence=0,
+            error_code=None,
+            safe_error_details={},
+            created_at=now,
+            updated_at=now,
+        )
+E       TypeError: ExecutionRecord.__init__() missing 3 required positional arguments: 'planning', 'thinking', and 'binding'
+
+tests/ai/test_local_execution_recovery.py:65: TypeError
+_______ test_local_infrastructure_failure_escapes_without_failed_commit ________
+
+    @pytest.mark.asyncio
+    async def test_local_infrastructure_failure_escapes_without_failed_commit() -> None:
+>       backend = _backend(AIError(ErrorCode.STORAGE_INTEGRITY_ERROR))
+                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+tests/ai/test_local_execution_recovery.py:152: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+tests/ai/test_local_execution_recovery.py:87: in _backend
+    record = _record()
+             ^^^^^^^^^
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+    def _record() -> ExecutionRecord:
+        now = datetime.now(timezone.utc)
+>       return ExecutionRecord(
+            execution_id="execution",
+            tenant_id="tenant",
+            session_id=None,
+            binding_digest="a" * 64,
+            parent_execution_id=None,
+            root_execution_id="execution",
+            source_execution_id=None,
+            base_execution_id=None,
+            lineage_kind=ExecutionLineageKind.RUN,
+            status=ExecutionStatus.STARTED,
+            revision=0,
+            event_sequence=0,
+            agent_run_sequence=0,
+            error_code=None,
+            safe_error_details={},
+            created_at=now,
+            updated_at=now,
+        )
+E       TypeError: ExecutionRecord.__init__() missing 3 required positional arguments: 'planning', 'thinking', and 'binding'
+
+tests/ai/test_local_execution_recovery.py:65: TypeError
+_ test_local_cancel_without_worker_confirms_durable_terminal_state[SUCCEEDED] __
+
+status = <ExecutionStatus.SUCCEEDED: 'SUCCEEDED'>
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "status",
+        (ExecutionStatus.SUCCEEDED, ExecutionStatus.CANCELLED, ExecutionStatus.CANCELLING),
+    )
+    async def test_local_cancel_without_worker_confirms_durable_terminal_state(
+        status: ExecutionStatus,
+    ) -> None:
+>       backend = _backend(ValueError("unused"))
+                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+tests/ai/test_local_execution_recovery.py:234: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+tests/ai/test_local_execution_recovery.py:87: in _backend
+    record = _record()
+             ^^^^^^^^^
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+    def _record() -> ExecutionRecord:
+        now = datetime.now(timezone.utc)
+>       return ExecutionRecord(
+            execution_id="execution",
+            tenant_id="tenant",
+            session_id=None,
+            binding_digest="a" * 64,
+            parent_execution_id=None,
+            root_execution_id="execution",
+            source_execution_id=None,
+            base_execution_id=None,
+            lineage_kind=ExecutionLineageKind.RUN,
+            status=ExecutionStatus.STARTED,
+            revision=0,
+            event_sequence=0,
+            agent_run_sequence=0,
+            error_code=None,
+            safe_error_details={},
+            created_at=now,
+            updated_at=now,
+        )
+E       TypeError: ExecutionRecord.__init__() missing 3 required positional arguments: 'planning', 'thinking', and 'binding'
+
+tests/ai/test_local_execution_recovery.py:65: TypeError
+_ test_local_cancel_without_worker_confirms_durable_terminal_state[CANCELLED] __
+
+status = <ExecutionStatus.CANCELLED: 'CANCELLED'>
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "status",
+        (ExecutionStatus.SUCCEEDED, ExecutionStatus.CANCELLED, ExecutionStatus.CANCELLING),
+    )
+    async def test_local_cancel_without_worker_confirms_durable_terminal_state(
+        status: ExecutionStatus,
+    ) -> None:
+>       backend = _backend(ValueError("unused"))
+                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+tests/ai/test_local_execution_recovery.py:234: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+tests/ai/test_local_execution_recovery.py:87: in _backend
+    record = _record()
+             ^^^^^^^^^
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+    def _record() -> ExecutionRecord:
+        now = datetime.now(timezone.utc)
+>       return ExecutionRecord(
+            execution_id="execution",
+            tenant_id="tenant",
+            session_id=None,
+            binding_digest="a" * 64,
+            parent_execution_id=None,
+            root_execution_id="execution",
+            source_execution_id=None,
+            base_execution_id=None,
+            lineage_kind=ExecutionLineageKind.RUN,
+            status=ExecutionStatus.STARTED,
+            revision=0,
+            event_sequence=0,
+            agent_run_sequence=0,
+            error_code=None,
+            safe_error_details={},
+            created_at=now,
+            updated_at=now,
+        )
+E       TypeError: ExecutionRecord.__init__() missing 3 required positional arguments: 'planning', 'thinking', and 'binding'
+
+tests/ai/test_local_execution_recovery.py:65: TypeError
+_ test_local_cancel_without_worker_confirms_durable_terminal_state[CANCELLING] _
+
+status = <ExecutionStatus.CANCELLING: 'CANCELLING'>
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "status",
+        (ExecutionStatus.SUCCEEDED, ExecutionStatus.CANCELLED, ExecutionStatus.CANCELLING),
+    )
+    async def test_local_cancel_without_worker_confirms_durable_terminal_state(
+        status: ExecutionStatus,
+    ) -> None:
+>       backend = _backend(ValueError("unused"))
+                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+tests/ai/test_local_execution_recovery.py:234: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+tests/ai/test_local_execution_recovery.py:87: in _backend
+    record = _record()
+             ^^^^^^^^^
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+    def _record() -> ExecutionRecord:
+        now = datetime.now(timezone.utc)
+>       return ExecutionRecord(
+            execution_id="execution",
+            tenant_id="tenant",
+            session_id=None,
+            binding_digest="a" * 64,
+            parent_execution_id=None,
+            root_execution_id="execution",
+            source_execution_id=None,
+            base_execution_id=None,
+            lineage_kind=ExecutionLineageKind.RUN,
+            status=ExecutionStatus.STARTED,
+            revision=0,
+            event_sequence=0,
+            agent_run_sequence=0,
+            error_code=None,
+            safe_error_details={},
+            created_at=now,
+            updated_at=now,
+        )
+E       TypeError: ExecutionRecord.__init__() missing 3 required positional arguments: 'planning', 'thinking', and 'binding'
+
+tests/ai/test_local_execution_recovery.py:65: TypeError
+__ test_local_cancel_before_worker_coroutine_starts_confirms_side_effect_stop __
+
+    @pytest.mark.asyncio
+    async def test_local_cancel_before_worker_coroutine_starts_confirms_side_effect_stop() -> None:
+>       backend = _backend(ValueError("unused"))
+                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+tests/ai/test_local_execution_recovery.py:243: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+tests/ai/test_local_execution_recovery.py:87: in _backend
+    record = _record()
+             ^^^^^^^^^
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+    def _record() -> ExecutionRecord:
+        now = datetime.now(timezone.utc)
+>       return ExecutionRecord(
+            execution_id="execution",
+            tenant_id="tenant",
+            session_id=None,
+            binding_digest="a" * 64,
+            parent_execution_id=None,
+            root_execution_id="execution",
+            source_execution_id=None,
+            base_execution_id=None,
+            lineage_kind=ExecutionLineageKind.RUN,
+            status=ExecutionStatus.STARTED,
+            revision=0,
+            event_sequence=0,
+            agent_run_sequence=0,
+            error_code=None,
+            safe_error_details={},
+            created_at=now,
+            updated_at=now,
+        )
+E       TypeError: ExecutionRecord.__init__() missing 3 required positional arguments: 'planning', 'thinking', and 'binding'
+
+tests/ai/test_local_execution_recovery.py:65: TypeError
+=========================== short test summary info ============================
+FAILED tests/ai/persistence/test_execution_start_service.py::test_execution_start_claim_has_one_launcher_winner - AttributeError: '_DefinitionCatalog' object has no attribute 'binding'
+FAILED tests/ai/persistence/test_execution_start_service.py::test_sql_execution_start_keeps_attempt_sequence_zero - AttributeError: '_DefinitionCatalog' object has no attribute 'binding'
+FAILED tests/ai/persistence/test_execution_start_service.py::test_filesystem_execution_start_keeps_attempt_sequence_zero - AttributeError: '_DefinitionCatalog' object has no attribute 'binding'
+FAILED tests/ai/persistence/test_execution_start_service.py::test_execution_memory_scope_can_be_disabled_but_not_blank - AttributeError: '_DefinitionCatalog' object has no attribute 'binding'
+FAILED tests/ai/test_architecture.py::test_source_graph_is_acyclic_and_static - AssertionError: assert False
+ +  where False = ArchitectureCheckResult(passed=False, errors=('public untyped annotation: linktools-ai/src/linktools/ai/workspace/_fac...sql', 'linktools.ai.runtime.state._steps', 'linktools.ai.runtime.state._store', 'linktools.ai.runtime.state._views']}}).passed
+ +    where ArchitectureCheckResult(passed=False, errors=('public untyped annotation: linktools-ai/src/linktools/ai/workspace/_fac...sql', 'linktools.ai.runtime.state._steps', 'linktools.ai.runtime.state._store', 'linktools.ai.runtime.state._views']}}) = check('linktools-ai/src/linktools/ai')
+ +      where check = <scripts.build.architecture.ArchitecturePolicyChecker object at 0x7fdfbbf97e00>.check
+ +        where <scripts.build.architecture.ArchitecturePolicyChecker object at 0x7fdfbbf97e00> = ArchitecturePolicyChecker()
+FAILED tests/ai/test_architecture.py::test_names_and_module_imports_are_clean - AssertionError: assert ('public unty...y:79:object',) == ()
+  
+  Left contains one more item: 'public untyped annotation: linktools-ai/src/linktools/ai/workspace/_factory.py:79:object'
+  
+  Full diff:
+  - ()
+  + (
+  +     'public untyped annotation: '
+  +     'linktools-ai/src/linktools/ai/workspace/_factory.py:79:object',
+  + )
+FAILED tests/ai/test_architecture.py::test_package_public_surface_and_optional_dependency_isolation - AssertionError: assert ['DisabledSan...runtime', ...] == ['DisabledSan...ce_principal']
+  
+  At index 4 diff: 'build_workspace_assets' != 'open_workspace_runtime'
+  Left contains one more item: 'trusted_workspace_principal'
+  
+  Full diff:
+    [
+        'DisabledSandbox',
+        'Sandbox',
+        'Workspace',
+        'WorkspacePolicy',
+  +     'build_workspace_assets',
+        'open_workspace_runtime',
+        'trusted_workspace_principal',
+    ]
+FAILED tests/ai/test_filesystem_mutation_invariants.py::test_nested_event_mutation_persists_after_restart - TypeError: ExecutionRecord.__init__() missing 3 required positional arguments: 'planning', 'thinking', and 'binding'
+FAILED tests/ai/test_history_projection_conformance.py::test_history_head_requires_open_for_mutations - TypeError: ExecutionRecord.__init__() missing 3 required positional arguments: 'planning', 'thinking', and 'binding'
+FAILED tests/ai/test_history_projection_conformance.py::test_execution_projection_paths_reject_a_sealed_history_head - TypeError: ExecutionRecord.__init__() missing 3 required positional arguments: 'planning', 'thinking', and 'binding'
+FAILED tests/ai/test_history_projection_conformance.py::test_terminal_prepare_accepts_an_unprojected_execution_run - TypeError: ExecutionRecord.__init__() missing 3 required positional arguments: 'planning', 'thinking', and 'binding'
+FAILED tests/ai/test_history_projection_conformance.py::test_conversation_head_replacement_preserves_physical_identity - linktools.ai.errors.AIError: current dataclass schema cannot be written as GA v1
+FAILED tests/ai/test_history_projection_conformance.py::test_terminal_commit_cancellation_still_finalizes_after_durable_commit - TypeError: ExecutionRecord.__init__() missing 3 required positional arguments: 'planning', 'thinking', and 'binding'
+FAILED tests/ai/test_history_projection_conformance.py::test_in_memory_raw_refs_fail_fast_even_when_snapshots_exist - TypeError: ExecutionRecord.__init__() missing 3 required positional arguments: 'planning', 'thinking', and 'binding'
+FAILED tests/ai/test_history_projection_conformance.py::test_terminal_reader_pages_from_execution_read_model - TypeError: ExecutionRecord.__init__() missing 3 required positional arguments: 'planning', 'thinking', and 'binding'
+FAILED tests/ai/test_history_projection_conformance.py::test_terminal_seal_reuses_durable_projection_after_staging_release - TypeError: ExecutionRecord.__init__() missing 3 required positional arguments: 'planning', 'thinking', and 'binding'
+FAILED tests/ai/test_history_projection_conformance.py::test_read_model_rejects_a_different_complete_source - TypeError: ExecutionRecord.__init__() missing 3 required positional arguments: 'planning', 'thinking', and 'binding'
+FAILED tests/ai/test_history_projection_conformance.py::test_read_model_accepts_current_v1_record - TypeError: ExecutionRecord.__init__() missing 3 required positional arguments: 'planning', 'thinking', and 'binding'
+FAILED tests/ai/test_history_projection_conformance.py::test_failed_claimed_attempt_without_run_is_skipped - TypeError: ExecutionRecord.__init__() missing 3 required positional arguments: 'planning', 'thinking', and 'binding'
+FAILED tests/ai/test_history_projection_conformance.py::test_history_skips_missing_non_final_attempt - TypeError: ExecutionRecord.__init__() missing 3 required positional arguments: 'planning', 'thinking', and 'binding'
+FAILED tests/ai/test_history_projection_conformance.py::test_successful_execution_requires_final_history_evidence[history] - TypeError: ExecutionRecord.__init__() missing 3 required positional arguments: 'planning', 'thinking', and 'binding'
+FAILED tests/ai/test_history_projection_conformance.py::test_successful_execution_requires_final_history_evidence[trace] - TypeError: ExecutionRecord.__init__() missing 3 required positional arguments: 'planning', 'thinking', and 'binding'
+FAILED tests/ai/test_history_projection_conformance.py::test_successful_execution_requires_final_history_evidence[transcript] - TypeError: ExecutionRecord.__init__() missing 3 required positional arguments: 'planning', 'thinking', and 'binding'
+FAILED tests/ai/test_history_projection_conformance.py::test_successful_history_preserves_user_prompt_and_projects_all_views - TypeError: ExecutionRecord.__init__() missing 3 required positional arguments: 'planning', 'thinking', and 'binding'
+FAILED tests/ai/test_local_execution_recovery.py::test_local_business_failure_commits_failed_without_escaping - TypeError: ExecutionRecord.__init__() missing 3 required positional arguments: 'planning', 'thinking', and 'binding'
+FAILED tests/ai/test_local_execution_recovery.py::test_local_infrastructure_failure_escapes_without_failed_commit - TypeError: ExecutionRecord.__init__() missing 3 required positional arguments: 'planning', 'thinking', and 'binding'
+FAILED tests/ai/test_local_execution_recovery.py::test_local_cancel_without_worker_confirms_durable_terminal_state[SUCCEEDED] - TypeError: ExecutionRecord.__init__() missing 3 required positional arguments: 'planning', 'thinking', and 'binding'
+FAILED tests/ai/test_local_execution_recovery.py::test_local_cancel_without_worker_confirms_durable_terminal_state[CANCELLED] - TypeError: ExecutionRecord.__init__() missing 3 required positional arguments: 'planning', 'thinking', and 'binding'
+FAILED tests/ai/test_local_execution_recovery.py::test_local_cancel_without_worker_confirms_durable_terminal_state[CANCELLING] - TypeError: ExecutionRecord.__init__() missing 3 required positional arguments: 'planning', 'thinking', and 'binding'
+FAILED tests/ai/test_local_execution_recovery.py::test_local_cancel_before_worker_coroutine_starts_confirms_side_effect_stop - TypeError: ExecutionRecord.__init__() missing 3 required positional arguments: 'planning', 'thinking', and 'binding'
+!!!!!!!!!!!!!!!!!!!!!!!!!! stopping after 30 failures !!!!!!!!!!!!!!!!!!!!!!!!!!
+30 failed, 147 passed in 15.73s

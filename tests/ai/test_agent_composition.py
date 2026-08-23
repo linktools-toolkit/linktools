@@ -10,7 +10,6 @@ from pydantic_ai.capabilities import AbstractCapability
 
 import linktools.ai as ai
 from linktools.ai.agent import AgentBindingSnapshot
-from linktools.ai.agent._output import bind_output
 from linktools.ai.capability import RuntimeCapability
 from linktools.ai.core import SessionStatus
 from linktools.ai.errors import AIError, ErrorCode
