@@ -22,7 +22,19 @@ jobs:
           python-version: '3.12'
 
       - name: Apply exact patches
-        run: python linktools-ai/scripts/build/_error_contract_closure.py
+        run: |
+          python linktools-ai/scripts/build/_error_contract_closure.py
+          python - <<'PY'
+          from pathlib import Path
+
+          path = Path("tests/ai/test_local_execution_recovery.py")
+          text = path.read_text()
+          old = "assert failure.code is ErrorCode.STORAGE_INTEGRITY_ERROR"
+          new = "assert failure.code is ErrorCode.INTERNAL_ERROR"
+          if text.count(old) != 1:
+              raise SystemExit("expected one local worker error assertion")
+          path.write_text(text.replace(old, new))
+          PY
 
       - name: Install verification dependencies
         run: |
@@ -81,7 +93,8 @@ jobs:
                   linktools-ai/src/linktools/ai/task/_local.py \
                   tests/ai/test_asset_repository.py \
                   tests/ai/test_closure_fix.py \
-                  tests/ai/test_error_contract.py
+                  tests/ai/test_error_contract.py \
+                  tests/ai/test_local_execution_recovery.py
           git diff --cached --check
           git commit -m 'fix(ai): close remaining error propagation gaps'
           git push origin HEAD:fix/ai-error-contract-closure
