@@ -6,7 +6,7 @@ on:
       - fix/ai-error-contract-closure
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   verify:
@@ -66,7 +66,7 @@ jobs:
           echo "status=$status" >> "$GITHUB_OUTPUT"
           exit "$status"
 
-      - name: Validate branch-only Ruff fixes
+      - name: Apply validated branch-only Ruff fixes
         if: always()
         run: |
           git fetch --depth=1 origin fix/ai-error-contract-closure
@@ -108,16 +108,15 @@ jobs:
             tests/ai/test_error_contract_matrix.py \
             tests/ai/test_temporal_taskgraph_conformance.py \
             tests/ai/test_local_execution_recovery.py
-          set +e
-          PYTHONPATH=linktools-ai:linktools-ai/src:linktools/src python -m ruff check \
-            linktools-ai/scripts/build linktools-ai/src/linktools/ai \
-            linktools-ai/src/linktools/commands/ai tests/ai > /tmp/ruff-fixed.log 2>&1
-          set -e
-          git diff -- \
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add \
             linktools-ai/src/linktools/ai/runtime/_local.py \
             tests/ai/test_error_contract.py \
             tests/ai/test_error_contract_matrix.py \
-            tests/ai/test_temporal_taskgraph_conformance.py > /tmp/branch-ruff-fix.patch
+            tests/ai/test_temporal_taskgraph_conformance.py
+          git commit -m 'style(ai): close error contract Ruff delta'
+          git push origin HEAD:fix/ai-error-contract-closure
 
       - name: Upload Ruff diagnostics
         if: always()
@@ -127,8 +126,6 @@ jobs:
           path: |
             ruff.log
             ruff-baseline.log
-            /tmp/ruff-fixed.log
-            /tmp/branch-ruff-fix.patch
           if-no-files-found: error
 
       - name: Enforce Ruff result
