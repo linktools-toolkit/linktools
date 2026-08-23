@@ -1,4 +1,4 @@
-name: AI Runtime State Migration Gate
+name: AI Runtime Final Validation
 
 on:
   push:
@@ -9,7 +9,7 @@ permissions:
   contents: write
 
 concurrency:
-  group: ai-runtime-state-migration
+  group: ai-runtime-final-validation
   cancel-in-progress: true
 
 jobs:
@@ -29,7 +29,7 @@ jobs:
         run: |
           set -uo pipefail
           [[ -f .bootstrap/ready ]] || exit 0
-          RESULT=/tmp/runtime-state-migration-result.txt
+          RESULT=/tmp/ai-runtime-final-validation.txt
           : > "$RESULT"
           status=0
           export PYTHONPATH="linktools-ai:linktools-ai/src:linktools/src"
@@ -39,7 +39,9 @@ jobs:
             return 0
           }
           run_check python -m pip install -q --upgrade pip
-          if [[ $status -eq 0 ]]; then run_check python -m pip install -q -e ./linktools -e './linktools-ai[sqlite,evaluation,temporal]' pytest pytest-asyncio ruff; fi
+          if [[ $status -eq 0 ]]; then
+            run_check python -m pip install -q -e ./linktools -e './linktools-ai[sqlite,evaluation,temporal]' pytest pytest-asyncio ruff
+          fi
           for script in .bootstrap/patch*.py; do
             [[ -f "$script" ]] || continue
             if [[ $status -eq 0 ]]; then run_check python "$script"; fi
@@ -47,21 +49,23 @@ jobs:
           done
           if [[ $status -eq 0 ]]; then run_check python -m compileall -q linktools-ai/src/linktools/ai; fi
           if [[ $status -eq 0 ]]; then run_check ruff check --select E4,E7,E9,F linktools-ai/src/linktools/ai tests/ai; fi
+          if [[ $status -eq 0 ]]; then run_check ruff format --check linktools-ai/src/linktools/ai tests/ai; fi
+          if [[ $status -eq 0 ]]; then run_check python .bootstrap/audit.py; fi
           if [[ $status -eq 0 ]]; then run_check python -m scripts.build.architecture; fi
-          if [[ $status -eq 0 ]]; then run_check pytest -q tests/ai --maxfail=30; fi
+          if [[ $status -eq 0 ]]; then run_check pytest -q tests/ai; fi
           mkdir -p .bootstrap
           rm -f .bootstrap/ready
           cp "$RESULT" .bootstrap/result.txt
-          tail -n 300 "$RESULT" > .bootstrap/tail.txt
+          tail -n 400 "$RESULT" > .bootstrap/tail.txt
           printf '%s\n' "$status" > .bootstrap/status
           git config user.name github-actions[bot]
           git config user.email github-actions[bot]@users.noreply.github.com
           git add -A
           if ! git diff --cached --quiet; then
             if [[ $status -eq 0 ]]; then
-              git commit -m 'fix(ai): migrate legacy runtime agent identity state'
+              git commit -m 'fix(ai): close runtime identity migration and composition'
             else
-              git commit -m 'ci: record runtime state migration validation'
+              git commit -m 'ci: record final AI runtime validation'
             fi
             git push origin HEAD:refactor/ai-agent-runtime-asset-composition-impl
           fi
