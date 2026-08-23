@@ -57,8 +57,28 @@ def _iter_py_files(paths):
             yield candidate
 
 
+def _literal_value(node):
+    for type_name, attribute in (
+        ("Constant", "value"),
+        ("Str", "s"),
+        ("Num", "n"),
+        ("NameConstant", "value"),
+    ):
+        node_type = getattr(ast, type_name, None)
+        if node_type is not None and isinstance(node, node_type):
+            return True, getattr(node, attribute)
+    return False, None
+
+
+def _string_annotation_value(node):
+    is_literal, value = _literal_value(node)
+    if is_literal and isinstance(value, str):
+        return value
+    return None
+
+
 def _is_string_annotation(node):
-    return isinstance(node, ast.Constant) and isinstance(node.value, str)
+    return _string_annotation_value(node) is not None
 
 
 def _annotation_nodes(tree):
@@ -109,17 +129,19 @@ def _collect_union_leaves(node):
 
 
 def _union_member_key(node):
-    if isinstance(node, ast.Constant):
-        return repr(node.value)
+    is_literal, value = _literal_value(node)
+    if is_literal:
+        return repr(value)
     if isinstance(node, ast.Name):
         return node.id
     return None
 
 
 def _duplicate_union_violation(node):
-    if _is_string_annotation(node):
+    annotation = _string_annotation_value(node)
+    if annotation is not None:
         try:
-            node = ast.parse(node.value, mode="eval").body
+            node = ast.parse(annotation, mode="eval").body
         except SyntaxError:
             return None
     if not (isinstance(node, ast.BinOp) and isinstance(node.op, ast.BitOr)):
