@@ -12,6 +12,7 @@ import pytest
 from sqlalchemy.ext.asyncio import create_async_engine
 
 from linktools.ai.core import SessionStatus
+from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.migrate import provision_runtime_database
 from linktools.ai.runtime import RuntimeState
 from linktools.ai.runtime.state import _codec as codec
@@ -87,8 +88,9 @@ def test_full_schema_upgrade_chain_decodes_old_revision_and_rewrites_latest(
     current_fingerprint = codec._V1_SCHEMA_FINGERPRINTS["conversation_cursor"]
 
     def upgrade_v1_to_v2(raw: object, _codec: object) -> dict[str, object]:
-        assert isinstance(raw, dict)
-        assert set(raw) == {"step_run_id", "legacy_history_id", "message_count"}
+        expected = {"step_run_id", "legacy_history_id", "message_count"}
+        if not isinstance(raw, dict) or set(raw) != expected:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         return {
             "step_run_id": raw["step_run_id"],
             "history_id": raw["legacy_history_id"],
