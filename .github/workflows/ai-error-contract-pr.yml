@@ -47,10 +47,14 @@ jobs:
           python manage.py install --editable linktools linktools-ai
 
       - name: Compile
+        env:
+          PYTHONPATH: linktools-ai:linktools-ai/src:linktools/src
         run: python -m compileall -q linktools-ai/src/linktools/ai linktools-ai/src/linktools/commands/ai
 
       - name: Ruff
         continue-on-error: true
+        env:
+          PYTHONPATH: linktools-ai:linktools-ai/src:linktools/src
         run: |
           set -o pipefail
           python -m ruff check linktools-ai/scripts/build linktools-ai/src/linktools/ai linktools-ai/src/linktools/commands/ai tests/ai 2>&1 | tee /tmp/ruff.txt
@@ -64,6 +68,8 @@ jobs:
           if-no-files-found: ignore
 
       - name: AI tests
+        env:
+          PYTHONPATH: linktools-ai:linktools-ai/src:linktools/src
         run: |
           set -o pipefail
           python -m pytest -q tests/ai 2>&1 | tee /tmp/pytest.txt
