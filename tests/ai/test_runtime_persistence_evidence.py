@@ -228,10 +228,21 @@ def test_append_only_gate_rejects_historical_contract_mutation() -> None:
         baseline, removed_enum
     )
 
-    changed_external = copy.deepcopy(baseline)
-    changed_external["external"]["agent_binding_snapshot"]["version"] = 2
-    assert "historical external contract changed: agent_binding_snapshot" in (
-        validate_append_only(baseline, changed_external)
+    advanced_external = copy.deepcopy(baseline)
+    advanced_external["external"]["agent_binding_snapshot"]["version"] = 2
+    assert validate_append_only(baseline, advanced_external) == ()
+
+    changed_owner = copy.deepcopy(baseline)
+    changed_owner["external"]["agent_binding_snapshot"]["owner"] = "runtime"
+    assert "agent_binding_snapshot owner changed" in validate_append_only(
+        baseline, changed_owner
+    )
+
+    newer_baseline = copy.deepcopy(baseline)
+    newer_baseline["external"]["agent_binding_snapshot"]["version"] = 2
+    regressed_external = copy.deepcopy(baseline)
+    assert "agent_binding_snapshot version regressed" in validate_append_only(
+        newer_baseline, regressed_external
     )
 
     invented_legacy = copy.deepcopy(baseline)
@@ -242,3 +253,24 @@ def test_append_only_gate_rejects_historical_contract_mutation() -> None:
     assert "new dataclass cannot claim unversioned legacy: future_record" in (
         validate_append_only(baseline, invented_legacy)
     )
+
+
+def test_append_only_fixture_allows_new_revision_but_not_rewrite() -> None:
+    baseline = {"task_node@1": {"schema": 1}}
+    extended = {
+        "task_node@1": {"schema": 1},
+        "task_node@2": {"schema": 2},
+    }
+    assert validate_fixture_append_only(
+        baseline,
+        extended,
+        label="custom wire fixture",
+    ) == ()
+
+    rewritten = copy.deepcopy(extended)
+    rewritten["task_node@1"] = {"schema": 2}
+    assert validate_fixture_append_only(
+        baseline,
+        rewritten,
+        label="custom wire fixture",
+    ) == ("historical custom wire fixture changed: task_node@1",)
