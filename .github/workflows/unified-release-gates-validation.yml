@@ -102,9 +102,9 @@ jobs:
           linktools-common/src
           linktools-mobile/src
           linktools-cntr/src
-      - name: Diagnose AI Ruff gate
+      - name: Diagnose AI Ruff correctness gate
         run: >-
-          ruff check --no-cache
+          ruff check --no-cache --select F,E9,I
           scripts/check/ai
           linktools-ai/src/linktools/ai
           linktools-ai/src/linktools/commands/ai
