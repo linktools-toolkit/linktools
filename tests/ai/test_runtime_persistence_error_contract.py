@@ -73,6 +73,17 @@ def test_legacy_binding_malformed_descriptor_remains_integrity_error() -> None:
     assert raised.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
 
 
+def test_legacy_binding_future_version_remains_unsupported() -> None:
+    compiler = _compiler()
+    payload = _legacy_binding_payload(compiler)
+    payload["version"] = 2
+
+    with pytest.raises(AIError) as raised:
+        _migrate_legacy_binding(payload, compiler)
+
+    assert raised.value.code is ErrorCode.STORAGE_VERSION_UNSUPPORTED
+
+
 @pytest.mark.asyncio
 async def test_transcript_decoders_preserve_future_schema_unsupported(
     tmp_path: Path,
