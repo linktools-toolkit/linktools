@@ -16,7 +16,11 @@ from linktools.ai.migrate import provision_runtime_database
 from linktools.ai.runtime import RuntimeState
 from linktools.ai.runtime.state import _codec as codec
 from linktools.ai.runtime.state._contracts import ConversationCursor, SessionRecord
-from scripts.build.persistence import validate_append_only
+from scripts.build.persistence import (
+    validate_append_only,
+    validate_fixture_append_only,
+    validate_upgrade_fixtures,
+)
 
 
 def _session(tenant_id: str = "tenant") -> SessionRecord:
@@ -99,6 +103,16 @@ def test_full_schema_upgrade_chain_decodes_old_revision_and_rewrites_latest(
     )
     monkeypatch.setattr(codec, "_DATACLASS_PERSISTENCE_BY_VERSION", {1: contracts})
 
+    legacy_fields = {
+        "step_run_id": "run",
+        "legacy_history_id": "history",
+        "message_count": 7,
+    }
+    current_fields = {
+        "step_run_id": "run",
+        "history_id": "history",
+        "message_count": 7,
+    }
     legacy = {
         "v": 1,
         "value": {
@@ -106,11 +120,7 @@ def test_full_schema_upgrade_chain_decodes_old_revision_and_rewrites_latest(
             "payload": {
                 "$dataclass": "conversation_cursor",
                 "schema": 1,
-                "fields": {
-                    "step_run_id": "run",
-                    "legacy_history_id": "history",
-                    "message_count": 7,
-                },
+                "fields": legacy_fields,
             },
         },
     }
@@ -125,11 +135,24 @@ def test_full_schema_upgrade_chain_decodes_old_revision_and_rewrites_latest(
     )
     payload = rewritten["value"]["payload"]
     assert payload["schema"] == 2
-    assert payload["fields"] == {
-        "step_run_id": "run",
-        "history_id": "history",
-        "message_count": 7,
+    assert payload["fields"] == current_fields
+
+    manifest = codec._runtime_persistence_manifest()
+    assert validate_upgrade_fixtures(manifest, {}) == (
+        "missing upgrade fixture: conversation_cursor@1",
+    )
+    fixtures = {
+        "conversation_cursor@1": {
+            "fields": legacy_fields,
+            "current_fields": current_fields,
+        }
     }
+    assert validate_upgrade_fixtures(manifest, fixtures) == ()
+    changed = copy.deepcopy(fixtures)
+    changed["conversation_cursor@1"]["current_fields"]["message_count"] = 8
+    assert validate_fixture_append_only(fixtures, changed) == (
+        "historical upgrade fixture changed: conversation_cursor@1",
+    )
 
 
 @pytest.mark.asyncio
