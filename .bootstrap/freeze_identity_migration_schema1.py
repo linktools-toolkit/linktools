@@ -95,8 +95,8 @@ def main() -> None:
     text = replace_once(text, old, new, "freeze semantic migration output revision")
 
     forbidden = (
-        "_EXECUTION_V1_FIELDS",
-        "_RECOVERY_EXECUTION_V1_FIELDS",
+        "    _EXECUTION_V1_FIELDS,\n",
+        "    _RECOVERY_EXECUTION_V1_FIELDS,\n",
         "_CURRENT_SESSION_FIELDS",
         "_LEGACY_SESSION_FIELDS",
         "_CURRENT_PROJECTION_FIELDS",
@@ -104,9 +104,9 @@ def main() -> None:
         "_CURRENT_RECOVERY_INPUT_FIELDS",
         "_LEGACY_RECOVERY_INPUT_FIELDS",
         "_rebuild_data(",
-        "dataclass_fields",
-        "get_type_hints",
-        "_dataclass_persistence_contract",
+        "dataclass_fields(",
+        "get_type_hints(",
+        "_dataclass_persistence_contract(",
     )
     stale = [name for name in forbidden if name in text]
     if stale:

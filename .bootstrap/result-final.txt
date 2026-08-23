@@ -1,11 +1,14 @@
 ===== python .bootstrap/fix_legacy_identity_fixtures.py =====
 legacy identity fixtures normalized to authentic unversioned V1
 exit=0
+===== python .bootstrap/fix_freeze_stale_check.py =====
+migration bootstrap stale-symbol check made exact
+exit=0
 ===== python .bootstrap/freeze_identity_migration_schema1.py =====
 Traceback (most recent call last):
   File "/home/runner/work/linktools/linktools/.bootstrap/freeze_identity_migration_schema1.py", line 120, in <module>
     main()
   File "/home/runner/work/linktools/linktools/.bootstrap/freeze_identity_migration_schema1.py", line 113, in main
     raise RuntimeError(f"stale migration coupling remains: {stale}")
-RuntimeError: stale migration coupling remains: ['_EXECUTION_V1_FIELDS', 'dataclass_fields']
+RuntimeError: stale migration coupling remains: ['dataclass_fields(']
 exit=1
