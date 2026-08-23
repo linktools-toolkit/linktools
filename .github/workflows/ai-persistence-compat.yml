@@ -44,7 +44,12 @@ jobs:
           if ! grep -q 'class _DataclassPersistenceContract' linktools-ai/src/linktools/ai/runtime/state/_codec.py; then
             run_check python .bootstrap/apply_runtime_persistence_compat.py || true
           fi
-          if [ ! -f "$STATUS" ]; then run_check python .bootstrap/close_migration_schema_boundary.py || true; fi
+          if [ ! -f "$STATUS" ] && ! grep -q 'def _decode_current_record' linktools-ai/src/linktools/ai/runtime/state/_migration.py; then
+            run_check python .bootstrap/close_migration_schema_boundary.py || true
+          fi
+          if [ ! -f "$STATUS" ] && grep -q 'def _encode_persisted_value' linktools-ai/src/linktools/ai/runtime/state/_codec.py; then
+            run_check python .bootstrap/refine_typed_persistence_codec.py || true
+          fi
           if [ ! -f "$STATUS" ]; then run_check python -m compileall -q linktools-ai/src/linktools/ai || true; fi
           if [ ! -f "$STATUS" ]; then run_check ruff check --select E4,E7,E9,F linktools-ai/src/linktools/ai tests/ai || true; fi
           if [ ! -f "$STATUS" ]; then (cd linktools-ai && python -m scripts.build.persistence) >> "$RESULT" 2>&1; rc=$?; echo "===== persistence exit=$rc =====" >> "$RESULT"; if [ "$rc" -ne 0 ]; then echo "$rc" > "$STATUS"; fi; fi
