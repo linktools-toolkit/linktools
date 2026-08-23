@@ -43,7 +43,7 @@ jobs:
             filelock 'pydantic-ai-slim[mcp,openai,temporal]>=2.27.0,<3.0.0' \
             'pydantic-ai-harness[skills,dynamic-workflow]>=0.13.0' \
             'PyYAML>=6,<7' pytest pytest-asyncio 'sqlalchemy[asyncio]==2.0.51' \
-            'aiosqlite==0.22.1' ruff rich requests packaging
+            'aiosqlite==0.22.1' ruff rich requests packaging tomlkit
           python manage.py install --editable linktools linktools-ai
 
       - name: Compile
