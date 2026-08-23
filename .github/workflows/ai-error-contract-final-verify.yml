@@ -1,7 +1,7 @@
 name: Verify AI error contract final closure
 
 on:
-  pull_request:
+  push:
     branches:
       - fix/ai-error-contract-closure
 
@@ -13,8 +13,6 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-        with:
-          ref: fix/ai-error-contract-closure
 
       - uses: actions/setup-python@v5
         with:
