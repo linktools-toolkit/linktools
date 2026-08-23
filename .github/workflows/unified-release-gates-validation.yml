@@ -92,8 +92,28 @@ jobs:
           pip install -U -r requirements.txt
       - name: Install projects
         run: python manage.py install --editable
+
+      - name: Diagnose Python 3.6 source gate
+        run: >-
+          python scripts/check/python36.py
+          manage.py
+          scripts/check/python36.py
+          linktools/src
+          linktools-common/src
+          linktools-mobile/src
+          linktools-cntr/src
+      - name: Diagnose AI Ruff gate
+        run: >-
+          ruff check --no-cache
+          scripts/check/ai
+          linktools-ai/src/linktools/ai
+          linktools-ai/src/linktools/commands/ai
+          tests/ai
+      - name: Diagnose pytest gate
+        run: python -m pytest -q -p no:cacheprovider tests
       - name: Check source and tests
         run: python manage.py check
+
       - name: Build release artifacts
         run: |
           rm -rf dist
