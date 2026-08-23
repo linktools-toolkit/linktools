@@ -133,7 +133,7 @@ def test_maintenance_accepts_current_raw_state_formats() -> None:
         b"s" * 32,
         1,
         b"o" * 32,
-        ExecutionEventType.CREATED.value,
+        ExecutionEventType.EXECUTION_CREATED.value,
         None,
         None,
         {"value": "event"},
