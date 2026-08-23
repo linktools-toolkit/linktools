@@ -8,6 +8,10 @@ on:
 permissions:
   contents: write
 
+env:
+  PYTHONPATH: linktools-ai:linktools-ai/src:linktools/src
+  CLOSURE_DIR: /tmp/error-closure
+
 jobs:
   verify:
     runs-on: ubuntu-latest
@@ -28,14 +32,14 @@ jobs:
             'aiosqlite==0.22.1' ruff rich requests packaging
           python -m pip install -e ./linktools --no-deps
 
-      - name: Apply and verify closure candidates
+      - name: Prepare closure candidates
         run: |
           cp .github/ai-error-cancellation-closure.patch /tmp/error-closure.patch
           cp .github/ai-error-cancellation-contract.py /tmp/test_error_cancellation_contract.py
           cp .github/ai-error-capability-policy-closure.py /tmp/capability-policy-closure.py
           git fetch --depth=1 origin fix/ai-error-contract-closure
-          git worktree add /tmp/error-closure FETCH_HEAD
-          cd /tmp/error-closure
+          git worktree add "$CLOSURE_DIR" FETCH_HEAD
+          cd "$CLOSURE_DIR"
           git apply --check /tmp/error-closure.patch
           git apply /tmp/error-closure.patch
           python - <<'PY'
@@ -55,16 +59,31 @@ jobs:
             tests/ai/test_error_cancellation_contract.py tests/ai/test_spec_capability_refactor.py
           python -m ruff check tests/ai/test_error_cancellation_contract.py
           git diff --check
-          PYTHONPATH=linktools-ai:linktools-ai/src:linktools/src \
-            python -m compileall -q linktools-ai/src/linktools/ai
-          PYTHONPATH=linktools-ai:linktools-ai/src:linktools/src \
-            python -m pytest -q tests/ai
 
+      - name: Compile linktools-ai
+        working-directory: /tmp/error-closure
+        run: python -m compileall -q linktools-ai/src/linktools/ai
+
+      - name: Test closure contracts
+        working-directory: /tmp/error-closure
+        timeout-minutes: 3
+        run: |
+          python -m pytest -q \
+            tests/ai/test_error_cancellation_contract.py \
+            tests/ai/test_spec_capability_refactor.py
+
+      - name: Test linktools-ai
+        working-directory: /tmp/error-closure
+        timeout-minutes: 12
+        run: python -m pytest -q tests/ai
+
+      - name: Verify Ruff delta against fixed baseline
+        working-directory: /tmp/error-closure
+        run: |
           git fetch --depth=1 origin a4ded79a152ccfbc635503ee7b7bd394bd50970e
           git worktree add /tmp/error-baseline FETCH_HEAD
           set +e
-          PYTHONPATH=linktools-ai:linktools-ai/src:linktools/src \
-            python -m ruff check linktools-ai/scripts/build linktools-ai/src/linktools/ai \
+          python -m ruff check linktools-ai/scripts/build linktools-ai/src/linktools/ai \
             linktools-ai/src/linktools/commands/ai tests/ai > /tmp/ruff-current.log 2>&1
           current_status=$?
           cd /tmp/error-baseline
@@ -72,8 +91,8 @@ jobs:
             python -m ruff check linktools-ai/scripts/build linktools-ai/src/linktools/ai \
             linktools-ai/src/linktools/commands/ai tests/ai > /tmp/ruff-baseline.log 2>&1
           baseline_status=$?
-          set -e
           cd /tmp/error-closure
+          set -e
           python - <<'PY'
           import re
           from collections import Counter
@@ -99,6 +118,9 @@ jobs:
           PY
           test "$current_status" = "$baseline_status"
 
+      - name: Commit verified closure
+        working-directory: /tmp/error-closure
+        run: |
           git config user.name github-actions[bot]
           git config user.email 41898282+github-actions[bot]@users.noreply.github.com
           git add \
