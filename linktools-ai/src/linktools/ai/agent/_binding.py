@@ -101,8 +101,10 @@ class AgentBindingSnapshot:
         version = value["version"]
         revision = value["output_schema_revision"]
         descriptors = value["local_runtime_capability_descriptors"]
-        if version != 1 or isinstance(version, bool):
+        if isinstance(version, bool) or not isinstance(version, int) or version < 1:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        if version != 1:
+            raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
         if not isinstance(revision, int) or isinstance(revision, bool) or revision < 1:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         if not isinstance(descriptors, list):

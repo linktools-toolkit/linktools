@@ -301,14 +301,7 @@ def _domain_fields(
     if set(value) != {"type", "payload"} or value.get("type") != type_name:
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     payload = value.get("payload")
-    if not isinstance(payload, Mapping):
-        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-    if set(payload) != {"$dataclass", "fields"} or payload.get("$dataclass") != wire_id:
-        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-    raw_fields = payload.get("fields")
-    if not isinstance(raw_fields, Mapping):
-        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-    return raw_fields
+    return _persisted_dataclass_fields(payload, wire_id)
 
 
 def _collect_execution_binding(
@@ -727,15 +720,33 @@ def _usage_limits(value: object) -> AgentUsageLimits | None:
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
 
 
-def _nested_dataclass_fields(value: object, wire_id: str) -> Mapping[str, object]:
+def _persisted_dataclass_fields(
+    value: object,
+    wire_id: str,
+) -> Mapping[str, object]:
     if not isinstance(value, Mapping):
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-    if set(value) != {"$dataclass", "fields"} or value.get("$dataclass") != wire_id:
+    keys = set(value)
+    if keys == {"$dataclass", "fields"}:
+        pass
+    elif keys == {"$dataclass", "schema", "fields"}:
+        schema = value.get("schema")
+        if isinstance(schema, bool) or not isinstance(schema, int) or schema < 1:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        if schema != 1:
+            raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
+    else:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    if value.get("$dataclass") != wire_id:
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     raw_fields = value.get("fields")
     if not isinstance(raw_fields, Mapping):
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     return raw_fields
+
+
+def _nested_dataclass_fields(value: object, wire_id: str) -> Mapping[str, object]:
+    return _persisted_dataclass_fields(value, wire_id)
 
 
 def _rebuild_data(
@@ -755,7 +766,9 @@ def _is_current_binding(value: object) -> bool:
         return False
     try:
         AgentBindingSnapshot.from_payload(value)
-    except AIError:
+    except AIError as error:
+        if error.code is ErrorCode.STORAGE_VERSION_UNSUPPORTED:
+            raise
         return False
     return True
 

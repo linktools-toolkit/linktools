@@ -464,6 +464,21 @@ DataclassDecoder = Callable[
     [Mapping[str, object], "_VersionCodec"],
     object,
 ]
+DataclassUpgrade = Callable[
+    [Mapping[str, object], "_VersionCodec"],
+    Mapping[str, object],
+]
+
+
+@dataclass(frozen=True, slots=True)
+class _DataclassPersistenceContract:
+    fingerprints: Mapping[int, str]
+    upgrades: Mapping[int, DataclassUpgrade]
+    legacy_revision: int | None
+
+    @property
+    def current_revision(self) -> int:
+        return max(self.fingerprints)
 
 
 @dataclass(frozen=True, slots=True)
@@ -692,6 +707,26 @@ _VERSION_CODECS: Mapping[int, _VersionCodec] = MappingProxyType(
 _CURRENT_CODEC = _VERSION_CODECS[CURRENT_DATA_VERSION]
 
 
+def _build_v1_dataclass_persistence_contracts(
+) -> Mapping[str, _DataclassPersistenceContract]:
+    return MappingProxyType(
+        {
+            wire_id: _DataclassPersistenceContract(
+                fingerprints=MappingProxyType({1: fingerprint}),
+                upgrades=MappingProxyType({}),
+                legacy_revision=1,
+            )
+            for wire_id, fingerprint in _V1_SCHEMA_FINGERPRINTS.items()
+        }
+    )
+
+
+_V1_DATACLASS_PERSISTENCE = _build_v1_dataclass_persistence_contracts()
+_DATACLASS_PERSISTENCE_BY_VERSION: Mapping[
+    int, Mapping[str, _DataclassPersistenceContract]
+] = MappingProxyType({1: _V1_DATACLASS_PERSISTENCE})
+
+
 def _dataclass_schema_descriptor(
     target: type[object],
     codec: _VersionCodec,
@@ -853,6 +888,153 @@ def _unwrap_tagged_list(
     return items
 
 
+def _dataclass_persistence_contract(
+    wire_id: str,
+    codec: _VersionCodec,
+) -> _DataclassPersistenceContract:
+    contracts = _DATACLASS_PERSISTENCE_BY_VERSION.get(codec.version)
+    if contracts is None:
+        raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
+    contract = contracts.get(wire_id)
+    if contract is None:
+        raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
+    return contract
+
+
+def _encode_persisted_value(value: JsonValue, codec: _VersionCodec) -> JsonValue:
+    if isinstance(value, list):
+        return [_encode_persisted_value(item, codec) for item in value]
+    if not isinstance(value, Mapping):
+        return value
+    if "$dataclass" in value:
+        _require_exact_keys(value, frozenset({"$dataclass", "fields"}))
+        wire_id = value.get("$dataclass")
+        raw_fields = value.get("fields")
+        if not isinstance(wire_id, str) or not isinstance(raw_fields, Mapping):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        contract = _dataclass_persistence_contract(wire_id, codec)
+        if codec.domain_types.get(wire_id) is None:
+            raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
+        return {
+            "$dataclass": wire_id,
+            "schema": contract.current_revision,
+            "fields": {
+                str(key): _encode_persisted_value(cast(JsonValue, item), codec)
+                for key, item in raw_fields.items()
+            },
+        }
+    return {
+        str(key): _encode_persisted_value(cast(JsonValue, item), codec)
+        for key, item in value.items()
+    }
+
+
+def _apply_persisted_upgrades(
+    raw_fields: Mapping[str, object],
+    revision: int,
+    contract: _DataclassPersistenceContract,
+    codec: _VersionCodec,
+) -> Mapping[str, object]:
+    fields_value: Mapping[str, object] = dict(raw_fields)
+    current = revision
+    while current < contract.current_revision:
+        upgrade = contract.upgrades.get(current)
+        if upgrade is None:
+            raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
+        fields_value = dict(upgrade(fields_value, codec))
+        current += 1
+    return fields_value
+
+
+def _normalize_persisted_dataclass(
+    value: Mapping[str, object],
+    codec: _VersionCodec,
+) -> JsonValue:
+    keys = frozenset(value)
+    if keys == frozenset({"$dataclass", "fields"}):
+        explicit_revision: object | None = None
+    elif keys == frozenset({"$dataclass", "schema", "fields"}):
+        explicit_revision = value.get("schema")
+    else:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+
+    wire_id = value.get("$dataclass")
+    raw_fields = value.get("fields")
+    if not isinstance(wire_id, str) or not isinstance(raw_fields, Mapping):
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    contract = _dataclass_persistence_contract(wire_id, codec)
+    if codec.domain_types.get(wire_id) is None:
+        raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
+
+    if explicit_revision is None:
+        revision = contract.legacy_revision
+        if revision is None:
+            raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
+    else:
+        if (
+            isinstance(explicit_revision, bool)
+            or not isinstance(explicit_revision, int)
+            or explicit_revision < 1
+        ):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        revision = explicit_revision
+    if revision not in contract.fingerprints:
+        raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
+
+    normalized_fields = {
+        str(key): _normalize_persisted_value(cast(JsonValue, item), codec)
+        for key, item in raw_fields.items()
+    }
+    upgraded = _apply_persisted_upgrades(
+        normalized_fields, revision, contract, codec
+    )
+    return {
+        "$dataclass": wire_id,
+        "fields": cast(dict[str, JsonValue], dict(upgraded)),
+    }
+
+
+def _normalize_persisted_value(value: JsonValue, codec: _VersionCodec) -> JsonValue:
+    if isinstance(value, list):
+        return [_normalize_persisted_value(item, codec) for item in value]
+    if not isinstance(value, Mapping):
+        return value
+    if "$dataclass" in value:
+        return _normalize_persisted_dataclass(value, codec)
+    return {
+        str(key): _normalize_persisted_value(cast(JsonValue, item), codec)
+        for key, item in value.items()
+    }
+
+
+def _runtime_persistence_manifest() -> dict[str, JsonValue]:
+    contracts = _DATACLASS_PERSISTENCE_BY_VERSION[CURRENT_DATA_VERSION]
+    return {
+        "wire_version": CURRENT_DATA_VERSION,
+        "dataclasses": {
+            wire_id: {
+                "legacy_revision": contract.legacy_revision,
+                "revisions": {
+                    str(revision): fingerprint
+                    for revision, fingerprint in sorted(contract.fingerprints.items())
+                },
+            }
+            for wire_id, contract in sorted(contracts.items())
+        },
+        "enums": {
+            wire_id: sorted(cast(str, value) for value in values)
+            for wire_id, values in sorted(_V1_ENUM_VALUES.items())
+        },
+        "external": {
+            "agent_binding_snapshot": {"owner": "agent", "version": 1},
+            "model_message": {
+                "owner": "pydantic-ai",
+                "fixture": "runtime_model_messages_v1.json",
+            },
+        },
+    }
+
+
 def encode_envelope(
     value: Mapping[str, JsonValue],
     *,
@@ -862,7 +1044,13 @@ def encode_envelope(
         raise ValueError("only the frozen current data version may be written")
     if not isinstance(value, Mapping):
         raise TypeError("canonical data value must be a mapping")
-    return {"v": version, "value": dict(value)}
+    codec = _VERSION_CODECS.get(version)
+    if codec is None:
+        raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
+    persisted = _encode_persisted_value(dict(value), codec)
+    if not isinstance(persisted, Mapping):
+        raise TypeError("canonical data value must remain a mapping")
+    return {"v": version, "value": dict(persisted)}
 
 
 def parse_envelope(value: Mapping[str, JsonValue]) -> CanonicalEnvelope:
@@ -1295,7 +1483,8 @@ def _decode_enveloped_domain(
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     if payload_transform is not None:
         payload = payload_transform(payload)
-    return _decode_domain(payload, target, codec)
+    normalized = _normalize_persisted_value(payload, codec)
+    return _decode_domain(normalized, target, codec)
 
 
 def iter_runtime_object_refs(
@@ -1321,7 +1510,8 @@ def _iter_enveloped_runtime_object_refs(
     payload = envelope.value.get("payload")
     if payload is None:
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-    yield from _iter_runtime_object_refs(payload, default_domain, codec)
+    normalized = _normalize_persisted_value(payload, codec)
+    yield from _iter_runtime_object_refs(normalized, default_domain, codec)
 
 
 def _iter_runtime_object_refs(
@@ -1841,7 +2031,8 @@ def _decode_step_envelope(value: Mapping[str, JsonValue]) -> object:
     payload = envelope.value["payload"]
     if payload is None:
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-    return _decode_domain(payload, target, codec)
+    normalized = _normalize_persisted_value(payload, codec)
+    return _decode_domain(normalized, target, codec)
 
 
 def _validate_v1_codec_definition() -> None:
@@ -1865,6 +2056,26 @@ def _validate_v1_codec_definition() -> None:
         raise RuntimeError(
             "GA v1 schema fingerprint manifest does not match domain types"
         )
+    contracts = _DATACLASS_PERSISTENCE_BY_VERSION.get(1)
+    if contracts is None or set(contracts) != dataclass_wire_ids:
+        raise RuntimeError("GA v1 persistence contracts do not match domain types")
+    for wire_id, contract in contracts.items():
+        revisions = tuple(sorted(contract.fingerprints))
+        if not revisions or revisions != tuple(range(1, revisions[-1] + 1)):
+            raise RuntimeError(f"GA v1 persistence revisions are invalid: {wire_id}")
+        if (
+            contract.legacy_revision is not None
+            and contract.legacy_revision not in contract.fingerprints
+        ):
+            raise RuntimeError(f"GA v1 legacy revision is invalid: {wire_id}")
+        expected_upgrades = set(range(1, contract.current_revision))
+        if set(contract.upgrades) != expected_upgrades:
+            raise RuntimeError(f"GA v1 persistence upgrades are incomplete: {wire_id}")
+        if (
+            contract.fingerprints[contract.current_revision]
+            != _V1_SCHEMA_FINGERPRINTS[wire_id]
+        ):
+            raise RuntimeError(f"GA v1 current fingerprint is inconsistent: {wire_id}")
     if set(_V1_ENUM_VALUES) != set(enum_wire_ids):
         raise RuntimeError("GA v1 enum value manifest does not match enum types")
     custom_dataclasses = {
