@@ -22,22 +22,7 @@ jobs:
           python-version: '3.12'
 
       - name: Apply exact patches
-        run: |
-          python linktools-ai/scripts/build/_error_contract_closure.py
-          python - <<'PY'
-          from pathlib import Path
-          path = Path("linktools-ai/src/linktools/ai/runtime/_local.py")
-          text = path.read_text()
-          marker = '"terminal finalization failed after durable execution terminal: execution=%s"'
-          marker_pos = text.index(marker)
-          assignment = "operation_result = _execution_operation_result(persisted.status)"
-          assignment_pos = text.rfind(assignment, 0, marker_pos)
-          if assignment_pos < 0 or marker_pos - assignment_pos > 500:
-              raise SystemExit("terminal fallback assignment was not found next to its marker")
-          line_start = text.rfind("\n", 0, assignment_pos) + 1
-          line_end = text.index("\n", assignment_pos) + 1
-          path.write_text(text[:line_start] + text[line_end:])
-          PY
+        run: python linktools-ai/scripts/build/_error_contract_closure.py
 
       - name: Install verification dependencies
         run: |
@@ -56,12 +41,32 @@ jobs:
       - name: Ruff
         env:
           PYTHONPATH: linktools-ai:linktools-ai/src:linktools/src
-        run: python -m ruff check linktools-ai/scripts/build linktools-ai/src/linktools/ai linktools-ai/src/linktools/commands/ai tests/ai
+        run: |
+          set -o pipefail
+          python -m ruff check linktools-ai/scripts/build linktools-ai/src/linktools/ai linktools-ai/src/linktools/commands/ai tests/ai 2>&1 | tee /tmp/ruff.txt
+
+      - name: Upload Ruff diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ai-error-contract-ruff
+          path: /tmp/ruff.txt
+          if-no-files-found: ignore
 
       - name: AI tests
         env:
           PYTHONPATH: linktools-ai:linktools-ai/src:linktools/src
-        run: python -m pytest -q tests/ai
+        run: |
+          set -o pipefail
+          python -m pytest -q tests/ai 2>&1 | tee /tmp/pytest.txt
+
+      - name: Upload pytest diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ai-error-contract-pytest
+          path: /tmp/pytest.txt
+          if-no-files-found: ignore
 
       - name: Commit verified patches
         run: |
