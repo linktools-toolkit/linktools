@@ -210,3 +210,12 @@ def test_append_only_gate_rejects_historical_contract_mutation() -> None:
     assert "historical external contract changed: agent_binding_snapshot" in (
         validate_append_only(baseline, changed_external)
     )
+
+    invented_legacy = copy.deepcopy(baseline)
+    invented_legacy["dataclasses"]["future_record"] = {
+        "legacy_revision": 1,
+        "revisions": {"1": "e" * 64},
+    }
+    assert "new dataclass cannot claim unversioned legacy: future_record" in (
+        validate_append_only(baseline, invented_legacy)
+    )
