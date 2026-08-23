@@ -1,0 +1,82 @@
+name: merge-master-into-ai-composition
+
+on:
+  push:
+    branches:
+      - automation/merge-master-into-ai-composition
+
+permissions:
+  contents: write
+
+jobs:
+  merge:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out target branch
+        uses: actions/checkout@v4
+        with:
+          ref: refactor/ai-agent-runtime-asset-composition-impl
+          fetch-depth: 0
+
+      - name: Merge master
+        id: merge
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git fetch origin master automation/merge-master-into-ai-composition
+          if git merge-base --is-ancestor origin/master HEAD; then
+            echo "already_merged=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          set +e
+          git merge --no-ff --no-commit origin/master
+          merge_rc=$?
+          set -e
+
+          if [ "$merge_rc" -eq 0 ]; then
+            git commit -m "Merge master into refactor/ai-agent-runtime-asset-composition-impl"
+            git push origin HEAD:refactor/ai-agent-runtime-asset-composition-impl
+            echo "merged=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          mkdir -p /tmp/merge-conflicts
+          git diff --name-only --diff-filter=U > /tmp/merge-conflicts/conflicts.txt
+
+          if git show origin/automation/merge-master-into-ai-composition:.merge-resolutions.tar.gz.b64 >/tmp/merge-resolutions.tar.gz.b64 2>/dev/null; then
+            base64 -d /tmp/merge-resolutions.tar.gz.b64 >/tmp/merge-resolutions.tar.gz
+            tar -xzf /tmp/merge-resolutions.tar.gz -C .
+            git add -A
+            if [ -n "$(git diff --name-only --diff-filter=U)" ]; then
+              echo "resolution bundle did not resolve every conflict" >&2
+              exit 2
+            fi
+            git commit -m "Merge master into refactor/ai-agent-runtime-asset-composition-impl"
+            git push origin HEAD:refactor/ai-agent-runtime-asset-composition-impl
+            echo "merged=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          while IFS= read -r path; do
+            [ -n "$path" ] || continue
+            mkdir -p "/tmp/merge-conflicts/$(dirname "$path")"
+            git show ":1:$path" > "/tmp/merge-conflicts/$path.base" 2>/dev/null || true
+            git show ":2:$path" > "/tmp/merge-conflicts/$path.ours" 2>/dev/null || true
+            git show ":3:$path" > "/tmp/merge-conflicts/$path.theirs" 2>/dev/null || true
+            cp "$path" "/tmp/merge-conflicts/$path.conflict" 2>/dev/null || true
+          done < /tmp/merge-conflicts/conflicts.txt
+
+          tar -czf /tmp/merge-conflicts.tar.gz -C /tmp/merge-conflicts .
+          echo "conflicts=true" >> "$GITHUB_OUTPUT"
+          exit 1
+
+      - name: Upload merge conflicts
+        if: failure() && steps.merge.outputs.conflicts == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: merge-conflicts
+          path: /tmp/merge-conflicts.tar.gz
+          if-no-files-found: error
