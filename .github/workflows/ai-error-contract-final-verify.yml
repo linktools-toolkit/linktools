@@ -6,7 +6,7 @@ on:
       - fix/ai-error-contract-closure
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   verify:
@@ -28,159 +28,160 @@ jobs:
             'aiosqlite==0.22.1' ruff rich requests packaging
           python -m pip install -e ./linktools --no-deps
 
-      - name: Prepare semantic TRY004 candidate
+      - name: Check out final work branch snapshot
         run: |
-          cp .github/ai-error-spec-constructor-contract.py /tmp/spec-constructor-contract.py
-          cp .github/ai-error-spec-test-contract.py /tmp/spec-test-contract.py
           git fetch --depth=1 origin fix/ai-error-contract-closure
-          git worktree add /tmp/try004-closure FETCH_HEAD
-          cd /tmp/try004-closure
-          set +e
-          python -m ruff check --isolated --select TRY004 \
-            linktools-ai/scripts/build linktools-ai/src/linktools/ai \
-            linktools-ai/src/linktools/commands/ai tests/ai \
-            --output-format=json > /tmp/try004-before.json
-          status=$?
-          set -e
-          test "$status" -ne 0
-          python - <<'PY'
-          import json
-          from pathlib import Path
+          git worktree add /tmp/final-error-audit FETCH_HEAD
+          git -C /tmp/final-error-audit rev-parse HEAD | tee /tmp/final-head.txt
 
-          root = Path.cwd().resolve()
-          diagnostics = json.loads(Path('/tmp/try004-before.json').read_text())
-          if len(diagnostics) != 40:
-              raise SystemExit(f'expected 40 TRY004 diagnostics, found {len(diagnostics)}')
-
-          type_markers = {
-              'linktools-ai/src/linktools/ai/runtime/_message.py': (
-                  'model message persistence requires string object keys',
-              ),
-              'linktools-ai/src/linktools/ai/runtime/state/_contracts.py': (
-                  'execution modes must be boolean',
-                  'recovery prompt payload is invalid',
-                  'recovery execution modes must be boolean',
-              ),
-              'linktools-ai/src/linktools/ai/runtime/state/_plan.py': (
-                  'RuntimeDomain is required',
-              ),
-              'linktools-ai/src/linktools/ai/spec/_contract.py': (
-                  'agent system prompt must be a string',
-                  'agent instructions must be a string array',
-                  'agent metadata must be an object',
-              ),
-              'linktools-ai/src/linktools/ai/storage/_contracts.py': (
-                  'storage metadata must be a JSON object',
-              ),
-              'linktools-ai/src/linktools/ai/storage/_payload.py': (
-                  'object payload reference is invalid',
-              ),
-              'linktools-ai/src/linktools/ai/task/_graph.py': (
-                  'task node dependencies are invalid',
-                  'task node input must be a mapping',
-              ),
-              'linktools-ai/src/linktools/ai/temporal/workflow/_execution.py': (
-                  'returned an invalid execution snapshot',
-              ),
-          }
-
-          type_changes = 0
-          semantic_value_ignores = 0
-          by_file: dict[str, list[dict[str, object]]] = {}
-          for item in diagnostics:
-              path = Path(item['filename']).resolve()
-              relative = path.relative_to(root).as_posix()
-              by_file.setdefault(relative, []).append(item)
-
-          for relative, items in by_file.items():
-              path = Path(relative)
-              lines = path.read_text().splitlines(keepends=True)
-              for item in sorted(items, key=lambda value: value['location']['row'], reverse=True):
-                  row = item['location']['row']
-                  index = row - 1
-                  line = lines[index]
-                  if 'raise ValueError' not in line:
-                      raise SystemExit(f'{relative}:{row}: expected ValueError raise, found {line!r}')
-                  markers = type_markers.get(relative, ())
-                  if any(marker in line for marker in markers):
-                      lines[index] = line.replace('raise ValueError', 'raise TypeError', 1)
-                      type_changes += 1
-                  else:
-                      newline = '\n' if line.endswith('\n') else ''
-                      body = line[:-1] if newline else line
-                      lines[index] = f'{body}  # noqa: TRY004{newline}'
-                      semantic_value_ignores += 1
-              path.write_text(''.join(lines))
-
-          if type_changes != 13 or semantic_value_ignores != 27:
-              raise SystemExit(
-                  f'unexpected TRY004 classification: type={type_changes} value={semantic_value_ignores}'
-              )
-
-          extras = {
-              'linktools-ai/src/linktools/ai/runtime/_message.py': (
-                  ('    raise ValueError("model message persistence contains a non-JSON value")\n',
-                   '    raise TypeError("model message persistence contains a non-JSON value")\n'),
-              ),
-              'linktools-ai/src/linktools/ai/spec/_contract.py': (
-                  ('            raise ValueError("agent instructions must be strings")\n',
-                   '            raise TypeError("agent instructions must be strings")\n'),
-                  ('            raise ValueError("agent usage_limits must be AgentUsageLimits or None")\n',
-                   '            raise TypeError("agent usage_limits must be AgentUsageLimits or None")\n'),
-              ),
-              'linktools-ai/src/linktools/ai/storage/_payload.py': (
-                  ('                raise ValueError("object payload reference is invalid")\n',
-                   '                raise TypeError("object payload reference is invalid")\n'),
-              ),
-              'linktools-ai/src/linktools/ai/task/_graph.py': (
-                  ('            raise ValueError("task node dependencies are invalid") from error\n',
-                   '            raise TypeError("task node dependencies are invalid") from error\n'),
-              ),
-          }
-          for relative, pairs in extras.items():
-              path = Path(relative)
-              text = path.read_text()
-              for old, new in pairs:
-                  count = text.count(old)
-                  if count != 1:
-                      raise SystemExit(f'{relative}: expected one extra replacement, found {count}: {old!r}')
-                  text = text.replace(old, new)
-              path.write_text(text)
-          PY
-          python /tmp/spec-constructor-contract.py
-          python /tmp/spec-test-contract.py
-          git diff --check
-
-      - name: Ruff exact release command
-        working-directory: /tmp/try004-closure
-        env:
-          PYTHONPATH: linktools-ai:linktools-ai/src:linktools/src
-        run: python -m ruff check linktools-ai/scripts/build linktools-ai/src/linktools/ai linktools-ai/src/linktools/commands/ai tests/ai
-
-      - name: Ruff isolated proof
-        working-directory: /tmp/try004-closure
-        env:
-          PYTHONPATH: linktools-ai:linktools-ai/src:linktools/src
-        run: python -m ruff check --isolated linktools-ai/scripts/build linktools-ai/src/linktools/ai linktools-ai/src/linktools/commands/ai tests/ai
-
-      - name: Compile semantic candidate
-        working-directory: /tmp/try004-closure
+      - name: Compile linktools-ai
+        working-directory: /tmp/final-error-audit
         env:
           PYTHONPATH: linktools-ai:linktools-ai/src:linktools/src
         run: python -m compileall -q linktools-ai/src/linktools/ai
 
-      - name: Test semantic candidate
-        working-directory: /tmp/try004-closure
+      - name: Test linktools-ai
+        working-directory: /tmp/final-error-audit
         timeout-minutes: 12
         env:
           PYTHONPATH: linktools-ai:linktools-ai/src:linktools/src
         run: python -m pytest -q tests/ai
 
-      - name: Commit semantic TRY004 closure
-        working-directory: /tmp/try004-closure
+      - name: Ruff exact release command
+        working-directory: /tmp/final-error-audit
+        env:
+          PYTHONPATH: linktools-ai:linktools-ai/src:linktools/src
+        run: python -m ruff check linktools-ai/scripts/build linktools-ai/src/linktools/ai linktools-ai/src/linktools/commands/ai tests/ai
+
+      - name: Ruff isolated proof
+        working-directory: /tmp/final-error-audit
+        env:
+          PYTHONPATH: linktools-ai:linktools-ai/src:linktools/src
+        run: python -m ruff check --isolated linktools-ai/scripts/build linktools-ai/src/linktools/ai linktools-ai/src/linktools/commands/ai tests/ai
+
+      - name: Generate semantic audit evidence
+        working-directory: /tmp/final-error-audit
         run: |
-          git config user.name github-actions[bot]
-          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
-          git add linktools-ai/src/linktools/ai tests/ai/test_spec_capability_refactor.py tests/ai/test_asset_repository.py
-          git commit -m 'style(ai): preserve exception semantics under Ruff'
-          git push origin HEAD:fix/ai-error-contract-closure
+          python - <<'PY'
+          import json
+          import re
+          from collections import Counter
+          from pathlib import Path
+
+          production_roots = (
+              Path('linktools-ai/src/linktools/ai'),
+              Path('linktools-ai/src/linktools/commands/ai'),
+          )
+          test_root = Path('tests/ai')
+
+          def py_files(roots):
+              for root in roots:
+                  yield from sorted(root.rglob('*.py'))
+
+          def matches(roots, pattern):
+              regex = re.compile(pattern)
+              result = []
+              for path in py_files(roots):
+                  lines = path.read_text().splitlines()
+                  for index, line in enumerate(lines):
+                      if regex.search(line):
+                          start = max(0, index - 4)
+                          end = min(len(lines), index + 5)
+                          result.append({
+                              'path': path.as_posix(),
+                              'line': index + 1,
+                              'text': line.strip(),
+                              'context': [
+                                  {'line': number + 1, 'text': lines[number]}
+                                  for number in range(start, end)
+                              ],
+                          })
+              return result
+
+          reports = {
+              'storage_integrity': matches(
+                  (Path('linktools-ai/src/linktools/ai'),),
+                  r'ErrorCode\.STORAGE_INTEGRITY_ERROR',
+              ),
+              'wide_catches': matches(
+                  production_roots,
+                  r'except\s+(?:Exception|BaseException)\b',
+              ),
+              'execution_result': matches(
+                  production_roots,
+                  r'\bExecutionResult\b',
+              ),
+              'noqa': matches(
+                  production_roots + (test_root,),
+                  r'#\s*noqa\b',
+              ),
+          }
+          Path('/tmp/final-semantic-audit.json').write_text(
+              json.dumps(reports, ensure_ascii=False, indent=2) + '\n'
+          )
+          summary = []
+          for name, values in reports.items():
+              counts = Counter(item['path'] for item in values)
+              summary.append(f'[{name}] total={len(values)}')
+              summary.extend(f'{count}\t{path}' for path, count in sorted(counts.items(), key=lambda item: (-item[1], item[0])))
+              summary.append('')
+          Path('/tmp/final-semantic-summary.txt').write_text('\n'.join(summary))
+
+          codes = (
+              'INTERNAL_ERROR',
+              'MODEL_API_ERROR',
+              'MODEL_REQUEST_REJECTED',
+              'MODEL_RATE_LIMITED',
+              'MODEL_TIMEOUT',
+              'MODEL_UNAVAILABLE',
+              'MODEL_RESPONSE_INVALID',
+              'MODEL_CONTENT_FILTERED',
+              'EXECUTION_CONCURRENCY_LIMIT_EXCEEDED',
+              'EXECUTION_NOT_READY',
+              'EXECUTION_WAIT_TIMEOUT',
+              'TASK_WAIT_TIMEOUT',
+              'TOOL_RETRY_REQUIRED',
+              'TOOL_EXECUTION_FAILED',
+              'ASSET_NOT_FOUND',
+              'STORAGE_PATH_INVALID',
+          )
+          production_text = '\n'.join(path.read_text() for path in py_files(production_roots))
+          test_text = '\n'.join(path.read_text() for path in py_files((test_root,)))
+          matrix = []
+          missing = []
+          for code in codes:
+              token = f'ErrorCode.{code}'
+              production = production_text.count(token)
+              validation = test_text.count(token)
+              matrix.append(f'{code}\tproduction={production}\tvalidation={validation}')
+              if production < 1 or validation < 1:
+                  missing.append(code)
+          Path('/tmp/final-error-code-matrix.txt').write_text('\n'.join(matrix) + '\n')
+          if missing:
+              raise SystemExit(f'new error codes missing production use or validation: {missing}')
+
+          forbidden = (
+              'ruff.toml',
+              '.github/workflows/ai-error-contract-closure.yml',
+              '.github/workflows/ai-error-contract-pr.yml',
+              '.github/workflows/ai-error-contract-pr-verify.yml',
+              'linktools-ai/scripts/build/_error_contract_closure.py',
+              'linktools-ai/scripts/build/_error_contract_followup.py',
+          )
+          leftovers = [path for path in forbidden if Path(path).exists()]
+          Path('/tmp/final-temp-leftovers.txt').write_text('\n'.join(leftovers) + ('\n' if leftovers else ''))
+          if leftovers:
+              raise SystemExit(f'forbidden temporary/config assets remain: {leftovers}')
+          PY
+
+      - name: Upload final semantic audit
+        uses: actions/upload-artifact@v4
+        with:
+          name: ai-error-contract-final-semantic-audit
+          path: |
+            /tmp/final-head.txt
+            /tmp/final-semantic-audit.json
+            /tmp/final-semantic-summary.txt
+            /tmp/final-error-code-matrix.txt
+            /tmp/final-temp-leftovers.txt
+          if-no-files-found: error
