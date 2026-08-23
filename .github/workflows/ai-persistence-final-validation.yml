@@ -61,9 +61,10 @@ jobs:
           if [ ! -f "$STATUS" ] && ! grep -q 'current dataclass fingerprint changed without a schema revision' linktools-ai/src/linktools/ai/runtime/state/_codec.py; then
             run_check python .bootstrap/complete_binding_codec_simplification.py || true
           fi
-          if [ ! -f "$STATUS" ] && [ ! -f linktools-ai/scripts/build/matrix/runtime_model_messages_v1.json ]; then
+          if [ ! -f "$STATUS" ] && { [ ! -f linktools-ai/scripts/build/matrix/runtime_model_messages_v1.json ] || ! grep -q 'def validate_external_fixtures' linktools-ai/scripts/build/persistence.py; }; then
             run_check python .bootstrap/add_external_persistence_fixture.py || true
           fi
+          if [ ! -f "$STATUS" ]; then run_check python .bootstrap/preserve_history_schema_errors.py || true; fi
           if [ ! -f "$STATUS" ]; then run_check python -m compileall -q linktools-ai/src/linktools/ai || true; fi
           if [ ! -f "$STATUS" ]; then run_check ruff check --select E4,E7,E9,F linktools-ai/src/linktools/ai tests/ai || true; fi
           if [ ! -f "$STATUS" ]; then (cd linktools-ai && python -m scripts.build.persistence) >> "$RESULT" 2>&1; rc=$?; echo "===== persistence exit=$rc =====" >> "$RESULT"; if [ "$rc" -ne 0 ]; then echo "$rc" > "$STATUS"; fi; fi
