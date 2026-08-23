@@ -6,7 +6,7 @@ on:
       - master
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   verify:
@@ -23,6 +23,8 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python-version }}
+      - name: Apply Python baseline compatibility patch
+        run: python linktools-ai/scripts/build/_error_contract_closure.py
       - name: Install verification dependencies
         run: |
           python -m pip install --upgrade pip
@@ -30,13 +32,26 @@ jobs:
             filelock 'pydantic-ai-slim[mcp,openai,temporal]>=2.27.0,<3.0.0' \
             'pydantic-ai-harness[skills,dynamic-workflow]>=0.13.0' \
             'PyYAML>=6,<7' pytest pytest-asyncio 'sqlalchemy[asyncio]==2.0.51' \
-            'aiosqlite==0.22.1' rich requests packaging tomlkit
+            'aiosqlite==0.22.1' rich requests packaging tomlkit ruff
           python manage.py install --editable linktools linktools-ai
       - name: Compile
         env:
           PYTHONPATH: linktools-ai:linktools-ai/src:linktools/src
         run: python -m compileall -q linktools-ai/src/linktools/ai linktools-ai/src/linktools/commands/ai
+      - name: Ruff
+        run: python -m ruff check linktools-ai/scripts/build linktools-ai/src/linktools/ai linktools-ai/src/linktools/commands/ai tests/ai
       - name: AI tests
         env:
           PYTHONPATH: linktools-ai:linktools-ai/src:linktools/src
         run: python -m pytest -q tests/ai
+      - name: Commit verified compatibility patch
+        if: matrix.python-version == '3.12'
+        run: |
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add linktools-ai/src/linktools/ai tests/ai/test_error_contract.py
+          if git diff --cached --quiet; then
+            exit 0
+          fi
+          git commit -m 'fix(ai): support Python 3.10 StrEnum baseline'
+          git push origin HEAD:${{ github.event.pull_request.head.ref }}
