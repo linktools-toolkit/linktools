@@ -1,0 +1,108 @@
+===== python -m pip install -q --upgrade pip =====
+===== python -m pip install -q -e ./linktools -e ./linktools-ai[sqlite,evaluation,temporal] pytest pytest-asyncio ruff =====
+===== python .bootstrap/patch.py =====
+runtime V1 agent identity migration staged
+===== python -m compileall -q linktools-ai/src/linktools/ai =====
+===== ruff check --select E4,E7,E9,F linktools-ai/src/linktools/ai tests/ai =====
+F401 [*] `pydantic_ai_harness.step_persistence.ContinuableSnapshot` imported but unused
+  --> linktools-ai/src/linktools/ai/adapter/_history.py:15:5
+   |
+13 | from pydantic_ai.messages import ModelRequest, ModelResponse
+14 | from pydantic_ai_harness.step_persistence import (
+15 |     ContinuableSnapshot,
+   |     ^^^^^^^^^^^^^^^^^^^
+16 |     RunRecord,
+17 |     StepEvent,
+   |
+help: Remove unused import: `pydantic_ai_harness.step_persistence.ContinuableSnapshot`
+   |
+14 | from pydantic_ai_harness.step_persistence import (
+   -     ContinuableSnapshot,
+15 |     RunRecord,
+   |
+
+F401 `._mcp.mcp_server_selector` imported but unused; consider removing, adding to `__all__`, or using a redundant alias
+  --> linktools-ai/src/linktools/ai/capability/__init__.py:13:54
+   |
+11 |     validate_fingerprint,
+12 | )
+13 | from ._mcp import MCPCapabilityProvider, MCPRuntime, mcp_server_selector
+   |                                                      ^^^^^^^^^^^^^^^^^^^
+14 | from ._names import SKILL_TOOL_NAMES
+15 | from ._skill import SkillCapabilityProvider
+   |
+help: Add unused import `mcp_server_selector` to __all__
+
+F401 [*] `typing.Any` imported but unused
+  --> linktools-ai/src/linktools/ai/runtime/state/_migration.py:16:20
+   |
+14 | from collections.abc import Mapping
+15 | from dataclasses import replace
+16 | from typing import Any, get_type_hints
+   |                    ^^^
+17 |
+18 | from pydantic import BaseModel
+   |
+help: Remove unused import: `typing.Any`
+   |
+15 | from dataclasses import replace
+   - from typing import Any, get_type_hints
+16 + from typing import get_type_hints
+17 |
+   |
+
+F401 [*] `._contracts.RecoveryExecutionInput` imported but unused
+  --> linktools-ai/src/linktools/ai/runtime/state/_migration.py:38:5
+   |
+36 |     ExecutionRecord,
+37 |     RecoveryAdmissionRecord,
+38 |     RecoveryExecutionInput,
+   |     ^^^^^^^^^^^^^^^^^^^^^^
+39 |     SessionRecord,
+40 | )
+   |
+help: Remove unused import: `._contracts.RecoveryExecutionInput`
+   |
+37 |     RecoveryAdmissionRecord,
+   -     RecoveryExecutionInput,
+38 |     SessionRecord,
+   |
+
+F401 [*] `linktools.ai.runtime.state.ContextProjection` imported but unused
+  --> tests/ai/test_runtime_state_identity_migration.py:16:5
+   |
+14 | from linktools.ai.runtime import RuntimeState
+15 | from linktools.ai.runtime.state import (
+16 |     ContextProjection,
+   |     ^^^^^^^^^^^^^^^^^
+17 |     RuntimeDomain,
+18 |     SessionRecord,
+   |
+help: Remove unused import
+   |
+15 | from linktools.ai.runtime.state import (
+   -     ContextProjection,
+   -     RuntimeDomain,
+16 |     SessionRecord,
+   |
+
+F401 [*] `linktools.ai.runtime.state.RuntimeDomain` imported but unused
+  --> tests/ai/test_runtime_state_identity_migration.py:17:5
+   |
+15 | from linktools.ai.runtime.state import (
+16 |     ContextProjection,
+17 |     RuntimeDomain,
+   |     ^^^^^^^^^^^^^
+18 |     SessionRecord,
+19 |     migrate_v1_agent_identity_state,
+   |
+help: Remove unused import
+   |
+15 | from linktools.ai.runtime.state import (
+   -     ContextProjection,
+   -     RuntimeDomain,
+16 |     SessionRecord,
+   |
+
+Found 6 errors.
+[*] 5 fixable with the `--fix` option.

@@ -27,7 +27,13 @@ from ._runtime_service import Runtime
 from ._session import DefaultSessionService
 from ._subagent import SubagentDispatcher
 from .service_api import ExecutionHistoryReader, SessionHistoryReader
-from .state import RecoveryCheckpointState, RuntimeDomain, RuntimeRetentionMode, RuntimeState
+from .state import (
+    RecoveryCheckpointState,
+    RuntimeDomain,
+    RuntimeRetentionMode,
+    RuntimeState,
+    migrate_v1_agent_identity_state,
+)
 
 _logger = environ.get_logger("ai.runtime.factory")
 
@@ -49,6 +55,11 @@ async def build_local_runtime(
 ) -> Runtime:
     if not state.ready or not assets.ready:
         raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+    migrated = await migrate_v1_agent_identity_state(
+        state, catalog, compiler, tenant_id=tenant_id
+    )
+    if migrated:
+        _logger.info("legacy Runtime V1 state normalized: records=%s", migrated)
     execution = DefaultExecutionService(
         state.execution,
         state.object_store(RuntimeDomain.EXECUTION),
