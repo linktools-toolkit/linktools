@@ -13,12 +13,21 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import cast
 
+from linktools.ai.agent import AgentBindingSnapshot
 from linktools.ai.core import JsonValue, canonical_json_bytes
 from linktools.ai.runtime._message import (
     decode_model_messages,
     encode_model_messages,
 )
-from linktools.ai.runtime.state._codec import _runtime_persistence_manifest
+from linktools.ai.runtime.state._codec import (
+    _CURRENT_CODEC,
+    _DATACLASS_PERSISTENCE_BY_VERSION,
+    _apply_persisted_upgrades,
+    _decode_dataclass,
+    _encode_persisted_domain,
+    _runtime_persistence_manifest,
+)
+from linktools.ai.spec import AgentSpec
 from pydantic_ai.messages import ModelRequest, UserPromptPart
 
 
@@ -116,6 +125,39 @@ def validate_append_only(
     return tuple(errors)
 
 
+def validate_fixture_append_only(
+    baseline: Mapping[str, JsonValue],
+    candidate: Mapping[str, JsonValue],
+) -> tuple[str, ...]:
+    errors: list[str] = []
+    for key, value in baseline.items():
+        if candidate.get(key) != value:
+            errors.append(f"historical upgrade fixture changed: {key}")
+    return tuple(errors)
+
+
+def _agent_binding_snapshot_fixture_value() -> AgentBindingSnapshot:
+    return AgentBindingSnapshot(
+        version=1,
+        agent_spec=AgentSpec("runtime-persistence-v1"),
+        agent_digest="a" * 64,
+        output_type_module="linktools.ai.runtime.fixture",
+        output_type_qualname="FixtureOutput",
+        output_schema_id="runtime.persistence.fixture",
+        output_schema_revision=1,
+        output_schema_fingerprint="b" * 64,
+        local_runtime_capability_descriptors=(),
+        binding_digest="c" * 64,
+    )
+
+
+def _load_external_fixture(path: Path) -> object:
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        raise ValueError(f"invalid external persistence fixture: {path}: {error}") from error
+
+
 def _model_message_fixture_values() -> tuple[ModelRequest, ...]:
     fixed = datetime(2026, 1, 1, tzinfo=timezone.utc)
     return (
@@ -137,31 +179,158 @@ def validate_external_fixtures(
     external = manifest.get("external")
     if not isinstance(external, Mapping):
         return ("external manifest is invalid",)
+    root = Path(matrix_dir)
+
+    binding_contract = external.get("agent_binding_snapshot")
+    if not isinstance(binding_contract, Mapping):
+        return ("agent_binding_snapshot external contract is invalid",)
+    binding_fixture = binding_contract.get("fixture")
+    if not isinstance(binding_fixture, str) or not binding_fixture:
+        return ("agent_binding_snapshot fixture is not declared",)
+    binding_path = root / binding_fixture
+    if not binding_path.is_file():
+        return (f"missing external persistence fixture: {binding_path}",)
+    try:
+        binding_value = _load_external_fixture(binding_path)
+    except ValueError as error:
+        return (str(error),)
+    expected_binding = _agent_binding_snapshot_fixture_value()
+    if binding_value != expected_binding.to_payload():
+        return ("agent_binding_snapshot writer drifted from the frozen V1 fixture",)
+    try:
+        decoded_binding = AgentBindingSnapshot.from_payload(binding_value)
+    except Exception as error:
+        return (f"agent_binding_snapshot V1 fixture is no longer readable: {error}",)
+    if decoded_binding != expected_binding:
+        return ("agent_binding_snapshot V1 fixture decodes to different semantics",)
+
     model_contract = external.get("model_message")
     if not isinstance(model_contract, Mapping):
         return ("model_message external contract is invalid",)
-    fixture_name = model_contract.get("fixture")
-    if not isinstance(fixture_name, str) or not fixture_name:
+    model_fixture = model_contract.get("fixture")
+    if not isinstance(model_fixture, str) or not model_fixture:
         return ("model_message fixture is not declared",)
-    path = Path(matrix_dir) / fixture_name
-    if not path.is_file():
-        return (f"missing external persistence fixture: {path}",)
+    model_path = root / model_fixture
+    if not model_path.is_file():
+        return (f"missing external persistence fixture: {model_path}",)
     try:
-        value = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as error:
-        return (f"invalid external persistence fixture: {path}: {error}",)
-    expected = json.loads(
+        model_value = _load_external_fixture(model_path)
+    except ValueError as error:
+        return (str(error),)
+    expected_model = json.loads(
         encode_model_messages(_model_message_fixture_values()).decode("utf-8")
     )
-    if value != expected:
+    if model_value != expected_model:
         return ("model_message writer drifted from the frozen V1 fixture",)
     try:
-        decoded = decode_model_messages(canonical_json_bytes(value))
+        decoded_model = decode_model_messages(canonical_json_bytes(model_value))
     except Exception as error:
         return (f"model_message V1 fixture is no longer readable: {error}",)
-    if decoded != _model_message_fixture_values():
+    if decoded_model != _model_message_fixture_values():
         return ("model_message V1 fixture decodes to different semantics",)
     return ()
+
+
+def _historical_revision_keys(
+    manifest: Mapping[str, JsonValue],
+) -> set[str]:
+    dataclasses = manifest.get("dataclasses")
+    if not isinstance(dataclasses, Mapping):
+        return set()
+    expected: set[str] = set()
+    for wire_id, raw_contract in dataclasses.items():
+        if not isinstance(wire_id, str) or not isinstance(raw_contract, Mapping):
+            continue
+        revisions = raw_contract.get("revisions")
+        if not isinstance(revisions, Mapping):
+            continue
+        numbers: list[int] = []
+        for raw_revision in revisions:
+            if not isinstance(raw_revision, str):
+                continue
+            try:
+                numbers.append(int(raw_revision))
+            except ValueError:
+                continue
+        if not numbers:
+            continue
+        current = max(numbers)
+        expected.update(f"{wire_id}@{revision}" for revision in numbers if revision < current)
+    return expected
+
+
+def validate_upgrade_fixtures(
+    manifest: Mapping[str, JsonValue],
+    fixtures: Mapping[str, JsonValue],
+) -> tuple[str, ...]:
+    errors: list[str] = []
+    expected = _historical_revision_keys(manifest)
+    if set(fixtures) != expected:
+        missing = sorted(expected - set(fixtures))
+        unknown = sorted(set(fixtures) - expected)
+        errors.extend(f"missing upgrade fixture: {key}" for key in missing)
+        errors.extend(f"unknown upgrade fixture: {key}" for key in unknown)
+        if missing or unknown:
+            return tuple(errors)
+
+    contracts = _DATACLASS_PERSISTENCE_BY_VERSION.get(_CURRENT_CODEC.version)
+    if contracts is None:
+        return ("current dataclass persistence contracts are unavailable",)
+    for key in sorted(expected):
+        wire_id, raw_revision = key.rsplit("@", 1)
+        revision = int(raw_revision)
+        fixture = fixtures[key]
+        if not isinstance(fixture, Mapping) or set(fixture) != {
+            "fields",
+            "current_fields",
+        }:
+            errors.append(f"invalid upgrade fixture: {key}")
+            continue
+        raw_fields = fixture.get("fields")
+        expected_fields = fixture.get("current_fields")
+        if not isinstance(raw_fields, Mapping) or not isinstance(
+            expected_fields, Mapping
+        ):
+            errors.append(f"invalid upgrade fixture fields: {key}")
+            continue
+        contract = contracts.get(wire_id)
+        target = _CURRENT_CODEC.domain_types.get(wire_id)
+        if contract is None or target is None:
+            errors.append(f"upgrade fixture target is unavailable: {key}")
+            continue
+        try:
+            upgraded = _apply_persisted_upgrades(
+                raw_fields,
+                revision,
+                contract,
+                _CURRENT_CODEC,
+            )
+            if dict(upgraded) != dict(expected_fields):
+                errors.append(f"upgrade fixture semantics changed: {key}")
+                continue
+            decoded = _decode_dataclass(
+                {
+                    "$dataclass": wire_id,
+                    "schema": revision,
+                    "fields": dict(raw_fields),
+                },
+                target,
+                _CURRENT_CODEC,
+                persisted=True,
+            )
+            rewritten = _encode_persisted_domain(decoded)
+        except Exception as error:
+            errors.append(f"upgrade fixture is no longer readable: {key}: {error}")
+            continue
+        if not isinstance(rewritten, Mapping):
+            errors.append(f"upgrade fixture rewrite is invalid: {key}")
+            continue
+        rewritten_fields = rewritten.get("fields")
+        if not isinstance(rewritten_fields, Mapping) or dict(rewritten_fields) != dict(
+            expected_fields
+        ):
+            errors.append(f"upgrade fixture rewrite changed: {key}")
+    return tuple(errors)
 
 
 def _git(
@@ -181,12 +350,7 @@ def load_git_baseline(
     *,
     base_ref: str | None = None,
 ) -> dict[str, JsonValue] | None:
-    """Load the manifest at the immutable branch/release comparison point.
-
-    Feature branches compare against their merge-base with ``origin/master``.
-    A master checkout compares against its first parent. Repositories without
-    Git history, including source distributions, simply skip this extra gate.
-    """
+    """Load one JSON contract at the immutable branch/release comparison point."""
     path = Path(manifest).resolve()
     repository = Path(__file__).resolve().parents[3]
     if not (repository / ".git").exists():
@@ -222,13 +386,9 @@ def load_git_baseline(
     try:
         value = json.loads(historical.stdout)
     except json.JSONDecodeError as error:
-        raise ValueError(
-            f"historical runtime persistence manifest is invalid at {base_sha}"
-        ) from error
+        raise ValueError(f"historical JSON contract is invalid at {base_sha}") from error
     if not isinstance(value, dict):
-        raise ValueError(
-            f"historical runtime persistence manifest is not an object at {base_sha}"
-        )
+        raise ValueError(f"historical JSON contract is not an object at {base_sha}")
     return cast("dict[str, JsonValue]", value)
 
 
@@ -236,15 +396,29 @@ def _default_manifest() -> Path:
     return Path(__file__).with_name("matrix") / "runtime-persistence-v1.json"
 
 
+def _default_upgrade_fixtures() -> Path:
+    return Path(__file__).with_name("matrix") / "runtime-persistence-upgrades-v1.json"
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--manifest", type=Path, default=_default_manifest())
+    parser.add_argument(
+        "--upgrade-fixtures",
+        type=Path,
+        default=_default_upgrade_fixtures(),
+    )
     parser.add_argument("--baseline", type=Path)
+    parser.add_argument("--upgrade-baseline", type=Path)
     parser.add_argument("--baseline-ref")
     args = parser.parse_args()
+
     candidate = load_manifest(args.manifest)
+    upgrade_fixtures = load_manifest(args.upgrade_fixtures)
     errors = list(validate_runtime_persistence_manifest(candidate))
     errors.extend(validate_external_fixtures(candidate, args.manifest.parent))
+    errors.extend(validate_upgrade_fixtures(candidate, upgrade_fixtures))
+
     if args.baseline is not None:
         baseline = load_manifest(args.baseline)
     else:
@@ -258,6 +432,23 @@ def main() -> int:
             baseline = None
     if baseline is not None:
         errors.extend(validate_append_only(baseline, candidate))
+
+    if args.upgrade_baseline is not None:
+        upgrade_baseline = load_manifest(args.upgrade_baseline)
+    else:
+        try:
+            upgrade_baseline = load_git_baseline(
+                args.upgrade_fixtures,
+                base_ref=args.baseline_ref,
+            )
+        except ValueError as error:
+            errors.append(str(error))
+            upgrade_baseline = None
+    if upgrade_baseline is not None:
+        errors.extend(
+            validate_fixture_append_only(upgrade_baseline, upgrade_fixtures)
+        )
+
     for error in errors:
         print(error)
     return 1 if errors else 0
@@ -272,5 +463,7 @@ __all__ = [
     "load_manifest",
     "validate_append_only",
     "validate_external_fixtures",
+    "validate_fixture_append_only",
     "validate_runtime_persistence_manifest",
+    "validate_upgrade_fixtures",
 ]
