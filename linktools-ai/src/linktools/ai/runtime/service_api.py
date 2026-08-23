@@ -120,6 +120,8 @@ class ExecutionResult:
         if self.status is ExecutionStatus.CANCELLED:
             if self.error_code != ErrorCode.EXECUTION_CANCELLED.value:
                 raise ValueError("cancelled execution result requires EXECUTION_CANCELLED")
+            if _has_output_contract(self):
+                raise ValueError("cancelled execution result cannot carry output")
             return
         if self.status is ExecutionStatus.FAILED:
             if self.error_code is None:
@@ -130,8 +132,19 @@ class ExecutionResult:
                 raise ValueError("failed execution result contains an unknown error code") from error
             if code is ErrorCode.EXECUTION_CANCELLED:
                 raise ValueError("failed execution result cannot carry EXECUTION_CANCELLED")
+            if _has_output_contract(self):
+                raise ValueError("failed execution result cannot carry output")
             return
         raise ValueError("execution result requires a terminal status")
+
+
+def _has_output_contract(result: ExecutionResult) -> bool:
+    return (
+        result.output is not None
+        or result.output_schema_id is not None
+        or result.output_schema_revision is not None
+        or result.output_schema_fingerprint is not None
+    )
 
 
 @dataclass(frozen=True, slots=True)

@@ -1441,9 +1441,9 @@ def _terminal_error(
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         return None, {}
     if execution.status is ExecutionStatus.CANCELLED:
-        if execution.error_code not in {None, ErrorCode.EXECUTION_CANCELLED.value}:
+        if execution.error_code != ErrorCode.EXECUTION_CANCELLED.value:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        return ErrorCode.EXECUTION_CANCELLED.value, details
+        return execution.error_code, details
     if execution.status is not ExecutionStatus.FAILED or execution.error_code is None:
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     try:

@@ -15,6 +15,7 @@ from linktools.ai.core import ExecutionStatus, ToolOperationStatus, UsageMetrics
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.runtime import ExecutionResult
 from linktools.ai.runtime._evaluation import _stable_error
+from linktools.ai.runtime._execution import _terminal_error
 from linktools.ai.runtime._local import _secondary_execution_error
 from linktools.ai.runtime._tool import RuntimeToolOperationBridge, ToolOperationRecord
 from linktools.ai.storage import InMemoryObjectStore, PayloadPolicy
@@ -147,6 +148,39 @@ def test_execution_result_enforces_terminal_error_contract() -> None:
             usage,
             "NOT_A_REAL_ERROR",
         )
+    with pytest.raises(ValueError):
+        ExecutionResult(
+            "failed-with-output",
+            ExecutionStatus.FAILED,
+            {"unexpected": True},
+            None,
+            None,
+            None,
+            usage,
+            ErrorCode.INTERNAL_ERROR.value,
+        )
+    with pytest.raises(ValueError):
+        ExecutionResult(
+            "cancelled-with-schema",
+            ExecutionStatus.CANCELLED,
+            None,
+            "unexpected-schema",
+            None,
+            None,
+            usage,
+            ErrorCode.EXECUTION_CANCELLED.value,
+        )
+
+
+def test_persisted_cancelled_execution_requires_explicit_cancel_code() -> None:
+    class PersistedExecution:
+        status = ExecutionStatus.CANCELLED
+        error_code = None
+        safe_error_details: dict[str, object] = {}
+
+    with pytest.raises(AIError) as error:
+        _terminal_error(PersistedExecution())  # type: ignore[arg-type]
+    assert error.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
 
 
 def test_ai_error_rejects_non_json_safe_details() -> None:
