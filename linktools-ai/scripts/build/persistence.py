@@ -75,6 +75,16 @@ def validate_append_only(
                 errors.append(
                     f"historical revision changed: {wire_id}@{revision}"
                 )
+    for wire_id, raw_candidate in candidate_dataclasses.items():
+        if wire_id in baseline_dataclasses:
+            continue
+        if not isinstance(raw_candidate, Mapping):
+            errors.append(f"new dataclass manifest is invalid: {wire_id}")
+            continue
+        if raw_candidate.get("legacy_revision") is not None:
+            errors.append(
+                f"new dataclass cannot claim unversioned legacy: {wire_id}"
+            )
 
     baseline_enums = baseline.get("enums")
     candidate_enums = candidate.get("enums")
@@ -174,7 +184,7 @@ def load_git_baseline(
     """Load the manifest at the immutable branch/release comparison point.
 
     Feature branches compare against their merge-base with ``origin/master``.
-    A master checkout compares against its first parent.  Repositories without
+    A master checkout compares against its first parent. Repositories without
     Git history, including source distributions, simply skip this extra gate.
     """
     path = Path(manifest).resolve()
