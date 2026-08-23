@@ -28,7 +28,7 @@ jobs:
           python -m pip install \
             filelock 'pydantic-ai-slim[mcp,openai,temporal]>=2.27.0,<3.0.0' \
             'pydantic-ai-harness[skills,dynamic-workflow]>=0.13.0' \
-            'PyYAML>=6,<7' pytest pytest-asyncio 'sqlalchemy[asyncio]==2.0.51' \
+            'PyYAML>=6,<7' pytest pytest-asyncio pytest-timeout 'sqlalchemy[asyncio]==2.0.51' \
             'aiosqlite==0.22.1' ruff rich requests packaging
           python -m pip install -e ./linktools --no-deps
 
@@ -66,9 +66,8 @@ jobs:
 
       - name: Test closure contracts
         working-directory: /tmp/error-closure
-        timeout-minutes: 3
         run: |
-          python -m pytest -q \
+          python -m pytest -vv --timeout=15 \
             tests/ai/test_error_cancellation_contract.py \
             tests/ai/test_spec_capability_refactor.py
 
