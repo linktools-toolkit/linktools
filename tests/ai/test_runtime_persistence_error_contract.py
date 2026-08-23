@@ -5,15 +5,17 @@
 import copy
 import hashlib
 from dataclasses import replace
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
 
 from linktools.ai.agent import AgentCompiler
-from linktools.ai.core import ExecutionEventType
+from linktools.ai.core import ExecutionEventType, ToolOperationStatus
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.model import ModelRegistry
 from linktools.ai.runtime import RuntimeDomain, RuntimeState
+from linktools.ai.runtime._tool import ToolOperationRecord
 from linktools.ai.runtime.state._codec import _encode_persisted_domain, encode_envelope
 from linktools.ai.runtime.state._contracts import (
     RuntimePayloadRef,
@@ -24,9 +26,11 @@ from linktools.ai.runtime.state._contracts import (
 )
 from linktools.ai.runtime.state._maintenance import RuntimeStorageInspection
 from linktools.ai.runtime.state._migration import _migrate_legacy_binding
+from linktools.ai.runtime.state._repositories import _domain_data
 from linktools.ai.runtime.state._store import StoredFact, StoredRecord
 from linktools.ai.spec import AgentSpec
 from linktools.ai.storage import StoredPayload
+from linktools.ai.task import TaskNodeView, TaskStatus
 
 
 def _future_schema(data: object) -> object:
@@ -93,6 +97,23 @@ def _read_model_record(*, version: int = 1) -> StoredRecord:
     )
 
 
+def _record(kind: str, value: object) -> StoredRecord:
+    return StoredRecord(
+        hashlib.sha256(f"key:{kind}".encode()).digest(),
+        hashlib.sha256(f"partition:{kind}".encode()).digest(),
+        None,
+        None,
+        kind,
+        kind,
+        None,
+        0,
+        None,
+        0,
+        None,
+        _domain_data(value),
+    )
+
+
 def test_legacy_binding_malformed_known_field_remains_integrity_error() -> None:
     compiler = _compiler()
     payload = _legacy_binding_payload(compiler)
@@ -152,6 +173,54 @@ def test_maintenance_accepts_current_raw_state_formats() -> None:
         RuntimeDomain.EXECUTION,
         (_read_model_record(),),
         (event, read_model_fact),
+        (),
+        references,
+    )
+
+    assert references == {}
+
+
+def test_maintenance_accepts_lease_projected_records() -> None:
+    now = datetime.now(timezone.utc)
+    task_node = TaskNodeView(
+        "graph",
+        "node",
+        (),
+        TaskStatus.PENDING,
+        None,
+        0,
+        None,
+        None,
+        None,
+        None,
+    )
+    tool_operation = ToolOperationRecord(
+        "operation",
+        "tenant",
+        "step",
+        "call",
+        "key",
+        "tool",
+        "arguments",
+        "binding",
+        True,
+        ToolOperationStatus.PENDING,
+        None,
+        0,
+        None,
+        None,
+        now,
+        now,
+    )
+
+    references: dict[int, set[str]] = {}
+    _inspection()._collect_references(
+        RuntimeDomain.RECOVERY,
+        (
+            _record("task_node", task_node),
+            _record("tool_operation", tool_operation),
+        ),
+        (),
         (),
         references,
     )
