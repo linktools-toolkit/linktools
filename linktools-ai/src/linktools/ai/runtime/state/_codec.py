@@ -495,131 +495,6 @@ class _VersionCodec:
     external_schema_types: Mapping[type[object], JsonValue]
 
 
-_EXECUTION_V1_FIELDS = frozenset(
-    {
-        "execution_id", "tenant_id", "session_id", "binding_digest",
-        "parent_execution_id", "root_execution_id", "source_execution_id",
-        "base_execution_id", "lineage_kind", "status", "revision",
-        "event_sequence", "agent_run_sequence", "error_code",
-        "safe_error_details", "created_at", "updated_at", "planning",
-        "thinking", "binding", "memory_scope", "conversation_step_run_id",
-        "result",
-    }
-)
-_RECOVERY_EXECUTION_V1_FIELDS = frozenset(
-    {
-        "user_prompt", "principal_id", "principal_kind", "session_id",
-        "memory_scope", "binding_digest", "lineage_kind",
-        "parent_execution_id", "root_execution_id", "source_execution_id",
-        "base_execution_id", "conversation_step_run_id", "idempotency",
-        "planning", "thinking", "binding",
-    }
-)
-
-
-def _encode_v1_exact_binding_record(
-    value: object,
-    expected_fields: frozenset[str],
-    codec: "_VersionCodec",
-    persisted: bool,
-) -> Mapping[str, JsonValue]:
-    actual_fields = frozenset(field.name for field in fields(value))
-    if actual_fields != expected_fields:
-        raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
-    planning = attrgetter("planning")(value)
-    thinking = attrgetter("thinking")(value)
-    binding = attrgetter("binding")(value)
-    if (
-        not isinstance(planning, bool)
-        or not isinstance(thinking, bool)
-        or not isinstance(binding, AgentBindingSnapshot)
-    ):
-        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-    return {
-        name: (
-            binding.to_payload()
-            if name == "binding"
-            else _encode_domain(
-                attrgetter(name)(value), codec, persisted=persisted
-            )
-        )
-        for name in expected_fields
-    }
-
-
-def _decode_v1_exact_binding_record_fields(
-    raw_fields: Mapping[str, object],
-    target: type[object],
-    expected_fields: frozenset[str],
-    codec: "_VersionCodec",
-    persisted: bool,
-) -> dict[str, object]:
-    _require_exact_keys(raw_fields, expected_fields)
-    hints = get_type_hints(target)
-    return {
-        name: (
-            AgentBindingSnapshot.from_payload(raw_fields[name])
-            if name == "binding"
-            else _decode_domain(
-                raw_fields[name], hints[name], codec, persisted=persisted
-            )
-        )
-        for name in expected_fields
-    }
-
-
-def _encode_v1_execution_record(
-    value: object,
-    codec: "_VersionCodec",
-    persisted: bool,
-) -> Mapping[str, JsonValue]:
-    if not isinstance(value, ExecutionRecord):
-        raise TypeError("V1 execution_record encoder received the wrong type")
-    return _encode_v1_exact_binding_record(
-        value, _EXECUTION_V1_FIELDS, codec, persisted
-    )
-
-
-def _decode_v1_execution_record(
-    raw_fields: Mapping[str, object],
-    codec: "_VersionCodec",
-    persisted: bool,
-) -> ExecutionRecord:
-    decoded = _decode_v1_exact_binding_record_fields(
-        raw_fields, ExecutionRecord, _EXECUTION_V1_FIELDS, codec, persisted
-    )
-    try:
-        return ExecutionRecord(**decoded)
-    except (TypeError, ValueError) as error:
-        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
-
-
-def _encode_v1_recovery_execution_input(
-    value: object,
-    codec: "_VersionCodec",
-    persisted: bool,
-) -> Mapping[str, JsonValue]:
-    if not isinstance(value, RecoveryExecutionInput):
-        raise TypeError("V1 recovery_execution_input encoder received the wrong type")
-    return _encode_v1_exact_binding_record(
-        value, _RECOVERY_EXECUTION_V1_FIELDS, codec, persisted
-    )
-
-
-def _decode_v1_recovery_execution_input(
-    raw_fields: Mapping[str, object],
-    codec: "_VersionCodec",
-    persisted: bool,
-) -> RecoveryExecutionInput:
-    decoded = _decode_v1_exact_binding_record_fields(
-        raw_fields, RecoveryExecutionInput, _RECOVERY_EXECUTION_V1_FIELDS, codec, persisted
-    )
-    try:
-        return RecoveryExecutionInput(**decoded)
-    except (TypeError, ValueError) as error:
-        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
-
-
 def _encode_v1_task_node(
     value: object,
     codec: "_VersionCodec",
@@ -680,18 +555,10 @@ def _decode_v1_task_node(
 
 
 _V1_DATACLASS_ENCODERS: Mapping[str, DataclassEncoder] = MappingProxyType(
-    {
-        "execution_record": _encode_v1_execution_record,
-        "recovery_execution_input": _encode_v1_recovery_execution_input,
-        "task_node": _encode_v1_task_node,
-    }
+    {"task_node": _encode_v1_task_node}
 )
 _V1_DATACLASS_DECODERS: Mapping[str, DataclassDecoder] = MappingProxyType(
-    {
-        "execution_record": _decode_v1_execution_record,
-        "recovery_execution_input": _decode_v1_recovery_execution_input,
-        "task_node": _decode_v1_task_node,
-    }
+    {"task_node": _decode_v1_task_node}
 )
 
 
@@ -703,6 +570,7 @@ _V1_EXTERNAL_SCHEMA_TYPES: Mapping[type[object], JsonValue] = MappingProxyType(
         OperationTerminalUpdate: (
             "linktools.ai.runtime.state.OperationTerminalUpdate"
         ),
+        AgentBindingSnapshot: "linktools.ai.agent.AgentBindingSnapshot@1",
         ModelRequest: "pydantic_ai.messages.ModelRequest",
         ModelResponse: "pydantic_ai.messages.ModelResponse",
     }
@@ -1186,6 +1054,8 @@ def _codec_wire_type_id(
 def _encode_external(value: object, codec: _VersionCodec) -> JsonValue:
     if type(value) not in codec.external_schema_types:
         raise TypeError(f"unsupported external type: {type(value).__name__}")
+    if isinstance(value, AgentBindingSnapshot):
+        return value.to_payload()
     if isinstance(value, IdempotencyTerminalUpdate):
         return {
             "scope": _encode_domain(value.scope, codec),
@@ -1217,6 +1087,13 @@ def _encode_external(value: object, codec: _VersionCodec) -> JsonValue:
 def _decode_external(value: object, target: type[object], codec: _VersionCodec) -> object:
     if target not in codec.external_schema_types:
         raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
+    if target is AgentBindingSnapshot:
+        try:
+            return AgentBindingSnapshot.from_payload(value)
+        except AIError:
+            raise
+        except (TypeError, ValueError, KeyError) as error:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
     if target in (ModelRequest, ModelResponse):
         try:
             raw = canonical_json_bytes([cast(JsonValue, value)])
@@ -2092,11 +1969,7 @@ def _validate_v1_codec_definition() -> None:
             raise RuntimeError(f"GA v1 current fingerprint is inconsistent: {wire_id}")
     if set(_V1_ENUM_VALUES) != set(enum_wire_ids):
         raise RuntimeError("GA v1 enum value manifest does not match enum types")
-    custom_dataclasses = {
-        "execution_record",
-        "recovery_execution_input",
-        "task_node",
-    }
+    custom_dataclasses = {"task_node"}
     if set(_V1_DATACLASS_ENCODERS) != custom_dataclasses:
         raise RuntimeError("GA v1 dataclass encoder manifest is invalid")
     if set(_V1_DATACLASS_DECODERS) != custom_dataclasses:
