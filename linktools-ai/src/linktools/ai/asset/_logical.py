@@ -6,14 +6,12 @@ import inspect
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from enum import StrEnum
-from types import MappingProxyType
 from typing import (
     TYPE_CHECKING,
     Any,
     Generic,
     Protocol,
     TypeVar,
-    cast,
     runtime_checkable,
 )
 
@@ -26,8 +24,6 @@ if TYPE_CHECKING:
     from ..storage import StorageDeleteResult, StorageEntryRevision, StorageResetResult
 
 LogicalT = TypeVar("LogicalT")
-_SNAPSHOT_TOKEN = object()
-
 
 class AssetScope(Protocol):
     @property
@@ -323,104 +319,6 @@ class ResolvedAsset(Generic[LogicalT]):
     scope: "AssetScope"
 
 
-class AssetTypeRegistry:
-    """Register logical asset bindings before producing an immutable snapshot."""
-
-    def __init__(self) -> None:
-        self._bindings: dict[str, AssetTypeBinding[object]] = {}
-        self._snapshot: AssetTypeRegistrySnapshot | None = None
-
-    @property
-    def frozen(self) -> bool:
-        return self._snapshot is not None
-
-    def register(self, binding: "AssetTypeBinding[object]") -> None:
-        if self._snapshot is not None:
-            raise AIError(ErrorCode.ASSET_CODEC_CONFLICT, "asset type registry is frozen")
-        if binding.kind in self._bindings:
-            raise AIError(ErrorCode.ASSET_CODEC_CONFLICT, "asset kind is already registered")
-        _validate_layouts(binding)
-        self._bindings[binding.kind] = binding
-
-    def manifest_entries(self) -> tuple[dict[str, JsonValue], ...]:
-        return _manifest_entries(tuple(self._bindings.values()))
-
-    def freeze(self) -> "AssetTypeRegistrySnapshot":
-        if self._snapshot is not None:
-            return self._snapshot
-        entries = self.manifest_entries()
-        layout_digest = canonical_sha256(
-            [
-                {
-                    "kind": entry["kind"],
-                    "variants": [
-                        {"name": variant["name"], "layout": variant["layout"]}
-                        for variant in cast(list[dict[str, JsonValue]], entry["variants"])
-                    ],
-                    "default_write_variant": entry["default_write_variant"],
-                    "allow_nested_id": entry["allow_nested_id"],
-                }
-                for entry in entries
-            ]
-        )
-        binding_digest = canonical_sha256(entries)
-        self._snapshot = AssetTypeRegistrySnapshot._create(
-            MappingProxyType(dict(self._bindings)),
-            layout_digest,
-            binding_digest,
-        )
-        return self._snapshot
-
-
-@dataclass(frozen=True, slots=True, init=False)
-class AssetTypeRegistrySnapshot:
-    """Immutable registry state consumed by an AssetRepository."""
-
-    _bindings: "Mapping[str, AssetTypeBinding[object]]"
-    layout_digest: str
-    binding_digest: str
-
-    def __init__(
-        self,
-        bindings: "Mapping[str, AssetTypeBinding[object]]",
-        layout_digest: str,
-        binding_digest: str,
-        *,
-        _token: object,
-    ) -> None:
-        if _token is not _SNAPSHOT_TOKEN:
-            raise TypeError("asset registry snapshots are factory-issued")
-        object.__setattr__(self, "_bindings", bindings)
-        object.__setattr__(self, "layout_digest", layout_digest)
-        object.__setattr__(self, "binding_digest", binding_digest)
-
-    @classmethod
-    def _create(
-        cls,
-        bindings: "Mapping[str, AssetTypeBinding[object]]",
-        layout_digest: str,
-        binding_digest: str,
-    ) -> "AssetTypeRegistrySnapshot":
-        return cls(bindings, layout_digest, binding_digest, _token=_SNAPSHOT_TOKEN)
-
-    @property
-    def frozen(self) -> bool:
-        return True
-
-    @property
-    def kinds(self) -> tuple[str, ...]:
-        return tuple(sorted(self._bindings))
-
-    def binding(self, kind: str) -> "AssetTypeBinding[object]":
-        try:
-            return self._bindings[kind]
-        except KeyError as error:
-            raise AIError(ErrorCode.ASSET_CODEC_UNKNOWN) from error
-
-    def manifest_entries(self) -> tuple[dict[str, JsonValue], ...]:
-        return _manifest_entries(tuple(self._bindings.values()))
-
-
 def _validate_layouts(binding: AssetTypeBinding[object]) -> None:
     variants = binding.variants
     descriptors = [canonical_sha256(variant.layout.descriptor()) for variant in variants]
@@ -448,33 +346,6 @@ def _is_protocol_class(value_type: type[object]) -> bool:
     return value_type is Protocol or Protocol in value_type.__bases__
 
 
-def _manifest_entries(bindings: tuple[AssetTypeBinding[object], ...]) -> tuple[dict[str, JsonValue], ...]:
-    entries: list[dict[str, JsonValue]] = []
-    for binding in sorted(bindings, key=lambda item: item.kind):
-        variants: list[dict[str, JsonValue]] = []
-        for variant in sorted(binding.variants, key=lambda item: item.name):
-            variants.append(
-                {
-                    "name": variant.name,
-                    "layout": variant.layout.descriptor(),
-                    "codec_fingerprint": variant.fingerprint,
-                    "codec_version": variant.codec_version,
-                    "adapter_fingerprint": variant.adapter_fingerprint,
-                }
-            )
-        qualified = f"{binding.value_type.__module__}.{binding.value_type.__qualname__}"
-        entries.append(
-            {
-                "kind": binding.kind,
-                "value_type": qualified,
-                "allow_nested_id": binding.allow_nested_id,
-                "identity_fingerprint": binding.identity_fingerprint,
-                "retarget_fingerprint": binding.retarget_fingerprint,
-                "default_write_variant": binding.default_write_variant,
-                "variants": variants,
-            }
-        )
-    return tuple(entries)
 
 
 __all__ = [
@@ -485,8 +356,6 @@ __all__ = [
     "AssetResource",
     "AssetRetargeter",
     "AssetTypeBinding",
-    "AssetTypeRegistry",
-    "AssetTypeRegistrySnapshot",
     "AssetValueAdapter",
     "AssetVariantBinding",
     "DirectoryLayout",

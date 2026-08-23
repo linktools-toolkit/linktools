@@ -11,6 +11,7 @@ from collections.abc import Mapping, Sequence
 from contextlib import AsyncExitStack, asynccontextmanager
 from dataclasses import dataclass
 from pathlib import PurePosixPath
+from types import MappingProxyType
 
 from linktools.core import environ
 
@@ -33,11 +34,11 @@ from ._logical import (
     AssetRef,
     AssetResource,
     AssetTypeBinding,
-    AssetTypeRegistry,
     AssetVariantBinding,
     DirectoryLayout,
     ResolvedAsset,
     SingleFileLayout,
+    _validate_layouts,
 )
 from ._store import AssetStore
 
@@ -276,11 +277,31 @@ class AssetRepository:
     ) -> None:
         if store is None:
             raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
-        registry = AssetTypeRegistry()
+        selected: dict[str, AssetTypeBinding[object]] = {}
         for binding in tuple(bindings):
-            registry.register(binding)
+            if not isinstance(binding, AssetTypeBinding):
+                raise TypeError("bindings must contain AssetTypeBinding values")
+            if binding.kind in selected:
+                raise AIError(ErrorCode.ASSET_CODEC_CONFLICT, "asset kind is already registered")
+            _validate_layouts(binding)
+            selected[binding.kind] = binding
         self._store = store
-        self._registry = registry.freeze()
+        self._bindings: Mapping[str, AssetTypeBinding[object]] = MappingProxyType(dict(selected))
+        self._kinds = tuple(sorted(selected))
+        self._layout_digest = canonical_sha256(
+            [
+                {
+                    "kind": binding.kind,
+                    "variants": [
+                        {"name": variant.name, "layout": variant.layout.descriptor()}
+                        for variant in sorted(binding.variants, key=lambda item: item.name)
+                    ],
+                    "default_write_variant": binding.default_write_variant,
+                    "allow_nested_id": binding.allow_nested_id,
+                }
+                for binding in sorted(selected.values(), key=lambda item: item.kind)
+            ]
+        )
         self._locks = _RepositoryKeyedLock()
 
     @property
@@ -291,11 +312,14 @@ class AssetRepository:
     @property
     def kinds(self) -> tuple[str, ...]:
         """Return registered logical Asset kinds in canonical order."""
-        return self._registry.kinds
+        return self._kinds
 
     def binding(self, kind: str) -> AssetTypeBinding[object]:
         """Return the logical binding registered for one kind."""
-        return self._registry.binding(kind)
+        try:
+            return self._bindings[kind]
+        except KeyError as error:
+            raise AIError(ErrorCode.ASSET_CODEC_UNKNOWN) from error
 
     async def current_revision(self) -> StorageRevision:
         """Return the raw storage revision used for composition stability checks."""
@@ -385,7 +409,7 @@ class AssetRepository:
             cursor,
             kind,
             normalized_prefix,
-            self._registry.layout_digest,
+            self._layout_digest,
             discovery_digest,
             visible,
         )
@@ -395,7 +419,7 @@ class AssetRepository:
             next_cursor = _typed_cursor(
                 kind,
                 normalized_prefix,
-                self._registry.layout_digest,
+                self._layout_digest,
                 discovery_digest,
                 selected[-1].ref.id,
             )
@@ -698,7 +722,7 @@ class AssetRepository:
         return tuple(changes)
 
     def _binding_for_kind(self, kind: str) -> AssetTypeBinding[object]:
-        return self._registry.binding(kind)
+        return self.binding(kind)
 
     def _binding_for(self, ref: AssetRef) -> AssetTypeBinding[object]:
         binding = self._binding_for_kind(ref.kind)
