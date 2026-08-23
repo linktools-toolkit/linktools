@@ -14,7 +14,49 @@ def replace_once(path: str, old: str, new: str) -> None:
     target.write_text(text.replace(old, new))
 
 
+def replace_count(path: str, old: str, new: str, expected: int) -> None:
+    target = Path(path)
+    text = target.read_text()
+    count = text.count(old)
+    if count != expected:
+        raise SystemExit(f"{path}: expected {expected} replacements, found {count}")
+    target.write_text(text.replace(old, new))
+
+
 def main() -> None:
+    path = "linktools-ai/src/linktools/ai/agent/_executor.py"
+    replace_once(
+        path,
+        '''from linktools.core import environ
+from pydantic import ValidationError
+''',
+        '''from linktools.core import environ
+from openai import APIError as OpenAIAPIError
+from pydantic import ValidationError
+''',
+    )
+    replace_once(
+        path,
+        '''    if isinstance(error, ModelAPIError):
+        return AIError(
+            ErrorCode.MODEL_API_ERROR,
+            retryable=False,
+            safe_details={"model_name": error.model_name},
+        )
+    if isinstance(error, UnexpectedModelBehavior):
+''',
+        '''    if isinstance(error, ModelAPIError):
+        return AIError(
+            ErrorCode.MODEL_API_ERROR,
+            retryable=False,
+            safe_details={"model_name": error.model_name},
+        )
+    if isinstance(error, OpenAIAPIError):
+        return AIError(ErrorCode.MODEL_API_ERROR, retryable=False)
+    if isinstance(error, UnexpectedModelBehavior):
+''',
+    )
+
     path = "linktools-ai/src/linktools/ai/runtime/_local.py"
     replace_once(
         path,
@@ -55,13 +97,18 @@ def main() -> None:
                 }:
                     try:
                         await self._commit_failure(current, error, run_id=run_id)
-                    except BaseException as commit_error:
-                        if isinstance(commit_error, asyncio.CancelledError):
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception as commit_error:
+                        try:
+                            persisted = await self._execution.executions.get(
+                                execution_id,
+                                tenant_id=original.tenant_id,
+                            )
+                        except asyncio.CancelledError:
                             raise
-                        persisted = await self._execution.executions.get(
-                            execution_id,
-                            tenant_id=original.tenant_id,
-                        )
+                        except Exception as readback_error:
+                            raise _secondary_execution_error(readback_error, error) from error
                         if persisted is not None and persisted.status in {
                             ExecutionStatus.SUCCEEDED,
                             ExecutionStatus.FAILED,
@@ -74,21 +121,7 @@ def main() -> None:
                                 exc_info=True,
                             )
                             return
-                        primary_code = _execution_error_code(error)
-                        if isinstance(commit_error, AIError):
-                            details = dict(commit_error.safe_details)
-                            details["primary_error_code"] = primary_code.value
-                            raise AIError(
-                                commit_error.code,
-                                safe_details=details,
-                            ) from error
-                        raise AIError(
-                            ErrorCode.INTERNAL_ERROR,
-                            safe_details={
-                                "phase": "execution_terminal_commit",
-                                "primary_error_code": primary_code.value,
-                            },
-                        ) from error
+                        raise _secondary_execution_error(commit_error, error) from error
                 persisted = await self._execution.executions.get(
                     execution_id,
                     tenant_id=original.tenant_id,
@@ -112,7 +145,7 @@ def main() -> None:
 ''',
         '''    async def _commit_failure(self, execution: ExecutionRecord, error: Exception, *, run_id: str | None = None) -> None:
         code = _execution_error_code(error)
-        details = error.safe_details if isinstance(error, AIError) else {}
+        details = _execution_error_details(error)
         cancelled = code is ErrorCode.EXECUTION_CANCELLED
         await self._commit_terminal(
             execution,
@@ -163,6 +196,34 @@ def main() -> None:
     return ErrorCode.INTERNAL_ERROR
 
 
+def _execution_error_details(error: Exception) -> dict[str, JsonValue]:
+    return dict(error.safe_details) if isinstance(error, AIError) else {}
+
+
+def _secondary_execution_error(error: Exception, primary: Exception) -> AIError:
+    primary_details: dict[str, JsonValue] = {
+        "primary_error_code": _execution_error_code(primary).value,
+        "primary_safe_error_details": _execution_error_details(primary),
+    }
+    if isinstance(error, AIError):
+        details = dict(error.safe_details)
+        details.update(primary_details)
+        return AIError(
+            error.code,
+            category=error.category,
+            retryable=error.retryable,
+            operation_id=error.operation_id,
+            safe_details=details,
+        )
+    return AIError(
+        ErrorCode.INTERNAL_ERROR,
+        safe_details={
+            "phase": "execution_terminal_commit",
+            **primary_details,
+        },
+    )
+
+
 def _is_infrastructure_error(error: Exception) -> bool:
 ''',
     )
@@ -170,237 +231,278 @@ def _is_infrastructure_error(error: Exception) -> bool:
     path = "linktools-ai/src/linktools/ai/runtime/_tool.py"
     replace_once(
         path,
-        '''    async def _decode_error(self, record: ToolOperationRecord) -> BaseException:
-        if record.error_payload is None:
-            try:
-                code = ErrorCode(record.error_code or ErrorCode.EXECUTION_FAILED.value)
-            except ValueError:
-                code = ErrorCode.EXECUTION_FAILED
-            return AIError(code)
-        payload = record.error_payload
-        if payload is None:
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        value = await self._payload_json(payload)
-        if not isinstance(value, dict):
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        kind = value.get("kind")
-        if kind == "model_retry" and isinstance(value.get("message"), str):
-            return ModelRetry(value["message"])
-        if kind == "tool_retry" and isinstance(value.get("content"), str):
-            return ToolRetryError(RetryPromptPart(value["content"], tool_call_id=str(value.get("tool_call_id", ""))))
-        if kind == "error" and isinstance(value.get("code"), str):
-            try:
-                code = ErrorCode(value["code"])
-            except ValueError:
-                code = ErrorCode.EXECUTION_FAILED
-            return AIError(code, safe_details={"error_digest": value.get("digest", "")})
-        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-
-    async def _error_payload(self, error: BaseException) -> tuple[str, StoredPayload]:
-        if isinstance(error, ModelRetry):
-            value = {"kind": "model_retry", "message": error.message}
-            return ErrorCode.OUTPUT_VALIDATION_FAILED.value, await self._json_payload(value)
-        if isinstance(error, ToolRetryError):
-            retry = error.tool_retry
-            value = {
-                "kind": "tool_retry",
-                "content": str(retry.content),
-                "tool_call_id": retry.tool_call_id,
-            }
-            return ErrorCode.OUTPUT_VALIDATION_FAILED.value, await self._json_payload(value)
-        digest = hashlib.sha256(f"{type(error).__name__}:{error}".encode()).hexdigest()
-        return ErrorCode.EXECUTION_FAILED.value, await self._json_payload(
-            {"kind": "error", "code": ErrorCode.EXECUTION_FAILED.value, "digest": digest}
-        )
-''',
-        '''    async def _decode_error(self, record: ToolOperationRecord) -> BaseException:
-        if record.error_payload is None:
-            if record.error_code is None:
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            try:
-                code = ErrorCode(record.error_code)
-            except ValueError as error:
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
-            return AIError(code)
-        value = await self._payload_json(record.error_payload)
-        if not isinstance(value, dict):
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        kind = value.get("kind")
-        if kind == "model_retry" and isinstance(value.get("message"), str):
-            return ModelRetry(value["message"])
-        if kind == "tool_retry" and isinstance(value.get("content"), str):
-            return ToolRetryError(
-                RetryPromptPart(
-                    value["content"],
-                    tool_call_id=str(value.get("tool_call_id", "")),
-                )
-            )
-        if kind == "error" and isinstance(value.get("code"), str):
-            try:
-                code = ErrorCode(value["code"])
-            except ValueError as error:
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
-            safe_details = value.get("safe_details", {})
-            if not isinstance(safe_details, dict):
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            return AIError(code, safe_details=safe_details)
-        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-
-    async def _error_payload(self, error: BaseException) -> tuple[str, StoredPayload]:
-        if isinstance(error, ModelRetry):
-            value = {"kind": "model_retry", "message": error.message}
-            return ErrorCode.TOOL_RETRY_REQUIRED.value, await self._json_payload(value)
-        if isinstance(error, ToolRetryError):
-            retry = error.tool_retry
-            value = {
-                "kind": "tool_retry",
-                "content": str(retry.content),
-                "tool_call_id": retry.tool_call_id,
-            }
-            return ErrorCode.TOOL_RETRY_REQUIRED.value, await self._json_payload(value)
-        if isinstance(error, AIError):
-            return error.code.value, await self._json_payload(
-                {
-                    "kind": "error",
-                    "code": error.code.value,
-                    "safe_details": dict(error.safe_details),
-                }
-            )
-        digest = hashlib.sha256(f"{type(error).__name__}:{error}".encode()).hexdigest()
+        '''        digest = hashlib.sha256(f"{type(error).__name__}:{error}".encode()).hexdigest()
         return ErrorCode.INTERNAL_ERROR.value, await self._json_payload(
             {
                 "kind": "error",
                 "code": ErrorCode.INTERNAL_ERROR.value,
-                "safe_details": {"error_digest": digest, "phase": "tool_execution"},
+                "safe_details": {
+                    "error_digest": digest,
+                    "phase": "tool_execution",
+                },
+            }
+        )
+''',
+        '''        digest = hashlib.sha256(type(error).__qualname__.encode("utf-8")).hexdigest()
+        return ErrorCode.TOOL_EXECUTION_FAILED.value, await self._json_payload(
+            {
+                "kind": "error",
+                "code": ErrorCode.TOOL_EXECUTION_FAILED.value,
+                "safe_details": {
+                    "error_digest": digest,
+                    "phase": "tool_execution",
+                },
             }
         )
 ''',
     )
 
-    path = "linktools-ai/src/linktools/ai/temporal/_task_operation.py"
+    path = "linktools-ai/src/linktools/ai/task/_local.py"
     replace_once(
         path,
-        '''        elif result.status in {"FAILED", "CANCELLED"}:
-            try:
-                await self._repository.fail(
-                    lease,
-                    tenant_id=request.tenant_id,
-                    error_code=ErrorCode.EXECUTION_FAILED.value,
-                    error_digest=canonical_sha256(
-                        {"type": "ExecutionResult", "code": result.status}
-                    ),
-                )
+        '''        except asyncio.CancelledError:
+            raise
+        except Exception as error:
+            run.failure = error if isinstance(error, AIError) else AIError(ErrorCode.STORAGE_UNAVAILABLE)
+            _logger.exception("local task graph scheduler failed: tenant=%s graph=%s", key[0], key[1])
 ''',
-        '''        elif result.status in {"FAILED", "CANCELLED"}:
-            terminal = await self._runner.terminal_result(
-                result.execution_id,
-                principal=stored.principal,
+        '''        except asyncio.CancelledError:
+            raise
+        except Exception as error:
+            run.failure = (
+                error
+                if isinstance(error, AIError)
+                else AIError(
+                    ErrorCode.INTERNAL_ERROR,
+                    safe_details={"phase": "task_scheduler"},
+                )
             )
-            if (
-                terminal.execution_id != result.execution_id
-                or terminal.status.value != result.status
-                or terminal.error_code is None
-            ):
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            try:
-                ErrorCode(terminal.error_code)
-            except ValueError as error:
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
-            try:
-                await self._repository.fail(
-                    lease,
-                    tenant_id=request.tenant_id,
-                    error_code=terminal.error_code,
-                    error_digest=canonical_sha256(
-                        {
-                            "type": "ExecutionResult",
-                            "code": terminal.error_code,
-                            "safe_error_details": terminal.safe_error_details,
-                        }
-                    ),
-                )
+            _logger.exception("local task graph scheduler failed: tenant=%s graph=%s", key[0], key[1])
 ''',
     )
 
-    path = "linktools-ai/src/linktools/commands/ai/run.py"
+    path = "linktools-ai/src/linktools/ai/asset/_repository.py"
     replace_once(
         path,
-        '''from linktools.core import ConfigField, environ
-from pydantic_ai.exceptions import ModelAPIError, UserError
-
+        '''        if len(first.candidates) == 0:
+            raise AIError(ErrorCode.STORAGE_NOT_FOUND)
 ''',
-        '''from linktools.core import ConfigField, environ
+        '''        if len(first.candidates) == 0:
+            raise AIError(ErrorCode.ASSET_NOT_FOUND)
+''',
+    )
 
+    path = "linktools-ai/src/linktools/ai/runtime/_evaluation.py"
+    replace_once(
+        path,
+        '''            if existing.status is IdempotencyStatus.FAILED:
+                raise _stable_error(existing.error_code, ErrorCode.STORAGE_UNAVAILABLE)
+''',
+        '''            if existing.status is IdempotencyStatus.FAILED:
+                raise _stable_error(existing.error_code)
 ''',
     )
     replace_once(
         path,
-        '''    @property
-    def known_errors(self) -> "list[type[BaseException]]":
-        return super().known_errors + [ModelAPIError, UserError]
+        '''def _stable_error(error_code: str | None, fallback: ErrorCode) -> AIError:
+    try:
+        return AIError(fallback if error_code is None else ErrorCode(error_code))
+    except ValueError:
+        return AIError(fallback)
+''',
+        '''def _stable_error(error_code: str | None) -> AIError:
+    if error_code is None:
+        return AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    try:
+        code = ErrorCode(error_code)
+    except ValueError:
+        return AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    return AIError(code)
+''',
+    )
 
+    path = "tests/ai/test_closure_fix.py"
+    replace_count(
+        path,
+        "assert raised.value.code is ErrorCode.STORAGE_UNAVAILABLE",
+        "assert raised.value.code is ErrorCode.INTERNAL_ERROR",
+        2,
+    )
+    replace_count(
+        path,
+        "assert late_raised.value.code is ErrorCode.STORAGE_UNAVAILABLE",
+        "assert late_raised.value.code is ErrorCode.INTERNAL_ERROR",
+        1,
+    )
+
+    path = "tests/ai/test_asset_repository.py"
+    replace_once(
+        path,
+        '''    with pytest.raises(AIError) as error:
+        await repository.resolve(AssetRef("subagent", "team/foo/child"))
+    assert error.value.code is ErrorCode.STORAGE_NOT_FOUND
 ''',
-        "",
+        '''    with pytest.raises(AIError) as error:
+        await repository.resolve(AssetRef("subagent", "team/foo/child"))
+    assert error.value.code is ErrorCode.ASSET_NOT_FOUND
+''',
+    )
+
+    path = "tests/ai/test_error_contract.py"
+    replace_once(
+        path,
+        '''from datetime import datetime, timezone
+
+import pytest
+from pydantic_ai.exceptions import ModelHTTPError, RunCancelled
+''',
+        '''from datetime import datetime, timezone
+
+import httpx
+import pytest
+from openai import APIError as OpenAIAPIError
+from pydantic_ai.exceptions import ModelHTTPError, RunCancelled
+''',
     )
     replace_once(
         path,
-        '''        payload = _result_payload(result)
-        if result.status is not ExecutionStatus.SUCCEEDED:
-            error_code, safe_details = await _terminal_failure_details(runtime, result.execution_id)
-            payload["error_code"] = error_code
-            payload["safe_error_details"] = safe_details
-        print(json.dumps(payload, ensure_ascii=False, sort_keys=True))
+        '''from linktools.ai.runtime import ExecutionResult
+from linktools.ai.runtime._tool import RuntimeToolOperationBridge, ToolOperationRecord
 ''',
-        '''        payload = _result_payload(result)
-        print(json.dumps(payload, ensure_ascii=False, sort_keys=True))
+        '''from linktools.ai.runtime import ExecutionResult
+from linktools.ai.runtime._evaluation import _stable_error
+from linktools.ai.runtime._local import _secondary_execution_error
+from linktools.ai.runtime._tool import RuntimeToolOperationBridge, ToolOperationRecord
 ''',
     )
     replace_once(
         path,
-        '''async def _terminal_failure_details(
-    runtime: Runtime,
-    execution_id: str,
-) -> tuple[object, object]:
-    after_sequence = 0
-    while True:
-        page = await runtime.event.list(
-            execution_id,
-            principal=runtime.default_principal,
-            after_sequence=after_sequence,
-            limit=100,
+        '''def test_unknown_agent_exception_is_internal_not_storage() -> None:
+    mapped = _map(RuntimeError("boom"))
+    assert mapped.code is ErrorCode.INTERNAL_ERROR
+    assert mapped.safe_details == {"phase": "agent_execution"}
+
+
+def test_execution_result_enforces_terminal_error_contract() -> None:
+''',
+        '''def test_unknown_agent_exception_is_internal_not_storage() -> None:
+    mapped = _map(RuntimeError("boom"))
+    assert mapped.code is ErrorCode.INTERNAL_ERROR
+    assert mapped.safe_details == {"phase": "agent_execution"}
+
+
+def test_raw_openai_api_error_stays_in_model_domain_without_payload_leak() -> None:
+    request = httpx.Request("POST", "https://example.invalid/v1/chat/completions")
+    mapped = _map(
+        OpenAIAPIError(
+            "provider secret",
+            request=request,
+            body={"secret": "provider body must not escape"},
         )
-        for event in reversed(page.items):
-            if event.event_type not in {
-                ExecutionEventType.EXECUTION_FAILED,
-                ExecutionEventType.EXECUTION_CANCELLED,
-            }:
-                continue
-            if not isinstance(event.payload, dict):
-                return None, {}
-            return event.payload.get("error_code"), event.payload.get("safe_error_details", {})
-        if page.next_cursor is None:
-            return None, {}
-        try:
-            next_sequence = int(page.next_cursor)
-        except (TypeError, ValueError) as error:
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
-        if next_sequence <= after_sequence:
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        after_sequence = next_sequence
+    )
+    assert mapped.code is ErrorCode.MODEL_API_ERROR
+    assert mapped.safe_details == {}
 
 
+def test_execution_result_enforces_terminal_error_contract() -> None:
 ''',
-        "",
     )
     replace_once(
         path,
-        '''        "output_schema_fingerprint": result.output_schema_fingerprint,
-    }
+        '''def test_ai_error_rejects_non_json_safe_details() -> None:
+    with pytest.raises(TypeError):
+        AIError(ErrorCode.INTERNAL_ERROR, safe_details={"bad": object()})
+    with pytest.raises(ValueError):
+        AIError(ErrorCode.INTERNAL_ERROR, safe_details={"bad": float("nan")})
+
+
+def _tool_bridge() -> RuntimeToolOperationBridge:
 ''',
-        '''        "output_schema_fingerprint": result.output_schema_fingerprint,
-        "error_code": result.error_code,
-        "safe_error_details": dict(result.safe_error_details),
+        '''def test_ai_error_rejects_non_json_safe_details() -> None:
+    with pytest.raises(TypeError):
+        AIError(ErrorCode.INTERNAL_ERROR, safe_details={"bad": object()})
+    with pytest.raises(TypeError):
+        AIError(ErrorCode.INTERNAL_ERROR, safe_details={1: "bad"})  # type: ignore[dict-item]
+    with pytest.raises(ValueError):
+        AIError(ErrorCode.INTERNAL_ERROR, safe_details={"bad": float("nan")})
+    cycle: list[object] = []
+    cycle.append(cycle)
+    with pytest.raises(ValueError):
+        AIError(ErrorCode.INTERNAL_ERROR, safe_details={"bad": cycle})
+
+
+def test_ai_error_copies_nested_safe_details() -> None:
+    source = {"nested": [{"value": 1}]}
+    error = AIError(ErrorCode.INTERNAL_ERROR, safe_details=source)
+    source["nested"][0]["value"] = 2
+    assert error.safe_details == {"nested": [{"value": 1}]}
+
+
+def test_secondary_terminal_error_preserves_primary_contract() -> None:
+    primary = AIError(
+        ErrorCode.MODEL_REQUEST_REJECTED,
+        safe_details={"status_code": 400},
+    )
+    secondary = AIError(
+        ErrorCode.STORAGE_UNAVAILABLE,
+        retryable=True,
+        operation_id="terminal-write",
+        safe_details={"phase": "commit"},
+    )
+    combined = _secondary_execution_error(secondary, primary)
+    assert combined.code is ErrorCode.STORAGE_UNAVAILABLE
+    assert combined.retryable is True
+    assert combined.operation_id == "terminal-write"
+    assert combined.safe_details == {
+        "phase": "commit",
+        "primary_error_code": ErrorCode.MODEL_REQUEST_REJECTED.value,
+        "primary_safe_error_details": {"status_code": 400},
     }
+
+
+def test_persisted_evaluation_error_rejects_missing_or_unknown_code() -> None:
+    assert _stable_error(None).code is ErrorCode.STORAGE_INTEGRITY_ERROR
+    assert _stable_error("UNKNOWN").code is ErrorCode.STORAGE_INTEGRITY_ERROR
+    assert _stable_error(ErrorCode.MODEL_TIMEOUT.value).code is ErrorCode.MODEL_TIMEOUT
+
+
+def _tool_bridge() -> RuntimeToolOperationBridge:
+''',
+    )
+    replace_once(
+        path,
+        '''@pytest.mark.asyncio
+async def test_tool_error_codec_maps_unknown_runtime_error_to_internal() -> None:
+    bridge = _tool_bridge()
+    code, payload = await bridge._error_payload(RuntimeError("provider secret"))
+    assert code == ErrorCode.INTERNAL_ERROR.value
+    decoded = await bridge._decode_error(
+        _failed_tool_record(error_code=code, error_payload=payload)
+    )
+    assert isinstance(decoded, AIError)
+    assert decoded.code is ErrorCode.INTERNAL_ERROR
+    assert decoded.safe_details["phase"] == "tool_execution"
+    assert "provider secret" not in str(decoded.safe_details)
+''',
+        '''@pytest.mark.asyncio
+async def test_tool_error_codec_maps_generic_failure_without_message_leak() -> None:
+    bridge = _tool_bridge()
+    code, payload = await bridge._error_payload(RuntimeError("provider secret"))
+    assert code == ErrorCode.TOOL_EXECUTION_FAILED.value
+    decoded = await bridge._decode_error(
+        _failed_tool_record(error_code=code, error_payload=payload)
+    )
+    assert isinstance(decoded, AIError)
+    assert decoded.code is ErrorCode.TOOL_EXECUTION_FAILED
+    assert decoded.safe_details["phase"] == "tool_execution"
+    assert "provider secret" not in str(decoded.safe_details)
+
+    second_code, second_payload = await bridge._error_payload(RuntimeError("other secret"))
+    second = await bridge._decode_error(
+        _failed_tool_record(error_code=second_code, error_payload=second_payload)
+    )
+    assert isinstance(second, AIError)
+    assert second.safe_details["error_digest"] == decoded.safe_details["error_digest"]
 ''',
     )
 
