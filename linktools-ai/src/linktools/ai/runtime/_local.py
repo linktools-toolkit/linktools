@@ -2803,7 +2803,7 @@ class LocalExecutionBackend:
         output: StoredPayload | None,
         error_code: str | None,
         stop_reason: StopReason,
-        definition: AgentDefinition | None,
+        binding: AgentBinding | None,
         run_id: str | None,
         usage: UsageMetrics,
         safe_error_details: Mapping[str, JsonValue] | None,
@@ -2933,7 +2933,7 @@ class LocalExecutionBackend:
                 terminal_plan = await self._step_lifecycle.prepare_execution_terminal_seal(
                     execution_id=current.execution_id,
                     run_ids=candidate_run_ids,
-                    agent_digest=binding.definition.digest,
+                    binding_digest=current.binding_digest,
                 )
             durable_commit = False
             try:

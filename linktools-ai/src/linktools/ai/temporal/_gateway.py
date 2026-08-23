@@ -7,6 +7,7 @@ from typing import Protocol
 
 from linktools.core import environ
 
+from ..agent import AgentBindingSnapshot
 from ..core import JsonValue
 from ..errors import AIError, ErrorCode
 from ..runtime import (
@@ -92,8 +93,7 @@ class WorkflowGateway:
         workflow_id: str,
         request: ExecutionRequest,
         *,
-        binding_digest: str,
-        binding: Mapping[str, JsonValue],
+        binding: AgentBindingSnapshot,
     ) -> ExecutionHandle:
         if not workflow_id.strip():
             raise ValueError("workflow id is required")
@@ -101,20 +101,19 @@ class WorkflowGateway:
             self._request_store,
             self._request_keys,
             request,
-            binding_digest=binding_digest,
             binding=binding,
         )
         workflow_request = ExecutionWorkflowInput(
             execution_id=workflow_id,
             tenant_id=request.principal.tenant_id,
-            binding_digest=binding_digest,
+            binding_digest=binding.binding_digest,
             request_ref=request_ref,
             worker_build=self._worker_build,
         )
         _logger.debug(
             "starting durable execution workflow: workflow_id=%s binding=%s",
             workflow_id,
-            binding_digest,
+            binding.binding_digest,
         )
         return await self._client.start_workflow(
             "execution",

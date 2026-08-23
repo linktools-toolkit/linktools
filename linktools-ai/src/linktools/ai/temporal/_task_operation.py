@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 
 from linktools.core import environ
 
+from ..agent import AgentBindingSnapshot
 from ..core import Principal, TaskStatus, canonical_sha256
 from ..errors import AIError, ErrorCode
 from ..runtime import RuntimeObjectKeyFactory, RuntimeTaskNodeRunner
@@ -84,14 +85,16 @@ class _RuntimeTaskOperation:
             if error.retryable:
                 raise
             return await self._fail_prepare(request, node, lease, error)
-        binding = node.input.get("binding")
-        if not isinstance(binding, Mapping):
+        try:
+            binding = AgentBindingSnapshot.from_payload(node.input.get("binding"))
+        except AIError as error:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
+        if binding.binding_digest != binding_digest:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         request_ref = await put_execution_request(
             self._request_store,
             self._request_keys,
             execution_request,
-            binding_digest=binding_digest,
             binding=binding,
         )
         operation_id = canonical_sha256(

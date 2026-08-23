@@ -6,6 +6,7 @@ from collections.abc import AsyncIterator, Mapping
 from dataclasses import dataclass, field
 from typing import Protocol
 
+from ..agent import AgentBindingSnapshot
 from ..core import (
     ApprovalDecision,
     ApprovalStatus,
@@ -491,8 +492,7 @@ class WorkflowGateway(Protocol):
         workflow_id: str,
         request: ExecutionRequest,
         *,
-        binding_digest: str,
-        binding: Mapping[str, JsonValue],
+        binding: AgentBindingSnapshot,
     ) -> ExecutionHandle: ...
 
     async def update_execution(self, workflow_id: str, operation: str, payload: 'Mapping[str, JsonValue]') -> WorkflowUpdateResult: ...
