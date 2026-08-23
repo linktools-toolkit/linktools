@@ -6,7 +6,7 @@ on:
       - fix/ai-error-contract-closure
 
 permissions:
-  contents: read
+  contents: write
   actions: read
 
 jobs:
@@ -29,69 +29,46 @@ jobs:
             'aiosqlite==0.22.1' ruff rich requests packaging
           python -m pip install -e ./linktools --no-deps
 
-      - name: Prepare corrected final Ruff candidate
+      - name: Apply verified final Ruff closure
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh run download 32628953978 \
+          gh run download 32629192010 \
             --repo linktools-toolkit/linktools \
-            --name ai-error-contract-ruff-final-candidate \
+            --name ai-error-contract-ruff-final-corrected \
             --dir /tmp/ruff-artifact
           git fetch --depth=1 origin fix/ai-error-contract-closure
           git worktree add /tmp/ruff-final FETCH_HEAD
           cd /tmp/ruff-final
-          git apply --check /tmp/ruff-artifact/ruff-final.patch
-          git apply /tmp/ruff-artifact/ruff-final.patch
-          python - <<'PY'
-          from pathlib import Path
-
-          path = Path('linktools-ai/src/linktools/ai/capability/__init__.py')
-          text = path.read_text()
-          export = '    "mcp_server_selector",\n'
-          if text.count(export) != 1:
-              raise SystemExit(f'expected one temporary mcp_server_selector export, found {text.count(export)}')
-          text = text.replace(export, '')
-          old = 'from ._mcp import MCPCapabilityProvider, MCPRuntime, mcp_server_selector\n'
-          new = 'from ._mcp import MCPCapabilityProvider, MCPRuntime, mcp_server_selector as mcp_server_selector\n'
-          if text.count(old) != 1:
-              raise SystemExit(f'expected one mcp_server_selector import, found {text.count(old)}')
-          path.write_text(text.replace(old, new))
-          PY
-          python -m ruff check --fix \
-            linktools-ai/scripts/build linktools-ai/src/linktools/ai \
-            linktools-ai/src/linktools/commands/ai tests/ai
+          git apply --check /tmp/ruff-artifact/ruff-final-corrected.patch
+          git apply /tmp/ruff-artifact/ruff-final-corrected.patch
           git diff --check
 
-      - name: Ruff corrected candidate
+      - name: Ruff verified closure
         working-directory: /tmp/ruff-final
         env:
           PYTHONPATH: linktools-ai:linktools-ai/src:linktools/src
         run: python -m ruff check linktools-ai/scripts/build linktools-ai/src/linktools/ai linktools-ai/src/linktools/commands/ai tests/ai
 
-      - name: Compile corrected candidate
+      - name: Compile verified closure
         working-directory: /tmp/ruff-final
         env:
           PYTHONPATH: linktools-ai:linktools-ai/src:linktools/src
         run: python -m compileall -q linktools-ai/src/linktools/ai
 
-      - name: Test corrected candidate
+      - name: Test verified closure
         working-directory: /tmp/ruff-final
         timeout-minutes: 12
         env:
           PYTHONPATH: linktools-ai:linktools-ai/src:linktools/src
         run: python -m pytest -q tests/ai
 
-      - name: Capture corrected candidate patch
+      - name: Commit verified final Ruff closure
         working-directory: /tmp/ruff-final
-        if: always()
         run: |
-          git diff --check
-          git diff > /tmp/ruff-final-corrected.patch
-
-      - name: Upload corrected final candidate
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: ai-error-contract-ruff-final-corrected
-          path: /tmp/ruff-final-corrected.patch
-          if-no-files-found: error
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add ruff.toml linktools-ai/scripts/build linktools-ai/src/linktools/ai \
+            linktools-ai/src/linktools/commands/ai tests/ai
+          git commit -m 'style(ai): close Ruff release gate'
+          git push origin HEAD:fix/ai-error-contract-closure
