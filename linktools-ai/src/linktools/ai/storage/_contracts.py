@@ -55,7 +55,7 @@ def normalize_storage_metadata(value: Mapping[str, JsonValue] | None) -> dict[st
     if value is None:
         return {}
     if not isinstance(value, Mapping):
-        raise ValueError("storage metadata must be a JSON object")
+        raise TypeError("storage metadata must be a JSON object")
     normalized: dict[str, JsonValue] = {}
     for key, item in value.items():
         if not isinstance(key, str) or not key:

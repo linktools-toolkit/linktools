@@ -33,7 +33,7 @@ class ImmutableJsonMapping(Mapping[str, JsonValue]):
     def _decode(self) -> "dict[str, JsonValue]":
         value = json.loads(self._payload.decode("utf-8"))
         if not isinstance(value, dict):
-            raise ValueError("immutable JSON mapping payload must be an object")
+            raise ValueError("immutable JSON mapping payload must be an object")  # noqa: TRY004
         return cast("dict[str, JsonValue]", value)
 
 

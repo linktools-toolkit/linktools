@@ -114,11 +114,11 @@ class SkillSpecCodec:
             revision = raw["revision"]
             content = raw["content"]
             if not isinstance(identity, str):
-                raise ValueError("skill id must be a string")
+                raise ValueError("skill id must be a string")  # noqa: TRY004
             if not isinstance(revision, int) or isinstance(revision, bool):
-                raise ValueError("skill revision must be an integer")
+                raise ValueError("skill revision must be an integer")  # noqa: TRY004
             if not isinstance(content, str):
-                raise ValueError("skill content must be a string")
+                raise ValueError("skill content must be a string")  # noqa: TRY004
             return SkillSpec(identity, revision, content)
         except AIError:
             raise
@@ -210,11 +210,11 @@ class MCPServerSpecCodec:
             command = raw["command"]
             args = raw.get("args", [])
             if not isinstance(identity, str):
-                raise ValueError("MCP server id must be a string")
+                raise ValueError("MCP server id must be a string")  # noqa: TRY004
             if not isinstance(revision, int) or isinstance(revision, bool):
-                raise ValueError("MCP server revision must be an integer")
+                raise ValueError("MCP server revision must be an integer")  # noqa: TRY004
             if not isinstance(command, str):
-                raise ValueError("MCP server command must be a string")
+                raise ValueError("MCP server command must be a string")  # noqa: TRY004
             if not isinstance(args, list) or any(not isinstance(item, str) for item in args):
                 raise ValueError("MCP server args must be a string array")
             return MCPServerSpec(identity, revision, command, tuple(args))
@@ -231,7 +231,7 @@ def _encode(value: "dict[str, object]") -> bytes:
 def _decode(data: bytes) -> "dict[str, object]":
     value = json.loads(data.decode("utf-8"))
     if not isinstance(value, dict):
-        raise ValueError("spec payload must be a JSON object")
+        raise ValueError("spec payload must be a JSON object")  # noqa: TRY004
     return value
 
 

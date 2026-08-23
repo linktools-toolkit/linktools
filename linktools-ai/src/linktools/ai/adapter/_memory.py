@@ -413,7 +413,7 @@ def _decode_mutation(value: str) -> MemoryMutation:
     try:
         raw = json.loads(value)
         if not isinstance(raw, dict):
-            raise ValueError
+            raise ValueError  # noqa: TRY004
         return MemoryMutation(None if raw.get("version") is None else str(raw["version"]), False, bool(raw["existed"]))
     except (TypeError, ValueError, json.JSONDecodeError) as error:
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error

@@ -900,7 +900,7 @@ def _read_filesystem_metadata(metadata: Path, destination: Path, key: str) -> Ob
     try:
         value = json.loads(metadata.read_text(encoding="utf-8"))
         if not isinstance(value, Mapping):
-            raise ValueError("object metadata must be an object")
+            raise ValueError("object metadata must be an object")  # noqa: TRY004
         if value.get("key") != key:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         digest = str(value["digest"])

@@ -55,7 +55,7 @@ class StoredPayload:
             raise ValueError("object payload descriptor is invalid")
         else:
             if not isinstance(self.ref, ObjectRef):
-                raise ValueError("object payload reference is invalid")
+                raise TypeError("object payload reference is invalid")
             if self.ref.digest != self.digest or self.ref.size != self.size:
                 raise ValueError("object payload descriptor does not match reference")
 
@@ -78,7 +78,7 @@ class StoredPayload:
     @classmethod
     def object(cls, reference: "ObjectRef") -> "StoredPayload":
         if not isinstance(reference, ObjectRef):
-            raise ValueError("object payload reference is invalid")
+            raise TypeError("object payload reference is invalid")
         return cls("object", None, reference.digest, reference.size, ref=reference)
 
     def to_json(self) -> dict[str, JsonValue]:
@@ -101,7 +101,7 @@ class StoredPayload:
     @classmethod
     def from_json(cls, raw: object) -> "StoredPayload":
         if not isinstance(raw, dict):
-            raise ValueError("stored payload must be an object")
+            raise ValueError("stored payload must be an object")  # noqa: TRY004
         kind = raw.get("kind")
         encoding = raw.get("encoding")
         digest = raw.get("digest")
@@ -112,7 +112,7 @@ class StoredPayload:
             or not isinstance(size, int)
             or isinstance(size, bool)
         ):
-            raise ValueError("stored payload fields are invalid")
+            raise ValueError("stored payload fields are invalid")  # noqa: TRY004
         if kind == "inline":
             if "ref" in raw or "value" not in raw:
                 raise ValueError("inline payload fields are invalid")

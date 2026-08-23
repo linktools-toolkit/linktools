@@ -53,7 +53,7 @@ def write_bytes_atomic(path: Path, value: bytes, *, fsync: bool = False) -> None
 def read_json(path: Path) -> "dict[str, JsonValue]":
     value = json.loads(path.read_text(encoding="utf-8"))
     if not isinstance(value, dict):
-        raise ValueError("JSON root must be an object")
+        raise ValueError("JSON root must be an object")  # noqa: TRY004
     return value
 
 
@@ -425,7 +425,7 @@ def _write_journal_text(path: Path, value: str) -> None:
 def _read_journal_json(path: Path) -> dict[str, object]:
     value = json.loads(path.read_text(encoding="utf-8"))
     if not isinstance(value, dict):
-        raise ValueError("filesystem journal JSON must be an object")
+        raise ValueError("filesystem journal JSON must be an object")  # noqa: TRY004
     return value
 
 

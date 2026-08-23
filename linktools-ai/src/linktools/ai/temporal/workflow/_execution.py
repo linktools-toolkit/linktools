@@ -627,7 +627,7 @@ async def _execute_activity(
         **kwargs,
     )
     if not isinstance(result, ExecutionWorkflowState):
-        raise ValueError(f"activity {name} returned an invalid execution snapshot")
+        raise TypeError(f"activity {name} returned an invalid execution snapshot")
     return result
 
 

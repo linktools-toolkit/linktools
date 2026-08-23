@@ -403,7 +403,7 @@ class ExecutionRecord:
 
     def __post_init__(self) -> None:
         if not isinstance(self.planning, bool) or not isinstance(self.thinking, bool):
-            raise ValueError("execution modes must be boolean")
+            raise TypeError("execution modes must be boolean")
         if self.binding is None:
             if self.planning or self.thinking:
                 raise ValueError("legacy execution without binding cannot enable modes")
@@ -843,9 +843,9 @@ class RecoveryExecutionInput:
         if isinstance(prompt, str):
             object.__setattr__(self, "user_prompt", StoredPayload.inline_text(prompt))
         elif not isinstance(prompt, StoredPayload):
-            raise ValueError("recovery prompt payload is invalid")
+            raise TypeError("recovery prompt payload is invalid")
         if not isinstance(self.planning, bool) or not isinstance(self.thinking, bool):
-            raise ValueError("recovery execution modes must be boolean")
+            raise TypeError("recovery execution modes must be boolean")
         if self.binding is None:
             if self.planning or self.thinking:
                 raise ValueError("legacy recovery input without binding cannot enable modes")
@@ -858,7 +858,7 @@ class RecoveryExecutionInput:
     def prompt_text(self) -> str:
         value = self.user_prompt.decode()
         if not isinstance(value, str):
-            raise ValueError("recovery prompt payload is not text")
+            raise ValueError("recovery prompt payload is not text")  # noqa: TRY004
         return value
 
 

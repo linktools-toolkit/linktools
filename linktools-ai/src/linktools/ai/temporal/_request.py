@@ -251,7 +251,7 @@ async def _read_payload(
 ) -> bytes:
     try:
         if not isinstance(request_ref, str):
-            raise ValueError("request reference is invalid")
+            raise ValueError("request reference is invalid")  # noqa: TRY004
         digest = request_ref.rsplit("/", 1)[-1]
         if _DIGEST.fullmatch(digest) is None:
             raise ValueError("request reference digest is invalid")
@@ -299,7 +299,7 @@ def _task_request_from_payload(value: Mapping[str, object]) -> TaskGraphRequest:
     graph_value = _mapping(payload["graph"], _GRAPH_FIELDS)
     nodes_value = graph_value["nodes"]
     if not isinstance(nodes_value, list):
-        raise ValueError("task graph nodes are invalid")
+        raise ValueError("task graph nodes are invalid")  # noqa: TRY004
     nodes = tuple(_task_node_from_payload(item) for item in nodes_value)
     graph = TaskGraph(_require_string(graph_value["graph_id"]), nodes)
     limits_value = _mapping(payload["limits"], _LIMIT_FIELDS)
@@ -326,7 +326,7 @@ def _task_node_from_payload(value: object) -> TaskNode:
         raise ValueError("task node dependencies are invalid")
     input_value = payload["input"]
     if not isinstance(input_value, dict):
-        raise ValueError("task node input is invalid")
+        raise ValueError("task node input is invalid")  # noqa: TRY004
     return TaskNode(
         _require_string(payload["node_id"]),
         tuple(dependencies),

@@ -2436,7 +2436,7 @@ def _json_bytes(value: Mapping[str, object]) -> bytes:
 def _read_json(path: Path) -> Mapping[str, object]:
     value = json.loads(path.read_text(encoding="utf-8"))
     if not isinstance(value, Mapping):
-        raise ValueError("JSON root must be an object")
+        raise ValueError("JSON root must be an object")  # noqa: TRY004
     return value
 
 

@@ -222,7 +222,7 @@ class RuntimeStatePlan:
 
     def route(self, domain: RuntimeDomain) -> RuntimeStateRoute:
         if not isinstance(domain, RuntimeDomain):
-            raise ValueError("RuntimeDomain is required")
+            raise TypeError("RuntimeDomain is required")
         return {
             RuntimeDomain.CONVERSATION: self.conversation,
             RuntimeDomain.EXECUTION: self.execution,

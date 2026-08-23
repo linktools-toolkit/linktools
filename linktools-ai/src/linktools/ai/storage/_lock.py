@@ -347,7 +347,7 @@ class FilesystemMutationLock:
 def _read_record(path: Path) -> 'dict[str, str | int | float]':
     value = json.loads(path.read_text(encoding="utf-8"))
     if not isinstance(value, dict):
-        raise ValueError("invalid lease record")
+        raise ValueError("invalid lease record")  # noqa: TRY004
     return value
 
 
