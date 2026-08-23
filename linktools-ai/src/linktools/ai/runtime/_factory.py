@@ -1,5 +1,3 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 """Runtime-internal service graph construction."""
 
 import asyncio

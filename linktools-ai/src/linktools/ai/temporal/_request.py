@@ -1,5 +1,3 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 """Content-addressed request transport for Temporal workflows."""
 
 import json

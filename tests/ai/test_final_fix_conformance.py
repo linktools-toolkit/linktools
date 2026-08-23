@@ -1,5 +1,3 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 """Regression coverage for close retry arbitration and SQLite pool setup."""
 
 from dataclasses import replace

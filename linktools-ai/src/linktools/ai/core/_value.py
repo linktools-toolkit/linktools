@@ -1,5 +1,3 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 """Pure values shared by every AI subsystem."""
 
 from collections.abc import Sequence

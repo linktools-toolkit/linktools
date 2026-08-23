@@ -1,5 +1,3 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 """Public runtime contracts."""
 
 from ._agent import AgentHandle

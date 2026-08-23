@@ -1,5 +1,3 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 """Generic TaskGraph contracts and local scheduling."""
 
 from ._api import open_local_task_api

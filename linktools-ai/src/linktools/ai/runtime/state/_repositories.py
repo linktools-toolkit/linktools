@@ -1,5 +1,3 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 """Backend-neutral Runtime repositories built on the StateStore contract."""
 
 import base64

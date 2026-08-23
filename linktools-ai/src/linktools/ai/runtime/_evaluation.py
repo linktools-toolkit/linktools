@@ -1,5 +1,3 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 """Evaluation query API and persistence-backed default service."""
 
 import asyncio

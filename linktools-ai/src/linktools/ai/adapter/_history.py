@@ -1,5 +1,3 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 """Project Harness step facts into Runtime trace and transcript views."""
 
 import re

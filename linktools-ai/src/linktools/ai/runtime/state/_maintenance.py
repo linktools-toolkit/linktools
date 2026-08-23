@@ -1,5 +1,3 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 """Offline Runtime storage validation and object mark-and-sweep."""
 
 from collections.abc import Awaitable, Callable, Mapping, Sequence

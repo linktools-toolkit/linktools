@@ -1,5 +1,3 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 """Runtime-owned one-level subagent dispatch and cancellation."""
 
 import asyncio

@@ -1,5 +1,3 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 """RuntimeState resource ownership and restart checks."""
 
 import asyncio

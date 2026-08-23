@@ -1,5 +1,3 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 """Standalone local Task API composition root."""
 
 from collections.abc import AsyncIterator

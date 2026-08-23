@@ -1,5 +1,3 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 """Canonical JSON encoding used by immutable manifests and bindings."""
 
 import json

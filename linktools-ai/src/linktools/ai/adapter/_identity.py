@@ -1,5 +1,3 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 """Production principal provider adapter."""
 
 from ..core import Principal

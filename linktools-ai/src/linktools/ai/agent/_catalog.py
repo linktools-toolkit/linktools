@@ -1,5 +1,3 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 """Agent definition lookup for Runtime services."""
 
 from collections.abc import Mapping

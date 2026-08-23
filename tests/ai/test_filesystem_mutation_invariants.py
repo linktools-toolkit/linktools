@@ -1,5 +1,3 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 """Filesystem Runtime mutation transaction evidence."""
 
 import asyncio

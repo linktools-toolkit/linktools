@@ -1,5 +1,3 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 """Runtime-owned tool authorization and durable operation contracts."""
 
 import hashlib

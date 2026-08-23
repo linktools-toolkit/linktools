@@ -1,5 +1,3 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 """Static exports for the domain-independent storage kernel."""
 
 from ._cache import (

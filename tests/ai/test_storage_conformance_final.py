@@ -1,5 +1,3 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 """Focused evidence for lazy filesystem state and Asset boundaries."""
 
 import asyncio

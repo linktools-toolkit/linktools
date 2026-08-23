@@ -1,5 +1,3 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 """Capability binding and runtime materialization contracts."""
 
 import importlib

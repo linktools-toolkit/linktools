@@ -1,5 +1,3 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 """Single-flight metadata refresh for ordered storage layers."""
 
 import asyncio

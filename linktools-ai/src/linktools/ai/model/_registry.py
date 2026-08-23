@@ -1,5 +1,3 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 """Thread-safe model registry and immutable snapshots."""
 
 from collections.abc import Mapping

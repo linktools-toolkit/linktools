@@ -1,5 +1,3 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 """Materialize Runtime repositories and their owned StateStore resources."""
 
 import asyncio

@@ -1,5 +1,3 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 """Model provider adapter protocol."""
 
 from typing import Protocol

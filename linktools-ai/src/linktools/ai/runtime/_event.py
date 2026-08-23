@@ -1,5 +1,3 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 """Durable event queries and bounded process-local execution streaming."""
 
 import asyncio

@@ -1,5 +1,3 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 """Public boundaries for the LinkTools AI runtime."""
 
 from .asset import AssetRef

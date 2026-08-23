@@ -1,5 +1,3 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 
 """Agent, Task, Observe, and Temporal boundary contracts."""
 

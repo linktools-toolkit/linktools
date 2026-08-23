@@ -1,5 +1,3 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 """Immutable execution usage accounting values."""
 
 from dataclasses import dataclass

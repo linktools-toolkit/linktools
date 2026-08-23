@@ -1,5 +1,3 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 
 """Static package, module, and ownership gates for the AI source tree."""
 

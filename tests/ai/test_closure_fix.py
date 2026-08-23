@@ -1,5 +1,3 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 """Fault coverage for tool terminal ownership and local task waiters."""
 
 import asyncio

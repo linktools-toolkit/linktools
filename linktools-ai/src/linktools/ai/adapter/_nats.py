@@ -1,5 +1,3 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 """NATS event publisher protocol."""
 
 from typing import Protocol

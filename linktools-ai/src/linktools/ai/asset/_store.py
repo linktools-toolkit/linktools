@@ -1,5 +1,3 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 """Raw file AssetStore backed by StorageOverlay."""
 
 import base64

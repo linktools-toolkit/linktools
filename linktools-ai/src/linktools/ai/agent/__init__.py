@@ -1,5 +1,3 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 """Agent definition compilation and execution."""
 
 from ._binding import AgentBindingSnapshot

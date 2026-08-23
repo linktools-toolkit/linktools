@@ -1,5 +1,3 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 """Immutable executable Agent definitions."""
 
 from dataclasses import dataclass

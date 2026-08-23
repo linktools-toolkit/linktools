@@ -1,5 +1,3 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 """Adapters for external runtimes and framework boundaries."""
 
 from ._history import StepExecutionHistoryReader, StepSessionHistoryReader

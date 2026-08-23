@@ -1,5 +1,3 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 """Canonical DBA-reviewed SQL metadata for Runtime StateStore primitives."""
 
 from typing import TYPE_CHECKING

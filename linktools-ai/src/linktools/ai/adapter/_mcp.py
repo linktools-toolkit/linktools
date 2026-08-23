@@ -1,5 +1,3 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 """Pydantic AI MCP runtime adapter."""
 
 from collections.abc import Sequence

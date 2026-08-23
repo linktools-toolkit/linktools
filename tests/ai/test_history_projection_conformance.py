@@ -1,5 +1,3 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 """Execution history projection for claimed and materialized attempts."""
 
 import asyncio

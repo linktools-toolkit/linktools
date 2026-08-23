@@ -1,5 +1,3 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 """Direct local-directory backend for Asset files."""
 
 import asyncio

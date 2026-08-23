@@ -1,5 +1,3 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 """Frozen pure projections for persisted transcript view coordinates."""
 
 from collections.abc import Sequence

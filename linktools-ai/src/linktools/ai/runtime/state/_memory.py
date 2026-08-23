@@ -1,5 +1,3 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 """In-memory implementation of the Runtime StateStore primitives."""
 
 import asyncio

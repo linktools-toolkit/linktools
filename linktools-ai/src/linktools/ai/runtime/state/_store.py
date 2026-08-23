@@ -1,5 +1,3 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 """Backend-neutral persistence primitives for Runtime state.
 
 The module deliberately contains no domain state machines.  It defines the

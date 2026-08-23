@@ -1,5 +1,3 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 """Immutable declaration contracts for Agent and Asset specifications."""
 
 from collections.abc import Mapping, Sequence

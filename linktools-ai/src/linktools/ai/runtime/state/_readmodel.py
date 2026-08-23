@@ -1,5 +1,3 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 """Terminal execution read models backed by Runtime StateStore facts."""
 
 import asyncio

@@ -1,5 +1,3 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 """Deterministic manifest digest helpers."""
 
 from pathlib import Path

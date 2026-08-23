@@ -1,5 +1,3 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 """Durable data contract for one effective Agent definition."""
 
 import json

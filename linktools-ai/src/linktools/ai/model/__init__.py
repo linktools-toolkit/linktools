@@ -1,5 +1,3 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 """Model registry, resolver, and binding contracts."""
 
 from ._contract import ModelBinding, ModelResolver

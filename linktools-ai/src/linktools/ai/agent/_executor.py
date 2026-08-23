@@ -1,5 +1,3 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 """Pydantic AI execution adapter for frozen AgentDefinitions."""
 
 from collections.abc import Awaitable, Callable

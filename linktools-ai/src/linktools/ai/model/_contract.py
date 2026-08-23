@@ -1,5 +1,3 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 """Model binding and resolution contracts."""
 
 from typing import Protocol

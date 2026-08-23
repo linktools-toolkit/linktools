@@ -1,5 +1,3 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 """Canonical transcript chunks and bounded context projections."""
 
 import hashlib

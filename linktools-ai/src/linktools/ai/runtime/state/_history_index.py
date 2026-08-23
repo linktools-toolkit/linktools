@@ -1,5 +1,3 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 """Skew-binary session prefix index construction and range resolution."""
 
 from collections.abc import Awaitable, Callable, Sequence

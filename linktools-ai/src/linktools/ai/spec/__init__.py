@@ -1,5 +1,3 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 """Spec DTOs and codecs; no runtime composition owner."""
 
 from ._assets import builtin_asset_bindings

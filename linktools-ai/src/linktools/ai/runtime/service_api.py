@@ -1,5 +1,3 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 """Runtime service protocols and transport-neutral request values."""
 
 from collections.abc import AsyncIterator, Mapping

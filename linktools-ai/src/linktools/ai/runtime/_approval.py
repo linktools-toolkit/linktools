@@ -1,5 +1,3 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 """Approval decision API and durable default implementation."""
 
 import hashlib

@@ -1,5 +1,3 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 """Committed Session history projection and continuation behavior."""
 
 from datetime import datetime, timezone

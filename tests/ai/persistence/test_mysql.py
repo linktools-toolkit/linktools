@@ -1,5 +1,3 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 """External SQL routes reject unsupported in-memory ownership."""
 
 import pytest

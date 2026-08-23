@@ -1,5 +1,3 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 """Authorized, durable delivery of externally supplied execution results."""
 
 import hashlib

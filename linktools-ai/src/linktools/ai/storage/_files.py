@@ -1,5 +1,3 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 """Root-contained atomic file primitives."""
 
 import hashlib

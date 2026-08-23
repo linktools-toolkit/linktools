@@ -1,5 +1,3 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 """Canonical versioned codecs for Runtime persistence values."""
 
 import base64

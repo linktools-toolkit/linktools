@@ -1,5 +1,3 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 """Ordered storage read layers."""
 
 from dataclasses import dataclass

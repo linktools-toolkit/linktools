@@ -1,5 +1,3 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 """Durable TaskGraph state-machine regression coverage."""
 
 from pathlib import Path

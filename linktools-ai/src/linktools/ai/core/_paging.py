@@ -1,5 +1,3 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 """Bounded pages and authenticated cursors."""
 
 import base64

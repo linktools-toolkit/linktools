@@ -1,5 +1,3 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 
 """Cold-start architecture and import checks. MT-51 MT-52."""
 

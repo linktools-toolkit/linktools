@@ -1,5 +1,3 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 """Session admission ownership and status transition conformance."""
 
 import asyncio

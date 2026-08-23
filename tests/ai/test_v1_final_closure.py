@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 """Adversarial evidence for the final GA V1 closure rules."""
 
 from collections.abc import Callable, Mapping

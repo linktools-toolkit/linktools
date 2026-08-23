@@ -1,5 +1,3 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 
 """`lt ai acp`: start the local ACP stdio Agent."""
 

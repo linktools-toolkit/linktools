@@ -1,5 +1,3 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 """Declarative Runtime domain routing."""
 
 from dataclasses import dataclass, field

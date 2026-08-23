@@ -1,5 +1,3 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 """Process-local storage metrics owned by one composed runtime."""
 
 from collections import Counter

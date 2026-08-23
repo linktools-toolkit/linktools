@@ -1,5 +1,3 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 """Validated inline/object payload descriptors for versioned records."""
 
 import base64

@@ -1,5 +1,3 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 """Private local service coordination for launch and stream leases."""
 
 from collections.abc import AsyncIterator

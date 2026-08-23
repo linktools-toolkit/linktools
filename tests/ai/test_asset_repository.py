@@ -1,5 +1,3 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 """Logical AssetRepository behavior and Skill Markdown contract checks."""
 
 from abc import ABC, abstractmethod

@@ -1,5 +1,3 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 """Runtime-owned transient object and Step retention."""
 
 from typing import Protocol

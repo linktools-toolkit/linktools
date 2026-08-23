@@ -1,5 +1,3 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 """Runtime-bound Agent execution handle."""
 
 from collections.abc import AsyncIterator, Mapping

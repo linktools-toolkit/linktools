@@ -1,5 +1,3 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 """Observation lifecycle and trace contracts."""
 
 from ._middleware import Middleware, MiddlewarePipeline

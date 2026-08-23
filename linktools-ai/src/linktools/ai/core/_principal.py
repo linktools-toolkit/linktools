@@ -1,5 +1,3 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 """Principal lookup boundary."""
 
 from dataclasses import dataclass

@@ -1,5 +1,3 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 """Persistence-backed Task API independent of Runtime composition."""
 
 import asyncio

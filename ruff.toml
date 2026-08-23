@@ -1,7 +1,0 @@
-[lint]
-# Serialized and persisted value-shape validation intentionally uses ValueError before boundary normalization.
-ignore = ["TRY004"]
-
-[lint.per-file-ignores]
-"linktools-ai/**/*.py" = ["EXE001", "UP009"]
-"tests/ai/**/*.py" = ["EXE001", "UP009"]

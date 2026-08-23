@@ -1,5 +1,3 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 """Canonical persistence conversion for Pydantic AI ModelMessage values."""
 
 import json

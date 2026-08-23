@@ -1,5 +1,3 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 """Recovery active-index consistency without bootstrap markers."""
 
 from datetime import datetime, timezone

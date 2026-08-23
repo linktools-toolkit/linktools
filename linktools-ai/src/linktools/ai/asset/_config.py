@@ -1,5 +1,3 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 """Strict configuration values used by asset loaders and codecs."""
 
 import math

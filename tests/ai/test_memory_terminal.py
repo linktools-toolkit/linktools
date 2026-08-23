@@ -1,5 +1,3 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 """In-memory terminal execution persistence checks."""
 
 from dataclasses import replace

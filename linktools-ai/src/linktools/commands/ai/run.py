@@ -1,5 +1,3 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 """`ai run`: execute one workspace Agent through Runtime."""
 
 import asyncio

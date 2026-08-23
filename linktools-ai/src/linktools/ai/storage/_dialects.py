@@ -1,5 +1,3 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 """Vendor-specific SQLAlchemy column types, statements, and engine configuration."""
 
 from dataclasses import dataclass

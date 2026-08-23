@@ -1,5 +1,3 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 """Generation-two filesystem Asset backend."""
 
 import asyncio

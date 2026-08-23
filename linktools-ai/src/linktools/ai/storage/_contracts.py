@@ -1,5 +1,3 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 """Domain-independent storage DTOs and protocols."""
 
 import math

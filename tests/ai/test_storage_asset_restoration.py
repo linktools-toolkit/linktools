@@ -1,5 +1,3 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 """Storage dialect and raw Asset backend contract checks."""
 
 from collections.abc import Sequence

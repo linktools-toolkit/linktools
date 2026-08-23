@@ -1,5 +1,3 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 """Explicit Runtime and Asset schema provisioning."""
 
 from collections.abc import Iterable

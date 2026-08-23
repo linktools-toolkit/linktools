@@ -1,5 +1,3 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 """Versioned Temporal workflow run context."""
 
 from typing import Any

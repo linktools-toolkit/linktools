@@ -1,5 +1,3 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 """Execution-scoped observable context."""
 
 from contextvars import ContextVar, Token

@@ -1,5 +1,3 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 """Built-in Asset type bindings for declaration specifications."""
 
 from dataclasses import replace

@@ -1,5 +1,3 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 """Boundary size and identifier validation shared by Entries and Services."""
 
 import re

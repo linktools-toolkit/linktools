@@ -1,5 +1,3 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 """Structured redaction at observation and error boundaries."""
 
 from dataclasses import dataclass

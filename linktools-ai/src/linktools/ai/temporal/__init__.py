@@ -1,5 +1,3 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 """Temporal durable production boundary."""
 
 from ._activity import (

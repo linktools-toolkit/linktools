@@ -1,5 +1,3 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 """Workspace composition root for the public Runtime."""
 
 import hashlib

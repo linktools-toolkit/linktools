@@ -1,5 +1,3 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 """Ordered, revision-aware storage overlay."""
 
 import asyncio

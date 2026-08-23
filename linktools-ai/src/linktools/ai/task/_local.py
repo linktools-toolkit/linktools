@@ -1,5 +1,3 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 """Process-local TaskGraph launcher backed by TaskRepository leases."""
 
 import asyncio

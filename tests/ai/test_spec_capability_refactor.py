@@ -1,5 +1,3 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 """Capability selection and immutable skill catalog contracts."""
 
 import json

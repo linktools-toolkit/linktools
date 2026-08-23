@@ -1,5 +1,3 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 """Skew-binary session prefix index conformance."""
 
 import pytest

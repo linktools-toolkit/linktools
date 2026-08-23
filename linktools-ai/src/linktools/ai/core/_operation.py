@@ -1,5 +1,3 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 """Generic durable operation ledger values."""
 
 from dataclasses import dataclass

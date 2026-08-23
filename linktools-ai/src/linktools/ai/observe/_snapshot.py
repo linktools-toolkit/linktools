@@ -1,5 +1,3 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 """Canonical run snapshot digest."""
 
 from dataclasses import dataclass

@@ -1,5 +1,3 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 """Agent stream event mapping checks."""
 
 from linktools.ai.agent._executor import LiveDelta, _map_event

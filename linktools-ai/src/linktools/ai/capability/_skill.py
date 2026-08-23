@@ -1,5 +1,3 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 """Skill binding contracts and Pydantic AI integration."""
 
 from collections.abc import Awaitable, Callable, Sequence

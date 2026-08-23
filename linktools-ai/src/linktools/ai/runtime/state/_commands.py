@@ -1,5 +1,3 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 """Named state commands for multi-record Runtime checkpoints."""
 
 import asyncio

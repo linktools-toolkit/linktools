@@ -1,5 +1,3 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 
 """Workspace-local Agent Skills and sub-agent discovery."""
 

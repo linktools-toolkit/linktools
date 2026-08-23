@@ -1,5 +1,3 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 """Frozen V1 persistence protocol fixtures."""
 
 import json

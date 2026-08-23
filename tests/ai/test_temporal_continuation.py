@@ -1,5 +1,3 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 """Regression coverage for Temporal continue-as-new stage restoration."""
 
 from dataclasses import replace

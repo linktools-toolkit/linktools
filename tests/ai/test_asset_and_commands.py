@@ -1,5 +1,3 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 """Raw AssetStore file and public command checks."""
 
 import asyncio

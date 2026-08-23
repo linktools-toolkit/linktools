@@ -1,5 +1,3 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 """Transport-only ACP adapter over the public Runtime."""
 
 import asyncio

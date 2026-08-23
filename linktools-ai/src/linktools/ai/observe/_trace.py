@@ -1,5 +1,3 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 """Trace DTOs and an in-memory recorder."""
 
 from dataclasses import dataclass

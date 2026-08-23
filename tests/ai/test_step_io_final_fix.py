@@ -1,5 +1,3 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 """Conformance coverage for staged step projection and local streaming."""
 
 from datetime import datetime, timezone

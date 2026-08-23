@@ -1,5 +1,3 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 """Typed logical asset discovery, scoped resources, and writes."""
 
 import asyncio

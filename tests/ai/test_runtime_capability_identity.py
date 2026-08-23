@@ -1,5 +1,3 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 """Regression coverage for durable RuntimeCapability type identity."""
 
 import pytest

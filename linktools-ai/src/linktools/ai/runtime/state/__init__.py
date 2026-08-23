@@ -1,5 +1,3 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 """Runtime state contracts and lifecycle owner."""
 
 from ._codec import (

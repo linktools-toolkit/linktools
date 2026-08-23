@@ -1,5 +1,3 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 """Granular, journaled filesystem implementation of StateStore."""
 
 import asyncio

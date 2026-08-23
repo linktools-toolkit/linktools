@@ -1,5 +1,3 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 """Asset-owned opaque Object key derivation."""
 
 import re

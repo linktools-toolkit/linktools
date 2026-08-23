@@ -1,5 +1,3 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 """MCP capability provider and execution-scoped runtime contract."""
 
 import re

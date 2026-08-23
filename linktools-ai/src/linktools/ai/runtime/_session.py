@@ -1,5 +1,3 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 """Session query API and persistence-backed session service."""
 
 import asyncio

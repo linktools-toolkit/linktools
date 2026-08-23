@@ -1,5 +1,3 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 """Deterministic Session mutation workflow boundary."""
 
 from dataclasses import dataclass

@@ -1,5 +1,3 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 
 """Static cohesion checks for ownership, forwarding modules, and public types."""
 

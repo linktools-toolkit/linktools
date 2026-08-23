@@ -1,5 +1,3 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 """OpenAI model binding."""
 
 from dataclasses import dataclass, field

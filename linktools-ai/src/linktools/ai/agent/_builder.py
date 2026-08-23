@@ -1,5 +1,3 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 """Build a Pydantic AI agent from an already materialized definition."""
 
 from typing import cast

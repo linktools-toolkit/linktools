@@ -1,5 +1,3 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 """Cancellation-safe coordination for one durable commit boundary."""
 
 import asyncio

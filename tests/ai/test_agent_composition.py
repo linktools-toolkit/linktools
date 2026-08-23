@@ -1,5 +1,3 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 """Focused regression coverage for the final Agent composition contract."""
 
 from contextlib import asynccontextmanager

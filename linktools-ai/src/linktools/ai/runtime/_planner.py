@@ -1,5 +1,3 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 """Runtime-owned interpretation of Agent-backed generic TaskNodes."""
 
 import asyncio

@@ -1,5 +1,3 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 """Three-table SQL Asset backend with optimistic global revision CAS."""
 
 import hashlib
