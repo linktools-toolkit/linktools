@@ -135,11 +135,8 @@ jobs:
               'ASSET_NOT_FOUND',
               'STORAGE_PATH_INVALID',
           )
-          production_text = '\n'.join(
-              path.read_text()
-              for path in root.rglob('*.py')
-              if path.name != 'errors.py'
-          ) + '\n' + '\n'.join(path.read_text() for path in command_root.rglob('*.py'))
+          production_text = '\n'.join(path.read_text() for path in root.rglob('*.py'))
+          production_text += '\n' + '\n'.join(path.read_text() for path in command_root.rglob('*.py'))
           test_text = '\n'.join(path.read_text() for path in tests.rglob('*.py'))
           matrix = []
           missing = []
@@ -167,4 +164,6 @@ jobs:
             audit-wide-catches.txt
             audit-execution-result.txt
             audit-error-code-matrix.txt
+            linktools-ai/src/linktools/ai
+            linktools-ai/src/linktools/commands/ai
           if-no-files-found: error
