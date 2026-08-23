@@ -264,3 +264,50 @@ async def test_recovery_handoff_schema_must_match_restored_binding() -> None:
         )
 
     assert error.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
+
+
+@pytest.mark.asyncio
+async def test_agent_and_binding_identity_split_acceptance(tmp_path) -> None:
+    from pydantic import BaseModel
+    from linktools.ai.model import ModelRegistry
+    from linktools.ai.workspace import Workspace, open_workspace_runtime
+
+    workspace = Workspace.load(tmp_path)
+    models = ModelRegistry.openai(model="gpt-test")
+    async with open_workspace_runtime(workspace, models=models) as runtime:
+        base = runtime.agent()
+        text_binding = runtime._bind_agent(base._agent_digest)
+        structured_binding = runtime._bind_agent(
+            base._agent_digest,
+            output=BaseModel,
+        )
+
+        assert text_binding.definition.digest == structured_binding.definition.digest
+        assert text_binding.digest != structured_binding.digest
+        assert runtime._bind_agent(base._agent_digest).digest == text_binding.digest
+
+        local_capability = RuntimeCapability.from_spec(
+            "local-identity",
+            _DurableCapability,
+            config={"mode": "strict"},
+            revision=1,
+        )
+        local = runtime.agent(capabilities=(local_capability,))
+        local_binding = runtime._bind_agent(local._agent_digest)
+        assert local._agent_digest != base._agent_digest
+        assert local_binding.digest != text_binding.digest
+
+        session = await base.create_session("identity-session")
+        assert session.agent_digest == base._agent_digest
+        await runtime._ensure_session(
+            runtime._definition(base._agent_digest),
+            session.session_id,
+            runtime.default_principal,
+        )
+        with pytest.raises(AIError) as error:
+            await runtime._ensure_session(
+                runtime._definition(local._agent_digest),
+                session.session_id,
+                runtime.default_principal,
+            )
+        assert error.value.code is ErrorCode.SESSION_BINDING_MISMATCH
