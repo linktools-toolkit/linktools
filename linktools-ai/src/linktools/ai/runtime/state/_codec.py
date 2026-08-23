@@ -395,7 +395,7 @@ _V1_SCHEMA_FINGERPRINTS: Mapping[str, str] = MappingProxyType(
         "conversation_history_segment": "62cc29ba7ddb357641b4de91f9168a70ce4f518043444482ee16fefe57a336a5",
         "evaluation_record": "67ac6e9191111abc33d611d2bfd628a4190fa6794c28b8f15f8b878ba46ad345",
         "execution_cancel_request_commit": "1a5f2667e2909eb1a94b0446483ea19cc105131a67d606854bb6e3d11541fa7a",
-        "execution_event": "0c977a9bc5de198667dc34640acd192fe54a986227d886ffb1dea596a851c957",
+        "execution_event": "c7d10fa9a15092e7e29c503b938f12358b836ee0d578bd5faff0f0951d3bedf8",
         "execution_event_append": "2db5fe9712b5b6b99fbdf014e3d34f9d20bdcaf419c1f1c616547962d0de5d8d",
         "execution_history_head": "403fad67908ca97614648aa16b681fcecaa205f9ba0847f77ce5dbf666a86b68",
         "execution_history_seal": "dc5a7181d8ee8e23b75390bae449da48eca31f1286159212bb1960d5aad5a0bd",

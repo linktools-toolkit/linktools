@@ -94,7 +94,6 @@ from ._maintenance import (
     RuntimeStorageInspection,
     RuntimeStorageMaintenance,
 )
-from ._migration import migrate_v1_agent_identity_state
 from ._memory import MemoryStateStorageGroup, MemoryStateStore
 from ._plan import (
     RuntimeDomain,
@@ -294,5 +293,4 @@ __all__ = [
     "subject_digest",
     "run_durable_commit",
     "wire_type_id",
-    "migrate_v1_agent_identity_state",
 ]

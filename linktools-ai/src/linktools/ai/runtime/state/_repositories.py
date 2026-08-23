@@ -1132,7 +1132,7 @@ class SessionRepositoryImpl(_ResourceRepository[SessionRecord]):
             or existing_target.history_id != result.target_history_id
             or existing_target.tenant_id != self._tenant_id
             or existing_target.owner_principal_id != target.owner_principal_id
-            or existing_target.binding_digest != target.binding_digest
+            or existing_target.agent_digest != target.agent_digest
             or child.session_id != result.target_session_id
             or child.tenant_id != self._tenant_id
             or child.parent_history_id != result.source_history_id

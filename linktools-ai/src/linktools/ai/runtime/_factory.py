@@ -32,8 +32,9 @@ from .state import (
     RuntimeDomain,
     RuntimeRetentionMode,
     RuntimeState,
-    migrate_v1_agent_identity_state,
 )
+from .state._migration import migrate_v1_agent_identity_state
+
 
 _logger = environ.get_logger("ai.runtime.factory")
 

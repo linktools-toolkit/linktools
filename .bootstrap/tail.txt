@@ -1,108 +1,400 @@
-===== python -m pip install -q --upgrade pip =====
-===== python -m pip install -q -e ./linktools -e ./linktools-ai[sqlite,evaluation,temporal] pytest pytest-asyncio ruff =====
-===== python .bootstrap/patch.py =====
-runtime V1 agent identity migration staged
-===== python -m compileall -q linktools-ai/src/linktools/ai =====
-===== ruff check --select E4,E7,E9,F linktools-ai/src/linktools/ai tests/ai =====
-F401 [*] `pydantic_ai_harness.step_persistence.ContinuableSnapshot` imported but unused
-  --> linktools-ai/src/linktools/ai/adapter/_history.py:15:5
+225 |         )
+    -
+226 |
+227 |
+228 | class _History:
+    -     async def trace(self, execution_id: str, *, tenant_id: str, cursor: str | None, limit: int) -> Page[object]:
+229 +     async def trace(
+230 +         self, execution_id: str, *, tenant_id: str, cursor: str | None, limit: int
+231 +     ) -> Page[object]:
+232 |         del execution_id, tenant_id, cursor, limit
+233 |         return Page((), None)
+234 |
+    -     async def transcript(self, execution_id: str, *, tenant_id: str, cursor: str | None, limit: int) -> Page[object]:
+235 +     async def transcript(
+236 +         self, execution_id: str, *, tenant_id: str, cursor: str | None, limit: int
+237 +     ) -> Page[object]:
+238 |         del execution_id, tenant_id, cursor, limit
+--------------------------------------------------------------------------------
+266 |
+    -     async def prepare_start(self, request: object, execution: object, identity: object) -> None:
+267 +     async def prepare_start(
+268 +         self, request: object, execution: object, identity: object
+269 +     ) -> None:
+270 |         del request, execution, identity
+    |
+
+unformatted: File would be reformatted
+   --> tests/ai/test_session_history_projection.py:209:44
+    |
+208 |         service = _service(state)
+    -         first_page = await service.history("session", principal=Principal("owner", "tenant"), limit=2)
+209 +         first_page = await service.history(
+210 +             "session", principal=Principal("owner", "tenant"), limit=2
+211 +         )
+212 |         assert first_page.next_cursor is not None
+--------------------------------------------------------------------------------
+315 | @pytest.mark.asyncio
+    - async def test_session_history_fork_copies_continuation_without_execution_lookup() -> None:
+316 + async def test_session_history_fork_copies_continuation_without_execution_lookup() -> (
+317 +     None
+318 + ):
+319 |     state = RuntimeState.in_memory()
+    |
+
+unformatted: File would be reformatted
+   --> tests/ai/test_spec_capability_refactor.py:11:46
+    |
+10  | from linktools.ai.agent import select_platform_tool_names
+    - from linktools.ai.agent._capabilities import PLAN_SAFE_METADATA_KEY, tool_allowed_in_planning
+11  + from linktools.ai.agent._capabilities import (
+12  +     PLAN_SAFE_METADATA_KEY,
+13  +     tool_allowed_in_planning,
+14  + )
+15  | from linktools.ai.asset import AssetRef
+--------------------------------------------------------------------------------
+152 |         (MCPServerSpecCodec(), {"id": "mcp", "revision": "1", "command": "echo"}),
+    -         (MCPServerSpecCodec(), {"id": "mcp", "revision": 1, "command": "echo", "args": [1]}),
+153 +         (
+154 +             MCPServerSpecCodec(),
+155 +             {"id": "mcp", "revision": 1, "command": "echo", "args": [1]},
+156 +         ),
+157 |     ),
+158 | )
+    - def test_asset_spec_codecs_reject_type_coercion(codec: object, payload: dict[str, object]) -> None:
+159 + def test_asset_spec_codecs_reject_type_coercion(
+160 +     codec: object, payload: dict[str, object]
+161 + ) -> None:
+162 |     with pytest.raises(AIError) as error:
+    |
+
+unformatted: File would be reformatted
+  --> tests/ai/test_state_codec_protocol.py:81:85
    |
-13 | from pydantic_ai.messages import ModelRequest, ModelResponse
-14 | from pydantic_ai_harness.step_persistence import (
-15 |     ContinuableSnapshot,
-   |     ^^^^^^^^^^^^^^^^^^^
-16 |     RunRecord,
-17 |     StepEvent,
-   |
-help: Remove unused import: `pydantic_ai_harness.step_persistence.ContinuableSnapshot`
-   |
-14 | from pydantic_ai_harness.step_persistence import (
-   -     ContinuableSnapshot,
-15 |     RunRecord,
+80 |
+   - def test_future_envelope_version_is_parseable_but_not_decoded_without_registry() -> None:
+81 + def test_future_envelope_version_is_parseable_but_not_decoded_without_registry() -> (
+82 +     None
+83 + ):
+84 |     future = {"v": CURRENT_DATA_VERSION + 1, "value": {"type": "future"}}
    |
 
-F401 `._mcp.mcp_server_selector` imported but unused; consider removing, adding to `__all__`, or using a redundant alias
-  --> linktools-ai/src/linktools/ai/capability/__init__.py:13:54
-   |
-11 |     validate_fingerprint,
-12 | )
-13 | from ._mcp import MCPCapabilityProvider, MCPRuntime, mcp_server_selector
-   |                                                      ^^^^^^^^^^^^^^^^^^^
-14 | from ._names import SKILL_TOOL_NAMES
-15 | from ._skill import SkillCapabilityProvider
-   |
-help: Add unused import `mcp_server_selector` to __all__
+unformatted: File would be reformatted
+   --> tests/ai/test_step_io_final_fix.py:91:33
+    |
+90  |         await state.execution.executions.state_store.mutate(
+    -             lambda transaction: state.execution.executions.insert_history_head_in_transaction(
+    -                 transaction,
+    -                 ExecutionHistoryHeadRecord(
+    -                     "execution",
+    -                     "tenant",
+    -                     ExecutionHistoryState.OPEN,
+    -                     0,
+    -                     None,
+    -                 ),
+91  +             lambda transaction: (
+92  +                 state.execution.executions.insert_history_head_in_transaction(
+93  +                     transaction,
+94  +                     ExecutionHistoryHeadRecord(
+95  +                         "execution",
+96  +                         "tenant",
+97  +                         ExecutionHistoryState.OPEN,
+98  +                         0,
+99  +                         None,
+100 +                     ),
+101 +                 )
+102 |             )
+--------------------------------------------------------------------------------
+154 | @pytest.mark.asyncio
+    - async def test_first_recovery_effect_uses_one_filesystem_generation(tmp_path: Path) -> None:
+155 + async def test_first_recovery_effect_uses_one_filesystem_generation(
+156 +     tmp_path: Path,
+157 + ) -> None:
+158 |     state = RuntimeState.filesystem(tmp_path / "runtime")
+--------------------------------------------------------------------------------
+175 |         )
+    -         generation = next((path for path in (tmp_path / "runtime" / "recovery").rglob("generation")), None)
+176 +         generation = next(
+177 +             (path for path in (tmp_path / "runtime" / "recovery").rglob("generation")),
+178 +             None,
+179 +         )
+180 |         assert generation is not None
+    |
 
-F401 [*] `typing.Any` imported but unused
-  --> linktools-ai/src/linktools/ai/runtime/state/_migration.py:16:20
+unformatted: File would be reformatted
+   --> tests/ai/test_storage_asset_restoration.py:89:12
+    |
+88  |     assert not is_retryable_sql_transaction(unavailable)
+    -     assert classify_sql_error(RuntimeError("application failure")) is SqlErrorKind.UNKNOWN
+89  +     assert (
+90  +         classify_sql_error(RuntimeError("application failure")) is SqlErrorKind.UNKNOWN
+91  +     )
+92  |     assert not is_retryable_sql_transaction(RuntimeError("application failure"))
+--------------------------------------------------------------------------------
+153 | @pytest.mark.asyncio
+    - async def test_local_directory_asset_layer_stat_has_integer_revision(tmp_path: Path) -> None:
+154 + async def test_local_directory_asset_layer_stat_has_integer_revision(
+155 +     tmp_path: Path,
+156 + ) -> None:
+157 |     path = tmp_path / "mapped" / "mcp" / "one.json"
+158 |     path.parent.mkdir(parents=True)
+159 |     path.write_bytes(b"one")
+    -     primary = InMemoryAssetBackend(AssetRoot("memory:primary", "memory", "primary", "primary"))
+160 +     primary = InMemoryAssetBackend(
+161 +         AssetRoot("memory:primary", "memory", "primary", "primary")
+162 +     )
+163 |     builtin = DirectoryAssetBackend(
+--------------------------------------------------------------------------------
+210 |         session.statements.clear()
+    -         assert await dialect.upsert_increment(
+    -             session,
+    -             table=table,
+    -             values={"path": "sample/one", "value": "one"},
+    -             column="revision",
+    -             index_elements=("path",),
+    -         ) == 1
+211 +         assert (
+212 +             await dialect.upsert_increment(
+213 +                 session,
+214 +                 table=table,
+215 +                 values={"path": "sample/one", "value": "one"},
+216 +                 column="revision",
+217 +                 index_elements=("path",),
+218 +             )
+219 +             == 1
+220 +         )
+221 |         assert marker in str(session.statements[0].compile(dialect=compiler_dialect))
+--------------------------------------------------------------------------------
+237 |         assert backend.root.scheme == "sql"
+    -         assert tuple(table.name for table in (tables["ai_asset_entries"], tables["ai_asset_changes"], tables["ai_asset_heads"])) == (
+238 +         assert tuple(
+239 +             table.name
+240 +             for table in (
+241 +                 tables["ai_asset_entries"],
+242 +                 tables["ai_asset_changes"],
+243 +                 tables["ai_asset_heads"],
+244 +             )
+245 +         ) == (
+246 |             "ai_asset_entries",
+--------------------------------------------------------------------------------
+265 | @pytest.mark.asyncio
+    - async def test_sql_asset_namespace_isolates_the_same_logical_key(tmp_path: Path) -> None:
+266 + async def test_sql_asset_namespace_isolates_the_same_logical_key(
+267 +     tmp_path: Path,
+268 + ) -> None:
+269 |     from sqlalchemy.ext.asyncio import create_async_engine
+270 |
+    -     engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'asset-isolation.db'}")
+271 +     engine = create_async_engine(
+272 +         f"sqlite+aiosqlite:///{tmp_path / 'asset-isolation.db'}"
+273 +     )
+274 |     first = SqlAssetBackend(engine, namespace="assets-a")
+--------------------------------------------------------------------------------
+290 | @pytest.mark.asyncio
+    - async def test_sql_asset_backend_persists_history_outside_revision_row(tmp_path: Path) -> None:
+291 + async def test_sql_asset_backend_persists_history_outside_revision_row(
+292 +     tmp_path: Path,
+293 + ) -> None:
+294 |     from sqlalchemy import event, func, select
+--------------------------------------------------------------------------------
+351 |             counts = []
+    -             for table in (tables["ai_asset_entries"], tables["ai_asset_changes"], tables["ai_objects"], tables["ai_asset_heads"]):
+    -                 counts.append(await session.scalar(select(func.count()).select_from(table)))
+352 +             for table in (
+353 +                 tables["ai_asset_entries"],
+354 +                 tables["ai_asset_changes"],
+355 +                 tables["ai_objects"],
+356 +                 tables["ai_asset_heads"],
+357 +             ):
+358 +                 counts.append(
+359 +                     await session.scalar(select(func.count()).select_from(table))
+360 +                 )
+361 |         assert counts == [1, 4, 2, 1]
+--------------------------------------------------------------------------------
+377 |         async with engine.connect() as connection:
+    -             tables = await connection.run_sync(lambda sync_connection: inspect(sync_connection).get_table_names())
+378 +             tables = await connection.run_sync(
+379 +                 lambda sync_connection: inspect(sync_connection).get_table_names()
+380 +             )
+381 |         assert {"ai_asset_entries", "ai_asset_changes", "ai_asset_heads"} <= set(tables)
+--------------------------------------------------------------------------------
+439 |             dialect = resolve_dialect(session)
+    -             assert await dialect.upsert_increment(
+    -                 session,
+    -                 table=table,
+    -                 values={"namespace": "test"},
+    -                 column="revision",
+    -                 index_elements=("namespace",),
+    -             ) == 1
+    -             assert await dialect.upsert_increment(
+    -                 session,
+    -                 table=table,
+    -                 values={"namespace": "test"},
+    -                 column="revision",
+    -                 index_elements=("namespace",),
+    -             ) == 2
+440 +             assert (
+441 +                 await dialect.upsert_increment(
+442 +                     session,
+443 +                     table=table,
+444 +                     values={"namespace": "test"},
+445 +                     column="revision",
+446 +                     index_elements=("namespace",),
+447 +                 )
+448 +                 == 1
+449 +             )
+450 +             assert (
+451 +                 await dialect.upsert_increment(
+452 +                     session,
+453 +                     table=table,
+454 +                     values={"namespace": "test"},
+455 +                     column="revision",
+456 +                     index_elements=("namespace",),
+457 +                 )
+458 +                 == 2
+459 +             )
+460 |             deleted = await dialect.delete_returning(
+--------------------------------------------------------------------------------
+502 |         assert len(result.results) == 130
+    -         assert await backend.get(AssetKey("skill", "skill-129/SKILL.md")) == b"skill-129"
+503 +         assert (
+504 +             await backend.get(AssetKey("skill", "skill-129/SKILL.md")) == b"skill-129"
+505 +         )
+506 |         async with session_factory() as session:
+507 |             counts = []
+    -             for table in (tables["ai_asset_entries"], tables["ai_asset_changes"], tables["ai_objects"]):
+    -                 counts.append(await session.scalar(select(func.count()).select_from(table)))
+508 +             for table in (
+509 +                 tables["ai_asset_entries"],
+510 +                 tables["ai_asset_changes"],
+511 +                 tables["ai_objects"],
+512 +             ):
+513 +                 counts.append(
+514 +                     await session.scalar(select(func.count()).select_from(table))
+515 +                 )
+516 |         assert tuple(counts) == (130, 130, 130)
+    |
+
+unformatted: File would be reformatted
+   --> tests/ai/test_storage_conformance_final.py:11:32
+    |
+10  |
+    - from linktools.ai.asset import AssetKey, AssetRoot, DirectoryAssetBackend, PrefixAssetPathAdapter
+11  + from linktools.ai.asset import (
+12  +     AssetKey,
+13  +     AssetRoot,
+14  +     DirectoryAssetBackend,
+15  +     PrefixAssetPathAdapter,
+16  + )
+17  | from linktools.ai.errors import AIError
+    - from linktools.ai.runtime.state import FilesystemStateStorageGroup, FilesystemStateStore, StoredRecord
+18  + from linktools.ai.runtime.state import (
+19  +     FilesystemStateStorageGroup,
+20  +     FilesystemStateStore,
+21  +     StoredRecord,
+22  + )
+23  |
+--------------------------------------------------------------------------------
+89  | @pytest.mark.asyncio
+    - async def test_filesystem_deleted_record_does_not_resurface_from_cache(tmp_path: Path) -> None:
+90  + async def test_filesystem_deleted_record_does_not_resurface_from_cache(
+91  +     tmp_path: Path,
+92  + ) -> None:
+93  |     store = FilesystemStateStore(
+--------------------------------------------------------------------------------
+102 |         await store.mutate(lambda transaction: transaction.insert_record(record))
+    -         assert await store.read(lambda transaction: transaction.get_record(record.key_digest)) == record
+    -         assert await store.mutate(lambda transaction: transaction.delete_record(record.key_digest))
+    -         assert await store.read(lambda transaction: transaction.get_record(record.key_digest)) is None
+103 +         assert (
+104 +             await store.read(
+105 +                 lambda transaction: transaction.get_record(record.key_digest)
+106 +             )
+107 +             == record
+108 +         )
+109 +         assert await store.mutate(
+110 +             lambda transaction: transaction.delete_record(record.key_digest)
+111 +         )
+112 +         assert (
+113 +             await store.read(
+114 +                 lambda transaction: transaction.get_record(record.key_digest)
+115 +             )
+116 +             is None
+117 +         )
+118 |     finally:
+--------------------------------------------------------------------------------
+135 |     loaded = await backend.load_metadata(None)
+    -     assert tuple(change.key for change in loaded.changes) == (AssetKey("agent", "default.json"),)
+136 +     assert tuple(change.key for change in loaded.changes) == (
+137 +         AssetKey("agent", "default.json"),
+138 +     )
+139 |     assert await backend.get_many((AssetKey("agent", "default.json"),)) == {
+    |
+
+unformatted: File would be reformatted
+  --> tests/ai/test_temporal_continuation.py:85:12
    |
-14 | from collections.abc import Mapping
-15 | from dataclasses import replace
-16 | from typing import Any, get_type_hints
-   |                    ^^^
-17 |
-18 | from pydantic import BaseModel
-   |
-help: Remove unused import: `typing.Any`
-   |
-15 | from dataclasses import replace
-   - from typing import Any, get_type_hints
-16 + from typing import get_type_hints
-17 |
+84 |     assert _should_continue_as_new(continued) is False
+   -     assert _should_continue_as_new(
+   -         replace(continued, last_event_sequence=CONTINUE_EVENT_THRESHOLD * 2)
+   -     ) is True
+85 +     assert (
+86 +         _should_continue_as_new(
+87 +             replace(continued, last_event_sequence=CONTINUE_EVENT_THRESHOLD * 2)
+88 +         )
+89 +         is True
+90 +     )
+91 |
    |
 
-F401 [*] `._contracts.RecoveryExecutionInput` imported but unused
-  --> linktools-ai/src/linktools/ai/runtime/state/_migration.py:38:5
+unformatted: File would be reformatted
+  --> tests/ai/test_v5_conformance.py:23:77
    |
-36 |     ExecutionRecord,
-37 |     RecoveryAdmissionRecord,
-38 |     RecoveryExecutionInput,
-   |     ^^^^^^^^^^^^^^^^^^^^^^
-39 |     SessionRecord,
-40 | )
-   |
-help: Remove unused import: `._contracts.RecoveryExecutionInput`
-   |
-37 |     RecoveryAdmissionRecord,
-   -     RecoveryExecutionInput,
-38 |     SessionRecord,
+22 |     ledger = TaskCompletionLedger()
+   -     assert ledger.complete("task", "owner", 1, "digest") == ledger.complete("task", "owner", 1, "digest")
+23 +     assert ledger.complete("task", "owner", 1, "digest") == ledger.complete(
+24 +         "task", "owner", 1, "digest"
+25 +     )
+26 |     with pytest.raises(AIError) as error:
    |
 
-F401 [*] `linktools.ai.runtime.state.ContextProjection` imported but unused
-  --> tests/ai/test_runtime_state_identity_migration.py:16:5
+unformatted: File would be reformatted
+  --> tests/ai/test_workspace_capabilities.py:9:43
    |
-14 | from linktools.ai.runtime import RuntimeState
-15 | from linktools.ai.runtime.state import (
-16 |     ContextProjection,
-   |     ^^^^^^^^^^^^^^^^^
-17 |     RuntimeDomain,
-18 |     SessionRecord,
-   |
-help: Remove unused import
-   |
-15 | from linktools.ai.runtime.state import (
-   -     ContextProjection,
-   -     RuntimeDomain,
-16 |     SessionRecord,
-   |
-
-F401 [*] `linktools.ai.runtime.state.RuntimeDomain` imported but unused
-  --> tests/ai/test_runtime_state_identity_migration.py:17:5
-   |
-15 | from linktools.ai.runtime.state import (
-16 |     ContextProjection,
-17 |     RuntimeDomain,
-   |     ^^^^^^^^^^^^^
-18 |     SessionRecord,
-19 |     migrate_v1_agent_identity_state,
-   |
-help: Remove unused import
-   |
-15 | from linktools.ai.runtime.state import (
-   -     ContextProjection,
-   -     RuntimeDomain,
-16 |     SessionRecord,
+8  | import pytest
+   - from linktools.ai.workspace._tools import build_workspace_capabilities, build_workspace_tool_map
+9  + from linktools.ai.workspace._tools import (
+10 +     build_workspace_capabilities,
+11 +     build_workspace_tool_map,
+12 + )
+13 |
+14 |
+15 | def test_workspace_capabilities_are_stable_and_root_scoped(tmp_path: Path) -> None:
+16 |     capabilities = build_workspace_capabilities(tmp_path)
+   -     assert tuple(capability.provider for capability in capabilities) == ("runtime", "runtime")
+   -     assert tuple(capability.id for capability in capabilities) == ("workspace-filesystem", "workspace-shell")
+17 +     assert tuple(capability.provider for capability in capabilities) == (
+18 +         "runtime",
+19 +         "runtime",
+20 +     )
+21 +     assert tuple(capability.id for capability in capabilities) == (
+22 +         "workspace-filesystem",
+23 +         "workspace-shell",
+24 +     )
+25 |     assert capabilities == build_workspace_capabilities(tmp_path)
    |
 
-Found 6 errors.
-[*] 5 fixable with the `--fix` option.
+unformatted: File would be reformatted
+  --> tests/ai/test_workspace_runtime_regressions.py:11:36
+   |
+10 | from linktools.ai.spec import AgentSpec, AgentSpecCodec
+   - from linktools.ai.workspace import Workspace, build_workspace_assets, open_workspace_runtime
+11 + from linktools.ai.workspace import (
+12 +     Workspace,
+13 +     build_workspace_assets,
+14 +     open_workspace_runtime,
+15 + )
+16 |
+   |
+
+143 files would be reformatted, 45 files already formatted

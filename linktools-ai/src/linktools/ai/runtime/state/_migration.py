@@ -35,12 +35,14 @@ from ._codec import (
 )
 from ._contracts import (
     ContextProjection,
+    EvaluationRecord,
     ExecutionRecord,
     RecoveryAdmissionRecord,
     SessionRecord,
 )
 from ._plan import RuntimeDomain
 from ._repositories import (
+    EvaluationRepositoryImpl,
     ExecutionRepositoryImpl,
     RecoveryCheckpointRepositoryImpl,
     SessionRepositoryImpl,
@@ -111,17 +113,21 @@ async def migrate_v1_agent_identity_state(
     sessions = state.conversation.sessions
     executions = state.execution.executions
     recovery = state.recovery.checkpoints
+    evaluations = state.evaluation.records
     if not isinstance(sessions, SessionRepositoryImpl):
         raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
     if not isinstance(executions, ExecutionRepositoryImpl):
         raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
     if not isinstance(recovery, RecoveryCheckpointRepositoryImpl):
         raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+    if not isinstance(evaluations, EvaluationRepositoryImpl):
+        raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
 
     repositories = {
         RuntimeDomain.CONVERSATION: sessions,
         RuntimeDomain.EXECUTION: executions,
         RuntimeDomain.RECOVERY: recovery,
+        RuntimeDomain.EVALUATION: evaluations,
     }
     completed = [
         await _migration_complete(repository, domain)
@@ -134,11 +140,17 @@ async def migrate_v1_agent_identity_state(
     # This prevents a malformed execution from partially migrating its Session.
     legacy_bindings: dict[str, AgentBinding] = {}
     legacy_agents: dict[str, str] = {}
+    execution_targets: dict[str, tuple[str, str]] = {}
     execution_records = await _records(executions, "execution")
     recovery_records = await _records(recovery, "recovery_admission")
     for record in execution_records:
         _collect_execution_binding(
-            record, compiler, catalog, legacy_bindings, legacy_agents
+            record,
+            compiler,
+            catalog,
+            legacy_bindings,
+            legacy_agents,
+            execution_targets,
         )
     for record in recovery_records:
         _collect_recovery_binding(
@@ -165,6 +177,17 @@ async def migrate_v1_agent_identity_state(
             if data is not None:
                 await _replace_data(history._store, record, data)
                 migrated += 1
+
+    # Evaluation binds to the exact executable identity of its linked
+    # execution. Reconcile it before rewriting Execution so a crash at any
+    # boundary remains restartable. Historical evaluation idempotency request
+    # digests are intentionally not rewritten because the original request is
+    # not fully reconstructable.
+    for record in await _records(evaluations, "evaluation"):
+        data = _migrate_evaluation_data(record, execution_targets)
+        if data is not None:
+            await _replace_data(evaluations.state_store, record, data)
+            migrated += 1
 
     # Exact execution/recovery records are migrated last. Their old snapshots
     # are the evidence used above to migrate Session/projection identity.
@@ -293,6 +316,7 @@ def _collect_execution_binding(
     catalog: AgentCatalog,
     bindings: dict[str, AgentBinding],
     agents: dict[str, str],
+    targets: dict[str, tuple[str, str]],
 ) -> None:
     fields = _domain_fields(
         record.data,
@@ -303,7 +327,13 @@ def _collect_execution_binding(
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     binding = fields["binding"]
     if _is_current_binding(binding):
-        _decode_enveloped_domain(record.data, ExecutionRecord)
+        current = _decode_enveloped_domain(record.data, ExecutionRecord)
+        _remember_execution_target(
+            targets,
+            current.execution_id,
+            current.binding_digest,
+            current.binding.output_schema_fingerprint,
+        )
         return
     if binding is None:
         raise AIError(
@@ -313,8 +343,29 @@ def _collect_execution_binding(
     legacy_digest, migrated = _migrate_legacy_binding(binding, compiler)
     if _decode_domain(fields["binding_digest"], str, _CURRENT_CODEC) != legacy_digest:
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    execution_id = _decode_domain(fields["execution_id"], str, _CURRENT_CODEC)
+    if not isinstance(execution_id, str) or not execution_id:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     _remember_binding(bindings, agents, legacy_digest, migrated, catalog)
+    _remember_execution_target(
+        targets,
+        execution_id,
+        migrated.digest,
+        migrated.snapshot.output_schema_fingerprint,
+    )
 
+
+def _remember_execution_target(
+    targets: dict[str, tuple[str, str]],
+    execution_id: str,
+    binding_digest: str,
+    output_schema_fingerprint: str,
+) -> None:
+    target = (binding_digest, output_schema_fingerprint)
+    previous = targets.get(execution_id)
+    if previous is not None and previous != target:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    targets[execution_id] = target
 
 def _collect_recovery_binding(
     record: StoredRecord,
@@ -377,6 +428,24 @@ def _remember_binding(
     agents[legacy_digest] = agent_digest
     catalog.register_definition(binding.definition)
     catalog.register_binding(binding)
+
+
+def _migrate_evaluation_data(
+    record: StoredRecord,
+    targets: Mapping[str, tuple[str, str]],
+) -> Mapping[str, JsonValue] | None:
+    value = _decode_enveloped_domain(record.data, EvaluationRecord)
+    target = targets.get(value.execution_id)
+    if target is None:
+        # The linked Execution may have been retained elsewhere or already
+        # released. Without that authority there is no safe identity rewrite.
+        return None
+    binding_digest, output_schema_fingerprint = target
+    if value.output_schema_fingerprint != output_schema_fingerprint:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    if value.binding_digest == binding_digest:
+        return None
+    return _domain_data(replace(value, binding_digest=binding_digest))
 
 
 def _migrate_execution_data(

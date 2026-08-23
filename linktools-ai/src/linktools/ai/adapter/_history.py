@@ -12,7 +12,6 @@ from typing import Protocol, runtime_checkable
 from linktools.core import environ
 from pydantic_ai.messages import ModelRequest, ModelResponse
 from pydantic_ai_harness.step_persistence import (
-    ContinuableSnapshot,
     RunRecord,
     StepEvent,
     StepStore,

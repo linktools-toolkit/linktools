@@ -8,15 +8,17 @@ from datetime import datetime, timezone
 import pytest
 
 from linktools.ai.agent import AgentCatalog, AgentCompiler
-from linktools.ai.core import ExecutionLineageKind, ExecutionStatus, SessionStatus
+from linktools.ai.core import (
+    EvaluationStatus,
+    ExecutionLineageKind,
+    ExecutionStatus,
+    SessionStatus,
+)
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.model import ModelRegistry
 from linktools.ai.runtime import RuntimeState
-from linktools.ai.runtime.state import (
-    RuntimeDomain,
-    SessionRecord,
-    migrate_v1_agent_identity_state,
-)
+from linktools.ai.runtime.state import RuntimeDomain, SessionRecord
+from linktools.ai.runtime.state._migration import migrate_v1_agent_identity_state
 from linktools.ai.runtime.state._codec import (
     _decode_enveloped_domain,
     encode_domain,
@@ -24,6 +26,7 @@ from linktools.ai.runtime.state._codec import (
 )
 from linktools.ai.runtime.state._contracts import (
     ContextProjection,
+    EvaluationRecord,
     ExecutionRecord,
     RecoveryAdmissionRecord,
     RecoveryExecutionInput,
@@ -365,3 +368,151 @@ async def test_migration_preserves_historical_projection_digest() -> None:
         assert migrated.digest == "historic-projection-digest"
     finally:
         await state.close()
+
+@pytest.mark.asyncio
+async def test_migration_rewrites_evaluation_from_linked_legacy_execution() -> None:
+    state = RuntimeState.in_memory()
+    await state.initialize(namespace="legacy-evaluation", tenant_id="tenant")
+    compiler, catalog = _compiler_catalog()
+    binding = compiler.bind(catalog.root_definition("default"))
+    legacy_digest = "a" * 64
+    execution = _execution(binding)
+    executions = state.execution.executions
+    stored = executions._stored(
+        "execution", "execution", execution, state=execution.status.value
+    )
+    stored = replace(
+        stored,
+        data=_legacy_execution_data(execution, binding, legacy_digest),
+    )
+    await executions.state_store.mutate(lambda tx: tx.insert_record(stored))
+    now = datetime.now(timezone.utc)
+    evaluation = EvaluationRecord(
+        evaluation_id="evaluation",
+        tenant_id="tenant",
+        execution_id="execution",
+        dataset_id="dataset",
+        dataset_revision=1,
+        evaluator_id="default",
+        evaluator_revision=1,
+        binding_digest=legacy_digest,
+        output_schema_fingerprint=binding.snapshot.output_schema_fingerprint,
+        artifact_digest=None,
+        status=EvaluationStatus.SUCCEEDED,
+        revision=0,
+        metrics={},
+        created_at=now,
+        updated_at=now,
+    )
+    await state.evaluation.records.create(evaluation)
+    try:
+        assert await migrate_v1_agent_identity_state(
+            state, catalog, compiler, tenant_id="tenant"
+        ) == 2
+        migrated = await state.evaluation.records.get(
+            "evaluation", tenant_id="tenant"
+        )
+        assert migrated is not None
+        assert migrated.binding_digest == binding.digest
+        assert migrated.output_schema_fingerprint == binding.snapshot.output_schema_fingerprint
+    finally:
+        await state.close()
+
+
+@pytest.mark.asyncio
+async def test_migration_converges_evaluation_after_execution_was_already_migrated() -> None:
+    state = RuntimeState.in_memory()
+    await state.initialize(namespace="partial-evaluation", tenant_id="tenant")
+    compiler, catalog = _compiler_catalog()
+    binding = compiler.bind(catalog.root_definition("default"))
+    execution = _execution(binding)
+    executions = state.execution.executions
+    await executions.state_store.mutate(
+        lambda tx: tx.insert_record(
+            executions._stored(
+                "execution",
+                execution.execution_id,
+                execution,
+                state=execution.status.value,
+            )
+        )
+    )
+    now = datetime.now(timezone.utc)
+    evaluation = EvaluationRecord(
+        evaluation_id="evaluation",
+        tenant_id="tenant",
+        execution_id=execution.execution_id,
+        dataset_id="dataset",
+        dataset_revision=1,
+        evaluator_id="default",
+        evaluator_revision=1,
+        binding_digest="f" * 64,
+        output_schema_fingerprint=binding.snapshot.output_schema_fingerprint,
+        artifact_digest=None,
+        status=EvaluationStatus.SUCCEEDED,
+        revision=0,
+        metrics={},
+        created_at=now,
+        updated_at=now,
+    )
+    await state.evaluation.records.create(evaluation)
+    try:
+        assert await migrate_v1_agent_identity_state(
+            state, catalog, compiler, tenant_id="tenant"
+        ) == 1
+        migrated = await state.evaluation.records.get(
+            "evaluation", tenant_id="tenant"
+        )
+        assert migrated is not None
+        assert migrated.binding_digest == binding.digest
+    finally:
+        await state.close()
+
+
+@pytest.mark.asyncio
+async def test_migration_rejects_evaluation_output_contract_drift() -> None:
+    state = RuntimeState.in_memory()
+    await state.initialize(namespace="evaluation-contract-drift", tenant_id="tenant")
+    compiler, catalog = _compiler_catalog()
+    binding = compiler.bind(catalog.root_definition("default"))
+    execution = _execution(binding)
+    executions = state.execution.executions
+    await executions.state_store.mutate(
+        lambda tx: tx.insert_record(
+            executions._stored(
+                "execution",
+                execution.execution_id,
+                execution,
+                state=execution.status.value,
+            )
+        )
+    )
+    now = datetime.now(timezone.utc)
+    await state.evaluation.records.create(
+        EvaluationRecord(
+            evaluation_id="evaluation",
+            tenant_id="tenant",
+            execution_id=execution.execution_id,
+            dataset_id="dataset",
+            dataset_revision=1,
+            evaluator_id="default",
+            evaluator_revision=1,
+            binding_digest="e" * 64,
+            output_schema_fingerprint="d" * 64,
+            artifact_digest=None,
+            status=EvaluationStatus.SUCCEEDED,
+            revision=0,
+            metrics={},
+            created_at=now,
+            updated_at=now,
+        )
+    )
+    try:
+        with pytest.raises(AIError) as raised:
+            await migrate_v1_agent_identity_state(
+                state, catalog, compiler, tenant_id="tenant"
+            )
+        assert raised.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
+    finally:
+        await state.close()
+
