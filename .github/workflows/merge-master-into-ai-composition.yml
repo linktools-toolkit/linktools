@@ -21,6 +21,16 @@ jobs:
           ref: refactor/ai-agent-runtime-asset-composition-impl
           fetch-depth: 0
 
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install validation dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e ./linktools -e ./linktools-ai pytest pytest-asyncio 'sqlalchemy[asyncio]==2.0.51' aiosqlite==0.22.1 ruff
+
       - name: Merge master
         id: merge
         shell: bash
@@ -57,6 +67,24 @@ jobs:
               echo "resolution bundle did not resolve every conflict" >&2
               exit 2
             fi
+
+            python -m compileall -q linktools-ai/src/linktools/ai
+            ruff check --select E4,E7,E9,F linktools-ai/src/linktools/ai tests/ai
+            pytest -q \
+              tests/ai/test_error_contract.py \
+              tests/ai/test_error_cancellation_contract.py \
+              tests/ai/test_error_contract_matrix.py \
+              tests/ai/test_error_review_regressions.py \
+              tests/ai/test_agent_composition.py \
+              tests/ai/test_runtime_binding_contract.py \
+              tests/ai/test_workspace_runtime_regressions.py \
+              tests/ai/test_local_execution_recovery.py \
+              tests/ai/test_runtime_persistence_error_contract.py \
+              tests/ai/test_runtime_persistence_compatibility.py \
+              tests/ai/test_runtime_persistence_evidence.py \
+              tests/ai/test_runtime_state_identity_migration_ownership.py \
+              tests/ai/test_runtime_composition_regressions.py
+
             git commit -m "Merge master into refactor/ai-agent-runtime-asset-composition-impl"
             git push origin HEAD:refactor/ai-agent-runtime-asset-composition-impl
             echo "merged=true" >> "$GITHUB_OUTPUT"
