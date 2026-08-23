@@ -36,6 +36,7 @@ jobs:
           rm -f ruff.toml
           python - <<'PY'
           import re
+          import subprocess
           from pathlib import Path
 
           roots = (
@@ -44,16 +45,28 @@ jobs:
               Path('linktools-ai/src/linktools/commands/ai'),
               Path('tests/ai'),
           )
+          modes: dict[str, str] = {}
+          raw = subprocess.check_output(('git', 'ls-files', '-s', '-z'))
+          for entry in raw.decode().split('\0'):
+              if not entry:
+                  continue
+              metadata, path = entry.split('\t', 1)
+              mode = metadata.split(' ', 1)[0]
+              modes[path] = mode
+
           coding = re.compile(r'^#.*coding[:=]\s*[-\w.]+')
           for root in roots:
               for path in root.rglob('*.py'):
+                  relative = path.as_posix()
+                  executable = modes.get(relative) == '100755'
                   lines = path.read_text().splitlines(keepends=True)
                   changed = False
-                  if lines and lines[0].startswith('#!'):
+                  if not executable and lines and lines[0].startswith('#!'):
                       lines.pop(0)
                       changed = True
-                  if lines and coding.match(lines[0]):
-                      lines.pop(0)
+                  coding_index = 1 if executable and lines and lines[0].startswith('#!') else 0
+                  if len(lines) > coding_index and coding.match(lines[coding_index]):
+                      lines.pop(coding_index)
                       changed = True
                   if changed:
                       path.write_text(''.join(lines))
@@ -82,8 +95,6 @@ jobs:
               raise SystemExit('expected audited TRY004 diagnostics before semantic cleanup')
           if set(rules) != {'TRY004'}:
               raise SystemExit(f'unexpected strict Ruff diagnostics remain: {dict(rules)}')
-          if status := 0:
-              raise SystemExit(status)
           PY
           test "$status" -ne 0
 
