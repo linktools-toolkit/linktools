@@ -1,5 +1,5 @@
 {
-  "idempotency_terminal_update": {
+  "execution_terminal_commit@1:idempotency_terminal_update": {
     "error_code": "terminal-error",
     "expected_status": {
       "$enum": "idempotency_status",
@@ -14,7 +14,7 @@
     "result_digest": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
     "scope": "scope"
   },
-  "operation_terminal_update": {
+  "execution_terminal_commit@1:operation_terminal_update": {
     "error_code": "terminal-error",
     "expected_status": {
       "$enum": "operation_status",
@@ -28,7 +28,7 @@
     "result_digest": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
     "result_ref": "result"
   },
-  "task_node": {
+  "task_node@1": {
     "$dataclass": "task_node",
     "fields": {
       "budget_cost": 2,
