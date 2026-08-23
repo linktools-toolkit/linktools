@@ -29,6 +29,7 @@ jobs:
           set +e
           RESULT=.bootstrap/result.txt
           STATUS=.bootstrap/status
+          rm -f "$STATUS"
           : > "$RESULT"
           run_check() {
             echo "===== $* =====" | tee -a "$RESULT"
@@ -41,6 +42,7 @@ jobs:
             fi
           }
           run_check python .bootstrap/apply_runtime_persistence_compat.py || true
+          if [ ! -f "$STATUS" ]; then run_check python .bootstrap/close_migration_schema_boundary.py || true; fi
           if [ ! -f "$STATUS" ]; then run_check python -m compileall -q linktools-ai/src/linktools/ai || true; fi
           if [ ! -f "$STATUS" ]; then run_check ruff check --select E4,E7,E9,F linktools-ai/src/linktools/ai tests/ai || true; fi
           if [ ! -f "$STATUS" ]; then (cd linktools-ai && python -m scripts.build.persistence) >> "$RESULT" 2>&1; rc=$?; echo "===== persistence exit=$rc =====" >> "$RESULT"; if [ "$rc" -ne 0 ]; then echo "$rc" > "$STATUS"; fi; fi
