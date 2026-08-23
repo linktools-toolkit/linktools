@@ -248,6 +248,15 @@ def validate_external_fixtures(
     return ()
 
 
+def _current_contract(wire_id: str):
+    contracts = runtime_codec._DATACLASS_PERSISTENCE_BY_VERSION.get(
+        runtime_codec._CURRENT_CODEC.version
+    )
+    if contracts is None or wire_id not in contracts:
+        raise RuntimeError(f"missing persistence contract: {wire_id}")
+    return contracts[wire_id]
+
+
 def _custom_wire_values() -> dict[str, JsonValue]:
     task_node = TaskNode(
         "node",
@@ -272,17 +281,43 @@ def _custom_wire_values() -> dict[str, JsonValue]:
         result_digest="d" * 64,
         error_code="terminal-error",
     )
+    task_revision = _current_contract("task_node").current_revision
+    terminal_revision = _current_contract(
+        "execution_terminal_commit"
+    ).current_revision
     return {
-        "task_node": runtime_codec._encode_persisted_domain(task_node),
-        "idempotency_terminal_update": runtime_codec._encode_external(
+        f"task_node@{task_revision}": runtime_codec._encode_persisted_domain(
+            task_node
+        ),
+        (
+            f"execution_terminal_commit@{terminal_revision}:"
+            "idempotency_terminal_update"
+        ): runtime_codec._encode_external(
             idempotency,
             runtime_codec._CURRENT_CODEC,
         ),
-        "operation_terminal_update": runtime_codec._encode_external(
+        (
+            f"execution_terminal_commit@{terminal_revision}:"
+            "operation_terminal_update"
+        ): runtime_codec._encode_external(
             operation,
             runtime_codec._CURRENT_CODEC,
         ),
     }
+
+
+def _custom_wire_keys() -> set[str]:
+    task_contract = _current_contract("task_node")
+    terminal_contract = _current_contract("execution_terminal_commit")
+    values = {f"task_node@{revision}" for revision in task_contract.fingerprints}
+    for revision in terminal_contract.fingerprints:
+        values.add(
+            f"execution_terminal_commit@{revision}:idempotency_terminal_update"
+        )
+        values.add(
+            f"execution_terminal_commit@{revision}:operation_terminal_update"
+        )
+    return values
 
 
 def validate_custom_wire_fixture(matrix_dir: str | Path) -> tuple[str, ...]:
@@ -293,10 +328,18 @@ def validate_custom_wire_fixture(matrix_dir: str | Path) -> tuple[str, ...]:
         value = _load_json(path)
     except ValueError as error:
         return (str(error),)
-    expected = _custom_wire_values()
-    return () if value == expected else (
-        "Runtime custom V1 wire drifted from its frozen fixture",
-    )
+    if not isinstance(value, Mapping):
+        return ("Runtime custom V1 wire fixture must be an object",)
+    expected_keys = _custom_wire_keys()
+    actual_keys = set(value)
+    errors = [
+        *(f"missing custom wire fixture: {key}" for key in sorted(expected_keys - actual_keys)),
+        *(f"unknown custom wire fixture: {key}" for key in sorted(actual_keys - expected_keys)),
+    ]
+    for key, expected in _custom_wire_values().items():
+        if value.get(key) != expected:
+            errors.append(f"current custom wire drifted: {key}")
+    return tuple(errors)
 
 
 def _historical_revision_keys(
