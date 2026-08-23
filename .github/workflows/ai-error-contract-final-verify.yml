@@ -33,145 +33,115 @@ jobs:
           git fetch --depth=1 origin fix/ai-error-contract-closure
           git worktree add /tmp/try004-closure FETCH_HEAD
           cd /tmp/try004-closure
+          set +e
+          python -m ruff check --isolated --select TRY004 \
+            linktools-ai/scripts/build linktools-ai/src/linktools/ai \
+            linktools-ai/src/linktools/commands/ai tests/ai \
+            --output-format=json > /tmp/try004-before.json
+          status=$?
+          set -e
+          test "$status" -ne 0
           python - <<'PY'
+          import json
           from pathlib import Path
 
-          replacements = {
-              'linktools-ai/src/linktools/ai/adapter/_memory.py': [
-                  ('        if not isinstance(raw, dict):\n            raise ValueError\n',
-                   '        if not isinstance(raw, dict):\n            raise ValueError  # noqa: TRY004\n'),
-              ],
-              'linktools-ai/src/linktools/ai/core/_json.py': [
-                  ('        raise ValueError("immutable JSON mapping payload must be an object")\n',
-                   '        raise ValueError("immutable JSON mapping payload must be an object")  # noqa: TRY004\n'),
-              ],
-              'linktools-ai/src/linktools/ai/core/_paging.py': [
-                  ('                raise ValueError("cursor fields")\n',
-                   '                raise ValueError("cursor fields")  # noqa: TRY004\n'),
-              ],
-              'linktools-ai/src/linktools/ai/runtime/_artifact.py': [
-                  ('        raise ValueError("grant payload must be an object")\n',
-                   '        raise ValueError("grant payload must be an object")  # noqa: TRY004\n'),
-              ],
-              'linktools-ai/src/linktools/ai/runtime/_message.py': [
-                  ('                raise ValueError("model message persistence requires string object keys")\n',
-                   '                raise TypeError("model message persistence requires string object keys")\n'),
-                  ('    raise ValueError("model message persistence contains a non-JSON value")\n',
-                   '    raise TypeError("model message persistence contains a non-JSON value")\n'),
-              ],
-              'linktools-ai/src/linktools/ai/runtime/state/_codec.py': [
-                  ('        raise ValueError("value must be a string or null")\n',
-                   '        raise ValueError("value must be a string or null")  # noqa: TRY004\n'),
-                  ('        raise ValueError(f"{key} must be an integer")\n',
-                   '        raise ValueError(f"{key} must be an integer")  # noqa: TRY004\n'),
-                  ('        raise ValueError(f"{key} must be a boolean")\n',
-                   '        raise ValueError(f"{key} must be a boolean")  # noqa: TRY004\n'),
-                  ('        raise ValueError("digest must be a string or null")\n',
-                   '        raise ValueError("digest must be a string or null")  # noqa: TRY004\n'),
-                  ('        raise ValueError("timestamp must be a string or null")\n',
-                   '        raise ValueError("timestamp must be a string or null")  # noqa: TRY004\n'),
-              ],
-              'linktools-ai/src/linktools/ai/runtime/state/_contracts.py': [
-                  ('            raise ValueError("execution modes must be boolean")\n',
-                   '            raise TypeError("execution modes must be boolean")\n'),
-                  ('            raise ValueError("recovery prompt payload is invalid")\n',
-                   '            raise TypeError("recovery prompt payload is invalid")\n'),
-                  ('            raise ValueError("recovery execution modes must be boolean")\n',
-                   '            raise TypeError("recovery execution modes must be boolean")\n'),
-                  ('            raise ValueError("recovery prompt payload is not text")\n',
-                   '            raise ValueError("recovery prompt payload is not text")  # noqa: TRY004\n'),
-              ],
-              'linktools-ai/src/linktools/ai/runtime/state/_filesystem.py': [
-                  ('        raise ValueError("JSON root must be an object")\n',
-                   '        raise ValueError("JSON root must be an object")  # noqa: TRY004\n'),
-              ],
-              'linktools-ai/src/linktools/ai/runtime/state/_plan.py': [
-                  ('            raise ValueError("RuntimeDomain is required")\n',
-                   '            raise TypeError("RuntimeDomain is required")\n'),
-              ],
-              'linktools-ai/src/linktools/ai/spec/_codec.py': [
-                  ('                raise ValueError("skill id must be a string")\n',
-                   '                raise ValueError("skill id must be a string")  # noqa: TRY004\n'),
-                  ('                raise ValueError("skill revision must be an integer")\n',
-                   '                raise ValueError("skill revision must be an integer")  # noqa: TRY004\n'),
-                  ('                raise ValueError("skill content must be a string")\n',
-                   '                raise ValueError("skill content must be a string")  # noqa: TRY004\n'),
-                  ('                raise ValueError("MCP server id must be a string")\n',
-                   '                raise ValueError("MCP server id must be a string")  # noqa: TRY004\n'),
-                  ('                raise ValueError("MCP server revision must be an integer")\n',
-                   '                raise ValueError("MCP server revision must be an integer")  # noqa: TRY004\n'),
-                  ('                raise ValueError("MCP server command must be a string")\n',
-                   '                raise ValueError("MCP server command must be a string")  # noqa: TRY004\n'),
-                  ('        raise ValueError("spec payload must be a JSON object")\n',
-                   '        raise ValueError("spec payload must be a JSON object")  # noqa: TRY004\n'),
-              ],
-              'linktools-ai/src/linktools/ai/spec/_contract.py': [
-                  ('            raise ValueError("agent system prompt must be a string")\n',
-                   '            raise TypeError("agent system prompt must be a string")\n'),
-                  ('            raise ValueError("agent instructions must be a string array")\n',
-                   '            raise TypeError("agent instructions must be a string array")\n'),
-                  ('            raise ValueError("agent instructions must be strings")\n',
-                   '            raise TypeError("agent instructions must be strings")\n'),
-                  ('            raise ValueError("agent metadata must be an object")\n',
-                   '            raise TypeError("agent metadata must be an object")\n'),
-                  ('            raise ValueError("agent usage_limits must be AgentUsageLimits or None")\n',
-                   '            raise TypeError("agent usage_limits must be AgentUsageLimits or None")\n'),
-              ],
-              'linktools-ai/src/linktools/ai/storage/_contracts.py': [
-                  ('        raise ValueError("storage metadata must be a JSON object")\n',
-                   '        raise TypeError("storage metadata must be a JSON object")\n'),
-              ],
-              'linktools-ai/src/linktools/ai/storage/_files.py': [
-                  ('        raise ValueError("JSON root must be an object")\n',
-                   '        raise ValueError("JSON root must be an object")  # noqa: TRY004\n'),
-                  ('        raise ValueError("filesystem journal JSON must be an object")\n',
-                   '        raise ValueError("filesystem journal JSON must be an object")  # noqa: TRY004\n'),
-              ],
-              'linktools-ai/src/linktools/ai/storage/_lock.py': [
-                  ('        raise ValueError("invalid lease record")\n',
-                   '        raise ValueError("invalid lease record")  # noqa: TRY004\n'),
-              ],
-              'linktools-ai/src/linktools/ai/storage/_object.py': [
-                  ('            raise ValueError("object metadata must be an object")\n',
-                   '            raise ValueError("object metadata must be an object")  # noqa: TRY004\n'),
-              ],
-              'linktools-ai/src/linktools/ai/storage/_payload.py': [
-                  ('            raise ValueError("object payload reference is invalid")\n',
-                   '            raise TypeError("object payload reference is invalid")\n'),
-                  ('            raise ValueError("stored payload must be an object")\n',
-                   '            raise ValueError("stored payload must be an object")  # noqa: TRY004\n'),
-                  ('            raise ValueError("stored payload fields are invalid")\n',
-                   '            raise ValueError("stored payload fields are invalid")  # noqa: TRY004\n'),
-              ],
-              'linktools-ai/src/linktools/ai/task/_graph.py': [
-                  ('            raise ValueError("task node dependencies are invalid")\n',
-                   '            raise TypeError("task node dependencies are invalid")\n'),
-                  ('            raise ValueError("task node dependencies are invalid") from error\n',
-                   '            raise TypeError("task node dependencies are invalid") from error\n'),
-                  ('            raise ValueError("task node input must be a mapping")\n',
-                   '            raise TypeError("task node input must be a mapping")\n'),
-              ],
-              'linktools-ai/src/linktools/ai/temporal/_request.py': [
-                  ('            raise ValueError("request reference is invalid")\n',
-                   '            raise ValueError("request reference is invalid")  # noqa: TRY004\n'),
-                  ('        raise ValueError("task graph nodes are invalid")\n',
-                   '        raise ValueError("task graph nodes are invalid")  # noqa: TRY004\n'),
-                  ('        raise ValueError("task node input is invalid")\n',
-                   '        raise ValueError("task node input is invalid")  # noqa: TRY004\n'),
-              ],
-              'linktools-ai/src/linktools/ai/temporal/workflow/_execution.py': [
-                  ('        raise ValueError(f"activity {name} returned an invalid execution snapshot")\n',
-                   '        raise TypeError(f"activity {name} returned an invalid execution snapshot")\n'),
-              ],
+          root = Path.cwd().resolve()
+          diagnostics = json.loads(Path('/tmp/try004-before.json').read_text())
+          if len(diagnostics) != 40:
+              raise SystemExit(f'expected 40 TRY004 diagnostics, found {len(diagnostics)}')
+
+          type_markers = {
+              'linktools-ai/src/linktools/ai/runtime/_message.py': (
+                  'model message persistence requires string object keys',
+              ),
+              'linktools-ai/src/linktools/ai/runtime/state/_contracts.py': (
+                  'execution modes must be boolean',
+                  'recovery prompt payload is invalid',
+                  'recovery execution modes must be boolean',
+              ),
+              'linktools-ai/src/linktools/ai/runtime/state/_plan.py': (
+                  'RuntimeDomain is required',
+              ),
+              'linktools-ai/src/linktools/ai/spec/_contract.py': (
+                  'agent system prompt must be a string',
+                  'agent instructions must be a string array',
+                  'agent metadata must be an object',
+              ),
+              'linktools-ai/src/linktools/ai/storage/_contracts.py': (
+                  'storage metadata must be a JSON object',
+              ),
+              'linktools-ai/src/linktools/ai/storage/_payload.py': (
+                  'object payload reference is invalid',
+              ),
+              'linktools-ai/src/linktools/ai/task/_graph.py': (
+                  'task node dependencies are invalid',
+                  'task node input must be a mapping',
+              ),
+              'linktools-ai/src/linktools/ai/temporal/workflow/_execution.py': (
+                  'returned an invalid execution snapshot',
+              ),
           }
 
-          for filename, pairs in replacements.items():
-              path = Path(filename)
+          type_changes = 0
+          semantic_value_ignores = 0
+          by_file: dict[str, list[dict[str, object]]] = {}
+          for item in diagnostics:
+              path = Path(item['filename']).resolve()
+              relative = path.relative_to(root).as_posix()
+              by_file.setdefault(relative, []).append(item)
+
+          for relative, items in by_file.items():
+              path = Path(relative)
+              lines = path.read_text().splitlines(keepends=True)
+              for item in sorted(items, key=lambda value: value['location']['row'], reverse=True):
+                  row = item['location']['row']
+                  index = row - 1
+                  line = lines[index]
+                  if 'raise ValueError' not in line:
+                      raise SystemExit(f'{relative}:{row}: expected ValueError raise, found {line!r}')
+                  markers = type_markers.get(relative, ())
+                  if any(marker in line for marker in markers):
+                      lines[index] = line.replace('raise ValueError', 'raise TypeError', 1)
+                      type_changes += 1
+                  else:
+                      newline = '\n' if line.endswith('\n') else ''
+                      body = line[:-1] if newline else line
+                      lines[index] = f'{body}  # noqa: TRY004{newline}'
+                      semantic_value_ignores += 1
+              path.write_text(''.join(lines))
+
+          if type_changes != 13 or semantic_value_ignores != 27:
+              raise SystemExit(
+                  f'unexpected TRY004 classification: type={type_changes} value={semantic_value_ignores}'
+              )
+
+          extras = {
+              'linktools-ai/src/linktools/ai/runtime/_message.py': (
+                  ('    raise ValueError("model message persistence contains a non-JSON value")\n',
+                   '    raise TypeError("model message persistence contains a non-JSON value")\n'),
+              ),
+              'linktools-ai/src/linktools/ai/spec/_contract.py': (
+                  ('            raise ValueError("agent instructions must be strings")\n',
+                   '            raise TypeError("agent instructions must be strings")\n'),
+                  ('            raise ValueError("agent usage_limits must be AgentUsageLimits or None")\n',
+                   '            raise TypeError("agent usage_limits must be AgentUsageLimits or None")\n'),
+              ),
+              'linktools-ai/src/linktools/ai/storage/_payload.py': (
+                  ('                raise ValueError("object payload reference is invalid")\n',
+                   '                raise TypeError("object payload reference is invalid")\n'),
+              ),
+              'linktools-ai/src/linktools/ai/task/_graph.py': (
+                  ('            raise ValueError("task node dependencies are invalid") from error\n',
+                   '            raise TypeError("task node dependencies are invalid") from error\n'),
+              ),
+          }
+          for relative, pairs in extras.items():
+              path = Path(relative)
               text = path.read_text()
               for old, new in pairs:
                   count = text.count(old)
                   if count != 1:
-                      raise SystemExit(f'{filename}: expected one replacement, found {count}: {old!r}')
+                      raise SystemExit(f'{relative}: expected one extra replacement, found {count}: {old!r}')
                   text = text.replace(old, new)
               path.write_text(text)
           PY
