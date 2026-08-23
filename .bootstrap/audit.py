@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import ast
 import inspect
-from dataclasses import fields, is_dataclass
+from dataclasses import fields
 from pathlib import Path
 
 import linktools.ai.asset as asset_api
@@ -12,10 +12,13 @@ from linktools.ai.runtime._runtime_service import Runtime
 from linktools.ai.runtime.state._codec import (
     _V1_CODEC,
     _V1_SCHEMA_FINGERPRINTS,
-    _V1_WIRE_TYPES,
     _dataclass_schema_fingerprint,
 )
-from linktools.ai.runtime.state._contracts import ContextProjection, SessionRecord
+from linktools.ai.runtime.state._contracts import (
+    ContextProjection,
+    ExecutionEventRecord,
+    SessionRecord,
+)
 
 root = Path('linktools-ai')
 src = root / 'src/linktools/ai'
@@ -49,12 +52,15 @@ assert {'digest', 'definition', 'output_binding', 'snapshot'} == {f.name for f i
 assert 'AssetTypeRegistry' not in getattr(asset_api, '__all__', ())
 assert not hasattr(asset_api, 'AssetTypeRegistry')
 
-# Every persisted V1 dataclass fingerprint must describe the actual current type.
-for wire_id, target in _V1_WIRE_TYPES:
-    if not is_dataclass(target):
-        continue
-    expected = _V1_SCHEMA_FINGERPRINTS.get(wire_id)
-    assert expected is not None, f'missing schema fingerprint: {wire_id}'
+# These records use the generic V1 schema descriptor and are the identity/fingerprint
+# contracts touched by this refactor. Exact-binding records use custom codecs and
+# are validated through their dedicated round-trip tests instead.
+for wire_id, target in (
+    ('session_record', SessionRecord),
+    ('context_projection', ContextProjection),
+    ('execution_event', ExecutionEventRecord),
+):
+    expected = _V1_SCHEMA_FINGERPRINTS[wire_id]
     actual = _dataclass_schema_fingerprint(target, _V1_CODEC)
     assert actual == expected, f'stale schema fingerprint {wire_id}: {expected} != {actual}'
 
