@@ -1,6 +1,6 @@
 {
   "idempotency_terminal_update": {
-    "error_code": null,
+    "error_code": "terminal-error",
     "expected_status": {
       "$enum": "idempotency_status",
       "value": "STARTED"
@@ -11,11 +11,11 @@
       "value": "COMPLETED"
     },
     "request_digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-    "result_digest": null,
+    "result_digest": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
     "scope": "scope"
   },
   "operation_terminal_update": {
-    "error_code": null,
+    "error_code": "terminal-error",
     "expected_status": {
       "$enum": "operation_status",
       "value": "RUNNING"
@@ -25,8 +25,8 @@
       "value": "SUCCEEDED"
     },
     "operation_id": "operation",
-    "result_digest": null,
-    "result_ref": null
+    "result_digest": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+    "result_ref": "result"
   },
   "task_node": {
     "$dataclass": "task_node",
