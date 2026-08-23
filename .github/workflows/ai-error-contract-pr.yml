@@ -24,7 +24,29 @@ jobs:
       - name: Apply exact patches
         run: |
           python linktools-ai/scripts/build/_error_contract_closure.py
-          sed -i '/operation_result = _execution_operation_result(persisted.status)/d' linktools-ai/src/linktools/ai/runtime/_local.py
+          python - <<'PY'
+          from pathlib import Path
+          path = Path("linktools-ai/src/linktools/ai/runtime/_local.py")
+          text = path.read_text()
+          old = '''                        if persisted is not None and persisted.status in {
+                              ExecutionStatus.SUCCEEDED,
+                              ExecutionStatus.FAILED,
+                              ExecutionStatus.CANCELLED,
+                          }:
+                              operation_result = _execution_operation_result(persisted.status)
+                              _logger.error(
+          '''
+          new = '''                        if persisted is not None and persisted.status in {
+                              ExecutionStatus.SUCCEEDED,
+                              ExecutionStatus.FAILED,
+                              ExecutionStatus.CANCELLED,
+                          }:
+                              _logger.error(
+          '''
+          if text.count(old) != 1:
+              raise SystemExit(f"expected one terminal fallback cleanup, found {text.count(old)}")
+          path.write_text(text.replace(old, new))
+          PY
 
       - name: Install verification dependencies
         run: |
