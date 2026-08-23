@@ -179,8 +179,8 @@ def _wheel_resource(wheel, resource):
     if not isinstance(value, dict):
         raise ValueError("capability resource must be a JSON object: %s" % resource)
     tools = value.get("tools")
-    if not isinstance(tools, list):
-        raise ValueError("capability resource tools must be a list: %s" % resource)
+    if not isinstance(tools, dict):
+        raise ValueError("capability resource tools must be an object: %s" % resource)
     return payload
 
 
