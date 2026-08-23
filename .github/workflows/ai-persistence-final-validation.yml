@@ -69,6 +69,9 @@ jobs:
           if [ ! -f "$STATUS" ] && { [ ! -f linktools-ai/scripts/build/matrix/runtime_model_messages_v1.json ] || ! grep -q 'def validate_external_fixtures' linktools-ai/scripts/build/persistence.py; }; then
             run_check python .bootstrap/add_external_persistence_fixture.py || true
           fi
+          if [ ! -f "$STATUS" ] && { [ ! -f linktools-ai/scripts/build/matrix/runtime_agent_binding_snapshot_v1.json ] || ! grep -q 'runtime_agent_binding_snapshot_v1.json' linktools-ai/src/linktools/ai/runtime/state/_codec.py; }; then
+            run_check python .bootstrap/add_binding_snapshot_fixture.py || true
+          fi
           if [ ! -f "$STATUS" ]; then run_check python .bootstrap/preserve_history_schema_errors.py || true; fi
           if [ ! -f "$STATUS" ]; then run_check python -m compileall -q linktools-ai/src/linktools/ai || true; fi
           if [ ! -f "$STATUS" ]; then run_check ruff check --select E4,E7,E9,F linktools-ai/src/linktools/ai tests/ai || true; fi
