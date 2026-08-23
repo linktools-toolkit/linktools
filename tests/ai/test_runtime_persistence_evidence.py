@@ -9,12 +9,72 @@ from dataclasses import is_dataclass, replace
 from datetime import datetime, timezone
 
 import pytest
+from sqlalchemy.ext.asyncio import create_async_engine
 
 from linktools.ai.core import SessionStatus
+from linktools.ai.migrate import provision_runtime_database
 from linktools.ai.runtime import RuntimeState
 from linktools.ai.runtime.state import _codec as codec
 from linktools.ai.runtime.state._contracts import ConversationCursor, SessionRecord
 from scripts.build.persistence import validate_append_only
+
+
+def _session(tenant_id: str = "tenant") -> SessionRecord:
+    now = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    return SessionRecord(
+        session_id="session",
+        tenant_id=tenant_id,
+        owner_principal_id="owner",
+        agent_digest="a" * 64,
+        status=SessionStatus.OPEN,
+        revision=0,
+        resource_generation=0,
+        cwd=None,
+        metadata={},
+        created_at=now,
+        updated_at=now,
+        closed_at=None,
+        active_execution_id=None,
+        continuation=None,
+        history_quality="complete",
+        history_id="history",
+    )
+
+
+async def _insert_legacy_session(state: RuntimeState, session: SessionRecord):
+    repository = state.conversation.sessions
+    stored = repository._stored(
+        "session", "session", session, state=session.status.value
+    )
+    legacy_data = copy.deepcopy(stored.data)
+    legacy_data["value"]["payload"].pop("schema")
+    legacy = replace(stored, data=legacy_data)
+    await repository.state_store.mutate(lambda tx: tx.insert_record(legacy))
+    raw = await repository.state_store.read(
+        lambda tx: tx.get_record(legacy.key_digest)
+    )
+    assert raw is not None
+    return legacy.key_digest, raw
+
+
+async def _assert_legacy_read_is_pure(
+    state: RuntimeState,
+    session: SessionRecord,
+    key: bytes,
+    raw_before: object,
+) -> None:
+    loaded = await state.conversation.sessions.get(
+        session.session_id,
+        tenant_id=session.tenant_id,
+    )
+    assert loaded == session
+    raw_after = await state.conversation.sessions.state_store.read(
+        lambda tx: tx.get_record(key)
+    )
+    assert raw_after is not None
+    assert raw_after.storage_version == raw_before.storage_version
+    assert raw_after.data == raw_before.data
+    assert "schema" not in raw_after.data["value"]["payload"]
 
 
 def test_full_schema_upgrade_chain_decodes_old_revision_and_rewrites_latest(
@@ -75,58 +135,44 @@ def test_full_schema_upgrade_chain_decodes_old_revision_and_rewrites_latest(
 @pytest.mark.asyncio
 async def test_filesystem_legacy_read_is_pure_and_survives_reopen(tmp_path) -> None:
     root = tmp_path / "runtime"
-    namespace = "persistence-no-read-repair"
-    tenant_id = "tenant"
-    now = datetime(2026, 1, 1, tzinfo=timezone.utc)
-    session = SessionRecord(
-        session_id="session",
-        tenant_id=tenant_id,
-        owner_principal_id="owner",
-        agent_digest="a" * 64,
-        status=SessionStatus.OPEN,
-        revision=0,
-        resource_generation=0,
-        cwd=None,
-        metadata={},
-        created_at=now,
-        updated_at=now,
-        closed_at=None,
-        active_execution_id=None,
-        continuation=None,
-        history_quality="complete",
-        history_id="history",
-    )
+    namespace = "persistence-no-read-repair-fs"
+    session = _session()
 
     state = RuntimeState.filesystem(root)
-    await state.initialize(namespace=namespace, tenant_id=tenant_id)
-    repository = state.conversation.sessions
-    stored = repository._stored(
-        "session", "session", session, state=session.status.value
-    )
-    legacy_data = copy.deepcopy(stored.data)
-    legacy_data["value"]["payload"].pop("schema")
-    legacy = replace(stored, data=legacy_data)
-    await repository.state_store.mutate(lambda tx: tx.insert_record(legacy))
-    raw_before = await repository.state_store.read(
-        lambda tx: tx.get_record(legacy.key_digest)
-    )
-    assert raw_before is not None
+    await state.initialize(namespace=namespace, tenant_id=session.tenant_id)
+    key, raw_before = await _insert_legacy_session(state, session)
     await state.close()
 
     reopened = RuntimeState.filesystem(root)
-    await reopened.initialize(namespace=namespace, tenant_id=tenant_id)
+    await reopened.initialize(namespace=namespace, tenant_id=session.tenant_id)
     try:
-        loaded = await reopened.conversation.sessions.get(
-            "session", tenant_id=tenant_id
+        await _assert_legacy_read_is_pure(
+            reopened, session, key, raw_before
         )
-        assert loaded == session
-        raw_after = await reopened.conversation.sessions.state_store.read(
-            lambda tx: tx.get_record(legacy.key_digest)
+    finally:
+        await reopened.close()
+
+
+@pytest.mark.asyncio
+async def test_sqlite_legacy_read_is_pure_and_survives_reopen(tmp_path) -> None:
+    path = tmp_path / "runtime.db"
+    engine = create_async_engine(f"sqlite+aiosqlite:///{path}")
+    await provision_runtime_database(engine)
+    await engine.dispose()
+
+    namespace = "persistence-no-read-repair-sqlite"
+    session = _session()
+    state = RuntimeState.sqlite(path)
+    await state.initialize(namespace=namespace, tenant_id=session.tenant_id)
+    key, raw_before = await _insert_legacy_session(state, session)
+    await state.close()
+
+    reopened = RuntimeState.sqlite(path)
+    await reopened.initialize(namespace=namespace, tenant_id=session.tenant_id)
+    try:
+        await _assert_legacy_read_is_pure(
+            reopened, session, key, raw_before
         )
-        assert raw_after is not None
-        assert raw_after.storage_version == raw_before.storage_version
-        assert raw_after.data == raw_before.data
-        assert "schema" not in raw_after.data["value"]["payload"]
     finally:
         await reopened.close()
 
