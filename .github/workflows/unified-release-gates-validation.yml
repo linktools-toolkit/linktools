@@ -102,15 +102,44 @@ jobs:
           linktools-common/src
           linktools-mobile/src
           linktools-cntr/src
-      - name: Diagnose AI Ruff correctness gate
-        run: >-
-          ruff check --no-cache --select F,E9,I
-          scripts/check/ai
-          linktools-ai/src/linktools/ai
-          linktools-ai/src/linktools/commands/ai
-          tests/ai
-      - name: Diagnose pytest gate
-        run: python -m pytest -q -p no:cacheprovider tests
+
+      - name: Capture Ruff and pytest diagnostics
+        shell: bash
+        run: |
+          mkdir -p diagnostics
+          set +e
+          ruff check --no-cache --select F,E9,I --output-format concise scripts/check/ai > diagnostics/ruff-scripts.txt 2>&1
+          echo $? > diagnostics/ruff-scripts.status
+          ruff check --no-cache --select F,E9,I --output-format concise linktools-ai/src/linktools/ai > diagnostics/ruff-source.txt 2>&1
+          echo $? > diagnostics/ruff-source.status
+          ruff check --no-cache --select F,E9,I --output-format concise linktools-ai/src/linktools/commands/ai > diagnostics/ruff-commands.txt 2>&1
+          echo $? > diagnostics/ruff-commands.status
+          ruff check --no-cache --select F,E9,I --output-format concise tests/ai > diagnostics/ruff-tests.txt 2>&1
+          echo $? > diagnostics/ruff-tests.status
+          python -m pytest -q -p no:cacheprovider tests > diagnostics/pytest.txt 2>&1
+          echo $? > diagnostics/pytest.status
+          set -e
+          for file in diagnostics/*.status; do printf '%s=' "$file"; cat "$file"; done
+          for file in diagnostics/ruff-*.txt; do echo "===== $file ====="; head -200 "$file"; done
+          echo '===== pytest tail ====='
+          tail -100 diagnostics/pytest.txt
+
+      - name: Upload diagnostics
+        uses: actions/upload-artifact@v4
+        with:
+          name: unified-release-gates-diagnostics
+          path: diagnostics
+
+      - name: Enforce diagnostics
+        shell: bash
+        run: |
+          for file in diagnostics/*.status; do
+            if [ "$(cat "$file")" != "0" ]; then
+              echo "::error::$file failed"
+              exit 1
+            fi
+          done
+
       - name: Check source and tests
         run: python manage.py check
 
