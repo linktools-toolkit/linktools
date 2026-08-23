@@ -1,21 +1,169 @@
 ===== python -m pip install -q --upgrade pip =====
 ===== python -m pip install -q -e ./linktools -e ./linktools-ai[sqlite,evaluation,temporal] pytest pytest-asyncio ruff =====
-===== python .bootstrap/patch_fingerprint.py =====
-execution_event V1 fingerprint aligned with mechanical schema descriptor
 ===== python -m compileall -q linktools-ai/src/linktools/ai =====
 ===== ruff check --select E4,E7,E9,F linktools-ai/src/linktools/ai tests/ai =====
 All checks passed!
 ===== python .bootstrap/audit.py =====
-Traceback (most recent call last):
-  File "/home/runner/work/linktools/linktools/.bootstrap/audit.py", line 58, in <module>
-    actual = _dataclass_schema_fingerprint(target, _V1_CODEC)
-             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "/home/runner/work/linktools/linktools/linktools-ai/src/linktools/ai/runtime/state/_codec.py", line 825, in _dataclass_schema_fingerprint
-    canonical_json_bytes(_dataclass_schema_descriptor(target, codec))
-                         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "/home/runner/work/linktools/linktools/linktools-ai/src/linktools/ai/runtime/state/_codec.py", line 716, in _dataclass_schema_descriptor
-    "type": _schema_type_descriptor(annotation, codec),
-            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "/home/runner/work/linktools/linktools/linktools-ai/src/linktools/ai/runtime/state/_codec.py", line 756, in _schema_type_descriptor
-    raise TypeError(f"schema dataclass is not in the V1 codec: {annotation!r}")
-TypeError: schema dataclass is not in the V1 codec: <class 'linktools.ai.agent._binding.AgentBindingSnapshot'>
+final architecture audit passed
+===== python -m scripts.build.architecture =====
+<frozen runpy>:128: RuntimeWarning: 'scripts.build.architecture' found in sys.modules after import of package 'scripts.build', but prior to execution of 'scripts.build.architecture'; this may result in unpredictable behaviour
+===== pytest -q tests/ai =====
+
+==================================== ERRORS ====================================
+_____________ ERROR collecting tests/ai/test_agent_composition.py ______________
+ImportError while importing test module '/home/runner/work/linktools/linktools/tests/ai/test_agent_composition.py'.
+Hint: make sure your test modules/packages have valid Python names.
+Traceback:
+/opt/hostedtoolcache/Python/3.12.14/x64/lib/python3.12/importlib/__init__.py:90: in import_module
+    return _bootstrap._gcd_import(name[level:], package, level)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+tests/ai/test_agent_composition.py:29: in <module>
+    from linktools.ai.workspace import trusted_workspace_principal
+linktools-ai/src/linktools/ai/workspace/__init__.py:5: in <module>
+    from ._factory import build_workspace_assets, open_workspace_runtime
+linktools-ai/src/linktools/ai/workspace/_factory.py:36: in <module>
+    from ..capability import (
+E   ImportError: cannot import name 'mcp_server_selector' from 'linktools.ai.capability' (/home/runner/work/linktools/linktools/linktools-ai/src/linktools/ai/capability/__init__.py)
+_________________ ERROR collecting tests/ai/test_contracts.py __________________
+ImportError while importing test module '/home/runner/work/linktools/linktools/tests/ai/test_contracts.py'.
+Hint: make sure your test modules/packages have valid Python names.
+Traceback:
+/opt/hostedtoolcache/Python/3.12.14/x64/lib/python3.12/importlib/__init__.py:90: in import_module
+    return _bootstrap._gcd_import(name[level:], package, level)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+tests/ai/test_contracts.py:69: in <module>
+    from linktools.ai.workspace import trusted_workspace_principal
+linktools-ai/src/linktools/ai/workspace/__init__.py:5: in <module>
+    from ._factory import build_workspace_assets, open_workspace_runtime
+linktools-ai/src/linktools/ai/workspace/_factory.py:36: in <module>
+    from ..capability import (
+E   ImportError: cannot import name 'mcp_server_selector' from 'linktools.ai.capability' (/home/runner/work/linktools/linktools/linktools-ai/src/linktools/ai/capability/__init__.py)
+________ ERROR collecting tests/ai/test_deferred_notification_replay.py ________
+ImportError while importing test module '/home/runner/work/linktools/linktools/tests/ai/test_deferred_notification_replay.py'.
+Hint: make sure your test modules/packages have valid Python names.
+Traceback:
+/opt/hostedtoolcache/Python/3.12.14/x64/lib/python3.12/importlib/__init__.py:90: in import_module
+    return _bootstrap._gcd_import(name[level:], package, level)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+tests/ai/test_deferred_notification_replay.py:30: in <module>
+    from linktools.ai.workspace import trusted_workspace_principal
+linktools-ai/src/linktools/ai/workspace/__init__.py:5: in <module>
+    from ._factory import build_workspace_assets, open_workspace_runtime
+linktools-ai/src/linktools/ai/workspace/_factory.py:36: in <module>
+    from ..capability import (
+E   ImportError: cannot import name 'mcp_server_selector' from 'linktools.ai.capability' (/home/runner/work/linktools/linktools/linktools-ai/src/linktools/ai/capability/__init__.py)
+_______________ ERROR collecting tests/ai/test_local_commands.py _______________
+ImportError while importing test module '/home/runner/work/linktools/linktools/tests/ai/test_local_commands.py'.
+Hint: make sure your test modules/packages have valid Python names.
+Traceback:
+/opt/hostedtoolcache/Python/3.12.14/x64/lib/python3.12/importlib/__init__.py:90: in import_module
+    return _bootstrap._gcd_import(name[level:], package, level)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+tests/ai/test_local_commands.py:10: in <module>
+    from linktools.commands.ai.acp import command as acp_command
+linktools-ai/src/linktools/commands/ai/acp.py:13: in <module>
+    from ...ai.acp import ACPApplication
+linktools-ai/src/linktools/ai/acp.py:23: in <module>
+    from .workspace import Workspace, open_workspace_runtime
+linktools-ai/src/linktools/ai/workspace/__init__.py:5: in <module>
+    from ._factory import build_workspace_assets, open_workspace_runtime
+linktools-ai/src/linktools/ai/workspace/_factory.py:36: in <module>
+    from ..capability import (
+E   ImportError: cannot import name 'mcp_server_selector' from 'linktools.ai.capability' (/home/runner/work/linktools/linktools/linktools-ai/src/linktools/ai/capability/__init__.py)
+___________ ERROR collecting tests/ai/test_non_workspace_pipeline.py ___________
+ImportError while importing test module '/home/runner/work/linktools/linktools/tests/ai/test_non_workspace_pipeline.py'.
+Hint: make sure your test modules/packages have valid Python names.
+Traceback:
+/opt/hostedtoolcache/Python/3.12.14/x64/lib/python3.12/importlib/__init__.py:90: in import_module
+    return _bootstrap._gcd_import(name[level:], package, level)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+tests/ai/test_non_workspace_pipeline.py:25: in <module>
+    from linktools.ai.workspace import DisabledSandbox
+linktools-ai/src/linktools/ai/workspace/__init__.py:5: in <module>
+    from ._factory import build_workspace_assets, open_workspace_runtime
+linktools-ai/src/linktools/ai/workspace/_factory.py:36: in <module>
+    from ..capability import (
+E   ImportError: cannot import name 'mcp_server_selector' from 'linktools.ai.capability' (/home/runner/work/linktools/linktools/linktools-ai/src/linktools/ai/capability/__init__.py)
+________ ERROR collecting tests/ai/test_runtime_session_auto_create.py _________
+ImportError while importing test module '/home/runner/work/linktools/linktools/tests/ai/test_runtime_session_auto_create.py'.
+Hint: make sure your test modules/packages have valid Python names.
+Traceback:
+/opt/hostedtoolcache/Python/3.12.14/x64/lib/python3.12/importlib/__init__.py:90: in import_module
+    return _bootstrap._gcd_import(name[level:], package, level)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+tests/ai/test_runtime_session_auto_create.py:12: in <module>
+    from linktools.ai.workspace import trusted_workspace_principal
+linktools-ai/src/linktools/ai/workspace/__init__.py:5: in <module>
+    from ._factory import build_workspace_assets, open_workspace_runtime
+linktools-ai/src/linktools/ai/workspace/_factory.py:36: in <module>
+    from ..capability import (
+E   ImportError: cannot import name 'mcp_server_selector' from 'linktools.ai.capability' (/home/runner/work/linktools/linktools/linktools-ai/src/linktools/ai/capability/__init__.py)
+__ ERROR collecting tests/ai/test_runtime_state_identity_migration_sqlite.py ___
+ImportError while importing test module '/home/runner/work/linktools/linktools/tests/ai/test_runtime_state_identity_migration_sqlite.py'.
+Hint: make sure your test modules/packages have valid Python names.
+Traceback:
+/opt/hostedtoolcache/Python/3.12.14/x64/lib/python3.12/importlib/__init__.py:90: in import_module
+    return _bootstrap._gcd_import(name[level:], package, level)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+tests/ai/test_runtime_state_identity_migration_sqlite.py:21: in <module>
+    from linktools.ai.workspace import Workspace, open_workspace_runtime
+linktools-ai/src/linktools/ai/workspace/__init__.py:5: in <module>
+    from ._factory import build_workspace_assets, open_workspace_runtime
+linktools-ai/src/linktools/ai/workspace/_factory.py:36: in <module>
+    from ..capability import (
+E   ImportError: cannot import name 'mcp_server_selector' from 'linktools.ai.capability' (/home/runner/work/linktools/linktools/linktools-ai/src/linktools/ai/capability/__init__.py)
+_____________ ERROR collecting tests/ai/test_selective_storage.py ______________
+ImportError while importing test module '/home/runner/work/linktools/linktools/tests/ai/test_selective_storage.py'.
+Hint: make sure your test modules/packages have valid Python names.
+Traceback:
+/opt/hostedtoolcache/Python/3.12.14/x64/lib/python3.12/importlib/__init__.py:90: in import_module
+    return _bootstrap._gcd_import(name[level:], package, level)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+tests/ai/test_selective_storage.py:12: in <module>
+    from linktools.ai.workspace import open_workspace_runtime
+linktools-ai/src/linktools/ai/workspace/__init__.py:5: in <module>
+    from ._factory import build_workspace_assets, open_workspace_runtime
+linktools-ai/src/linktools/ai/workspace/_factory.py:36: in <module>
+    from ..capability import (
+E   ImportError: cannot import name 'mcp_server_selector' from 'linktools.ai.capability' (/home/runner/work/linktools/linktools/linktools-ai/src/linktools/ai/capability/__init__.py)
+___________ ERROR collecting tests/ai/test_workspace_capabilities.py ___________
+ImportError while importing test module '/home/runner/work/linktools/linktools/tests/ai/test_workspace_capabilities.py'.
+Hint: make sure your test modules/packages have valid Python names.
+Traceback:
+/opt/hostedtoolcache/Python/3.12.14/x64/lib/python3.12/importlib/__init__.py:90: in import_module
+    return _bootstrap._gcd_import(name[level:], package, level)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+tests/ai/test_workspace_capabilities.py:9: in <module>
+    from linktools.ai.workspace._tools import build_workspace_capabilities, build_workspace_tool_map
+linktools-ai/src/linktools/ai/workspace/__init__.py:5: in <module>
+    from ._factory import build_workspace_assets, open_workspace_runtime
+linktools-ai/src/linktools/ai/workspace/_factory.py:36: in <module>
+    from ..capability import (
+E   ImportError: cannot import name 'mcp_server_selector' from 'linktools.ai.capability' (/home/runner/work/linktools/linktools/linktools-ai/src/linktools/ai/capability/__init__.py)
+_______ ERROR collecting tests/ai/test_workspace_runtime_regressions.py ________
+ImportError while importing test module '/home/runner/work/linktools/linktools/tests/ai/test_workspace_runtime_regressions.py'.
+Hint: make sure your test modules/packages have valid Python names.
+Traceback:
+/opt/hostedtoolcache/Python/3.12.14/x64/lib/python3.12/importlib/__init__.py:90: in import_module
+    return _bootstrap._gcd_import(name[level:], package, level)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+tests/ai/test_workspace_runtime_regressions.py:11: in <module>
+    from linktools.ai.workspace import Workspace, build_workspace_assets, open_workspace_runtime
+linktools-ai/src/linktools/ai/workspace/__init__.py:5: in <module>
+    from ._factory import build_workspace_assets, open_workspace_runtime
+linktools-ai/src/linktools/ai/workspace/_factory.py:36: in <module>
+    from ..capability import (
+E   ImportError: cannot import name 'mcp_server_selector' from 'linktools.ai.capability' (/home/runner/work/linktools/linktools/linktools-ai/src/linktools/ai/capability/__init__.py)
+=========================== short test summary info ============================
+ERROR tests/ai/test_agent_composition.py
+ERROR tests/ai/test_contracts.py
+ERROR tests/ai/test_deferred_notification_replay.py
+ERROR tests/ai/test_local_commands.py
+ERROR tests/ai/test_non_workspace_pipeline.py
+ERROR tests/ai/test_runtime_session_auto_create.py
+ERROR tests/ai/test_runtime_state_identity_migration_sqlite.py
+ERROR tests/ai/test_selective_storage.py
+ERROR tests/ai/test_workspace_capabilities.py
+ERROR tests/ai/test_workspace_runtime_regressions.py
+!!!!!!!!!!!!!!!!!!! Interrupted: 10 errors during collection !!!!!!!!!!!!!!!!!!!
+10 errors in 2.87s
