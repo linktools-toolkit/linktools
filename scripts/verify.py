@@ -30,6 +30,7 @@ class _Artifact:
         self.path = path
         self.kind = kind
         self.name = name
+        self.normalized_name = _normalize_name(name)
         self.version = version
         self.requires_python = requires_python
 
@@ -86,7 +87,7 @@ def _read_artifact(path):
         requires_python = ""
     if not isinstance(requires_python, str):
         requires_python = str(requires_python)
-    return _Artifact(path, kind, _normalize_name(name), version, requires_python)
+    return _Artifact(path, kind, name, version, requires_python)
 
 
 def _load_artifacts(known_projects):
@@ -99,7 +100,7 @@ def _load_artifacts(known_projects):
         if _artifact_kind(path) is None:
             raise ValueError("unknown file in dist: %s" % path.name)
         artifact = _read_artifact(path)
-        if artifact.name not in known_projects:
+        if artifact.normalized_name not in known_projects:
             raise ValueError("artifact does not belong to a registered project: %s" % path.name)
         artifacts.append(artifact)
     return artifacts
@@ -115,13 +116,13 @@ def _source_metadata(project_path):
         raise ValueError("missing project name: %s" % pyproject)
     if not isinstance(requires_python, str) or not requires_python:
         raise ValueError("missing requires-python: %s" % pyproject)
-    return _normalize_name(name), requires_python
+    return name, requires_python
 
 
 def _selected_pairs(artifacts, selected, project_paths):
     pairs = {}
     for project in selected:
-        project_artifacts = [artifact for artifact in artifacts if artifact.name == project]
+        project_artifacts = [artifact for artifact in artifacts if artifact.normalized_name == project]
         wheels = [artifact for artifact in project_artifacts if artifact.kind == "wheel"]
         sdists = [artifact for artifact in project_artifacts if artifact.kind == "sdist"]
         if len(wheels) != 1 or len(sdists) != 1:
@@ -161,7 +162,7 @@ def _validate_version(pairs, project_paths):
         version_file = project_paths[project] / ".version"
         if not version_file.is_file():
             raise ValueError("missing version file: %s" % version_file)
-        if version_file.read_text(encoding="utf-8").strip() != version:
+        if version_file.read_text(encoding="utf-8") != version:
             raise ValueError(".version mismatch for %s" % project)
 
 
@@ -211,7 +212,10 @@ def _site_packages(python):
 def _install_wheels(environment, wheels):
     venv.create(str(environment), with_pip=True, system_site_packages=False)
     python = _venv_python(environment)
-    subprocess.check_call([str(python), "-m", "pip", "install", "--no-deps"] + [str(wheel.path) for wheel in wheels])
+    for wheel in wheels:
+        subprocess.check_call(
+            [str(python), "-m", "pip", "install", "--no-deps", str(wheel.path)]
+        )
     return python
 
 
