@@ -1,28 +1,29 @@
 ===== python .bootstrap/patch.py =====
-mandatory ExecutionRecord binding fields reordered before defaults
+agent composition tests migrated to final identity model
 ===== python .bootstrap/patch2.py =====
-runtime binding contract tests migrated to mandatory snapshot
+runtime composition regressions migrated to mandatory exact binding
+===== python .bootstrap/patch3.py =====
+recovery integrity tests migrated to mandatory snapshot
 ===== python -m compileall -q linktools-ai/src/linktools/ai =====
 ===== python -m pip install -q --upgrade pip =====
 ===== python -m pip install -q -e ./linktools -e ./linktools-ai[sqlite,evaluation,temporal] pytest pytest-asyncio ruff =====
-===== ruff check --select E4,E7,E9,F linktools-ai/src/linktools/ai/agent/__init__.py linktools-ai/src/linktools/ai/agent/_binding.py linktools-ai/src/linktools/ai/agent/_builder.py linktools-ai/src/linktools/ai/agent/_catalog.py linktools-ai/src/linktools/ai/agent/_compiler.py linktools-ai/src/linktools/ai/agent/_definition.py linktools-ai/src/linktools/ai/agent/_executor.py linktools-ai/src/linktools/ai/asset/__init__.py linktools-ai/src/linktools/ai/asset/_repository.py linktools-ai/src/linktools/ai/runtime/_agent.py linktools-ai/src/linktools/ai/runtime/_coordinator.py linktools-ai/src/linktools/ai/runtime/_execution.py linktools-ai/src/linktools/ai/runtime/_factory.py linktools-ai/src/linktools/ai/runtime/_local.py linktools-ai/src/linktools/ai/runtime/_planner.py linktools-ai/src/linktools/ai/runtime/_runtime_service.py linktools-ai/src/linktools/ai/runtime/_session.py linktools-ai/src/linktools/ai/runtime/_subagent.py linktools-ai/src/linktools/ai/runtime/service_api.py linktools-ai/src/linktools/ai/runtime/state/_commands.py linktools-ai/src/linktools/ai/runtime/state/_contracts.py linktools-ai/src/linktools/ai/runtime/state/_history.py linktools-ai/src/linktools/ai/runtime/state/_steps.py linktools-ai/src/linktools/ai/spec/_codec.py linktools-ai/src/linktools/ai/spec/_contract.py linktools-ai/src/linktools/ai/temporal/_gateway.py linktools-ai/src/linktools/ai/temporal/_request.py linktools-ai/src/linktools/ai/temporal/_task_operation.py linktools-ai/src/linktools/ai/workspace/__init__.py linktools-ai/src/linktools/ai/workspace/_factory.py tests/ai/test_agent_composition.py tests/ai/test_asset_repository.py tests/ai/test_contracts.py tests/ai/test_runtime_binding_contract.py tests/ai/test_workspace_runtime_regressions.py =====
-All checks passed!
-===== python -m scripts.build.architecture =====
-<frozen runpy>:128: RuntimeWarning: 'scripts.build.architecture' found in sys.modules after import of package 'scripts.build', but prior to execution of 'scripts.build.architecture'; this may result in unpredictable behaviour
-===== pytest -q tests/ai --maxfail=30 =====
+===== ruff check --select E4,E7,E9,F linktools-ai/src/linktools/ai/agent/__init__.py linktools-ai/src/linktools/ai/agent/_binding.py linktools-ai/src/linktools/ai/agent/_builder.py linktools-ai/src/linktools/ai/agent/_catalog.py linktools-ai/src/linktools/ai/agent/_compiler.py linktools-ai/src/linktools/ai/agent/_definition.py linktools-ai/src/linktools/ai/agent/_executor.py linktools-ai/src/linktools/ai/asset/__init__.py linktools-ai/src/linktools/ai/asset/_repository.py linktools-ai/src/linktools/ai/runtime/_agent.py linktools-ai/src/linktools/ai/runtime/_coordinator.py linktools-ai/src/linktools/ai/runtime/_execution.py linktools-ai/src/linktools/ai/runtime/_factory.py linktools-ai/src/linktools/ai/runtime/_local.py linktools-ai/src/linktools/ai/runtime/_planner.py linktools-ai/src/linktools/ai/runtime/_runtime_service.py linktools-ai/src/linktools/ai/runtime/_session.py linktools-ai/src/linktools/ai/runtime/_subagent.py linktools-ai/src/linktools/ai/runtime/service_api.py linktools-ai/src/linktools/ai/runtime/state/_commands.py linktools-ai/src/linktools/ai/runtime/state/_contracts.py linktools-ai/src/linktools/ai/runtime/state/_history.py linktools-ai/src/linktools/ai/runtime/state/_steps.py linktools-ai/src/linktools/ai/spec/_codec.py linktools-ai/src/linktools/ai/spec/_contract.py linktools-ai/src/linktools/ai/temporal/_gateway.py linktools-ai/src/linktools/ai/temporal/_request.py linktools-ai/src/linktools/ai/temporal/_task_operation.py linktools-ai/src/linktools/ai/workspace/__init__.py linktools-ai/src/linktools/ai/workspace/_factory.py tests/ai/test_agent_composition.py tests/ai/test_asset_repository.py tests/ai/test_contracts.py tests/ai/test_recovery_integrity_validator.py tests/ai/test_runtime_binding_contract.py tests/ai/test_runtime_composition_regressions.py tests/ai/test_workspace_runtime_regressions.py =====
+F401 [*] `linktools.ai.agent._output.bind_output` imported but unused
+  --> tests/ai/test_agent_composition.py:13:40
+   |
+11 | import linktools.ai as ai
+12 | from linktools.ai.agent import AgentBindingSnapshot
+13 | from linktools.ai.agent._output import bind_output
+   |                                        ^^^^^^^^^^^
+14 | from linktools.ai.capability import RuntimeCapability
+15 | from linktools.ai.core import SessionStatus
+   |
+help: Remove unused import: `linktools.ai.agent._output.bind_output`
+   |
+12 | from linktools.ai.agent import AgentBindingSnapshot
+   - from linktools.ai.agent._output import bind_output
+13 | from linktools.ai.capability import RuntimeCapability
+   |
 
-==================================== ERRORS ====================================
-_____________ ERROR collecting tests/ai/test_agent_composition.py ______________
-ImportError while importing test module '/home/runner/work/linktools/linktools/tests/ai/test_agent_composition.py'.
-Hint: make sure your test modules/packages have valid Python names.
-Traceback:
-/opt/hostedtoolcache/Python/3.12.14/x64/lib/python3.12/importlib/__init__.py:90: in import_module
-    return _bootstrap._gcd_import(name[level:], package, level)
-           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-tests/ai/test_agent_composition.py:29: in <module>
-    from linktools.ai.runtime._factory import _restore_recovery_definitions
-E   ImportError: cannot import name '_restore_recovery_definitions' from 'linktools.ai.runtime._factory' (/home/runner/work/linktools/linktools/linktools-ai/src/linktools/ai/runtime/_factory.py)
-=========================== short test summary info ============================
-ERROR tests/ai/test_agent_composition.py
-!!!!!!!!!!!!!!!!!!!! Interrupted: 1 error during collection !!!!!!!!!!!!!!!!!!!!
-1 error in 4.08s
+Found 1 error.
+[*] 1 fixable with the `--fix` option.

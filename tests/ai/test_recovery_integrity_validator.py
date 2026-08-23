@@ -5,6 +5,8 @@
 from datetime import datetime, timezone
 
 import pytest
+from linktools.ai.agent import AgentBindingSnapshot
+from linktools.ai.agent._output import bind_output
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.runtime import RuntimeState
 from linktools.ai.runtime.state._codec import encode_domain, encode_envelope
@@ -16,11 +18,28 @@ from linktools.ai.runtime.state._contracts import (
     RecoveryHandoffPhase,
     RecoveryIdempotencyInput,
 )
+from linktools.ai.spec import AgentSpec
 from linktools.ai.runtime.state._store import (
     StoredRecord,
     partition_digest,
     record_key_digest,
 )
+
+
+def _binding() -> AgentBindingSnapshot:
+    output = bind_output()
+    return AgentBindingSnapshot(
+        version=1,
+        agent_spec=AgentSpec("default", 1, "default"),
+        agent_digest="b" * 64,
+        output_type_module=output.value_type.__module__,
+        output_type_qualname=output.value_type.__qualname__,
+        output_schema_id=output.schema_id,
+        output_schema_revision=output.schema_revision,
+        output_schema_fingerprint=output.schema_fingerprint,
+        local_runtime_capability_descriptors=(),
+        binding_digest="a" * 64,
+    )
 
 
 def _checkpoint(
@@ -38,8 +57,7 @@ def _checkpoint(
             principal_kind="user",
             session_id=None,
             memory_scope=None,
-            agent_id="default",
-            binding_digest="binding",
+            binding_digest="a" * 64,
             lineage_kind="run",
             parent_execution_id=None,
             root_execution_id=execution_id,
@@ -47,6 +65,9 @@ def _checkpoint(
             base_execution_id=None,
             conversation_step_run_id=None,
             idempotency=RecoveryIdempotencyInput("scope", "key", "digest"),
+            planning=False,
+            thinking=False,
+            binding=_binding(),
         ),
         "run-1" if state is RecoveryCheckpointState.ACTIVE else None,
         1 if state is RecoveryCheckpointState.ACTIVE else 0,
