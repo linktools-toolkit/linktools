@@ -85,6 +85,7 @@ jobs:
               | sha256sum -c -
 
             tar -xzf /tmp/merge-resolutions.tar.gz -C .
+            git show origin/automation/merge-master-into-ai-composition:.merge-test-adapt.py | python -
             git add -A
             if [ -n "$(git diff --name-only --diff-filter=U)" ]; then
               echo "resolution bundle did not resolve every conflict" >&2
