@@ -595,15 +595,17 @@ def _git(repository: Path, *arguments: str) -> subprocess.CompletedProcess[str]:
     )
 
 
-def _repository_path(path_value: str | Path) -> tuple[Path, str] | None:
+def _repository_path(path_value: str | Path) -> tuple[Path, str]:
     path = Path(path_value).resolve()
     repository = Path(__file__).resolve().parents[3]
     if not (repository / ".git").exists():
-        return None
+        raise ValueError("persistence Git repository is unavailable")
     try:
         relative = path.relative_to(repository.resolve()).as_posix()
-    except ValueError:
-        return None
+    except ValueError as error:
+        raise ValueError(
+            f"persistence contract path is outside repository: {path}"
+        ) from error
     return repository, relative
 
 
@@ -638,10 +640,7 @@ def load_git_json_baseline(
     base_ref: str | None = None,
 ) -> object | None:
     """Load one JSON contract from the target branch's immutable history."""
-    resolved = _repository_path(path_value)
-    if resolved is None:
-        return None
-    repository, relative = resolved
+    repository, relative = _repository_path(path_value)
     baseline = _baseline_commit(repository, base_ref=base_ref)
     listed = _git(
         repository,
