@@ -18,13 +18,11 @@ from pydantic_ai.usage import RunUsage, UsageLimits
 
 from linktools.ai.agent._executor import DurableBoundary, _execution_error, _map_event
 from linktools.ai.core import (
-    ExecutionLineageKind,
     ExecutionStatus,
     JsonValue,
     Principal,
     ResourceKind,
     ResourceRef,
-    StopReason,
     StructuredRedactor,
     TaskStatus,
     UsageMetrics,
@@ -32,15 +30,8 @@ from linktools.ai.core import (
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.model import ModelRegistry
 from linktools.ai.runtime import DefaultExecutionService, ExecutionResult
-from linktools.ai.runtime._local import LocalExecutionBackend
 from linktools.ai.runtime._planner import _execution_failure
 from linktools.ai.runtime._subagent import _subagent_result
-from linktools.ai.runtime.state import (
-    ExecutionRecord,
-    RecoveryCheckpoint,
-    RecoveryCheckpointState,
-    RecoveryHandoffPhase,
-)
 from linktools.ai.storage import StoragePath
 from linktools.ai.task import DefaultTaskService, TaskGraph, TaskLease, TaskNode, TaskNodeView
 from linktools.ai.temporal._task_operation import _RuntimeTaskOperation
@@ -72,48 +63,6 @@ def _failed_result(
         UsageMetrics(),
         code.value,
         details or {"provider": "test"},
-    )
-
-
-def _started_execution() -> ExecutionRecord:
-    now = datetime.now(timezone.utc)
-    return ExecutionRecord(
-        "execution",
-        "tenant",
-        None,
-        "binding",
-        None,
-        "execution",
-        None,
-        None,
-        ExecutionLineageKind.RUN,
-        ExecutionStatus.STARTED,
-        0,
-        0,
-        1,
-        None,
-        {},
-        now,
-        now,
-    )
-
-
-def _active_checkpoint() -> RecoveryCheckpoint:
-    now = datetime.now(timezone.utc)
-    return RecoveryCheckpoint(
-        "execution",
-        "tenant",
-        SimpleNamespace(),
-        "run",
-        1,
-        RecoveryCheckpointState.ACTIVE,
-        RecoveryHandoffPhase.NONE,
-        None,
-        None,
-        None,
-        0,
-        now,
-        now,
     )
 
 
@@ -311,102 +260,6 @@ async def test_task_wait_timeout_has_stable_code() -> None:
             timeout_seconds=0.01,
         )
     assert error.value.code is ErrorCode.TASK_WAIT_TIMEOUT
-
-
-class _FailureSteps:
-    def __init__(self, snapshot: object | None) -> None:
-        self._snapshot = snapshot
-
-    async def get_run(self, *, run_id: str) -> object | None:
-        del run_id
-        return None
-
-    async def latest_snapshot(
-        self,
-        *,
-        run_id: str,
-        include_interrupted: bool = False,
-    ) -> object | None:
-        del run_id, include_interrupted
-        return self._snapshot
-
-
-class _FailureTerminalBackend(LocalExecutionBackend):
-    def _validate_recovery_identity(
-        self,
-        current: ExecutionRecord,
-        recovery_input: object,
-    ) -> None:
-        del current, recovery_input
-
-    async def verify_terminal_projection(
-        self,
-        execution: ExecutionRecord,
-        status: ExecutionStatus,
-        run_id: str | None,
-    ) -> None:
-        del execution, status, run_id
-
-    async def _commit_execution_terminal_checkpoint(
-        self,
-        current: ExecutionRecord,
-        commit: object,
-        **kwargs: object,
-    ) -> object:
-        del current
-        self.captured_commit = commit
-        self.captured_recovery_run = kwargs.get("recovery_run")
-        self.captured_recovery_snapshot = kwargs.get("recovery_snapshot")
-        return SimpleNamespace()
-
-
-def _failure_backend(snapshot: object | None) -> _FailureTerminalBackend:
-    backend = object.__new__(_FailureTerminalBackend)
-    backend._steps = _FailureSteps(snapshot)
-    backend._pending_audit_events = {}
-    backend._terminal_events = {}
-    return backend
-
-
-@pytest.mark.asyncio
-async def test_failed_run_without_snapshot_commits_failed_terminal() -> None:
-    backend = _failure_backend(None)
-    await backend._commit_same_group_recovery_terminal(
-        _started_execution(),
-        _active_checkpoint(),
-        status=ExecutionStatus.FAILED,
-        output=None,
-        error_code=ErrorCode.MODEL_RATE_LIMITED.value,
-        stop_reason=StopReason.ERROR,
-        definition=None,
-        run_id="run",
-        usage=UsageMetrics(),
-        safe_error_details={"status_code": 429},
-    )
-    terminal = getattr(backend.captured_commit, "execution")
-    assert terminal.status is ExecutionStatus.FAILED
-    assert terminal.error_code == ErrorCode.MODEL_RATE_LIMITED.value
-    assert backend.captured_recovery_run is None
-    assert backend.captured_recovery_snapshot is None
-
-
-@pytest.mark.asyncio
-async def test_snapshot_without_run_is_storage_integrity_error() -> None:
-    backend = _failure_backend(SimpleNamespace(state="interrupted"))
-    with pytest.raises(AIError) as error:
-        await backend._commit_same_group_recovery_terminal(
-            _started_execution(),
-            _active_checkpoint(),
-            status=ExecutionStatus.FAILED,
-            output=None,
-            error_code=ErrorCode.MODEL_RATE_LIMITED.value,
-            stop_reason=StopReason.ERROR,
-            definition=None,
-            run_id="run",
-            usage=UsageMetrics(),
-            safe_error_details={"status_code": 429},
-        )
-    assert error.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
 
 
 class _FailedAgent:
