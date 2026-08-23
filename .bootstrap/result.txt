@@ -1,11 +1,21 @@
 ===== python -m pip install -q --upgrade pip =====
 ===== python -m pip install -q -e ./linktools -e ./linktools-ai[sqlite,evaluation,temporal] pytest pytest-asyncio ruff =====
+===== python .bootstrap/patch_fingerprint.py =====
+execution_event V1 fingerprint aligned with mechanical schema descriptor
 ===== python -m compileall -q linktools-ai/src/linktools/ai =====
 ===== ruff check --select E4,E7,E9,F linktools-ai/src/linktools/ai tests/ai =====
 All checks passed!
 ===== python .bootstrap/audit.py =====
 Traceback (most recent call last):
-  File "/home/runner/work/linktools/linktools/.bootstrap/audit.py", line 59, in <module>
-    assert actual == expected, f'stale schema fingerprint {wire_id}: {expected} != {actual}'
-           ^^^^^^^^^^^^^^^^^^
-AssertionError: stale schema fingerprint execution_event: c7d10fa9a15092e7e29c503b938f12358b836ee0d578bd5faff0f0951d3bedf8 != 0c977a9bc5de198667dc34640acd192fe54a986227d886ffb1dea596a851c957
+  File "/home/runner/work/linktools/linktools/.bootstrap/audit.py", line 58, in <module>
+    actual = _dataclass_schema_fingerprint(target, _V1_CODEC)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/runner/work/linktools/linktools/linktools-ai/src/linktools/ai/runtime/state/_codec.py", line 825, in _dataclass_schema_fingerprint
+    canonical_json_bytes(_dataclass_schema_descriptor(target, codec))
+                         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/runner/work/linktools/linktools/linktools-ai/src/linktools/ai/runtime/state/_codec.py", line 716, in _dataclass_schema_descriptor
+    "type": _schema_type_descriptor(annotation, codec),
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/runner/work/linktools/linktools/linktools-ai/src/linktools/ai/runtime/state/_codec.py", line 756, in _schema_type_descriptor
+    raise TypeError(f"schema dataclass is not in the V1 codec: {annotation!r}")
+TypeError: schema dataclass is not in the V1 codec: <class 'linktools.ai.agent._binding.AgentBindingSnapshot'>
