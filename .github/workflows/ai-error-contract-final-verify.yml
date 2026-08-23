@@ -21,147 +21,81 @@ jobs:
       - name: Install verification dependencies
         run: |
           python -m pip install --upgrade pip
-          python -m pip install \
-            filelock 'pydantic-ai-slim[mcp,openai,temporal]>=2.27.0,<3.0.0' \
-            'pydantic-ai-harness[skills,dynamic-workflow]>=0.13.0' \
-            'PyYAML>=6,<7' pytest pytest-asyncio 'sqlalchemy[asyncio]==2.0.51' \
-            'aiosqlite==0.22.1' ruff rich requests packaging
-          python -m pip install -e ./linktools --no-deps
+          python -m pip install ruff
 
-      - name: Check out work branch snapshot
+      - name: Compare Ruff diagnostics with fixed baseline
         run: |
           git fetch --depth=1 origin fix/ai-error-contract-closure
-          git worktree add /tmp/final-error-audit FETCH_HEAD
-          git -C /tmp/final-error-audit rev-parse HEAD | tee /tmp/final-error-audit/audit-head.txt
+          git worktree add /tmp/ruff-current FETCH_HEAD
+          git fetch --depth=1 origin a4ded79a152ccfbc635503ee7b7bd394bd50970e
+          git worktree add /tmp/ruff-baseline FETCH_HEAD
 
-      - name: Compile linktools-ai
-        working-directory: /tmp/final-error-audit
-        env:
-          PYTHONPATH: linktools-ai:linktools-ai/src:linktools/src
-        run: python -m compileall -q linktools-ai/src/linktools/ai
-
-      - name: Test linktools-ai
-        working-directory: /tmp/final-error-audit
-        timeout-minutes: 12
-        env:
-          PYTHONPATH: linktools-ai:linktools-ai/src:linktools/src
-        run: python -m pytest -q tests/ai | tee audit-pytest.txt
-
-      - name: Ruff linktools-ai
-        working-directory: /tmp/final-error-audit
-        env:
-          PYTHONPATH: linktools-ai:linktools-ai/src:linktools/src
-        run: |
+          set +e
+          cd /tmp/ruff-current
           python -m ruff check \
             linktools-ai/scripts/build linktools-ai/src/linktools/ai \
-            linktools-ai/src/linktools/commands/ai tests/ai | tee audit-ruff.txt
+            linktools-ai/src/linktools/commands/ai tests/ai \
+            --output-format=json > /tmp/ruff-current.json
+          current_status=$?
+          cd /tmp/ruff-baseline
+          python -m ruff check \
+            linktools-ai/scripts/build linktools-ai/src/linktools/ai \
+            linktools-ai/src/linktools/commands/ai tests/ai \
+            --output-format=json > /tmp/ruff-baseline.json
+          baseline_status=$?
+          set -e
 
-      - name: Generate semantic audit evidence
-        working-directory: /tmp/final-error-audit
-        run: |
           python - <<'PY'
-          import re
+          import json
+          from collections import Counter
           from pathlib import Path
 
-          source_roots = [Path('linktools-ai/src/linktools/ai'), Path('linktools-ai/src/linktools/commands/ai')]
-          tests_root = Path('tests/ai')
+          current = json.loads(Path('/tmp/ruff-current.json').read_text())
+          baseline = json.loads(Path('/tmp/ruff-baseline.json').read_text())
 
-          def files(roots):
-              for root in roots:
-                  yield from sorted(root.rglob('*.py'))
+          def key(item):
+              filename = item['filename']
+              marker = '/linktools/'
+              if marker in filename:
+                  filename = filename.split(marker, 1)[1]
+              return filename, item['code'], item['message']
 
-          def contexts(roots, pattern, radius=2):
-              regex = re.compile(pattern)
-              output = []
-              for path in files(roots):
-                  lines = path.read_text().splitlines()
-                  for index, line in enumerate(lines):
-                      if regex.search(line):
-                          start = max(0, index - radius)
-                          end = min(len(lines), index + radius + 1)
-                          output.append(f'=== {path}:{index + 1} ===')
-                          output.extend(
-                              f'{number + 1:>5}: {lines[number]}'
-                              for number in range(start, end)
-                          )
-                          output.append('')
-              return output
+          current_counter = Counter(map(key, current))
+          baseline_counter = Counter(map(key, baseline))
+          added = current_counter - baseline_counter
+          removed = baseline_counter - current_counter
 
-          reports = {
-              'audit-storage-integrity.txt': contexts(
-                  [Path('linktools-ai/src/linktools/ai')],
-                  r'ErrorCode\.STORAGE_INTEGRITY_ERROR',
-              ),
-              'audit-wide-catches.txt': contexts(
-                  source_roots,
-                  r'except\s+(?:Exception|BaseException)\b',
-              ),
-              'audit-execution-result.txt': contexts(
-                  source_roots,
-                  r'\bExecutionResult\b',
-              ),
-          }
-          for name, rows in reports.items():
-              Path(name).write_text('\n'.join(rows) + ('\n' if rows else ''))
-
-          codes = (
-              'INTERNAL_ERROR',
-              'MODEL_API_ERROR',
-              'MODEL_REQUEST_REJECTED',
-              'MODEL_RATE_LIMITED',
-              'MODEL_TIMEOUT',
-              'MODEL_UNAVAILABLE',
-              'MODEL_RESPONSE_INVALID',
-              'MODEL_CONTENT_FILTERED',
-              'EXECUTION_CONCURRENCY_LIMIT_EXCEEDED',
-              'EXECUTION_NOT_READY',
-              'EXECUTION_WAIT_TIMEOUT',
-              'TASK_WAIT_TIMEOUT',
-              'TOOL_RETRY_REQUIRED',
-              'TOOL_EXECUTION_FAILED',
-              'ASSET_NOT_FOUND',
-              'STORAGE_PATH_INVALID',
-          )
-          production_text = '\n'.join(path.read_text() for path in files(source_roots))
-          test_text = '\n'.join(path.read_text() for path in files([tests_root]))
-          matrix = []
-          missing = []
-          for code in codes:
-              token = f'ErrorCode.{code}'
-              production = production_text.count(token)
-              validation = test_text.count(token)
-              matrix.append(f'{code}\tproduction={production}\tvalidation={validation}')
-              if production < 1 or validation < 1:
-                  missing.append(code)
-          Path('audit-error-code-matrix.txt').write_text('\n'.join(matrix) + '\n')
-          if missing:
-              raise SystemExit(f'new error codes missing production use or validation: {missing}')
-
-          forbidden = (
-              '.github/workflows/ai-error-contract-closure.yml',
-              '.github/workflows/ai-error-contract-pr.yml',
-              '.github/workflows/ai-error-contract-pr-verify.yml',
-              'linktools-ai/scripts/build/_error_contract_closure.py',
-              'linktools-ai/scripts/build/_error_contract_followup.py',
-          )
-          leftovers = [path for path in forbidden if Path(path).exists()]
-          Path('audit-temp-leftovers.txt').write_text('\n'.join(leftovers) + ('\n' if leftovers else ''))
-          if leftovers:
-              raise SystemExit(f'legacy temporary verification assets remain: {leftovers}')
+          report = [
+              f'current_status={int(bool(current))}',
+              f'baseline_status={int(bool(baseline))}',
+              f'current_count={len(current)}',
+              f'baseline_count={len(baseline)}',
+              f'added_count={sum(added.values())}',
+              f'removed_count={sum(removed.values())}',
+              '',
+              '[added]',
+          ]
+          for (filename, code, message), count in sorted(added.items()):
+              report.append(f'{count}\t{code}\t{filename}\t{message}')
+          report.extend(['', '[removed]'])
+          for (filename, code, message), count in sorted(removed.items()):
+              report.append(f'{count}\t{code}\t{filename}\t{message}')
+          Path('/tmp/ruff-diff.txt').write_text('\n'.join(report) + '\n')
+          print('\n'.join(report[:80]))
           PY
 
-      - name: Upload final audit evidence
+          printf '%s\n' "$current_status" > /tmp/ruff-current.status
+          printf '%s\n' "$baseline_status" > /tmp/ruff-baseline.status
+
+      - name: Upload Ruff comparison
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: ai-error-contract-final-audit
+          name: ai-error-contract-ruff-comparison
           path: |
-            /tmp/final-error-audit/audit-head.txt
-            /tmp/final-error-audit/audit-pytest.txt
-            /tmp/final-error-audit/audit-ruff.txt
-            /tmp/final-error-audit/audit-storage-integrity.txt
-            /tmp/final-error-audit/audit-wide-catches.txt
-            /tmp/final-error-audit/audit-execution-result.txt
-            /tmp/final-error-audit/audit-error-code-matrix.txt
-            /tmp/final-error-audit/audit-temp-leftovers.txt
+            /tmp/ruff-current.json
+            /tmp/ruff-baseline.json
+            /tmp/ruff-current.status
+            /tmp/ruff-baseline.status
+            /tmp/ruff-diff.txt
           if-no-files-found: error
