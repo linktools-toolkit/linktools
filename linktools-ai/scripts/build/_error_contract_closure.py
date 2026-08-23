@@ -21,7 +21,7 @@ def main() -> None:
     if compat.exists():
         raise SystemExit(f"{compat}: compatibility module already exists")
     compat.write_text(
-        '''#!/usr/bin/env python3\n# -*- coding: utf-8 -*-\n"""Compatibility helpers for the supported Python baseline."""\n\ntry:\n    from enum import StrEnum\nexcept ImportError:\n    from enum import Enum\n\n    class StrEnum(str, Enum):\n        """Python 3.10-compatible subset of enum.StrEnum."""\n\n        def __str__(self) -> str:\n            return str(self.value)\n\n\n__all__ = ["StrEnum"]\n'''
+        '''#!/usr/bin/env python3\n# -*- coding: utf-8 -*-\n"""Compatibility helpers for the supported Python baseline."""\n\nfrom enum import Enum\n\ntry:\n    from enum import StrEnum\nexcept ImportError:\n\n    class StrEnum(str, Enum):\n        """Python 3.10-compatible subset of enum.StrEnum."""\n\n        def __str__(self) -> str:\n            return str(self.value)\n\n\n__all__ = ["StrEnum"]\n'''
     )
 
     imports = {
