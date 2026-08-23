@@ -76,7 +76,7 @@ async def build_workspace_assets(
     workspace: Workspace,
     *,
     store: AssetStore | None = None,
-    bindings: Sequence[AssetTypeBinding[object]] = (),
+    bindings: "Sequence[AssetTypeBinding[object]]" = (),
     path_adapter: AssetPathAdapter | None = None,
 ) -> AssetRepository:
     if not isinstance(workspace, Workspace):

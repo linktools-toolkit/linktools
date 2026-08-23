@@ -1,15 +1,16 @@
+===== python -m pip install -q --upgrade pip =====
+===== python -m pip install -q -e ./linktools -e ./linktools-ai[sqlite,evaluation,temporal] pytest pytest-asyncio ruff =====
 ===== python .bootstrap/patch.py =====
+runtime state canonical V1 binding codec applied
+fingerprint context_projection: 8f77d052bed206e72f13faab7fcb3471cf11358c3b8ac65ffd96d5c13e229bc2 -> c88e1bb049f0aa9cf13f09b08509eccf65872d2b357d6233f91cc28f8dacc197
+fingerprint execution_event: c7d10fa9a15092e7e29c503b938f12358b836ee0d578bd5faff0f0951d3bedf8 -> 0c977a9bc5de198667dc34640acd192fe54a986227d886ffb1dea596a851c957
+fingerprint session_record: d29d8d76c025ee18d7e93f2315e699618470e096b728e23673f28cad61961ca2 -> 6c9801789a78c9e8d1f0d8f638a7a0cfbe515cb3489cd10cfb9a0c5177037682
+workspace heterogeneous binding annotation retained
+===== python .bootstrap/patch2.py =====
 Traceback (most recent call last):
-  File "/home/runner/work/linktools/linktools/.bootstrap/patch.py", line 5, in <module>
-    from linktools.ai.runtime.state import _codec as codec_module
-  File "/home/runner/work/linktools/linktools/linktools-ai/src/linktools/ai/__init__.py", line 5, in <module>
-    from .asset import AssetRef
-  File "/home/runner/work/linktools/linktools/linktools-ai/src/linktools/ai/asset/__init__.py", line 12, in <module>
-    from ._backend import InMemoryAssetBackend
-  File "/home/runner/work/linktools/linktools/linktools-ai/src/linktools/ai/asset/_backend.py", line 12, in <module>
-    from linktools.core import environ
-  File "/home/runner/work/linktools/linktools/linktools/src/linktools/core/__init__.py", line 41, in <module>
-    from ._environ import BaseEnviron, Environ, environ
-  File "/home/runner/work/linktools/linktools/linktools/src/linktools/core/_environ.py", line 13, in <module>
-    from linktools import utils, metadata
-ImportError: cannot import name 'metadata' from 'linktools' (unknown location)
+  File "/home/runner/work/linktools/linktools/.bootstrap/patch2.py", line 46, in <module>
+    text = once(text, '        binding_digest="binding",\n', '        binding_digest="a" * 64,\n', 'history execution digest')
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/runner/work/linktools/linktools/.bootstrap/patch2.py", line 7, in once
+    raise RuntimeError(f'{label}: expected one match, got {count}')
+RuntimeError: history execution digest: expected one match, got 3

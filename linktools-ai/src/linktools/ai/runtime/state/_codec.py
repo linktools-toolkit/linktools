@@ -388,14 +388,14 @@ _V1_SCHEMA_FINGERPRINTS: Mapping[str, str] = MappingProxyType(
         "agent_attempt_claim": "6c70466a08d20f57baf058d8da2a7d2ab3cd738494e45d82111e791fc8beaac2",
         "approval_record": "14d31c99c7e60edebe193b1349c54e5c9a342829c4a8538651d7e9b1249a158d",
         "artifact_record": "9e8c5e9b10ebe4d75605a7dafcb11c7b442694485c5aae21138cb81339992a93",
-        "context_projection": "8f77d052bed206e72f13faab7fcb3471cf11358c3b8ac65ffd96d5c13e229bc2",
+        "context_projection": "c88e1bb049f0aa9cf13f09b08509eccf65872d2b357d6233f91cc28f8dacc197",
         "conversation_cursor": "85bc775ad1c18bebf3a9b54ca634d874350f906c36f61c0f1254bff1b3b18888",
         "conversation_history": "e02add0b6455024f22d2599fa4479a5f4ee89fb4af399e70e9e6dfee119eae76",
         "conversation_history_index_node": "0db81616aa96a4e8a78f818334ddbd1b42f3023acb4e1209de8057f76a729729",
         "conversation_history_segment": "62cc29ba7ddb357641b4de91f9168a70ce4f518043444482ee16fefe57a336a5",
         "evaluation_record": "67ac6e9191111abc33d611d2bfd628a4190fa6794c28b8f15f8b878ba46ad345",
         "execution_cancel_request_commit": "1a5f2667e2909eb1a94b0446483ea19cc105131a67d606854bb6e3d11541fa7a",
-        "execution_event": "c7d10fa9a15092e7e29c503b938f12358b836ee0d578bd5faff0f0951d3bedf8",
+        "execution_event": "0c977a9bc5de198667dc34640acd192fe54a986227d886ffb1dea596a851c957",
         "execution_event_append": "2db5fe9712b5b6b99fbdf014e3d34f9d20bdcaf419c1f1c616547962d0de5d8d",
         "execution_history_head": "403fad67908ca97614648aa16b681fcecaa205f9ba0847f77ce5dbf666a86b68",
         "execution_history_seal": "dc5a7181d8ee8e23b75390bae449da48eca31f1286159212bb1960d5aad5a0bd",
@@ -432,7 +432,7 @@ _V1_SCHEMA_FINGERPRINTS: Mapping[str, str] = MappingProxyType(
         "run_record": "07005d406627ef2a843fc41601c6149336d52d4a5a3b81635fdd1ba58f5c1e9f",
         "runtime_payload_ref": "e681eb4a80417ccdae9ece1f4679dd0601a02dfc5cb89989e2c021c70f63a20e",
         "session_fork_result": "b3a7401efb44d7d9671cc1505dc52d7cb2e04edf2e05d19da2a7f371e201e91b",
-        "session_record": "d29d8d76c025ee18d7e93f2315e699618470e096b728e23673f28cad61961ca2",
+        "session_record": "6c9801789a78c9e8d1f0d8f638a7a0cfbe515cb3489cd10cfb9a0c5177037682",
         "step_event": "c970e92b12e5b3f0fa72afac8e955061c98927dec5805e2acce6e39fc82828e5",
         "stored_payload": "f893cfe67f1722ed1605f28758a868307ef6c253e610a9d2d1853ba422aba7f7",
         "stored_step_snapshot": "b054107b4077a2cf9e948aadb63dae4ae50b8bc73fe72c5908610c332ee70886",
@@ -480,114 +480,71 @@ class _VersionCodec:
     external_schema_types: Mapping[type[object], JsonValue]
 
 
-_EXECUTION_V1_LEGACY_FIELDS = frozenset(
+_EXECUTION_V1_FIELDS = frozenset(
     {
-        "execution_id",
-        "tenant_id",
-        "session_id",
-        "binding_digest",
-        "parent_execution_id",
-        "root_execution_id",
-        "source_execution_id",
-        "base_execution_id",
-        "lineage_kind",
-        "status",
-        "revision",
-        "event_sequence",
-        "agent_run_sequence",
-        "error_code",
-        "safe_error_details",
-        "created_at",
-        "updated_at",
-        "memory_scope",
-        "conversation_step_run_id",
+        "execution_id", "tenant_id", "session_id", "binding_digest",
+        "parent_execution_id", "root_execution_id", "source_execution_id",
+        "base_execution_id", "lineage_kind", "status", "revision",
+        "event_sequence", "agent_run_sequence", "error_code",
+        "safe_error_details", "created_at", "updated_at", "planning",
+        "thinking", "binding", "memory_scope", "conversation_step_run_id",
         "result",
     }
 )
-_EXECUTION_V1_CURRENT_FIELDS = _EXECUTION_V1_LEGACY_FIELDS | frozenset(
-    {"planning", "thinking", "binding"}
-)
-_RECOVERY_EXECUTION_V1_LEGACY_FIELDS = frozenset(
+_RECOVERY_EXECUTION_V1_FIELDS = frozenset(
     {
-        "user_prompt",
-        "principal_id",
-        "principal_kind",
-        "session_id",
-        "memory_scope",
-        "agent_id",
-        "binding_digest",
-        "lineage_kind",
-        "parent_execution_id",
-        "root_execution_id",
-        "source_execution_id",
-        "base_execution_id",
-        "conversation_step_run_id",
-        "idempotency",
+        "user_prompt", "principal_id", "principal_kind", "session_id",
+        "memory_scope", "binding_digest", "lineage_kind",
+        "parent_execution_id", "root_execution_id", "source_execution_id",
+        "base_execution_id", "conversation_step_run_id", "idempotency",
+        "planning", "thinking", "binding",
     }
 )
-_RECOVERY_EXECUTION_V1_CURRENT_FIELDS = _RECOVERY_EXECUTION_V1_LEGACY_FIELDS | frozenset(
-    {"planning", "thinking", "binding"}
-)
 
 
-def _encode_v1_extended_record(
+def _encode_v1_exact_binding_record(
     value: object,
-    legacy_fields: frozenset[str],
+    expected_fields: frozenset[str],
     codec: "_VersionCodec",
 ) -> Mapping[str, JsonValue]:
+    actual_fields = frozenset(field.name for field in fields(value))
+    if actual_fields != expected_fields:
+        raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
     planning = attrgetter("planning")(value)
     thinking = attrgetter("thinking")(value)
     binding = attrgetter("binding")(value)
-    if not isinstance(planning, bool) or not isinstance(thinking, bool):
+    if (
+        not isinstance(planning, bool)
+        or not isinstance(thinking, bool)
+        or not isinstance(binding, AgentBindingSnapshot)
+    ):
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-    if binding is None:
-        if planning or thinking:
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        return {
-            name: _encode_domain(attrgetter(name)(value), codec)
-            for name in legacy_fields
-        }
-    if not isinstance(binding, AgentBindingSnapshot):
-        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-    encoded = {
-        name: _encode_domain(attrgetter(name)(value), codec)
-        for name in legacy_fields
+    return {
+        name: (
+            binding.to_payload()
+            if name == "binding"
+            else _encode_domain(attrgetter(name)(value), codec)
+        )
+        for name in expected_fields
     }
-    encoded["planning"] = planning
-    encoded["thinking"] = thinking
-    encoded["binding"] = binding.to_payload()
-    return encoded
 
 
-def _decode_v1_extended_record_fields(
+def _decode_v1_exact_binding_record_fields(
     raw_fields: Mapping[str, object],
     target: type[object],
-    legacy_fields: frozenset[str],
-    current_fields: frozenset[str],
+    expected_fields: frozenset[str],
     codec: "_VersionCodec",
 ) -> dict[str, object]:
-    actual = frozenset(raw_fields)
-    if actual == legacy_fields:
-        planning = False
-        thinking = False
-        binding = None
-    elif actual == current_fields:
-        planning = _decode_domain(raw_fields["planning"], bool, codec)
-        thinking = _decode_domain(raw_fields["thinking"], bool, codec)
-        binding = AgentBindingSnapshot.from_payload(raw_fields["binding"])
-    else:
-        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    _require_exact_keys(raw_fields, expected_fields)
     hints = get_type_hints(target)
-    decoded = {
-        name: _decode_domain(raw_fields[name], hints[name], codec)
-        for name in legacy_fields
+    return {
+        name: (
+            AgentBindingSnapshot.from_payload(raw_fields[name])
+            if name == "binding"
+            else _decode_domain(raw_fields[name], hints[name], codec)
+        )
+        for name in expected_fields
     }
-    decoded.update(
-        planning=planning,
-        thinking=thinking,
-        binding=binding,
-    )
-    return decoded
 
 
 def _encode_v1_execution_record(
@@ -596,19 +553,15 @@ def _encode_v1_execution_record(
 ) -> Mapping[str, JsonValue]:
     if not isinstance(value, ExecutionRecord):
         raise TypeError("V1 execution_record encoder received the wrong type")
-    return _encode_v1_extended_record(value, _EXECUTION_V1_LEGACY_FIELDS, codec)
+    return _encode_v1_exact_binding_record(value, _EXECUTION_V1_FIELDS, codec)
 
 
 def _decode_v1_execution_record(
     raw_fields: Mapping[str, object],
     codec: "_VersionCodec",
 ) -> ExecutionRecord:
-    decoded = _decode_v1_extended_record_fields(
-        raw_fields,
-        ExecutionRecord,
-        _EXECUTION_V1_LEGACY_FIELDS,
-        _EXECUTION_V1_CURRENT_FIELDS,
-        codec,
+    decoded = _decode_v1_exact_binding_record_fields(
+        raw_fields, ExecutionRecord, _EXECUTION_V1_FIELDS, codec
     )
     try:
         return ExecutionRecord(**decoded)
@@ -622,10 +575,8 @@ def _encode_v1_recovery_execution_input(
 ) -> Mapping[str, JsonValue]:
     if not isinstance(value, RecoveryExecutionInput):
         raise TypeError("V1 recovery_execution_input encoder received the wrong type")
-    return _encode_v1_extended_record(
-        value,
-        _RECOVERY_EXECUTION_V1_LEGACY_FIELDS,
-        codec,
+    return _encode_v1_exact_binding_record(
+        value, _RECOVERY_EXECUTION_V1_FIELDS, codec
     )
 
 
@@ -633,12 +584,8 @@ def _decode_v1_recovery_execution_input(
     raw_fields: Mapping[str, object],
     codec: "_VersionCodec",
 ) -> RecoveryExecutionInput:
-    decoded = _decode_v1_extended_record_fields(
-        raw_fields,
-        RecoveryExecutionInput,
-        _RECOVERY_EXECUTION_V1_LEGACY_FIELDS,
-        _RECOVERY_EXECUTION_V1_CURRENT_FIELDS,
-        codec,
+    decoded = _decode_v1_exact_binding_record_fields(
+        raw_fields, RecoveryExecutionInput, _RECOVERY_EXECUTION_V1_FIELDS, codec
     )
     try:
         return RecoveryExecutionInput(**decoded)

@@ -23,6 +23,7 @@ def _binding(digest: str) -> AgentBindingSnapshot:
     return AgentBindingSnapshot(
         version=1,
         agent_spec=AgentSpec("agent", 1, "model"),
+        agent_digest="d" * 64,
         output_type_module="builtins",
         output_type_qualname="str",
         output_schema_id="test-output",
@@ -34,8 +35,8 @@ def _binding(digest: str) -> AgentBindingSnapshot:
 
 
 class _DefinitionCatalog:
-    def definition(self, digest: str) -> object:
-        return SimpleNamespace(digest=digest, binding_snapshot=_binding(digest))
+    def binding(self, digest: str) -> object:
+        return SimpleNamespace(digest=digest, snapshot=_binding(digest))
 
 
 

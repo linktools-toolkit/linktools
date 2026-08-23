@@ -9,6 +9,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
+from linktools.ai.agent import AgentBindingSnapshot
+from linktools.ai.agent._output import bind_output
 from linktools.ai.core import (
     ExecutionEventType,
     ExecutionLineageKind,
@@ -19,6 +21,23 @@ from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.runtime import RuntimeDomain, RuntimeState
 from linktools.ai.runtime._tool import ToolOperationRecord
 from linktools.ai.runtime.state._contracts import ExecutionRecord
+from linktools.ai.spec import AgentSpec
+
+
+def _binding() -> AgentBindingSnapshot:
+    output = bind_output()
+    return AgentBindingSnapshot(
+        version=1,
+        agent_spec=AgentSpec("agent", 1, "default"),
+        agent_digest="b" * 64,
+        output_type_module=output.value_type.__module__,
+        output_type_qualname=output.value_type.__qualname__,
+        output_schema_id=output.schema_id,
+        output_schema_revision=output.schema_revision,
+        output_schema_fingerprint=output.schema_fingerprint,
+        local_runtime_capability_descriptors=(),
+        binding_digest="a" * 64,
+    )
 
 
 def _tool_record() -> ToolOperationRecord:
@@ -71,8 +90,9 @@ async def test_nested_event_mutation_persists_after_restart(tmp_path: Path) -> N
     await state.initialize(namespace="nested-event", tenant_id="tenant")
     now = datetime.now(timezone.utc)
     execution = ExecutionRecord(
-        "execution", "tenant", None, "binding", None, "execution", None, None,
+        "execution", "tenant", None, "a" * 64, None, "execution", None, None,
         ExecutionLineageKind.RUN, ExecutionStatus.STARTED, 0, 0, 0, None, {}, now, now,
+        False, False, _binding(),
     )
     try:
         await state.execution.executions.create(execution)
