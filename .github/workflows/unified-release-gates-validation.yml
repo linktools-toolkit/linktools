@@ -25,27 +25,27 @@ jobs:
           from pathlib import Path
 
           root = Path('.')
-          replacements = (
-              ('linktools-ai/scripts/build/', 'scripts/check/ai/'),
-              ('linktools-ai/scripts/build', 'scripts/check/ai'),
-              ('scripts/build/', 'scripts/check/ai/'),
-              ('scripts/build', 'scripts/check/ai'),
-              ('scripts.build', 'scripts.check.ai'),
-          )
           suffixes = {'.py', '.json', '.md', '.yml', '.yaml', '.toml', '.txt'}
           workflow = Path('.github/workflows/unified-release-gates-validation.yml')
+          ai_prefixes = ('scripts/check/ai/', 'tests/ai/')
+          ai_files = {'linktools-ai/AGENTS.md', 'linktools-ai/README.md'}
+
           for path in root.rglob('*'):
               if not path.is_file() or path == workflow or '.git' in path.parts:
                   continue
               if path.suffix.lower() not in suffixes:
                   continue
+              relative = path.as_posix()
               try:
                   text = path.read_text(encoding='utf-8')
               except UnicodeDecodeError:
                   continue
-              updated = text
-              for old, new in replacements:
-                  updated = updated.replace(old, new)
+              updated = text.replace('linktools-ai/scripts/build/', 'scripts/check/ai/')
+              updated = updated.replace('linktools-ai/scripts/build', 'scripts/check/ai')
+              if relative.startswith(ai_prefixes) or relative in ai_files:
+                  updated = updated.replace('scripts/build/', 'scripts/check/ai/')
+                  updated = updated.replace('scripts/build', 'scripts/check/ai')
+                  updated = updated.replace('scripts.build', 'scripts.check.ai')
               if path == Path('scripts/verify.py'):
                   updated = updated.replace(
                       'version_file.read_text(encoding="utf-8").strip() != version',
@@ -55,8 +55,12 @@ jobs:
                   path.write_text(updated, encoding='utf-8')
           PY
           rm -rf linktools-ai/scripts
-          if git grep -n -E 'scripts\.build|linktools-ai/scripts/build|scripts/build/' -- ':!:.github/workflows/unified-release-gates-validation.yml'; then
-            echo '::error::stale build-script reference remains'
+          if git grep -n -E 'scripts\.build|linktools-ai/scripts/build' -- ':!:.github/workflows/unified-release-gates-validation.yml'; then
+            echo '::error::stale AI build-script reference remains'
+            exit 1
+          fi
+          if git grep -n 'scripts/build' -- scripts/check/ai tests/ai linktools-ai/AGENTS.md linktools-ai/README.md; then
+            echo '::error::stale AI gate path remains'
             exit 1
           fi
           test ! -e linktools-ai/scripts
