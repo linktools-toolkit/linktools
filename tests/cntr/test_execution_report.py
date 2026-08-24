@@ -9,16 +9,25 @@ import linktools.cntr.commands._shared as cntr_shared
 from linktools.cntr.execution.model import ExecutionRecord, get_records
 from linktools.cntr.lifecycle.dispatcher import LifecycleDispatcher
 from linktools.cntr.lifecycle.hooks import HookRegistry
+from linktools.cntr.runtime.images import ImagePlan
 
 
-def _record(manager, monkeypatch):
+def _record(manager, monkeypatch, image_plan=None):
     def fake(containers, *args, privilege=None, **kwargs):
         class _Proc:
             def check_call(self):
                 return 0
         return _Proc()
 
+    if image_plan is None:
+        image_plan = ImagePlan((), (), ("portainer",))
     monkeypatch.setattr(manager.runtime, "create_docker_compose_process", fake)
+    monkeypatch.setattr(manager.compose_runner, "final_model", lambda context: {"services": {}})
+    monkeypatch.setattr(
+        manager.image_preparer,
+        "plan",
+        lambda model, services=(), force_pull=False: image_plan,
+    )
     monkeypatch.setattr(LifecycleDispatcher, "_invoke_callback", lambda self, func, context=None: None)
     monkeypatch.setattr(HookRegistry, "call", lambda self, phase, context=None, reverse=False: None)
 
@@ -26,19 +35,23 @@ def _record(manager, monkeypatch):
 def test_on_command_up_return_value_is_none(monkeypatch, fresh_manager):
     monkeypatch.setattr(cntr_shared, "manager", fresh_manager)
     _record(fresh_manager, monkeypatch)
-    result = cntr_main.command.on_command_up(names=["portainer"], build=False, pull=False)
+    result = cntr_main.command.on_command_up(names=["portainer"], pull=False)
     assert result is None
 
 
 def test_on_command_up_return_value_is_none_with_report(monkeypatch, fresh_manager):
     monkeypatch.setattr(cntr_shared, "manager", fresh_manager)
     _record(fresh_manager, monkeypatch)
-    result = cntr_main.command.on_command_up(names=["portainer"], build=False, pull=False, report=True)
+    result = cntr_main.command.on_command_up(names=["portainer"], pull=False, report=True)
     assert result is None
 
 
 def test_up_records_build_and_up_phases(fresh_manager, monkeypatch):
-    _record(fresh_manager, monkeypatch)
+    _record(
+        fresh_manager,
+        monkeypatch,
+        ImagePlan(("portainer",), (), ("portainer",)),
+    )
     context_holder = []
     real_make_context = fresh_manager.compose_operations._make_context
 
@@ -49,7 +62,7 @@ def test_up_records_build_and_up_phases(fresh_manager, monkeypatch):
 
     monkeypatch.setattr(fresh_manager.compose_operations, "_make_context", spy_make_context)
 
-    fresh_manager.compose_operations.up(names=["portainer"], build=True, pull=False)
+    fresh_manager.compose_operations.up(names=["portainer"], pull=False)
 
     records = get_records(context_holder[0])
     phases = [r.phase for r in records]
@@ -109,7 +122,7 @@ def test_failure_diagnostic_is_logged_regardless_of_report_flag(fresh_manager, m
     monkeypatch.setattr(fresh_manager.logger, "error", lambda msg: errors.append(msg))
 
     try:
-        fresh_manager.compose_operations.down(names=["portainer"])  # report defaults to False
+        fresh_manager.compose_operations.down(names=["portainer"])
     except RuntimeError:
         pass
 
@@ -122,6 +135,14 @@ def test_build_command_proxy_secrets_are_redacted(fresh_manager, monkeypatch):
     monkeypatch.setattr(LifecycleDispatcher, "_invoke_callback", lambda self, func, context=None: None)
     monkeypatch.setattr(HookRegistry, "call", lambda self, phase, context=None, reverse=False: None)
     monkeypatch.setenv("http_proxy", "http://user:super-secret@proxy:8080")
+    monkeypatch.setattr(fresh_manager.compose_runner, "final_model", lambda context: {"services": {}})
+    monkeypatch.setattr(
+        fresh_manager.image_preparer,
+        "plan",
+        lambda model, services=(), force_pull=False: ImagePlan(
+            ("portainer",), (), ("portainer",)
+        ),
+    )
 
     def fail(containers, *args, privilege=None, **kwargs):
         class _Proc:
@@ -142,7 +163,7 @@ def test_build_command_proxy_secrets_are_redacted(fresh_manager, monkeypatch):
     monkeypatch.setattr(fresh_manager.compose_operations, "_make_context", spy_make_context)
 
     try:
-        fresh_manager.compose_operations.up(names=["portainer"], build=True, pull=False)
+        fresh_manager.compose_operations.up(names=["portainer"], pull=False)
     except RuntimeError:
         pass
 
@@ -158,11 +179,11 @@ def test_report_flag_does_not_change_running_state_writes(fresh_manager, monkeyp
     _record(fresh_manager, monkeypatch)
     monkeypatch.setattr(cntr_shared, "manager", fresh_manager)
 
-    cntr_main.command.on_command_up(names=["portainer"], build=False, pull=False, report=True)
+    cntr_main.command.on_command_up(names=["portainer"], pull=False, report=True)
     with_report = set(fresh_manager.running_state.get_persisted())
 
     fresh_manager.running_state._set([])
-    cntr_main.command.on_command_up(names=["portainer"], build=False, pull=False, report=False)
+    cntr_main.command.on_command_up(names=["portainer"], pull=False, report=False)
     without_report = set(fresh_manager.running_state.get_persisted())
 
     assert with_report == without_report == {"portainer"}
