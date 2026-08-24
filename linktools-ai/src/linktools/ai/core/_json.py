@@ -12,6 +12,52 @@ from typing import TypeAlias, cast
 JsonValue: TypeAlias = str | int | float | bool | None | list["JsonValue"] | dict[str, "JsonValue"]
 
 
+def normalize_json_value(value: "object") -> JsonValue:
+    """Return a detached value that satisfies the runtime JSON contract."""
+    return _normalize_json_value(value, set())
+
+
+def _normalize_json_value(value: object, seen: set[int]) -> JsonValue:
+    if isinstance(value, Enum):
+        raise TypeError("JSON values cannot contain enum instances")
+    if value is None:
+        return None
+    if isinstance(value, str):
+        return str(value)
+    if isinstance(value, bool):
+        return bool(value)
+    if isinstance(value, int):
+        return int(value)
+    if isinstance(value, float):
+        if not math.isfinite(value):
+            raise ValueError("JSON numbers must be finite")
+        return float(value)
+    if isinstance(value, list):
+        identity = id(value)
+        if identity in seen:
+            raise ValueError("JSON values cannot contain cycles")
+        seen.add(identity)
+        try:
+            return [_normalize_json_value(item, seen) for item in value]
+        finally:
+            seen.remove(identity)
+    if isinstance(value, dict):
+        identity = id(value)
+        if identity in seen:
+            raise ValueError("JSON values cannot contain cycles")
+        seen.add(identity)
+        try:
+            normalized: dict[str, JsonValue] = {}
+            for key, item in value.items():
+                if isinstance(key, Enum) or not isinstance(key, str):
+                    raise TypeError("JSON object keys must be strings")
+                normalized[str(key)] = _normalize_json_value(item, seen)
+            return normalized
+        finally:
+            seen.remove(identity)
+    raise TypeError(f"unsupported JSON value: {type(value).__name__}")
+
+
 class ImmutableJsonMapping(Mapping[str, JsonValue]):
     """Store one JSON object canonically and return detached values on access."""
 
@@ -35,7 +81,7 @@ class ImmutableJsonMapping(Mapping[str, JsonValue]):
     def _decode(self) -> "dict[str, JsonValue]":
         value = json.loads(self._payload.decode("utf-8"))
         if not isinstance(value, dict):
-            raise ValueError("immutable JSON mapping payload must be an object")
+            raise ValueError("immutable JSON mapping payload must be an object")  # noqa: TRY004
         return cast("dict[str, JsonValue]", value)
 
 
@@ -83,4 +129,9 @@ def canonical_json_bytes(value: JsonValue) -> bytes:
     ).encode("utf-8")
 
 
-__all__ = ["ImmutableJsonMapping", "JsonValue", "canonical_json_bytes"]
+__all__ = [
+    "ImmutableJsonMapping",
+    "JsonValue",
+    "canonical_json_bytes",
+    "normalize_json_value",
+]

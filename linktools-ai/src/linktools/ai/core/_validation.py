@@ -7,7 +7,7 @@ import unicodedata
 from enum import Enum
 
 from ..errors import AIError, ErrorCode
-from ._json import JsonValue, canonical_json_bytes
+from ._json import JsonValue, canonical_json_bytes, normalize_json_value
 
 
 def validate_tenant_id(value: str) -> str:
@@ -73,21 +73,24 @@ def validate_user_prompt(value: str) -> str:
 
 
 def validate_external_payload(value: JsonValue) -> JsonValue:
-    if len(canonical_json_bytes(value)) > 4 * 1024 * 1024:
+    normalized = normalize_json_value(value)
+    if len(canonical_json_bytes(normalized)) > 4 * 1024 * 1024:
         raise AIError(ErrorCode.EXTERNAL_RESULT_TOO_LARGE)
-    return value
+    return normalized
 
 
 def validate_tool_arguments(value: JsonValue) -> JsonValue:
-    if len(canonical_json_bytes(value)) > 1024 * 1024:
+    normalized = normalize_json_value(value)
+    if len(canonical_json_bytes(normalized)) > 1024 * 1024:
         raise AIError(ErrorCode.TOOL_ARGUMENTS_TOO_LARGE)
-    return value
+    return normalized
 
 
 def validate_observation_payload(value: JsonValue) -> JsonValue:
-    if len(canonical_json_bytes(value)) > 1024 * 1024:
+    normalized = normalize_json_value(value)
+    if len(canonical_json_bytes(normalized)) > 1024 * 1024:
         raise AIError(ErrorCode.OBSERVATION_PAYLOAD_TOO_LARGE)
-    return value
+    return normalized
 
 
 def validate_page_limit(value: int) -> int:
@@ -128,10 +131,24 @@ def _text(value: str, maximum: int, code: ErrorCode) -> str:
 
 
 __all__ = [
-    "validate_agent_id", "validate_asset_kind", "validate_asset_namespace", "validate_capability_provider", "validate_enum",
-    "validate_external_payload", "validate_idempotency_key", "validate_lease_owner", "validate_lease_seconds",
-    "validate_memory_scope", "validate_persistence_namespace", "validate_observation_payload", "validate_page_limit",
-    "validate_principal_id", "validate_principal_kind", "validate_resource_id", "validate_shell_timeout",
+    "validate_agent_id",
+    "validate_asset_kind",
+    "validate_asset_namespace",
+    "validate_capability_provider",
+    "validate_enum",
+    "validate_external_payload",
+    "validate_idempotency_key",
+    "validate_lease_owner",
+    "validate_lease_seconds",
+    "validate_memory_scope",
+    "validate_observation_payload",
+    "validate_page_limit",
+    "validate_persistence_namespace",
+    "validate_principal_id",
+    "validate_principal_kind",
+    "validate_resource_id",
+    "validate_shell_timeout",
+    "validate_tenant_id",
+    "validate_tool_arguments",
     "validate_user_prompt",
-    "validate_tenant_id", "validate_tool_arguments",
 ]

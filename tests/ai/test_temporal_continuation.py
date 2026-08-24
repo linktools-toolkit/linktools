@@ -5,7 +5,6 @@
 from dataclasses import replace
 
 import pytest
-
 from linktools.ai.core import ApprovalDecision, canonical_sha256
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.temporal.workflow._execution import (

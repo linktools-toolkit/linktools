@@ -4,7 +4,7 @@
 
 
 import pytest
-
+from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.runtime.state import RuntimeState
 
 
@@ -26,5 +26,6 @@ async def test_runtime_state_close_is_idempotent_and_single_use(tmp_path) -> Non
     await state.close()
     await state.close()
     assert state.ready is False
-    with pytest.raises(Exception):
+    with pytest.raises(AIError) as error:
         await state.initialize(namespace="review", tenant_id="tenant")
+    assert error.value.code is ErrorCode.RUNTIME_DEPENDENCY_NOT_READY

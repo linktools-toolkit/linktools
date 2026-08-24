@@ -8,6 +8,8 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from linktools.ai.agent import AgentBindingSnapshot
+from linktools.ai.agent._output import bind_output
 from linktools.ai.core import ExecutionLineageKind, ExecutionStatus, step_run_id
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.runtime import RuntimeDomain, RuntimeState
@@ -30,9 +32,26 @@ from linktools.ai.runtime.state._contracts import (
     ExecutionRecord,
     StoredStepSnapshot,
 )
+from linktools.ai.spec import AgentSpec
 from linktools.ai.task import TaskNode
 from pydantic_ai.messages import ModelRequest, UserPromptPart
 from pydantic_ai_harness.step_persistence import ContinuableSnapshot, RunRecord
+
+
+def _binding_snapshot() -> AgentBindingSnapshot:
+    output = bind_output()
+    return AgentBindingSnapshot(
+        version=1,
+        agent_spec=AgentSpec("agent", 1, "default"),
+        agent_digest="b" * 64,
+        output_type_module=output.value_type.__module__,
+        output_type_qualname=output.value_type.__qualname__,
+        output_schema_id=output.schema_id,
+        output_schema_revision=output.schema_revision,
+        output_schema_fingerprint=output.schema_fingerprint,
+        local_runtime_capability_descriptors=(),
+        binding_digest="a" * 64,
+    )
 
 
 def _assert_integrity(callback: Callable[[], object]) -> None:
@@ -219,28 +238,28 @@ def test_v1_tagged_scalars_require_canonical_inverse() -> None:
     )
 
 
-def test_v1_dataclass_and_any_readers_require_exact_shapes() -> None:
+def test_v1_dataclass_reader_tolerates_ordinary_shape_changes() -> None:
     cursor = ConversationCursor("run")
     wire = encode_domain(cursor)
     fields = dict(wire["fields"])
     fields.pop("history_id")
-    _assert_integrity(
-        lambda: decode_domain(
-            {"$dataclass": "conversation_cursor", "fields": fields},
-            ConversationCursor,
-        )
-    )
+    assert decode_domain(
+        {"$dataclass": "conversation_cursor", "fields": fields},
+        ConversationCursor,
+    ) == cursor
     fields = dict(wire["fields"])
     fields["unknown"] = None
+    assert decode_domain(
+        {"$dataclass": "conversation_cursor", "fields": fields},
+        ConversationCursor,
+    ) == cursor
     _assert_integrity(
         lambda: decode_domain(
-            {"$dataclass": "conversation_cursor", "fields": fields},
-            ConversationCursor,
-        )
-    )
-    _assert_integrity(
-        lambda: decode_domain(
-            {"$dataclass": "conversation_cursor", "fields": wire["fields"], "extra": 1},
+            {
+                "$dataclass": "conversation_cursor",
+                "fields": wire["fields"],
+                "extra": 1,
+            },
             ConversationCursor,
         )
     )
@@ -268,7 +287,7 @@ def test_v1_dataclass_and_any_readers_require_exact_shapes() -> None:
     assert decode_domain(encode_domain({"value": 1}), Any) == {"value": 1}
 
 
-def test_v1_envelopes_and_step_wire_have_exact_ownership() -> None:
+def test_v1_envelopes_keep_exact_members() -> None:
     cursor = ConversationCursor("run")
     envelope = encode_envelope(
         {"type": wire_type_id(cursor), "payload": encode_domain(cursor)}
@@ -305,8 +324,17 @@ def test_v1_envelopes_and_step_wire_have_exact_ownership() -> None:
         lambda: _decode_step_envelope(
             {
                 "v": 1,
-                "value": {"type": "stored_step_snapshot", "payload": {}, "extra": 1},
+                "value": {
+                    "type": "stored_step_snapshot",
+                    "payload": encode_domain(stored),
+                    "extra": 1,
+                },
             }
+        )
+    )
+    _assert_integrity(
+        lambda: _decode_step_envelope(
+            {"v": 1, "value": {"type": "stored_step_snapshot"}}
         )
     )
     _assert_unsupported(
@@ -349,7 +377,7 @@ async def test_stored_snapshot_is_durable_authority_across_reopen(
         execution_id="execution",
         tenant_id="tenant",
         session_id=None,
-        binding_digest="binding",
+        binding_digest="a" * 64,
         parent_execution_id=None,
         root_execution_id="execution",
         source_execution_id=None,
@@ -363,6 +391,9 @@ async def test_stored_snapshot_is_durable_authority_across_reopen(
         safe_error_details={},
         created_at=now,
         updated_at=now,
+        planning=False,
+        thinking=False,
+        binding=_binding_snapshot(),
     )
     run_id = step_run_id(
         namespace="closure-reopen",

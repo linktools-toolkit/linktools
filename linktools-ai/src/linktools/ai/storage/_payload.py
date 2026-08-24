@@ -7,7 +7,7 @@ import binascii
 import hashlib
 from dataclasses import dataclass
 
-from ..core import JsonValue, canonical_json_bytes
+from ..core import JsonValue, canonical_json_bytes, normalize_json_value
 from ._object import ObjectRef
 
 _MAX_INLINE_LIMIT = 256 * 1024
@@ -50,6 +50,8 @@ class StoredPayload:
         if self.kind == "inline":
             if self.encoding not in {"json", "utf-8", "base64"} or self.ref is not None:
                 raise ValueError("inline payload descriptor is invalid")
+            if self.encoding == "json":
+                object.__setattr__(self, "value", normalize_json_value(self.value))
             actual_digest, actual_size = _inline_digest_size(self.encoding, self.value)
             if actual_digest != self.digest or actual_size != self.size:
                 raise ValueError("inline payload digest or size does not match value")
@@ -57,14 +59,15 @@ class StoredPayload:
             raise ValueError("object payload descriptor is invalid")
         else:
             if not isinstance(self.ref, ObjectRef):
-                raise ValueError("object payload reference is invalid")
+                raise TypeError("object payload reference is invalid")
             if self.ref.digest != self.digest or self.ref.size != self.size:
                 raise ValueError("object payload descriptor does not match reference")
 
     @classmethod
     def inline_json(cls, value: JsonValue) -> "StoredPayload":
-        digest, size = _inline_digest_size("json", value)
-        return cls("inline", "json", digest, size, value)
+        normalized = normalize_json_value(value)
+        digest, size = _inline_digest_size("json", normalized)
+        return cls("inline", "json", digest, size, normalized)
 
     @classmethod
     def inline_text(cls, value: str) -> "StoredPayload":
@@ -80,7 +83,7 @@ class StoredPayload:
     @classmethod
     def object(cls, reference: "ObjectRef") -> "StoredPayload":
         if not isinstance(reference, ObjectRef):
-            raise ValueError("object payload reference is invalid")
+            raise TypeError("object payload reference is invalid")
         return cls("object", None, reference.digest, reference.size, ref=reference)
 
     def to_json(self) -> dict[str, JsonValue]:
@@ -103,7 +106,7 @@ class StoredPayload:
     @classmethod
     def from_json(cls, raw: object) -> "StoredPayload":
         if not isinstance(raw, dict):
-            raise ValueError("stored payload must be an object")
+            raise ValueError("stored payload must be an object")  # noqa: TRY004
         kind = raw.get("kind")
         encoding = raw.get("encoding")
         digest = raw.get("digest")
@@ -114,7 +117,7 @@ class StoredPayload:
             or not isinstance(size, int)
             or isinstance(size, bool)
         ):
-            raise ValueError("stored payload fields are invalid")
+            raise ValueError("stored payload fields are invalid")  # noqa: TRY004
         if kind == "inline":
             if "ref" in raw or "value" not in raw:
                 raise ValueError("inline payload fields are invalid")
@@ -152,7 +155,8 @@ def payload_fits_inline(payload: StoredPayload, policy: PayloadPolicy) -> bool:
 
 def _inline_digest_size(encoding: str, value: object) -> tuple[str, int]:
     if encoding == "json":
-        data = canonical_json_bytes(value)
+        normalized = normalize_json_value(value)
+        data = canonical_json_bytes(normalized)
     elif encoding == "utf-8":
         if not isinstance(value, str):
             raise ValueError("text payload must be a string")

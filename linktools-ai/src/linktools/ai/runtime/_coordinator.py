@@ -64,6 +64,7 @@ class _LocalRuntimeCoordinator:
 
     async def resume(
         self,
+        agent_id: str,
         binding_digest: str,
         session_id: str,
         request: ResumeSessionRequest,
@@ -79,6 +80,7 @@ class _LocalRuntimeCoordinator:
 
         try:
             handle = await self._session._resume_with_launch_gate(
+                agent_id,
                 binding_digest,
                 session_id,
                 request,

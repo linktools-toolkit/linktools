@@ -22,7 +22,6 @@ _AGENT_FIELDS = frozenset(
         "system_prompt",
         "instructions",
         "allow_tools",
-        "metadata",
         "usage_limits",
     }
 )
@@ -45,7 +44,6 @@ class AgentSpecCodec:
                 "system_prompt": value.system_prompt,
                 "instructions": list(value.instructions),
                 "allow_tools": list(value.allow_tools),
-                "metadata": dict(value.metadata),
                 "usage_limits": None
                 if value.usage_limits is None
                 else {
@@ -65,12 +63,11 @@ class AgentSpecCodec:
             raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID, "agent spec is invalid") from error
         if set(raw) - _AGENT_FIELDS:
             raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID, "agent spec fields are invalid")
-        for required in ("id", "revision", "model"):
-            if required not in raw:
-                raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID, f"agent spec requires {required}")
+        if "id" not in raw:
+            raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID, "agent spec requires id")
         identity = raw["id"]
-        revision = raw["revision"]
-        model = raw["model"]
+        revision = raw.get("revision", 1)
+        model = raw.get("model", "default")
         if not isinstance(identity, str) or not identity.strip():
             raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID, "agent id must be a non-empty string")
         if not isinstance(revision, int) or isinstance(revision, bool) or revision < 1:
@@ -83,9 +80,6 @@ class AgentSpecCodec:
         instructions = raw.get("instructions", [])
         if not isinstance(instructions, list) or any(not isinstance(item, str) for item in instructions):
             raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID, "instructions must be a string array")
-        metadata = raw.get("metadata", {})
-        if not isinstance(metadata, Mapping):
-            raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID, "metadata must be an object")
         try:
             return AgentSpec(
                 id=identity,
@@ -94,7 +88,6 @@ class AgentSpecCodec:
                 system_prompt=system_prompt,
                 instructions=tuple(instructions),
                 allow_tools=_strict_allowlist(raw, "allow_tools", ("*",)),
-                metadata=cast("Mapping[str, object]", metadata),
                 usage_limits=_decode_usage_limits(raw.get("usage_limits")),
             )
         except AIError:
@@ -116,11 +109,11 @@ class SkillSpecCodec:
             revision = raw["revision"]
             content = raw["content"]
             if not isinstance(identity, str):
-                raise ValueError("skill id must be a string")
+                raise ValueError("skill id must be a string")  # noqa: TRY004
             if not isinstance(revision, int) or isinstance(revision, bool):
-                raise ValueError("skill revision must be an integer")
+                raise ValueError("skill revision must be an integer")  # noqa: TRY004
             if not isinstance(content, str):
-                raise ValueError("skill content must be a string")
+                raise ValueError("skill content must be a string")  # noqa: TRY004
             return SkillSpec(identity, revision, content)
         except AIError:
             raise
@@ -212,11 +205,11 @@ class MCPServerSpecCodec:
             command = raw["command"]
             args = raw.get("args", [])
             if not isinstance(identity, str):
-                raise ValueError("MCP server id must be a string")
+                raise ValueError("MCP server id must be a string")  # noqa: TRY004
             if not isinstance(revision, int) or isinstance(revision, bool):
-                raise ValueError("MCP server revision must be an integer")
+                raise ValueError("MCP server revision must be an integer")  # noqa: TRY004
             if not isinstance(command, str):
-                raise ValueError("MCP server command must be a string")
+                raise ValueError("MCP server command must be a string")  # noqa: TRY004
             if not isinstance(args, list) or any(not isinstance(item, str) for item in args):
                 raise ValueError("MCP server args must be a string array")
             return MCPServerSpec(identity, revision, command, tuple(args))
@@ -233,7 +226,7 @@ def _encode(value: "dict[str, object]") -> bytes:
 def _decode(data: bytes) -> "dict[str, object]":
     value = json.loads(data.decode("utf-8"))
     if not isinstance(value, dict):
-        raise ValueError("spec payload must be a JSON object")
+        raise ValueError("spec payload must be a JSON object")  # noqa: TRY004
     return value
 
 

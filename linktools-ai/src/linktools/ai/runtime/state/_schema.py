@@ -34,7 +34,18 @@ def build_runtime_sql_metadata(
     metadata: "MetaData | None" = None,
 ) -> "MetaData":
     """Build the five canonical Runtime primitive tables."""
-    from sqlalchemy import JSON, BigInteger, Boolean, Column, MetaData, String, Table, Text, TIMESTAMP, text
+    from sqlalchemy import (
+        JSON,
+        TIMESTAMP,
+        BigInteger,
+        Boolean,
+        Column,
+        MetaData,
+        String,
+        Table,
+        Text,
+        text,
+    )
     from sqlalchemy.dialects import mysql
 
     if metadata is None:

@@ -1,0 +1,22 @@
+{
+  "agent_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "agent_spec": {
+    "allow_tools": [
+      "*"
+    ],
+    "id": "runtime-persistence-v1",
+    "instructions": [],
+    "model": "default",
+    "revision": 1,
+    "system_prompt": "",
+    "usage_limits": null
+  },
+  "binding_digest": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+  "local_runtime_capability_descriptors": [],
+  "output_schema_fingerprint": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "output_schema_id": "runtime.persistence.fixture",
+  "output_schema_revision": 1,
+  "output_type_module": "linktools.ai.runtime.fixture",
+  "output_type_qualname": "FixtureOutput",
+  "version": 1
+}

@@ -8,12 +8,19 @@ from datetime import datetime, timezone
 
 from linktools.core import environ
 
+from ..agent import AgentBindingSnapshot
 from ..core import Principal, TaskStatus, canonical_sha256
 from ..errors import AIError, ErrorCode
 from ..runtime import RuntimeObjectKeyFactory, RuntimeTaskNodeRunner
 from ..runtime.state import TaskState
 from ..storage import ObjectStore
-from ..task import TaskDependencyResult, TaskGraphRequest, TaskLease, TaskNode, TaskNodeView
+from ..task import (
+    TaskDependencyResult,
+    TaskGraphRequest,
+    TaskLease,
+    TaskNode,
+    TaskNodeView,
+)
 from ._request import put_execution_request, read_task_request
 from .workflow import ExecutionWorkflowInput, ExecutionWorkflowResult, TaskWorkflowInput
 
@@ -69,9 +76,8 @@ class _RuntimeTaskOperation:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
 
         owner = _task_owner(request, node_id, workflow_run_id)
-        if current.status is TaskStatus.RUNNING:
-            if current.owner != owner and _lease_is_active(current):
-                return current
+        if current.status is TaskStatus.RUNNING and current.owner != owner and _lease_is_active(current):
+            return current
         lease = await self._acquire_lease(current, request, owner)
         try:
             binding_digest, execution_request = await self._runner.prepare(
@@ -84,14 +90,16 @@ class _RuntimeTaskOperation:
             if error.retryable:
                 raise
             return await self._fail_prepare(request, node, lease, error)
-        binding = node.input.get("binding")
-        if not isinstance(binding, Mapping):
+        try:
+            binding = AgentBindingSnapshot.from_payload(node.input.get("binding"))
+        except AIError as error:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
+        if binding.binding_digest != binding_digest:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         request_ref = await put_execution_request(
             self._request_store,
             self._request_keys,
             execution_request,
-            binding_digest=binding_digest,
             binding=binding,
         )
         operation_id = canonical_sha256(
@@ -197,13 +205,31 @@ class _RuntimeTaskOperation:
                     error,
                 )
         elif result.status in {"FAILED", "CANCELLED"}:
+            terminal = await self._runner.terminal_result(
+                result.execution_id,
+                principal=stored.principal,
+            )
+            if (
+                terminal.execution_id != result.execution_id
+                or terminal.status.value != result.status
+                or terminal.error_code is None
+            ):
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            try:
+                ErrorCode(terminal.error_code)
+            except ValueError as error:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
             try:
                 await self._repository.fail(
                     lease,
                     tenant_id=request.tenant_id,
-                    error_code=ErrorCode.EXECUTION_FAILED.value,
+                    error_code=terminal.error_code,
                     error_digest=canonical_sha256(
-                        {"type": "ExecutionResult", "code": result.status}
+                        {
+                            "type": "ExecutionResult",
+                            "code": terminal.error_code,
+                            "safe_error_details": dict(terminal.safe_error_details),
+                        }
                     ),
                 )
             except AIError as error:
@@ -267,9 +293,7 @@ class _RuntimeTaskOperation:
         _validate_node_view(current, node, request.graph_id)
         if current.status is TaskStatus.SUCCEEDED:
             await self._validate_execution_result(current, principal)
-        elif current.status is TaskStatus.BLOCKED:
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        elif current.status not in {TaskStatus.FAILED, TaskStatus.CANCELLED}:
+        elif current.status is TaskStatus.BLOCKED or current.status not in {TaskStatus.FAILED, TaskStatus.CANCELLED}:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         await self._repository.reconcile_graph(
             request.graph_id,

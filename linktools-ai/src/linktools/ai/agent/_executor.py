@@ -2,15 +2,27 @@
 # -*- coding: utf-8 -*-
 """Pydantic AI execution adapter for frozen AgentDefinitions."""
 
+import asyncio
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Protocol, cast
+from typing import Protocol
 
 from linktools.core import environ
+from openai import APIError as OpenAIAPIError
+from pydantic import ValidationError
 from pydantic_ai import AgentRunResultEvent, ModelSettings
-from pydantic_ai.capabilities import AbstractCapability
+from pydantic_ai.capabilities import AbstractCapability, ReinjectSystemPrompt
 from pydantic_ai.capabilities import AgentCapability as PydanticAgentCapability
+from pydantic_ai.exceptions import (
+    ConcurrencyLimitExceeded,
+    ContentFilterError,
+    ModelAPIError,
+    ModelHTTPError,
+    RunCancelled,
+    UnexpectedModelBehavior,
+    UserError,
+)
 from pydantic_ai.messages import (
     FunctionToolCallEvent,
     FunctionToolResultEvent,
@@ -31,9 +43,17 @@ from pydantic_ai_harness.memory import SearchableMemoryStore
 from pydantic_ai_harness.step_persistence import StepStore
 
 from ..capability import CapabilityMaterializationContext
-from ..core import ExecutionDeltaType, ExecutionEventType, JsonValue, UsageMetrics, canonical_sha256
+from ..core import (
+    ExecutionDeltaType,
+    ExecutionEventType,
+    JsonValue,
+    UsageMetrics,
+    canonical_sha256,
+    normalize_json_value,
+)
 from ..errors import AIError, ErrorCode
 from ..spec import AgentUsageLimits
+from ._binding import AgentBinding
 from ._builder import build_pydantic_agent
 from ._capabilities import (
     MEMORY_READ_TOOL_NAMES,
@@ -94,7 +114,7 @@ class AgentExecutor:
 
     async def execute(
         self,
-        definition: AgentDefinition,
+        binding: AgentBinding,
         user_prompt: str,
         history: "list[ModelMessage]",
         conversation_id: str,
@@ -114,53 +134,76 @@ class AgentExecutor:
         event_sink: EventSink,
         usage_sink: "UsageSink | None" = None,
         tool_operations: "ToolOperationBridge | None" = None,
+        replace_history_system_prompt: bool = False,
     ) -> AgentExecutionResult:
-        if not isinstance(planning, bool) or not isinstance(thinking, bool):
+        if (
+            not isinstance(planning, bool)
+            or not isinstance(thinking, bool)
+            or not isinstance(replace_history_system_prompt, bool)
+        ):
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+        definition = binding.definition
         run_usage = RunUsage()
         usage_limits = _to_usage_limits(definition.spec.usage_limits)
         result: AgentExecutionResult | None = None
+        primary_error: BaseException | None = None
         try:
-            result = await self._execute(
-                definition,
-                user_prompt,
-                history,
-                conversation_id,
-                step_store=step_store,
-                step_run_id=step_run_id,
-                segment_sequence=segment_sequence,
-                history_id=history_id,
-                capability_context=capability_context,
-                memory_scope=memory_scope,
-                memory_store=memory_store,
-                platform_tool_names=platform_tool_names,
-                planning=planning,
-                thinking=thinking,
-                parent_step_run_id=parent_step_run_id,
-                subagent_delegate=subagent_delegate,
-                event_sink=event_sink,
-                run_usage=run_usage,
-                usage_limits=usage_limits,
-                tool_operations=tool_operations,
-            )
-            return result
-        except UsageLimitExceeded as error:
-            raise AIError(
-                ErrorCode.EXECUTION_USAGE_LIMIT_EXCEEDED,
-                retryable=False,
-                safe_details={
-                    "limits": _limit_details(usage_limits),
-                    "usage": _usage_details(run_usage),
-                },
-            ) from error
+            try:
+                result = await self._execute(
+                    binding,
+                    user_prompt,
+                    history,
+                    conversation_id,
+                    step_store=step_store,
+                    step_run_id=step_run_id,
+                    segment_sequence=segment_sequence,
+                    history_id=history_id,
+                    capability_context=capability_context,
+                    memory_scope=memory_scope,
+                    memory_store=memory_store,
+                    platform_tool_names=platform_tool_names,
+                    planning=planning,
+                    thinking=thinking,
+                    parent_step_run_id=parent_step_run_id,
+                    subagent_delegate=subagent_delegate,
+                    event_sink=event_sink,
+                    run_usage=run_usage,
+                    usage_limits=usage_limits,
+                    tool_operations=tool_operations,
+                    replace_history_system_prompt=replace_history_system_prompt,
+                )
+                return result
+            except asyncio.CancelledError as error:
+                primary_error = error
+                raise
+            except AIError as error:
+                primary_error = error
+                raise
+            except Exception as error:
+                mapped = _execution_error(
+                    error,
+                    usage_limits=usage_limits,
+                    run_usage=run_usage,
+                )
+                primary_error = mapped
+                raise mapped from error
         finally:
             if usage_sink is not None:
                 usage = result.usage if result is not None else _usage_metrics(run_usage)
-                await usage_sink(usage)
+                try:
+                    await usage_sink(usage)
+                except Exception:
+                    if primary_error is None:
+                        raise
+                    _logger.error(
+                        "usage sink failed after agent execution failure: step=%s",
+                        step_run_id,
+                        exc_info=False,
+                    )
 
     async def _execute(
         self,
-        definition: AgentDefinition,
+        binding: AgentBinding,
         user_prompt: str,
         history: "list[ModelMessage]",
         conversation_id: str,
@@ -181,7 +224,9 @@ class AgentExecutor:
         run_usage: RunUsage,
         usage_limits: UsageLimits,
         tool_operations: "ToolOperationBridge | None",
+        replace_history_system_prompt: bool,
     ) -> AgentExecutionResult:
+        definition = binding.definition
         if not self._execution_root.is_dir():
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
         if await step_store.get_run(run_id=step_run_id) is not None:
@@ -192,10 +237,10 @@ class AgentExecutor:
                 ErrorCode.REQUEST_FIELD_INVALID,
                 safe_details={"field": "thinking", "reason": "model_not_supported"},
             )
-        agent = build_pydantic_agent(definition, model=model)
-        materialized: "list[PydanticAgentCapability[None]]" = []
-        for binding in definition.effective_capabilities:
-            materialized.extend(await binding.materialize(capability_context))
+        agent = build_pydantic_agent(binding, model=model)
+        materialized: list[PydanticAgentCapability[None]] = []
+        for capability in definition.effective_capabilities:
+            materialized.extend(await capability.materialize(capability_context))
         trusted_tool_classes = _trusted_tool_classes(
             definition,
             platform_tool_names=platform_tool_names,
@@ -233,6 +278,8 @@ class AgentExecutor:
                 trusted_mcp_selectors=definition.trusted_mcp_selectors,
             ),
         )
+        if replace_history_system_prompt:
+            capabilities = (*capabilities, ReinjectSystemPrompt(replace_existing=True))
         _logger.debug(
             "agent execution started: agent=%s definition=%s step=%s capability_count=%s planning=%s thinking=%s",
             definition.spec.id,
@@ -262,16 +309,29 @@ class AgentExecutor:
                 if emission is not None:
                     await event_sink(emission)
         if final_result is None:
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            raise AIError(
+                ErrorCode.INTERNAL_ERROR,
+                safe_details={"phase": "agent_result"},
+            )
         run = await step_store.get_run(run_id=step_run_id)
         snapshot = await step_store.latest_snapshot(run_id=step_run_id)
         unresolved = await step_store.list_unresolved_tool_effects(run_id=step_run_id)
         if run is None or snapshot is None or unresolved or run.conversation_id != conversation_id:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         output = final_result.output
-        if not isinstance(output, definition.output_type):
+        if not isinstance(output, binding.output_type):
             raise AIError(ErrorCode.OUTPUT_VALIDATION_FAILED)
-        payload = cast(dict[str, JsonValue], output.model_dump(mode="json"))
+        try:
+            payload = normalize_json_value(output.model_dump(mode="json"))
+        except (TypeError, ValueError) as error:
+            _logger.warning(
+                "agent output validation failed: step=%s",
+                step_run_id,
+            )
+            raise AIError(
+                ErrorCode.OUTPUT_VALIDATION_FAILED,
+                retryable=False,
+            ) from error
         _logger.debug("agent execution completed: definition=%s step=%s", definition.digest, step_run_id)
         usage = _usage_metrics(run_usage)
         return AgentExecutionResult(final_result.run_id, payload, final_result.all_messages(), usage)
@@ -407,10 +467,78 @@ def _map_event(event: object) -> "AgentEmission | None":
                     "tool_name": part.tool_name or "unknown",
                     "result_digest": None,
                     "status": "FAILED",
-                    "safe_error_code": ErrorCode.OUTPUT_VALIDATION_FAILED.value,
+                    "safe_error_code": ErrorCode.TOOL_RETRY_REQUIRED.value,
                 },
             )
     return None
+
+
+def _execution_error(
+    error: Exception,
+    *,
+    usage_limits: UsageLimits,
+    run_usage: RunUsage,
+) -> AIError:
+    if isinstance(error, UsageLimitExceeded):
+        return AIError(
+            ErrorCode.EXECUTION_USAGE_LIMIT_EXCEEDED,
+            retryable=False,
+            safe_details={
+                "limits": _limit_details(usage_limits),
+                "usage": _usage_details(run_usage),
+            },
+        )
+    if isinstance(error, RunCancelled):
+        return AIError(ErrorCode.EXECUTION_CANCELLED, retryable=False)
+    if isinstance(error, ConcurrencyLimitExceeded):
+        return AIError(
+            ErrorCode.EXECUTION_CONCURRENCY_LIMIT_EXCEEDED,
+            retryable=True,
+        )
+    if isinstance(error, ContentFilterError):
+        return AIError(ErrorCode.MODEL_CONTENT_FILTERED, retryable=False)
+    if isinstance(error, ModelHTTPError):
+        details: dict[str, JsonValue] = {
+            "model_name": error.model_name,
+            "status_code": error.status_code,
+        }
+        retry_after = error.retry_after
+        if isinstance(retry_after, (int, float, str)) and not isinstance(retry_after, bool):
+            details["retry_after"] = retry_after
+        if error.status_code == 408:
+            code = ErrorCode.MODEL_TIMEOUT
+        elif error.status_code == 429:
+            code = ErrorCode.MODEL_RATE_LIMITED
+        elif error.status_code >= 500:
+            code = ErrorCode.MODEL_UNAVAILABLE
+        elif 400 <= error.status_code < 500:
+            code = ErrorCode.MODEL_REQUEST_REJECTED
+        else:
+            code = ErrorCode.MODEL_API_ERROR
+        return AIError(code, safe_details=details)
+    if isinstance(error, ModelAPIError):
+        return AIError(
+            ErrorCode.MODEL_API_ERROR,
+            retryable=False,
+            safe_details={"model_name": error.model_name},
+        )
+    if isinstance(error, OpenAIAPIError):
+        return AIError(ErrorCode.MODEL_API_ERROR, retryable=False)
+    if isinstance(error, UnexpectedModelBehavior):
+        return AIError(ErrorCode.MODEL_RESPONSE_INVALID, retryable=False)
+    if isinstance(error, ValidationError):
+        return AIError(ErrorCode.OUTPUT_VALIDATION_FAILED, retryable=False)
+    if isinstance(error, UserError):
+        return AIError(
+            ErrorCode.INTERNAL_ERROR,
+            retryable=False,
+            safe_details={"phase": "agent_execution"},
+        )
+    return AIError(
+        ErrorCode.INTERNAL_ERROR,
+        retryable=False,
+        safe_details={"phase": "agent_execution"},
+    )
 
 
 def _to_usage_limits(value: AgentUsageLimits | None) -> UsageLimits:
@@ -466,8 +594,8 @@ def _usage_details(value: RunUsage) -> dict[str, int]:
 
 
 __all__ = [
-    "AgentExecutionResult",
     "AgentEmission",
+    "AgentExecutionResult",
     "AgentExecutor",
     "DurableBoundary",
     "EventSink",

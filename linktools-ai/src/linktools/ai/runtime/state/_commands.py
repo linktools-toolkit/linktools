@@ -12,7 +12,6 @@ from pydantic_ai_harness.step_persistence import (
     ContinuableSnapshot,
     RunRecord,
     StepEvent,
-    ToolEffectRecord,
 )
 
 from ...core import (
@@ -560,154 +559,26 @@ class RuntimeStateCommands:
         result_payload: StoredPayload | None = None,
         error_code: str | None = None,
         error_payload: StoredPayload | None = None,
-        run: RunRecord | None = None,
-        effect: ToolEffectRecord | None = None,
     ) -> ToolOperationRecord:
         if self._tools is None:
             raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
         if result_payload is None and error_code is None:
             raise ValueError("tool terminal command requires a result or error")
+        expected_status = (
+            ToolOperationStatus.COMPLETED
+            if result_payload is not None
+            else ToolOperationStatus.FAILED
+        )
+        terminal_error_code = error_code or ErrorCode.EXECUTION_FAILED.value
         _logger.debug(
-            "tool terminal checkpoint requested: operation=%s effect=%s",
+            "tool terminal checkpoint requested: operation=%s status=%s",
             tool_operation_id,
-            effect is not None,
+            expected_status.value,
         )
         stores = [self._tools.state_store]
-        if effect is not None:
-            if self._recovery_steps is None or run is None:
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            stores.append(self._recovery_steps.state_store)
-        if not _same_group(stores):
-            terminal_error_code = error_code or ErrorCode.EXECUTION_FAILED.value
-            if effect is not None:
-                async def materialize_effect() -> None:
-                    await self._recovery_steps.materialize_effect(run, effect)
-
-                async def effect_readback() -> CommitObservation[None]:
-                    try:
-                        archived = await self._recovery_steps.get_tool_effect(
-                            run_id=run.run_id,
-                            tool_call_id=effect.tool_call_id,
-                        )
-                    except AIError as error:
-                        return CommitObservation(
-                            DurableCommitState.UNRESOLVED,
-                            error=error,
-                        )
-                    if archived == effect:
-                        return CommitObservation(DurableCommitState.COMMITTED)
-                    if archived is None:
-                        return CommitObservation(DurableCommitState.NOT_COMMITTED)
-                    return CommitObservation(
-                        DurableCommitState.PARTIAL_INTEGRITY_ERROR,
-                        error=AIError(ErrorCode.STORAGE_INTEGRITY_ERROR),
-                    )
-
-                await self._commit_or_raise(materialize_effect, effect_readback)
-
-            async def finish() -> ToolOperationRecord:
-                if result_payload is not None:
-                    return await self._tools.complete_payload(
-                        tool_operation_id,
-                        tenant_id=tenant_id,
-                        owner=owner,
-                        fence=fence,
-                        result_payload=result_payload,
-                    )
-                return await self._tools.fail_payload(
-                    tool_operation_id,
-                    tenant_id=tenant_id,
-                    owner=owner,
-                    fence=fence,
-                    error_code=terminal_error_code,
-                    error_payload=error_payload,
-                )
-
-            expected_status = (
-                ToolOperationStatus.COMPLETED
-                if result_payload is not None
-                else ToolOperationStatus.FAILED
-            )
-
-            async def terminal_readback() -> CommitObservation[ToolOperationRecord]:
-                try:
-                    observed = await self._tools.get_operation(
-                        tool_operation_id,
-                        tenant_id=tenant_id,
-                    )
-                except AIError as error:
-                    return CommitObservation(
-                        DurableCommitState.UNRESOLVED,
-                        error=error,
-                    )
-                if observed is None:
-                    return CommitObservation(DurableCommitState.NOT_COMMITTED)
-                if observed.status is expected_status:
-                    payload_matches = (
-                        observed.result_payload == result_payload
-                        if result_payload is not None
-                        else observed.error_code == terminal_error_code
-                        and observed.error_payload == error_payload
-                    )
-                    if not payload_matches:
-                        return CommitObservation(
-                            DurableCommitState.PARTIAL_INTEGRITY_ERROR,
-                            error=AIError(ErrorCode.TOOL_RESULT_CONFLICT),
-                        )
-                    if effect is not None:
-                        try:
-                            archived = await self._recovery_steps.get_tool_effect(
-                                run_id=run.run_id,
-                                tool_call_id=effect.tool_call_id,
-                            )
-                        except AIError as error:
-                            return CommitObservation(
-                                DurableCommitState.UNRESOLVED,
-                                error=error,
-                            )
-                        if archived != effect:
-                            return CommitObservation(
-                                DurableCommitState.PARTIAL_INTEGRITY_ERROR,
-                                error=AIError(ErrorCode.STORAGE_INTEGRITY_ERROR),
-                            )
-                    return CommitObservation(
-                        DurableCommitState.COMMITTED,
-                        value=observed,
-                    )
-                if (
-                    observed.status is ToolOperationStatus.CLAIMED
-                    and observed.owner == owner
-                    and observed.fence == fence
-                ):
-                    return CommitObservation(DurableCommitState.NOT_COMMITTED)
-                return CommitObservation(DurableCommitState.UNRESOLVED)
-
-            result = await run_durable_commit(finish, terminal_readback)
-            if result.state is DurableCommitState.COMMITTED:
-                if result.value is None:
-                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                if result.cancelled:
-                    raise asyncio.CancelledError
-                return result.value
-            if result.state is DurableCommitState.NOT_COMMITTED:
-                if result.error is not None:
-                    raise result.error
-                raise AIError(ErrorCode.STORAGE_CONFLICT)
-            if result.state is DurableCommitState.PARTIAL_INTEGRITY_ERROR:
-                raise AIError(
-                    ErrorCode.STORAGE_INTEGRITY_ERROR,
-                    "tool terminal commit left partial durable state",
-                ) from result.error
-            raise AIError(ErrorCode.STORAGE_COMMIT_UNKNOWN) from result.error
 
         async def callback(group: StateGroupTransaction) -> ToolOperationRecord:
             transaction = group.transaction(self._tools.state_store)
-            if effect is not None:
-                await self._recovery_steps.materialize_effect_in_transaction(
-                    group.transaction(self._recovery_steps.state_store),
-                    run,
-                    effect,
-                )
             if result_payload is not None:
                 return await self._tools.complete_in_transaction(
                     transaction,
@@ -726,13 +597,6 @@ class RuntimeStateCommands:
                 error_code=error_code or ErrorCode.EXECUTION_FAILED.value,
                 error_payload=error_payload,
             )
-
-        expected_status = (
-            ToolOperationStatus.COMPLETED
-            if result_payload is not None
-            else ToolOperationStatus.FAILED
-        )
-        terminal_error_code = error_code or ErrorCode.EXECUTION_FAILED.value
 
         async def readback() -> CommitObservation[ToolOperationRecord]:
             try:
@@ -754,16 +618,6 @@ class RuntimeStateCommands:
                             DurableCommitState.PARTIAL_INTEGRITY_ERROR,
                             error=AIError(ErrorCode.TOOL_RESULT_CONFLICT),
                         )
-                    if effect is not None:
-                        archived = await self._recovery_steps.get_tool_effect(
-                            run_id=run.run_id,
-                            tool_call_id=effect.tool_call_id,
-                        )
-                        if archived != effect:
-                            return CommitObservation(
-                                DurableCommitState.PARTIAL_INTEGRITY_ERROR,
-                                error=AIError(ErrorCode.STORAGE_INTEGRITY_ERROR),
-                            )
                     return CommitObservation(
                         DurableCommitState.COMMITTED,
                         value=observed,
@@ -892,7 +746,6 @@ class RuntimeStateCommands:
             prepared_conversation = await self._conversation_steps.prepare_snapshots(
                 conversation_run,
                 (conversation_snapshot,),
-                binding_digest=commit.execution.binding_digest,
             )
         prepared_recovery = ()
         if (
@@ -903,7 +756,6 @@ class RuntimeStateCommands:
             prepared_recovery = await self._recovery_steps.prepare_snapshots(
                 recovery_run,
                 (recovery_snapshot,),
-                binding_digest=commit.execution.binding_digest,
             )
         prepared_execution: PreparedStepSnapshotBatch | tuple[()] = ()
         if (
@@ -915,7 +767,6 @@ class RuntimeStateCommands:
             prepared_execution = await self._execution_steps.prepare_snapshots(
                 execution_run,
                 execution_snapshots,
-                binding_digest=commit.execution.binding_digest,
             )
         seal = _execution_history_seal(
             commit,
@@ -975,7 +826,6 @@ class RuntimeStateCommands:
                             group.transaction(self._conversation_steps.state_store),
                             conversation_run,
                             prepared_conversation[0],
-                            binding_digest=commit.execution.binding_digest,
                         )
                         session = await self._conversation.get_in_transaction(
                             conversation_transaction,
@@ -1181,7 +1031,6 @@ class RuntimeStateCommands:
                     group.transaction(self._conversation_steps.state_store),
                     conversation_run,
                     prepared_conversation[0],
-                    binding_digest=commit.execution.binding_digest,
                 )
                 session = await self._conversation.get_in_transaction(
                     conversation_transaction,
@@ -1222,7 +1071,6 @@ class RuntimeStateCommands:
                             next_cursor=next_cursor,
                             run=conversation_run,
                             snapshot=conversation_snapshot,
-                            binding_digest=commit.execution.binding_digest,
                         ):
                             break
             else:
@@ -1459,7 +1307,6 @@ class RuntimeStateCommands:
                     execution_id=commit.execution.execution_id,
                     events=execution_events,
                     snapshots=execution_snapshots,
-                    binding_digest=commit.execution.binding_digest,
                 )
             terminal_stores = [self._execution.state_store]
             if recovery_state_merged:
@@ -1505,8 +1352,6 @@ class RuntimeStateCommands:
         self,
         run: RunRecord | None,
         snapshot: ContinuableSnapshot | None,
-        *,
-        binding_digest: str,
     ) -> None:
         if run is None and snapshot is None:
             return
@@ -1516,13 +1361,11 @@ class RuntimeStateCommands:
             self._recovery_steps,
             run,
             snapshot,
-            binding_digest=binding_digest,
         ):
             return
         prepared = await self._recovery_steps.prepare_snapshots(
             run,
             (snapshot,),
-            binding_digest=binding_digest,
         )
         stores = [self._recovery.state_store, self._recovery_steps.state_store]
 
@@ -1540,7 +1383,6 @@ class RuntimeStateCommands:
                         self._recovery_steps,
                         run,
                         snapshot,
-                        binding_digest=binding_digest,
                     )
                 except AIError as error:
                     if error.code is ErrorCode.STORAGE_INTEGRITY_ERROR:
@@ -1567,7 +1409,6 @@ class RuntimeStateCommands:
                 self._recovery_steps,
                 run,
                 snapshot,
-                binding_digest=binding_digest,
             )
 
     async def _materialize_snapshot_with_reconciliation(
@@ -1576,21 +1417,18 @@ class RuntimeStateCommands:
         run: RunRecord,
         snapshot: ContinuableSnapshot,
         *,
-        binding_digest: str,
         execution_id: str | None = None,
     ) -> None:
         if await self._step_snapshot_visible(
             archive,
             run,
             snapshot,
-            binding_digest=binding_digest,
         ):
             return
         async def operation() -> None:
             await archive.materialize_snapshot(
                 run,
                 snapshot,
-                binding_digest=binding_digest,
                 execution_id=execution_id,
             )
 
@@ -1600,7 +1438,6 @@ class RuntimeStateCommands:
                     archive,
                     run,
                     snapshot,
-                    binding_digest=binding_digest,
                 )
             except AIError as error:
                 if error.code is ErrorCode.STORAGE_INTEGRITY_ERROR:
@@ -1724,15 +1561,12 @@ class RuntimeStateCommands:
         archive: StateStepArchive,
         run: RunRecord,
         snapshot: ContinuableSnapshot,
-        *,
-        binding_digest: str,
     ) -> bool:
         return (
             await archive.get_run(run_id=run.run_id) == run
             and await archive.verify_snapshot_projection(
                 run_id=run.run_id,
                 snapshot=snapshot,
-                binding_digest=binding_digest,
             )
         )
 
@@ -1745,7 +1579,6 @@ class RuntimeStateCommands:
         next_cursor: ConversationCursor,
         run: RunRecord,
         snapshot: ContinuableSnapshot,
-        binding_digest: str,
     ) -> bool:
         session = await self._conversation.get(session_id, tenant_id=tenant_id)
         return (
@@ -1757,7 +1590,6 @@ class RuntimeStateCommands:
                 self._conversation_steps,
                 run,
                 snapshot,
-                binding_digest=binding_digest,
             )
         )
 
@@ -1768,7 +1600,6 @@ class RuntimeStateCommands:
         execution_id: str,
         events: Sequence[StepEvent],
         snapshots: Sequence[ContinuableSnapshot],
-        binding_digest: str,
     ) -> None:
         if self._execution_steps is None:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -1777,7 +1608,6 @@ class RuntimeStateCommands:
                 run,
                 events=events,
                 snapshots=snapshots,
-                binding_digest=binding_digest,
                 execution_id=execution_id,
             )
 
@@ -2103,18 +1933,16 @@ class RuntimeStateCommands:
             )
             if actual != recovery_checkpoint:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        for archive, run, snapshot, binding_digest in (
+        for archive, run, snapshot in (
             (
                 self._conversation_steps,
                 conversation_run,
                 conversation_snapshot,
-                commit.execution.binding_digest,
             ),
             (
                 self._recovery_steps,
                 recovery_run,
                 recovery_snapshot,
-                commit.execution.binding_digest,
             ),
         ):
             if run is None and snapshot is None:
@@ -2125,7 +1953,6 @@ class RuntimeStateCommands:
             if not await archive.verify_snapshot_projection(
                 run_id=run.run_id,
                 snapshot=snapshot,
-                binding_digest=binding_digest,
             ):
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             if stored_run != run:
@@ -2148,7 +1975,6 @@ class RuntimeStateCommands:
             if execution_snapshots and not await self._execution_steps.verify_snapshot_projection(
                 run_id=execution_run.run_id,
                 snapshot=execution_snapshots[-1],
-                binding_digest=commit.execution.binding_digest,
             ):
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         return True
@@ -2266,7 +2092,6 @@ class ExecutionStateCommands:
             prepared_snapshots = await self._steps.prepare_snapshots(
                 step_run,
                 snapshots,
-                binding_digest=commit.execution.binding_digest,
             )
         history_seal = _execution_history_seal(
             commit,
@@ -2313,7 +2138,6 @@ class ExecutionStateCommands:
                         if isinstance(prepared_snapshots, PreparedStepSnapshotBatch)
                         else ()
                     ),
-                    binding_digest=commit.execution.binding_digest,
                     execution_id=commit.execution.execution_id,
                     history_head_guard=(head, head_record),
                 )
@@ -2439,14 +2263,12 @@ class ConversationStateCommands:
         next_cursor: ConversationCursor,
         step_run: RunRecord,
         snapshot: ContinuableSnapshot,
-        binding_digest: str,
     ) -> SessionRecord:
         if self._steps is None:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         prepared = await self._steps.prepare_snapshots(
             step_run,
             (snapshot,),
-            binding_digest=binding_digest,
         )
 
         async def mutate(transaction: StateTransaction) -> SessionRecord:
@@ -2464,7 +2286,6 @@ class ConversationStateCommands:
                 step_run,
                 events=(),
                 snapshots=prepared.snapshots,
-                binding_digest=binding_digest,
             )
             if self._histories is None:
                 raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
@@ -2504,7 +2325,7 @@ def _execution_history_seal(
     current_events: Sequence[StepEvent],
     current_batch: PreparedStepSnapshotBatch | None,
 ) -> ExecutionHistorySealRecord:
-    heads = list(
+    heads = [
         ExecutionRunSealHead(
             projection.run.run_id,
             projection.target_event_offset,
@@ -2513,7 +2334,7 @@ def _execution_history_seal(
             projection.projection_digest,
         )
         for projection in projections
-    )
+    ]
     if not projections and current_run is not None:
         heads.append(
             ExecutionRunSealHead(

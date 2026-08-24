@@ -9,12 +9,11 @@ import os
 import shutil
 import tempfile
 from collections.abc import AsyncIterator, Callable, Mapping
-from contextlib import asynccontextmanager
+from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import (
     TYPE_CHECKING,
-    AsyncContextManager,
     BinaryIO,
     Protocol,
     TypeVar,
@@ -113,7 +112,7 @@ class ObjectStoreInspection(Protocol):
 class ObjectStoreMaintenance(ObjectStoreInspection, Protocol):
     async def delete_object(self, key: str, *, expected_digest: str) -> bool: ...
 
-    def offline_exclusivity(self) -> AsyncContextManager[None]: ...
+    def offline_exclusivity(self) -> AbstractAsyncContextManager[None]: ...
 
 
 class InMemoryObjectStore:
@@ -232,7 +231,7 @@ class _ScopedObjectStore:
     async def validate_integrity(self) -> None:
         await self._parent.validate_integrity()
 
-    def offline_exclusivity(self) -> AsyncContextManager[None]:
+    def offline_exclusivity(self) -> AbstractAsyncContextManager[None]:
         return self._parent.offline_exclusivity()
 
     async def _list_objects(self) -> AsyncIterator[ObjectStat]:
@@ -903,7 +902,7 @@ def _read_filesystem_metadata(metadata: Path, destination: Path, key: str) -> Ob
     try:
         value = json.loads(metadata.read_text(encoding="utf-8"))
         if not isinstance(value, Mapping):
-            raise ValueError("object metadata must be an object")
+            raise ValueError("object metadata must be an object")  # noqa: TRY004
         if value.get("key") != key:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         digest = str(value["digest"])
@@ -967,9 +966,9 @@ __all__ = [
     "ObjectStore",
     "ObjectStoreInspection",
     "ObjectStoreMaintenance",
-    "runtime_object_key",
     "SqlObjectStore",
     "TransientObjectStore",
     "build_object_sql_metadata",
     "read_object",
+    "runtime_object_key",
 ]

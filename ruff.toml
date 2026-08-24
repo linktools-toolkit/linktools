@@ -1,5 +1,0 @@
-[lint]
-select = ["F", "E4", "E7", "E9"]
-
-[lint.per-file-ignores]
-"linktools-ai/src/linktools/ai/runtime/_session.py" = ["F401"]

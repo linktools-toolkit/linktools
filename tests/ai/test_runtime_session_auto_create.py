@@ -5,7 +5,6 @@
 from types import SimpleNamespace
 
 import pytest
-
 from linktools.ai.core import SessionStatus
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.runtime import Runtime, SessionView
@@ -25,12 +24,12 @@ class _RaceSessionService:
             raise AIError(ErrorCode.AUTHORIZATION_DENIED)
         return SessionView(
             session_id,
-            "a" * 64,
+            "agent",
             SessionStatus.OPEN,
         )
 
-    async def create(self, binding_digest: str, request: object) -> SessionView:
-        del binding_digest, request
+    async def create(self, agent_id: str, request: object) -> SessionView:
+        del agent_id, request
         self.create_calls += 1
         raise AIError(ErrorCode.STORAGE_CONFLICT)
 

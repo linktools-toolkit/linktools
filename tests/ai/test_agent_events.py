@@ -2,6 +2,8 @@
 # -*- coding: utf-8 -*-
 """Agent stream event mapping checks."""
 
+from linktools.ai.agent._executor import LiveDelta, _map_event
+from linktools.ai.core import ExecutionDeltaType
 from pydantic_ai.messages import (
     PartDeltaEvent,
     PartStartEvent,
@@ -10,9 +12,6 @@ from pydantic_ai.messages import (
     ThinkingPart,
     ThinkingPartDelta,
 )
-
-from linktools.ai.agent._executor import LiveDelta, _map_event
-from linktools.ai.core import ExecutionDeltaType
 
 
 def test_thinking_parts_are_forwarded_as_thinking_events() -> None:

@@ -2,11 +2,11 @@
 # -*- coding: utf-8 -*-
 """Storage dialect and raw Asset backend contract checks."""
 
+from collections.abc import Sequence
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-from collections.abc import Sequence
 from linktools.ai.asset import (
     AssetKey,
     AssetRoot,
@@ -20,8 +20,8 @@ from linktools.ai.asset import (
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.migrate import provision_asset_database
 from linktools.ai.storage import (
-    PayloadPolicy,
     MySQLDialect,
+    PayloadPolicy,
     PostgreSQLDialect,
     SqlErrorKind,
     SQLiteDialect,

@@ -14,7 +14,11 @@ from ..asset import AssetRef, AssetRepository
 from ..core import canonical_sha256
 from ..errors import AIError, ErrorCode
 from ..spec import SkillSpec
-from ._contract import CapabilityBinding, CapabilityMaterializationContext, CapabilityRefResolution
+from ._contract import (
+    CapabilityBinding,
+    CapabilityMaterializationContext,
+    CapabilityRefResolution,
+)
 from ._names import SKILL_TOOL_NAMES
 
 

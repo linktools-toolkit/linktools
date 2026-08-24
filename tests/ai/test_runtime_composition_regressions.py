@@ -6,8 +6,6 @@ from datetime import datetime, timezone
 from types import SimpleNamespace
 
 import pytest
-from pydantic import BaseModel
-
 from linktools.ai.agent import AgentBindingSnapshot
 from linktools.ai.agent._output import bind_output, restore_output
 from linktools.ai.core import (
@@ -28,6 +26,7 @@ from linktools.ai.runtime.state._contracts import (
     RecoveryIdempotencyInput,
 )
 from linktools.ai.spec import AgentSpec
+from pydantic import BaseModel
 
 
 class _DenyAuthorization:
@@ -81,6 +80,7 @@ def _binding() -> AgentBindingSnapshot:
     return AgentBindingSnapshot(
         version=1,
         agent_spec=AgentSpec("agent", 1, "model"),
+        agent_digest="b" * 64,
         output_type_module=output.value_type.__module__,
         output_type_qualname=output.value_type.__qualname__,
         output_schema_id=output.schema_id,
@@ -93,11 +93,12 @@ def _binding() -> AgentBindingSnapshot:
 
 def _execution(*, binding: AgentBindingSnapshot | None = None) -> ExecutionRecord:
     now = datetime.now(timezone.utc)
+    selected = binding or _binding()
     return ExecutionRecord(
         execution_id="execution",
         tenant_id="tenant",
         session_id=None,
-        binding_digest="a" * 64,
+        binding_digest=selected.binding_digest,
         parent_execution_id=None,
         root_execution_id="execution",
         source_execution_id=None,
@@ -111,9 +112,9 @@ def _execution(*, binding: AgentBindingSnapshot | None = None) -> ExecutionRecor
         safe_error_details={},
         created_at=now,
         updated_at=now,
-        planning=binding is not None,
+        planning=False,
         thinking=False,
-        binding=binding,
+        binding=selected,
     )
 
 
@@ -121,14 +122,14 @@ def _recovery(
     *,
     binding: AgentBindingSnapshot | None = None,
 ) -> RecoveryExecutionInput:
+    selected = binding or _binding()
     return RecoveryExecutionInput(
         user_prompt="prompt",
         principal_id="principal",
         principal_kind="service",
         session_id=None,
         memory_scope=None,
-        agent_id="agent",
-        binding_digest="a" * 64,
+        binding_digest=selected.binding_digest,
         lineage_kind=ExecutionLineageKind.RUN.value,
         parent_execution_id=None,
         root_execution_id="execution",
@@ -136,9 +137,9 @@ def _recovery(
         base_execution_id=None,
         conversation_step_run_id=None,
         idempotency=RecoveryIdempotencyInput("scope", "key", "request"),
-        planning=binding is not None,
+        planning=False,
         thinking=False,
-        binding=binding,
+        binding=selected,
     )
 
 
@@ -183,16 +184,10 @@ def test_output_contract_maps_bind_and_restore_failures() -> None:
         (_recovery, RecoveryExecutionInput),
     ),
 )
-def test_binding_codec_accepts_legacy_and_current_exact_v1_shapes(
+def test_binding_codec_round_trips_mandatory_exact_v1_shape(
     factory: object,
     target: type[object],
 ) -> None:
-    legacy = factory()
-    decoded_legacy = decode_domain(encode_domain(legacy), target)
-    assert decoded_legacy.binding is None
-    assert decoded_legacy.planning is False
-    assert decoded_legacy.thinking is False
-
     current = factory(binding=_binding())
     assert decode_domain(encode_domain(current), target) == current
 

@@ -5,19 +5,6 @@
 from datetime import datetime, timezone
 
 import pytest
-from pydantic_ai.messages import (
-    ModelRequest,
-    ModelResponse,
-    RetryPromptPart,
-    SystemPromptPart,
-    TextContent,
-    TextPart,
-    ToolCallPart,
-    ToolReturnPart,
-    UserPromptPart,
-)
-from pydantic_ai_harness.step_persistence import ContinuableSnapshot, RunRecord
-
 from linktools.ai.adapter import StepSessionHistoryReader
 from linktools.ai.core import (
     HmacCursorSigner,
@@ -36,6 +23,18 @@ from linktools.ai.runtime import (
 )
 from linktools.ai.runtime.state import RuntimeDomain
 from linktools.ai.runtime.state._contracts import ConversationCursor, SessionRecord
+from pydantic_ai.messages import (
+    ModelRequest,
+    ModelResponse,
+    RetryPromptPart,
+    SystemPromptPart,
+    TextContent,
+    TextPart,
+    ToolCallPart,
+    ToolReturnPart,
+    UserPromptPart,
+)
+from pydantic_ai_harness.step_persistence import ContinuableSnapshot, RunRecord
 from sqlalchemy.ext.asyncio import create_async_engine
 
 
@@ -45,7 +44,7 @@ def _session(session_id: str = "session") -> SessionRecord:
         session_id=session_id,
         tenant_id="tenant",
         owner_principal_id="owner",
-        binding_digest="binding",
+        agent_id="agent",
         status=SessionStatus.OPEN,
         revision=0,
         resource_generation=0,
@@ -322,7 +321,7 @@ async def test_session_history_fork_copies_continuation_without_execution_lookup
         service = _service(state)
         principal = Principal("owner", "tenant")
         await service.fork(
-            "binding",
+            "agent",
             "session",
             ForkSessionRequest(principal, "fork", "fork-operation"),
         )

@@ -17,7 +17,7 @@ _logger = environ.get_logger("ai.model.registry")
 
 class ModelRegistry:
     def __init__(self) -> None:
-        self._bindings: "dict[str, ModelBinding]" = {}
+        self._bindings: dict[str, ModelBinding] = {}
         self._revision = 0
         self._lock = RLock()
 
@@ -75,7 +75,7 @@ class _ModelRegistrySnapshot:
         try:
             return self._bindings[route_id]
         except KeyError as error:
-            raise AIError(ErrorCode.STORAGE_NOT_FOUND) from error
+            raise AIError(ErrorCode.MODEL_CONNECTION_NOT_FOUND) from error
 
 
 __all__ = ["ModelRegistry"]

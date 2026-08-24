@@ -5,9 +5,10 @@
 import asyncio
 from dataclasses import replace
 from datetime import datetime, timezone
+from types import SimpleNamespace
 
 import pytest
-from types import SimpleNamespace
+from linktools.ai.agent import AgentBindingSnapshot
 from linktools.ai.core import (
     ExecutionStatus,
     Page,
@@ -17,13 +18,12 @@ from linktools.ai.core import (
     TenantAuthorizationPolicy,
 )
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.agent import AgentBindingSnapshot
-from linktools.ai.spec import AgentSpec
 from linktools.ai.migrate import provision_database
 from linktools.ai.runtime import ExecutionRequest, RuntimeState
 from linktools.ai.runtime._execution import CancelEffectOutcome, DefaultExecutionService
 from linktools.ai.runtime.state import RuntimeDomain
 from linktools.ai.runtime.state._contracts import ConversationCursor, SessionRecord
+from linktools.ai.spec import AgentSpec
 from sqlalchemy.ext.asyncio import create_async_engine
 
 
@@ -33,7 +33,7 @@ def _session() -> SessionRecord:
         session_id="session",
         tenant_id="tenant",
         owner_principal_id="owner",
-        binding_digest="b" * 64,
+        agent_id="agent",
         status=SessionStatus.OPEN,
         revision=0,
         resource_generation=0,
@@ -201,6 +201,7 @@ def _binding(digest: str) -> AgentBindingSnapshot:
     return AgentBindingSnapshot(
         version=1,
         agent_spec=AgentSpec("agent", 1, "model"),
+        agent_digest="b" * 64,
         output_type_module="builtins",
         output_type_qualname="str",
         output_schema_id="test-output",
@@ -212,8 +213,12 @@ def _binding(digest: str) -> AgentBindingSnapshot:
 
 
 class _DefinitionCatalog:
-    def definition(self, digest: str) -> object:
-        return SimpleNamespace(digest=digest, binding_snapshot=_binding(digest))
+    def binding(self, digest: str) -> object:
+        return SimpleNamespace(
+            digest=digest,
+            definition=SimpleNamespace(digest="b" * 64),
+            snapshot=_binding(digest),
+        )
 
 
 
@@ -284,8 +289,8 @@ async def test_rejected_admission_terminalizes_pending_start() -> None:
             state._object_store(RuntimeDomain.EXECUTION),
             TenantAuthorizationPolicy(),
             sessions=state.conversation.sessions,
-        catalog=_DefinitionCatalog(),
-        compiler=object(),
+            catalog=_DefinitionCatalog(),
+            compiler=object(),
             backend=backend,
             history_reader=_History(),
         )
@@ -322,6 +327,7 @@ async def test_rejected_admission_terminalizes_pending_start() -> None:
         )
         with pytest.raises(AIError) as error:
             await service.run_for_session(
+                "agent",
                 "b" * 64,
                 "session",
                 ExecutionRequest(

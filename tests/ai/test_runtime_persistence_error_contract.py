@@ -1,0 +1,386 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""Persistence version errors must survive repository wrapper boundaries."""
+
+import copy
+import hashlib
+from dataclasses import replace
+from datetime import datetime, timezone
+from pathlib import Path
+
+import pytest
+from linktools.ai.core import (
+    ExecutionEventType,
+    SessionStatus,
+    ToolOperationStatus,
+)
+from linktools.ai.errors import AIError, ErrorCode
+from linktools.ai.runtime import RuntimeDomain, RuntimeState
+from linktools.ai.runtime._session import _session_agent_id
+from linktools.ai.runtime._tool import ToolOperationRecord
+from linktools.ai.runtime.state._codec import (
+    _decode_enveloped_domain,
+    _encode_persisted_domain,
+    encode_envelope,
+)
+from linktools.ai.runtime.state._contracts import (
+    RuntimePayloadRef,
+    SessionRecord,
+    TranscriptChunk,
+    TranscriptOrigin,
+    TranscriptSeekDimension,
+    TranscriptSeekRecord,
+)
+from linktools.ai.runtime.state._maintenance import RuntimeStorageInspection
+from linktools.ai.runtime.state._repositories import _domain_data
+from linktools.ai.runtime.state._store import StoredFact, StoredRecord
+from linktools.ai.storage import StoredPayload
+from linktools.ai.task import TaskNodeView, TaskStatus
+
+
+def _future_schema(data: object) -> object:
+    value = copy.deepcopy(data)
+    value["value"]["payload"]["schema"] = 99
+    return value
+
+
+def _precomposition_session_data() -> dict[str, object]:
+    now = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    session = SessionRecord(
+        session_id="session",
+        tenant_id="tenant",
+        owner_principal_id="owner",
+        agent_id="agent",
+        status=SessionStatus.OPEN,
+        revision=0,
+        resource_generation=0,
+        cwd=None,
+        metadata={},
+        created_at=now,
+        updated_at=now,
+        closed_at=None,
+        active_execution_id=None,
+    )
+    payload = _encode_persisted_domain(session)
+    payload["fields"].pop("agent_id")
+    payload["fields"]["binding_digest"] = "b" * 64
+    return encode_envelope({"type": "session_record", "payload": payload})
+
+
+class _NoObjects:
+    def object_store(self, domain: RuntimeDomain) -> object:
+        raise AssertionError(f"unexpected object reference in {domain.value}")
+
+
+def _inspection() -> RuntimeStorageInspection:
+    return RuntimeStorageInspection(
+        {},
+        _NoObjects(),
+        durable_domains=frozenset(),
+    )
+
+
+def _read_model_record(*, version: int = 1) -> StoredRecord:
+    return StoredRecord(
+        b"k" * 32,
+        b"p" * 32,
+        None,
+        None,
+        "execution_read_model",
+        "execution",
+        "COMPLETE",
+        0,
+        None,
+        0,
+        None,
+        {
+            "execution_id": "execution",
+            "tenant_id": "tenant",
+            "source_digest": "source",
+            "model_version": version,
+            "status": "COMPLETE",
+            "trace_count": 0,
+            "history_count": 0,
+            "transcript_count": 0,
+            "revision": 1,
+        },
+    )
+
+
+def _record(kind: str, value: object) -> StoredRecord:
+    return StoredRecord(
+        hashlib.sha256(f"key:{kind}".encode()).digest(),
+        hashlib.sha256(f"partition:{kind}".encode()).digest(),
+        None,
+        None,
+        kind,
+        kind,
+        None,
+        0,
+        None,
+        0,
+        None,
+        _domain_data(value),
+    )
+
+
+def _task_node() -> TaskNodeView:
+    return TaskNodeView(
+        "graph",
+        "node",
+        (),
+        TaskStatus.PENDING,
+        None,
+        0,
+        None,
+        None,
+        None,
+        None,
+    )
+
+
+def _transcript_chunk_data() -> dict[str, object]:
+    raw = b"[]"
+    chunk = TranscriptChunk(
+        "owner",
+        0,
+        1,
+        TranscriptOrigin.RAW,
+        "raw",
+        hashlib.sha256(raw).hexdigest(),
+        len(raw),
+        RuntimePayloadRef(
+            StoredPayload.inline_bytes(raw),
+            RuntimeDomain.EXECUTION,
+        ),
+    )
+    return encode_envelope(
+        {
+            "type": "transcript_chunk",
+            "payload": _encode_persisted_domain(chunk),
+        }
+    )
+
+
+def test_generic_tolerance_does_not_guess_missing_agent_identity() -> None:
+    with pytest.raises(AIError) as raised:
+        _session_agent_id(
+            _decode_enveloped_domain(_precomposition_session_data(), SessionRecord)
+        )
+
+    assert raised.value.code is ErrorCode.STORAGE_VERSION_UNSUPPORTED
+
+
+def test_persisted_explicit_null_schema_is_integrity_error() -> None:
+    data = copy.deepcopy(_transcript_chunk_data())
+    data["value"]["payload"]["schema"] = None
+
+    with pytest.raises(AIError) as raised:
+        _decode_enveloped_domain(data, TranscriptChunk)
+
+    assert raised.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
+
+
+def test_maintenance_accepts_current_raw_state_formats() -> None:
+    inspection = _inspection()
+    references: dict[int, set[str]] = {}
+    event = StoredFact(
+        b"s" * 32,
+        1,
+        b"o" * 32,
+        ExecutionEventType.EXECUTION_CREATED.value,
+        None,
+        None,
+        {"kind": "business", "digest": "value", "size": 1},
+    )
+    read_model_fact = StoredFact(
+        b"r" * 32,
+        1,
+        b"o" * 32,
+        "execution_read_trace",
+        None,
+        None,
+        {"items": [{"kind": "business", "digest": "value", "size": 1}]},
+    )
+
+    inspection._collect_references(
+        RuntimeDomain.EXECUTION,
+        (_read_model_record(),),
+        (event, read_model_fact),
+        (),
+        references,
+    )
+
+    assert references == {}
+
+
+def test_maintenance_accepts_lease_projected_records() -> None:
+    now = datetime.now(timezone.utc)
+    tool_operation = ToolOperationRecord(
+        "operation",
+        "tenant",
+        "step",
+        "call",
+        "key",
+        "tool",
+        "arguments",
+        "binding",
+        True,
+        ToolOperationStatus.PENDING,
+        None,
+        0,
+        None,
+        None,
+        now,
+        now,
+    )
+
+    references: dict[int, set[str]] = {}
+    inspection = _inspection()
+    inspection._collect_references(
+        RuntimeDomain.TASK,
+        (_record("task_node", _task_node()),),
+        (),
+        (),
+        references,
+    )
+    inspection._collect_references(
+        RuntimeDomain.RECOVERY,
+        (_record("tool_operation", tool_operation),),
+        (),
+        (),
+        references,
+    )
+
+    assert references == {}
+
+
+def test_maintenance_rejects_partial_current_lease_projection() -> None:
+    record = _record("task_node", _task_node())
+    data = copy.deepcopy(record.data)
+    data["value"]["payload"]["fields"]["owner"] = None
+
+    with pytest.raises(AIError) as raised:
+        _inspection()._collect_references(
+            RuntimeDomain.TASK,
+            (replace(record, data=data),),
+            (),
+            (),
+            {},
+        )
+
+    assert raised.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
+
+
+def test_maintenance_preserves_future_lease_projected_schema() -> None:
+    record = _record("task_node", _task_node())
+    data = _future_schema(record.data)
+    data["value"]["payload"]["fields"]["owner"] = None
+
+    with pytest.raises(AIError) as raised:
+        _inspection()._collect_references(
+            RuntimeDomain.TASK,
+            (replace(record, data=data),),
+            (),
+            (),
+            {},
+        )
+
+    assert raised.value.code is ErrorCode.STORAGE_VERSION_UNSUPPORTED
+
+
+def test_maintenance_rejects_future_read_model_version() -> None:
+    inspection = _inspection()
+    with pytest.raises(AIError) as raised:
+        inspection._collect_references(
+            RuntimeDomain.EXECUTION,
+            (_read_model_record(version=2),),
+            (),
+            (),
+            {},
+        )
+
+    assert raised.value.code is ErrorCode.STORAGE_VERSION_UNSUPPORTED
+
+
+def test_maintenance_rejects_future_persisted_schema() -> None:
+    fact = StoredFact(
+        b"s" * 32,
+        1,
+        b"o" * 32,
+        "transcript_chunk",
+        None,
+        "raw",
+        _future_schema(_transcript_chunk_data()),
+    )
+
+    with pytest.raises(AIError) as raised:
+        _inspection()._collect_references(
+            RuntimeDomain.EXECUTION,
+            (),
+            (fact,),
+            (),
+            {},
+        )
+
+    assert raised.value.code is ErrorCode.STORAGE_VERSION_UNSUPPORTED
+
+
+@pytest.mark.asyncio
+async def test_transcript_decoders_preserve_future_schema_unsupported(
+    tmp_path: Path,
+) -> None:
+    state = RuntimeState.filesystem(tmp_path / "runtime")
+    await state.initialize(namespace="future-transcript-schema", tenant_id="tenant")
+    try:
+        history = state.steps.read_store(
+            RuntimeDomain.EXECUTION
+        ).transcript_repository
+
+        head = history.empty_head("owner")
+        head_record = history._new_head_record(head)
+        with pytest.raises(AIError) as raised:
+            history.decode_head(
+                replace(head_record, data=_future_schema(head_record.data))
+            )
+        assert raised.value.code is ErrorCode.STORAGE_VERSION_UNSUPPORTED
+
+        seek = TranscriptSeekRecord(
+            "owner",
+            TranscriptSeekDimension.MESSAGE,
+            0,
+            1,
+            0,
+            0,
+            1,
+        )
+        seek_data = encode_envelope(
+            {
+                "type": "transcript_seek",
+                "payload": _encode_persisted_domain(seek),
+            }
+        )
+        with pytest.raises(AIError) as raised:
+            history._decode_seek(
+                replace(
+                    head_record,
+                    kind="transcript_seek",
+                    data=_future_schema(seek_data),
+                )
+            )
+        assert raised.value.code is ErrorCode.STORAGE_VERSION_UNSUPPORTED
+
+        fact = StoredFact(
+            b"s" * 32,
+            1,
+            b"o" * 32,
+            "transcript_chunk",
+            None,
+            "raw",
+            _future_schema(_transcript_chunk_data()),
+        )
+        with pytest.raises(AIError) as raised:
+            history.decode_chunk(fact)
+        assert raised.value.code is ErrorCode.STORAGE_VERSION_UNSUPPORTED
+    finally:
+        await state.close()

@@ -3,14 +3,20 @@
 """Offline Runtime storage validation and object mark-and-sweep."""
 
 from collections.abc import Awaitable, Callable, Mapping, Sequence
-from contextlib import AsyncExitStack
-from typing import AsyncContextManager, Protocol
+from contextlib import AbstractAsyncContextManager, AsyncExitStack
+from typing import Protocol
 
 from linktools.core import environ
 
+from ...core import ExecutionEventType
 from ...errors import AIError, ErrorCode
 from ...storage import ObjectStoreInspection, ObjectStoreMaintenance
-from ._codec import _iter_enveloped_runtime_object_refs
+from ._codec import (
+    _VERSION_CODECS,
+    _decode_domain,
+    _iter_enveloped_runtime_object_refs,
+    decode_envelope,
+)
 from ._plan import RuntimeDomain
 from ._store import (
     FactScanCursor,
@@ -33,6 +39,38 @@ _OBJECT_DOMAINS = frozenset(
     }
 )
 _MAINTENANCE_PAGE_SIZE = 128
+_ENVELOPED_FACT_KINDS = frozenset(
+    {
+        "step_effect",
+        "step_event",
+        "step_snapshot",
+        "transcript_chunk",
+    }
+)
+_EXECUTION_EVENT_FACT_KINDS = frozenset(value.value for value in ExecutionEventType)
+_READ_MODEL_RECORD_KIND = "execution_read_model"
+_READ_MODEL_FACT_KINDS = frozenset(
+    {
+        "execution_read_history",
+        "execution_read_trace",
+        "execution_read_transcript",
+    }
+)
+_READ_MODEL_FIELDS = frozenset(
+    {
+        "execution_id",
+        "tenant_id",
+        "source_digest",
+        "model_version",
+        "status",
+        "trace_count",
+        "history_count",
+        "transcript_count",
+        "revision",
+    }
+)
+_LEASE_PROJECTED_WIRE_IDS = frozenset({"task_node_view", "tool_operation"})
+_LEASE_FIELDS = frozenset({"owner", "fence", "lease_expires_at"})
 
 
 class ObjectRouter(Protocol):
@@ -40,7 +78,7 @@ class ObjectRouter(Protocol):
 
 
 class OfflineExclusiveStorage(Protocol):
-    def offline_exclusivity(self) -> AsyncContextManager[None]: ...
+    def offline_exclusivity(self) -> AbstractAsyncContextManager[None]: ...
 
 
 class RuntimeStorageInspection:
@@ -185,18 +223,46 @@ class RuntimeStorageInspection:
         operations: tuple[StoredOperation, ...],
         references: dict[int, set[str]],
     ) -> None:
-        values = (
-            *(record.data for record in records),
-            *(fact.data for fact in facts),
-            *(operation.data for operation in operations),
-        )
-        for value in values:
-            for source_domain, reference in _iter_enveloped_runtime_object_refs(
+        for record in records:
+            if record.kind == _READ_MODEL_RECORD_KIND:
+                _validate_read_model_record(record.data)
+            else:
+                self._collect_enveloped_references(domain, record.data, references)
+        for fact in facts:
+            if fact.kind in _ENVELOPED_FACT_KINDS:
+                self._collect_enveloped_references(domain, fact.data, references)
+            elif fact.kind in _EXECUTION_EVENT_FACT_KINDS:
+                continue
+            elif fact.kind in _READ_MODEL_FACT_KINDS:
+                _validate_read_model_fact(fact.data)
+            else:
+                raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
+        for operation in operations:
+            self._collect_enveloped_references(domain, operation.data, references)
+
+    def _collect_enveloped_references(
+        self,
+        domain: RuntimeDomain,
+        value: Mapping[str, object],
+        references: dict[int, set[str]],
+    ) -> None:
+        _validate_enveloped_value(value)
+        self._record_references(
+            _iter_enveloped_runtime_object_refs(
                 value,
                 default_domain=domain,
-            ):
-                object_store = self._objects.object_store(source_domain)
-                references.setdefault(id(object_store), set()).add(reference.key)
+            ),
+            references,
+        )
+
+    def _record_references(
+        self,
+        values: object,
+        references: dict[int, set[str]],
+    ) -> None:
+        for source_domain, reference in values:
+            object_store = self._objects.object_store(source_domain)
+            references.setdefault(id(object_store), set()).add(reference.key)
 
 
 class OfflineRuntimeStorageMaintenance:
@@ -221,6 +287,77 @@ class OfflineRuntimeStorageMaintenance:
                         object_store.offline_exclusivity()
                     )
                 return await self._inspection._compact_objects()
+
+
+def _validate_enveloped_value(value: Mapping[str, object]) -> None:
+    envelope = decode_envelope(value)
+    if set(envelope.value) != {"type", "payload"}:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    codec = _VERSION_CODECS.get(envelope.version)
+    if codec is None:
+        raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
+    wire_id = envelope.value.get("type")
+    if not isinstance(wire_id, str):
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    target = codec.domain_types.get(wire_id)
+    if target is None:
+        raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
+    payload = envelope.value.get("payload")
+    if payload is None:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    partial_projected_lease = False
+    if wire_id in _LEASE_PROJECTED_WIRE_IDS:
+        if not isinstance(payload, Mapping):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        fields_value = payload.get("fields")
+        if not isinstance(fields_value, Mapping):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        present = _LEASE_FIELDS.intersection(fields_value)
+        partial_projected_lease = bool(present and present != _LEASE_FIELDS)
+        payload = _restore_projected_lease_fields(payload)
+    try:
+        _decode_domain(payload, target, codec, persisted=True)
+    except AIError:
+        raise
+    except (KeyError, TypeError, ValueError) as error:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
+    if partial_projected_lease:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+
+
+def _restore_projected_lease_fields(value: object) -> object:
+    if not isinstance(value, Mapping):
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    fields = value.get("fields")
+    if not isinstance(fields, Mapping):
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    restored = dict(value)
+    restored["fields"] = {
+        "owner": None,
+        "fence": 0,
+        "lease_expires_at": None,
+        **fields,
+    }
+    return restored
+
+
+def _validate_read_model_record(value: Mapping[str, object]) -> None:
+    if frozenset(value) != _READ_MODEL_FIELDS:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    version = value.get("model_version")
+    if isinstance(version, bool) or not isinstance(version, int) or version < 1:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    if version != 1:
+        raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
+
+
+def _validate_read_model_fact(value: Mapping[str, object]) -> None:
+    if set(value) != {"items"}:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    items = value.get("items")
+    if not isinstance(items, list) or any(not isinstance(item, Mapping) for item in items):
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+
 
 RuntimeStorageMaintenance = RuntimeStorageInspection
 

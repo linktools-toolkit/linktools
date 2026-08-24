@@ -6,7 +6,7 @@ import asyncio
 import json
 import re
 import uuid
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
@@ -16,7 +16,7 @@ from typing import Protocol
 
 from linktools.core import environ
 
-from ..agent import AgentBindingSnapshot, AgentCompiler, AgentDefinition, AgentDefinitionCatalog
+from ..agent import AgentBinding, AgentBindingSnapshot, AgentCatalog, AgentCompiler
 from ..core import (
     AuthorizationAction,
     AuthorizationPolicy,
@@ -24,6 +24,7 @@ from ..core import (
     ExecutionLineageKind,
     ExecutionStatus,
     IdempotencyStatus,
+    JsonValue,
     OperationKind,
     OperationStatus,
     Page,
@@ -192,7 +193,7 @@ class DefaultExecutionService:
         authorization: AuthorizationPolicy,
         *,
         sessions: SessionRepository,
-        catalog: AgentDefinitionCatalog,
+        catalog: AgentCatalog,
         compiler: AgentCompiler,
         backend: "ExecutionBackend | None" = None,
         operation_ids: "Callable[[], str] | None" = None,
@@ -253,35 +254,34 @@ class DefaultExecutionService:
             raise RuntimeError("local execution waiter is already bound")
         self._local_waiter = waiter
 
-    def _definition(
+    def _binding(
         self,
         binding_digest: str,
-        binding: "AgentBindingSnapshot | None" = None,
-    ) -> AgentDefinition:
+        snapshot: "AgentBindingSnapshot | None" = None,
+    ) -> AgentBinding:
         try:
-            definition = self._catalog.definition(binding_digest)
+            binding = self._catalog.binding(binding_digest)
         except AIError as error:
-            if error.code is not ErrorCode.AGENT_DEFINITION_UNAVAILABLE or binding is None:
+            if error.code is not ErrorCode.AGENT_DEFINITION_UNAVAILABLE or snapshot is None:
                 raise
-            if binding.binding_digest != binding_digest:
+            if snapshot.binding_digest != binding_digest:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
-            definition = self._catalog.register(self._compiler.restore(binding))
-        if binding is not None and definition.binding_snapshot != binding:
+            binding = self._catalog.register_binding(self._compiler.restore(snapshot))
+        if snapshot is not None and binding.snapshot != snapshot:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        return definition
+        return binding
 
     def _validate_replayed_execution(
         self,
         execution: ExecutionRecord,
-        definition: AgentDefinition,
+        binding: AgentBinding,
         request: ExecutionRequest,
     ) -> None:
         if (
-            execution.binding_digest != definition.digest
+            execution.binding_digest != binding.digest
             or execution.planning is not request.planning
             or execution.thinking is not request.thinking
-            or execution.binding is None
-            or execution.binding != definition.binding_snapshot
+            or execution.binding != binding.snapshot
         ):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
 
@@ -344,11 +344,13 @@ class DefaultExecutionService:
     async def _run_handoff_cleanup(self, execution_id: str, tenant_id: str, state: _ExecutionHandoffState) -> None:
         try:
             await self._release_terminal(execution_id, tenant_id=tenant_id)
-        except BaseException:
+        except BaseException as error:
             async with self._handoff_condition:
                 state.release_in_progress = False
                 state.release_requested = True
                 self._handoff_condition.notify_all()
+            if not isinstance(error, Exception):
+                raise
             _logger.error("execution handoff cleanup failed: execution=%s", execution_id, exc_info=environ.debug)
             return
         async with self._handoff_condition:
@@ -380,10 +382,22 @@ class DefaultExecutionService:
     async def run(self, binding_digest: str, request: ExecutionRequest) -> ExecutionHandle:
         return await self._start(binding_digest, request, scope="execution.run")
 
-    async def run_for_session(self, binding_digest: str, session_id: str, request: ExecutionRequest) -> ExecutionHandle:
+    async def run_for_session(
+        self,
+        agent_id: str,
+        binding_digest: str,
+        session_id: str,
+        request: ExecutionRequest,
+    ) -> ExecutionHandle:
         if not session_id.strip():
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
-        return await self._start(binding_digest, request, session_id=session_id, scope="session.resume")
+        return await self._start(
+            binding_digest,
+            request,
+            session_id=session_id,
+            session_agent_id=agent_id,
+            scope="session.resume",
+        )
 
     async def _run_with_launch_gate(
         self,
@@ -395,6 +409,7 @@ class DefaultExecutionService:
 
     async def _run_for_session_with_launch_gate(
         self,
+        agent_id: str,
         binding_digest: str,
         session_id: str,
         request: ExecutionRequest,
@@ -406,6 +421,7 @@ class DefaultExecutionService:
             binding_digest,
             request,
             session_id=session_id,
+            session_agent_id=agent_id,
             scope="session.resume",
             launch_gate=gate,
         )
@@ -442,6 +458,7 @@ class DefaultExecutionService:
         request: ExecutionRequest,
         *,
         session_id: "str | None" = None,
+        session_agent_id: "str | None" = None,
         source_execution_id: "str | None" = None,
         base_execution_id: "str | None" = None,
         conversation_step_run_id: "str | None" = None,
@@ -456,6 +473,7 @@ class DefaultExecutionService:
                 binding_digest,
                 request,
                 session_id=session_id,
+                session_agent_id=session_agent_id,
                 source_execution_id=source_execution_id,
                 base_execution_id=base_execution_id,
                 conversation_step_run_id=conversation_step_run_id,
@@ -470,6 +488,7 @@ class DefaultExecutionService:
                 binding_digest,
                 request,
                 session_id=session_id,
+                session_agent_id=session_agent_id,
                 source_execution_id=source_execution_id,
                 base_execution_id=base_execution_id,
                 conversation_step_run_id=conversation_step_run_id,
@@ -486,6 +505,7 @@ class DefaultExecutionService:
         request: ExecutionRequest,
         *,
         session_id: "str | None" = None,
+        session_agent_id: "str | None" = None,
         source_execution_id: "str | None" = None,
         base_execution_id: "str | None" = None,
         conversation_step_run_id: "str | None" = None,
@@ -501,12 +521,16 @@ class DefaultExecutionService:
             raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
         if request.idempotency_key is None:
             raise AIError(ErrorCode.IDEMPOTENCY_KEY_INVALID)
-        definition = self._definition(binding_digest)
+        binding = self._binding(binding_digest)
         conversation_run_id = conversation_step_run_id
         if session_id is not None and source_execution_id is None:
             session = await self._sessions.get(session_id, tenant_id=request.principal.tenant_id)
             if session is None:
                 raise AIError(ErrorCode.SESSION_NOT_FOUND)
+            from ._session import _session_agent_id
+
+            if _session_agent_id(session) != session_agent_id:
+                raise AIError(ErrorCode.SESSION_BINDING_MISMATCH)
             conversation_run_id = None if session.continuation is None else session.continuation.step_run_id
             base_execution_id = None
             lineage_kind = ExecutionLineageKind.SESSION_RESUME
@@ -528,7 +552,7 @@ class DefaultExecutionService:
             if existing.status is IdempotencyStatus.RESERVED:
                 pending = await self._state.executions.get(existing.resource_id, tenant_id=request.principal.tenant_id)
                 if pending is not None:
-                    self._validate_replayed_execution(pending, definition, request)
+                    self._validate_replayed_execution(pending, binding, request)
                 if pending is not None and pending.status is ExecutionStatus.STARTED:
                     await self._launch_started(
                         request,
@@ -556,7 +580,7 @@ class DefaultExecutionService:
             started = await self._state.executions.get(existing.resource_id, tenant_id=request.principal.tenant_id)
             if started is None:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            self._validate_replayed_execution(started, definition, request)
+            self._validate_replayed_execution(started, binding, request)
             if existing.status is IdempotencyStatus.COMPLETED:
                 if started.status not in {ExecutionStatus.SUCCEEDED, ExecutionStatus.FAILED, ExecutionStatus.CANCELLED}:
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -596,7 +620,7 @@ class DefaultExecutionService:
             conversation_step_run_id=conversation_run_id,
             planning=request.planning,
             thinking=request.thinking,
-            binding=definition.binding_snapshot,
+            binding=binding.snapshot,
         )
         reservation = await self._state.executions.reserve_start(
             ExecutionStartReservation(
@@ -620,7 +644,7 @@ class DefaultExecutionService:
         if not reservation.created:
             if reservation.idempotency.request_digest != request_digest:
                 raise AIError(ErrorCode.IDEMPOTENCY_CONFLICT)
-            self._validate_replayed_execution(reservation.execution, definition, request)
+            self._validate_replayed_execution(reservation.execution, binding, request)
             if reservation.execution.status is ExecutionStatus.PENDING_START and reservation.idempotency.status is IdempotencyStatus.RESERVED:
                 await self._prepare_and_launch(
                     request,
@@ -770,6 +794,7 @@ class DefaultExecutionService:
                 ExecutionStatus.FAILED,
                 now,
                 error_code=error.code.value,
+                safe_error_details=error.safe_details,
                 terminal_event=True,
             )
             if self._terminal_committer is None:
@@ -828,7 +853,7 @@ class DefaultExecutionService:
         try:
             if self._backend is not None:
                 await self._backend.abort_start(terminal)
-        except BaseException:
+        except Exception:
             _logger.error(
                 "pending start cleanup failed: execution=%s",
                 terminal.execution_id,
@@ -933,10 +958,11 @@ class DefaultExecutionService:
     async def result(self, execution_id: str, *, principal: Principal) -> ExecutionResult:
         execution = await self._load_authorized(execution_id, principal, AuthorizationAction.EXECUTION_READ)
         if execution.status not in {ExecutionStatus.SUCCEEDED, ExecutionStatus.FAILED, ExecutionStatus.CANCELLED}:
-            raise AIError(ErrorCode.STORAGE_NOT_FOUND)
+            raise AIError(ErrorCode.EXECUTION_NOT_READY)
         result = await self._state.executions.get_result(execution_id, tenant_id=principal.tenant_id)
         if result is None:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        error_code, safe_details = _terminal_error(execution)
         if execution.status in {ExecutionStatus.FAILED, ExecutionStatus.CANCELLED}:
             if result.output is not None or any(
                 value is not None
@@ -947,15 +973,20 @@ class DefaultExecutionService:
                 )
             ):
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            return ExecutionResult(
-                execution.execution_id,
-                execution.status,
-                None,
-                result.output_schema_id,
-                result.output_schema_revision,
-                result.output_schema_fingerprint,
-                result.usage,
-            )
+            try:
+                return ExecutionResult(
+                    execution.execution_id,
+                    execution.status,
+                    None,
+                    result.output_schema_id,
+                    result.output_schema_revision,
+                    result.output_schema_fingerprint,
+                    result.usage,
+                    error_code,
+                    safe_details,
+                )
+            except ValueError as error:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
         if result.output is None:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         try:
@@ -986,6 +1017,8 @@ class DefaultExecutionService:
                 result.output_schema_revision,
                 result.output_schema_fingerprint,
                 result.usage,
+                error_code,
+                safe_details,
             )
         except AIError:
             raise
@@ -1021,7 +1054,7 @@ class DefaultExecutionService:
         try:
             return await asyncio.wait_for(wait_once(), timeout_seconds)
         except asyncio.TimeoutError as error:
-            raise AIError(ErrorCode.STORAGE_UNAVAILABLE, "execution wait timed out") from error
+            raise AIError(ErrorCode.EXECUTION_WAIT_TIMEOUT) from error
 
     async def run_and_wait(self, binding_digest: str, request: ExecutionRequest, *, timeout_seconds: "float | None" = None) -> ExecutionResult:
         handle = await self.run(binding_digest, request)
@@ -1031,8 +1064,8 @@ class DefaultExecutionService:
         previous = await self._load_authorized(execution_id, request.principal, AuthorizationAction.EXECUTION_READ)
         if previous.binding_digest != binding_digest:
             raise AIError(ErrorCode.RUNTIME_SERVICE_MISMATCH)
-        definition = self._definition(previous.binding_digest, previous.binding)
-        if definition.digest != binding_digest:
+        binding = self._binding(previous.binding_digest, previous.binding)
+        if binding.digest != binding_digest:
             raise AIError(ErrorCode.RUNTIME_SERVICE_MISMATCH)
         retry_request = ExecutionRequest(
             user_prompt=request.user_prompt,
@@ -1059,8 +1092,8 @@ class DefaultExecutionService:
         previous = await self._load_authorized(execution_id, request.principal, AuthorizationAction.EXECUTION_READ)
         if previous.binding_digest != binding_digest:
             raise AIError(ErrorCode.RUNTIME_SERVICE_MISMATCH)
-        definition = self._definition(previous.binding_digest, previous.binding)
-        if definition.digest != binding_digest:
+        binding = self._binding(previous.binding_digest, previous.binding)
+        if binding.digest != binding_digest:
             raise AIError(ErrorCode.RUNTIME_SERVICE_MISMATCH)
         fork_request = ExecutionRequest(
             user_prompt=request.user_prompt,
@@ -1139,7 +1172,7 @@ class DefaultExecutionService:
             tenant_id=request.principal.tenant_id,
         )
         if latest is None:
-            raise AIError(ErrorCode.STORAGE_NOT_FOUND)
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         execution = latest
         prepared_before_claim = execution.status is ExecutionStatus.PENDING_START
         if execution.status is ExecutionStatus.FINALIZING:
@@ -1232,7 +1265,14 @@ class DefaultExecutionService:
             if cancelling_current.status is not ExecutionStatus.CANCELLING:
                 raise AIError(ErrorCode.STORAGE_CONFLICT)
             now = datetime.now(timezone.utc)
-            terminal = _next_execution(cancelling_current, ExecutionStatus.CANCELLED, now, error_code=None, terminal_event=True)
+            terminal = _next_execution(
+                cancelling_current,
+                ExecutionStatus.CANCELLED,
+                now,
+                error_code=ErrorCode.EXECUTION_CANCELLED.value,
+                safe_error_details={},
+                terminal_event=True,
+            )
             result = ResultRecord(
                 execution_id,
                 request.principal.tenant_id,
@@ -1281,7 +1321,10 @@ class DefaultExecutionService:
                 execution=terminal,
                 result=result,
                 terminal_event_type=ExecutionEventType.EXECUTION_CANCELLED,
-                terminal_event_payload={},
+                terminal_event_payload={
+                    "error_code": ErrorCode.EXECUTION_CANCELLED.value,
+                    "safe_error_details": {},
+                },
                 idempotency=idempotency,
                 operation=operation_update,
             )
@@ -1302,7 +1345,7 @@ class DefaultExecutionService:
             if prepared_before_claim:
                 try:
                     await self._backend.abort_start(terminal)
-                except BaseException:
+                except Exception:
                     _logger.error(
                         "pending cancellation cleanup failed: execution=%s",
                         execution_id,
@@ -1317,7 +1360,7 @@ class DefaultExecutionService:
                 return resolved
             if isinstance(error, AIError) and error.code in {ErrorCode.STORAGE_CONFLICT, ErrorCode.EXECUTION_RESULT_CONFLICT}:
                 raise
-            error_code = error.code.value if isinstance(error, AIError) else ErrorCode.STORAGE_UNAVAILABLE.value
+            error_code = error.code.value if isinstance(error, AIError) else ErrorCode.INTERNAL_ERROR.value
             try:
                 current = await self._state.operations.get(operation.operation_id, tenant_id=request.principal.tenant_id)
                 if current is not None and current.status is OperationStatus.PENDING:
@@ -1328,11 +1371,10 @@ class DefaultExecutionService:
                         next_record=_operation_failure(current, error_code),
                     )
             except Exception:
-                _logger.error(
+                _logger.exception(
                     "execution cancellation ledger update failed: execution=%s operation=%s",
                     execution_id,
                     operation.operation_id,
-                    exc_info=True,
                 )
             raise
         return CancelExecutionResult(execution_id, True)
@@ -1393,7 +1435,6 @@ class DefaultExecutionService:
         )
         return CancelExecutionResult(execution_id, current.status is ExecutionStatus.CANCELLED)
 
-
     @_observed_query
     async def trace(self, execution_id: str, *, principal: Principal, cursor: "str | None" = None, limit: int = 100) -> "Page[ExecutionTraceItem]":
         record = await self._load_authorized(execution_id, principal, AuthorizationAction.EXECUTION_READ)
@@ -1418,6 +1459,29 @@ class DefaultExecutionService:
         if record is None:
             raise AIError(ErrorCode.AUTHORIZATION_DENIED)
         return record
+
+
+def _terminal_error(
+    execution: ExecutionRecord,
+) -> "tuple[str | None, Mapping[str, JsonValue]]":
+    details = dict(execution.safe_error_details)
+    if execution.status is ExecutionStatus.SUCCEEDED:
+        if execution.error_code is not None or details:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        return None, {}
+    if execution.status is ExecutionStatus.CANCELLED:
+        if execution.error_code != ErrorCode.EXECUTION_CANCELLED.value:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        return execution.error_code, details
+    if execution.status is not ExecutionStatus.FAILED or execution.error_code is None:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    try:
+        code = ErrorCode(execution.error_code)
+    except ValueError as error:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
+    if code is ErrorCode.EXECUTION_CANCELLED:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    return code.value, details
 
 
 def _request_digest(
@@ -1514,7 +1578,16 @@ def _operation_status(operation: OperationLedgerRecord, status: OperationStatus)
     )
 
 
-def _next_execution(record: ExecutionRecord, status: ExecutionStatus, now: datetime, *, error_code: "str | None" = None, agent_run_sequence: int | None = None, terminal_event: bool = False) -> ExecutionRecord:
+def _next_execution(
+    record: ExecutionRecord,
+    status: ExecutionStatus,
+    now: datetime,
+    *,
+    error_code: "str | None" = None,
+    safe_error_details: "Mapping[str, JsonValue] | None" = None,
+    agent_run_sequence: int | None = None,
+    terminal_event: bool = False,
+) -> ExecutionRecord:
     return replace(
         record,
         status=status,
@@ -1522,15 +1595,22 @@ def _next_execution(record: ExecutionRecord, status: ExecutionStatus, now: datet
         event_sequence=record.event_sequence + (1 if terminal_event else 0),
         agent_run_sequence=record.agent_run_sequence if agent_run_sequence is None else agent_run_sequence,
         error_code=error_code,
+        safe_error_details=(
+            record.safe_error_details
+            if safe_error_details is None
+            else dict(safe_error_details)
+        ),
         updated_at=now,
     )
 
 
 def _stable_idempotency_error(error_code: str | None, fallback: ErrorCode) -> AIError:
-    try:
-        return AIError(fallback if error_code is None else ErrorCode(error_code))
-    except ValueError:
+    if error_code is None:
         return AIError(fallback)
+    try:
+        return AIError(ErrorCode(error_code))
+    except ValueError as error:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
 
 
 def _stable_operation_error(error_code: "str | None") -> AIError:
@@ -1538,8 +1618,8 @@ def _stable_operation_error(error_code: "str | None") -> AIError:
         return AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     try:
         return AIError(ErrorCode(error_code))
-    except ValueError:
-        return AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    except ValueError as error:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
 
 
 __all__ = ["CancelEffectOutcome", "DefaultExecutionService", "ExecutionBackend"]

@@ -35,4 +35,4 @@ class TemporalRunContext(BaseModel):
 RunContext = TemporalRunContext
 
 
-__all__ = ["TemporalRunContext", "RunContext"]
+__all__ = ["RunContext", "TemporalRunContext"]

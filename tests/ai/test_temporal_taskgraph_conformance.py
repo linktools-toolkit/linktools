@@ -11,10 +11,17 @@ from types import SimpleNamespace
 import linktools.ai.temporal._activity as temporal_activity
 import pytest
 from linktools.ai.agent import AgentBindingSnapshot
-from linktools.ai.core import Principal, TaskStatus, canonical_sha256
+from linktools.ai.core import (
+    ExecutionStatus,
+    Principal,
+    TaskStatus,
+    UsageMetrics,
+    canonical_sha256,
+)
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.runtime import (
     ExecutionRequest,
+    ExecutionResult,
     RuntimeObjectKeyFactory,
     RuntimeState,
 )
@@ -45,6 +52,7 @@ def _binding() -> AgentBindingSnapshot:
     return AgentBindingSnapshot(
         version=1,
         agent_spec=AgentSpec("agent", 1, "model"),
+        agent_digest="c" * 64,
         output_type_module="builtins",
         output_type_qualname="str",
         output_schema_id="test-output",
@@ -78,6 +86,7 @@ class _ReplayRunner:
         self.failure = failure
         self.result_digest = canonical_sha256({"output": "value"})
         self.result_calls = 0
+        self.terminal_status = ExecutionStatus.FAILED
 
     async def prepare(
         self,
@@ -94,6 +103,29 @@ class _ReplayRunner:
             "prompt",
             principal,
             "key",
+        )
+
+    async def terminal_result(
+        self,
+        execution_id: str,
+        *,
+        principal: Principal,
+    ) -> ExecutionResult:
+        del principal
+        error_code = (
+            ErrorCode.EXECUTION_CANCELLED
+            if self.terminal_status is ExecutionStatus.CANCELLED
+            else ErrorCode.EXECUTION_FAILED
+        )
+        return ExecutionResult(
+            execution_id,
+            self.terminal_status,
+            None,
+            None,
+            None,
+            None,
+            UsageMetrics(),
+            error_code.value,
         )
 
     async def result(
@@ -448,6 +480,8 @@ async def test_stale_settle_replay_uses_higher_fence_durable_status(
     child_status: str,
 ) -> None:
     runner = _ReplayRunner()
+    if child_status in {"FAILED", "CANCELLED"}:
+        runner.terminal_status = ExecutionStatus(child_status)
     state, activity, request = await _runtime_activity(runner)
     original_list_nodes = state.task.tasks.list_nodes
     original_reconcile = state.task.tasks.reconcile_graph

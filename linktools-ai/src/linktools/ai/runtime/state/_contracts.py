@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-from __future__ import annotations
-
 """Runtime persistence contracts and immutable records.
 
 This module contains no backend, filesystem, database, or workflow code.  It
 is the single semantic boundary shared by the local and SQL implementations.
 """
+
+from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
@@ -253,7 +253,6 @@ ContextProjectionItem = TranscriptSpanRef | InlineContextBlock
 
 @dataclass(frozen=True, slots=True)
 class ContextProjection:
-    binding_digest: str
     items: tuple[ContextProjectionItem, ...]
     digest: str
 
@@ -308,7 +307,6 @@ class SessionRecord:
     session_id: str
     tenant_id: str
     owner_principal_id: str
-    binding_digest: str
     status: SessionStatus
     revision: int
     resource_generation: int
@@ -321,6 +319,7 @@ class SessionRecord:
     continuation: ConversationCursor | None = None
     history_quality: str = "complete"
     history_id: str | None = None
+    agent_id: str | None = None
 
     def __post_init__(self) -> None:
         if self.active_execution_id is not None and not self.active_execution_id.strip():
@@ -396,20 +395,17 @@ class ExecutionRecord:
     safe_error_details: Mapping[str, JsonValue]
     created_at: datetime
     updated_at: datetime
+    planning: bool
+    thinking: bool
+    binding: AgentBindingSnapshot
     memory_scope: str | None = None
     conversation_step_run_id: str | None = None
     result: ResultRecord | None = None
-    planning: bool = False
-    thinking: bool = False
-    binding: AgentBindingSnapshot | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.planning, bool) or not isinstance(self.thinking, bool):
-            raise ValueError("execution modes must be boolean")
-        if self.binding is None:
-            if self.planning or self.thinking:
-                raise ValueError("legacy execution without binding cannot enable modes")
-        elif self.binding.binding_digest != self.binding_digest:
+            raise TypeError("execution modes must be boolean")
+        if not isinstance(self.binding, AgentBindingSnapshot) or self.binding.binding_digest != self.binding_digest:
             raise ValueError("execution binding snapshot does not match binding digest")
 
 
@@ -827,7 +823,6 @@ class RecoveryExecutionInput:
     principal_kind: str
     session_id: str | None
     memory_scope: str | None
-    agent_id: str
     binding_digest: str
     lineage_kind: str
     parent_execution_id: str | None
@@ -836,31 +831,25 @@ class RecoveryExecutionInput:
     base_execution_id: str | None
     conversation_step_run_id: str | None
     idempotency: RecoveryIdempotencyInput
-    planning: bool = False
-    thinking: bool = False
-    binding: AgentBindingSnapshot | None = None
+    planning: bool
+    thinking: bool
+    binding: AgentBindingSnapshot
 
     def __post_init__(self) -> None:
         prompt = self.user_prompt
         if isinstance(prompt, str):
             object.__setattr__(self, "user_prompt", StoredPayload.inline_text(prompt))
         elif not isinstance(prompt, StoredPayload):
-            raise ValueError("recovery prompt payload is invalid")
+            raise TypeError("recovery prompt payload is invalid")
         if not isinstance(self.planning, bool) or not isinstance(self.thinking, bool):
-            raise ValueError("recovery execution modes must be boolean")
-        if self.binding is None:
-            if self.planning or self.thinking:
-                raise ValueError("legacy recovery input without binding cannot enable modes")
-        elif (
-            self.binding.binding_digest != self.binding_digest
-            or self.binding.agent_spec.id != self.agent_id
-        ):
+            raise TypeError("recovery execution modes must be boolean")
+        if not isinstance(self.binding, AgentBindingSnapshot) or self.binding.binding_digest != self.binding_digest:
             raise ValueError("recovery binding snapshot does not match execution identity")
 
     def prompt_text(self) -> str:
         value = self.user_prompt.decode()
         if not isinstance(value, str):
-            raise ValueError("recovery prompt payload is not text")
+            raise ValueError("recovery prompt payload is not text")  # noqa: TRY004
         return value
 
 
@@ -1464,15 +1453,16 @@ class RecoveryState:
 
 
 __all__ = [
+    "AgentAttemptClaim",
     "ApprovalRecord",
     "ApprovalRepository",
     "ArtifactRecord",
     "ArtifactRepository",
     "ArtifactState",
+    "ContextProjection",
     "ConversationCursor",
     "ConversationHistoryRecord",
     "ConversationHistoryRepository",
-    "ContextProjection",
     "ConversationState",
     "EvaluationRecord",
     "EvaluationRepository",
@@ -1486,7 +1476,6 @@ __all__ = [
     "ExecutionRepository",
     "ExecutionRunSealHead",
     "ExecutionStartClaim",
-    "AgentAttemptClaim",
     "ExecutionStartReservation",
     "ExecutionStartReservationResult",
     "ExecutionStartUnknownCommit",
@@ -1495,17 +1484,21 @@ __all__ = [
     "ExecutionTerminalCommitResult",
     "ExternalCallRecord",
     "ExternalCallRepository",
+    "HistoryQuality",
     "IdempotencyRecord",
     "IdempotencyRepository",
     "IdempotencyTerminalUpdate",
+    "InlineContextBlock",
+    "LoadedContextMessage",
+    "LoadedModelContext",
     "MemoryRecord",
     "MemoryRepository",
     "MemoryState",
     "OperationLedgerRepository",
     "OperationTerminalUpdate",
-    "RecoveryCheckpoint",
-    "RecoveryAdmissionRecord",
     "RecoveryActiveRecord",
+    "RecoveryAdmissionRecord",
+    "RecoveryCheckpoint",
     "RecoveryCheckpointRepository",
     "RecoveryCheckpointState",
     "RecoveryConversationIntent",
@@ -1517,12 +1510,14 @@ __all__ = [
     "RecoveryTerminalHandoff",
     "RecoveryTerminalOutcome",
     "ResultRecord",
-    "InlineContextBlock",
-    "HistoryQuality",
-    "LoadedContextMessage",
-    "LoadedModelContext",
     "RuntimePayloadRef",
+    "RuntimeRepository",
+    "SessionRecord",
+    "SessionRepository",
     "StoredStepSnapshot",
+    "TaskRepository",
+    "TaskState",
+    "ToolOperationAdmission",
     "TranscriptChunk",
     "TranscriptHeadRecord",
     "TranscriptOrigin",
@@ -1530,10 +1525,4 @@ __all__ = [
     "TranscriptSeekDimension",
     "TranscriptSeekRecord",
     "TranscriptSpanRef",
-    "RuntimeRepository",
-    "SessionRecord",
-    "SessionRepository",
-    "TaskRepository",
-    "TaskState",
-    "ToolOperationAdmission",
 ]

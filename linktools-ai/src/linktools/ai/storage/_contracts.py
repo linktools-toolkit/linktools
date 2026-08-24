@@ -9,8 +9,8 @@ from datetime import datetime
 from enum import StrEnum
 from typing import Generic, Protocol, TypeVar, runtime_checkable
 
-from ..errors import AIError, ErrorCode
 from ..core import JsonValue
+from ..errors import AIError, ErrorCode
 
 KeyT = TypeVar("KeyT", bound=Hashable)
 ValueT = TypeVar("ValueT")
@@ -57,7 +57,7 @@ def normalize_storage_metadata(value: Mapping[str, JsonValue] | None) -> dict[st
     if value is None:
         return {}
     if not isinstance(value, Mapping):
-        raise ValueError("storage metadata must be a JSON object")
+        raise TypeError("storage metadata must be a JSON object")
     normalized: dict[str, JsonValue] = {}
     for key, item in value.items():
         if not isinstance(key, str) or not key:
@@ -328,7 +328,7 @@ __all__ = [
     "StorageRevision",
     "StorageStatReader",
     "StorageWriter",
-    "normalize_storage_metadata",
     "VersionSummary",
     "VersionedStorage",
+    "normalize_storage_metadata",
 ]

@@ -5,17 +5,18 @@
 import asyncio
 import json
 import sys
+from collections.abc import AsyncIterator
 from argparse import Namespace
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 from linktools.cli import BaseCommand, CommandError
 from linktools.cli.argparse import ConfigAction
 from linktools.core import ConfigField, environ
-from pydantic_ai.exceptions import ModelAPIError, UserError
 
 from ...ai.core import ExecutionDeltaType, ExecutionEventType, ExecutionStatus
-from ...ai.errors import AIError, ErrorCode
+from ...ai.errors import AIError
 from ...ai.migrate import provision_runtime_database
 from ...ai.model import ModelRegistry
 from ...ai.runtime import ExecutionResult, Runtime, RuntimeState
@@ -32,10 +33,6 @@ _logger = environ.get_logger("commands.ai.run")
 
 class Command(BaseCommand):
     """Run a prompt against the Agent definitions in the current workspace."""
-
-    @property
-    def known_errors(self) -> "list[type[BaseException]]":
-        return super().known_errors + [ModelAPIError, UserError]
 
     def init_arguments(self, parser: "CommandParser") -> None:
         parser.add_argument("prompt", help="the prompt")
@@ -71,25 +68,25 @@ class Command(BaseCommand):
         )
 
         async def execute() -> int:
-            state = await _build_runtime_state(workspace, args.storage)
-            async with open_workspace_runtime(
-                workspace,
-                state=state,
-                models=ModelRegistry.openai(
-                    model=args.model,
-                    base_url=args.base_url,
-                    api_key=args.api_key,
-                ),
-            ) as runtime:
-                return await _emit_result(
-                    runtime,
-                    args.prompt,
-                    session_id,
-                    memory_scope,
-                    args.json,
-                    args.planning,
-                    args.thinking,
-                )
+            async with _open_runtime_state(workspace, args.storage) as state:
+                async with open_workspace_runtime(
+                    workspace,
+                    state=state,
+                    models=ModelRegistry.openai(
+                        model=args.model,
+                        base_url=args.base_url,
+                        api_key=args.api_key,
+                    ),
+                ) as runtime:
+                    return await _emit_result(
+                        runtime,
+                        args.prompt,
+                        session_id,
+                        memory_scope,
+                        args.json,
+                        args.planning,
+                        args.thinking,
+                    )
 
         try:
             return asyncio.run(execute())
@@ -97,11 +94,16 @@ class Command(BaseCommand):
             raise CommandError(str(error)) from error
 
 
-async def _build_runtime_state(workspace: Workspace, storage: str) -> RuntimeState:
+@asynccontextmanager
+async def _open_runtime_state(
+    workspace: Workspace,
+    storage: str,
+) -> AsyncIterator[RuntimeState]:
     if storage == "filesystem":
         path = workspace.storage_root / "runtime"
         _logger.info("ai run storage selected: backend=filesystem path=%s", path)
-        return RuntimeState.filesystem(path)
+        yield RuntimeState.filesystem(path)
+        return
     if storage != "sqlite":
         raise ValueError(f"unsupported Runtime storage backend: {storage}")
 
@@ -112,10 +114,11 @@ async def _build_runtime_state(workspace: Workspace, storage: str) -> RuntimeSta
     engine = create_async_engine(f"sqlite+aiosqlite:///{path}")
     try:
         await provision_runtime_database(engine)
+        _logger.info("ai run storage selected: backend=sqlite path=%s", path)
+        yield RuntimeState.sql(engine)
     finally:
+        _logger.debug("ai run SQL engine disposing: path=%s", path)
         await engine.dispose()
-    _logger.info("ai run storage selected: backend=sqlite path=%s", path)
-    return RuntimeState.sqlite(path)
 
 
 async def _emit_result(
@@ -127,21 +130,23 @@ async def _emit_result(
     planning: bool,
     thinking: bool,
 ) -> int:
-    agent = runtime.agent(planning=planning, thinking=thinking)
+    agent = runtime.agent()
     if as_json:
-        result = await agent.run(prompt, session_id=session_id, memory_scope=memory_scope)
+        result = await agent.run(
+            prompt,
+            session_id=session_id,
+            memory_scope=memory_scope,
+            planning=planning,
+            thinking=thinking,
+        )
         payload = _result_payload(result)
-        if result.status is not ExecutionStatus.SUCCEEDED:
-            error_code, safe_details = await _terminal_failure_details(runtime, result.execution_id)
-            payload["error_code"] = error_code
-            payload["safe_error_details"] = safe_details
         print(json.dumps(payload, ensure_ascii=False, sort_keys=True))
         if result.status is not ExecutionStatus.SUCCEEDED:
             raise CommandError(
                 "execution failed: "
                 f"execution_id={result.execution_id} status={result.status.value} "
-                f"error_code={payload['error_code']} "
-                f"safe_error_details={payload['safe_error_details']}"
+                f"error_code={result.error_code} "
+                f"safe_error_details={dict(result.safe_error_details)}"
             )
         return 0
 
@@ -150,7 +155,13 @@ async def _emit_result(
     terminal_status = "UNKNOWN"
     terminal_error_code: object = None
     terminal_safe_details: object = {}
-    async for event in agent.stream(prompt, session_id=session_id, memory_scope=memory_scope):
+    async for event in agent.stream(
+        prompt,
+        session_id=session_id,
+        memory_scope=memory_scope,
+        planning=planning,
+        thinking=thinking,
+    ):
         execution_id = event.execution_id
         if event.event_type is ExecutionDeltaType.ASSISTANT_TEXT_DELTA:
             text = event.payload.get("text") if isinstance(event.payload, dict) else None
@@ -185,38 +196,6 @@ async def _emit_result(
     return 0
 
 
-async def _terminal_failure_details(
-    runtime: Runtime,
-    execution_id: str,
-) -> tuple[object, object]:
-    after_sequence = 0
-    while True:
-        page = await runtime.event.list(
-            execution_id,
-            principal=runtime.default_principal,
-            after_sequence=after_sequence,
-            limit=100,
-        )
-        for event in reversed(page.items):
-            if event.event_type not in {
-                ExecutionEventType.EXECUTION_FAILED,
-                ExecutionEventType.EXECUTION_CANCELLED,
-            }:
-                continue
-            if not isinstance(event.payload, dict):
-                return None, {}
-            return event.payload.get("error_code"), event.payload.get("safe_error_details", {})
-        if page.next_cursor is None:
-            return None, {}
-        try:
-            next_sequence = int(page.next_cursor)
-        except (TypeError, ValueError) as error:
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
-        if next_sequence <= after_sequence:
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        after_sequence = next_sequence
-
-
 def _result_payload(result: ExecutionResult) -> dict[str, object]:
     return {
         "execution_id": result.execution_id,
@@ -225,6 +204,8 @@ def _result_payload(result: ExecutionResult) -> dict[str, object]:
         "output_schema_id": result.output_schema_id,
         "output_schema_revision": result.output_schema_revision,
         "output_schema_fingerprint": result.output_schema_fingerprint,
+        "error_code": result.error_code,
+        "safe_error_details": dict(result.safe_error_details),
     }
 
 

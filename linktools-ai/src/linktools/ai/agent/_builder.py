@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Build a Pydantic AI agent from an already materialized definition."""
+"""Build a Pydantic AI agent from an already materialized binding."""
 
 from typing import cast
 
@@ -8,16 +8,17 @@ from pydantic import BaseModel
 from pydantic_ai import Agent, TextOutput
 from pydantic_ai.models import Model
 
-from ._definition import AgentDefinition
+from ._binding import AgentBinding
 from ._output import AssistantTextOutput
 
 
 def build_pydantic_agent(
-    definition: AgentDefinition,
+    binding: AgentBinding,
     *,
     model: Model,
 ) -> "Agent[None, object]":
-    output_type: "type[BaseModel] | TextOutput" = definition.output_type
+    definition = binding.definition
+    output_type: type[BaseModel] | TextOutput = binding.output_type
     if output_type is AssistantTextOutput:
         output_type = TextOutput(_assistant_text_output)
     return cast(

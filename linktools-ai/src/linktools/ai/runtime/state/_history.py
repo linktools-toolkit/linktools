@@ -9,7 +9,7 @@ from collections.abc import AsyncIterator, Mapping, Sequence
 from dataclasses import dataclass, replace
 
 from linktools.core import environ
-from pydantic_ai.messages import ModelMessage
+from pydantic_ai.messages import ModelMessage, ModelRequest, SystemPromptPart
 
 from ...core import canonical_json_bytes
 from ...errors import AIError, ErrorCode
@@ -18,6 +18,7 @@ from .._message import decode_model_messages, encode_model_messages
 from ..service_api import SessionHistoryItem
 from ._codec import (
     _decode_enveloped_domain,
+    _encode_persisted_domain,
     encode_domain,
     encode_envelope,
 )
@@ -94,6 +95,21 @@ def _overlap_signature(message: ModelMessage) -> bytes:
     return canonical_json_bytes(remove_timestamps(value))
 
 
+def _conversation_overlap_signature(message: ModelMessage) -> bytes:
+    if not isinstance(message, ModelRequest):
+        return _overlap_signature(message)
+    return _overlap_signature(
+        replace(
+            message,
+            parts=tuple(
+                part
+                for part in message.parts
+                if not isinstance(part, SystemPromptPart)
+            ),
+        )
+    )
+
+
 def _exact_message_signature(message: ModelMessage) -> bytes:
     """Full canonical serialization including timestamp, for exact-content proof."""
     return encode_model_messages((message,))
@@ -156,7 +172,6 @@ class _ContextProjector:
         owner_id: str,
         messages: Sequence[ModelMessage],
         *,
-        binding_digest: str,
         origins: Sequence[TranscriptOrigin] = (),
         sources: Sequence[TranscriptMessageRef | None] = (),
     ) -> ContextProjection:
@@ -210,18 +225,16 @@ class _ContextProjector:
                     )
                 )
             index = end
-        digest = self._digest(binding_digest, items)
-        return ContextProjection(binding_digest, tuple(items), digest)
+        digest = self._digest(items)
+        return ContextProjection(tuple(items), digest)
 
     def _digest(
         self,
-        binding_digest: str,
         items: Sequence[TranscriptSpanRef | InlineContextBlock],
     ) -> str:
         return hashlib.sha256(
             canonical_json_bytes(
                 {
-                    "binding_digest": binding_digest,
                     "items": encode_domain(tuple(items)),
                 }
             )
@@ -294,6 +307,10 @@ class TranscriptRepository:
             0,
         )
 
+    def empty_head_record(self, owner_id: str) -> StoredRecord:
+        """Return the canonical stored record for an empty transcript head."""
+        return self._new_head_record(self.empty_head(owner_id))
+
     async def create_head_in_transaction(
         self,
         transaction: StateTransaction,
@@ -304,7 +321,7 @@ class TranscriptRepository:
         if existing is not None:
             return self._decode_head(existing)
         head = self.empty_head(owner_id)
-        await transaction.insert_record(self._new_head_record(head))
+        await transaction.insert_record(self.empty_head_record(owner_id))
         return head
 
     async def get_head_in_transaction(
@@ -320,7 +337,9 @@ class TranscriptRepository:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         try:
             head = _decode_enveloped_domain(record.data, TranscriptHeadRecord)
-        except (TypeError, ValueError, AIError) as error:
+        except AIError:
+            raise
+        except (TypeError, ValueError) as error:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
         if head.owner_domain is not self._owner_domain:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -345,7 +364,7 @@ class TranscriptRepository:
             0,
             None,
             encode_envelope(
-                {"type": "transcript_head", "payload": encode_domain(head)}
+                {"type": "transcript_head", "payload": _encode_persisted_domain(head)}
             ),
         )
 
@@ -521,7 +540,7 @@ class TranscriptRepository:
         upgraded = replace(
             head_record,
             data=encode_envelope(
-                {"type": "transcript_head", "payload": encode_domain(next_head)}
+                {"type": "transcript_head", "payload": _encode_persisted_domain(next_head)}
             ),
             storage_version=head_record.storage_version + 1,
         )
@@ -547,7 +566,7 @@ class TranscriptRepository:
                     encode_envelope(
                         {
                             "type": "transcript_chunk",
-                            "payload": encode_domain(chunk),
+                            "payload": _encode_persisted_domain(chunk),
                         }
                     ),
                 )
@@ -605,7 +624,7 @@ class TranscriptRepository:
             dimension: base
             for dimension, base, _version in dimensions
         }
-        records: list[StoredRecord] = []
+        candidates: dict[bytes, tuple[TranscriptSeekRecord, StoredRecord]] = {}
         message_cursor = base_head.message_count
         for chunk, sequence, session_item_count, execution_item_count in zip(
             chunks,
@@ -646,34 +665,45 @@ class TranscriptRepository:
                         version,
                     )
                     key = self._seek_key(owner_id, dimension, version, block_start)
-                    existing = await transaction.get_record(key)
-                    if existing is None:
-                        records.append(
-                            StoredRecord(
-                                key,
-                                self._partition("transcript_seek"),
-                                None,
-                                self._head_key(owner_id),
-                                "transcript_seek",
-                                f"b:{block_start:020d}",
-                                None,
-                                0,
-                                None,
-                                0,
-                                None,
-                                encode_envelope(
-                                    {
-                                        "type": "transcript_seek",
-                                        "payload": encode_domain(seek),
-                                    }
-                                ),
-                            )
-                        )
-                    elif self._decode_seek(existing) != seek:
+                    candidate = StoredRecord(
+                        key,
+                        self._partition("transcript_seek"),
+                        None,
+                        self._head_key(owner_id),
+                        "transcript_seek",
+                        f"b:{block_start:020d}",
+                        None,
+                        0,
+                        None,
+                        0,
+                        None,
+                        encode_envelope(
+                            {
+                                "type": "transcript_seek",
+                                "payload": _encode_persisted_domain(seek),
+                            }
+                        ),
+                    )
+                    previous = candidates.get(key)
+                    if previous is not None and previous[0] != seek:
                         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                    candidates[key] = (seek, candidate)
             message_cursor = message_end
             for dimension, _base, _version in dimensions:
                 cursors[dimension] = view_ranges[dimension][1]
+
+        if not candidates:
+            return
+        keys = tuple(candidates)
+        existing = await transaction.get_records(keys)
+        records: list[StoredRecord] = []
+        for key, (seek, candidate) in candidates.items():
+            current = existing.get(key)
+            if current is not None:
+                if self._decode_seek(current) != seek:
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                continue
+            records.append(candidate)
         if records:
             await transaction.insert_records(tuple(records))
             _logger.debug(
@@ -688,7 +718,9 @@ class TranscriptRepository:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         try:
             return _decode_enveloped_domain(record.data, TranscriptSeekRecord)
-        except (TypeError, ValueError, AIError) as error:
+        except AIError:
+            raise
+        except (TypeError, ValueError) as error:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
 
     async def prepare_projection(
@@ -737,8 +769,8 @@ class TranscriptRepository:
             changed = True
         if not changed:
             return projection
-        digest = self._projector._digest(projection.binding_digest, items)
-        return ContextProjection(projection.binding_digest, tuple(items), digest)
+        digest = self._projector._digest(items)
+        return ContextProjection(tuple(items), digest)
 
     def history_stream(self, history_id: str) -> bytes:
         return stream_digest(
@@ -920,17 +952,11 @@ class TranscriptRepository:
         history_id: str,
         *,
         tenant_id: str,
-        binding_digest: str | None = None,
     ) -> LoadedModelContext:
         require_no_run_history_lock("TranscriptRepository.load_session_model_context")
         projection = await self.load_projection(history_id)
         if projection is not None:
-            if binding_digest is not None and projection.binding_digest != binding_digest:
-                raise AIError(ErrorCode.SESSION_BINDING_MISMATCH)
-            return await self.load_model_context(
-                history_id,
-                binding_digest=binding_digest,
-            )
+            return await self.load_model_context(history_id)
         head = await self.get_head(history_id)
         if head is None:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -1024,7 +1050,7 @@ class TranscriptRepository:
             encode_envelope(
                 {
                     "type": "context_projection",
-                    "payload": encode_domain(projection),
+                    "payload": _encode_persisted_domain(projection),
                 }
             ),
         )
@@ -1115,8 +1141,6 @@ class TranscriptRepository:
     async def load_model_context(
         self,
         owner_id: str,
-        *,
-        binding_digest: str | None = None,
     ) -> LoadedModelContext:
         require_no_run_history_lock("TranscriptRepository.load_model_context")
         projection = await self.load_projection(owner_id)
@@ -1127,13 +1151,6 @@ class TranscriptRepository:
             if head.message_count:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             return LoadedModelContext(())
-        if binding_digest is not None and projection.binding_digest != binding_digest:
-            _logger.info(
-                "context projection binding mismatch: domain=%s owner=%s",
-                self._runtime_domain.value,
-                owner_id,
-            )
-            raise AIError(ErrorCode.SESSION_BINDING_MISMATCH)
         span_refs: list[tuple[TranscriptSpanRef, tuple[TranscriptMessageRef, ...]]] = []
         refs: list[TranscriptMessageRef] = []
         for item in projection.items:
@@ -1619,7 +1636,7 @@ class TranscriptRepository:
             return
         expected = end - start
         emitted = 0
-        after_sequence: "int | None" = None
+        after_sequence: int | None = None
         if seek_owner_id is not None:
             after_sequence = await self._seek_fact_sequence(seek_owner_id, start)
         while True:
@@ -1659,14 +1676,12 @@ class TranscriptRepository:
         owner_id: str,
         messages: Sequence[ModelMessage],
         *,
-        binding_digest: str,
         origins: Sequence[TranscriptOrigin] = (),
         sources: Sequence[TranscriptMessageRef | None] = (),
     ) -> ContextProjection:
         return self._projector.project(
             owner_id,
             messages,
-            binding_digest=binding_digest,
             origins=origins,
             sources=sources,
         )
@@ -1690,8 +1705,10 @@ class TranscriptRepository:
     def decode_chunk(self, fact: StoredFact) -> TranscriptChunk:
         try:
             return _decode_enveloped_domain(fact.data, TranscriptChunk)
-        except AIError as error:
-            raise ValueError("transcript chunk payload is invalid") from error
+        except AIError:
+            raise
+        except (TypeError, ValueError) as error:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
 
     def _owner_key(self, owner_id: str) -> bytes:
         return self._head_key(owner_id)

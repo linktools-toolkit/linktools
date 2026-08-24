@@ -216,7 +216,7 @@ class RuntimeStatePlan:
             if not relative.parts or relative.parts[0] in {".state-groups"} or relative.parts[0].startswith(".txn-"):
                 raise ValueError("filesystem route points at a reserved transaction path")
             grouped.setdefault(route.transaction_root, []).append(route.path)
-        for root, paths in grouped.items():
+        for paths in grouped.values():
             for index, left in enumerate(sorted(paths)):
                 for right in sorted(paths)[index + 1 :]:
                     if left in right.parents or right in left.parents:
@@ -224,7 +224,7 @@ class RuntimeStatePlan:
 
     def route(self, domain: RuntimeDomain) -> RuntimeStateRoute:
         if not isinstance(domain, RuntimeDomain):
-            raise ValueError("RuntimeDomain is required")
+            raise TypeError("RuntimeDomain is required")
         return {
             RuntimeDomain.CONVERSATION: self.conversation,
             RuntimeDomain.EXECUTION: self.execution,

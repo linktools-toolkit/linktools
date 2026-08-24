@@ -136,7 +136,7 @@ class ExecutionWorkflowResult:
 
 class ExecutionWorkflow:
     def __init__(self) -> None:
-        self._state: "ExecutionWorkflowState | None" = None
+        self._state: ExecutionWorkflowState | None = None
 
     async def run(
         self,
@@ -629,7 +629,7 @@ async def _execute_activity(
         **kwargs,
     )
     if not isinstance(result, ExecutionWorkflowState):
-        raise ValueError(f"activity {name} returned an invalid execution snapshot")
+        raise TypeError(f"activity {name} returned an invalid execution snapshot")
     return result
 
 

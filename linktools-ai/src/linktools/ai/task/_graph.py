@@ -73,11 +73,11 @@ class TaskNode:
         budget_cost: int = 1,
     ) -> None:
         if isinstance(dependencies, (str, bytes)):
-            raise ValueError("task node dependencies are invalid")
+            raise TypeError("task node dependencies are invalid")
         try:
             normalized_dependencies = tuple(dependencies)
         except TypeError as error:
-            raise ValueError("task node dependencies are invalid") from error
+            raise TypeError("task node dependencies are invalid") from error
         if (
             not isinstance(node_id, str)
             or not node_id.strip()
@@ -90,7 +90,7 @@ class TaskNode:
             raise ValueError("task node identity is invalid")
         values: Mapping[str, JsonValue] = {} if input is None else input
         if not isinstance(values, Mapping):
-            raise ValueError("task node input must be a mapping")
+            raise TypeError("task node input must be a mapping")
         normalized = _normalize_json_mapping(values)
         object.__setattr__(self, "node_id", node_id)
         object.__setattr__(self, "dependencies", normalized_dependencies)
@@ -341,8 +341,18 @@ def ready_nodes(graph: TaskGraph, completed: "frozenset[str]") -> "tuple[TaskNod
 
 
 __all__ = [
-    "CancelGraphRequest", "TaskGraphLimits", "TaskCompletionLedger", "TaskGraph",
-    "TaskGraphHandle", "TaskGraphRequest", "TaskGraphResult", "TaskGraphView", "TaskNode",
-    "TaskDependencyResult", "TaskGraphValidationError", "TaskStatus", "TaskTerminalRecord",
+    "CancelGraphRequest",
+    "TaskCompletionLedger",
+    "TaskDependencyResult",
+    "TaskGraph",
+    "TaskGraphHandle",
+    "TaskGraphLimits",
+    "TaskGraphRequest",
+    "TaskGraphResult",
+    "TaskGraphValidationError",
+    "TaskGraphView",
+    "TaskNode",
+    "TaskStatus",
+    "TaskTerminalRecord",
     "ready_nodes",
 ]

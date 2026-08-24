@@ -6,7 +6,10 @@
 from pathlib import Path
 
 import pytest
-from linktools.ai.workspace._tools import build_workspace_capabilities, build_workspace_tool_map
+from linktools.ai.workspace._tools import (
+    build_workspace_capabilities,
+    build_workspace_tool_map,
+)
 
 
 def test_workspace_capabilities_are_stable_and_root_scoped(tmp_path: Path) -> None:

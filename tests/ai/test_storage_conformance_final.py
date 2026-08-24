@@ -7,10 +7,18 @@ import hashlib
 from pathlib import Path
 
 import pytest
-
-from linktools.ai.asset import AssetKey, AssetRoot, DirectoryAssetBackend, PrefixAssetPathAdapter
+from linktools.ai.asset import (
+    AssetKey,
+    AssetRoot,
+    DirectoryAssetBackend,
+    PrefixAssetPathAdapter,
+)
 from linktools.ai.errors import AIError
-from linktools.ai.runtime.state import FilesystemStateStorageGroup, FilesystemStateStore, StoredRecord
+from linktools.ai.runtime.state import (
+    FilesystemStateStorageGroup,
+    FilesystemStateStore,
+    StoredRecord,
+)
 
 
 def _record(value: str) -> StoredRecord:

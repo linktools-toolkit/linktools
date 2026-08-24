@@ -6,6 +6,7 @@ from collections.abc import AsyncIterator, Mapping
 from dataclasses import dataclass, field
 from typing import Protocol
 
+from ..agent import AgentBindingSnapshot
 from ..core import (
     ApprovalDecision,
     ApprovalStatus,
@@ -26,7 +27,13 @@ from ..core import (
 from ..errors import AIError, ErrorCode
 from ..observe import RunSnapshot
 from ..storage import ObjectRef
-from ..task import CancelGraphRequest, TaskGraphHandle, TaskGraphRequest, TaskGraphResult, TaskGraphView
+from ..task import (
+    CancelGraphRequest,
+    TaskGraphHandle,
+    TaskGraphRequest,
+    TaskGraphResult,
+    TaskGraphView,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -107,6 +114,44 @@ class ExecutionResult:
     output_schema_revision: int | None
     output_schema_fingerprint: str | None
     usage: UsageMetrics
+    error_code: "str | None" = None
+    safe_error_details: "Mapping[str, JsonValue]" = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        details = dict(self.safe_error_details)
+        object.__setattr__(self, "safe_error_details", details)
+        if self.status is ExecutionStatus.SUCCEEDED:
+            if self.error_code is not None or details:
+                raise ValueError("successful execution result cannot carry an error")
+            return
+        if self.status is ExecutionStatus.CANCELLED:
+            if self.error_code != ErrorCode.EXECUTION_CANCELLED.value:
+                raise ValueError("cancelled execution result requires EXECUTION_CANCELLED")
+            if _has_output_contract(self):
+                raise ValueError("cancelled execution result cannot carry output")
+            return
+        if self.status is ExecutionStatus.FAILED:
+            if self.error_code is None:
+                raise ValueError("failed execution result requires an error code")
+            try:
+                code = ErrorCode(self.error_code)
+            except ValueError as error:
+                raise ValueError("failed execution result contains an unknown error code") from error
+            if code is ErrorCode.EXECUTION_CANCELLED:
+                raise ValueError("failed execution result cannot carry EXECUTION_CANCELLED")
+            if _has_output_contract(self):
+                raise ValueError("failed execution result cannot carry output")
+            return
+        raise ValueError("execution result requires a terminal status")
+
+
+def _has_output_contract(result: ExecutionResult) -> bool:
+    return (
+        result.output is not None
+        or result.output_schema_id is not None
+        or result.output_schema_revision is not None
+        or result.output_schema_fingerprint is not None
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -270,7 +315,7 @@ class CloseSessionRequest:
 @dataclass(frozen=True, slots=True)
 class SessionView:
     session_id: str
-    binding_digest: str
+    agent_id: str
     status: SessionStatus
     revision: int = 0
     resource_generation: int = 0
@@ -491,8 +536,7 @@ class WorkflowGateway(Protocol):
         workflow_id: str,
         request: ExecutionRequest,
         *,
-        binding_digest: str,
-        binding: Mapping[str, JsonValue],
+        binding: AgentBindingSnapshot,
     ) -> ExecutionHandle: ...
 
     async def update_execution(self, workflow_id: str, operation: str, payload: 'Mapping[str, JsonValue]') -> WorkflowUpdateResult: ...
@@ -517,14 +561,14 @@ class ExecutionService(Protocol):
 
 
 class SessionService(Protocol):
-    async def create(self, binding_digest: str, request: CreateSessionRequest) -> SessionView: ...
+    async def create(self, agent_id: str, request: CreateSessionRequest) -> SessionView: ...
     async def get(self, session_id: str, *, principal: Principal) -> SessionView: ...
     async def list(self, request: ListSessionRequest) -> 'Page[SessionView]': ...
     async def history(self, session_id: str, *, principal: Principal, cursor: 'str | None' = None, limit: int = 100) -> 'Page[SessionHistoryItem]': ...
     async def load(self, session_id: str, *, principal: Principal) -> LoadedSession: ...
-    async def resume(self, binding_digest: str, session_id: str, request: ResumeSessionRequest) -> ExecutionHandle: ...
-    async def fork(self, binding_digest: str, session_id: str, request: ForkSessionRequest) -> SessionView: ...
-    async def update(self, binding_digest: str, session_id: str, request: UpdateSessionRequest) -> SessionView: ...
+    async def resume(self, agent_id: str, binding_digest: str, session_id: str, request: ResumeSessionRequest) -> ExecutionHandle: ...
+    async def fork(self, agent_id: str, session_id: str, request: ForkSessionRequest) -> SessionView: ...
+    async def update(self, agent_id: str, session_id: str, request: UpdateSessionRequest) -> SessionView: ...
     async def close(self, session_id: str, request: CloseSessionRequest) -> SessionView: ...
 
 
@@ -570,17 +614,59 @@ class BudgetService(Protocol):
 
 
 __all__ = [
-    "ApprovalDecisionRequest", "ApprovalDecisionResult", "ApprovalService", "ApprovalView",
-    "ExternalSupplyRequest", "ExternalSupplyResult", "ExternalService",
-    "ArtifactDownload", "ArtifactService", "ArtifactView", "BudgetService", "CancelExecutionRequest",
-    "BudgetReservation", "BudgetReservationRequest", "BudgetSettlement", "BudgetSettlementRequest",
-    "CancelExecutionResult", "CancelGraphRequest", "CloseSessionRequest", "CompareEvaluationRequest",
-    "CreateSessionRequest", "EvaluationComparison", "EvaluationHandle", "EvaluationService",
-    "EvaluationView", "EventService", "ExecutionEvent", "ExecutionStreamEvent", "ExecutionHandle",
-    "ExecutionRequest", "ExecutionResult", "ExecutionService", "ExecutionView",
-    "ExecutionHistoryItem", "ExecutionHistoryReader", "SessionHistoryItem", "SessionHistoryReader",
-    "ForkExecutionRequest", "ForkSessionRequest", "ListSessionRequest", "LoadedSession", "Page",
-    "ReplayEvaluationRequest", "ResumeSessionRequest", "RetryExecutionRequest", "RunEvaluationRequest",
-    "SessionService", "SessionView", "TaskService", "ExecutionTraceItem", "TranscriptItem", "UpdateSessionRequest",
-    "WorkflowGateway", "WorkflowQueryResult", "WorkflowUpdateResult",
+    "ApprovalDecisionRequest",
+    "ApprovalDecisionResult",
+    "ApprovalService",
+    "ApprovalView",
+    "ArtifactDownload",
+    "ArtifactService",
+    "ArtifactView",
+    "BudgetReservation",
+    "BudgetReservationRequest",
+    "BudgetService",
+    "BudgetSettlement",
+    "BudgetSettlementRequest",
+    "CancelExecutionRequest",
+    "CancelExecutionResult",
+    "CancelGraphRequest",
+    "CloseSessionRequest",
+    "CompareEvaluationRequest",
+    "CreateSessionRequest",
+    "EvaluationComparison",
+    "EvaluationHandle",
+    "EvaluationService",
+    "EvaluationView",
+    "EventService",
+    "ExecutionEvent",
+    "ExecutionHandle",
+    "ExecutionHistoryItem",
+    "ExecutionHistoryReader",
+    "ExecutionRequest",
+    "ExecutionResult",
+    "ExecutionService",
+    "ExecutionStreamEvent",
+    "ExecutionTraceItem",
+    "ExecutionView",
+    "ExternalService",
+    "ExternalSupplyRequest",
+    "ExternalSupplyResult",
+    "ForkExecutionRequest",
+    "ForkSessionRequest",
+    "ListSessionRequest",
+    "LoadedSession",
+    "Page",
+    "ReplayEvaluationRequest",
+    "ResumeSessionRequest",
+    "RetryExecutionRequest",
+    "RunEvaluationRequest",
+    "SessionHistoryItem",
+    "SessionHistoryReader",
+    "SessionService",
+    "SessionView",
+    "TaskService",
+    "TranscriptItem",
+    "UpdateSessionRequest",
+    "WorkflowGateway",
+    "WorkflowQueryResult",
+    "WorkflowUpdateResult",
 ]

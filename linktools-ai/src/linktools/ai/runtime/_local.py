@@ -26,8 +26,8 @@ from pydantic_ai_harness.step_persistence import (
 
 from ..agent import (
     MEMORY_TOOL_NAMES,
-    AgentDefinition,
-    AgentDefinitionCatalog,
+    AgentBinding,
+    AgentCatalog,
     AgentExecutor,
     DurableBoundary,
     LiveDelta,
@@ -209,7 +209,7 @@ class LocalExecutionBackend:
         namespace: str,
         steps: StepStore,
         executor: AgentExecutor,
-        catalog: AgentDefinitionCatalog,
+        catalog: AgentCatalog,
         *,
         tenant_id: str,
         execution_root: Path,
@@ -256,6 +256,7 @@ class LocalExecutionBackend:
         self._terminal_events: dict[str, asyncio.Event] = {}
         self._pending_audit_events: dict[str, list[ExecutionEventAppend]] = {}
         self._pending_audit_locks: dict[str, asyncio.Lock] = {}
+        self._recovery_relaunch_ids: set[str] = set()
         self._accepting = True
         execution_steps = self._step_reads[RuntimeDomain.EXECUTION]
         conversation_steps = self._step_reads[RuntimeDomain.CONVERSATION]
@@ -301,14 +302,11 @@ class LocalExecutionBackend:
                 execution.tenant_id,
             )
             raise AIError(ErrorCode.AUTHORIZATION_DENIED)
-        definition = self._catalog.definition(execution.binding_digest)
+        binding = self._catalog.binding(execution.binding_digest)
         if (
             request.planning is not execution.planning
             or request.thinking is not execution.thinking
-            or (
-                execution.binding is not None
-                and execution.binding != definition.binding_snapshot
-            )
+            or execution.binding != binding.snapshot
         ):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
 
@@ -379,10 +377,10 @@ class LocalExecutionBackend:
         identity: ExecutionStartIdentity,
     ) -> ExecutionRecord:
         await self._validate_start(request, execution)
-        if execution.status is not ExecutionStatus.PENDING_START or execution.binding is None:
+        if execution.status is not ExecutionStatus.PENDING_START:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        definition = self._catalog.definition(execution.binding_digest)
-        if execution.binding != definition.binding_snapshot:
+        binding = self._catalog.binding(execution.binding_digest)
+        if execution.binding != binding.snapshot:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         now = datetime.now(timezone.utc)
         recovery_input = RecoveryExecutionInput(
@@ -391,7 +389,6 @@ class LocalExecutionBackend:
             principal_kind=request.principal.kind,
             session_id=execution.session_id,
             memory_scope=execution.memory_scope,
-            agent_id=definition.spec.id,
             binding_digest=execution.binding_digest,
             lineage_kind=execution.lineage_kind.value,
             parent_execution_id=execution.parent_execution_id,
@@ -696,7 +693,7 @@ class LocalExecutionBackend:
             failure = _WorkerFailure(error.code, dict(error.safe_details))
         else:
             failure = _WorkerFailure(
-                ErrorCode.STORAGE_INTEGRITY_ERROR,
+                ErrorCode.INTERNAL_ERROR,
                 {"phase": "local_execution_worker"},
             )
         details = dict(failure.safe_details)
@@ -791,12 +788,59 @@ class LocalExecutionBackend:
             for checkpoint in page.items:
                 if checkpoint.state is RecoveryCheckpointState.COMPLETED:
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                await self._reconcile_checkpoint(checkpoint)
+                try:
+                    await self._reconcile_checkpoint(checkpoint)
+                except AIError as error:
+                    if error.code is not ErrorCode.AGENT_DEFINITION_UNAVAILABLE:
+                        raise
+                    _logger.warning(
+                        "recovery reconciliation deferred: execution=%s",
+                        checkpoint.execution_id,
+                    )
             if page.next_cursor is None:
                 return
             cursor = page.next_cursor
 
     async def _reconcile_checkpoint(self, checkpoint: RecoveryCheckpoint) -> None:
+        recovery_input = checkpoint.input
+        principal = Principal(recovery_input.principal_id, checkpoint.tenant_id, recovery_input.principal_kind)
+        execution = await self._execution.executions.get(checkpoint.execution_id, tenant_id=checkpoint.tenant_id)
+        if execution is not None and (
+            execution.execution_id != checkpoint.execution_id
+            or execution.tenant_id != checkpoint.tenant_id
+            or execution.binding_digest != recovery_input.binding_digest
+            or execution.parent_execution_id != recovery_input.parent_execution_id
+            or execution.root_execution_id != recovery_input.root_execution_id
+            or execution.source_execution_id != recovery_input.source_execution_id
+            or execution.base_execution_id != recovery_input.base_execution_id
+            or execution.conversation_step_run_id != recovery_input.conversation_step_run_id
+            or execution.lineage_kind.value != recovery_input.lineage_kind
+            or execution.planning is not recovery_input.planning
+            or execution.thinking is not recovery_input.thinking
+            or execution.binding != recovery_input.binding
+        ):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        if checkpoint.handoff_phase is not RecoveryHandoffPhase.NONE:
+            self._validate_recovery_handoff_integrity(checkpoint, execution)
+        if (
+            checkpoint.handoff_phase is RecoveryHandoffPhase.NONE
+            and execution is not None
+            and execution.status
+            in {
+                ExecutionStatus.SUCCEEDED,
+                ExecutionStatus.FAILED,
+                ExecutionStatus.CANCELLED,
+            }
+        ):
+            if execution.session_id is not None:
+                await self._conversation.sessions.release_execution(
+                    execution.session_id,
+                    tenant_id=execution.tenant_id,
+                    execution_id=execution.execution_id,
+                )
+            await self._finish_checkpoint(checkpoint)
+            return
+        self._catalog.binding(recovery_input.binding_digest)
         if checkpoint.handoff_phase is not RecoveryHandoffPhase.NONE:
             if (
                 self._handoff_contract_digest is None
@@ -806,45 +850,14 @@ class LocalExecutionBackend:
                 raise AIError(ErrorCode.STORAGE_DEPENDENCY_NOT_READY)
             await self._reconcile_handoff(checkpoint)
             return
-        recovery_input = checkpoint.input
-        principal = Principal(recovery_input.principal_id, checkpoint.tenant_id, recovery_input.principal_kind)
-        execution = await self._execution.executions.get(checkpoint.execution_id, tenant_id=checkpoint.tenant_id)
-        if execution is not None and execution.status in {
-            ExecutionStatus.SUCCEEDED,
-            ExecutionStatus.FAILED,
-            ExecutionStatus.CANCELLED,
-        }:
-            if execution.session_id is not None:
-                await self._conversation.sessions.release_execution(
-                    execution.session_id,
-                    tenant_id=execution.tenant_id,
-                    execution_id=execution.execution_id,
-                )
-            await self._finish_checkpoint(checkpoint)
-            return
-        if execution is not None:
-            if (
-                execution.binding_digest != recovery_input.binding_digest
-                or execution.parent_execution_id != recovery_input.parent_execution_id
-                or execution.root_execution_id != recovery_input.root_execution_id
-                or execution.source_execution_id != recovery_input.source_execution_id
-                or execution.base_execution_id != recovery_input.base_execution_id
-                or execution.conversation_step_run_id != recovery_input.conversation_step_run_id
-                or execution.lineage_kind.value != recovery_input.lineage_kind
-                or execution.planning is not recovery_input.planning
-                or execution.thinking is not recovery_input.thinking
-                or execution.binding != recovery_input.binding
-            ):
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         if execution is None:
             execution = await self._create_recovery_execution(checkpoint)
         if checkpoint.state in {
             RecoveryCheckpointState.ADMITTED,
             RecoveryCheckpointState.ACTIVE,
             RecoveryCheckpointState.WAITING,
-        }:
-            if not await self._reconcile_session_recovery(execution):
-                return
+        } and not await self._reconcile_session_recovery(execution):
+            return
         if (
             checkpoint.state is RecoveryCheckpointState.ADMITTED
             and execution.status is ExecutionStatus.PENDING_START
@@ -906,6 +919,7 @@ class LocalExecutionBackend:
             planning=recovery_input.planning,
             thinking=recovery_input.thinking,
         )
+        self._recovery_relaunch_ids.add(checkpoint.execution_id)
         await self.launch(request, execution)
         _logger.info(
             "local recovery execution relaunched: tenant=%s execution=%s",
@@ -1012,6 +1026,36 @@ class LocalExecutionBackend:
             )
             return False
         return True
+
+    def _validate_recovery_handoff_integrity(
+        self,
+        checkpoint: RecoveryCheckpoint,
+        execution: ExecutionRecord | None,
+    ) -> None:
+        handoff = checkpoint.terminal_handoff
+        if handoff is None:
+            raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
+        outcome = handoff.outcome
+        if outcome.terminal_status in {ExecutionStatus.FAILED, ExecutionStatus.CANCELLED} and (
+            handoff.conversation is not None
+            or outcome.output is not None
+            or any(
+                value is not None
+                for value in (
+                    outcome.output_schema_id,
+                    outcome.output_schema_revision,
+                    outcome.output_schema_fingerprint,
+                )
+            )
+        ):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        if (
+            execution is not None
+            and execution.status
+            in {ExecutionStatus.SUCCEEDED, ExecutionStatus.FAILED, ExecutionStatus.CANCELLED}
+            and execution.status is not outcome.terminal_status
+        ):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
 
     async def _validate_handoff_output(self, outcome: RecoveryTerminalOutcome) -> None:
         output = outcome.output
@@ -1800,6 +1844,12 @@ class LocalExecutionBackend:
         checkpoint: RecoveryCheckpoint | None = None
         run_id: str | None = None
         recovery_history_run_id: str | None = None
+        try:
+            recovery_relaunch_ids = self._recovery_relaunch_ids
+        except AttributeError:
+            recovery_relaunch_ids = set()
+        exact_recovery_context = execution_id in recovery_relaunch_ids
+        recovery_relaunch_ids.discard(execution_id)
         operation_started_at = monotonic()
         operation_result = "failure"
         try:
@@ -1836,6 +1886,7 @@ class LocalExecutionBackend:
                     RecoveryCheckpointState.ACTIVE,
                     RecoveryCheckpointState.WAITING,
                 }:
+                    exact_recovery_context = True
                     if (
                         checkpoint.step_run_id is None
                         or checkpoint.agent_run_sequence != current.agent_run_sequence
@@ -1851,9 +1902,10 @@ class LocalExecutionBackend:
                     expected_revision=current.revision,
                     expected_agent_run_sequence=current.agent_run_sequence,
                 )
-            definition = self._catalog.definition(current.binding_digest)
-            if current.binding is not None and current.binding != definition.binding_snapshot:
+            binding = self._catalog.binding(current.binding_digest)
+            if current.binding != binding.snapshot:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            definition = binding.definition
             run_id = (
                 checkpoint.step_run_id
                 if checkpoint is not None and checkpoint.step_run_id is not None
@@ -1877,7 +1929,12 @@ class LocalExecutionBackend:
                     tenant_id=current.tenant_id,
                 )
             )
-            history_id = None if session is None else session.history_id
+            history_id = (
+                None
+                if session is None
+                else session.history_id
+                or (None if session.continuation is None else session.continuation.history_id)
+            )
             tool_owner = f"tool:{execution_id}:{uuid.uuid4().hex}"
             if self._recovery_enabled:
                 if checkpoint is None:
@@ -1937,25 +1994,32 @@ class LocalExecutionBackend:
                     )
                     else None
                 ),
-                step_store=self._steps,
             ) if tool_repository is not None else None
             loaded_context = LoadedModelContext(())
+            session_history_source = (
+                current.lineage_kind is ExecutionLineageKind.SESSION_RESUME
+                and history_id is not None
+            )
             if recovery_history_run_id is not None:
                 loaded_context = await self._steps.load_loaded_model_context(
                     RuntimeDomain.RECOVERY,
                     recovery_history_run_id,
-                    binding_digest=current.binding_digest,
                 )
-            elif history_id is not None:
+            elif session_history_source:
                 loaded_context = await self._steps.load_loaded_model_context(
                     RuntimeDomain.CONVERSATION,
                     history_id,
-                    binding_digest=current.binding_digest,
                 )
-            if recovery_history_run_id is not None or history_id is not None:
+            if recovery_history_run_id is not None or (
+                session_history_source and loaded_context.messages
+            ):
                 history = list(loaded_context.model_messages())
             else:
                 history = await self._history(current)
+            session_history_start = (
+                current.lineage_kind is ExecutionLineageKind.SESSION_RESUME
+                and bool(history)
+            )
             if isinstance(self._steps, RuntimeStepStore):
                 self._steps.register_context_baseline(run_id, loaded_context)
 
@@ -1999,7 +2063,7 @@ class LocalExecutionBackend:
                 )
             try:
                 result = await self._executor.execute(
-                    definition,
+                    binding,
                     request.user_prompt,
                     history,
                     conversation_id,
@@ -2034,6 +2098,9 @@ class LocalExecutionBackend:
                     event_sink=sink,
                     usage_sink=lambda usage: self._capture_usage(execution_id, usage),
                     tool_operations=tool_operations,
+                    replace_history_system_prompt=(
+                        session_history_start and not exact_recovery_context
+                    ),
                 )
             except Exception as error:
                 if _is_infrastructure_error(error):
@@ -2047,7 +2114,32 @@ class LocalExecutionBackend:
                     ExecutionStatus.FAILED,
                     ExecutionStatus.CANCELLED,
                 }:
-                    await self._commit_failure(current, error, run_id=run_id)
+                    try:
+                        await self._commit_failure(current, error, run_id=run_id)
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception as commit_error:
+                        try:
+                            persisted = await self._execution.executions.get(
+                                execution_id,
+                                tenant_id=original.tenant_id,
+                            )
+                        except asyncio.CancelledError:
+                            raise
+                        except Exception as readback_error:  # noqa: BLE001
+                            raise _secondary_execution_error(readback_error, error) from error
+                        if persisted is not None and persisted.status in {
+                            ExecutionStatus.SUCCEEDED,
+                            ExecutionStatus.FAILED,
+                            ExecutionStatus.CANCELLED,
+                        }:
+                            operation_result = _execution_operation_result(persisted.status)
+                            _logger.exception(
+                                "terminal finalization failed after durable execution terminal: execution=%s",
+                                execution_id,
+                            )
+                            return
+                        raise _secondary_execution_error(commit_error, error) from error
                 persisted = await self._execution.executions.get(
                     execution_id,
                     tenant_id=original.tenant_id,
@@ -2055,15 +2147,14 @@ class LocalExecutionBackend:
                 if persisted is None:
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                 operation_result = _execution_operation_result(persisted.status)
-                _logger.error(
+                _logger.exception(
                     "local execution failed: execution=%s",
                     execution_id,
-                    exc_info=True,
                 )
                 return
             await self._commit_success(
                 current,
-                definition,
+                binding,
                 result.output,
                 result.usage,
                 run_id,
@@ -2090,10 +2181,9 @@ class LocalExecutionBackend:
                 operation_result = _execution_operation_result(persisted.status)
             raise
         except Exception:
-            _logger.error(
+            _logger.exception(
                 "local execution infrastructure failure: execution=%s",
                 execution_id,
-                exc_info=True,
             )
             raise
         finally:
@@ -2141,7 +2231,6 @@ class LocalExecutionBackend:
                         (
                             await recovery_archive.load_loaded_model_context(
                                 owner_id=recovery_run_id,
-                                binding_digest=execution.binding_digest,
                             )
                         ).model_messages()
                     )
@@ -2162,12 +2251,23 @@ class LocalExecutionBackend:
                 tenant_id=execution.tenant_id,
             )
         )
-        if session is not None and session.history_id is not None:
+        if (
+            execution.lineage_kind is ExecutionLineageKind.SESSION_RESUME
+            and session is not None
+            and (
+                session.history_id is not None
+                or (
+                    session.continuation is not None
+                    and session.continuation.history_id is not None
+                )
+            )
+        ):
+            history_id = session.history_id or session.continuation.history_id
             try:
                 return [
                     message
                     async for message in self._steps.iter_session_messages(
-                        session.history_id,
+                        history_id,
                         tenant_id=execution.tenant_id,
                     )
                 ]
@@ -2254,7 +2354,7 @@ class LocalExecutionBackend:
     async def _commit_success(
         self,
         execution: ExecutionRecord,
-        definition: AgentDefinition,
+        binding: AgentBinding,
         output: JsonValue,
         usage: UsageMetrics,
         run_id: str,
@@ -2288,7 +2388,7 @@ class LocalExecutionBackend:
                 output_payload,
                 None,
                 StopReason.END_TURN,
-                definition=definition,
+                binding=binding,
                 run_id=run_id,
                 usage=usage,
             )
@@ -2325,7 +2425,7 @@ class LocalExecutionBackend:
             output_payload,
             None,
             StopReason.END_TURN,
-            definition=definition,
+            binding=binding,
             run_id=run_id,
             usage=usage,
             expected_cursor=expected_cursor,
@@ -2346,7 +2446,11 @@ class LocalExecutionBackend:
             )
             if session is None:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            history_id = session.history_id
+            history_id = session.history_id or (
+                None
+                if session.continuation is None
+                else session.continuation.history_id
+            )
         if execution.conversation_step_run_id is not None:
             return ConversationCursor(
                 execution.conversation_step_run_id,
@@ -2441,7 +2545,8 @@ class LocalExecutionBackend:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         next_cursor = ConversationCursor(
             source_run_id,
-            history_id=session.history_id,
+            history_id=session.history_id
+            or (None if session.continuation is None else session.continuation.history_id),
         )
         conversation_archive = self._step_reads[RuntimeDomain.CONVERSATION]
         if isinstance(conversation_archive, StateStepArchive):
@@ -2457,7 +2562,6 @@ class LocalExecutionBackend:
                     next_cursor=next_cursor,
                     step_run=run,
                     snapshot=snapshot,
-                    binding_digest=execution.binding_digest,
                 )
             except AIError as error:
                 if error.code is not ErrorCode.STORAGE_COMMIT_UNKNOWN:
@@ -2522,14 +2626,15 @@ class LocalExecutionBackend:
         )
 
     async def _commit_failure(self, execution: ExecutionRecord, error: Exception, *, run_id: str | None = None) -> None:
-        code = ErrorCode.OUTPUT_VALIDATION_FAILED if isinstance(error, ValidationError) else error.code if isinstance(error, AIError) else ErrorCode.EXECUTION_FAILED
-        details = error.safe_details if isinstance(error, AIError) else {}
+        code = _execution_error_code(error)
+        details = _execution_error_details(error)
+        cancelled = code is ErrorCode.EXECUTION_CANCELLED
         await self._commit_terminal(
             execution,
-            ExecutionStatus.FAILED,
+            ExecutionStatus.CANCELLED if cancelled else ExecutionStatus.FAILED,
             None,
             code.value,
-            StopReason.ERROR,
+            StopReason.CANCELLED if cancelled else StopReason.ERROR,
             run_id=run_id,
             safe_error_details=details,
         )
@@ -2542,7 +2647,7 @@ class LocalExecutionBackend:
         error_code: str | None,
         stop_reason: StopReason,
         *,
-        definition: AgentDefinition | None = None,
+        binding: AgentBinding | None = None,
         run_id: str | None = None,
         usage: UsageMetrics | None = None,
         safe_error_details: Mapping[str, JsonValue] | None = None,
@@ -2570,11 +2675,11 @@ class LocalExecutionBackend:
         schema_revision: int | None = None
         schema_fingerprint: str | None = None
         if status is ExecutionStatus.SUCCEEDED:
-            if definition is None or output is None:
+            if binding is None or output is None:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            schema_id = definition.output_binding.schema_id
-            schema_revision = definition.output_binding.schema_revision
-            schema_fingerprint = definition.output_schema_fingerprint
+            schema_id = binding.output_binding.schema_id
+            schema_revision = binding.output_binding.schema_revision
+            schema_fingerprint = binding.output_schema_fingerprint
         elif output is not None:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         if self._recovery_enabled:
@@ -2600,7 +2705,7 @@ class LocalExecutionBackend:
                     output=output,
                     error_code=error_code,
                     stop_reason=stop_reason,
-                    definition=definition,
+                    binding=binding,
                     run_id=run_id,
                     usage=captured_usage,
                     safe_error_details=safe_error_details,
@@ -2645,7 +2750,15 @@ class LocalExecutionBackend:
                     conversation = RecoveryConversationIntent(
                         current.session_id,
                         await self._expected_session_cursor(current),
-                        ConversationCursor(run_id, history_id=session.history_id),
+                        ConversationCursor(
+                            run_id,
+                            history_id=session.history_id
+                            or (
+                                None
+                                if session.continuation is None
+                                else session.continuation.history_id
+                            ),
+                        ),
                     )
                 terminal_event_type = (
                     ExecutionEventType.EXECUTION_SUCCEEDED
@@ -2806,7 +2919,7 @@ class LocalExecutionBackend:
         output: StoredPayload | None,
         error_code: str | None,
         stop_reason: StopReason,
-        definition: AgentDefinition | None,
+        binding: AgentBinding | None,
         run_id: str | None,
         usage: UsageMetrics,
         safe_error_details: Mapping[str, JsonValue] | None,
@@ -2815,11 +2928,16 @@ class LocalExecutionBackend:
         recovery_run = None
         recovery_snapshot = None
         if run_id is not None and status is not ExecutionStatus.SUCCEEDED:
-            recovery_run = await self._steps.get_run(run_id=run_id)
-            recovery_snapshot = await self._steps.latest_snapshot(
+            candidate_run = await self._steps.get_run(run_id=run_id)
+            candidate_snapshot = await self._steps.latest_snapshot(
                 run_id=run_id,
                 include_interrupted=True,
             )
+            if candidate_snapshot is not None:
+                if candidate_run is None:
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                recovery_run = candidate_run
+                recovery_snapshot = candidate_snapshot
         await self.verify_terminal_projection(
             current,
             status,
@@ -2830,11 +2948,11 @@ class LocalExecutionBackend:
         schema_revision: int | None = None
         schema_fingerprint: str | None = None
         if status is ExecutionStatus.SUCCEEDED:
-            if definition is None or output is None:
+            if binding is None or output is None:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            schema_id = definition.output_binding.schema_id
-            schema_revision = definition.output_binding.schema_revision
-            schema_fingerprint = definition.output_schema_fingerprint
+            schema_id = binding.output_binding.schema_id
+            schema_revision = binding.output_binding.schema_revision
+            schema_fingerprint = binding.output_schema_fingerprint
         elif output is not None:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         terminal = _terminal_record(
@@ -2933,6 +3051,9 @@ class LocalExecutionBackend:
                     )
                     for sequence in range(1, current.agent_run_sequence + 1)
                 )
+                candidate_run_ids = await self._existing_execution_run_ids(
+                    candidate_run_ids
+                )
                 terminal_plan = await self._step_lifecycle.prepare_execution_terminal_seal(
                     execution_id=current.execution_id,
                     run_ids=candidate_run_ids,
@@ -3014,6 +3135,28 @@ class LocalExecutionBackend:
         )
 
 
+    async def _existing_execution_run_ids(
+        self,
+        candidate_run_ids: Sequence[str],
+    ) -> tuple[str, ...]:
+        existing: list[str] = []
+        execution_archive = self._step_reads[RuntimeDomain.EXECUTION]
+        for run_id in dict.fromkeys(candidate_run_ids):
+            staged = await self._steps.get_run(run_id=run_id)
+            if staged is not None:
+                existing.append(run_id)
+                continue
+            archived = await execution_archive.get_run(run_id=run_id)
+            if archived is not None:
+                existing.append(run_id)
+                continue
+            if isinstance(execution_archive, StateStepArchive):
+                head = await execution_archive.execution_history_head(run_id)
+                if head != (0, 0, 0, "empty"):
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        return tuple(existing)
+
+
     async def _commit_execution_terminal_checkpoint_locked(
         self,
         current: ExecutionRecord,
@@ -3086,7 +3229,11 @@ class LocalExecutionBackend:
                 )
                 if session is None:
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                history_id = session.history_id
+                history_id = session.history_id or (
+                    None
+                    if session.continuation is None
+                    else session.continuation.history_id
+                )
             next_cursor = ConversationCursor(run_id, history_id=history_id)
         committed = await self._runtime_commands.commit_terminal_checkpoint(
             commit,
@@ -3119,7 +3266,7 @@ class LocalExecutionBackend:
                 tenant_id=execution.tenant_id,
                 execution_id=execution.execution_id,
             )
-        except BaseException:
+        except Exception:
             _logger.error(
                 "session admission release failed after terminal: execution=%s",
                 execution.execution_id,
@@ -3183,6 +3330,42 @@ def _admission_matches(existing: RecoveryCheckpoint, candidate: RecoveryCheckpoi
         and existing.terminal_handoff is None
         and existing.handoff_contract_digest is None
         and existing.pending_operation_id is None
+    )
+
+
+def _execution_error_code(error: Exception) -> ErrorCode:
+    if isinstance(error, ValidationError):
+        return ErrorCode.OUTPUT_VALIDATION_FAILED
+    if isinstance(error, AIError):
+        return error.code
+    return ErrorCode.INTERNAL_ERROR
+
+
+def _execution_error_details(error: Exception) -> dict[str, JsonValue]:
+    return dict(error.safe_details) if isinstance(error, AIError) else {}
+
+
+def _secondary_execution_error(error: Exception, primary: Exception) -> AIError:
+    primary_details: dict[str, JsonValue] = {
+        "primary_error_code": _execution_error_code(primary).value,
+        "primary_safe_error_details": _execution_error_details(primary),
+    }
+    if isinstance(error, AIError):
+        details = dict(error.safe_details)
+        details.update(primary_details)
+        return AIError(
+            error.code,
+            category=error.category,
+            retryable=error.retryable,
+            operation_id=error.operation_id,
+            safe_details=details,
+        )
+    return AIError(
+        ErrorCode.INTERNAL_ERROR,
+        safe_details={
+            "phase": "execution_terminal_commit",
+            **primary_details,
+        },
     )
 
 

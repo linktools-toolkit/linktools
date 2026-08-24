@@ -17,8 +17,8 @@ from ._store import (
     OperationQuery,
     OperationScanCursor,
     RecordQuery,
-    RecordScanCursor,
     RecordReplacement,
+    RecordScanCursor,
     StateCallback,
     StateGroupCallback,
     StateStorageGroup,
@@ -217,7 +217,7 @@ class MemoryStateStore:
                 self._operation_streams.pop(stream, None)
 
 
-class _MemoryOverlay(Generic[KeyT, MapValueT], MutableMapping[KeyT, MapValueT]):
+class _MemoryOverlay(Generic[KeyT, MapValueT], MutableMapping[KeyT, MapValueT]):  # noqa: PYI059
     def __init__(self, base: Mapping[KeyT, MapValueT]) -> None:
         self._base = base
         self._changes: dict[KeyT, MapValueT] = {}
