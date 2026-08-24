@@ -6,86 +6,16 @@ on:
       - master
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
-  migrate-strenum:
-    if: github.event_name == 'pull_request'
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          ref: refactor/unified-release-gates
-      - name: Rewrite StrEnum imports
-        run: |
-          python - <<'PY'
-          from pathlib import Path
-
-          replacements = {
-              "linktools-ai/src/linktools/ai/errors.py": "from ._compat import StrEnum",
-              "linktools-ai/src/linktools/ai/core/_value.py": "from .._compat import StrEnum",
-              "linktools-ai/src/linktools/ai/core/_principal.py": "from .._compat import StrEnum",
-              "linktools-ai/src/linktools/ai/core/_redaction.py": "from .._compat import StrEnum",
-              "linktools-ai/src/linktools/ai/storage/_contracts.py": "from .._compat import StrEnum",
-              "linktools-ai/src/linktools/ai/storage/_layer.py": "from .._compat import StrEnum",
-              "linktools-ai/src/linktools/ai/storage/_dialects.py": "from .._compat import StrEnum",
-              "linktools-ai/src/linktools/ai/asset/_logical.py": "from .._compat import StrEnum",
-              "linktools-ai/src/linktools/ai/runtime/_tool.py": "from .._compat import StrEnum",
-              "linktools-ai/src/linktools/ai/runtime/_execution.py": "from .._compat import StrEnum",
-              "linktools-ai/src/linktools/ai/runtime/state/_plan.py": "from ..._compat import StrEnum",
-              "linktools-ai/src/linktools/ai/runtime/state/_durability.py": "from ..._compat import StrEnum",
-              "linktools-ai/src/linktools/ai/runtime/state/_root.py": "from ..._compat import StrEnum",
-              "linktools-ai/src/linktools/ai/runtime/state/_contracts.py": "from ..._compat import StrEnum",
-              "linktools-ai/src/linktools/ai/runtime/state/_readmodel.py": "from ..._compat import StrEnum",
-              "linktools-ai/src/linktools/ai/runtime/state/_steps.py": "from ..._compat import StrEnum",
-              "linktools-ai/src/linktools/ai/temporal/workflow/_execution.py": "from ..._compat import StrEnum",
-          }
-          for filename, replacement in replacements.items():
-              path = Path(filename)
-              text = path.read_text(encoding="utf-8")
-              old = "from enum import StrEnum"
-              if text.count(old) == 1 and replacement not in text:
-                  path.write_text(text.replace(old, replacement), encoding="utf-8")
-              elif text.count(old) == 0 and text.count(replacement) == 1:
-                  continue
-              else:
-                  raise SystemExit(f"unexpected StrEnum import state in {filename}")
-
-          test_path = Path("tests/ai/test_contracts.py")
-          text = test_path.read_text(encoding="utf-8")
-          old = "from enum import Enum, IntEnum, StrEnum"
-          replacement = "from enum import Enum, IntEnum"
-          compat = "from linktools.ai._compat import StrEnum\n"
-          if text.count(old) == 1 and compat not in text:
-              text = text.replace(old, replacement)
-              anchor = "from linktools.ai.agent import AgentBindingSnapshot\n"
-              if text.count(anchor) != 1:
-                  raise SystemExit("unexpected test import anchor")
-              text = text.replace(anchor, compat + anchor)
-              test_path.write_text(text, encoding="utf-8")
-          elif text.count(old) == 0 and text.count(compat) == 1:
-              pass
-          else:
-              raise SystemExit("unexpected test StrEnum import state")
-          PY
-          git diff --check
-      - name: Commit migration
-        run: |
-          if git diff --quiet; then
-            exit 0
-          fi
-          git config user.name github-actions[bot]
-          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
-          git add linktools-ai/src/linktools/ai tests/ai/test_contracts.py
-          git commit -m "fix: support ai on Python 3.10"
-          git push origin HEAD:refactor/unified-release-gates
-
   diagnose:
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
         gate:
+          - cntr-tests
           - ai-ruff-gates
           - ai-ruff-runtime
           - ai-ruff-commands
@@ -105,6 +35,9 @@ jobs:
         shell: bash
         run: |
           case "${{ matrix.gate }}" in
+            cntr-tests)
+              python -m pytest -q -p no:cacheprovider tests/cntr
+              ;;
             ai-ruff-gates)
               ruff check --no-cache scripts/check/ai
               ;;
