@@ -15,6 +15,8 @@ if TYPE_CHECKING:
 
 
 class RuntimeDomain(str, Enum):
+    __str__ = str.__str__
+    __format__ = str.__format__
     CONVERSATION = "conversation"
     EXECUTION = "execution"
     MEMORY = "memory"
@@ -25,12 +27,16 @@ class RuntimeDomain(str, Enum):
 
 
 class RuntimeRetentionMode(str, Enum):
+    __str__ = str.__str__
+    __format__ = str.__format__
     DURABLE = "durable"
     VOLATILE = "volatile"
     TRANSIENT = "transient"
 
 
 class _RuntimeStateBackendKind(str, Enum):
+    __str__ = str.__str__
+    __format__ = str.__format__
     MEMORY = "memory"
     FILESYSTEM = "filesystem"
     SQLITE = "sqlite"

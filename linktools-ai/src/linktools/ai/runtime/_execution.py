@@ -179,6 +179,8 @@ class ExecutionBackend(Protocol):
 
 
 class CancelEffectOutcome(str, Enum):
+    __str__ = str.__str__
+    __format__ = str.__format__
     CONFIRMED = "CONFIRMED"
     UNKNOWN = "UNKNOWN"
 

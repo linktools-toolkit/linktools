@@ -37,6 +37,8 @@ if TYPE_CHECKING:
 
 
 class _RuntimeStateLifecycle(str, Enum):
+    __str__ = str.__str__
+    __format__ = str.__format__
     NEW = "new"
     INITIALIZING = "initializing"
     READY = "ready"

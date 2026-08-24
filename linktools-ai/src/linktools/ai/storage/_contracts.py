@@ -42,12 +42,16 @@ class StorageRevision:
 
 
 class StorageEntryStatus(str, Enum):
+    __str__ = str.__str__
+    __format__ = str.__format__
     NORMAL = "NORMAL"
     DELETED = "DELETED"
     RESET = "RESET"
 
 
 class StorageOperation(str, Enum):
+    __str__ = str.__str__
+    __format__ = str.__format__
     PUT = "PUT"
     DELETE = "DELETE"
     RESET = "RESET"
@@ -147,6 +151,8 @@ class StorageBatchResult(Generic[InfoT, KeyT]):
 
 
 class MetadataLoadMode(str, Enum):
+    __str__ = str.__str__
+    __format__ = str.__format__
     REPLACE = "REPLACE"
     PATCH = "PATCH"
 

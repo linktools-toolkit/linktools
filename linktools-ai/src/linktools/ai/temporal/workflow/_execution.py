@@ -30,6 +30,8 @@ CONTINUE_EVENT_THRESHOLD = 10000
 
 
 class WorkflowPhase(str, Enum):
+    __str__ = str.__str__
+    __format__ = str.__format__
     LOADING = "LOADING"
     RESERVING_BUDGET = "RESERVING_BUDGET"
     RUNNING_AGENT = "RUNNING_AGENT"

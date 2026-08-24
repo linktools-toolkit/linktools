@@ -14,6 +14,8 @@ ValueT = TypeVar("ValueT")
 
 
 class DurableCommitState(str, Enum):
+    __str__ = str.__str__
+    __format__ = str.__format__
     COMMITTED = "committed"
     NOT_COMMITTED = "not_committed"
     PARTIAL_INTEGRITY_ERROR = "partial_integrity_error"

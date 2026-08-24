@@ -168,6 +168,8 @@ class ToolDescriptor:
 
 
 class ToolAuthorization(str, Enum):
+    __str__ = str.__str__
+    __format__ = str.__format__
     ALLOW = "ALLOW"
     DENY = "DENY"
     REQUIRE_APPROVAL = "REQUIRE_APPROVAL"

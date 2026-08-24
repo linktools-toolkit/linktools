@@ -217,6 +217,8 @@ def _chunk_message_groups(
 
 
 class _RunDurabilityKind(str, Enum):
+    __str__ = str.__str__
+    __format__ = str.__format__
     PROJECTION = "projection"
     SNAPSHOT = "snapshot"
     TOOL_EFFECT = "tool_effect"

@@ -110,11 +110,15 @@ class ConversationHistoryIndexNodeRecord:
 
 
 class TranscriptOrigin(str, Enum):
+    __str__ = str.__str__
+    __format__ = str.__format__
     RAW = "raw"
     UNKNOWN = "unknown"
 
 
 class TranscriptOwnerDomain(str, Enum):
+    __str__ = str.__str__
+    __format__ = str.__format__
     CONVERSATION = "conversation"
     EXECUTION = "execution"
     RECOVERY = "recovery"
@@ -139,6 +143,8 @@ class TranscriptChunk:
 
 
 class TranscriptSeekDimension(str, Enum):
+    __str__ = str.__str__
+    __format__ = str.__format__
     MESSAGE = "message"
     SESSION_HISTORY_ITEM = "session_history_item"
     EXECUTION_TRANSCRIPT_ITEM = "execution_transcript_item"
@@ -267,6 +273,8 @@ class StoredStepSnapshot:
 
 
 class HistoryQuality(str, Enum):
+    __str__ = str.__str__
+    __format__ = str.__format__
     COMPLETE = "complete"
     CONSERVATIVE = "conservative"
 
@@ -451,6 +459,8 @@ class ExecutionHistorySealRecord:
 
 
 class ExecutionHistoryState(str, Enum):
+    __str__ = str.__str__
+    __format__ = str.__format__
     OPEN = "open"
     SEALED = "sealed"
 
@@ -801,6 +811,8 @@ class RecoveryStateRecord:
 
 
 class RecoveryCheckpointState(str, Enum):
+    __str__ = str.__str__
+    __format__ = str.__format__
     ADMITTED = "admitted"
     ACTIVE = "active"
     WAITING = "waiting"
@@ -809,6 +821,8 @@ class RecoveryCheckpointState(str, Enum):
 
 
 class RecoveryHandoffPhase(str, Enum):
+    __str__ = str.__str__
+    __format__ = str.__format__
     NONE = "none"
     PREPARED = "prepared"
     CONVERSATION_RESOLVED = "conversation_resolved"

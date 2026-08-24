@@ -12,6 +12,8 @@ from ._value import Principal, PrincipalKind, ResourceKind
 
 
 class AuthorizationAction(str, Enum):
+    __str__ = str.__str__
+    __format__ = str.__format__
     EXECUTION_RUN = "execution.run"
     EXECUTION_READ = "execution.read"
     EXECUTION_CANCEL = "execution.cancel"

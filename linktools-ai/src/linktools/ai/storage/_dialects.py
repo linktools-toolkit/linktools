@@ -53,6 +53,8 @@ class InsertResult:
 
 
 class IntegrityViolationKind(str, Enum):
+    __str__ = str.__str__
+    __format__ = str.__format__
     UNIQUE_CONFLICT = "unique_conflict"
     FOREIGN_KEY = "foreign_key"
     CHECK = "check"
@@ -60,6 +62,8 @@ class IntegrityViolationKind(str, Enum):
 
 
 class SqlErrorKind(str, Enum):
+    __str__ = str.__str__
+    __format__ = str.__format__
     INTEGRITY = "integrity"
     RETRYABLE_TRANSACTION = "retryable_transaction"
     DATABASE = "database"
@@ -67,11 +71,15 @@ class SqlErrorKind(str, Enum):
 
 
 class SqlTransactionPhase(str, Enum):
+    __str__ = str.__str__
+    __format__ = str.__format__
     BODY = "body"
     COMMIT = "commit"
 
 
 class SqlTransactionDisposition(str, Enum):
+    __str__ = str.__str__
+    __format__ = str.__format__
     RETRYABLE_ABORTED = "retryable_aborted"
     NONRETRYABLE_ABORTED = "nonretryable_aborted"
     COMMIT_UNKNOWN = "commit_unknown"

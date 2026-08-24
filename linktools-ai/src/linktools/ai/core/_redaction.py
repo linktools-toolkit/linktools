@@ -12,6 +12,8 @@ from ._json import JsonValue
 
 
 class RedactionClass(str, Enum):
+    __str__ = str.__str__
+    __format__ = str.__format__
     PUBLIC = "PUBLIC"
     IDENTIFIER = "IDENTIFIER"
     SENSITIVE = "SENSITIVE"
