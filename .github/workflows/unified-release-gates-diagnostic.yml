@@ -14,6 +14,14 @@ permissions:
 jobs:
   diagnose:
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        gate:
+          - cntr-python36
+          - cntr-tests
+          - ai-ruff
+          - ai-tests
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -24,15 +32,20 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install -U -r requirements.txt
           python manage.py install --editable
-      - name: Check linktools
-        run: python manage.py check linktools
-      - name: Check linktools-common
-        run: python manage.py check linktools-common
-      - name: Check linktools-mobile
-        run: python manage.py check linktools-mobile
-      - name: Check linktools-cntr
-        run: python manage.py check linktools-cntr
-      - name: Check linktools-ai
-        run: python manage.py check linktools-ai
-      - name: Check default package set
-        run: python manage.py check
+      - name: Run diagnostic gate
+        shell: bash
+        run: |
+          case "${{ matrix.gate }}" in
+            cntr-python36)
+              python scripts/check/python36.py manage.py scripts/check/python36.py linktools-cntr/src
+              ;;
+            cntr-tests)
+              python -m pytest -q -p no:cacheprovider tests/cntr
+              ;;
+            ai-ruff)
+              ruff check --no-cache scripts/check/ai linktools-ai/src/linktools/ai linktools-ai/src/linktools/commands/ai tests/ai
+              ;;
+            ai-tests)
+              python -m pytest -q -p no:cacheprovider linktools-ai/tests tests/ai tests/test_import_surface.py
+              ;;
+          esac
