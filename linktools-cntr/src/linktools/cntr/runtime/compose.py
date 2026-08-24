@@ -52,8 +52,6 @@ class ComposeRunner:
         for container in context.target_containers:
             services.extend(container.services.keys())
         if not services:
-            # Imported lazily to keep runtime.compose free of a module-level
-            # dependency on ..container (which imports this module).
             from ..container import ContainerError
             names = ",".join(c.name for c in context.target_containers)
             raise ContainerError(f"No service found in container `{names}`")
@@ -100,9 +98,18 @@ class ComposeRunner:
             context.containers, *self.pull_args(services)
         ).check_call()
 
-    def options_for_build(self, services: "Sequence[str]", pull: bool = False) -> ComposeOptions:
-        return ComposeOptions(pull=pull, services=list(services),
-                              emit_default_pull=False)
+    def options_for_build(
+        self,
+        services: "Sequence[str]",
+        pull: bool = False,
+        include_proxy_build_args: bool = True,
+    ) -> ComposeOptions:
+        return ComposeOptions(
+            pull=pull,
+            services=list(services),
+            emit_default_pull=False,
+            include_proxy_build_args=include_proxy_build_args,
+        )
 
     def final_model(self, context: "EventContext") -> "dict[str, Any]":
         result = self.manager.structured_runner.execute_json(
