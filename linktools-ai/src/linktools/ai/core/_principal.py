@@ -3,7 +3,7 @@
 """Principal lookup boundary."""
 
 from dataclasses import dataclass
-from enum import StrEnum
+from .._compat import StrEnum
 from typing import Protocol, runtime_checkable
 
 from ..errors import AIError, ErrorCode

@@ -7,7 +7,7 @@ import json
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import datetime
-from enum import StrEnum
+from .._compat import StrEnum
 from typing import TYPE_CHECKING, Any, Protocol
 
 from linktools.core import environ

@@ -11,7 +11,7 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
-from enum import StrEnum
+from ..._compat import StrEnum
 from typing import TYPE_CHECKING, Protocol
 
 from pydantic_ai.messages import ModelMessage

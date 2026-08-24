@@ -4,7 +4,7 @@
 
 from collections.abc import Sequence
 from dataclasses import dataclass
-from enum import StrEnum
+from .._compat import StrEnum
 
 from ..errors import AIError, ErrorCode
 from ._paging import Page

@@ -5,7 +5,7 @@
 import inspect
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
-from enum import StrEnum
+from .._compat import StrEnum
 from typing import (
     TYPE_CHECKING,
     Any,

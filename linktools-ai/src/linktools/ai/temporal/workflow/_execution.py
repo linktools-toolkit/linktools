@@ -5,7 +5,7 @@
 from collections.abc import Mapping
 from dataclasses import dataclass, replace
 from datetime import timedelta
-from enum import StrEnum
+from ..._compat import StrEnum
 
 try:
     from temporalio import workflow as _temporal_workflow

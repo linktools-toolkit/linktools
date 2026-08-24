@@ -3,7 +3,7 @@
 """Ordered storage read layers."""
 
 from dataclasses import dataclass
-from enum import StrEnum
+from .._compat import StrEnum
 from typing import Generic
 
 from ._contracts import InfoT, KeyT, ReadableStorageBackend, ValueT

@@ -3,7 +3,7 @@
 """Structured redaction at observation and error boundaries."""
 
 from dataclasses import dataclass
-from enum import StrEnum
+from .._compat import StrEnum
 from typing import Protocol
 
 from ..errors import AIError, ErrorCode, SafeError

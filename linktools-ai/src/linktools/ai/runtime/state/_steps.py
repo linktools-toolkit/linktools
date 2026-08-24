@@ -7,7 +7,7 @@ from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequenc
 from contextlib import asynccontextmanager
 from contextvars import ContextVar, Token
 from dataclasses import dataclass, replace
-from enum import StrEnum
+from ..._compat import StrEnum
 from time import monotonic
 from typing import Protocol, runtime_checkable
 from uuid import uuid4

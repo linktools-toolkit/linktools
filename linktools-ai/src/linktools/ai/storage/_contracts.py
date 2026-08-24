@@ -6,7 +6,7 @@ import math
 from collections.abc import Hashable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime
-from enum import StrEnum
+from .._compat import StrEnum
 from typing import Generic, Protocol, TypeVar, runtime_checkable
 
 from ..core import JsonValue

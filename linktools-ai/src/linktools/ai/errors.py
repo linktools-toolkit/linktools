@@ -7,7 +7,7 @@ import json
 import math
 from collections.abc import Mapping
 from dataclasses import dataclass
-from enum import StrEnum
+from ._compat import StrEnum
 from typing import TypeAlias
 
 from linktools.errors import Error

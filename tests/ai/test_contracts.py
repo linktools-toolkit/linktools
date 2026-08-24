@@ -7,9 +7,10 @@ import warnings
 from collections.abc import Callable
 from dataclasses import fields
 from datetime import date, datetime, timezone
-from enum import Enum, IntEnum, StrEnum
+from enum import Enum, IntEnum
 
 import pytest
+from linktools.ai._compat import StrEnum
 from linktools.ai.agent import AgentBindingSnapshot
 from linktools.ai.agent._output import bind_output
 from linktools.ai.asset import AssetRef

@@ -10,7 +10,7 @@ from collections.abc import Callable, Mapping
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
-from enum import StrEnum
+from .._compat import StrEnum
 from functools import wraps
 from typing import Protocol
 

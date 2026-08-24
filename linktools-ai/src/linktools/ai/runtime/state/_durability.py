@@ -5,7 +5,7 @@
 import asyncio
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from enum import StrEnum
+from ..._compat import StrEnum
 from typing import Generic, TypeVar
 
 from ...errors import AIError, ErrorCode

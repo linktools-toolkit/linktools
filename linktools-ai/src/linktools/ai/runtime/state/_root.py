@@ -4,7 +4,7 @@
 
 import asyncio
 from collections.abc import Awaitable, Callable
-from enum import StrEnum
+from ..._compat import StrEnum
 from pathlib import Path
 from typing import TYPE_CHECKING
 

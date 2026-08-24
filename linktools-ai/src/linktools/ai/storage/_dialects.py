@@ -4,7 +4,7 @@
 
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from enum import StrEnum
+from .._compat import StrEnum
 from typing import TYPE_CHECKING, Protocol, TypeAlias, runtime_checkable
 
 from linktools.core import environ
