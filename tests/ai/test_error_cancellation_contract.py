@@ -127,6 +127,15 @@ async def test_transient_handoff_cleanup_preserves_cancellation(
     assert state.release_requested is True
 
 
+def _cancellation_cleanup_error(error: asyncio.CancelledError) -> BaseException | None:
+    if error.__cause__ is not None:
+        return error.__cause__
+    context = error.__context__
+    if isinstance(context, asyncio.CancelledError):
+        return context.__cause__
+    return None
+
+
 @pytest.mark.asyncio
 async def test_local_terminal_admission_cleanup_preserves_cancellation() -> None:
     class Sessions:
@@ -188,8 +197,9 @@ async def test_task_runner_preserves_cancellation_when_child_cleanup_fails() -> 
     with pytest.raises(asyncio.CancelledError) as error:
         await task
 
-    assert isinstance(error.value.__cause__, AIError)
-    assert error.value.__cause__.code is ErrorCode.STORAGE_RECOVERY_REQUIRED
+    cleanup_error = _cancellation_cleanup_error(error.value)
+    assert isinstance(cleanup_error, AIError)
+    assert cleanup_error.code is ErrorCode.STORAGE_RECOVERY_REQUIRED
 
 
 @pytest.mark.asyncio
@@ -226,4 +236,4 @@ async def test_subagent_child_cleanup_failure_does_not_replace_cancellation() ->
     with pytest.raises(asyncio.CancelledError) as error:
         await task
 
-    assert isinstance(error.value.__cause__, RuntimeError)
+    assert isinstance(_cancellation_cleanup_error(error.value), RuntimeError)

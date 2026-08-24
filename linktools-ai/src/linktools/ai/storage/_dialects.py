@@ -4,7 +4,7 @@
 
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from .._compat import StrEnum
+from enum import Enum
 from typing import TYPE_CHECKING, Protocol, TypeAlias, runtime_checkable
 
 from linktools.core import environ
@@ -52,26 +52,26 @@ class InsertResult:
     row_id: "int | None" = None
 
 
-class IntegrityViolationKind(StrEnum):
+class IntegrityViolationKind(str, Enum):
     UNIQUE_CONFLICT = "unique_conflict"
     FOREIGN_KEY = "foreign_key"
     CHECK = "check"
     UNKNOWN = "unknown"
 
 
-class SqlErrorKind(StrEnum):
+class SqlErrorKind(str, Enum):
     INTEGRITY = "integrity"
     RETRYABLE_TRANSACTION = "retryable_transaction"
     DATABASE = "database"
     UNKNOWN = "unknown"
 
 
-class SqlTransactionPhase(StrEnum):
+class SqlTransactionPhase(str, Enum):
     BODY = "body"
     COMMIT = "commit"
 
 
-class SqlTransactionDisposition(StrEnum):
+class SqlTransactionDisposition(str, Enum):
     RETRYABLE_ABORTED = "retryable_aborted"
     NONRETRYABLE_ABORTED = "nonretryable_aborted"
     COMMIT_UNKNOWN = "commit_unknown"

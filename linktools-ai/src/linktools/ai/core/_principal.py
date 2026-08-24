@@ -3,7 +3,7 @@
 """Principal lookup boundary."""
 
 from dataclasses import dataclass
-from .._compat import StrEnum
+from enum import Enum
 from typing import Protocol, runtime_checkable
 
 from ..errors import AIError, ErrorCode
@@ -11,7 +11,7 @@ from ._validation import validate_principal_id, validate_resource_id, validate_t
 from ._value import Principal, PrincipalKind, ResourceKind
 
 
-class AuthorizationAction(StrEnum):
+class AuthorizationAction(str, Enum):
     EXECUTION_RUN = "execution.run"
     EXECUTION_READ = "execution.read"
     EXECUTION_CANCEL = "execution.cancel"

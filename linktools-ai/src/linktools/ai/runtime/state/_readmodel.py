@@ -6,7 +6,7 @@ import asyncio
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from ..._compat import StrEnum
+from enum import Enum
 from uuid import uuid4
 
 from linktools.core import environ
@@ -34,7 +34,7 @@ _LEASE_SECONDS = 30
 _MODEL_VERSION = 1
 
 
-class ExecutionReadModelStatus(StrEnum):
+class ExecutionReadModelStatus(str, Enum):
     BUILDING = "BUILDING"
     COMPLETE = "COMPLETE"
 

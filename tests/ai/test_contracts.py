@@ -10,7 +10,6 @@ from datetime import date, datetime, timezone
 from enum import Enum, IntEnum
 
 import pytest
-from linktools.ai._compat import StrEnum
 from linktools.ai.agent import AgentBindingSnapshot
 from linktools.ai.agent._output import bind_output
 from linktools.ai.asset import AssetRef
@@ -80,7 +79,7 @@ class _JsonEnum(Enum):
     VALUE = "value"
 
 
-class _JsonStrEnum(StrEnum):
+class _JsonStrEnum(str, Enum):
     VALUE = "value"
 
 

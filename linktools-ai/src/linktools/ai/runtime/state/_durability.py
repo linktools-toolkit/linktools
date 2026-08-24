@@ -5,7 +5,7 @@
 import asyncio
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from ..._compat import StrEnum
+from enum import Enum
 from typing import Generic, TypeVar
 
 from ...errors import AIError, ErrorCode
@@ -13,7 +13,7 @@ from ...errors import AIError, ErrorCode
 ValueT = TypeVar("ValueT")
 
 
-class DurableCommitState(StrEnum):
+class DurableCommitState(str, Enum):
     COMMITTED = "committed"
     NOT_COMMITTED = "not_committed"
     PARTIAL_INTEGRITY_ERROR = "partial_integrity_error"

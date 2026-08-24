@@ -3,7 +3,7 @@
 """Structured redaction at observation and error boundaries."""
 
 from dataclasses import dataclass
-from .._compat import StrEnum
+from enum import Enum
 from typing import Protocol
 
 from ..errors import AIError, ErrorCode, SafeError
@@ -11,7 +11,7 @@ from ._ids import canonical_sha256
 from ._json import JsonValue
 
 
-class RedactionClass(StrEnum):
+class RedactionClass(str, Enum):
     PUBLIC = "PUBLIC"
     IDENTIFIER = "IDENTIFIER"
     SENSITIVE = "SENSITIVE"
