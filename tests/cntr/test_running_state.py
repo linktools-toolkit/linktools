@@ -56,13 +56,25 @@ def test_get_actual_with_no_containers_returns_empty(fresh_manager):
     assert fresh_manager.running_state.get_actual([]) == []
 
 
-def test_get_actual_raises_unavailable_when_docker_binary_is_missing(fresh_manager):
+def test_get_actual_raises_unavailable_when_runtime_is_unavailable(fresh_manager, monkeypatch):
+    from linktools.cntr.runtime.inspect import RuntimeInspectionUnavailable
+
+    def raise_error(containers):
+        raise RuntimeInspectionUnavailable("docker unavailable")
+
+    monkeypatch.setattr(fresh_manager.docker_inspector, "get_project_state", raise_error)
     container = fresh_manager.containers["nginx"]
     with pytest.raises(RuntimeStateUnavailable):
         fresh_manager.running_state.get_actual([container])
 
 
-def test_get_effective_falls_back_to_persisted(fresh_manager):
+def test_get_effective_falls_back_to_persisted(fresh_manager, monkeypatch):
+    from linktools.cntr.runtime.inspect import RuntimeInspectionUnavailable
+
+    def raise_error(containers):
+        raise RuntimeInspectionUnavailable("docker unavailable")
+
+    monkeypatch.setattr(fresh_manager.docker_inspector, "get_project_state", raise_error)
     fresh_manager.running_state._set(["portainer"])
     container = fresh_manager.containers["nginx"]
     assert fresh_manager.running_state.get_effective([container]) == ["portainer"]
