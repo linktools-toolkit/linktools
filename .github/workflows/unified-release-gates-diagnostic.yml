@@ -13,7 +13,7 @@ permissions:
 
 jobs:
   migrate-strenum:
-    if: github.event_name == 'push' && github.actor != 'github-actions[bot]'
+    if: github.event_name == 'push'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -45,21 +45,29 @@ jobs:
               path = Path(filename)
               text = path.read_text(encoding="utf-8")
               old = "from enum import StrEnum"
-              if text.count(old) != 1:
-                  raise SystemExit(f"unexpected StrEnum import count in {filename}")
-              path.write_text(text.replace(old, replacement), encoding="utf-8")
+              if text.count(old) == 1 and replacement not in text:
+                  path.write_text(text.replace(old, replacement), encoding="utf-8")
+              elif text.count(old) == 0 and text.count(replacement) == 1:
+                  continue
+              else:
+                  raise SystemExit(f"unexpected StrEnum import state in {filename}")
 
           test_path = Path("tests/ai/test_contracts.py")
           text = test_path.read_text(encoding="utf-8")
           old = "from enum import Enum, IntEnum, StrEnum"
-          if text.count(old) != 1:
-              raise SystemExit("unexpected test StrEnum import")
-          text = text.replace(old, "from enum import Enum, IntEnum")
-          anchor = "from linktools.ai.agent import AgentBindingSnapshot\n"
-          if text.count(anchor) != 1:
-              raise SystemExit("unexpected test import anchor")
-          text = text.replace(anchor, "from linktools.ai._compat import StrEnum\n" + anchor)
-          test_path.write_text(text, encoding="utf-8")
+          replacement = "from enum import Enum, IntEnum"
+          compat = "from linktools.ai._compat import StrEnum\n"
+          if text.count(old) == 1 and compat not in text:
+              text = text.replace(old, replacement)
+              anchor = "from linktools.ai.agent import AgentBindingSnapshot\n"
+              if text.count(anchor) != 1:
+                  raise SystemExit("unexpected test import anchor")
+              text = text.replace(anchor, compat + anchor)
+              test_path.write_text(text, encoding="utf-8")
+          elif text.count(old) == 0 and text.count(compat) == 1:
+              pass
+          else:
+              raise SystemExit("unexpected test StrEnum import state")
           PY
           git diff --check
       - name: Commit migration
