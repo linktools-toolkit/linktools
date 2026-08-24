@@ -1,0 +1,82 @@
+name: Temporary unified release gate reporter
+
+on:
+  push:
+    branches:
+      - refactor/unified-release-gates
+
+permissions:
+  contents: read
+  issues: write
+  pull-requests: write
+
+jobs:
+  report:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+      - name: Run release gates
+        shell: bash
+        run: |
+          set -u
+          report="$RUNNER_TEMP/release-gates-report.txt"
+          : > "$report"
+
+          run_stage() {
+            name="$1"
+            shift
+            printf '\n===== %s =====\n' "$name" >> "$report"
+            set +e
+            "$@" >> "$report" 2>&1
+            status=$?
+            set -e
+            printf '\nEXIT=%s\n' "$status" >> "$report"
+            printf '%s=%s\n' "$name" "$status" >> "$RUNNER_TEMP/release-gates-status.txt"
+            return 0
+          }
+
+          : > "$RUNNER_TEMP/release-gates-status.txt"
+          run_stage pip-requirements python -m pip install -U -r requirements.txt
+          run_stage editable-install python manage.py install --editable
+          run_stage clean python manage.py clean
+          run_stage check python manage.py check
+
+          check_status="$(awk -F= '$1 == "check" {print $2}' "$RUNNER_TEMP/release-gates-status.txt")"
+          if [ "$check_status" = "0" ]; then
+            run_stage build env VERSION=v0.0.0 RELEASE=true python manage.py build
+            build_status="$(awk -F= '$1 == "build" {print $2}' "$RUNNER_TEMP/release-gates-status.txt")"
+            if [ "$build_status" = "0" ]; then
+              run_stage verify env VERSION=v0.0.0 python manage.py verify
+            else
+              printf '\n===== verify =====\nSKIPPED: build failed\nEXIT=125\n' >> "$report"
+            fi
+          else
+            printf '\n===== build =====\nSKIPPED: check failed\nEXIT=125\n' >> "$report"
+            printf '\n===== verify =====\nSKIPPED: check failed\nEXIT=125\n' >> "$report"
+          fi
+
+          run_stage legacy-paths bash -c "! git grep -n 'scripts\\.build' -- . && ! git grep -n 'linktools-ai/scripts/build' -- . && ! git grep -n 'scripts/build/matrix' -- ."
+          cat "$RUNNER_TEMP/release-gates-status.txt" >> "$report"
+          cp "$report" release-gates-report.txt
+      - name: Comment result
+        if: always()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            let report = 'report file was not produced';
+            if (fs.existsSync('release-gates-report.txt')) {
+              report = fs.readFileSync('release-gates-report.txt', 'utf8');
+            }
+            if (report.length > 55000) {
+              report = '... truncated to last 55000 characters ...\n' + report.slice(-55000);
+            }
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: 22,
+              body: `<!-- unified-release-gates-reporter -->\nCommit: ${context.sha}\n\n\`\`\`text\n${report}\n\`\`\``
+            });
