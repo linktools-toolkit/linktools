@@ -6,12 +6,6 @@ import pytest
 import _harness
 
 
-def _close_manager_cache(manager) -> None:
-    cache = vars(manager.environ).get("cache")
-    if cache is not None:
-        cache.close()
-
-
 @pytest.fixture(scope="session")
 def snapshot_manager(tmp_path_factory):
     """A fully-prepared ContainerManager over an isolated temp data dir.
@@ -22,11 +16,7 @@ def snapshot_manager(tmp_path_factory):
     """
     data = tmp_path_factory.mktemp("data")
     temp = tmp_path_factory.mktemp("temp")
-    manager = _harness.make_manager(data, temp)
-    try:
-        yield manager
-    finally:
-        _close_manager_cache(manager)
+    return _harness.make_manager(data, temp)
 
 
 @pytest.fixture(scope="session")
@@ -44,8 +34,4 @@ def fresh_manager(tmp_path):
     Distinct from ``snapshot_manager`` (session-scoped, must stay pristine for the
     snapshot regression tests). All builtins are installed and prepared.
     """
-    manager = _harness.make_manager(tmp_path / "data", tmp_path / "temp")
-    try:
-        yield manager
-    finally:
-        _close_manager_cache(manager)
+    return _harness.make_manager(tmp_path / "data", tmp_path / "temp")

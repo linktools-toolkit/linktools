@@ -22,7 +22,6 @@
         ]
       },
       "hostname": "nginx",
-      "image": "aio-nginx",
       "logging": {
         "driver": "json-file",
         "options": {

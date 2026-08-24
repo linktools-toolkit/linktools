@@ -177,11 +177,7 @@ class ComposeOperations:
                                   container=container_scope, logger=manager.logger):
                     manager.compose_runner.pull(context, image_plan.pull)
             if image_plan.build:
-                build_options = manager.compose_runner.options_for_build(
-                    image_plan.build,
-                    pull=pull,
-                    include_proxy_build_args=False,
-                )
+                build_options = manager.compose_runner.options_for_build(image_plan.build, pull=pull)
                 with record_phase(context, "build", command=tuple(manager.compose_runner.build_args(build_options)),
                                   container=container_scope, logger=manager.logger):
                     manager.compose_runner.build(context, build_options)
