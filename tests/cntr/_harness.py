@@ -39,14 +39,8 @@ def _placeholder(prompt, type=str, default=MISSING, choices=None, **kwargs):
     through to its field-level default, so faking a value here would mask
     that fallback path never being reached in production either.
     """
-    # DOCKER_USER must be a real account: DOCKER_UID/DOCKER_GID derive from it
-    # via get_uid/get_gid, which fail on synthetic names.
     if prompt == "DOCKER_USER":
         return os.environ.get("SUDO_USER") or getpass.getuser() or "root"
-    # Fields whose ``default`` is a fresh utils.random_string()/random_secret()
-    # each process (e.g. cached=True password generation) would otherwise make
-    # snapshots flake between runs -- pin them to a fixed placeholder instead
-    # of falling through to the caller-supplied (non-deterministic) default.
     if prompt in ("LLDAP_ADMIN_PASSWORD",):
         return "snapval"
     if default is not MISSING:
@@ -115,8 +109,10 @@ def make_manager(data_path, temp_path, name: str = "aio"):
     from linktools.core._environ import Environ
     from linktools.cntr.manager import ContainerManager
 
-    environ = Environ()  # fresh instance; no stale instance-level caches
+    environ = Environ()
     manager = ContainerManager(environ, name=name)
+    manager.env_config.set("DOCKER_UID", 1000)
+    manager.env_config.set("DOCKER_GID", 1001)
     manager.installed_state.add(*manager.containers.keys())
     manager.prepare_installed_containers()
     return manager
