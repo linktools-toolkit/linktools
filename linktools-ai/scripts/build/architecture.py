@@ -11,8 +11,12 @@ from typing import cast
 
 from linktools.ai.core import JsonValue
 
-from .cohesion import check_files
-from .names import check_names
+if __package__:
+    from .cohesion import check_files
+    from .names import check_names
+else:
+    from cohesion import check_files
+    from names import check_names
 
 _DURABLE_REFLECTION_FUNCTIONS = {
     "linktools.ai.agent._output": frozenset(

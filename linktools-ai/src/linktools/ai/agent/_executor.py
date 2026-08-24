@@ -12,7 +12,7 @@ from linktools.core import environ
 from openai import APIError as OpenAIAPIError
 from pydantic import ValidationError
 from pydantic_ai import AgentRunResultEvent, ModelSettings
-from pydantic_ai.capabilities import AbstractCapability
+from pydantic_ai.capabilities import AbstractCapability, ReinjectSystemPrompt
 from pydantic_ai.capabilities import AgentCapability as PydanticAgentCapability
 from pydantic_ai.exceptions import (
     ConcurrencyLimitExceeded,
@@ -133,8 +133,13 @@ class AgentExecutor:
         event_sink: EventSink,
         usage_sink: "UsageSink | None" = None,
         tool_operations: "ToolOperationBridge | None" = None,
+        replace_history_system_prompt: bool = False,
     ) -> AgentExecutionResult:
-        if not isinstance(planning, bool) or not isinstance(thinking, bool):
+        if (
+            not isinstance(planning, bool)
+            or not isinstance(thinking, bool)
+            or not isinstance(replace_history_system_prompt, bool)
+        ):
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
         definition = binding.definition
         run_usage = RunUsage()
@@ -164,6 +169,7 @@ class AgentExecutor:
                     run_usage=run_usage,
                     usage_limits=usage_limits,
                     tool_operations=tool_operations,
+                    replace_history_system_prompt=replace_history_system_prompt,
                 )
                 return result
             except asyncio.CancelledError as error:
@@ -191,7 +197,7 @@ class AgentExecutor:
                     _logger.error(
                         "usage sink failed after agent execution failure: step=%s",
                         step_run_id,
-                        exc_info=environ.debug,
+                        exc_info=False,
                     )
 
     async def _execute(
@@ -217,6 +223,7 @@ class AgentExecutor:
         run_usage: RunUsage,
         usage_limits: UsageLimits,
         tool_operations: "ToolOperationBridge | None",
+        replace_history_system_prompt: bool,
     ) -> AgentExecutionResult:
         definition = binding.definition
         if not self._execution_root.is_dir():
@@ -270,6 +277,8 @@ class AgentExecutor:
                 trusted_mcp_selectors=definition.trusted_mcp_selectors,
             ),
         )
+        if replace_history_system_prompt:
+            capabilities = (*capabilities, ReinjectSystemPrompt(replace_existing=True))
         _logger.debug(
             "agent execution started: agent=%s definition=%s step=%s capability_count=%s planning=%s thinking=%s",
             definition.spec.id,

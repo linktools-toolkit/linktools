@@ -17,7 +17,6 @@ from linktools.ai.core import (
     StopReason,
     UsageMetrics,
 )
-from linktools.ai.spec import AgentSpec
 from linktools.ai.runtime import RuntimeDomain, RuntimeState
 from linktools.ai.runtime.state._contracts import (
     ExecutionRecord,
@@ -26,6 +25,7 @@ from linktools.ai.runtime.state._contracts import (
     IdempotencyTerminalUpdate,
     ResultRecord,
 )
+from linktools.ai.spec import AgentSpec
 from linktools.ai.storage import ObjectRef, StoredPayload
 
 

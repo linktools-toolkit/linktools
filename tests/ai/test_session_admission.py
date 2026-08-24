@@ -21,7 +21,7 @@ def _session() -> SessionRecord:
         session_id="session",
         tenant_id="tenant",
         owner_principal_id="owner",
-        agent_digest="a" * 64,
+        agent_id="agent",
         status=SessionStatus.OPEN,
         revision=0,
         resource_generation=0,

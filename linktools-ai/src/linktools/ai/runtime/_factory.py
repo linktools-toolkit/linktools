@@ -9,7 +9,7 @@ from pathlib import Path
 from linktools.core import environ
 from pydantic_ai_harness.memory import SearchableMemoryStore
 
-from ..agent import AgentCompiler, AgentCatalog, AgentExecutor
+from ..agent import AgentCatalog, AgentCompiler, AgentExecutor
 from ..asset import AssetRepository
 from ..core import AuthorizationPolicy, HmacCursorSigner
 from ..errors import AIError, ErrorCode
@@ -33,7 +33,6 @@ from .state import (
     RuntimeRetentionMode,
     RuntimeState,
 )
-
 
 _logger = environ.get_logger("ai.runtime.factory")
 
@@ -253,10 +252,13 @@ async def _restore_recovery_bindings(
             except AIError as error:
                 if error.code is ErrorCode.STORAGE_INTEGRITY_ERROR:
                     raise
-                raise AIError(
-                    ErrorCode.AGENT_DEFINITION_UNAVAILABLE,
-                    safe_details={"execution_id": checkpoint.execution_id},
-                ) from error
+                if error.code is ErrorCode.AGENT_DEFINITION_UNAVAILABLE:
+                    _logger.warning(
+                        "recovery binding unavailable: execution=%s",
+                        checkpoint.execution_id,
+                    )
+                    continue
+                raise
             if binding.digest != recovery_input.binding_digest:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             catalog.register_definition(binding.definition)

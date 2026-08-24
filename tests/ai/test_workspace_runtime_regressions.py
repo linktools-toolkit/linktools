@@ -3,12 +3,15 @@
 """Regression tests for workspace RuntimeState composition."""
 
 import pytest
-
 from linktools.ai.adapter import RuntimeMemoryStore
 from linktools.ai.model import ModelRegistry
 from linktools.ai.runtime import RuntimeDomain, RuntimeState
 from linktools.ai.spec import AgentSpec, AgentSpecCodec
-from linktools.ai.workspace import Workspace, build_workspace_assets, open_workspace_runtime
+from linktools.ai.workspace import (
+    Workspace,
+    build_workspace_assets,
+    open_workspace_runtime,
+)
 
 
 @pytest.mark.asyncio

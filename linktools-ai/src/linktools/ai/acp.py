@@ -89,7 +89,12 @@ class ACPAgent:
         _, schema = _require_acp()
         from .runtime import ForkSessionRequest
 
-        session = await self._runtime.session.fork(session_id, ForkSessionRequest(self._principal, uuid4().hex, uuid4().hex, cwd))
+        source = await self._runtime.session.get(session_id, principal=self._principal)
+        session = await self._runtime.session.fork(
+            source.agent_id,
+            session_id,
+            ForkSessionRequest(self._principal, uuid4().hex, uuid4().hex, cwd),
+        )
         return schema.ForkSessionResponse(sessionId=session.session_id)
 
     async def close_session(self, session_id: str, **kwargs: JsonValue) -> JsonValue:

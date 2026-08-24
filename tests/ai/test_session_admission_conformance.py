@@ -33,7 +33,7 @@ def _session() -> SessionRecord:
         session_id="session",
         tenant_id="tenant",
         owner_principal_id="owner",
-        agent_digest="b" * 64,
+        agent_id="agent",
         status=SessionStatus.OPEN,
         revision=0,
         resource_generation=0,
@@ -327,6 +327,7 @@ async def test_rejected_admission_terminalizes_pending_start() -> None:
         )
         with pytest.raises(AIError) as error:
             await service.run_for_session(
+                "agent",
                 "b" * 64,
                 "session",
                 ExecutionRequest(

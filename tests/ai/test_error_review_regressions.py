@@ -8,12 +8,13 @@ from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
 
-import pytest
 import linktools.ai.agent._capabilities as capabilities_module
+import linktools.ai.agent._executor as executor_module
+import pytest
 from linktools.ai.agent import AgentBindingSnapshot
 from linktools.ai.agent._capabilities import AgentRunScope
 from linktools.ai.agent._executor import AgentExecutor
-from linktools.ai.agent._output import bind_output
+from linktools.ai.agent._output import AssistantTextOutput, bind_output
 from linktools.ai.core import ExecutionLineageKind, ExecutionStatus, OperationStatus
 from linktools.ai.errors import ErrorCode
 from linktools.ai.runtime._execution import CancelEffectOutcome, DefaultExecutionService
@@ -21,6 +22,7 @@ from linktools.ai.runtime.service_api import CancelExecutionRequest
 from linktools.ai.runtime.state import ExecutionRecord
 from linktools.ai.spec import AgentSpec
 from linktools.ai.workspace import trusted_workspace_principal
+from pydantic_ai.capabilities import ReinjectSystemPrompt
 from pydantic_ai_harness.compaction import DeduplicateFileReads
 
 
@@ -106,6 +108,112 @@ async def test_agent_executor_cancellation_is_not_replaced_by_usage_sink_failure
             event_sink=event_sink,  # type: ignore[arg-type]
             usage_sink=usage_sink,  # type: ignore[arg-type]
         )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("replace_history_system_prompt", [False, True])
+async def test_agent_executor_reinjects_only_when_requested(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    replace_history_system_prompt: bool,
+) -> None:
+    output_binding = bind_output()
+    model = SimpleNamespace(profile={})
+    definition = SimpleNamespace(
+        digest="b" * 64,
+        spec=AgentSpec("agent", 1, "default"),
+        model=SimpleNamespace(materialize=lambda: model),
+        effective_capabilities=(),
+        trusted_tool_classes=(),
+        trusted_mcp_selectors=(),
+    )
+    binding = SimpleNamespace(
+        definition=definition,
+        output_binding=output_binding,
+        output_type=output_binding.value_type,
+    )
+    captured: dict[str, object] = {}
+
+    class _StepStore:
+        def __init__(self) -> None:
+            self._get_run_calls = 0
+
+        async def get_run(self, *, run_id: str) -> object | None:
+            del run_id
+            self._get_run_calls += 1
+            if self._get_run_calls == 1:
+                return None
+            return SimpleNamespace(conversation_id="conversation")
+
+        async def latest_snapshot(self, *, run_id: str, include_interrupted: bool = False) -> object:
+            del run_id, include_interrupted
+            return object()
+
+        async def list_unresolved_tool_effects(self, *, run_id: str) -> tuple[object, ...]:
+            del run_id
+            return ()
+
+    class _Result:
+        run_id = "run"
+        output = AssistantTextOutput(text="ok")
+
+        def all_messages(self) -> list[object]:
+            return []
+
+    class _ResultEvent:
+        def __init__(self) -> None:
+            self.result = _Result()
+
+    class _Events:
+        def __init__(self) -> None:
+            self._done = False
+
+        async def __aenter__(self) -> object:
+            return self
+
+        async def __aexit__(self, *args: object) -> None:
+            del args
+
+        def __aiter__(self) -> "_Events":
+            return self
+
+        async def __anext__(self) -> _ResultEvent:
+            if self._done:
+                raise StopAsyncIteration
+            self._done = True
+            return _ResultEvent()
+
+    class _Agent:
+        def run_stream_events(self, *args: object, **kwargs: object) -> _Events:
+            del args
+            captured["capabilities"] = kwargs["capabilities"]
+            return _Events()
+
+    async def compose_platform(*args: object, **kwargs: object) -> tuple[object, ...]:
+        del args, kwargs
+        return ()
+
+    monkeypatch.setattr(executor_module, "build_pydantic_agent", lambda *args, **kwargs: _Agent())
+    monkeypatch.setattr(executor_module, "compose_platform_capabilities", compose_platform)
+    monkeypatch.setattr(executor_module, "AgentRunResultEvent", _ResultEvent)
+
+    executor = AgentExecutor(execution_root=tmp_path)
+    await executor.execute(
+        binding,  # type: ignore[arg-type]
+        "new prompt",
+        [],
+        "conversation",
+        step_store=_StepStore(),  # type: ignore[arg-type]
+        step_run_id="run",
+        segment_sequence=1,
+        capability_context=SimpleNamespace(),  # type: ignore[arg-type]
+        event_sink=lambda _event: asyncio.sleep(0),  # type: ignore[arg-type]
+        replace_history_system_prompt=replace_history_system_prompt,
+    )
+
+    capabilities = captured["capabilities"]
+    assert isinstance(capabilities, tuple)
+    assert any(isinstance(capability, ReinjectSystemPrompt) for capability in capabilities) is replace_history_system_prompt
 
 
 @pytest.mark.asyncio

@@ -1,152 +1,64 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Systemic compatibility contract for Runtime persisted dataclasses."""
+"""Systemic compatibility contract for Runtime persisted values."""
 
 import copy
-import json
-from pathlib import Path
+from dataclasses import replace
+from datetime import datetime, timezone
 
 import pytest
-
+from linktools.ai.agent import AgentBindingSnapshot
+from linktools.ai.agent._output import bind_output
+from linktools.ai.core import SessionStatus
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.runtime.state._codec import (
-    _CURRENT_CODEC,
-    _DataclassPersistenceContract,
-    _apply_persisted_upgrades,
     _decode_enveloped_domain,
     _decode_step_envelope,
     _encode_persisted_domain,
-    _encode_step_envelope,
-    _runtime_persistence_manifest,
     decode_domain,
+    decode_record,
     encode_domain,
-    encode_envelope,
     wire_type_id,
 )
-from linktools.ai.runtime.state._contracts import ConversationCursor
-from linktools.ai.agent import AgentBindingSnapshot
-from linktools.ai.agent._output import bind_output
+from linktools.ai.runtime.state._contracts import SessionRecord
 from linktools.ai.spec import AgentSpec
+from linktools.ai.storage import StoredPayload
+from linktools.ai.task import TaskNode
 from pydantic_ai_harness.step_persistence import RunRecord
-from datetime import datetime, timezone
 
 
-def _legacy_cursor_envelope() -> dict[str, object]:
+def _session() -> SessionRecord:
+    now = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    return SessionRecord(
+        session_id="session",
+        tenant_id="tenant",
+        owner_principal_id="owner",
+        agent_id="agent",
+        status=SessionStatus.OPEN,
+        revision=0,
+        resource_generation=0,
+        cwd=None,
+        metadata={},
+        created_at=now,
+        updated_at=now,
+        closed_at=None,
+        active_execution_id=None,
+        history_id="history",
+    )
+
+
+def _envelope(
+    payload: object,
+    *,
+    wire_id: str = "session_record",
+) -> dict[str, object]:
     return {
         "v": 1,
         "value": {
-            "type": "conversation_cursor",
-            "payload": {
-                "$dataclass": "conversation_cursor",
-                "fields": {
-                    "step_run_id": "run",
-                    "history_id": None,
-                    "message_count": 0,
-                },
-            },
+            "type": wire_id,
+            "payload": payload,
         },
     }
-
-
-def test_semantic_encoding_remains_unversioned_and_byte_stable() -> None:
-    cursor = ConversationCursor("run", None, 0)
-    assert encode_domain(cursor) == {
-        "$dataclass": "conversation_cursor",
-        "fields": {
-            "step_run_id": "run",
-            "history_id": None,
-            "message_count": 0,
-        },
-    }
-    assert decode_domain(encode_domain(cursor), ConversationCursor) == cursor
-
-
-def test_persistence_envelope_tags_dataclass_schema_without_changing_wire_major() -> None:
-    cursor = ConversationCursor("run", None, 0)
-    envelope = encode_envelope(
-        {
-            "type": wire_type_id(cursor),
-            "payload": _encode_persisted_domain(cursor),
-        }
-    )
-    assert envelope["v"] == 1
-    payload = envelope["value"]["payload"]
-    assert payload["$dataclass"] == "conversation_cursor"
-    assert payload["schema"] == 1
-    assert set(payload) == {"$dataclass", "schema", "fields"}
-    assert _decode_enveloped_domain(envelope, ConversationCursor) == cursor
-
-
-def test_legacy_unversioned_v1_remains_readable() -> None:
-    envelope = _legacy_cursor_envelope()
-    assert _decode_enveloped_domain(envelope, ConversationCursor) == ConversationCursor(
-        "run", None, 0
-    )
-
-
-def test_unknown_schema_is_unsupported_but_malformed_known_schema_is_integrity() -> None:
-    envelope = encode_envelope(
-        {
-            "type": "conversation_cursor",
-            "payload": _encode_persisted_domain(
-                ConversationCursor("run", None, 0)
-            ),
-        }
-    )
-    future = copy.deepcopy(envelope)
-    future["value"]["payload"]["schema"] = 99
-    with pytest.raises(AIError) as raised:
-        _decode_enveloped_domain(future, ConversationCursor)
-    assert raised.value.code is ErrorCode.STORAGE_VERSION_UNSUPPORTED
-
-    malformed = copy.deepcopy(envelope)
-    malformed["value"]["payload"]["fields"].pop("history_id")
-    with pytest.raises(AIError) as raised:
-        _decode_enveloped_domain(malformed, ConversationCursor)
-    assert raised.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
-
-    for invalid in (True, 0, -1, "1"):
-        malformed_revision = copy.deepcopy(envelope)
-        malformed_revision["value"]["payload"]["schema"] = invalid
-        with pytest.raises(AIError) as raised:
-            _decode_enveloped_domain(malformed_revision, ConversationCursor)
-        assert raised.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
-
-
-def test_adjacent_upgrade_chain_is_explicit_and_pure() -> None:
-    def one_to_two(raw, _codec):
-        assert set(raw) == {"old"}
-        return {"new": raw["old"]}
-
-    contract = _DataclassPersistenceContract(
-        fingerprints={1: "a", 2: "b"},
-        upgrades={1: one_to_two},
-        legacy_revision=1,
-    )
-    source = {"old": "value"}
-    assert _apply_persisted_upgrades(source, 1, contract, _CURRENT_CODEC) == {
-        "new": "value"
-    }
-    assert source == {"old": "value"}
-
-
-def test_step_persistence_writes_schema_and_reads_legacy_unversioned() -> None:
-    now = datetime(2026, 1, 1, tzinfo=timezone.utc)
-    run = RunRecord(
-        run_id="run",
-        conversation_id="conversation",
-        parent_run_id=None,
-        agent_name="agent",
-        metadata={},
-        started_at=now,
-    )
-    current = _encode_step_envelope(run)
-    assert current["value"]["payload"]["schema"] == 1
-    assert _decode_step_envelope(current) == run
-
-    legacy = copy.deepcopy(current)
-    legacy["value"]["payload"].pop("schema")
-    assert _decode_step_envelope(legacy) == run
 
 
 def _binding_snapshot_payload() -> dict[str, object]:
@@ -166,24 +78,195 @@ def _binding_snapshot_payload() -> dict[str, object]:
     return snapshot.to_payload()
 
 
-def test_agent_binding_snapshot_future_version_is_unsupported() -> None:
-    payload = _binding_snapshot_payload()
-    assert AgentBindingSnapshot.from_payload(payload).version == 1
-    future = dict(payload)
-    future["version"] = 2
+def test_current_generic_dataclass_round_trip() -> None:
+    cursor = _session()
+    encoded = encode_domain(cursor)
+    assert encoded["$dataclass"] == "session_record"
+    assert "schema" not in encoded
+    assert decode_domain(encoded, SessionRecord) == cursor
+
+
+def test_persisted_generic_writer_keeps_schema_one() -> None:
+    session = _session()
+    payload = _encode_persisted_domain(session)
+    assert payload["schema"] == 1
+    assert _decode_enveloped_domain(
+        _envelope(payload),
+        SessionRecord,
+    ) == session
+
+
+def test_missing_defaulted_session_field_uses_constructor_default() -> None:
+    session = _session()
+    payload = copy.deepcopy(_encode_persisted_domain(session))
+    payload["fields"].pop("history_id")
+    assert _decode_enveloped_domain(
+        _envelope(payload),
+        SessionRecord,
+    ) == replace(session, history_id=None)
+
+
+def test_missing_required_session_field_is_integrity_error() -> None:
+    payload = copy.deepcopy(_encode_persisted_domain(_session()))
+    payload["fields"].pop("status")
     with pytest.raises(AIError) as raised:
-        AgentBindingSnapshot.from_payload(future)
-    assert raised.value.code is ErrorCode.STORAGE_VERSION_UNSUPPORTED
-    malformed = dict(payload)
-    malformed["version"] = True
-    with pytest.raises(AIError) as raised:
-        AgentBindingSnapshot.from_payload(malformed)
+        _decode_enveloped_domain(_envelope(payload), SessionRecord)
     assert raised.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
 
 
-def test_checked_in_runtime_persistence_manifest_matches_codec_contract() -> None:
-    path = (
-        Path(__file__).resolve().parents[2]
-        / "linktools-ai/scripts/build/matrix/runtime-persistence-v1.json"
+def test_unknown_historical_field_is_ignored() -> None:
+    session = _session()
+    payload = copy.deepcopy(_encode_persisted_domain(session))
+    payload["fields"]["removed_field"] = {"not": "decoded"}
+    assert _decode_enveloped_domain(
+        _envelope(payload),
+        SessionRecord,
+    ) == session
+
+
+def test_malformed_known_field_is_integrity_error() -> None:
+    payload = copy.deepcopy(_encode_persisted_domain(_session()))
+    payload["fields"]["revision"] = "not-an-int"
+    with pytest.raises(AIError) as raised:
+        _decode_enveloped_domain(_envelope(payload), SessionRecord)
+    assert raised.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
+
+
+def test_generic_payload_without_or_with_schema_one_is_readable() -> None:
+    session = _session()
+    with_schema = _envelope(_encode_persisted_domain(session))
+    without_schema = copy.deepcopy(with_schema)
+    without_schema["value"]["payload"].pop("schema")
+    assert _decode_enveloped_domain(with_schema, SessionRecord) == session
+    assert _decode_enveloped_domain(without_schema, SessionRecord) == session
+
+
+@pytest.mark.parametrize("schema", [True, 0, -1, "1"])
+def test_malformed_generic_schema_is_integrity_error(schema: object) -> None:
+    payload = copy.deepcopy(_encode_persisted_domain(_session()))
+    payload["schema"] = schema
+    with pytest.raises(AIError) as raised:
+        _decode_enveloped_domain(_envelope(payload), SessionRecord)
+    assert raised.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
+
+
+def test_positive_unknown_generic_schema_is_unsupported() -> None:
+    payload = copy.deepcopy(_encode_persisted_domain(_session()))
+    payload["schema"] = 2
+    with pytest.raises(AIError) as raised:
+        _decode_enveloped_domain(_envelope(payload), SessionRecord)
+    assert raised.value.code is ErrorCode.STORAGE_VERSION_UNSUPPORTED
+
+
+def test_unknown_outer_version_is_unsupported() -> None:
+    value = _envelope(_encode_persisted_domain(_session()))
+    value["v"] = 2
+    with pytest.raises(AIError) as raised:
+        _decode_enveloped_domain(value, SessionRecord)
+    assert raised.value.code is ErrorCode.STORAGE_VERSION_UNSUPPORTED
+
+
+def test_unknown_wire_type_is_unsupported() -> None:
+    value = _envelope(_encode_persisted_domain(_session()), wire_id="future_record")
+    with pytest.raises(AIError) as raised:
+        _decode_enveloped_domain(value, SessionRecord)
+    assert raised.value.code is ErrorCode.STORAGE_VERSION_UNSUPPORTED
+
+
+def test_known_wire_type_with_wrong_target_is_integrity_error() -> None:
+    value = _envelope(_encode_persisted_domain(_session()))
+    with pytest.raises(AIError) as raised:
+        _decode_enveloped_domain(value, RunRecord)
+    assert raised.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
+
+
+def test_reserved_dataclass_tag_cannot_be_combined() -> None:
+    payload = copy.deepcopy(_encode_persisted_domain(_session()))
+    payload["$mapping"] = {"items": []}
+    with pytest.raises(AIError) as raised:
+        _decode_enveloped_domain(_envelope(payload), SessionRecord)
+    assert raised.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
+
+
+def test_envelope_metadata_is_not_accepted() -> None:
+    value = _envelope(_encode_persisted_domain(_session()))
+    value["trace_id"] = "old"
+    with pytest.raises(AIError) as raised:
+        _decode_enveloped_domain(value, SessionRecord)
+    assert raised.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
+
+    reserved = copy.deepcopy(value)
+    reserved["$tuple"] = []
+    with pytest.raises(AIError) as raised:
+        _decode_enveloped_domain(reserved, SessionRecord)
+    assert raised.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
+
+
+def test_current_enum_value_round_trip_and_unknown_value_boundary() -> None:
+    session = _session()
+    payload = copy.deepcopy(_encode_persisted_domain(session))
+    assert _decode_enveloped_domain(_envelope(payload), SessionRecord) == session
+
+    payload["fields"]["status"]["value"] = "FUTURE"
+    with pytest.raises(AIError) as raised:
+        _decode_enveloped_domain(_envelope(payload), SessionRecord)
+    assert raised.value.code is ErrorCode.STORAGE_VERSION_UNSUPPORTED
+
+
+def test_explicit_custom_task_node_shape_remains_strict() -> None:
+    node = TaskNode("node", (), input={"key": "value"}, budget_cost=1)
+    payload = encode_domain(node)
+    payload["fields"]["extra"] = None
+    with pytest.raises(AIError) as raised:
+        decode_domain(payload, TaskNode)
+    assert raised.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
+
+
+def test_agent_binding_snapshot_shape_remains_strict() -> None:
+    payload = _binding_snapshot_payload()
+    payload.pop("agent_digest")
+    with pytest.raises(AIError) as raised:
+        AgentBindingSnapshot.from_payload(payload)
+    assert raised.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
+
+
+def test_low_level_record_shape_remains_strict() -> None:
+    record = StoredPayload.inline_bytes(b"payload")
+    stored = {
+        "key": "6b" * 32,
+        "partition": "70" * 32,
+        "scope": None,
+        "parent": None,
+        "kind": "payload",
+        "sort": "payload",
+        "state": None,
+        "storage_version": 0,
+        "lease": {"owner": None, "fence": 0, "expires_at": None},
+        "data": {"value": record.to_json()},
+    }
+    stored.pop("kind")
+    with pytest.raises(AIError) as raised:
+        decode_record(stored)
+    assert raised.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
+
+
+def test_step_persistence_keeps_schema_one_and_reads_unversioned_payload() -> None:
+    now = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    run = RunRecord(
+        run_id="run",
+        conversation_id="conversation",
+        parent_run_id=None,
+        agent_name="agent",
+        metadata={},
+        started_at=now,
     )
-    assert json.loads(path.read_text(encoding="utf-8")) == _runtime_persistence_manifest()
+    current = _decode_step_envelope(
+        {
+            "v": 1,
+            "value": {
+                "type": wire_type_id(run),
+                "payload": _encode_persisted_domain(run),
+            },
+        }
+    )
+    assert current == run

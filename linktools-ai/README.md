@@ -18,9 +18,9 @@ AssetStore
 - **Asset** owns declaration origin, storage, discovery, and decoding.
 - **AgentSpec** declares one Agent.
 - **Capability** supplies executable behavior.
-- **AgentDefinition** is the output-independent Agent identity inside one Runtime.
+- **AgentDefinition** is the compiled output-independent definition inside one Runtime.
 - **AgentBinding** is the exact executable identity for one output contract.
-- **Session** is pinned to Agent identity.
+- **Session** is bound to the stable `AgentSpec.id`.
 - **Execution**, recovery, evaluation, TaskGraph, and Temporal pin the exact Agent binding.
 
 ## 1. Run a workspace
@@ -104,16 +104,12 @@ Agent-local `RuntimeCapability` values must be durable and exactly restorable. D
 
 ## 2. Identity model
 
-The Runtime deliberately keeps two identities:
+A Session is bound to `AgentSpec.id`, not a compiled Agent digest.
+Each new execution uses the current Agent binding.
+Retry and recovery remain pinned to the exact historical binding.
 
-- `agent_digest` identifies the effective output-independent Agent definition.
-- `binding_digest` identifies one exact executable binding: `agent_digest + output binding`.
-
-`agent_digest` includes the `AgentSpec`, resolved model fingerprint, effective capability bindings, and Runtime composition fingerprint. It does not include output, planning, thinking, Session identity, memory scope, principal, idempotency key, or wait timeout.
-
-`binding_digest` adds only the output binding fingerprint to `agent_digest`. Changing output therefore keeps the same Agent identity but creates a different exact execution binding. Planning and thinking are persisted execution modes and change neither digest.
-
-This split allows one Session to use text output, structured output, and different planning/thinking modes across turns while still rejecting a genuinely different Agent definition.
+History is content-owned: a projection digest identifies projected conversation
+content, not the Agent definition that consumed it.
 
 ## 3. Agent controls
 
@@ -182,7 +178,7 @@ There are three capability scopes:
 2. **Direct Runtime-global capabilities**: supplied through `open_workspace_runtime(..., capabilities=...)` and recreated by Runtime composition.
 3. **Agent-local capabilities**: supplied through `runtime.agent(..., capabilities=...)`; they must be durable and exactly restorable.
 
-There is no arbitrary `agent.run(..., capabilities=...)` scope. Runtime-global capability fingerprints participate in `agent_digest`; Agent-local capability descriptors also participate in the Agent identity and are persisted in the exact binding snapshot.
+There is no arbitrary `agent.run(..., capabilities=...)` scope. Runtime-global capability fingerprints and Agent-local capability descriptors participate in the exact executable binding, not Session identity.
 
 ## 6. Output
 
@@ -226,9 +222,7 @@ page = await runtime.session.history(
 )
 ```
 
-A Session stores `agent_digest`, not `binding_digest`. Reusing a Session with a different effective Agent definition fails with `SESSION_BINDING_MISMATCH`. Changing only output, planning, or thinking is allowed.
-
-Model-context projections are also keyed by `agent_digest`. Exact execution records, terminal sealing, recovery, evaluation, TaskGraph, and Temporal remain keyed by `binding_digest` and the matching binding snapshot.
+A Session is bound to `AgentSpec.id`, not a compiled Agent digest. Each new execution uses the current Agent binding. Retry and recovery remain pinned to the exact historical binding.
 
 Session history is the committed conversation projection. Execution trace/transcript remain separate audit views.
 
@@ -261,6 +255,9 @@ state = RuntimeState.from_plan(
 ```
 
 MySQL, PostgreSQL, and SQLite use the same Runtime state contracts. The application owns an externally supplied engine and disposes it after Runtime shutdown.
+
+Runtime persistence uses a tolerant reader for ordinary internal dataclasses,
+while exact execution and storage contracts remain fail-closed.
 
 ## 9. Durable execution binding
 
@@ -336,7 +333,8 @@ Top-level `linktools.ai` remains intentionally small. Sibling packages use the p
 |---|---|
 | Runtime `namespace` | Isolates one Runtime data set inside a storage target |
 | `tenant_id` | Authorization and resource ownership boundary |
-| `agent_digest` | Effective output-independent Agent identity |
+| `AgentSpec.id` | Stable logical Agent identity for a Session |
+| `agent_digest` | Exact output-independent Agent definition |
 | `binding_digest` | Exact executable Agent + output identity |
 | `memory_scope` | Selects a memory collection inside one tenant |
 | Asset `namespace` | Isolates raw Asset storage; unrelated to Runtime state |

@@ -53,6 +53,7 @@ from ._durability import (
 from ._history import (
     TranscriptCapture,
     TranscriptRepository,
+    _conversation_overlap_signature,
     _exact_message_signature,
     _overlap_signature,
     suffix_prefix_overlap,
@@ -96,7 +97,6 @@ class _StepArchiveBatch(Protocol):
         *,
         events: Sequence[StepEvent],
         snapshots: Sequence[ContinuableSnapshot],
-        binding_digest: str | None = None,
         execution_id: str | None = None,
     ) -> None: ...
 
@@ -253,7 +253,6 @@ class CapturedExecutionProjection:
     base_snapshot_offset: int
     target_event_offset: int
     target_snapshot_offset: int
-    binding_digest: "str | None"
 
 
 @dataclass(frozen=True, slots=True)
@@ -611,10 +610,9 @@ class InMemoryStepArchive(StagingStepStore):
         *,
         events: Sequence[StepEvent],
         snapshots: Sequence[ContinuableSnapshot],
-        binding_digest: str | None = None,
         execution_id: str | None = None,
     ) -> None:
-        del binding_digest, execution_id
+        del execution_id
         self._ensure_open()
         async with self._lock:
             previous = self._runs.get(run.run_id)
@@ -703,8 +701,7 @@ class InMemoryStepArchive(StagingStepStore):
             for message in snapshot.messages:
                 yield message
 
-    async def load_model_context(self, *, run_id: str, binding_digest: str) -> tuple[object, ...]:
-        del binding_digest
+    async def load_model_context(self, *, run_id: str) -> tuple[object, ...]:
         snapshot = await self.latest_snapshot(run_id=run_id, include_interrupted=True)
         return () if snapshot is None else tuple(snapshot.messages)
 
@@ -867,23 +864,18 @@ class StateStepArchive(StepStore):
         self,
         run: RunRecord,
         snapshots: Sequence[ContinuableSnapshot],
-        *,
-        binding_digest: str | None = None,
     ) -> PreparedStepSnapshotBatch:
         self._ensure_open()
         require_no_run_history_lock("StateStepArchive.prepare_snapshots")
         return await self._prepare_snapshots(
             run,
             snapshots,
-            binding_digest=binding_digest,
         )
 
     async def prepare_snapshots_after_seal(
         self,
         run: RunRecord,
         snapshots: Sequence[ContinuableSnapshot],
-        *,
-        binding_digest: str | None = None,
     ) -> PreparedStepSnapshotBatch:
         self._ensure_open()
         require_no_run_history_lock("StateStepArchive.prepare_snapshots_after_seal")
@@ -894,7 +886,6 @@ class StateStepArchive(StepStore):
         return await self._prepare_snapshots(
             run,
             snapshots,
-            binding_digest=binding_digest,
         )
 
     async def initialize(self) -> None:
@@ -1041,8 +1032,6 @@ class StateStepArchive(StepStore):
         self,
         run: RunRecord,
         snapshots: Sequence[ContinuableSnapshot],
-        *,
-        binding_digest: str | None = None,
     ) -> PreparedStepSnapshotBatch:
         prepared: list[PreparedStepSnapshot] = []
         owner_id = run.run_id
@@ -1071,12 +1060,16 @@ class StateStepArchive(StepStore):
         working_start = suffix_start
         target_message_count = head.message_count
         target_quality = head.quality
-        projection_binding = binding_digest or run.run_id
         for snapshot in snapshots:
             incoming = tuple(snapshot.messages)
-            incoming_signatures = tuple(_overlap_signature(message) for message in incoming)
+            signature = (
+                _conversation_overlap_signature
+                if self._runtime_domain is RuntimeDomain.CONVERSATION
+                else _overlap_signature
+            )
+            incoming_signatures = tuple(signature(message) for message in incoming)
             stored_signatures = tuple(
-                _overlap_signature(message) for message in working_messages
+                signature(message) for message in working_messages
             )
             overlap = suffix_prefix_overlap(stored_signatures, incoming_signatures)
             delta = list(incoming[overlap:])
@@ -1130,7 +1123,6 @@ class StateStepArchive(StepStore):
             projection = self._history.project_context(
                 owner_id,
                 snapshot.messages,
-                agent_digest=projection_binding,
                 origins=origins,
                 sources=sources,
             )
@@ -1321,18 +1313,11 @@ class StateStepArchive(StepStore):
         transaction: StateTransaction,
         run: RunRecord,
         snapshots: Sequence[PreparedStepSnapshot],
-        *,
-        binding_digest: str | None = None,
     ) -> tuple[PreparedStepSnapshot, ...]:
         del transaction, run
         values = tuple(snapshots)
         if any(not isinstance(snapshot, PreparedStepSnapshot) for snapshot in values):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        if binding_digest is not None and any(
-            snapshot.projection.agent_digest != binding_digest
-            for snapshot in values
-        ):
-            raise AIError(ErrorCode.SESSION_BINDING_MISMATCH)
         return values
 
     async def _execution_history_guard_in_transaction(
@@ -1385,7 +1370,6 @@ class StateStepArchive(StepStore):
         *,
         events: Sequence[StepEvent],
         snapshots: Sequence[ContinuableSnapshot],
-        binding_digest: str | None = None,
         execution_id: str | None = None,
     ) -> None:
         self._ensure_open()
@@ -1393,7 +1377,6 @@ class StateStepArchive(StepStore):
         prepared = await self._prepare_snapshots(
             run,
             snapshots,
-            binding_digest=binding_digest,
         )
         await self._store.mutate(
             lambda transaction: self._sync_projection_in_transaction(
@@ -1438,7 +1421,6 @@ class StateStepArchive(StepStore):
         *,
         events: Sequence[StepEvent],
         snapshots: Sequence[PreparedStepSnapshot],
-        binding_digest: str | None = None,
         execution_id: str | None = None,
         history_head_guard: tuple[ExecutionHistoryHeadRecord, StoredRecord] | None = None,
     ) -> None:
@@ -1447,7 +1429,6 @@ class StateStepArchive(StepStore):
             transaction,
             run,
             snapshots,
-            binding_digest=binding_digest,
         )
         facts = tuple(
             ("event", event, _step_event_kind(event)) for event in events
@@ -1573,7 +1554,6 @@ class StateStepArchive(StepStore):
         run: RunRecord,
         snapshot: ContinuableSnapshot,
         *,
-        binding_digest: str | None = None,
         execution_id: str | None = None,
     ) -> None:
         self._ensure_open()
@@ -1581,7 +1561,6 @@ class StateStepArchive(StepStore):
         prepared = await self._prepare_snapshots(
             run,
             (snapshot,),
-            binding_digest=binding_digest,
         )
         await self._store.mutate(
             lambda transaction: self._materialize_snapshot_in_transaction(
@@ -1598,7 +1577,6 @@ class StateStepArchive(StepStore):
         run: RunRecord,
         snapshot: PreparedStepSnapshot,
         *,
-        binding_digest: str | None = None,
         execution_id: str | None = None,
         history_head_guard: tuple[ExecutionHistoryHeadRecord, StoredRecord] | None = None,
     ) -> None:
@@ -1651,7 +1629,6 @@ class StateStepArchive(StepStore):
         run: RunRecord,
         snapshot: PreparedStepSnapshot,
         *,
-        binding_digest: str | None = None,
         execution_id: str | None = None,
         history_head_guard: tuple[ExecutionHistoryHeadRecord, StoredRecord] | None = None,
     ) -> None:
@@ -1662,7 +1639,6 @@ class StateStepArchive(StepStore):
             transaction,
             run,
             snapshot,
-            binding_digest=binding_digest,
             execution_id=execution_id,
             history_head_guard=history_head_guard,
         )
@@ -1674,7 +1650,6 @@ class StateStepArchive(StepStore):
         *,
         events: Sequence[StepEvent],
         snapshots: Sequence[PreparedStepSnapshot],
-        binding_digest: str | None = None,
         execution_id: str | None = None,
         history_head_guard: tuple[ExecutionHistoryHeadRecord, StoredRecord] | None = None,
     ) -> None:
@@ -1686,7 +1661,6 @@ class StateStepArchive(StepStore):
             run,
             events=events,
             snapshots=snapshots,
-            binding_digest=binding_digest,
             execution_id=execution_id,
             history_head_guard=history_head_guard,
         )
@@ -1880,12 +1854,10 @@ class StateStepArchive(StepStore):
         self,
         *,
         run_id: str,
-        binding_digest: str,
     ) -> tuple[object, ...]:
         require_no_run_history_lock("StateStepArchive.load_model_context")
         values = await self._history.load_model_context(
             run_id,
-            binding_digest=binding_digest,
         )
         return values.model_messages()
 
@@ -1893,18 +1865,15 @@ class StateStepArchive(StepStore):
         self,
         *,
         owner_id: str,
-        binding_digest: str | None = None,
     ) -> LoadedModelContext:
         require_no_run_history_lock("StateStepArchive.load_loaded_model_context")
         if self._runtime_domain is RuntimeDomain.CONVERSATION:
             return await self._history.load_session_model_context(
                 owner_id,
                 tenant_id=self._tenant_id,
-                binding_digest=binding_digest,
             )
         values = await self._history.load_model_context(
             owner_id,
-            binding_digest=binding_digest,
         )
         return values
 
@@ -1991,14 +1960,12 @@ class StateStepArchive(StepStore):
         history_id: str,
         *,
         tenant_id: str,
-        agent_digest: str | None = None,
     ) -> tuple[object, ...]:
         require_no_run_history_lock("StateStepArchive.load_session_model_context")
         return (
             await self._history.load_session_model_context(
                 history_id,
                 tenant_id=tenant_id,
-                agent_digest=agent_digest,
             )
         ).model_messages()
 
@@ -2007,7 +1974,6 @@ class StateStepArchive(StepStore):
         *,
         run_id: str,
         snapshot: ContinuableSnapshot,
-        agent_digest: str | None = None,
     ) -> bool:
         require_no_run_history_lock(
             "StateStepArchive.verify_snapshot_projection"
@@ -2021,12 +1987,7 @@ class StateStepArchive(StepStore):
         projection = await self._history.load_projection(run_id)
         if projection is None or projection.digest != stored.projection_digest:
             return False
-        if agent_digest is not None and projection.agent_digest != agent_digest:
-            return False
-        context = await self._history.load_model_context(
-            run_id,
-            agent_digest=agent_digest,
-        )
+        context = await self._history.load_model_context(run_id)
         return (
             stored.run_id == snapshot.run_id
             and stored.step_index == snapshot.step_index
@@ -2256,7 +2217,6 @@ class RuntimeStepStore(StepStore):
         self._initialized = False
         self._preflight = False
         self._projection_offsets: dict[str, _ProjectionOffset] = {}
-        self._projection_bindings: dict[str, str] = {}
         self._projection_dirty: set[str] = set()
         self._durability_flights: dict[str, _RunDurabilityFlight] = {}
         self._terminal_seals: dict[str, _LocalExecutionTerminalSeal] = {}
@@ -2270,7 +2230,6 @@ class RuntimeStepStore(StepStore):
         for archive in self._archives.values():
             await archive.initialize()
         self._projection_offsets.clear()
-        self._projection_bindings.clear()
         self._projection_dirty.clear()
         self._durability_flights.clear()
         self._terminal_seals.clear()
@@ -2484,15 +2443,12 @@ class RuntimeStepStore(StepStore):
         self,
         runtime_domain: RuntimeDomain,
         owner_id: str,
-        *,
-        binding_digest: str | None = None,
     ) -> LoadedModelContext:
         archive = self._archives.get(runtime_domain)
         if not isinstance(archive, StateStepArchive):
             raise AIError(ErrorCode.STORAGE_DEPENDENCY_NOT_READY)
         return await archive.load_loaded_model_context(
             owner_id=owner_id,
-            binding_digest=binding_digest,
         )
 
     async def resolve_transcript_message_refs(
@@ -2656,15 +2612,12 @@ class RuntimeStepStore(StepStore):
     async def load_session_model_context(
         self,
         history_id: str,
-        *,
-        binding_digest: str | None = None,
     ) -> LoadedModelContext:
         archive = self._archives.get(RuntimeDomain.CONVERSATION)
         if not isinstance(archive, StateStepArchive):
             raise AIError(ErrorCode.STORAGE_DEPENDENCY_NOT_READY)
         return await archive.load_loaded_model_context(
             owner_id=history_id,
-            binding_digest=binding_digest,
         )
 
     async def materialize_recovery_snapshot(self, *, step_run_id: str, require_complete: bool) -> None:
@@ -2844,7 +2797,6 @@ class RuntimeStepStore(StepStore):
                 batch = await archive.prepare_snapshots_after_seal(
                     projection.run,
                     projection.snapshots,
-                    binding_digest=binding_digest,
                 )
                 prepared.append(
                     PreparedExecutionProjection(
@@ -2996,8 +2948,6 @@ class RuntimeStepStore(StepStore):
     async def capture_execution_projection(
         self,
         step_run_id: str,
-        *,
-        binding_digest: "str | None" = None,
     ) -> "tuple[CapturedExecutionProjection, _RunProjectionFlight] | None":
         """CAPTURE: snapshot staged state under the run lock with no durable I/O."""
         await self._ensure_business()
@@ -3019,8 +2969,6 @@ class RuntimeStepStore(StepStore):
                     )
                     if projection is None:
                         return None
-                    if binding_digest is not None:
-                        self._projection_bindings[step_run_id] = binding_digest
                     flight = self._install_durability_flight_locked(
                         step_run_id,
                         _RunDurabilityKind.PROJECTION,
@@ -3033,7 +2981,6 @@ class RuntimeStepStore(StepStore):
                         projection.base_snapshot_offset,
                         projection.target_event_offset,
                         projection.target_snapshot_offset,
-                        binding_digest,
                     )
                     _logger.debug(
                         "projection flight captured: run=%s token=%s "
@@ -3128,7 +3075,6 @@ class RuntimeStepStore(StepStore):
                     captured.run,
                     captured.events,
                     captured.snapshots,
-                    binding_digest=captured.binding_digest,
                     execution_id=execution_id,
                 )
 
@@ -3190,15 +3136,10 @@ class RuntimeStepStore(StepStore):
             await self.finalize_execution_projection(flight, captured)
             return
         started = monotonic()
-        binding = captured.binding_digest or self._projection_bindings.get(
-            flight.run_id,
-            flight.run_id,
-        )
         try:
             prepared = await archive.prepare_snapshots(
                 captured.run,
                 captured.snapshots,
-                binding_digest=binding,
             )
         except BaseException:
             await self.abandon_execution_projection(flight)
@@ -3380,7 +3321,6 @@ class RuntimeStepStore(StepStore):
                             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                         self._staging.release_run_local(run_id)
                         self._projection_offsets.pop(run_id, None)
-                        self._projection_bindings.pop(run_id, None)
                         self._projection_dirty.discard(run_id)
                         for archive in self._archives.values():
                             if isinstance(archive, StateStepArchive):
@@ -3426,7 +3366,6 @@ class RuntimeStepStore(StepStore):
                     if runtime_domain is RuntimeDomain.EXECUTION:
                         self._ensure_run_mutable(step_run_id)
                     self._projection_offsets.pop(step_run_id, None)
-                    self._projection_bindings.pop(step_run_id, None)
                     self._projection_dirty.discard(step_run_id)
                     flight = self._install_durability_flight_locked(
                         step_run_id,
@@ -3601,7 +3540,6 @@ async def _sync_projection(
     events: tuple[StepEvent, ...],
     snapshots: tuple[ContinuableSnapshot, ...],
     *,
-    binding_digest: str | None = None,
     execution_id: str | None = None,
 ) -> None:
     if isinstance(target, _StepArchiveBatch):
@@ -3609,7 +3547,6 @@ async def _sync_projection(
             run,
             events=events,
             snapshots=snapshots,
-            binding_digest=binding_digest,
             execution_id=execution_id,
         )
         return

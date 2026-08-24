@@ -8,7 +8,7 @@ from collections.abc import Mapping
 
 from linktools.core import environ
 
-from ..agent import AgentBindingSnapshot, AgentCompiler, AgentCatalog
+from ..agent import AgentBindingSnapshot, AgentCatalog, AgentCompiler
 from ..core import (
     ExecutionStatus,
     Principal,

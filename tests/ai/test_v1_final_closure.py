@@ -238,28 +238,28 @@ def test_v1_tagged_scalars_require_canonical_inverse() -> None:
     )
 
 
-def test_v1_dataclass_and_any_readers_require_exact_shapes() -> None:
+def test_v1_dataclass_reader_tolerates_ordinary_shape_changes() -> None:
     cursor = ConversationCursor("run")
     wire = encode_domain(cursor)
     fields = dict(wire["fields"])
     fields.pop("history_id")
-    _assert_integrity(
-        lambda: decode_domain(
-            {"$dataclass": "conversation_cursor", "fields": fields},
-            ConversationCursor,
-        )
-    )
+    assert decode_domain(
+        {"$dataclass": "conversation_cursor", "fields": fields},
+        ConversationCursor,
+    ) == cursor
     fields = dict(wire["fields"])
     fields["unknown"] = None
+    assert decode_domain(
+        {"$dataclass": "conversation_cursor", "fields": fields},
+        ConversationCursor,
+    ) == cursor
     _assert_integrity(
         lambda: decode_domain(
-            {"$dataclass": "conversation_cursor", "fields": fields},
-            ConversationCursor,
-        )
-    )
-    _assert_integrity(
-        lambda: decode_domain(
-            {"$dataclass": "conversation_cursor", "fields": wire["fields"], "extra": 1},
+            {
+                "$dataclass": "conversation_cursor",
+                "fields": wire["fields"],
+                "extra": 1,
+            },
             ConversationCursor,
         )
     )
@@ -287,7 +287,7 @@ def test_v1_dataclass_and_any_readers_require_exact_shapes() -> None:
     assert decode_domain(encode_domain({"value": 1}), Any) == {"value": 1}
 
 
-def test_v1_envelopes_and_step_wire_have_exact_ownership() -> None:
+def test_v1_envelopes_keep_exact_members() -> None:
     cursor = ConversationCursor("run")
     envelope = encode_envelope(
         {"type": wire_type_id(cursor), "payload": encode_domain(cursor)}
@@ -324,8 +324,17 @@ def test_v1_envelopes_and_step_wire_have_exact_ownership() -> None:
         lambda: _decode_step_envelope(
             {
                 "v": 1,
-                "value": {"type": "stored_step_snapshot", "payload": {}, "extra": 1},
+                "value": {
+                    "type": "stored_step_snapshot",
+                    "payload": encode_domain(stored),
+                    "extra": 1,
+                },
             }
+        )
+    )
+    _assert_integrity(
+        lambda: _decode_step_envelope(
+            {"v": 1, "value": {"type": "stored_step_snapshot"}}
         )
     )
     _assert_unsupported(

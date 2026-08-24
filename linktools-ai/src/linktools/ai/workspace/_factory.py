@@ -19,9 +19,9 @@ from ..agent import (
     WORKSPACE_FILESYSTEM_READ_TOOL_NAMES,
     WORKSPACE_FILESYSTEM_TOOL_NAMES,
     WORKSPACE_SHELL_TOOL_NAMES,
+    AgentCatalog,
     AgentCompiler,
     AgentDefinition,
-    AgentCatalog,
 )
 from ..asset import (
     AssetDiscoveryStatus,
@@ -259,6 +259,7 @@ def _platform_policy_fingerprint() -> str:
         {
             "version": 1,
             "runtime_contract_revision": 1,
+            "history_system_prompt_owner": "current_binding",
         }
     )
 

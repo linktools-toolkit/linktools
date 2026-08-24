@@ -1,4 +1,5 @@
-
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
 import asyncio
 from dataclasses import replace
 from datetime import datetime, timezone
@@ -19,7 +20,6 @@ from linktools.ai.core import (
     UsageMetrics,
 )
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.spec import AgentSpec
 from linktools.ai.runtime import RuntimeState
 from linktools.ai.runtime._event import (
     DefaultEventService,
@@ -38,6 +38,7 @@ from linktools.ai.runtime.state._contracts import (
     ExecutionTerminalCommitResult,
     ResultRecord,
 )
+from linktools.ai.spec import AgentSpec
 
 
 def _binding_snapshot() -> AgentBindingSnapshot:

@@ -38,16 +38,21 @@ from linktools.ai.runtime.state import (
     StoredRecord,
     TranscriptMessageRef,
 )
+from linktools.ai.runtime.state._history import (
+    _conversation_overlap_signature,
+    _overlap_signature,
+)
 from linktools.ai.runtime.state._steps import LockOrderError, _RunHistoryLock
-from linktools.ai.spec import AgentSpec
 from linktools.ai.runtime.state._store import (
     partition_digest,
     record_key_digest,
     sortable_identity,
 )
+from linktools.ai.spec import AgentSpec
 from pydantic_ai.messages import (
     ModelRequest,
     ModelResponse,
+    SystemPromptPart,
     TextPart,
     ThinkingPart,
     UserPromptPart,
@@ -100,6 +105,26 @@ def _record(status: ExecutionStatus, sequence: int) -> ExecutionRecord:
         thinking=False,
         binding=_binding(),
     )
+
+
+def test_conversation_overlap_ignores_only_standing_system_prompt() -> None:
+    old = ModelRequest(
+        parts=(
+            SystemPromptPart(content="old"),
+            UserPromptPart(content="hello"),
+        )
+    )
+    new = ModelRequest(
+        parts=(
+            SystemPromptPart(content="new"),
+            UserPromptPart(content="hello"),
+        )
+    )
+
+    assert _conversation_overlap_signature(old) == _conversation_overlap_signature(new)
+    assert _overlap_signature(old) != _overlap_signature(new)
+    assert len(old.parts) == 2
+    assert len(new.parts) == 2
 
 
 @pytest.mark.asyncio

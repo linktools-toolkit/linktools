@@ -113,7 +113,7 @@ class AgentHandle:
         metadata: "Mapping[str, JsonValue] | None" = None,
     ) -> SessionView:
         return await self._runtime._create_session_for_agent(
-            self._agent_digest,
+            self.agent_id,
             session_id,
             principal=principal,
             cwd=cwd,

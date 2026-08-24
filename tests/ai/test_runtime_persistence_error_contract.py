@@ -9,12 +9,14 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
-
-from linktools.ai.agent import AgentCompiler
-from linktools.ai.core import ExecutionEventType, ToolOperationStatus
+from linktools.ai.core import (
+    ExecutionEventType,
+    SessionStatus,
+    ToolOperationStatus,
+)
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.model import ModelRegistry
 from linktools.ai.runtime import RuntimeDomain, RuntimeState
+from linktools.ai.runtime._session import _session_agent_id
 from linktools.ai.runtime._tool import ToolOperationRecord
 from linktools.ai.runtime.state._codec import (
     _decode_enveloped_domain,
@@ -23,16 +25,15 @@ from linktools.ai.runtime.state._codec import (
 )
 from linktools.ai.runtime.state._contracts import (
     RuntimePayloadRef,
+    SessionRecord,
     TranscriptChunk,
     TranscriptOrigin,
     TranscriptSeekDimension,
     TranscriptSeekRecord,
 )
 from linktools.ai.runtime.state._maintenance import RuntimeStorageInspection
-from linktools.ai.runtime.state._migration import _migrate_legacy_binding
 from linktools.ai.runtime.state._repositories import _domain_data
 from linktools.ai.runtime.state._store import StoredFact, StoredRecord
-from linktools.ai.spec import AgentSpec
 from linktools.ai.storage import StoredPayload
 from linktools.ai.task import TaskNodeView, TaskStatus
 
@@ -43,22 +44,27 @@ def _future_schema(data: object) -> object:
     return value
 
 
-def _legacy_binding_payload(compiler: AgentCompiler) -> dict[str, object]:
-    binding = compiler.bind(compiler.compile(AgentSpec("default")))
-    payload = dict(binding.snapshot.to_payload())
-    payload.pop("agent_digest")
-    spec = dict(payload["agent_spec"])
-    spec["metadata"] = {}
-    payload["agent_spec"] = spec
-    payload["binding_digest"] = "f" * 64
-    return payload
-
-
-def _compiler() -> AgentCompiler:
-    return AgentCompiler(
-        model_resolver=ModelRegistry.openai(model="gpt-test").snapshot(),
-        runtime_fingerprint="a" * 64,
+def _precomposition_session_data() -> dict[str, object]:
+    now = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    session = SessionRecord(
+        session_id="session",
+        tenant_id="tenant",
+        owner_principal_id="owner",
+        agent_id="agent",
+        status=SessionStatus.OPEN,
+        revision=0,
+        resource_generation=0,
+        cwd=None,
+        metadata={},
+        created_at=now,
+        updated_at=now,
+        closed_at=None,
+        active_execution_id=None,
     )
+    payload = _encode_persisted_domain(session)
+    payload["fields"].pop("agent_id")
+    payload["fields"]["binding_digest"] = "b" * 64
+    return encode_envelope({"type": "session_record", "payload": payload})
 
 
 class _NoObjects:
@@ -156,35 +162,11 @@ def _transcript_chunk_data() -> dict[str, object]:
     )
 
 
-def test_legacy_binding_malformed_known_field_remains_integrity_error() -> None:
-    compiler = _compiler()
-    payload = _legacy_binding_payload(compiler)
-    payload["output_schema_fingerprint"] = "invalid"
-
+def test_generic_tolerance_does_not_guess_missing_agent_identity() -> None:
     with pytest.raises(AIError) as raised:
-        _migrate_legacy_binding(payload, compiler)
-
-    assert raised.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
-
-
-def test_legacy_binding_malformed_descriptor_remains_integrity_error() -> None:
-    compiler = _compiler()
-    payload = _legacy_binding_payload(compiler)
-    payload["local_runtime_capability_descriptors"] = [None]
-
-    with pytest.raises(AIError) as raised:
-        _migrate_legacy_binding(payload, compiler)
-
-    assert raised.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
-
-
-def test_legacy_binding_future_version_remains_unsupported() -> None:
-    compiler = _compiler()
-    payload = _legacy_binding_payload(compiler)
-    payload["version"] = 2
-
-    with pytest.raises(AIError) as raised:
-        _migrate_legacy_binding(payload, compiler)
+        _session_agent_id(
+            _decode_enveloped_domain(_precomposition_session_data(), SessionRecord)
+        )
 
     assert raised.value.code is ErrorCode.STORAGE_VERSION_UNSUPPORTED
 

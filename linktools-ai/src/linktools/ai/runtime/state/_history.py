@@ -9,7 +9,7 @@ from collections.abc import AsyncIterator, Mapping, Sequence
 from dataclasses import dataclass, replace
 
 from linktools.core import environ
-from pydantic_ai.messages import ModelMessage
+from pydantic_ai.messages import ModelMessage, ModelRequest, SystemPromptPart
 
 from ...core import canonical_json_bytes
 from ...errors import AIError, ErrorCode
@@ -95,6 +95,21 @@ def _overlap_signature(message: ModelMessage) -> bytes:
     return canonical_json_bytes(remove_timestamps(value))
 
 
+def _conversation_overlap_signature(message: ModelMessage) -> bytes:
+    if not isinstance(message, ModelRequest):
+        return _overlap_signature(message)
+    return _overlap_signature(
+        replace(
+            message,
+            parts=tuple(
+                part
+                for part in message.parts
+                if not isinstance(part, SystemPromptPart)
+            ),
+        )
+    )
+
+
 def _exact_message_signature(message: ModelMessage) -> bytes:
     """Full canonical serialization including timestamp, for exact-content proof."""
     return encode_model_messages((message,))
@@ -157,7 +172,6 @@ class _ContextProjector:
         owner_id: str,
         messages: Sequence[ModelMessage],
         *,
-        agent_digest: str,
         origins: Sequence[TranscriptOrigin] = (),
         sources: Sequence[TranscriptMessageRef | None] = (),
     ) -> ContextProjection:
@@ -211,18 +225,16 @@ class _ContextProjector:
                     )
                 )
             index = end
-        digest = self._digest(agent_digest, items)
-        return ContextProjection(agent_digest, tuple(items), digest)
+        digest = self._digest(items)
+        return ContextProjection(tuple(items), digest)
 
     def _digest(
         self,
-        agent_digest: str,
         items: Sequence[TranscriptSpanRef | InlineContextBlock],
     ) -> str:
         return hashlib.sha256(
             canonical_json_bytes(
                 {
-                    "agent_digest": agent_digest,
                     "items": encode_domain(tuple(items)),
                 }
             )
@@ -742,8 +754,8 @@ class TranscriptRepository:
             changed = True
         if not changed:
             return projection
-        digest = self._projector._digest(projection.agent_digest, items)
-        return ContextProjection(projection.agent_digest, tuple(items), digest)
+        digest = self._projector._digest(items)
+        return ContextProjection(tuple(items), digest)
 
     def history_stream(self, history_id: str) -> bytes:
         return stream_digest(
@@ -925,17 +937,11 @@ class TranscriptRepository:
         history_id: str,
         *,
         tenant_id: str,
-        agent_digest: str | None = None,
     ) -> LoadedModelContext:
         require_no_run_history_lock("TranscriptRepository.load_session_model_context")
         projection = await self.load_projection(history_id)
         if projection is not None:
-            if agent_digest is not None and projection.agent_digest != agent_digest:
-                raise AIError(ErrorCode.SESSION_BINDING_MISMATCH)
-            return await self.load_model_context(
-                history_id,
-                agent_digest=agent_digest,
-            )
+            return await self.load_model_context(history_id)
         head = await self.get_head(history_id)
         if head is None:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -1120,8 +1126,6 @@ class TranscriptRepository:
     async def load_model_context(
         self,
         owner_id: str,
-        *,
-        agent_digest: str | None = None,
     ) -> LoadedModelContext:
         require_no_run_history_lock("TranscriptRepository.load_model_context")
         projection = await self.load_projection(owner_id)
@@ -1132,13 +1136,6 @@ class TranscriptRepository:
             if head.message_count:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             return LoadedModelContext(())
-        if agent_digest is not None and projection.agent_digest != agent_digest:
-            _logger.info(
-                "context projection binding mismatch: domain=%s owner=%s",
-                self._runtime_domain.value,
-                owner_id,
-            )
-            raise AIError(ErrorCode.SESSION_BINDING_MISMATCH)
         span_refs: list[tuple[TranscriptSpanRef, tuple[TranscriptMessageRef, ...]]] = []
         refs: list[TranscriptMessageRef] = []
         for item in projection.items:
@@ -1664,14 +1661,12 @@ class TranscriptRepository:
         owner_id: str,
         messages: Sequence[ModelMessage],
         *,
-        agent_digest: str,
         origins: Sequence[TranscriptOrigin] = (),
         sources: Sequence[TranscriptMessageRef | None] = (),
     ) -> ContextProjection:
         return self._projector.project(
             owner_id,
             messages,
-            agent_digest=agent_digest,
             origins=origins,
             sources=sources,
         )

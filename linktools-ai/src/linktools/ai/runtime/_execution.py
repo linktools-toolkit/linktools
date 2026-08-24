@@ -382,10 +382,22 @@ class DefaultExecutionService:
     async def run(self, binding_digest: str, request: ExecutionRequest) -> ExecutionHandle:
         return await self._start(binding_digest, request, scope="execution.run")
 
-    async def run_for_session(self, binding_digest: str, session_id: str, request: ExecutionRequest) -> ExecutionHandle:
+    async def run_for_session(
+        self,
+        agent_id: str,
+        binding_digest: str,
+        session_id: str,
+        request: ExecutionRequest,
+    ) -> ExecutionHandle:
         if not session_id.strip():
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
-        return await self._start(binding_digest, request, session_id=session_id, scope="session.resume")
+        return await self._start(
+            binding_digest,
+            request,
+            session_id=session_id,
+            session_agent_id=agent_id,
+            scope="session.resume",
+        )
 
     async def _run_with_launch_gate(
         self,
@@ -397,6 +409,7 @@ class DefaultExecutionService:
 
     async def _run_for_session_with_launch_gate(
         self,
+        agent_id: str,
         binding_digest: str,
         session_id: str,
         request: ExecutionRequest,
@@ -408,6 +421,7 @@ class DefaultExecutionService:
             binding_digest,
             request,
             session_id=session_id,
+            session_agent_id=agent_id,
             scope="session.resume",
             launch_gate=gate,
         )
@@ -444,6 +458,7 @@ class DefaultExecutionService:
         request: ExecutionRequest,
         *,
         session_id: "str | None" = None,
+        session_agent_id: "str | None" = None,
         source_execution_id: "str | None" = None,
         base_execution_id: "str | None" = None,
         conversation_step_run_id: "str | None" = None,
@@ -458,6 +473,7 @@ class DefaultExecutionService:
                 binding_digest,
                 request,
                 session_id=session_id,
+                session_agent_id=session_agent_id,
                 source_execution_id=source_execution_id,
                 base_execution_id=base_execution_id,
                 conversation_step_run_id=conversation_step_run_id,
@@ -472,6 +488,7 @@ class DefaultExecutionService:
                 binding_digest,
                 request,
                 session_id=session_id,
+                session_agent_id=session_agent_id,
                 source_execution_id=source_execution_id,
                 base_execution_id=base_execution_id,
                 conversation_step_run_id=conversation_step_run_id,
@@ -488,6 +505,7 @@ class DefaultExecutionService:
         request: ExecutionRequest,
         *,
         session_id: "str | None" = None,
+        session_agent_id: "str | None" = None,
         source_execution_id: "str | None" = None,
         base_execution_id: "str | None" = None,
         conversation_step_run_id: "str | None" = None,
@@ -509,7 +527,9 @@ class DefaultExecutionService:
             session = await self._sessions.get(session_id, tenant_id=request.principal.tenant_id)
             if session is None:
                 raise AIError(ErrorCode.SESSION_NOT_FOUND)
-            if session.agent_digest != binding.definition.digest:
+            from ._session import _session_agent_id
+
+            if _session_agent_id(session) != session_agent_id:
                 raise AIError(ErrorCode.SESSION_BINDING_MISMATCH)
             conversation_run_id = None if session.continuation is None else session.continuation.step_run_id
             base_execution_id = None

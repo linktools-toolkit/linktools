@@ -16,8 +16,13 @@ from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.runtime import ExecutionRequest
 from linktools.ai.runtime._execution import CancelEffectOutcome, ExecutionStartIdentity
 from linktools.ai.runtime._local import LocalExecutionBackend
-from linktools.ai.runtime.state import ExecutionRecord
+from linktools.ai.runtime.state import (
+    ExecutionRecord,
+    LoadedContextMessage,
+    LoadedModelContext,
+)
 from linktools.ai.spec import AgentSpec
+from pydantic_ai.messages import ModelRequest, UserPromptPart
 
 
 def _binding_snapshot() -> AgentBindingSnapshot:
@@ -165,6 +170,78 @@ def _backend(error: Exception) -> LocalExecutionBackend:
 async def _empty_history(execution: ExecutionRecord) -> list[object]:
     del execution
     return []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("messages", "expected_replacement"),
+    (
+        ((), False),
+        ((ModelRequest(parts=(UserPromptPart(content="prior"),)),), True),
+    ),
+)
+async def test_session_prompt_replacement_requires_prior_conversation_history(
+    messages: tuple[ModelRequest, ...],
+    expected_replacement: bool,
+) -> None:
+    backend = _backend(ValueError("model output failed"))
+    record = replace(
+        _record(),
+        session_id="session",
+        lineage_kind=ExecutionLineageKind.SESSION_RESUME,
+    )
+    backend._execution.executions.record = record
+
+    async def session_get(session_id: str, *, tenant_id: str) -> object:
+        del session_id, tenant_id
+        return SimpleNamespace(history_id="history")
+
+    class _Steps:
+        async def load_loaded_model_context(
+            self,
+            domain: object,
+            owner_id: str,
+        ) -> LoadedModelContext:
+            del domain, owner_id
+            return LoadedModelContext(
+                tuple(LoadedContextMessage(message, None) for message in messages)
+            )
+
+    class _Executor:
+        def __init__(self) -> None:
+            self.replacement: bool | None = None
+
+        async def execute(self, *args: object, **kwargs: object) -> object:
+            del args
+            self.replacement = kwargs["replace_history_system_prompt"]
+            raise ValueError("model output failed")
+
+    executor = _Executor()
+    backend._conversation = SimpleNamespace(
+        sessions=SimpleNamespace(get=session_get),
+    )
+    backend._steps = _Steps()
+    backend._executor = executor
+
+    async def commit_failure(
+        execution: ExecutionRecord,
+        error: Exception,
+        *,
+        run_id: str | None = None,
+    ) -> None:
+        del error, run_id
+        backend._execution.executions.record = replace(
+            execution,
+            status=ExecutionStatus.FAILED,
+        )
+
+    backend._commit_failure = commit_failure
+    await backend._run(
+        ExecutionRequest("prompt", Principal("owner", "tenant"), "idempotency"),
+        record,
+    )
+
+    assert executor.replacement is expected_replacement
 
 
 @pytest.mark.asyncio

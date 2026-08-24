@@ -253,7 +253,6 @@ ContextProjectionItem = TranscriptSpanRef | InlineContextBlock
 
 @dataclass(frozen=True, slots=True)
 class ContextProjection:
-    agent_digest: str
     items: tuple[ContextProjectionItem, ...]
     digest: str
 
@@ -308,7 +307,6 @@ class SessionRecord:
     session_id: str
     tenant_id: str
     owner_principal_id: str
-    agent_digest: str
     status: SessionStatus
     revision: int
     resource_generation: int
@@ -321,6 +319,7 @@ class SessionRecord:
     continuation: ConversationCursor | None = None
     history_quality: str = "complete"
     history_id: str | None = None
+    agent_id: str | None = None
 
     def __post_init__(self) -> None:
         if self.active_execution_id is not None and not self.active_execution_id.strip():

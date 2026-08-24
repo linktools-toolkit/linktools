@@ -76,7 +76,7 @@ class _LocalRuntimeCoordinatorPort(Protocol):
 
     async def resume(
         self,
-        agent_digest: str,
+        agent_id: str,
         binding_digest: str,
         session_id: str,
         request: ResumeSessionRequest,
@@ -265,14 +265,14 @@ class Runtime:
             )
             if local_stream and self._local_coordinator is not None:
                 handle = await self._local_coordinator.resume(
-                    definition.digest,
+                    definition.spec.id,
                     binding.digest,
                     session_id,
                     resume_request,
                 )
             else:
                 handle = await self.session.resume(
-                    definition.digest,
+                    definition.spec.id,
                     binding.digest,
                     session_id,
                     resume_request,
@@ -408,7 +408,7 @@ class Runtime:
 
     async def _create_session_for_agent(
         self,
-        agent_digest: str,
+        agent_id: str,
         session_id: str,
         *,
         principal: "Principal | None",
@@ -416,13 +416,12 @@ class Runtime:
         metadata: "Mapping[str, JsonValue] | None",
     ) -> SessionView:
         principal = self._resolve_principal(principal)
-        definition = self._catalog.definition(agent_digest)
+        validate_agent_id(agent_id)
         values = dict(metadata or {})
         if any(key.startswith("linktools.ai.") for key in values):
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
-        values["linktools.ai.agent_id"] = definition.spec.id
         return await self.session.create(
-            definition.digest,
+            agent_id,
             CreateSessionRequest(
                 principal,
                 session_id,
@@ -566,13 +565,13 @@ class Runtime:
                 raise
             try:
                 await self.session.create(
-                    definition.digest,
+                    definition.spec.id,
                     CreateSessionRequest(
                         principal,
                         session_id,
                         secrets.token_urlsafe(32),
                         None,
-                        {"linktools.ai.agent_id": definition.spec.id},
+                        {},
                     ),
                 )
                 return
@@ -582,7 +581,7 @@ class Runtime:
             session = await self.session.get(session_id, principal=principal)
         if session.status is not SessionStatus.OPEN:
             raise AIError(ErrorCode.SESSION_CONFLICT)
-        if session.agent_digest != definition.digest:
+        if session.agent_id != definition.spec.id:
             raise AIError(ErrorCode.SESSION_BINDING_MISMATCH)
 
     def _ensure_open(self) -> None:

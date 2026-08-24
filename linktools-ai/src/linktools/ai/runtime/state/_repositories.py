@@ -33,6 +33,7 @@ from ...core import (
     canonical_json_bytes,
     canonical_sha256,
     operation_replay_matches,
+    validate_agent_id,
     validate_lease_owner,
     validate_lease_seconds,
 )
@@ -810,6 +811,7 @@ class SessionRepositoryImpl(_ResourceRepository[SessionRecord]):
 
     async def create(self, value: SessionRecord) -> SessionRecord:
         _require_tenant(value, self._tenant_id)
+        _require_explicit_session_agent_id(value)
         value = _ensure_session_history(value)
 
         async def mutate(transaction: StateTransaction) -> SessionRecord:
@@ -846,6 +848,7 @@ class SessionRepositoryImpl(_ResourceRepository[SessionRecord]):
     ) -> tuple[SessionRecord, bool]:
         _require_tenant(record, self._tenant_id)
         _require_tenant(operation, self._tenant_id)
+        _require_explicit_session_agent_id(record)
         record = _ensure_session_history(record)
 
         async def mutate(transaction: StateTransaction) -> tuple[SessionRecord, bool]:
@@ -893,6 +896,7 @@ class SessionRepositoryImpl(_ResourceRepository[SessionRecord]):
     ) -> tuple[SessionRecord, bool]:
         _require_tenant(target, self._tenant_id)
         _require_tenant(operation, self._tenant_id)
+        _require_explicit_session_agent_id(target)
         if (
             operation.resource_kind is not ResourceKind.SESSION
             or operation.resource_id != target.session_id
@@ -1132,7 +1136,7 @@ class SessionRepositoryImpl(_ResourceRepository[SessionRecord]):
             or existing_target.history_id != result.target_history_id
             or existing_target.tenant_id != self._tenant_id
             or existing_target.owner_principal_id != target.owner_principal_id
-            or existing_target.agent_digest != target.agent_digest
+            or existing_target.agent_id != target.agent_id
             or child.session_id != result.target_session_id
             or child.tenant_id != self._tenant_id
             or child.parent_history_id != result.source_history_id
@@ -4725,9 +4729,26 @@ def _projected_record(
     value: object,
 ) -> StoredRecord:
     _require_tenant(value, repository._tenant_id)
+    if isinstance(value, SessionRecord):
+        from .._session import _session_agent_id
+
+        if value.agent_id is None:
+            current_value = _decode_enveloped_domain(current.data, SessionRecord)
+            value = replace(value, agent_id=_session_agent_id(current_value))
+        else:
+            _session_agent_id(value)
     identity = _canonical_record_identity(current.kind, value)
     projected = repository._stored(current.kind, identity, value, state=_record_state(value))
     return replace(projected, storage_version=current.storage_version + 1)
+
+
+def _require_explicit_session_agent_id(value: SessionRecord) -> None:
+    if value.agent_id is None:
+        raise AIError(ErrorCode.AGENT_ID_INVALID)
+    try:
+        validate_agent_id(value.agent_id)
+    except TypeError as error:
+        raise AIError(ErrorCode.AGENT_ID_INVALID) from error
 
 
 def _event_payload(value: object) -> Mapping[str, JsonValue]:

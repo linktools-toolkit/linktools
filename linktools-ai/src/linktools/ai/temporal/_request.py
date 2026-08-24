@@ -320,7 +320,7 @@ def _execution_request_from_payload(
     planning = payload["planning"]
     thinking = payload["thinking"]
     if not isinstance(planning, bool) or not isinstance(thinking, bool):
-        raise ValueError("execution mode fields are invalid")
+        raise ValueError("execution mode fields are invalid")  # noqa: TRY004
     binding = AgentBindingSnapshot.from_payload(payload["binding"])
     memory_scope = payload["memory_scope"]
     if memory_scope is not None and not isinstance(memory_scope, str):

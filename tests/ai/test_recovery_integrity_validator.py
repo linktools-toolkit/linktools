@@ -18,12 +18,12 @@ from linktools.ai.runtime.state._contracts import (
     RecoveryHandoffPhase,
     RecoveryIdempotencyInput,
 )
-from linktools.ai.spec import AgentSpec
 from linktools.ai.runtime.state._store import (
     StoredRecord,
     partition_digest,
     record_key_digest,
 )
+from linktools.ai.spec import AgentSpec
 
 
 def _binding() -> AgentBindingSnapshot:
@@ -180,7 +180,7 @@ async def test_validator_reports_tampered_active_entry() -> None:
                     None,
                     encode_envelope(
                         {
-                            "type": "RecoveryActiveRecord",
+                            "type": "recovery_active",
                             "payload": encode_domain(
                                 RecoveryActiveRecord("e1", "tenant")
                             ),
