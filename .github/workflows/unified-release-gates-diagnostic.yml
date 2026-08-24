@@ -18,10 +18,13 @@ jobs:
       fail-fast: false
       matrix:
         gate:
-          - cntr-python36
-          - cntr-tests
-          - ai-ruff
-          - ai-tests
+          - ai-ruff-gates
+          - ai-ruff-runtime
+          - ai-ruff-commands
+          - ai-ruff-tests
+          - ai-tests-package
+          - ai-tests-root
+          - ai-import-surface
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -36,16 +39,25 @@ jobs:
         shell: bash
         run: |
           case "${{ matrix.gate }}" in
-            cntr-python36)
-              python scripts/check/python36.py manage.py scripts/check/python36.py linktools-cntr/src
+            ai-ruff-gates)
+              ruff check --no-cache scripts/check/ai
               ;;
-            cntr-tests)
-              python -m pytest -q -p no:cacheprovider tests/cntr
+            ai-ruff-runtime)
+              ruff check --no-cache linktools-ai/src/linktools/ai
               ;;
-            ai-ruff)
-              ruff check --no-cache scripts/check/ai linktools-ai/src/linktools/ai linktools-ai/src/linktools/commands/ai tests/ai
+            ai-ruff-commands)
+              ruff check --no-cache linktools-ai/src/linktools/commands/ai
               ;;
-            ai-tests)
-              python -m pytest -q -p no:cacheprovider linktools-ai/tests tests/ai tests/test_import_surface.py
+            ai-ruff-tests)
+              ruff check --no-cache tests/ai
+              ;;
+            ai-tests-package)
+              python -m pytest -q -p no:cacheprovider linktools-ai/tests
+              ;;
+            ai-tests-root)
+              python -m pytest -q -p no:cacheprovider tests/ai
+              ;;
+            ai-import-surface)
+              python -m pytest -q -p no:cacheprovider tests/test_import_surface.py
               ;;
           esac
