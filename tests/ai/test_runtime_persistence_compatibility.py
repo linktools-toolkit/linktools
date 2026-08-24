@@ -117,8 +117,14 @@ def test_context_projection_persisted_writer_rejects_runtime_type_mismatch() -> 
         "d" * 64,
     )
 
-    with pytest.raises(TypeError, match="persisted V1 wire is not readable"):
+    with pytest.raises(AIError) as raised:
         _encode_persisted_domain(projection)
+    assert raised.value.code is ErrorCode.INTERNAL_ERROR
+    assert raised.value.retryable is False
+    assert raised.value.safe_details == {
+        "phase": "persistence_encode",
+        "domain_type": "ContextProjection",
+    }
 
 
 def test_persisted_writer_rejects_mutated_stored_payload() -> None:
@@ -127,8 +133,14 @@ def test_persisted_writer_rejects_mutated_stored_payload() -> None:
     assert isinstance(value, dict)
     value["value"] = 2
 
-    with pytest.raises(TypeError):
+    with pytest.raises(AIError) as raised:
         _encode_persisted_domain(payload)
+    assert raised.value.code is ErrorCode.INTERNAL_ERROR
+    assert raised.value.retryable is False
+    assert raised.value.safe_details == {
+        "phase": "persistence_encode",
+        "domain_type": "StoredPayload",
+    }
 
 
 def test_missing_defaulted_session_field_uses_constructor_default() -> None:
