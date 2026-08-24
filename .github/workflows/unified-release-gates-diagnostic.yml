@@ -1,9 +1,6 @@
 name: Temporary unified release gate diagnostics
 
 on:
-  push:
-    branches:
-      - refactor/unified-release-gates
   pull_request:
     branches:
       - master
@@ -13,10 +10,12 @@ permissions:
 
 jobs:
   migrate-strenum:
-    if: github.event_name == 'push'
+    if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: refactor/unified-release-gates
       - name: Rewrite StrEnum imports
         run: |
           python - <<'PY'
