@@ -46,7 +46,10 @@ def _binding_snapshot() -> AgentBindingSnapshot:
 
 
 @pytest.mark.asyncio
-async def test_in_memory_terminal_commit_validates_success_result() -> None:
+@pytest.mark.parametrize("payload_kind", ["inline", "object"])
+async def test_in_memory_terminal_commit_validates_success_result(
+    payload_kind: str,
+) -> None:
     state = RuntimeState.in_memory()
     await state.initialize(namespace="memory-terminal", tenant_id="tenant")
     try:
@@ -91,6 +94,11 @@ async def test_in_memory_terminal_commit_validates_success_result() -> None:
         await state.execution.idempotency.reserve(identity)
 
         result_ref = ObjectRef("memory", "result", "c" * 64, 0)
+        result_payload = (
+            StoredPayload.inline_json({"text": "result"})
+            if payload_kind == "inline"
+            else StoredPayload.object(result_ref)
+        )
         terminal = replace(
             execution,
             status=ExecutionStatus.SUCCEEDED,
@@ -104,7 +112,7 @@ async def test_in_memory_terminal_commit_validates_success_result() -> None:
             "schema",
             1,
             "fingerprint",
-            StoredPayload.object(result_ref),
+            result_payload,
             StopReason.END_TURN,
             UsageMetrics(),
             now,
@@ -123,7 +131,7 @@ async def test_in_memory_terminal_commit_validates_success_result() -> None:
                     identity.status,
                     IdempotencyStatus.COMPLETED,
                     identity.request_digest,
-                    result_ref.digest,
+                    result_payload.digest,
                     None,
                 ),
             )
@@ -131,5 +139,17 @@ async def test_in_memory_terminal_commit_validates_success_result() -> None:
 
         assert committed.execution.status is ExecutionStatus.SUCCEEDED
         assert committed.result == result
+        persisted_execution = await state.execution.executions.get(
+            "execution",
+            tenant_id="tenant",
+        )
+        persisted_result = await state.execution.executions.get_result(
+            "execution",
+            tenant_id="tenant",
+        )
+        assert persisted_execution is not None
+        assert persisted_execution.status is ExecutionStatus.SUCCEEDED
+        assert persisted_execution.result == result
+        assert persisted_result == result
     finally:
         await state.close()

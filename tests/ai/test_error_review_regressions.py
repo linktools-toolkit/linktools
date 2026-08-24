@@ -16,7 +16,7 @@ from linktools.ai.agent._capabilities import AgentRunScope
 from linktools.ai.agent._executor import AgentExecutor
 from linktools.ai.agent._output import AssistantTextOutput, bind_output
 from linktools.ai.core import ExecutionLineageKind, ExecutionStatus, OperationStatus
-from linktools.ai.errors import ErrorCode
+from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.runtime._execution import CancelEffectOutcome, DefaultExecutionService
 from linktools.ai.runtime.service_api import CancelExecutionRequest
 from linktools.ai.runtime.state import ExecutionRecord
@@ -214,6 +214,127 @@ async def test_agent_executor_reinjects_only_when_requested(
     capabilities = captured["capabilities"]
     assert isinstance(capabilities, tuple)
     assert any(isinstance(capability, ReinjectSystemPrompt) for capability in capabilities) is replace_history_system_prompt
+
+
+@pytest.mark.asyncio
+async def test_agent_executor_rejects_non_json_output(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class InvalidOutput(AssistantTextOutput):
+        def model_dump(self, *args: object, **kwargs: object) -> dict[str, object]:
+            del args, kwargs
+            return {"value": ("invalid",)}
+
+    model = SimpleNamespace(profile={})
+    definition = SimpleNamespace(
+        digest="b" * 64,
+        spec=AgentSpec("agent", 1, "default"),
+        model=SimpleNamespace(materialize=lambda: model),
+        effective_capabilities=(),
+        trusted_tool_classes=(),
+        trusted_mcp_selectors=(),
+    )
+    binding = SimpleNamespace(
+        definition=definition,
+        output_type=InvalidOutput,
+    )
+
+    class _StepStore:
+        def __init__(self) -> None:
+            self._get_run_calls = 0
+
+        async def get_run(self, *, run_id: str) -> object | None:
+            del run_id
+            self._get_run_calls += 1
+            if self._get_run_calls == 1:
+                return None
+            return SimpleNamespace(conversation_id="conversation")
+
+        async def latest_snapshot(
+            self,
+            *,
+            run_id: str,
+            include_interrupted: bool = False,
+        ) -> object:
+            del run_id, include_interrupted
+            return object()
+
+        async def list_unresolved_tool_effects(
+            self,
+            *,
+            run_id: str,
+        ) -> tuple[object, ...]:
+            del run_id
+            return ()
+
+    class _Result:
+        run_id = "run"
+        output = InvalidOutput(text="invalid")
+
+        def all_messages(self) -> list[object]:
+            return []
+
+    class _ResultEvent:
+        def __init__(self) -> None:
+            self.result = _Result()
+
+    class _Events:
+        def __init__(self) -> None:
+            self._done = False
+
+        async def __aenter__(self) -> object:
+            return self
+
+        async def __aexit__(self, *args: object) -> None:
+            del args
+
+        def __aiter__(self) -> "_Events":
+            return self
+
+        async def __anext__(self) -> _ResultEvent:
+            if self._done:
+                raise StopAsyncIteration
+            self._done = True
+            return _ResultEvent()
+
+    class _Agent:
+        def run_stream_events(self, *args: object, **kwargs: object) -> _Events:
+            del args, kwargs
+            return _Events()
+
+    async def compose_platform(*args: object, **kwargs: object) -> tuple[object, ...]:
+        del args, kwargs
+        return ()
+
+    monkeypatch.setattr(
+        executor_module,
+        "build_pydantic_agent",
+        lambda *args, **kwargs: _Agent(),
+    )
+    monkeypatch.setattr(executor_module, "compose_platform_capabilities", compose_platform)
+    monkeypatch.setattr(executor_module, "AgentRunResultEvent", _ResultEvent)
+
+    async def event_sink(_event: object) -> None:
+        del _event
+
+    executor = AgentExecutor(execution_root=tmp_path)
+    with pytest.raises(AIError) as raised:
+        await executor.execute(
+            binding,  # type: ignore[arg-type]
+            "prompt",
+            [],
+            "conversation",
+            step_store=_StepStore(),  # type: ignore[arg-type]
+            step_run_id="run",
+            segment_sequence=1,
+            capability_context=SimpleNamespace(),  # type: ignore[arg-type]
+            event_sink=event_sink,  # type: ignore[arg-type]
+        )
+
+    assert raised.value.code is ErrorCode.OUTPUT_VALIDATION_FAILED
+    assert raised.value.retryable is False
+    assert raised.value.safe_details == {}
 
 
 @pytest.mark.asyncio

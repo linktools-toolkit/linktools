@@ -11,7 +11,12 @@ from ._ids import (
     step_conversation_id,
     step_run_id,
 )
-from ._json import ImmutableJsonMapping, JsonValue, canonical_json_bytes
+from ._json import (
+    ImmutableJsonMapping,
+    JsonValue,
+    canonical_json_bytes,
+    normalize_json_value,
+)
 from ._operation import (
     OperationLedgerInput,
     OperationLedgerRecord,
@@ -121,6 +126,7 @@ __all__ = [
     "canonical_string_tuple",
     "deterministic_id",
     "idempotency_key_digest",
+    "normalize_json_value",
     "operation_cas_immutable_matches",
     "operation_replay_matches",
     "principal_identity_payload",

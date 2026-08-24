@@ -6,7 +6,7 @@ import asyncio
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Protocol, cast
+from typing import Protocol
 
 from linktools.core import environ
 from openai import APIError as OpenAIAPIError
@@ -49,6 +49,7 @@ from ..core import (
     JsonValue,
     UsageMetrics,
     canonical_sha256,
+    normalize_json_value,
 )
 from ..errors import AIError, ErrorCode
 from ..spec import AgentUsageLimits
@@ -320,7 +321,17 @@ class AgentExecutor:
         output = final_result.output
         if not isinstance(output, binding.output_type):
             raise AIError(ErrorCode.OUTPUT_VALIDATION_FAILED)
-        payload = cast(dict[str, JsonValue], output.model_dump(mode="json"))
+        try:
+            payload = normalize_json_value(output.model_dump(mode="json"))
+        except (TypeError, ValueError) as error:
+            _logger.warning(
+                "agent output validation failed: step=%s",
+                step_run_id,
+            )
+            raise AIError(
+                ErrorCode.OUTPUT_VALIDATION_FAILED,
+                retryable=False,
+            ) from error
         _logger.debug("agent execution completed: definition=%s step=%s", definition.digest, step_run_id)
         usage = _usage_metrics(run_usage)
         return AgentExecutionResult(final_result.run_id, payload, final_result.all_messages(), usage)

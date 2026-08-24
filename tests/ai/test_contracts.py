@@ -4,19 +4,26 @@
 """Agent, Task, Observe, and Temporal boundary contracts."""
 
 import warnings
+from collections.abc import Callable
 from dataclasses import fields
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
+from enum import Enum, IntEnum, StrEnum
 
 import pytest
 from linktools.ai.agent import AgentBindingSnapshot
 from linktools.ai.agent._output import bind_output
 from linktools.ai.asset import AssetRef
 from linktools.ai.core import (
+    JsonValue,
     OperationLedgerRecord,
     Principal,
     PrincipalKind,
     ResourceKind,
     ResourceRef,
+    normalize_json_value,
+    validate_external_payload,
+    validate_observation_payload,
+    validate_tool_arguments,
 )
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.model import ModelRegistry
@@ -68,6 +75,18 @@ from linktools.ai.temporal.workflow import (
 from linktools.ai.workspace import trusted_workspace_principal
 
 
+class _JsonEnum(Enum):
+    VALUE = "value"
+
+
+class _JsonStrEnum(StrEnum):
+    VALUE = "value"
+
+
+class _JsonIntEnum(IntEnum):
+    VALUE = 1
+
+
 def _binding_snapshot(
     *,
     agent_id: str = "default",
@@ -87,6 +106,154 @@ def _binding_snapshot(
         local_runtime_capability_descriptors=(),
         binding_digest=digest,
     )
+
+
+def test_normalize_json_value_detaches_nested_values() -> None:
+    source: dict[str, object] = {"items": [{"value": 1}], "text": "ok"}
+    normalized = normalize_json_value(source)
+
+    source["items"][0]["value"] = 2  # type: ignore[index]
+
+    assert normalized == {"items": [{"value": 1}], "text": "ok"}
+    assert normalized is not source
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        ("tuple",),
+        {"set"},
+        frozenset({"frozen"}),
+        b"bytes",
+        bytearray(b"bytearray"),
+        datetime(2026, 1, 1, tzinfo=timezone.utc),
+        date(2026, 1, 1),
+        _JsonEnum.VALUE,
+        _JsonStrEnum.VALUE,
+        _JsonIntEnum.VALUE,
+        {1: "non-string key"},
+        float("nan"),
+        float("inf"),
+        float("-inf"),
+        object(),
+    ],
+)
+def test_normalize_json_value_rejects_non_json_runtime_values(value: object) -> None:
+    with pytest.raises((TypeError, ValueError)):
+        normalize_json_value(value)
+
+
+def test_normalize_json_value_rejects_cycles() -> None:
+    list_value: list[object] = []
+    list_value.append(list_value)
+    dict_value: dict[str, object] = {}
+    dict_value["self"] = dict_value
+
+    with pytest.raises(ValueError):
+        normalize_json_value(list_value)
+    with pytest.raises(ValueError):
+        normalize_json_value(dict_value)
+
+
+@pytest.mark.parametrize(
+    "validator",
+    [
+        validate_external_payload,
+        validate_tool_arguments,
+        validate_observation_payload,
+    ],
+)
+def test_json_validators_return_detached_normalized_values(
+    validator: Callable[[JsonValue], JsonValue],
+) -> None:
+    source: dict[str, JsonValue] = {"items": [{"value": 1}]}
+    normalized = validator(source)
+
+    source["items"][0]["value"] = 2  # type: ignore[index]
+
+    assert normalized == {"items": [{"value": 1}]}
+
+
+@pytest.mark.parametrize(
+    "validator",
+    [
+        validate_external_payload,
+        validate_tool_arguments,
+        validate_observation_payload,
+    ],
+)
+def test_json_validators_reject_tuples(
+    validator: Callable[[JsonValue], JsonValue],
+) -> None:
+    with pytest.raises(TypeError):
+        validator(("invalid",))  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize(
+    ("validator", "value", "code"),
+    [
+        (
+            validate_external_payload,
+            {"value": "x" * (4 * 1024 * 1024)},
+            ErrorCode.EXTERNAL_RESULT_TOO_LARGE,
+        ),
+        (
+            validate_tool_arguments,
+            {"value": "x" * (1024 * 1024)},
+            ErrorCode.TOOL_ARGUMENTS_TOO_LARGE,
+        ),
+        (
+            validate_observation_payload,
+            {"value": "x" * (1024 * 1024)},
+            ErrorCode.OBSERVATION_PAYLOAD_TOO_LARGE,
+        ),
+    ],
+)
+def test_json_validators_preserve_size_errors(
+    validator: Callable[[JsonValue], JsonValue],
+    value: JsonValue,
+    code: ErrorCode,
+) -> None:
+    with pytest.raises(AIError) as raised:
+        validator(value)
+    assert raised.value.code is code
+
+
+def test_stored_payload_inline_json_detaches_source() -> None:
+    source: dict[str, JsonValue] = {"items": [{"value": 1}]}
+    payload = StoredPayload.inline_json(source)
+    expected = StoredPayload.inline_json({"items": [{"value": 1}]})
+
+    source["items"][0]["value"] = 2  # type: ignore[index]
+
+    assert payload.value == expected.value
+    assert payload.digest == expected.digest
+    assert payload.size == expected.size
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        ("tuple",),
+        datetime(2026, 1, 1, tzinfo=timezone.utc),
+        _JsonEnum.VALUE,
+        {1: "non-string key"},
+        float("nan"),
+        float("inf"),
+        float("-inf"),
+    ],
+)
+def test_stored_payload_inline_json_rejects_non_json_values(value: object) -> None:
+    with pytest.raises((TypeError, ValueError)):
+        StoredPayload.inline_json(value)  # type: ignore[arg-type]
+
+
+def test_stored_payload_inline_json_rejects_cycles() -> None:
+    value: list[object] = []
+    value.append(value)
+
+    with pytest.raises(ValueError):
+        StoredPayload.inline_json(value)  # type: ignore[arg-type]
 
 
 def test_task_graph_rejects_cycles_and_agent_spec_is_stable() -> None:

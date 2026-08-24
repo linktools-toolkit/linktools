@@ -23,6 +23,8 @@ from linktools.ai.runtime._message import (
 )
 from linktools.ai.runtime.state import _codec as runtime_codec
 from linktools.ai.runtime.state._contracts import (
+    ContextProjection,
+    ContextProjectionItem,
     IdempotencyTerminalUpdate,
     OperationTerminalUpdate,
 )
@@ -227,12 +229,44 @@ def validate_custom_wire_fixture(matrix_dir: str | Path) -> tuple[str, ...]:
     return ()
 
 
+def _validate_generic_writer_closure() -> tuple[str, ...]:
+    valid = ContextProjection((), "d" * 64)
+    try:
+        payload = runtime_codec._encode_persisted_domain(valid)
+        decoded = runtime_codec._decode_enveloped_domain(
+            runtime_codec.encode_envelope(
+                {
+                    "type": runtime_codec.wire_type_id(valid),
+                    "payload": payload,
+                }
+            ),
+            ContextProjection,
+        )
+    except (AIError, KeyError, TypeError, ValueError):
+        return ("generic persistence writer failed valid round-trip",)
+    if decoded != valid:
+        return ("generic persistence writer failed valid round-trip",)
+
+    invalid = ContextProjection(
+        cast("tuple[ContextProjectionItem, ...]", ("invalid",)),
+        "d" * 64,
+    )
+    try:
+        runtime_codec._encode_persisted_domain(invalid)
+    except TypeError:
+        return ()
+    except Exception:
+        return ("generic persistence writer returned the wrong failure type",)
+    return ("generic persistence writer accepted unreadable runtime value",)
+
+
 def validate_exact_fixtures(matrix_dir: str | Path) -> tuple[str, ...]:
     root = Path(matrix_dir)
     return (
         *validate_agent_binding_fixture(root),
         *validate_custom_wire_fixture(root),
         *validate_model_message_fixture(root),
+        *_validate_generic_writer_closure(),
     )
 
 

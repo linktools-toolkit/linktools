@@ -7,11 +7,18 @@ from dataclasses import replace
 from datetime import datetime, timezone
 
 import pytest
+from linktools.ai.agent import AgentBindingSnapshot
+from linktools.ai.agent._output import bind_output
 from linktools.ai.core import (
+    ExecutionEventType,
+    ExecutionLineageKind,
+    ExecutionStatus,
     HmacCursorSigner,
     Principal,
     SessionStatus,
+    StopReason,
     TenantAuthorizationPolicy,
+    UsageMetrics,
 )
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.migrate import provision_runtime_database
@@ -22,7 +29,15 @@ from linktools.ai.runtime.state._codec import (
     _encode_persisted_domain,
     encode_envelope,
 )
-from linktools.ai.runtime.state._contracts import ContextProjection, SessionRecord
+from linktools.ai.runtime.state._contracts import (
+    ContextProjection,
+    ExecutionRecord,
+    ExecutionTerminalCommit,
+    ResultRecord,
+    SessionRecord,
+)
+from linktools.ai.spec import AgentSpec
+from linktools.ai.storage import ObjectRef, StoredPayload
 from sqlalchemy.ext.asyncio import create_async_engine
 
 
@@ -43,6 +58,69 @@ def _session() -> SessionRecord:
         closed_at=None,
         active_execution_id=None,
         history_id="history",
+    )
+
+
+def _binding_snapshot() -> AgentBindingSnapshot:
+    output = bind_output()
+    return AgentBindingSnapshot(
+        version=1,
+        agent_spec=AgentSpec("agent", 1, "default"),
+        agent_digest="b" * 64,
+        output_type_module=output.value_type.__module__,
+        output_type_qualname=output.value_type.__qualname__,
+        output_schema_id=output.schema_id,
+        output_schema_revision=output.schema_revision,
+        output_schema_fingerprint=output.schema_fingerprint,
+        local_runtime_capability_descriptors=(),
+        binding_digest="a" * 64,
+    )
+
+
+def _execution() -> ExecutionRecord:
+    now = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    return ExecutionRecord(
+        execution_id="execution",
+        tenant_id="tenant",
+        session_id=None,
+        binding_digest="a" * 64,
+        parent_execution_id=None,
+        root_execution_id="execution",
+        source_execution_id=None,
+        base_execution_id=None,
+        lineage_kind=ExecutionLineageKind.RUN,
+        status=ExecutionStatus.STARTED,
+        revision=1,
+        event_sequence=0,
+        agent_run_sequence=1,
+        error_code=None,
+        safe_error_details={},
+        created_at=now,
+        updated_at=now,
+        planning=False,
+        thinking=False,
+        binding=_binding_snapshot(),
+    )
+
+
+def _result(execution_id: str, payload_kind: str, now: datetime) -> ResultRecord:
+    output = (
+        StoredPayload.inline_json({"text": "result"})
+        if payload_kind == "inline"
+        else StoredPayload.object(
+            ObjectRef("runtime", "result", "c" * 64, 7)
+        )
+    )
+    return ResultRecord(
+        execution_id=execution_id,
+        tenant_id="tenant",
+        output_schema_id="schema",
+        output_schema_revision=1,
+        output_schema_fingerprint="fingerprint",
+        output=output,
+        stop_reason=StopReason.END_TURN,
+        usage=UsageMetrics(),
+        created_at=now,
     )
 
 
@@ -87,6 +165,84 @@ async def _assert_read_preserves_raw_record(
     assert raw_after is not None
     assert raw_after.storage_version == raw_before.storage_version
     assert raw_after.data == raw_before.data
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("backend", ["filesystem", "sqlite"])
+@pytest.mark.parametrize("payload_kind", ["inline", "object"])
+async def test_terminal_result_readback_survives_reopen(
+    tmp_path,
+    backend: str,
+    payload_kind: str,
+) -> None:
+    path = tmp_path / f"terminal-{backend}-{payload_kind}"
+    if backend == "filesystem":
+        state = RuntimeState.filesystem(path)
+    else:
+        database = path.with_suffix(".db")
+        engine = create_async_engine(f"sqlite+aiosqlite:///{database}")
+        await provision_runtime_database(engine)
+        await engine.dispose()
+        state = RuntimeState.sqlite(database)
+
+    execution = _execution()
+    now = execution.updated_at
+    result = _result(execution.execution_id, payload_kind, now)
+    terminal = replace(
+        execution,
+        status=ExecutionStatus.SUCCEEDED,
+        revision=2,
+        event_sequence=1,
+        result=result,
+    )
+    commit = ExecutionTerminalCommit(
+        expected_revision=1,
+        expected_event_sequence=0,
+        execution=terminal,
+        result=result,
+        terminal_event_type=ExecutionEventType.EXECUTION_SUCCEEDED,
+        terminal_event_payload={},
+    )
+    await state.initialize(namespace=f"terminal-{backend}", tenant_id="tenant")
+    await state.execution.executions.create(execution)
+    try:
+        await state.execution.executions.commit_terminal(commit)
+        current = await state.execution.executions.get(
+            execution.execution_id,
+            tenant_id="tenant",
+        )
+        current_result = await state.execution.executions.get_result(
+            execution.execution_id,
+            tenant_id="tenant",
+        )
+        assert current is not None
+        assert current.status is ExecutionStatus.SUCCEEDED
+        assert current.result == result
+        assert current_result == result
+    finally:
+        await state.close()
+
+    reopened = (
+        RuntimeState.filesystem(path)
+        if backend == "filesystem"
+        else RuntimeState.sqlite(path.with_suffix(".db"))
+    )
+    await reopened.initialize(namespace=f"terminal-{backend}", tenant_id="tenant")
+    try:
+        current = await reopened.execution.executions.get(
+            execution.execution_id,
+            tenant_id="tenant",
+        )
+        current_result = await reopened.execution.executions.get_result(
+            execution.execution_id,
+            tenant_id="tenant",
+        )
+        assert current is not None
+        assert current.status is ExecutionStatus.SUCCEEDED
+        assert current.result == result
+        assert current_result == result
+    finally:
+        await reopened.close()
 
 
 @pytest.mark.asyncio

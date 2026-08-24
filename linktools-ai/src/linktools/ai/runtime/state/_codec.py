@@ -835,7 +835,33 @@ def encode_domain(value: DomainT) -> JsonValue:
 
 def _encode_persisted_domain(value: DomainT) -> JsonValue:
     """Encode one domain value for a Runtime persistence envelope."""
-    return _encode_domain(value, _CURRENT_CODEC, persisted=True)
+    wire = _encode_domain(value, _CURRENT_CODEC, persisted=True)
+    try:
+        _decode_domain(
+            wire,
+            type(value),
+            _CURRENT_CODEC,
+            persisted=True,
+        )
+    except AIError as error:
+        if error.code is ErrorCode.STORAGE_VERSION_UNSUPPORTED:
+            raise
+        _logger.warning(
+            "persisted domain writer closure rejected value: type=%s",
+            type(value).__name__,
+        )
+        raise TypeError(
+            f"{type(value).__name__} persisted V1 wire is not readable by current decoder"
+        ) from error
+    except (KeyError, TypeError, ValueError) as error:
+        _logger.warning(
+            "persisted domain writer closure rejected value: type=%s",
+            type(value).__name__,
+        )
+        raise TypeError(
+            f"{type(value).__name__} persisted V1 wire is not readable by current decoder"
+        ) from error
+    return wire
 
 
 def decode_domain(value: JsonValue, target: type[DomainT]) -> DomainT:

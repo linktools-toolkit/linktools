@@ -5,6 +5,7 @@
 import copy
 from dataclasses import replace
 from datetime import datetime, timezone
+from typing import cast
 
 import pytest
 from linktools.ai.agent import AgentBindingSnapshot
@@ -20,7 +21,11 @@ from linktools.ai.runtime.state._codec import (
     encode_domain,
     wire_type_id,
 )
-from linktools.ai.runtime.state._contracts import SessionRecord
+from linktools.ai.runtime.state._contracts import (
+    ContextProjection,
+    ContextProjectionItem,
+    SessionRecord,
+)
 from linktools.ai.spec import AgentSpec
 from linktools.ai.storage import StoredPayload
 from linktools.ai.task import TaskNode
@@ -94,6 +99,36 @@ def test_persisted_generic_writer_keeps_schema_one() -> None:
         _envelope(payload),
         SessionRecord,
     ) == session
+
+
+def test_context_projection_persisted_writer_round_trips() -> None:
+    projection = ContextProjection((), "d" * 64)
+    payload = _encode_persisted_domain(projection)
+
+    assert _decode_enveloped_domain(
+        _envelope(payload, wire_id="context_projection"),
+        ContextProjection,
+    ) == projection
+
+
+def test_context_projection_persisted_writer_rejects_runtime_type_mismatch() -> None:
+    projection = ContextProjection(
+        cast("tuple[ContextProjectionItem, ...]", ("invalid",)),
+        "d" * 64,
+    )
+
+    with pytest.raises(TypeError, match="persisted V1 wire is not readable"):
+        _encode_persisted_domain(projection)
+
+
+def test_persisted_writer_rejects_mutated_stored_payload() -> None:
+    payload = StoredPayload.inline_json({"value": 1})
+    value = payload.value
+    assert isinstance(value, dict)
+    value["value"] = 2
+
+    with pytest.raises(TypeError):
+        _encode_persisted_domain(payload)
 
 
 def test_missing_defaulted_session_field_uses_constructor_default() -> None:

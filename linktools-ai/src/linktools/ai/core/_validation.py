@@ -7,7 +7,7 @@ import unicodedata
 from enum import Enum
 
 from ..errors import AIError, ErrorCode
-from ._json import JsonValue, canonical_json_bytes
+from ._json import JsonValue, canonical_json_bytes, normalize_json_value
 
 
 def validate_tenant_id(value: str) -> str:
@@ -73,21 +73,24 @@ def validate_user_prompt(value: str) -> str:
 
 
 def validate_external_payload(value: JsonValue) -> JsonValue:
-    if len(canonical_json_bytes(value)) > 4 * 1024 * 1024:
+    normalized = normalize_json_value(value)
+    if len(canonical_json_bytes(normalized)) > 4 * 1024 * 1024:
         raise AIError(ErrorCode.EXTERNAL_RESULT_TOO_LARGE)
-    return value
+    return normalized
 
 
 def validate_tool_arguments(value: JsonValue) -> JsonValue:
-    if len(canonical_json_bytes(value)) > 1024 * 1024:
+    normalized = normalize_json_value(value)
+    if len(canonical_json_bytes(normalized)) > 1024 * 1024:
         raise AIError(ErrorCode.TOOL_ARGUMENTS_TOO_LARGE)
-    return value
+    return normalized
 
 
 def validate_observation_payload(value: JsonValue) -> JsonValue:
-    if len(canonical_json_bytes(value)) > 1024 * 1024:
+    normalized = normalize_json_value(value)
+    if len(canonical_json_bytes(normalized)) > 1024 * 1024:
         raise AIError(ErrorCode.OBSERVATION_PAYLOAD_TOO_LARGE)
-    return value
+    return normalized
 
 
 def validate_page_limit(value: int) -> int:
