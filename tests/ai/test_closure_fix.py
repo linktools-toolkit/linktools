@@ -3,7 +3,7 @@
 """Fault coverage for tool terminal ownership and local task waiters."""
 
 import asyncio
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from typing import Any
 
@@ -15,7 +15,8 @@ from linktools.ai.agent._capabilities import (
 from linktools.ai.core import Principal, TaskStatus, ToolOperationStatus
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.runtime._tool import RuntimeToolOperationBridge, ToolOperationRecord
-from linktools.ai.storage import PayloadPolicy
+from linktools.ai.runtime.state import ToolOperationAdmission
+from linktools.ai.storage import PayloadPolicy, StoredPayload
 from linktools.ai.task._graph import (
     CancelGraphRequest,
     TaskGraph,
@@ -117,17 +118,105 @@ class _OperationRepository:
         )
 
 
-def _context() -> RunContext[None]:
+class _TerminalRepository:
+    def __init__(self) -> None:
+        self.record: ToolOperationRecord | None = None
+
+    async def get_operation(
+        self,
+        tool_operation_id: str,
+        *,
+        tenant_id: str,
+    ) -> ToolOperationRecord | None:
+        if self.record is None:
+            return None
+        if self.record.tool_operation_id != tool_operation_id:
+            return None
+        if self.record.tenant_id != tenant_id:
+            return None
+        return self.record
+
+
+class _TerminalCommands:
+    def __init__(self, repository: _TerminalRepository) -> None:
+        self._repository = repository
+        self.calls: list[tuple[str, bool, bool]] = []
+
+    async def commit_tool_admission(
+        self,
+        request: ToolOperationAdmission,
+    ) -> ToolOperationRecord:
+        now = datetime.now(timezone.utc)
+        self._repository.record = ToolOperationRecord(
+            tool_operation_id=request.tool_operation_id,
+            tenant_id=request.tenant_id,
+            step_run_id=request.step_run_id,
+            tool_call_id=request.tool_call_id,
+            idempotency_key_digest=request.idempotency_key_digest,
+            tool_name=request.tool_name,
+            arguments_digest=request.arguments_digest,
+            binding_fingerprint=request.binding_fingerprint,
+            replay_safe=request.replay_safe,
+            status=ToolOperationStatus.CLAIMED,
+            owner=request.owner,
+            fence=1,
+            lease_expires_at=None,
+            error_code=None,
+            created_at=now,
+            updated_at=now,
+        )
+        return self._repository.record
+
+    async def commit_tool_terminal(
+        self,
+        tool_operation_id: str,
+        *,
+        tenant_id: str,
+        owner: str,
+        fence: int,
+        result_payload: StoredPayload | None = None,
+        error_code: str | None = None,
+        error_payload: StoredPayload | None = None,
+    ) -> ToolOperationRecord:
+        record = await self._repository.get_operation(
+            tool_operation_id,
+            tenant_id=tenant_id,
+        )
+        assert record is not None
+        assert record.owner == owner
+        assert record.fence == fence
+        self.calls.append(
+            (tool_operation_id, result_payload is not None, error_payload is not None)
+        )
+        status = (
+            ToolOperationStatus.COMPLETED
+            if result_payload is not None
+            else ToolOperationStatus.FAILED
+        )
+        self._repository.record = replace(
+            record,
+            status=status,
+            owner=None,
+            lease_expires_at=None,
+            error_code=error_code,
+            result_payload=result_payload,
+            error_payload=error_payload,
+            updated_at=datetime.now(timezone.utc),
+        )
+        return self._repository.record
+
+
+def _context(run_id: str = "run") -> RunContext[None]:
     return RunContext(
         deps=None,
         model=TestModel(),
         usage=RunUsage(),
-        run_id="run",
+        run_id=run_id,
     )
 
 
-def _call() -> ToolCallPart:
-    return ToolCallPart("tool", {}, tool_call_id="call")
+def _call(tool_call_id: str = "call") -> ToolCallPart:
+    return ToolCallPart("tool", {}, tool_call_id=tool_call_id)
 
 
 def _definition(replay_safe: bool) -> ToolDefinition:
@@ -154,6 +243,46 @@ async def test_tool_operation_uses_runtime_step_id_for_admission() -> None:
     await bridge.begin(_context(), _call(), _definition(replay_safe=True), {})
 
     assert repository.request.step_run_id == "runtime-step"
+
+
+async def test_tool_terminal_bridge_only_commits_operation_state() -> None:
+    repository = _TerminalRepository()
+    commands = _TerminalCommands(repository)
+    bridge = RuntimeToolOperationBridge(
+        repository,
+        object(),
+        namespace="namespace",
+        tenant_id="tenant",
+        execution_id="execution",
+        step_run_id="runtime-step",
+        binding_fingerprint="binding",
+        owner="owner",
+        payload_policy=PayloadPolicy(),
+        terminal_commands=commands,
+    )
+
+    success = await bridge.begin(
+        _context(),
+        _call("success-call"),
+        _definition(replay_safe=True),
+        {},
+    )
+    await bridge.complete(success, {"ok": True})
+    completed = repository.record
+    assert completed is not None
+    assert completed.status is ToolOperationStatus.COMPLETED
+
+    failed = await bridge.begin(
+        _context(),
+        _call("failed-call"),
+        _definition(replay_safe=True),
+        {"failed": True},
+    )
+    await bridge.fail(failed, ValueError("failure"))
+    assert repository.record is not None
+    assert repository.record.status is ToolOperationStatus.FAILED
+    assert len(commands.calls) == 2
+    assert all(result or error for _, result, error in commands.calls)
 
 
 async def _capability(

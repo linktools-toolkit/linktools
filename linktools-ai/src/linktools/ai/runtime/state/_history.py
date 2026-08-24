@@ -307,6 +307,10 @@ class TranscriptRepository:
             0,
         )
 
+    def empty_head_record(self, owner_id: str) -> StoredRecord:
+        """Return the canonical stored record for an empty transcript head."""
+        return self._new_head_record(self.empty_head(owner_id))
+
     async def create_head_in_transaction(
         self,
         transaction: StateTransaction,
@@ -317,7 +321,7 @@ class TranscriptRepository:
         if existing is not None:
             return self._decode_head(existing)
         head = self.empty_head(owner_id)
-        await transaction.insert_record(self._new_head_record(head))
+        await transaction.insert_record(self.empty_head_record(owner_id))
         return head
 
     async def get_head_in_transaction(
@@ -620,7 +624,7 @@ class TranscriptRepository:
             dimension: base
             for dimension, base, _version in dimensions
         }
-        records: list[StoredRecord] = []
+        candidates: dict[bytes, tuple[TranscriptSeekRecord, StoredRecord]] = {}
         message_cursor = base_head.message_count
         for chunk, sequence, session_item_count, execution_item_count in zip(
             chunks,
@@ -661,34 +665,45 @@ class TranscriptRepository:
                         version,
                     )
                     key = self._seek_key(owner_id, dimension, version, block_start)
-                    existing = await transaction.get_record(key)
-                    if existing is None:
-                        records.append(
-                            StoredRecord(
-                                key,
-                                self._partition("transcript_seek"),
-                                None,
-                                self._head_key(owner_id),
-                                "transcript_seek",
-                                f"b:{block_start:020d}",
-                                None,
-                                0,
-                                None,
-                                0,
-                                None,
-                                encode_envelope(
-                                    {
-                                        "type": "transcript_seek",
-                                        "payload": _encode_persisted_domain(seek),
-                                    }
-                                ),
-                            )
-                        )
-                    elif self._decode_seek(existing) != seek:
+                    candidate = StoredRecord(
+                        key,
+                        self._partition("transcript_seek"),
+                        None,
+                        self._head_key(owner_id),
+                        "transcript_seek",
+                        f"b:{block_start:020d}",
+                        None,
+                        0,
+                        None,
+                        0,
+                        None,
+                        encode_envelope(
+                            {
+                                "type": "transcript_seek",
+                                "payload": _encode_persisted_domain(seek),
+                            }
+                        ),
+                    )
+                    previous = candidates.get(key)
+                    if previous is not None and previous[0] != seek:
                         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                    candidates[key] = (seek, candidate)
             message_cursor = message_end
             for dimension, _base, _version in dimensions:
                 cursors[dimension] = view_ranges[dimension][1]
+
+        if not candidates:
+            return
+        keys = tuple(candidates)
+        existing = await transaction.get_records(keys)
+        records: list[StoredRecord] = []
+        for key, (seek, candidate) in candidates.items():
+            current = existing.get(key)
+            if current is not None:
+                if self._decode_seek(current) != seek:
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                continue
+            records.append(candidate)
         if records:
             await transaction.insert_records(tuple(records))
             _logger.debug(

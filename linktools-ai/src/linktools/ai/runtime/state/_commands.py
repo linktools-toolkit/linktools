@@ -12,7 +12,6 @@ from pydantic_ai_harness.step_persistence import (
     ContinuableSnapshot,
     RunRecord,
     StepEvent,
-    ToolEffectRecord,
 )
 
 from ...core import (
@@ -560,154 +559,26 @@ class RuntimeStateCommands:
         result_payload: StoredPayload | None = None,
         error_code: str | None = None,
         error_payload: StoredPayload | None = None,
-        run: RunRecord | None = None,
-        effect: ToolEffectRecord | None = None,
     ) -> ToolOperationRecord:
         if self._tools is None:
             raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
         if result_payload is None and error_code is None:
             raise ValueError("tool terminal command requires a result or error")
+        expected_status = (
+            ToolOperationStatus.COMPLETED
+            if result_payload is not None
+            else ToolOperationStatus.FAILED
+        )
+        terminal_error_code = error_code or ErrorCode.EXECUTION_FAILED.value
         _logger.debug(
-            "tool terminal checkpoint requested: operation=%s effect=%s",
+            "tool terminal checkpoint requested: operation=%s status=%s",
             tool_operation_id,
-            effect is not None,
+            expected_status.value,
         )
         stores = [self._tools.state_store]
-        if effect is not None:
-            if self._recovery_steps is None or run is None:
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            stores.append(self._recovery_steps.state_store)
-        if not _same_group(stores):
-            terminal_error_code = error_code or ErrorCode.EXECUTION_FAILED.value
-            if effect is not None:
-                async def materialize_effect() -> None:
-                    await self._recovery_steps.materialize_effect(run, effect)
-
-                async def effect_readback() -> CommitObservation[None]:
-                    try:
-                        archived = await self._recovery_steps.get_tool_effect(
-                            run_id=run.run_id,
-                            tool_call_id=effect.tool_call_id,
-                        )
-                    except AIError as error:
-                        return CommitObservation(
-                            DurableCommitState.UNRESOLVED,
-                            error=error,
-                        )
-                    if archived == effect:
-                        return CommitObservation(DurableCommitState.COMMITTED)
-                    if archived is None:
-                        return CommitObservation(DurableCommitState.NOT_COMMITTED)
-                    return CommitObservation(
-                        DurableCommitState.PARTIAL_INTEGRITY_ERROR,
-                        error=AIError(ErrorCode.STORAGE_INTEGRITY_ERROR),
-                    )
-
-                await self._commit_or_raise(materialize_effect, effect_readback)
-
-            async def finish() -> ToolOperationRecord:
-                if result_payload is not None:
-                    return await self._tools.complete_payload(
-                        tool_operation_id,
-                        tenant_id=tenant_id,
-                        owner=owner,
-                        fence=fence,
-                        result_payload=result_payload,
-                    )
-                return await self._tools.fail_payload(
-                    tool_operation_id,
-                    tenant_id=tenant_id,
-                    owner=owner,
-                    fence=fence,
-                    error_code=terminal_error_code,
-                    error_payload=error_payload,
-                )
-
-            expected_status = (
-                ToolOperationStatus.COMPLETED
-                if result_payload is not None
-                else ToolOperationStatus.FAILED
-            )
-
-            async def terminal_readback() -> CommitObservation[ToolOperationRecord]:
-                try:
-                    observed = await self._tools.get_operation(
-                        tool_operation_id,
-                        tenant_id=tenant_id,
-                    )
-                except AIError as error:
-                    return CommitObservation(
-                        DurableCommitState.UNRESOLVED,
-                        error=error,
-                    )
-                if observed is None:
-                    return CommitObservation(DurableCommitState.NOT_COMMITTED)
-                if observed.status is expected_status:
-                    payload_matches = (
-                        observed.result_payload == result_payload
-                        if result_payload is not None
-                        else observed.error_code == terminal_error_code
-                        and observed.error_payload == error_payload
-                    )
-                    if not payload_matches:
-                        return CommitObservation(
-                            DurableCommitState.PARTIAL_INTEGRITY_ERROR,
-                            error=AIError(ErrorCode.TOOL_RESULT_CONFLICT),
-                        )
-                    if effect is not None:
-                        try:
-                            archived = await self._recovery_steps.get_tool_effect(
-                                run_id=run.run_id,
-                                tool_call_id=effect.tool_call_id,
-                            )
-                        except AIError as error:
-                            return CommitObservation(
-                                DurableCommitState.UNRESOLVED,
-                                error=error,
-                            )
-                        if archived != effect:
-                            return CommitObservation(
-                                DurableCommitState.PARTIAL_INTEGRITY_ERROR,
-                                error=AIError(ErrorCode.STORAGE_INTEGRITY_ERROR),
-                            )
-                    return CommitObservation(
-                        DurableCommitState.COMMITTED,
-                        value=observed,
-                    )
-                if (
-                    observed.status is ToolOperationStatus.CLAIMED
-                    and observed.owner == owner
-                    and observed.fence == fence
-                ):
-                    return CommitObservation(DurableCommitState.NOT_COMMITTED)
-                return CommitObservation(DurableCommitState.UNRESOLVED)
-
-            result = await run_durable_commit(finish, terminal_readback)
-            if result.state is DurableCommitState.COMMITTED:
-                if result.value is None:
-                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                if result.cancelled:
-                    raise asyncio.CancelledError
-                return result.value
-            if result.state is DurableCommitState.NOT_COMMITTED:
-                if result.error is not None:
-                    raise result.error
-                raise AIError(ErrorCode.STORAGE_CONFLICT)
-            if result.state is DurableCommitState.PARTIAL_INTEGRITY_ERROR:
-                raise AIError(
-                    ErrorCode.STORAGE_INTEGRITY_ERROR,
-                    "tool terminal commit left partial durable state",
-                ) from result.error
-            raise AIError(ErrorCode.STORAGE_COMMIT_UNKNOWN) from result.error
 
         async def callback(group: StateGroupTransaction) -> ToolOperationRecord:
             transaction = group.transaction(self._tools.state_store)
-            if effect is not None:
-                await self._recovery_steps.materialize_effect_in_transaction(
-                    group.transaction(self._recovery_steps.state_store),
-                    run,
-                    effect,
-                )
             if result_payload is not None:
                 return await self._tools.complete_in_transaction(
                     transaction,
@@ -726,13 +597,6 @@ class RuntimeStateCommands:
                 error_code=error_code or ErrorCode.EXECUTION_FAILED.value,
                 error_payload=error_payload,
             )
-
-        expected_status = (
-            ToolOperationStatus.COMPLETED
-            if result_payload is not None
-            else ToolOperationStatus.FAILED
-        )
-        terminal_error_code = error_code or ErrorCode.EXECUTION_FAILED.value
 
         async def readback() -> CommitObservation[ToolOperationRecord]:
             try:
@@ -754,16 +618,6 @@ class RuntimeStateCommands:
                             DurableCommitState.PARTIAL_INTEGRITY_ERROR,
                             error=AIError(ErrorCode.TOOL_RESULT_CONFLICT),
                         )
-                    if effect is not None:
-                        archived = await self._recovery_steps.get_tool_effect(
-                            run_id=run.run_id,
-                            tool_call_id=effect.tool_call_id,
-                        )
-                        if archived != effect:
-                            return CommitObservation(
-                                DurableCommitState.PARTIAL_INTEGRITY_ERROR,
-                                error=AIError(ErrorCode.STORAGE_INTEGRITY_ERROR),
-                            )
                     return CommitObservation(
                         DurableCommitState.COMMITTED,
                         value=observed,

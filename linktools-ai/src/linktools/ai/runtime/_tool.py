@@ -6,7 +6,7 @@ import hashlib
 import json
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime
 from enum import StrEnum
 from typing import TYPE_CHECKING, Any, Protocol
 
@@ -19,8 +19,6 @@ from pydantic_ai.messages import (
     ToolReturnPart,
 )
 from pydantic_ai.tools import RunContext, ToolDefinition
-from pydantic_ai_harness.step_persistence import RunRecord, StepStore, ToolEffectRecord
-
 from ..core import (
     Principal,
     ResourceRef,
@@ -160,8 +158,6 @@ class _ToolTerminalCommands(Protocol):
         result_payload: StoredPayload | None = None,
         error_code: str | None = None,
         error_payload: StoredPayload | None = None,
-        run: "RunRecord | None" = None,
-        effect: ToolEffectRecord | None = None,
     ) -> ToolOperationRecord: ...
 
 
@@ -223,7 +219,6 @@ class RuntimeToolOperationBridge:
         payload_policy: PayloadPolicy,
         recovery_step_run_id: str | None = None,
         terminal_commands: _ToolTerminalCommands | None = None,
-        step_store: StepStore | None = None,
     ) -> None:
         self._repository = repository
         self._recovery_objects = recovery_objects
@@ -236,9 +231,7 @@ class RuntimeToolOperationBridge:
         self._payload_policy = payload_policy
         self._recovery_step_run_id = recovery_step_run_id
         self._terminal_commands = terminal_commands
-        self._step_store = step_store
         self._decisions: dict[tuple[str, str], ToolOperationDecision] = {}
-        self._admitted_operations: dict[str, ToolOperationRecord] = {}
         self._lease_seconds = 60
 
     async def begin(
@@ -285,7 +278,6 @@ class RuntimeToolOperationBridge:
             existing = await self._terminal_commands.commit_tool_admission(admission)
         else:
             existing = await self._repository.admit(admission)
-        self._admitted_operations[existing.tool_operation_id] = existing
         decision = await self._decision_from_record(existing, replay_safe)
         self._decisions[key] = decision
         _logger.debug(
@@ -349,7 +341,6 @@ class RuntimeToolOperationBridge:
                 error.code.value,
             )
             raise
-        self._update_admitted_operation(record)
         return _decision_type(decision, fence=record.fence)
 
     async def complete(
@@ -360,10 +351,6 @@ class RuntimeToolOperationBridge:
         payload = await self._result_payload(decision, result)
 
         async def finish() -> ToolOperationRecord:
-            run, effect = await self._terminal_effect(
-                decision,
-                status="completed",
-            )
             if self._terminal_commands is not None:
                 return await self._terminal_commands.commit_tool_terminal(
                     decision.operation_id,
@@ -371,8 +358,6 @@ class RuntimeToolOperationBridge:
                     owner=self._owner,
                     fence=decision.fence,
                     result_payload=payload,
-                    run=run,
-                    effect=effect,
                 )
             return await self._repository.complete_payload(
                 decision.operation_id,
@@ -397,11 +382,6 @@ class RuntimeToolOperationBridge:
         code, payload = await self._error_payload(error)
 
         async def finish() -> ToolOperationRecord:
-            run, effect = await self._terminal_effect(
-                decision,
-                status="failed",
-                effect_summary=f"error_code={code}",
-            )
             if self._terminal_commands is not None:
                 return await self._terminal_commands.commit_tool_terminal(
                     decision.operation_id,
@@ -410,8 +390,6 @@ class RuntimeToolOperationBridge:
                     fence=decision.fence,
                     error_code=code,
                     error_payload=payload,
-                    run=run,
-                    effect=effect,
                 )
             return await self._repository.fail_payload(
                 decision.operation_id,
@@ -429,53 +407,6 @@ class RuntimeToolOperationBridge:
             expected_payload=payload,
             expected_error=code,
         )
-
-    async def _terminal_effect(
-        self,
-        decision: "ToolOperationDecision",
-        *,
-        status: str,
-        effect_summary: str | None = None,
-    ) -> tuple[RunRecord | None, ToolEffectRecord | None]:
-        if self._terminal_commands is None:
-            return None, None
-        if self._step_store is None:
-            raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
-        operation = self._admitted_operations.get(decision.operation_id)
-        if operation is None:
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        run = await self._step_store.get_run(run_id=operation.step_run_id)
-        if run is None:
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        prior = await self._step_store.get_tool_effect(
-            run_id=operation.step_run_id,
-            tool_call_id=operation.tool_call_id,
-        )
-        now = datetime.now(timezone.utc)
-        effect = ToolEffectRecord(
-            tool_call_id=operation.tool_call_id,
-            tool_name=operation.tool_name,
-            run_id=operation.step_run_id,
-            status=status,
-            started_at=prior.started_at if prior is not None else operation.created_at,
-            ended_at=now,
-            idempotency_key=(
-                prior.idempotency_key
-                if prior is not None
-                else operation.idempotency_key_digest
-            ),
-            effect_summary=(
-                effect_summary
-                if effect_summary is not None
-                else prior.effect_summary if prior is not None else None
-            ),
-        )
-        return run, effect
-
-    def _update_admitted_operation(self, record: ToolOperationRecord) -> None:
-        current = self._admitted_operations.get(record.tool_operation_id)
-        if current is not None:
-            self._admitted_operations[record.tool_operation_id] = record
 
     async def unknown(
         self,
@@ -650,8 +581,6 @@ class RuntimeToolOperationBridge:
 
         result = await run_durable_commit(operation, readback)
         if result.state is DurableCommitState.COMMITTED:
-            if result.value is not None:
-                self._update_admitted_operation(result.value)
             return result.cancelled
         if result.state is DurableCommitState.NOT_COMMITTED:
             if result.error is not None:

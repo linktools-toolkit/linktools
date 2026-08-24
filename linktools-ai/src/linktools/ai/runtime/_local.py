@@ -1994,7 +1994,6 @@ class LocalExecutionBackend:
                     )
                     else None
                 ),
-                step_store=self._steps,
             ) if tool_repository is not None else None
             loaded_context = LoadedModelContext(())
             session_history_source = (

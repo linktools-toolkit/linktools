@@ -5,7 +5,9 @@
 import asyncio
 import json
 import sys
+from collections.abc import AsyncIterator
 from argparse import Namespace
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -66,25 +68,25 @@ class Command(BaseCommand):
         )
 
         async def execute() -> int:
-            state = await _build_runtime_state(workspace, args.storage)
-            async with open_workspace_runtime(
-                workspace,
-                state=state,
-                models=ModelRegistry.openai(
-                    model=args.model,
-                    base_url=args.base_url,
-                    api_key=args.api_key,
-                ),
-            ) as runtime:
-                return await _emit_result(
-                    runtime,
-                    args.prompt,
-                    session_id,
-                    memory_scope,
-                    args.json,
-                    args.planning,
-                    args.thinking,
-                )
+            async with _open_runtime_state(workspace, args.storage) as state:
+                async with open_workspace_runtime(
+                    workspace,
+                    state=state,
+                    models=ModelRegistry.openai(
+                        model=args.model,
+                        base_url=args.base_url,
+                        api_key=args.api_key,
+                    ),
+                ) as runtime:
+                    return await _emit_result(
+                        runtime,
+                        args.prompt,
+                        session_id,
+                        memory_scope,
+                        args.json,
+                        args.planning,
+                        args.thinking,
+                    )
 
         try:
             return asyncio.run(execute())
@@ -92,11 +94,16 @@ class Command(BaseCommand):
             raise CommandError(str(error)) from error
 
 
-async def _build_runtime_state(workspace: Workspace, storage: str) -> RuntimeState:
+@asynccontextmanager
+async def _open_runtime_state(
+    workspace: Workspace,
+    storage: str,
+) -> AsyncIterator[RuntimeState]:
     if storage == "filesystem":
         path = workspace.storage_root / "runtime"
         _logger.info("ai run storage selected: backend=filesystem path=%s", path)
-        return RuntimeState.filesystem(path)
+        yield RuntimeState.filesystem(path)
+        return
     if storage != "sqlite":
         raise ValueError(f"unsupported Runtime storage backend: {storage}")
 
@@ -107,10 +114,11 @@ async def _build_runtime_state(workspace: Workspace, storage: str) -> RuntimeSta
     engine = create_async_engine(f"sqlite+aiosqlite:///{path}")
     try:
         await provision_runtime_database(engine)
+        _logger.info("ai run storage selected: backend=sqlite path=%s", path)
+        yield RuntimeState.sql(engine)
     finally:
+        _logger.debug("ai run SQL engine disposing: path=%s", path)
         await engine.dispose()
-    _logger.info("ai run storage selected: backend=sqlite path=%s", path)
-    return RuntimeState.sqlite(path)
 
 
 async def _emit_result(

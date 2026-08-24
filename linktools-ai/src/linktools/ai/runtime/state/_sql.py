@@ -901,11 +901,7 @@ class _SqlTransaction:
             self._sequence_cache[key] = 0
 
     async def insert_fact(self, fact: StoredFact) -> None:
-        from sqlalchemy import insert
-
-        if fact.owner_key_digest not in self._guarded_record_keys:
-            raise RuntimeError("fact owner must be guarded in the current transaction")
-        await self._session.execute(insert(self._table("ai_state_facts")).values(_fact_values(fact)))
+        await self.insert_facts((fact,))
 
     async def insert_facts(self, facts: Sequence[StoredFact]) -> None:
         if not facts:

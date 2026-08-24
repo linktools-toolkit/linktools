@@ -913,7 +913,6 @@ class StateStepArchive(StepStore):
     ) -> None:
         self._ensure_open()
         require_no_run_history_lock("StateStepArchive.register_run")
-        value = self._stored_run(record)
 
         async def mutate(transaction: StateTransaction) -> None:
             history_head_guard = await self._execution_history_guard_in_transaction(
@@ -921,29 +920,15 @@ class StateStepArchive(StepStore):
                 execution_id,
                 None,
             )
-            stored = await transaction.get_record(self._run_key(record.run_id))
-            if stored is not None:
-                if _decode_step(stored.data) != record:
-                    raise AIError(ErrorCode.STORAGE_CONFLICT)
-                if await self._history.get_head_in_transaction(
+            _owner_record, created = await self._ensure_run_with_head_in_transaction(
+                transaction,
+                record,
+            )
+            if created:
+                await self._advance_execution_history_head_in_transaction(
                     transaction,
-                    self._history_id(record)
-                    if self._runtime_domain is RuntimeDomain.CONVERSATION
-                    else record.run_id,
-                ) is None:
-                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                return
-            await transaction.insert_record(value)
-            await self._history.create_head_in_transaction(
-                transaction,
-                self._history_id(record)
-                if self._runtime_domain is RuntimeDomain.CONVERSATION
-                else record.run_id,
-            )
-            await self._advance_execution_history_head_in_transaction(
-                transaction,
-                history_head_guard,
-            )
+                    history_head_guard,
+                )
 
         await self._store.mutate(mutate)
 
@@ -1443,26 +1428,11 @@ class StateStepArchive(StepStore):
             history_head_guard,
         )
         if not facts:
-            owner = self._run_key(run.run_id)
-            current = await transaction.get_record(owner)
-            if current is None:
-                await transaction.insert_record(self._stored_run(run))
-                await self._history.create_head_in_transaction(
-                    transaction,
-                    self._history_id(run)
-                    if self._runtime_domain is RuntimeDomain.CONVERSATION
-                    else run.run_id,
-                )
-            elif _decode_step(current.data) != run:
-                raise AIError(ErrorCode.STORAGE_CONFLICT)
-            if await self._history.get_head_in_transaction(
+            _owner_record, created = await self._ensure_run_with_head_in_transaction(
                 transaction,
-                self._history_id(run)
-                if self._runtime_domain is RuntimeDomain.CONVERSATION
-                else run.run_id,
-            ) is None:
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            if current is None and history_head_guard is not None and not supplied_history_head_guard:
+                run,
+            )
+            if created and history_head_guard is not None and not supplied_history_head_guard:
                 await self._advance_execution_history_head_in_transaction(
                     transaction,
                     history_head_guard,
@@ -1528,15 +1498,11 @@ class StateStepArchive(StepStore):
                     default=HistoryQuality.COMPLETE,
                 ),
             )
-            for snapshot in snapshots:
-                await self._history.store_projection(
-                    transaction,
-                    snapshot.owner_id,
-                    snapshot.projection,
-                )
-        owner_record = await transaction.get_record(owner)
-        if owner_record is None:
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            await self._history.store_projection(
+                transaction,
+                snapshots[-1].owner_id,
+                snapshots[-1].projection,
+            )
         if await transaction.guard_record(
             owner,
             expected_storage_version=owner_record.storage_version,
@@ -1761,29 +1727,54 @@ class StateStepArchive(StepStore):
         transaction: StateTransaction,
         run: RunRecord,
     ) -> StoredRecord:
-        owner = self._run_key(run.run_id)
-        owner_record = await transaction.get_record(owner)
-        if owner_record is None:
-            await transaction.insert_record(self._stored_run(run))
-            await self._history.create_head_in_transaction(
-                transaction,
-                self._history_id(run)
-                if self._runtime_domain is RuntimeDomain.CONVERSATION
-                else run.run_id,
-            )
-            owner_record = await transaction.get_record(owner)
-        elif _decode_step(owner_record.data) != run:
-            raise AIError(ErrorCode.STORAGE_CONFLICT)
-        if owner_record is None:
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        if await self._history.get_head_in_transaction(
+        owner_record, _created = await self._ensure_run_with_head_in_transaction(
             transaction,
+            run,
+        )
+        return owner_record
+
+    async def _ensure_run_with_head_in_transaction(
+        self,
+        transaction: StateTransaction,
+        run: RunRecord,
+    ) -> tuple[StoredRecord, bool]:
+        owner = self._run_key(run.run_id)
+        history_owner = (
             self._history_id(run)
             if self._runtime_domain is RuntimeDomain.CONVERSATION
-            else run.run_id,
-        ) is None:
+            else run.run_id
+        )
+        head_key = self._history.head_key(history_owner)
+        records = await transaction.get_records((owner, head_key))
+        owner_record = records.get(owner)
+        head_record = records.get(head_key)
+        if owner_record is None:
+            stored_run = self._stored_run(run)
+            if head_record is None:
+                await transaction.insert_records(
+                    (
+                        stored_run,
+                        self._history.empty_head_record(history_owner),
+                    )
+                )
+                _logger.debug(
+                    "step run admitted with transcript head: run=%s",
+                    run.run_id,
+                )
+            else:
+                self._history.decode_head(head_record)
+                await transaction.insert_records((stored_run,))
+                _logger.debug(
+                    "step run admitted using existing transcript head: run=%s",
+                    run.run_id,
+                )
+            return stored_run, True
+        elif _decode_step(owner_record.data) != run:
+            raise AIError(ErrorCode.STORAGE_CONFLICT)
+        elif head_record is None:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        return owner_record
+        self._history.decode_head(head_record)
+        return owner_record, False
 
     async def _has_existing_fact_in_transaction(
         self,

@@ -4,23 +4,41 @@
 
 import asyncio
 import hashlib
+import re
 import threading
 from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from linktools.ai.agent import AgentBindingSnapshot
+from linktools.ai.agent._capabilities import _RuntimeStepPersistence
 from linktools.ai.agent._output import bind_output
+from linktools.ai.core import (
+    ExecutionLineageKind,
+    ExecutionStatus,
+    IdempotencyStatus,
+    ResourceKind,
+    SessionStatus,
+    ToolOperationStatus,
+)
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.migrate import build_sql_schema_metadata, provision_database
-from linktools.ai.runtime.state import RuntimeState
+from linktools.ai.runtime import RuntimeDomain, RuntimeState
+from linktools.ai.runtime._tool import RuntimeToolOperationBridge
+from linktools.ai.runtime.state import RuntimeStateCommands
 from linktools.ai.runtime.state._contracts import (
+    ExecutionRecord,
+    ExecutionStartClaim,
+    ExecutionStartReservation,
+    IdempotencyRecord,
     RecoveryCheckpoint,
     RecoveryCheckpointState,
     RecoveryExecutionInput,
     RecoveryHandoffPhase,
     RecoveryIdempotencyInput,
+    SessionRecord,
 )
 from linktools.ai.runtime.state._filesystem import FilesystemStateStore
 from linktools.ai.runtime.state._materializer import materialize_runtime_state
@@ -29,18 +47,71 @@ from linktools.ai.spec import AgentSpec
 from linktools.ai.storage import (
     FilesystemJournal,
     FilesystemWriterLock,
+    PayloadPolicy,
     SqlStorageContext,
     create_sql_storage_context,
 )
 from linktools.ai.storage import _database as database_module
 from linktools.ai.storage import _files as files_module
 from linktools.ai.storage import _object as object_module
-from sqlalchemy import MetaData
+from pydantic_ai.messages import ToolCallPart
+from pydantic_ai.models.test import TestModel
+from pydantic_ai.tools import RunContext, ToolDefinition
+from pydantic_ai.usage import RunUsage
+from pydantic_ai_harness.step_persistence import RunRecord
+from sqlalchemy import MetaData, event
 from sqlalchemy.dialects import mysql
 from sqlalchemy.ext.asyncio import create_async_engine
 from sqlalchemy.schema import CreateTable
 
 pytestmark = pytest.mark.asyncio
+
+
+class _SqlCursorCounter:
+    def __init__(self, engine: object) -> None:
+        self.entries: list[tuple[str, str, str, bool]] = []
+        self.scope = ""
+        self._engine = engine
+        event.listen(engine.sync_engine, "before_cursor_execute", self._record)
+
+    def close(self) -> None:
+        event.remove(self._engine.sync_engine, "before_cursor_execute", self._record)
+
+    def reset(self, scope: str) -> None:
+        self.entries.clear()
+        self.scope = scope
+
+    def count(self, action: str, table: str) -> int:
+        return sum(
+            entry[1] == action and entry[2] == table
+            for entry in self.entries
+        )
+
+    def executemany(self, action: str, table: str) -> bool:
+        return any(
+            entry[1] == action
+            and entry[2] == table
+            and entry[3]
+            for entry in self.entries
+        )
+
+    def _record(
+        self,
+        _connection: object,
+        _cursor: object,
+        statement: str,
+        _parameters: object,
+        _context: object,
+        executemany: bool,
+    ) -> None:
+        normalized = re.sub(r"\s+", " ", statement.upper())
+        action = normalized.split(" ", 1)[0]
+        match = re.search(
+            r"(?:FROM|INTO|UPDATE|JOIN) ([A-Z0-9_]+)",
+            normalized,
+        )
+        table = "" if match is None else match.group(1)
+        self.entries.append((self.scope, action, table, executemany))
 
 
 def _binding_snapshot() -> AgentBindingSnapshot:
@@ -57,6 +128,287 @@ def _binding_snapshot() -> AgentBindingSnapshot:
         local_runtime_capability_descriptors=(),
         binding_digest="a" * 64,
     )
+
+
+def _tool_run(run_id: str) -> RunRecord:
+    return RunRecord(
+        run_id=run_id,
+        conversation_id="conversation",
+        parent_run_id=None,
+        agent_name="agent",
+        metadata={},
+        started_at=datetime.now(timezone.utc),
+    )
+
+
+async def test_sql_cursor_counter_captures_core_batch_gates(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "runtime.db"
+    engine = create_async_engine(f"sqlite+aiosqlite:///{path}")
+    await provision_database(engine)
+    counter = _SqlCursorCounter(engine)
+    state = RuntimeState.sql(engine)
+    await state.initialize(namespace="cursor-gates", tenant_id="tenant")
+    now = datetime.now(timezone.utc)
+    session = SessionRecord(
+        session_id="session",
+        tenant_id="tenant",
+        owner_principal_id="owner",
+        agent_id="agent",
+        status=SessionStatus.OPEN,
+        revision=0,
+        resource_generation=0,
+        cwd=None,
+        metadata={},
+        created_at=now,
+        updated_at=now,
+        closed_at=None,
+        active_execution_id=None,
+    )
+    execution = ExecutionRecord(
+        execution_id="execution",
+        tenant_id="tenant",
+        session_id=None,
+        binding_digest="a" * 64,
+        parent_execution_id=None,
+        root_execution_id="execution",
+        source_execution_id=None,
+        base_execution_id=None,
+        lineage_kind=ExecutionLineageKind.RUN,
+        status=ExecutionStatus.PENDING_START,
+        revision=0,
+        event_sequence=0,
+        agent_run_sequence=0,
+        error_code=None,
+        safe_error_details={},
+        created_at=now,
+        updated_at=now,
+        planning=False,
+        thinking=False,
+        binding=_binding_snapshot(),
+    )
+    reserved_execution = replace(
+        execution,
+        execution_id="reserved",
+        root_execution_id="reserved",
+    )
+    identity = IdempotencyRecord(
+        "tenant",
+        RuntimeDomain.EXECUTION,
+        "scope",
+        "key",
+        "request",
+        ResourceKind.EXECUTION,
+        "reserved",
+        IdempotencyStatus.RESERVED,
+        None,
+        None,
+        now,
+        now,
+    )
+    try:
+        counter.reset("session.create")
+        await state.conversation.sessions.create(session)
+        assert counter.count("INSERT", "AI_STATE_RECORDS") == 1
+        assert counter.count("INSERT", "AI_STATE_SEQUENCES") == 1
+
+        counter.reset("execution.create_with_head")
+        await state.execution.executions.create_with_history_head(execution)
+        assert counter.count("SELECT", "AI_STATE_RECORDS") == 1
+        assert counter.count("INSERT", "AI_STATE_RECORDS") == 1
+
+        counter.reset("execution.reserve_start")
+        await state.execution.executions.reserve_start(
+            ExecutionStartReservation(reserved_execution, identity)
+        )
+        assert counter.count("SELECT", "AI_STATE_RECORDS") == 1
+        assert counter.count("INSERT", "AI_STATE_RECORDS") == 1
+
+        counter.reset("execution.claim_start")
+        await state.execution.executions.claim_start(
+            ExecutionStartClaim(
+                "reserved",
+                "tenant",
+                0,
+                0,
+                "scope",
+                "key",
+                "request",
+                now,
+            )
+        )
+        assert counter.count("UPDATE", "AI_STATE_RECORDS") == 1
+        assert counter.executemany("UPDATE", "AI_STATE_RECORDS")
+        assert counter.count("INSERT", "AI_STATE_FACTS") == 1
+    finally:
+        counter.close()
+        await state.close()
+        await engine.dispose()
+
+
+async def test_cli_sql_state_context_owns_one_engine_on_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import linktools.commands.ai.run as run_module
+    import sqlalchemy.ext.asyncio as sqlalchemy_asyncio
+
+    created: list[object] = []
+    provisioned: list[object] = []
+    disposed: list[object] = []
+    original_create = sqlalchemy_asyncio.create_async_engine
+    original_dispose = sqlalchemy_asyncio.AsyncEngine.dispose
+    original_provision = run_module.provision_runtime_database
+
+    def create_engine(*args: object, **kwargs: object) -> object:
+        engine = original_create(*args, **kwargs)
+        created.append(engine)
+        return engine
+
+    async def provision(engine: object) -> None:
+        provisioned.append(engine)
+        await original_provision(engine)
+
+    async def dispose(engine: object, *args: object, **kwargs: object) -> None:
+        disposed.append(engine)
+        await original_dispose(engine, *args, **kwargs)
+
+    monkeypatch.setattr(sqlalchemy_asyncio, "create_async_engine", create_engine)
+    monkeypatch.setattr(sqlalchemy_asyncio.AsyncEngine, "dispose", dispose)
+    monkeypatch.setattr(run_module, "provision_runtime_database", provision)
+
+    with pytest.raises(RuntimeError, match="request failed"):
+        async with run_module._open_runtime_state(
+            SimpleNamespace(storage_root=tmp_path),
+            "sqlite",
+        ):
+            raise RuntimeError("request failed")
+
+    assert len(created) == 1
+    assert provisioned == created
+    assert disposed == created
+
+
+def _runtime_commands(state: RuntimeState, namespace: str) -> RuntimeStateCommands:
+    return RuntimeStateCommands(
+        state.execution.executions,
+        namespace=namespace,
+        events=state.execution.events,
+        operations=state.execution.operations,
+        conversation=state.conversation.sessions,
+        recovery=state.recovery.checkpoints,
+        conversation_history=state.conversation.histories,
+        tools=state.recovery.tools,
+        conversation_steps=state.steps.read_store(RuntimeDomain.CONVERSATION),
+        execution_steps=state.steps.read_store(RuntimeDomain.EXECUTION),
+        recovery_steps=state.steps.read_store(RuntimeDomain.RECOVERY),
+    )
+
+
+async def test_sqlite_parallel_tool_lifecycle_uses_one_effect_writer(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "runtime.db"
+    provisioning_engine = create_async_engine(f"sqlite+aiosqlite:///{path}")
+    await provision_database(provisioning_engine)
+    await provisioning_engine.dispose()
+
+    state = RuntimeState.sqlite(path)
+    await state.initialize(namespace="parallel-tools", tenant_id="tenant")
+    try:
+        run_id = "run"
+        await state.steps.register_run(_tool_run(run_id))
+        commands = _runtime_commands(state, "parallel-tools")
+        bridge = RuntimeToolOperationBridge(
+            state.recovery.tools,
+            state.object_store(RuntimeDomain.RECOVERY),
+            namespace="parallel-tools",
+            tenant_id="tenant",
+            execution_id="execution",
+            step_run_id=run_id,
+            binding_fingerprint="a" * 64,
+            owner="owner",
+            payload_policy=PayloadPolicy(),
+            terminal_commands=commands,
+        )
+        persistence = _RuntimeStepPersistence(
+            tool_operations=bridge,
+            store=state.steps,
+            agent_name="agent",
+            run_id=run_id,
+        )
+        call_ids = ("call-a", "call-b")
+        entered = {call_id: asyncio.Event() for call_id in call_ids}
+        release = asyncio.Event()
+        handler_calls = {call_id: 0 for call_id in call_ids}
+
+        async def execute(call_id: str) -> object:
+            context = RunContext(
+                deps=None,
+                model=TestModel(),
+                usage=RunUsage(),
+                run_id=run_id,
+            )
+            call = ToolCallPart("tool", {}, tool_call_id=call_id)
+            tool_def = ToolDefinition(
+                name="tool",
+                metadata={"linktools.ai.replay_safe": True},
+            )
+            await persistence.before_tool_execute(
+                context,
+                call=call,
+                tool_def=tool_def,
+                args={},
+            )
+
+            async def handler(_args: dict[str, object]) -> dict[str, str]:
+                handler_calls[call_id] += 1
+                entered[call_id].set()
+                await release.wait()
+                return {"call_id": call_id}
+
+            result = await persistence.wrap_tool_execute(
+                context,
+                call=call,
+                tool_def=tool_def,
+                args={},
+                handler=handler,
+            )
+            return await persistence.after_tool_execute(
+                context,
+                call=call,
+                tool_def=tool_def,
+                args={},
+                result=result,
+            )
+
+        tasks = [asyncio.create_task(execute(call_id)) for call_id in call_ids]
+        await asyncio.gather(*(entered[call_id].wait() for call_id in call_ids))
+        release.set()
+        assert await asyncio.gather(*tasks) == [
+            {"call_id": "call-a"},
+            {"call_id": "call-b"},
+        ]
+
+        recovery = state.steps.read_store(RuntimeDomain.RECOVERY)
+        for call_id in call_ids:
+            operation = await state.recovery.tools.get_by_call(
+                run_id,
+                call_id,
+                tenant_id="tenant",
+            )
+            assert operation is not None
+            assert operation.status is ToolOperationStatus.COMPLETED
+            assert handler_calls[call_id] == 1
+            effect = await recovery.get_tool_effect(
+                run_id=run_id,
+                tool_call_id=call_id,
+            )
+            assert effect is not None
+            assert effect.status == "completed"
+    finally:
+        await state.close()
 
 
 async def test_mysql_audit_columns_match_stg_contract() -> None:
