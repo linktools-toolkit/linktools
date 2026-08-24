@@ -280,8 +280,6 @@ def _run_ai_ruff(environment: "typing.Dict[str, str]") -> None:
             ruff,
             "check",
             "--no-cache",
-            "--select",
-            "E4,E7,E9,F",
             "scripts/check/ai",
             "linktools-ai/src/linktools/ai",
             "linktools-ai/src/linktools/commands/ai",
