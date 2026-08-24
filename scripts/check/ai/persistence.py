@@ -253,8 +253,17 @@ def _validate_generic_writer_closure() -> tuple[str, ...]:
     )
     try:
         runtime_codec._encode_persisted_domain(invalid)
-    except TypeError:
-        return ()
+    except AIError as error:
+        if (
+            error.code is ErrorCode.INTERNAL_ERROR
+            and error.retryable is False
+            and error.safe_details == {
+                "phase": "persistence_encode",
+                "domain_type": "ContextProjection",
+            }
+        ):
+            return ()
+        return ("generic persistence writer returned the wrong failure contract",)
     except Exception:
         return ("generic persistence writer returned the wrong failure type",)
     return ("generic persistence writer accepted unreadable runtime value",)

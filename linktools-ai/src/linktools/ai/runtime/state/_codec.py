@@ -15,6 +15,7 @@ from operator import attrgetter
 from types import MappingProxyType
 from typing import (
     Any,
+    ForwardRef,
     Literal,
     TypeVar,
     Union,
@@ -377,6 +378,7 @@ _VERSION_CODECS: Mapping[int, _VersionCodec] = MappingProxyType(
     }
 )
 _CURRENT_CODEC = _VERSION_CODECS[CURRENT_DATA_VERSION]
+_JSON_VALUE_FORWARD_REF = ForwardRef("JsonValue")
 
 
 @dataclass(frozen=True, slots=True)
@@ -835,31 +837,26 @@ def encode_domain(value: DomainT) -> JsonValue:
 
 def _encode_persisted_domain(value: DomainT) -> JsonValue:
     """Encode one domain value for a Runtime persistence envelope."""
-    wire = _encode_domain(value, _CURRENT_CODEC, persisted=True)
     try:
+        wire = _encode_domain(value, _CURRENT_CODEC, persisted=True)
         _decode_domain(
             wire,
             type(value),
             _CURRENT_CODEC,
             persisted=True,
         )
-    except AIError as error:
-        if error.code is ErrorCode.STORAGE_VERSION_UNSUPPORTED:
-            raise
-        _logger.warning(
-            "persisted domain writer closure rejected value: type=%s",
+    except Exception as error:
+        _logger.error(
+            "Runtime persistence writer closure failed: type=%s",
             type(value).__name__,
         )
-        raise TypeError(
-            f"{type(value).__name__} persisted V1 wire is not readable by current decoder"
-        ) from error
-    except (KeyError, TypeError, ValueError) as error:
-        _logger.warning(
-            "persisted domain writer closure rejected value: type=%s",
-            type(value).__name__,
-        )
-        raise TypeError(
-            f"{type(value).__name__} persisted V1 wire is not readable by current decoder"
+        raise AIError(
+            ErrorCode.INTERNAL_ERROR,
+            retryable=False,
+            safe_details={
+                "phase": "persistence_encode",
+                "domain_type": type(value).__name__,
+            },
         ) from error
     return wire
 
@@ -1007,6 +1004,22 @@ def _decode_domain(
 ) -> object:
     if target is Any or target is object:
         return _decode_any(value, codec, persisted=persisted)
+    if target == "JsonValue":
+        return _decode_domain(
+            value,
+            JsonValue,
+            codec,
+            persisted=persisted,
+        )
+    if isinstance(target, ForwardRef):
+        if target == _JSON_VALUE_FORWARD_REF:
+            return _decode_domain(
+                value,
+                JsonValue,
+                codec,
+                persisted=persisted,
+            )
+        raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
     origin = get_origin(target)
     arguments = get_args(target)
     if origin is Literal:

@@ -13,6 +13,7 @@ from linktools.core import environ
 
 from ...errors import AIError, ErrorCode
 from ...storage import (
+    IntegrityViolationKind,
     SqlStorageContext,
     create_sql_storage_context,
 )
@@ -166,12 +167,56 @@ class SqlStateStorageGroup:
             raise
         except AIError:
             raise
-        except BaseException as error:
-            from sqlalchemy.exc import IntegrityError
+        except Exception as error:
+            from sqlalchemy.exc import (
+                DBAPIError,
+                DataError,
+                IntegrityError,
+                InterfaceError,
+                OperationalError,
+                ProgrammingError,
+                SQLAlchemyError,
+                TimeoutError as SqlAlchemyTimeoutError,
+            )
 
+            internal_details = {"phase": "runtime_state_sql_mutation"}
             if isinstance(error, IntegrityError):
-                raise AIError(ErrorCode.STORAGE_CONFLICT) from error
-            raise AIError(ErrorCode.STORAGE_UNAVAILABLE) from error
+                violation = self._context.dialect.classify_integrity_error(error)
+                code = (
+                    ErrorCode.STORAGE_CONFLICT
+                    if violation is IntegrityViolationKind.UNIQUE_CONFLICT
+                    else ErrorCode.INTERNAL_ERROR
+                )
+            elif isinstance(error, (ProgrammingError, DataError)):
+                code = ErrorCode.INTERNAL_ERROR
+            elif isinstance(
+                error,
+                (InterfaceError, OperationalError, SqlAlchemyTimeoutError),
+            ):
+                code = ErrorCode.STORAGE_UNAVAILABLE
+            elif isinstance(error, DBAPIError):
+                code = (
+                    ErrorCode.STORAGE_UNAVAILABLE
+                    if error.connection_invalidated is True
+                    else ErrorCode.INTERNAL_ERROR
+                )
+            elif isinstance(error, SQLAlchemyError):
+                code = ErrorCode.INTERNAL_ERROR
+            else:
+                code = ErrorCode.INTERNAL_ERROR
+
+            _logger.error(
+                "SQL Runtime state mutation error mapped: error_type=%s code=%s",
+                type(error).__name__,
+                code.value,
+            )
+            if code is ErrorCode.INTERNAL_ERROR:
+                raise AIError(
+                    code,
+                    retryable=False,
+                    safe_details=internal_details,
+                ) from error
+            raise AIError(code) from error
 
     @asynccontextmanager
     async def _session(self):

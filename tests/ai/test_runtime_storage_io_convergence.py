@@ -247,6 +247,33 @@ async def test_sql_cursor_counter_captures_core_batch_gates(
         await engine.dispose()
 
 
+async def test_sql_state_group_maps_programming_failure_to_internal(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "runtime.db"
+    engine = create_async_engine(f"sqlite+aiosqlite:///{path}")
+    await provision_database(engine)
+    state = RuntimeState.sqlite(path)
+    await state.initialize(namespace="sql-error-contract", tenant_id="tenant")
+    store = state.execution.executions.state_store
+
+    async def fail(_transaction: object) -> None:
+        raise TypeError("boom")
+
+    try:
+        with pytest.raises(AIError) as raised:
+            await store.storage_group.mutate((store,), fail)
+        assert raised.value.code is ErrorCode.INTERNAL_ERROR
+        assert raised.value.code is not ErrorCode.STORAGE_UNAVAILABLE
+        assert raised.value.retryable is False
+        assert raised.value.safe_details == {
+            "phase": "runtime_state_sql_mutation"
+        }
+    finally:
+        await state.close()
+        await engine.dispose()
+
+
 async def test_cli_sql_state_context_owns_one_engine_on_failure(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
