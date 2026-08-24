@@ -1,0 +1,133 @@
+name: Temporary AI floor fixup
+
+on:
+  pull_request:
+    branches:
+      - master
+
+permissions:
+  contents: write
+
+jobs:
+  fixup:
+    if: github.event.pull_request.head.ref == 'refactor/unified-release-gates'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: refactor/unified-release-gates
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+      - name: Apply deterministic fixup
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import re
+
+          enum_files = [
+              "linktools-ai/src/linktools/ai/asset/_logical.py",
+              "linktools-ai/src/linktools/ai/core/_principal.py",
+              "linktools-ai/src/linktools/ai/core/_redaction.py",
+              "linktools-ai/src/linktools/ai/core/_value.py",
+              "linktools-ai/src/linktools/ai/errors.py",
+              "linktools-ai/src/linktools/ai/runtime/_execution.py",
+              "linktools-ai/src/linktools/ai/runtime/_tool.py",
+              "linktools-ai/src/linktools/ai/runtime/state/_contracts.py",
+              "linktools-ai/src/linktools/ai/runtime/state/_durability.py",
+              "linktools-ai/src/linktools/ai/runtime/state/_plan.py",
+              "linktools-ai/src/linktools/ai/runtime/state/_readmodel.py",
+              "linktools-ai/src/linktools/ai/runtime/state/_root.py",
+              "linktools-ai/src/linktools/ai/runtime/state/_steps.py",
+              "linktools-ai/src/linktools/ai/storage/_contracts.py",
+              "linktools-ai/src/linktools/ai/storage/_dialects.py",
+              "linktools-ai/src/linktools/ai/storage/_layer.py",
+              "linktools-ai/src/linktools/ai/temporal/workflow/_execution.py",
+          ]
+          import_pattern = re.compile(r"^from \.{1,3}_compat import StrEnum$", re.MULTILINE)
+          class_pattern = re.compile(r"class ([A-Za-z_][A-Za-z0-9_]*)\(StrEnum\):")
+          total_classes = 0
+          for name in enum_files:
+              path = Path(name)
+              text = path.read_text(encoding="utf-8")
+              text, import_count = import_pattern.subn("from enum import Enum", text)
+              if import_count != 1:
+                  raise SystemExit(f"{name}: expected one StrEnum import, got {import_count}")
+              text, class_count = class_pattern.subn(r"class \1(str, Enum):", text)
+              if class_count < 1:
+                  raise SystemExit(f"{name}: expected at least one StrEnum class")
+              total_classes += class_count
+              path.write_text(text, encoding="utf-8")
+          if total_classes < len(enum_files):
+              raise SystemExit("unexpected string-enum replacement count")
+
+          contracts = Path("tests/ai/test_contracts.py")
+          text = contracts.read_text(encoding="utf-8")
+          old = "from linktools.ai._compat import StrEnum\n"
+          if text.count(old) != 1:
+              raise SystemExit("test_contracts.py: expected one compatibility import")
+          text = text.replace(old, "")
+          old_class = "class _JsonStrEnum(StrEnum):"
+          if text.count(old_class) != 1:
+              raise SystemExit("test_contracts.py: expected _JsonStrEnum declaration")
+          text = text.replace(old_class, "class _JsonStrEnum(str, Enum):")
+          contracts.write_text(text, encoding="utf-8")
+
+          compat = Path("linktools-ai/src/linktools/ai/_compat.py")
+          if not compat.is_file():
+              raise SystemExit("expected compatibility helper to exist before removal")
+          compat.unlink()
+
+          architecture = Path("tests/ai/test_architecture.py")
+          text = architecture.read_text(encoding="utf-8")
+          anchor = '        "WorkspacePolicy",\n        "open_workspace_runtime",\n'
+          if text.count(anchor) != 1:
+              raise SystemExit("test_architecture.py: workspace public-surface anchor changed")
+          text = text.replace(
+              anchor,
+              '        "WorkspacePolicy",\n        "build_workspace_assets",\n        "open_workspace_runtime",\n',
+          )
+          architecture.write_text(text, encoding="utf-8")
+
+          temporal = Path("tests/ai/test_temporal_taskgraph_conformance.py")
+          text = temporal.read_text(encoding="utf-8")
+          old = '''    monkeypatch.setattr(\n        temporal_activity._temporal_activity,\n        "info",\n        lambda: SimpleNamespace(workflow_run_id="test-workflow-run"),\n    )'''
+          new = '''    monkeypatch.setattr(\n        temporal_activity,\n        "_temporal_activity",\n        SimpleNamespace(info=lambda: SimpleNamespace(workflow_run_id="test-workflow-run")),\n    )'''
+          if text.count(old) != 1:
+              raise SystemExit("test_temporal_taskgraph_conformance.py: activity fixture changed")
+          temporal.write_text(text.replace(old, new), encoding="utf-8")
+
+          cancellation = Path("tests/ai/test_error_cancellation_contract.py")
+          text = cancellation.read_text(encoding="utf-8")
+          helper_anchor = "\n\n@pytest.mark.asyncio\nasync def test_local_terminal_admission_cleanup_preserves_cancellation() -> None:\n"
+          helper = '''\n\ndef _cancellation_cleanup_error(error: asyncio.CancelledError) -> BaseException | None:\n    if error.__cause__ is not None:\n        return error.__cause__\n    context = error.__context__\n    if isinstance(context, asyncio.CancelledError):\n        return context.__cause__\n    return None\n\n\n@pytest.mark.asyncio\nasync def test_local_terminal_admission_cleanup_preserves_cancellation() -> None:\n'''
+          if text.count(helper_anchor) != 1:
+              raise SystemExit("test_error_cancellation_contract.py: helper anchor changed")
+          text = text.replace(helper_anchor, helper)
+          old = '''    assert isinstance(error.value.__cause__, AIError)\n    assert error.value.__cause__.code is ErrorCode.STORAGE_RECOVERY_REQUIRED'''
+          new = '''    cleanup_error = _cancellation_cleanup_error(error.value)\n    assert isinstance(cleanup_error, AIError)\n    assert cleanup_error.code is ErrorCode.STORAGE_RECOVERY_REQUIRED'''
+          if text.count(old) != 1:
+              raise SystemExit("test_error_cancellation_contract.py: task-runner assertion changed")
+          text = text.replace(old, new)
+          old = "    assert isinstance(error.value.__cause__, RuntimeError)"
+          new = "    assert isinstance(_cancellation_cleanup_error(error.value), RuntimeError)"
+          if text.count(old) != 1:
+              raise SystemExit("test_error_cancellation_contract.py: subagent assertion changed")
+          cancellation.write_text(text.replace(old, new), encoding="utf-8")
+          PY
+
+          if git grep -n '_compat import StrEnum\|linktools.ai._compat' -- linktools-ai tests/ai; then
+            echo 'stale StrEnum compatibility import remains' >&2
+            exit 1
+          fi
+          test ! -e linktools-ai/src/linktools/ai/_compat.py
+          git diff --check
+      - name: Commit fixup
+        shell: bash
+        run: |
+          git config user.name github-actions[bot]
+          git config user.email github-actions[bot]@users.noreply.github.com
+          git add linktools-ai/src/linktools/ai tests/ai
+          git commit -m "fix(ai): honor Python 3.10 test contract"
+          git push origin HEAD:refactor/unified-release-gates
