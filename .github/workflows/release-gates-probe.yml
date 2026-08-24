@@ -1,0 +1,100 @@
+name: Temporary release gates probe
+
+on:
+  push:
+    branches:
+      - refactor/unified-release-gates
+
+permissions:
+  contents: write
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: refactor/unified-release-gates
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+      - name: Run complete release-gate probe
+        shell: bash
+        run: |
+          set -u
+          git fetch origin master
+
+          python - <<'PY'
+          import re
+          from pathlib import Path
+
+          path = Path("linktools-ai/README.md")
+          master = __import__("subprocess").check_output(
+              ["git", "show", "origin/master:linktools-ai/README.md"], text=True
+          )
+          replacement = """## 13. Development checks
+
+Install the editable development environment once, then use the repository gate from the repository root:
+
+```bash
+python manage.py install --editable
+python manage.py check linktools-ai
+```
+
+The repository gate owns the AI-specific release checks; package-local release scripts are not a supported development entry point.
+"""
+          updated, count = re.subn(r"## 13\. Development checks\n.*\Z", replacement, master, flags=re.DOTALL)
+          if count != 1:
+              raise SystemExit("unexpected linktools-ai README development-checks section")
+          path.write_text(updated, encoding="utf-8")
+          PY
+
+          log=.github/release-gates-probe.log
+          : > "$log"
+          run_step() {
+            name="$1"
+            shift
+            printf '\n===== %s =====\n' "$name" >> "$log"
+            set +e
+            "$@" >> "$log" 2>&1
+            status=$?
+            set -e
+            printf 'EXIT=%s\n' "$status" >> "$log"
+            return 0
+          }
+
+          set -e
+          run_step pip-upgrade python -m pip install --upgrade pip
+          run_step install-requirements python -m pip install -U -r requirements.txt
+          run_step editable-install python manage.py install --editable
+          run_step clean-before python manage.py clean
+          run_step check python manage.py check
+
+          check_status="$(awk '/===== check =====/{seen=1; next} seen && /^EXIT=/{print substr($0,6); exit}' "$log")"
+          if [ "$check_status" = "0" ]; then
+            run_step build env VERSION=v0.0.0 RELEASE=true python manage.py build
+            build_status="$(awk '/===== build =====/{seen=1; next} seen && /^EXIT=/{print substr($0,6); exit}' "$log")"
+            if [ "$build_status" = "0" ]; then
+              run_step verify env VERSION=v0.0.0 python manage.py verify
+            else
+              printf '\n===== verify =====\nSKIPPED because build failed\nEXIT=125\n' >> "$log"
+            fi
+          else
+            printf '\n===== build =====\nSKIPPED because check failed\nEXIT=125\n' >> "$log"
+            printf '\n===== verify =====\nSKIPPED because check failed\nEXIT=125\n' >> "$log"
+          fi
+
+          run_step clean-after python manage.py clean
+
+          rm -f \
+            .github/workflows/release-gates-probe.yml \
+            .github/.release-gates-probe-trigger \
+            .github/workflows/apply-ai-readme-release-docs.yml \
+            .github/.ai-readme-release-docs-trigger
+
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add -A
+          git commit -m "test(release): record full gate probe"
+          git push origin HEAD:refactor/unified-release-gates
