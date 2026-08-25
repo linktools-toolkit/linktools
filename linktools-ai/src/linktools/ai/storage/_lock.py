@@ -124,6 +124,7 @@ class FilesystemLeaseCoordinator:
         self.lease_seconds = lease_seconds
         self._locks = KeyedAsyncLock()
         self._active: dict[str, Lease] = {}
+        self._lock_owners: dict[str, "asyncio.Task[object]"] = {}
 
     async def acquire(self, key: str, *, timeout: float = 30.0) -> Lease:
         if not key:
@@ -161,6 +162,7 @@ class FilesystemLeaseCoordinator:
                     raise
                 if lease is not None:
                     self._active[key] = lease
+                    self._lock_owners[key] = owner
                     _logger.debug(
                         "file lease acquired: key=%s fence=%s",
                         key,
@@ -245,10 +247,9 @@ class FilesystemLeaseCoordinator:
         if self._active.get(lease.key) != lease:
             return
         self._active.pop(lease.key, None)
-        owner = asyncio.current_task()
+        owner = self._lock_owners.pop(lease.key, None)
         if owner is None:
-            raise RuntimeError("filesystem lease release requires an asyncio task")
-        owner = cast("asyncio.Task[object]", owner)
+            raise RuntimeError(f"filesystem lease lock owner missing: {lease.key}")
         release_task = asyncio.create_task(asyncio.to_thread(self._release, lease))
         try:
             await asyncio.shield(release_task)
