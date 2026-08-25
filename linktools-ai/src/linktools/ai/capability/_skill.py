@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from typing import Protocol
 
 from pydantic_ai.capabilities import AbstractCapability
+from pydantic_ai.exceptions import ModelRetry
 from pydantic_ai.tools import RunContext
 from pydantic_ai.toolsets import FunctionToolset
 
@@ -173,7 +174,7 @@ class SkillCapability(AbstractCapability[None]):
             del ctx
             specification = await self.catalog.load_skill(skill_id)
             if specification is None:
-                raise ValueError("skill not found")
+                raise ModelRetry("skill not found")
             return {"id": specification.id, "content": specification.content}
 
         return toolset
