@@ -884,6 +884,7 @@ async def test_filesystem_close_cancellation_still_releases_writer(
     await operation
     with pytest.raises(asyncio.CancelledError):
         await closing
+    await store.close()
 
     reopened = FilesystemStateStore(root, namespace="n", tenant_id="t", runtime_domain="conversation")
     await reopened.initialize()
