@@ -284,9 +284,6 @@ def _load_release_config(project: str, project_path: str) -> "typing.Dict[str, t
         print("[-] %s release config has unknown field(s): %s" % (project, ", ".join(unknown_root)), file=sys.stderr)
         raise SystemExit(1)
     checks = _require_mapping(root.get("checks"), "%s checks" % project)
-    if not checks:
-        print("[-] %s checks must not be empty" % project, file=sys.stderr)
-        raise SystemExit(1)
     unknown_checks = _unknown_fields(checks, _SUPPORTED_CHECKS, "%s checks" % project)
     if unknown_checks:
         print("[-] %s has unknown check(s): %s" % (project, ", ".join(unknown_checks)), file=sys.stderr)
