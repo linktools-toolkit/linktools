@@ -16,7 +16,6 @@ from linktools.ai.core import ExecutionStatus, ResourceKind, ResourceRef
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.runtime._evaluation import DefaultEvaluationService
 from linktools.ai.runtime._execution import DefaultExecutionService
-from linktools.ai.runtime._local import LocalExecutionBackend
 from linktools.ai.runtime._planner import RuntimeTaskNodeRunner
 from linktools.ai.runtime._session import DefaultSessionService
 from linktools.ai.runtime._subagent import SubagentDispatcher
@@ -127,39 +126,13 @@ async def test_transient_handoff_cleanup_preserves_cancellation(
     assert state.release_requested is True
 
 
-def _cancellation_cleanup_error(error: asyncio.CancelledError) -> BaseException | None:
-    if error.__cause__ is not None:
-        return error.__cause__
-    context = error.__context__
-    if isinstance(context, asyncio.CancelledError):
-        return context.__cause__
-    return None
-
-
-@pytest.mark.asyncio
-async def test_local_terminal_admission_cleanup_preserves_cancellation() -> None:
-    class Sessions:
-        async def release_execution(self, *args, **kwargs) -> None:
-            del args, kwargs
-            raise asyncio.CancelledError
-
-    backend = object.__new__(LocalExecutionBackend)
-    backend._conversation = SimpleNamespace(sessions=Sessions())
-    execution = SimpleNamespace(
-        session_id="session",
-        tenant_id="tenant",
-        execution_id="execution",
-    )
-
-    with pytest.raises(asyncio.CancelledError):
-        await backend._release_session_admission_best_effort(execution)
-
-
 @pytest.mark.asyncio
 async def test_task_runner_preserves_cancellation_when_child_cleanup_fails() -> None:
     class Execution:
         def __init__(self) -> None:
             self.wait_started = asyncio.Event()
+            self.cancel_started = asyncio.Event()
+            self.finish_cancel = asyncio.Event()
 
         async def run(self, *args, **kwargs):
             del args, kwargs
@@ -172,11 +145,14 @@ async def test_task_runner_preserves_cancellation_when_child_cleanup_fails() -> 
 
         async def cancel(self, *args, **kwargs):
             del args, kwargs
+            self.cancel_started.set()
+            await self.finish_cancel.wait()
             raise RuntimeError("cleanup failed")
 
     execution = Execution()
     runner = object.__new__(RuntimeTaskNodeRunner)
     runner._execution = execution
+    runner._detached_tasks = set()
 
     async def prepare(*args, **kwargs):
         del args, kwargs
@@ -194,12 +170,15 @@ async def test_task_runner_preserves_cancellation_when_child_cleanup_fails() -> 
     await execution.wait_started.wait()
     task.cancel()
 
-    with pytest.raises(asyncio.CancelledError) as error:
+    with pytest.raises(asyncio.CancelledError):
         await task
 
-    cleanup_error = _cancellation_cleanup_error(error.value)
-    assert isinstance(cleanup_error, AIError)
-    assert cleanup_error.code is ErrorCode.STORAGE_RECOVERY_REQUIRED
+    await execution.cancel_started.wait()
+    pending = runner.pending_background_tasks
+    assert pending
+    execution.finish_cancel.set()
+    await asyncio.gather(*pending, return_exceptions=True)
+    assert runner.pending_background_tasks == ()
 
 
 @pytest.mark.asyncio
@@ -222,6 +201,7 @@ async def test_subagent_child_cleanup_failure_does_not_replace_cancellation() ->
     execution = Execution()
     dispatcher = object.__new__(SubagentDispatcher)
     dispatcher._execution = execution
+    dispatcher._detached_tasks = set()
     task = asyncio.create_task(
         dispatcher.cancel_child(
             "execution",
@@ -231,9 +211,12 @@ async def test_subagent_child_cleanup_failure_does_not_replace_cancellation() ->
     )
     await execution.cancel_started.wait()
     task.cancel()
-    execution.finish_cancel.set()
 
-    with pytest.raises(asyncio.CancelledError) as error:
+    with pytest.raises(asyncio.CancelledError):
         await task
 
-    assert isinstance(_cancellation_cleanup_error(error.value), RuntimeError)
+    pending = dispatcher.pending_background_tasks
+    assert pending
+    execution.finish_cancel.set()
+    await asyncio.gather(*pending, return_exceptions=True)
+    assert dispatcher.pending_background_tasks == ()

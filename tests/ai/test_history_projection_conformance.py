@@ -5,6 +5,7 @@
 import asyncio
 from datetime import datetime, timezone
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from linktools.ai.adapter import StepExecutionHistoryReader
@@ -71,13 +72,12 @@ def _binding() -> AgentBindingSnapshot:
         version=1,
         agent_spec=AgentSpec("default", 1, "default"),
         agent_digest="b" * 64,
-        output_type_module=output.value_type.__module__,
-        output_type_qualname=output.value_type.__qualname__,
         output_schema_id=output.schema_id,
         output_schema_revision=output.schema_revision,
         output_schema_fingerprint=output.schema_fingerprint,
         local_runtime_capability_descriptors=(),
         binding_digest="a" * 64,
+        global_runtime_capability_descriptors=(),
     )
 
 
@@ -402,36 +402,49 @@ async def test_terminal_commit_cancellation_still_finalizes_after_durable_commit
             del plan
             self.finalized.set()
 
+        async def discard_execution_terminal_seal(self, plan: object) -> None:
+            del plan
+
+        async def prepare_execution_terminal_seal(self, **kwargs: object) -> ExecutionTerminalSealPlan:
+            del kwargs
+            return plan
+
     lifecycle = Lifecycle()
     backend = object.__new__(LocalExecutionBackend)
     backend._step_reads = {
         RuntimeDomain.EXECUTION: object.__new__(StateStepArchive),
     }
     backend._step_lifecycle = lifecycle
+    backend._checkpoint_tasks = set()
+    backend._pending_audit_events = {}
+    backend._pending_audit_locks = {}
+    backend._execution_durable_tasks = {}
     started = asyncio.Event()
 
     async def commit(*args: object, **kwargs: object) -> object:
         del args, kwargs
         started.set()
         await asyncio.sleep(0.01)
-        return object()
+        return SimpleNamespace(execution=SimpleNamespace(event_sequence=0))
 
-    backend._commit_execution_terminal_checkpoint_locked = commit
-    current = _record(ExecutionStatus.SUCCEEDED, 1)
+    backend._commit_execution_terminal_checkpoint_locked_body = commit
+    current = _record(ExecutionStatus.SUCCEEDED, 0)
     plan = ExecutionTerminalSealPlan("execution", "a" * 64, (), ())
     task = asyncio.create_task(
         backend._commit_execution_terminal_checkpoint(
             current,
             object(),
             run_id=None,
-            terminal_plan=plan,
         )
     )
     await started.wait()
     task.cancel()
-    with pytest.raises(asyncio.CancelledError):
+    with pytest.raises(AIError) as error:
         await task
-    assert lifecycle.finalized.is_set()
+    assert error.value.code is ErrorCode.STORAGE_COMMIT_UNKNOWN
+    await lifecycle.finalized.wait()
+    await asyncio.sleep(0)
+    assert not backend._checkpoint_tasks
 
 
 @pytest.mark.asyncio
@@ -845,6 +858,7 @@ async def test_read_model_accepts_current_v1_record() -> None:
                         "history_count": 0,
                         "transcript_count": 0,
                         "revision": 1,
+                        "future_metadata": {"$future_v2": {"ignored": True}},
                     },
                 )
             )

@@ -7,7 +7,7 @@ import warnings
 from collections.abc import Callable
 from dataclasses import fields
 from datetime import date, datetime, timezone
-from enum import Enum, IntEnum
+from enum import Enum, IntEnum, StrEnum
 
 import pytest
 from linktools.ai.agent import AgentBindingSnapshot
@@ -79,7 +79,7 @@ class _JsonEnum(Enum):
     VALUE = "value"
 
 
-class _JsonStrEnum(str, Enum):
+class _JsonStrEnum(StrEnum):
     VALUE = "value"
 
 
@@ -98,13 +98,12 @@ def _binding_snapshot(
         version=1,
         agent_spec=spec,
         agent_digest="b" * 64,
-        output_type_module=output.value_type.__module__,
-        output_type_qualname=output.value_type.__qualname__,
         output_schema_id=output.schema_id,
         output_schema_revision=output.schema_revision,
         output_schema_fingerprint=output.schema_fingerprint,
         local_runtime_capability_descriptors=(),
         binding_digest=digest,
+        global_runtime_capability_descriptors=(),
     )
 
 

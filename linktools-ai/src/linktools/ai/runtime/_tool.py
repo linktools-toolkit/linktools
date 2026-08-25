@@ -2,12 +2,13 @@
 # -*- coding: utf-8 -*-
 """Runtime-owned tool authorization and durable operation contracts."""
 
+import asyncio
 import hashlib
 import json
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import datetime
-from enum import Enum
+from enum import StrEnum
 from typing import TYPE_CHECKING, Any, Protocol
 
 from linktools.core import environ
@@ -167,9 +168,7 @@ class ToolDescriptor:
     replay_safe: bool = False
 
 
-class ToolAuthorization(str, Enum):
-    __str__ = str.__str__
-    __format__ = str.__format__
+class ToolAuthorization(StrEnum):
     ALLOW = "ALLOW"
     DENY = "DENY"
     REQUIRE_APPROVAL = "REQUIRE_APPROVAL"
@@ -218,6 +217,7 @@ class RuntimeToolOperationBridge:
         step_run_id: str,
         binding_fingerprint: str,
         owner: str,
+        background_tasks: "set[asyncio.Task[object]]",
         payload_policy: PayloadPolicy,
         recovery_step_run_id: str | None = None,
         terminal_commands: _ToolTerminalCommands | None = None,
@@ -230,6 +230,7 @@ class RuntimeToolOperationBridge:
         self._step_run_id = step_run_id
         self._binding_fingerprint = binding_fingerprint
         self._owner = owner
+        self._background_tasks = background_tasks
         self._payload_policy = payload_policy
         self._recovery_step_run_id = recovery_step_run_id
         self._terminal_commands = terminal_commands
@@ -581,7 +582,11 @@ class RuntimeToolOperationBridge:
                 return CommitObservation(DurableCommitState.NOT_COMMITTED)
             return CommitObservation(DurableCommitState.UNRESOLVED)
 
-        result = await run_durable_commit(operation, readback)
+        result = await run_durable_commit(
+            operation,
+            readback,
+            background_tasks=self._background_tasks,
+        )
         if result.state is DurableCommitState.COMMITTED:
             return result.cancelled
         if result.state is DurableCommitState.NOT_COMMITTED:

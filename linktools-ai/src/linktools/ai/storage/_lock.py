@@ -8,11 +8,11 @@ import hashlib
 import json
 import os
 import time
-from collections.abc import AsyncIterator, Callable, Iterator
+from collections.abc import AsyncIterator, Iterator
 from contextlib import asynccontextmanager, contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TypeVar
+from typing import cast
 from uuid import uuid4
 
 from filelock import FileLock, Timeout
@@ -21,7 +21,7 @@ from linktools.core import environ
 from ..errors import AIError, ErrorCode
 
 _logger = environ.get_logger("ai.storage.lock")
-ValueT = TypeVar("ValueT")
+_DETACHED_LOCK_TASKS: set[asyncio.Task[object]] = set()
 
 
 class KeyedAsyncLock:
@@ -39,18 +39,42 @@ class KeyedAsyncLock:
                 raise RuntimeError(f"recursive keyed lock acquisition: {key}")
             lock = self._locks.setdefault(key, asyncio.Lock())
         await lock.acquire()
-        self._owners[key] = task
+        self._owners[key] = cast("asyncio.Task[object]", task)
 
     async def release(self, key: str) -> None:
         task = asyncio.current_task()
+        if task is None:
+            raise RuntimeError("keyed lock release requires an asyncio task")
+        await self._release_owned(key, cast("asyncio.Task[object]", task))
+
+    async def _release_owned(
+        self,
+        key: str,
+        owner: "asyncio.Task[object]",
+    ) -> None:
         async with self._guard:
             lock = self._locks.get(key)
             if lock is None or not lock.locked():
                 return
-            if task is None or self._owners.get(key) is not task:
+            if self._owners.get(key) is not owner:
                 raise RuntimeError(f"keyed lock owner mismatch: {key}")
             self._owners.pop(key, None)
             lock.release()
+
+    async def _release_if_owned(
+        self,
+        key: str,
+        owner: "asyncio.Task[object]",
+    ) -> bool:
+        async with self._guard:
+            lock = self._locks.get(key)
+            if lock is None or not lock.locked():
+                return False
+            if self._owners.get(key) is not owner:
+                return False
+            self._owners.pop(key, None)
+            lock.release()
+            return True
 
 
 @dataclass(frozen=True, slots=True)
@@ -93,7 +117,7 @@ class ProcessLeaseCoordinator:
 class FilesystemLeaseCoordinator:
     """Coordinate one key across processes sharing a filesystem root."""
 
-    def __init__(self, root: 'str | Path', *, lease_seconds: float = 30.0) -> None:
+    def __init__(self, root: "str | Path", *, lease_seconds: float = 30.0) -> None:
         if lease_seconds <= 0:
             raise ValueError("lease_seconds must be positive")
         self.root = Path(root).expanduser().resolve()
@@ -106,11 +130,35 @@ class FilesystemLeaseCoordinator:
             raise ValueError("lease key must not be empty")
         if timeout <= 0:
             raise ValueError("timeout must be positive")
-        await self._locks.acquire(key)
+        owner = asyncio.current_task()
+        if owner is None:
+            raise RuntimeError("filesystem lease requires an asyncio task")
+        owner = cast("asyncio.Task[object]", owner)
+        lock_acquired = False
+        attempt_cleanup_detached = False
         try:
+            await self._locks.acquire(key)
+            lock_acquired = True
             deadline = time.monotonic() + timeout
             while True:
-                lease = await asyncio.to_thread(self._try_acquire, key)
+                attempt_task = asyncio.create_task(
+                    asyncio.to_thread(self._try_acquire, key)
+                )
+                try:
+                    lease = await asyncio.shield(attempt_task)
+                except asyncio.CancelledError:
+                    attempt_cleanup_detached = True
+                    _detach_lock_task(
+                        asyncio.create_task(
+                            self._finish_cancelled_attempt(
+                                attempt_task,
+                                key,
+                                owner,
+                            )
+                        ),
+                        "filesystem lease acquire cleanup",
+                    )
+                    raise
                 if lease is not None:
                     self._active[key] = lease
                     _logger.debug(
@@ -123,8 +171,50 @@ class FilesystemLeaseCoordinator:
                     raise TimeoutError(f"timed out acquiring lease: {key}")
                 await asyncio.sleep(0.01)
         except BaseException:
-            await self._locks.release(key)
+            if not attempt_cleanup_detached:
+                if lock_acquired:
+                    await self._locks._release_owned(key, owner)
+                else:
+                    _detach_lock_task(
+                        asyncio.create_task(
+                            self._finish_cancelled_lock(key, owner)
+                        ),
+                        "filesystem lease lock cleanup",
+                    )
             raise
+
+    async def _finish_cancelled_lock(
+        self,
+        key: str,
+        owner: "asyncio.Task[object]",
+    ) -> None:
+        await self._locks._release_if_owned(key, owner)
+
+    async def _finish_cancelled_attempt(
+        self,
+        attempt_task: "asyncio.Task[Lease | None]",
+        key: str,
+        owner: "asyncio.Task[object]",
+    ) -> None:
+        lease: Lease | None = None
+        try:
+            lease = await attempt_task
+        except asyncio.CancelledError:
+            pass
+        except BaseException:  # noqa: BLE001
+            _logger.exception(
+                "filesystem lease acquisition failed: key=%s",
+                key,
+            )
+        if lease is not None:
+            try:
+                await asyncio.to_thread(self._release, lease)
+            except BaseException:  # noqa: BLE001
+                _logger.exception(
+                    "filesystem lease acquire cleanup failed: key=%s",
+                    key,
+                )
+        await self._locks._release_owned(key, owner)
 
     async def renew(self, lease: Lease) -> Lease:
         if self._active.get(lease.key) != lease:
@@ -134,14 +224,48 @@ class FilesystemLeaseCoordinator:
             self._active.pop(lease.key, None)
         return lease
 
+    async def _finish_cancelled_release(
+        self,
+        release_task: "asyncio.Task[None]",
+        key: str,
+        owner: "asyncio.Task[object]",
+    ) -> None:
+        try:
+            await release_task
+        except asyncio.CancelledError:
+            pass
+        except BaseException:  # noqa: BLE001
+            _logger.exception(
+                "filesystem lease release failed during cancellation cleanup: key=%s",
+                key,
+            )
+        await self._locks._release_owned(key, owner)
+
     async def release(self, lease: Lease) -> None:
         if self._active.get(lease.key) != lease:
             return
         self._active.pop(lease.key, None)
-        await asyncio.to_thread(self._release, lease)
-        await self._locks.release(lease.key)
+        owner = asyncio.current_task()
+        if owner is None:
+            raise RuntimeError("filesystem lease release requires an asyncio task")
+        owner = cast("asyncio.Task[object]", owner)
+        release_task = asyncio.create_task(asyncio.to_thread(self._release, lease))
+        try:
+            await asyncio.shield(release_task)
+        except asyncio.CancelledError:
+            _detach_lock_task(
+                asyncio.create_task(
+                    self._finish_cancelled_release(release_task, lease.key, owner)
+                ),
+                "filesystem lease release cleanup",
+            )
+            raise
+        except BaseException as error:  # noqa: BLE001
+            await self._locks._release_owned(lease.key, owner)
+            raise error
+        await self._locks._release_owned(lease.key, owner)
 
-    def _try_acquire(self, key: str) -> 'Lease | None':
+    def _try_acquire(self, key: str) -> "Lease | None":
         self.root.mkdir(parents=True, exist_ok=True)
         name = _lease_name(key)
         lease_path = self.root / f"{name}.lease"
@@ -157,13 +281,27 @@ class FilesystemLeaseCoordinator:
                 lease_path.unlink(missing_ok=True)
             fence = _next_fence(self.root / f"{name}.fence")
             token = uuid4().hex
-            record = {"key": key, "fence": fence, "token": token, "expires_at": now + self.lease_seconds}
+            record = {
+                "key": key,
+                "fence": fence,
+                "token": token,
+                "expires_at": now + self.lease_seconds,
+            }
             descriptor: int | None = None
             try:
-                descriptor = os.open(lease_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+                descriptor = os.open(
+                    lease_path,
+                    os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+                    0o600,
+                )
                 with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
                     descriptor = None
-                    json.dump(record, handle, sort_keys=True, separators=(",", ":"))
+                    json.dump(
+                        record,
+                        handle,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    )
                     handle.flush()
                     os.fsync(handle.fileno())
             except BaseException:
@@ -180,7 +318,10 @@ class FilesystemLeaseCoordinator:
                 record = _read_record(path)
             except FileNotFoundError:
                 return False
-            if record.get("token") != lease.token or int(record.get("fence", -1)) != lease.fence:
+            if (
+                record.get("token") != lease.token
+                or int(record.get("fence", -1)) != lease.fence
+            ):
                 return False
             record["expires_at"] = time.time() + self.lease_seconds
             _write_record(path, record)
@@ -193,7 +334,10 @@ class FilesystemLeaseCoordinator:
                 record = _read_record(path)
             except FileNotFoundError:
                 return
-            if record.get("token") == lease.token and int(record.get("fence", -1)) == lease.fence:
+            if (
+                record.get("token") == lease.token
+                and int(record.get("fence", -1)) == lease.fence
+            ):
                 path.unlink(missing_ok=True)
 
 
@@ -215,6 +359,7 @@ class FilesystemWriterLock:
     def __init__(self, path: "str | Path") -> None:
         self.path = Path(path)
         self._lock: FileLock | None = None
+        self._release_task: asyncio.Task[None] | None = None
 
     @property
     def acquired(self) -> bool:
@@ -223,17 +368,19 @@ class FilesystemWriterLock:
     async def acquire(self) -> None:
         if self._lock is not None:
             return
+        if self._release_task is not None and not self._release_task.done():
+            raise AIError(ErrorCode.STORAGE_CONFLICT)
         lock = FileLock(str(self.path), thread_local=False)
         acquire_task = asyncio.create_task(asyncio.to_thread(self._acquire, lock))
         try:
             acquired = await asyncio.shield(acquire_task)
         except asyncio.CancelledError:
-            try:
-                await asyncio.shield(acquire_task)
-            except BaseException:  # noqa: BLE001, S110
-                pass
-            else:
-                await _await_thread(lock.release)
+            _detach_lock_task(
+                asyncio.create_task(
+                    _finish_cancelled_writer_acquire(acquire_task, lock)
+                ),
+                "writer lock acquire cleanup",
+            )
             raise
         except Timeout as error:
             raise AIError(ErrorCode.STORAGE_CONFLICT) from error
@@ -243,20 +390,40 @@ class FilesystemWriterLock:
         _logger.debug("runtime writer lock acquired: path=%s", self.path)
 
     async def release(self) -> None:
-        lock = self._lock
-        if lock is None:
-            return
-        release_task = asyncio.create_task(asyncio.to_thread(lock.release))
+        task = self._release_task
+        if task is None:
+            lock = self._lock
+            if lock is None:
+                return
+            task = asyncio.create_task(asyncio.to_thread(lock.release))
+            self._release_task = task
+            task.add_done_callback(
+                lambda done, selected=lock: self._release_done(done, selected)
+            )
         try:
-            await asyncio.shield(release_task)
+            await asyncio.shield(task)
         except asyncio.CancelledError:
-            await asyncio.shield(release_task)
-            if self._lock is lock:
-                self._lock = None
             raise
-        if self._lock is lock:
-            self._lock = None
         _logger.debug("runtime writer lock released: path=%s", self.path)
+
+    def _release_done(
+        self,
+        task: "asyncio.Task[None]",
+        lock: FileLock,
+    ) -> None:
+        succeeded = False
+        try:
+            task.result()
+            succeeded = True
+        except asyncio.CancelledError:
+            pass
+        except BaseException:  # noqa: BLE001
+            _logger.exception("runtime writer lock release failed: path=%s", self.path)
+        finally:
+            if succeeded and self._lock is lock:
+                self._lock = None
+            if self._release_task is task:
+                self._release_task = None
 
     def _acquire(self, lock: FileLock) -> bool:
         self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -278,6 +445,7 @@ class FilesystemMutationLock:
         self._lock = FileLock(str(self.path), thread_local=False)
         self._acquired = False
         self._key = str(self.path)
+        self._owner_task: asyncio.Task[object] | None = None
 
     @property
     def acquired(self) -> bool:
@@ -285,27 +453,78 @@ class FilesystemMutationLock:
 
     async def __aenter__(self) -> "FilesystemMutationLock":  # noqa: PYI034
         try:
-            await asyncio.to_thread(self.path.parent.mkdir, parents=True, exist_ok=True)
+            await asyncio.to_thread(
+                self.path.parent.mkdir,
+                parents=True,
+                exist_ok=True,
+            )
         except OSError as error:
             raise AIError(ErrorCode.STORAGE_UNAVAILABLE) from error
         await _filesystem_mutation_locks.acquire(self._key)
+        owner = asyncio.current_task()
+        if owner is None:
+            raise RuntimeError("filesystem mutation lock requires an asyncio task")
+        self._owner_task = cast("asyncio.Task[object]", owner)
+        cleanup_detached = False
         try:
-            while not await asyncio.to_thread(self._try_acquire):
+            while True:
+                acquire_task = asyncio.create_task(asyncio.to_thread(self._try_acquire))
+                try:
+                    acquired = await asyncio.shield(acquire_task)
+                except asyncio.CancelledError:
+                    cleanup_detached = True
+                    _detach_lock_task(
+                        asyncio.create_task(
+                            self._finish_cancelled_acquire(acquire_task)
+                        ),
+                        "filesystem mutation acquire cleanup",
+                    )
+                    raise
+                if acquired:
+                    break
                 await asyncio.sleep(self.poll_interval)
         except OSError as error:
-            if self._acquired:
-                await asyncio.to_thread(self._release)
-                self._acquired = False
-            await _filesystem_mutation_locks.release(self._key)
+            await self._release_process_lock()
             raise AIError(ErrorCode.STORAGE_UNAVAILABLE) from error
+        except asyncio.CancelledError:
+            if not cleanup_detached:
+                _detach_lock_task(
+                    asyncio.create_task(self._release_process_lock()),
+                    "filesystem mutation process lock cleanup",
+                )
+            raise
         except BaseException:
             if self._acquired:
                 await asyncio.to_thread(self._release)
                 self._acquired = False
-            await _filesystem_mutation_locks.release(self._key)
+            await self._release_process_lock()
             raise
         _logger.debug("filesystem mutation lock acquired: path=%s", self.path)
         return self
+
+    async def _finish_cancelled_acquire(
+        self,
+        acquire_task: "asyncio.Task[bool]",
+    ) -> None:
+        acquired = False
+        try:
+            acquired = await acquire_task
+        except BaseException:  # noqa: BLE001
+            _logger.exception(
+                "filesystem mutation acquire cleanup failed: path=%s",
+                self.path,
+            )
+        if acquired or self._acquired:
+            try:
+                await asyncio.to_thread(self._release)
+                self._acquired = False
+            except BaseException:  # noqa: BLE001
+                _logger.exception(
+                    "filesystem mutation late lock release failed: path=%s",
+                    self.path,
+                )
+                return
+        await self._release_process_lock()
 
     @asynccontextmanager
     async def local(self) -> AsyncIterator[None]:
@@ -315,24 +534,51 @@ class FilesystemMutationLock:
         finally:
             await _filesystem_mutation_locks.release(self._key)
 
-    async def __aexit__(self, exc_type: object, exc: object, traceback: object) -> None:
+    async def __aexit__(
+        self,
+        exc_type: object,
+        exc: object,
+        traceback: object,
+    ) -> None:
         if not self._acquired:
             return
         release_task = asyncio.create_task(asyncio.to_thread(self._release))
-        released = False
         try:
             await asyncio.shield(release_task)
         except asyncio.CancelledError:
-            await asyncio.shield(release_task)
-            released = True
+            _detach_lock_task(
+                asyncio.create_task(
+                    self._finish_cancelled_release(release_task)
+                ),
+                "filesystem mutation release cleanup",
+            )
             raise
-        else:
-            released = True
-        finally:
-            if released:
-                self._acquired = False
-                await _filesystem_mutation_locks.release(self._key)
+        self._acquired = False
+        await self._release_process_lock()
         _logger.debug("filesystem mutation lock released: path=%s", self.path)
+
+    async def _finish_cancelled_release(
+        self,
+        release_task: "asyncio.Task[None]",
+    ) -> None:
+        try:
+            await release_task
+        except BaseException:  # noqa: BLE001
+            _logger.exception(
+                "filesystem mutation lock release failed: path=%s",
+                self.path,
+            )
+            return
+        self._acquired = False
+        await self._release_process_lock()
+        _logger.debug("filesystem mutation lock released: path=%s", self.path)
+
+    async def _release_process_lock(self) -> None:
+        owner = self._owner_task
+        if owner is None:
+            return
+        await _filesystem_mutation_locks._release_owned(self._key, owner)
+        self._owner_task = None
 
     def _try_acquire(self) -> bool:
         try:
@@ -346,7 +592,7 @@ class FilesystemMutationLock:
         self._lock.release()
 
 
-def _read_record(path: Path) -> 'dict[str, str | int | float]':
+def _read_record(path: Path) -> "dict[str, str | int | float]":
     value = json.loads(path.read_text(encoding="utf-8"))
     if not isinstance(value, dict):
         raise ValueError("invalid lease record")  # noqa: TRY004
@@ -386,19 +632,48 @@ def _write_fence(path: Path, fence: int) -> None:
     os.replace(temporary, path)
 
 
-def _write_record(path: Path, record: 'dict[str, str | int | float]') -> None:
+def _write_record(
+    path: Path,
+    record: "dict[str, str | int | float]",
+) -> None:
     temporary = path.with_name(f".{path.name}.{uuid4().hex}.tmp")
-    temporary.write_text(json.dumps(record, sort_keys=True, separators=(",", ":")), encoding="utf-8")
+    temporary.write_text(
+        json.dumps(record, sort_keys=True, separators=(",", ":")),
+        encoding="utf-8",
+    )
     os.replace(temporary, path)
 
 
-async def _await_thread(fn: Callable[[], ValueT]) -> ValueT:
-    task = asyncio.create_task(asyncio.to_thread(fn))
+async def _finish_cancelled_writer_acquire(
+    acquire_task: "asyncio.Task[bool]",
+    lock: FileLock,
+) -> None:
     try:
-        return await asyncio.shield(task)
-    except asyncio.CancelledError:
-        await asyncio.shield(task)
-        raise
+        acquired = await acquire_task
+    except BaseException:  # noqa: BLE001
+        return
+    if not acquired:
+        return
+    try:
+        await asyncio.to_thread(lock.release)
+    except BaseException:  # noqa: BLE001
+        _logger.exception("cancelled writer acquire cleanup failed")
+
+
+def _detach_lock_task(task: "asyncio.Task[object]", label: str) -> None:
+    _DETACHED_LOCK_TASKS.add(task)
+
+    def consume(done: "asyncio.Task[object]") -> None:
+        try:
+            done.result()
+        except asyncio.CancelledError:
+            pass
+        except BaseException:  # noqa: BLE001
+            _logger.exception("detached %s failed", label)
+        finally:
+            _DETACHED_LOCK_TASKS.discard(done)
+
+    task.add_done_callback(consume)
 
 
 __all__ = [

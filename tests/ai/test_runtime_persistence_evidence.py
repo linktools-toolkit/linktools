@@ -71,13 +71,12 @@ def _binding_snapshot() -> AgentBindingSnapshot:
         version=1,
         agent_spec=AgentSpec("agent", 1, "default"),
         agent_digest="b" * 64,
-        output_type_module=output.value_type.__module__,
-        output_type_qualname=output.value_type.__qualname__,
         output_schema_id=output.schema_id,
         output_schema_revision=output.schema_revision,
         output_schema_fingerprint=output.schema_fingerprint,
         local_runtime_capability_descriptors=(),
         binding_digest="a" * 64,
+        global_runtime_capability_descriptors=(),
     )
 
 
@@ -204,6 +203,48 @@ class _PersistenceTestModels:
         if route_id != "default":
             raise AssertionError(f"unexpected model route: {route_id}")
         return _PersistenceTestModelBinding()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("backend", ("filesystem", "sqlite"))
+async def test_terminal_stream_allows_immediate_runtime_close(
+    tmp_path: Path,
+    backend: str,
+) -> None:
+    workspace_root = tmp_path / "workspace"
+    agent_path = workspace_root / ".linktools" / "agents" / "default"
+    agent_path.parent.mkdir(parents=True)
+    agent_path.write_bytes(
+        AgentSpecCodec().encode(
+            AgentSpec("default", model="default", allow_tools=())
+        )
+    )
+    if backend == "filesystem":
+        state = RuntimeState.filesystem(tmp_path / "runtime")
+    else:
+        database = tmp_path / "runtime.db"
+        engine = create_async_engine(f"sqlite+aiosqlite:///{database}")
+        await provision_runtime_database(engine)
+        await engine.dispose()
+        state = RuntimeState.sqlite(database)
+
+    try:
+        async with open_workspace_runtime(
+            Workspace.load(workspace_root),
+            models=_PersistenceTestModels(),
+            state=state,
+        ) as runtime:
+            terminal_events = []
+            async for event in runtime.agent("default").stream("hello"):
+                if event.event_type in {
+                    ExecutionEventType.EXECUTION_SUCCEEDED,
+                    ExecutionEventType.EXECUTION_FAILED,
+                    ExecutionEventType.EXECUTION_CANCELLED,
+                }:
+                    terminal_events.append(event)
+            assert len(terminal_events) == 1
+    finally:
+        await state.close()
 
 
 @pytest.mark.asyncio

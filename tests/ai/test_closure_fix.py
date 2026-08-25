@@ -237,6 +237,7 @@ async def test_tool_operation_uses_runtime_step_id_for_admission() -> None:
         step_run_id="runtime-step",
         binding_fingerprint="binding",
         owner="owner",
+        background_tasks=set(),
         payload_policy=PayloadPolicy(),
     )
 
@@ -257,6 +258,7 @@ async def test_tool_terminal_bridge_only_commits_operation_state() -> None:
         step_run_id="runtime-step",
         binding_fingerprint="binding",
         owner="owner",
+        background_tasks=set(),
         payload_policy=PayloadPolicy(),
         terminal_commands=commands,
     )

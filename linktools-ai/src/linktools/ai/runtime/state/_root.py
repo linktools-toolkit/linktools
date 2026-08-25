@@ -4,7 +4,7 @@
 
 import asyncio
 from collections.abc import Awaitable, Callable
-from enum import Enum
+from enum import StrEnum
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -36,9 +36,7 @@ if TYPE_CHECKING:
     from ._steps import RuntimeStepStore
 
 
-class _RuntimeStateLifecycle(str, Enum):
-    __str__ = str.__str__
-    __format__ = str.__format__
+class _RuntimeStateLifecycle(StrEnum):
     NEW = "new"
     INITIALIZING = "initializing"
     READY = "ready"
@@ -49,7 +47,12 @@ class _RuntimeStateLifecycle(str, Enum):
 class RuntimeState:
     """Own materialized domain states and every resource acquired for them."""
 
-    def __init__(self, plan: RuntimeStatePlan, *, object_store: "ObjectStore | None" = None) -> None:
+    def __init__(
+        self,
+        plan: RuntimeStatePlan,
+        *,
+        object_store: "ObjectStore | None" = None,
+    ) -> None:
         _validate_state_configuration(plan, object_store)
         self._plan = plan
         self._external_object_store = object_store
@@ -79,7 +82,12 @@ class RuntimeState:
         return cls(RuntimeStatePlan())
 
     @classmethod
-    def filesystem(cls, path: "str | Path", *, object_store: "ObjectStore | None" = None) -> "RuntimeState":
+    def filesystem(
+        cls,
+        path: "str | Path",
+        *,
+        object_store: "ObjectStore | None" = None,
+    ) -> "RuntimeState":
         base = _normalize_path(path)
         return cls(
             RuntimeStatePlan(
@@ -95,17 +103,42 @@ class RuntimeState:
         )
 
     @classmethod
-    def sqlite(cls, path: "str | Path", *, object_store: "ObjectStore | None" = None) -> "RuntimeState":
+    def sqlite(
+        cls,
+        path: "str | Path",
+        *,
+        object_store: "ObjectStore | None" = None,
+    ) -> "RuntimeState":
         route = RuntimeStateRoute.sqlite(path)
-        return cls(RuntimeStatePlan(**{domain.value: route for domain in RuntimeDomain}), object_store=object_store)
+        return cls(
+            RuntimeStatePlan(
+                **{domain.value: route for domain in RuntimeDomain}
+            ),
+            object_store=object_store,
+        )
 
     @classmethod
-    def sql(cls, engine: "AsyncEngine", *, object_store: "ObjectStore | None" = None) -> "RuntimeState":
+    def sql(
+        cls,
+        engine: "AsyncEngine",
+        *,
+        object_store: "ObjectStore | None" = None,
+    ) -> "RuntimeState":
         route = RuntimeStateRoute.sql(engine)
-        return cls(RuntimeStatePlan(**{domain.value: route for domain in RuntimeDomain}), object_store=object_store)
+        return cls(
+            RuntimeStatePlan(
+                **{domain.value: route for domain in RuntimeDomain}
+            ),
+            object_store=object_store,
+        )
 
     @classmethod
-    def from_plan(cls, plan: RuntimeStatePlan, *, object_store: "ObjectStore | None" = None) -> "RuntimeState":
+    def from_plan(
+        cls,
+        plan: RuntimeStatePlan,
+        *,
+        object_store: "ObjectStore | None" = None,
+    ) -> "RuntimeState":
         return cls(plan, object_store=object_store)
 
     @property
@@ -184,7 +217,10 @@ class RuntimeState:
     async def initialize(self, *, namespace: str, tenant_id: str) -> None:
         async with self._lock:
             if self._lifecycle is not _RuntimeStateLifecycle.NEW:
-                raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY, "RuntimeState must be NEW")
+                raise AIError(
+                    ErrorCode.RUNTIME_DEPENDENCY_NOT_READY,
+                    "RuntimeState must be NEW",
+                )
             validate_persistence_namespace(namespace)
             if not tenant_id.strip():
                 raise ValueError("tenant_id is required")
@@ -198,8 +234,15 @@ class RuntimeState:
                     tenant_id=tenant_id,
                     object_store=self._external_object_store,
                 )
-                self._assign_materialized(materialized, namespace, tenant_id)
-                self._handoff_contract_digest = _handoff_digest(self._plan, self._external_object_store)
+                self._assign_materialized(
+                    materialized,
+                    namespace,
+                    tenant_id,
+                )
+                self._handoff_contract_digest = _handoff_digest(
+                    self._plan,
+                    self._external_object_store,
+                )
                 self._lifecycle = _RuntimeStateLifecycle.READY
             except BaseException:
                 self._lifecycle = _RuntimeStateLifecycle.CLOSED
@@ -215,16 +258,27 @@ class RuntimeState:
             self._lifecycle = _RuntimeStateLifecycle.CLOSING
             task = self._close_task
             if task is None or task.done():
-                task = asyncio.create_task(self._run_close_actions(), name="linktools-runtime-state-close")
+                task = asyncio.create_task(
+                    self._run_close_actions(),
+                    name="linktools-runtime-state-close",
+                )
+                task.add_done_callback(self._consume_close_result)
                 self._close_task = task
         try:
             await asyncio.shield(task)
-        except asyncio.CancelledError as cancellation:
-            try:
-                await asyncio.shield(task)
-            except BaseException as error:
-                raise error from cancellation
+        except asyncio.CancelledError:
+            if task.done():
+                self._consume_close_result(task)
             raise
+
+    def _consume_close_result(self, task: "asyncio.Task[None]") -> None:
+        try:
+            task.result()
+        except asyncio.CancelledError:
+            pass
+        except BaseException:  # noqa: BLE001
+            # A later close() resumes from _close_cursor and retries the failed action.
+            pass
 
     async def _run_close_actions(self) -> None:
         while self._close_cursor < len(self._close_actions):
@@ -233,7 +287,12 @@ class RuntimeState:
             self._close_cursor += 1
         self._lifecycle = _RuntimeStateLifecycle.CLOSED
 
-    def _assign_materialized(self, value: "_MaterializedRuntimeState", namespace: str, tenant_id: str) -> None:
+    def _assign_materialized(
+        self,
+        value: "_MaterializedRuntimeState",
+        namespace: str,
+        tenant_id: str,
+    ) -> None:
         self._conversation = value.conversation
         self._execution = value.execution
         self._memory = value.memory
@@ -252,12 +311,18 @@ class RuntimeState:
 
     def _require_ready(self) -> None:
         if self._lifecycle is not _RuntimeStateLifecycle.READY:
-            raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY, "RuntimeState is not ready")
+            raise AIError(
+                ErrorCode.RUNTIME_DEPENDENCY_NOT_READY,
+                "RuntimeState is not ready",
+            )
 
     def _require_state(self, value: object) -> object:
         self._require_ready()
         if value is None:
-            raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY, "RuntimeState is not ready")
+            raise AIError(
+                ErrorCode.RUNTIME_DEPENDENCY_NOT_READY,
+                "RuntimeState is not ready",
+            )
         return value
 
     def object_store(self, domain: RuntimeDomain) -> ObjectStore:
@@ -269,23 +334,47 @@ class RuntimeState:
     def _object_store(self, domain: RuntimeDomain) -> ObjectStore:
         return self.object_store(domain)
 
-    def working_object_store(self, domain: RuntimeDomain, *, owner_scope: str) -> ObjectStore:
+    def working_object_store(
+        self,
+        domain: RuntimeDomain,
+        *,
+        owner_scope: str,
+    ) -> ObjectStore:
         self._require_ready()
         if self._objects is None:
             raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
-        return self._objects.working_object_store(domain, owner_scope=owner_scope)
+        return self._objects.working_object_store(
+            domain,
+            owner_scope=owner_scope,
+        )
 
-    def _working_object_store(self, domain: RuntimeDomain, *, owner_scope: str) -> ObjectStore:
+    def _working_object_store(
+        self,
+        domain: RuntimeDomain,
+        *,
+        owner_scope: str,
+    ) -> ObjectStore:
         return self.working_object_store(domain, owner_scope=owner_scope)
 
-    async def _release_object_scope(self, domain: RuntimeDomain, *, owner_scope: str) -> None:
+    async def _release_object_scope(
+        self,
+        domain: RuntimeDomain,
+        *,
+        owner_scope: str,
+    ) -> None:
         self._require_ready()
         if self._objects is None:
             raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
-        await self._objects.release_object_scope(domain, owner_scope=owner_scope)
+        await self._objects.release_object_scope(
+            domain,
+            owner_scope=owner_scope,
+        )
 
 
-def _validate_state_configuration(plan: RuntimeStatePlan, object_store: "ObjectStore | None") -> None:
+def _validate_state_configuration(
+    plan: RuntimeStatePlan,
+    object_store: "ObjectStore | None",
+) -> None:
     if not isinstance(plan, RuntimeStatePlan):
         raise TypeError("plan must be a RuntimeStatePlan")
     object_domains = {
@@ -296,14 +385,26 @@ def _validate_state_configuration(plan: RuntimeStatePlan, object_store: "ObjectS
         RuntimeDomain.RECOVERY,
     }
     if object_store is not None and not any(
-        domain in object_domains and plan.route(domain).retention is RuntimeRetentionMode.DURABLE
+        domain in object_domains
+        and plan.route(domain).retention is RuntimeRetentionMode.DURABLE
         for domain in RuntimeDomain
     ):
-        raise ValueError("object_store requires at least one durable object-capable RuntimeDomain")
-    if plan.route(RuntimeDomain.CONVERSATION).retention is RuntimeRetentionMode.DURABLE:
-        if plan.route(RuntimeDomain.EXECUTION).retention is not RuntimeRetentionMode.DURABLE:
+        raise ValueError(
+            "object_store requires at least one durable object-capable RuntimeDomain"
+        )
+    if (
+        plan.route(RuntimeDomain.CONVERSATION).retention
+        is RuntimeRetentionMode.DURABLE
+    ):
+        if (
+            plan.route(RuntimeDomain.EXECUTION).retention
+            is not RuntimeRetentionMode.DURABLE
+        ):
             raise ValueError("durable conversation requires durable execution")
-        if plan.route(RuntimeDomain.RECOVERY).retention is not RuntimeRetentionMode.DURABLE:
+        if (
+            plan.route(RuntimeDomain.RECOVERY).retention
+            is not RuntimeRetentionMode.DURABLE
+        ):
             raise ValueError("durable conversation requires durable recovery")
 
 
@@ -313,7 +414,10 @@ def _normalize_path(value: "str | Path") -> Path:
     return Path(value).expanduser().resolve(strict=False)
 
 
-def _handoff_digest(plan: RuntimeStatePlan, object_store: "ObjectStore | None") -> str:
+def _handoff_digest(
+    plan: RuntimeStatePlan,
+    object_store: "ObjectStore | None",
+) -> str:
     object_domains = {
         RuntimeDomain.CONVERSATION,
         RuntimeDomain.EXECUTION,
@@ -322,15 +426,31 @@ def _handoff_digest(plan: RuntimeStatePlan, object_store: "ObjectStore | None") 
         RuntimeDomain.RECOVERY,
     }
     routes = {}
-    for domain in (RuntimeDomain.CONVERSATION, RuntimeDomain.EXECUTION, RuntimeDomain.RECOVERY):
+    for domain in (
+        RuntimeDomain.CONVERSATION,
+        RuntimeDomain.EXECUTION,
+        RuntimeDomain.RECOVERY,
+    ):
         route = plan.route(domain)
         routes[domain.value] = {
             "retention": route.retention.value,
             "route_kind": route.kind,
             "route_identity": route.route_identity,
-            "object_store_id": object_store.store_id
-            if object_store is not None and domain in object_domains and route.retention is RuntimeRetentionMode.DURABLE
-            else "builtin" if route.retention is RuntimeRetentionMode.DURABLE else "transient" if route.retention is RuntimeRetentionMode.TRANSIENT else "memory",
+            "object_store_id": (
+                object_store.store_id
+                if object_store is not None
+                and domain in object_domains
+                and route.retention is RuntimeRetentionMode.DURABLE
+                else (
+                    "builtin"
+                    if route.retention is RuntimeRetentionMode.DURABLE
+                    else (
+                        "transient"
+                        if route.retention is RuntimeRetentionMode.TRANSIENT
+                        else "memory"
+                    )
+                )
+            ),
         }
     return canonical_sha256({"version": 6, **routes})
 

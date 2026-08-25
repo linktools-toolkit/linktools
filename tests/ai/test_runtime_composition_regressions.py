@@ -81,13 +81,12 @@ def _binding() -> AgentBindingSnapshot:
         version=1,
         agent_spec=AgentSpec("agent", 1, "model"),
         agent_digest="b" * 64,
-        output_type_module=output.value_type.__module__,
-        output_type_qualname=output.value_type.__qualname__,
         output_schema_id=output.schema_id,
         output_schema_revision=output.schema_revision,
         output_schema_fingerprint=output.schema_fingerprint,
         local_runtime_capability_descriptors=(),
         binding_digest="a" * 64,
+        global_runtime_capability_descriptors=(),
     )
 
 
@@ -166,14 +165,21 @@ def test_output_contract_maps_bind_and_restore_failures() -> None:
     class LocalOutput(BaseModel):
         value: str
 
+    automatic = bind_output(LocalOutput)
+    assert automatic.schema_id == f"schema:{automatic.schema_fingerprint}"
+
     with pytest.raises(AIError) as bind_error:
-        bind_output(LocalOutput)
+        bind_output(LocalOutput, schema_id="assistant-text")
     assert bind_error.value.code is ErrorCode.OUTPUT_CONTRACT_INVALID
 
     descriptor = bind_output().descriptor
-    descriptor["module"] = "missing.output.module"
+    descriptor["future_metadata"] = {"$future_v2": ["ignored"]}
+    assert restore_output(descriptor).schema_id == bind_output().schema_id
+
+    missing = bind_output().descriptor
+    missing.pop("schema_fingerprint")
     with pytest.raises(AIError) as restore_error:
-        restore_output(descriptor)
+        restore_output(missing)
     assert restore_error.value.code is ErrorCode.AGENT_DEFINITION_UNAVAILABLE
 
 

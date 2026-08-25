@@ -6,7 +6,7 @@ import asyncio
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from enum import Enum
+from enum import StrEnum
 from uuid import uuid4
 
 from linktools.core import environ
@@ -34,9 +34,7 @@ _LEASE_SECONDS = 30
 _MODEL_VERSION = 1
 
 
-class ExecutionReadModelStatus(str, Enum):
-    __str__ = str.__str__
-    __format__ = str.__format__
+class ExecutionReadModelStatus(StrEnum):
     BUILDING = "BUILDING"
     COMPLETE = "COMPLETE"
 
@@ -625,7 +623,7 @@ class ExecutionReadModelRepository:
             "transcript_count",
             "revision",
         }
-        if set(data) != expected:
+        if not expected.issubset(data):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         try:
             execution_id = data["execution_id"]

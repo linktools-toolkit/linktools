@@ -29,13 +29,12 @@ def _binding(digest: str) -> AgentBindingSnapshot:
         version=1,
         agent_spec=AgentSpec("agent", 1, "model"),
         agent_digest="d" * 64,
-        output_type_module="builtins",
-        output_type_qualname="str",
         output_schema_id="test-output",
         output_schema_revision=1,
         output_schema_fingerprint="c" * 64,
         local_runtime_capability_descriptors=(),
         binding_digest=digest,
+        global_runtime_capability_descriptors=(),
     )
 
 

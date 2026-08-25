@@ -22,13 +22,12 @@ def _snapshot(*, binding_digest: str = "a" * 64) -> AgentBindingSnapshot:
         version=1,
         agent_spec=AgentSpec("agent", 1, "default"),
         agent_digest="b" * 64,
-        output_type_module=output.value_type.__module__,
-        output_type_qualname=output.value_type.__qualname__,
         output_schema_id=output.schema_id,
         output_schema_revision=output.schema_revision,
         output_schema_fingerprint=output.schema_fingerprint,
         local_runtime_capability_descriptors=(),
         binding_digest=binding_digest,
+        global_runtime_capability_descriptors=(),
     )
 
 
@@ -89,6 +88,35 @@ def _recovery(
         thinking=thinking,
         binding=_snapshot(binding_digest=binding_digest) if binding is None else binding,
     )
+
+
+def test_current_binding_snapshot_persists_schema_without_python_path() -> None:
+    output = bind_output()
+    snapshot = AgentBindingSnapshot(
+        version=1,
+        agent_spec=AgentSpec("agent", 1, "default"),
+        agent_digest="b" * 64,
+        output_schema_id=output.schema_id,
+        output_schema_revision=output.schema_revision,
+        output_schema_fingerprint=output.schema_fingerprint,
+        local_runtime_capability_descriptors=(),
+        binding_digest="a" * 64,
+        global_runtime_capability_descriptors=(),
+        output_schema_definition=output.schema_definition,
+    )
+    payload = snapshot.to_payload()
+    assert set(payload) == {
+        "version",
+        "agent_spec",
+        "agent_digest",
+        "output_schema_id",
+        "output_schema_revision",
+        "output_schema_fingerprint",
+        "local_runtime_capability_descriptors",
+        "binding_digest",
+        "global_runtime_capability_descriptors",
+        "output_schema_definition",
+    }
 
 
 def test_execution_requires_exact_binding_snapshot() -> None:

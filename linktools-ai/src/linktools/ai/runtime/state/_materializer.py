@@ -4,7 +4,7 @@
 
 import asyncio
 import hashlib
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -85,8 +85,14 @@ class _MaterializedRuntimeState:
 
 
 class _RuntimeObjectRouter:
-    def __init__(self, stores: Mapping[RuntimeDomain, ObjectStore]) -> None:
+    def __init__(
+        self,
+        stores: Mapping[RuntimeDomain, ObjectStore],
+        *,
+        close_guard_stores: Sequence[ObjectStore],
+    ) -> None:
         self._stores = dict(stores)
+        self._close_guard_stores = tuple(close_guard_stores)
 
     def object_store(self, domain: RuntimeDomain) -> ObjectStore:
         try:
@@ -114,10 +120,34 @@ class _RuntimeObjectRouter:
 
     async def clear_transient(self) -> None:
         seen: set[int] = set()
-        for store in self._stores.values():
+        for store in self._close_guard_stores:
             if isinstance(store, TransientObjectStore) and id(store) not in seen:
                 store.clear()
                 seen.add(id(store))
+
+    async def preflight_close(self) -> None:
+        pending: dict[int, asyncio.Task[object]] = {}
+        seen: set[int] = set()
+        for store in self._close_guard_stores:
+            if id(store) in seen:
+                continue
+            seen.add(id(store))
+            if not isinstance(store, (FilesystemObjectStore, SqlObjectStore)):
+                continue
+            for task in store.pending_background_tasks:
+                pending[id(task)] = task
+        if pending:
+            _logger.warning(
+                "runtime object preflight found pending background work: tasks=%s",
+                len(pending),
+            )
+            raise AIError(
+                ErrorCode.STORAGE_RECOVERY_REQUIRED,
+                safe_details={
+                    "phase": "object_preflight_close",
+                    "pending_tasks": len(pending),
+                },
+            )
 
 
 async def materialize_runtime_state(
@@ -288,7 +318,12 @@ async def materialize_runtime_state(
             durable_domains=plan.durable_domains,
             state_validators=(steps.validate_integrity,),
         )
-        actions: list[Callable[[], Awaitable[None]]] = [steps.preflight_close, retention.close, steps.close]
+        actions: list[Callable[[], Awaitable[None]]] = [
+            steps.preflight_close,
+            objects.preflight_close,
+            retention.close,
+            steps.close,
+        ]
         actions.extend(cleanups)
         _logger.info(
             "runtime state materialized: namespace=%s domains=%s",
@@ -368,17 +403,24 @@ def _build_object_router(
     contexts: Mapping[RuntimeDomain, SqlStorageContext],
 ) -> _RuntimeObjectRouter:
     values: dict[RuntimeDomain, ObjectStore] = {}
+    close_guard_stores: list[ObjectStore] = []
     sql_objects: dict[int, SqlObjectStore] = {}
     for domain in _OBJECT_DOMAINS:
         route = plan.route(domain)
         if route.retention is RuntimeRetentionMode.DURABLE and external is not None:
             values[domain] = external
         elif route.retention is RuntimeRetentionMode.VOLATILE:
-            values[domain] = InMemoryObjectStore()
+            store = InMemoryObjectStore()
+            values[domain] = store
+            close_guard_stores.append(store)
         elif route.retention is RuntimeRetentionMode.TRANSIENT:
-            values[domain] = TransientObjectStore()
+            store = TransientObjectStore()
+            values[domain] = store
+            close_guard_stores.append(store)
         elif route.kind == "filesystem" and route.path is not None:
-            values[domain] = FilesystemObjectStore(route.path / "objects")
+            store = FilesystemObjectStore(route.path / "objects")
+            values[domain] = store
+            close_guard_stores.append(store)
         elif route.kind in {"sqlite", "sql"} and domain in contexts:
             context = contexts[domain]
             context_key = id(context)
@@ -387,9 +429,13 @@ def _build_object_router(
                 object_store = SqlObjectStore.from_context(context)
                 sql_objects[context_key] = object_store
             values[domain] = object_store
+            close_guard_stores.append(object_store)
         else:
             raise AIError(ErrorCode.STORAGE_DEPENDENCY_NOT_READY)
-    return _RuntimeObjectRouter(values)
+    return _RuntimeObjectRouter(
+        values,
+        close_guard_stores=close_guard_stores,
+    )
 
 
 def _build_steps(

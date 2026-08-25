@@ -3,6 +3,7 @@
 """Runtime-owned one-level subagent dispatch and cancellation."""
 
 import asyncio
+from typing import cast
 
 from linktools.core import environ
 from pydantic_ai.exceptions import ModelRetry
@@ -28,6 +29,11 @@ class SubagentDispatcher:
         self._catalog = catalog
         self._compiler = compiler
         self._execution = execution
+        self._detached_tasks: set[asyncio.Task[object]] = set()
+
+    @property
+    def pending_background_tasks(self) -> tuple[asyncio.Task[object], ...]:
+        return tuple(task for task in self._detached_tasks if not task.done())
 
     def delegate_for(
         self,
@@ -87,9 +93,13 @@ class SubagentDispatcher:
             definition = self._catalog.root_definition(agent_id)
         except AIError as error:
             if error.code is ErrorCode.AGENT_DEFINITION_UNAVAILABLE:
-                raise ModelRetry("requested subagent Agent is unavailable") from error
+                raise ModelRetry(
+                    "requested subagent Agent is unavailable"
+                ) from error
             raise
-        binding = self._catalog.register_binding(self._compiler.bind(definition))
+        binding = self._catalog.register_binding(
+            self._compiler.bind(definition)
+        )
         idempotency_key = "subagent:" + canonical_sha256(
             {
                 "version": 1,
@@ -115,8 +125,11 @@ class SubagentDispatcher:
             root_execution_id=root_execution_id,
         )
         try:
-            result = await self._execution.wait(child.execution_id, principal=principal)
-        except BaseException as primary:
+            result = await self._execution.wait(
+                child.execution_id,
+                principal=principal,
+            )
+        except BaseException as primary:  # noqa: BLE001
             cleanup = asyncio.create_task(
                 self.cancel_child(
                     child.execution_id,
@@ -125,31 +138,38 @@ class SubagentDispatcher:
                 ),
                 name=f"ai-subagent-cleanup-{child.execution_id}",
             )
+            if isinstance(primary, asyncio.CancelledError):
+                self._detach(
+                    cast("asyncio.Task[object]", cleanup),
+                    "subagent child cleanup",
+                )
+                raise
             try:
                 await asyncio.shield(cleanup)
-            except asyncio.CancelledError as cancellation:
-                try:
-                    await cleanup
-                except BaseException as cleanup_error:
-                    _logger.exception(
-                        "subagent child cleanup failed after cancellation: execution=%s",
-                        child.execution_id,
-                    )
-                    raise cancellation from cleanup_error
+            except asyncio.CancelledError:
+                self._detach(
+                    cast("asyncio.Task[object]", cleanup),
+                    "subagent child cleanup",
+                )
                 raise
-            except BaseException as cleanup_error:
+            except BaseException:  # noqa: BLE001
                 _logger.exception(
                     "subagent child cleanup failed: execution=%s",
                     child.execution_id,
                 )
-                if isinstance(primary, asyncio.CancelledError):
-                    raise primary from cleanup_error
                 raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED) from primary
             raise
         return _subagent_result(result)
 
-    async def cancel_children(self, parent_execution_id: str, principal: Principal) -> None:
-        children = await self._execution.list_children(parent_execution_id, principal=principal)
+    async def cancel_children(
+        self,
+        parent_execution_id: str,
+        principal: Principal,
+    ) -> None:
+        children = await self._execution.list_children(
+            parent_execution_id,
+            principal=principal,
+        )
         for child in sorted(children, key=lambda value: value.execution_id):
             if child.status in {
                 ExecutionStatus.SUCCEEDED,
@@ -170,12 +190,20 @@ class SubagentDispatcher:
         parent_execution_id: str,
         principal: Principal,
     ) -> None:
-        current = await self._execution.inspect(execution_id, principal=principal)
-        if current.status in {ExecutionStatus.SUCCEEDED, ExecutionStatus.FAILED, ExecutionStatus.CANCELLED}:
+        current = await self._execution.inspect(
+            execution_id,
+            principal=principal,
+        )
+        if current.status in {
+            ExecutionStatus.SUCCEEDED,
+            ExecutionStatus.FAILED,
+            ExecutionStatus.CANCELLED,
+        }:
             return
         request = CancelExecutionRequest(
             principal=principal,
-            idempotency_key="subagent-cancel:" + canonical_sha256(
+            idempotency_key="subagent-cancel:"
+            + canonical_sha256(
                 {
                     "version": 1,
                     "parent_execution_id": parent_execution_id,
@@ -185,31 +213,104 @@ class SubagentDispatcher:
             force=True,
         )
         task = asyncio.create_task(
-            self._execution.cancel(execution_id, request),
+            self._cancel_child_operation(
+                execution_id,
+                request,
+                principal,
+            ),
             name=f"ai-subagent-cancel-{execution_id}",
         )
-        cancellation: asyncio.CancelledError | None = None
         try:
-            result = await asyncio.shield(task)
-        except asyncio.CancelledError as error:
-            if task.done() and task.cancelled():
-                raise
-            cancellation = error
-            try:
-                result = await task
-            except BaseException as cleanup_error:
-                raise cancellation from cleanup_error
-        except Exception as error:
+            await asyncio.shield(task)
+        except asyncio.CancelledError:
+            if task.done():
+                try:
+                    task.result()
+                except asyncio.CancelledError:
+                    pass
+                except BaseException as error:  # noqa: BLE001
+                    _logger.warning(
+                        "subagent cancellation failed after caller cancellation: "
+                        "execution=%s error=%s",
+                        execution_id,
+                        type(error).__name__,
+                    )
+            else:
+                self._detach(
+                    cast("asyncio.Task[object]", task),
+                    "subagent cancellation",
+                )
+            raise
+        except AIError:
+            raise
+        except BaseException as error:  # noqa: BLE001
+            raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED) from error
+
+    async def _cancel_child_operation(
+        self,
+        execution_id: str,
+        request: CancelExecutionRequest,
+        principal: Principal,
+    ) -> None:
+        try:
+            result = await self._execution.cancel(execution_id, request)
+        except AIError:
+            raise
+        except BaseException as error:  # noqa: BLE001
             raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED) from error
         if not result.cancelled:
-            current = await self._execution.inspect(execution_id, principal=principal)
-            if current.status not in {ExecutionStatus.SUCCEEDED, ExecutionStatus.FAILED, ExecutionStatus.CANCELLED}:
+            current = await self._execution.inspect(
+                execution_id,
+                principal=principal,
+            )
+            if current.status not in {
+                ExecutionStatus.SUCCEEDED,
+                ExecutionStatus.FAILED,
+                ExecutionStatus.CANCELLED,
+            }:
                 raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
-        current = await self._execution.inspect(execution_id, principal=principal)
-        if current.status not in {ExecutionStatus.SUCCEEDED, ExecutionStatus.FAILED, ExecutionStatus.CANCELLED}:
+        current = await self._execution.inspect(
+            execution_id,
+            principal=principal,
+        )
+        if current.status not in {
+            ExecutionStatus.SUCCEEDED,
+            ExecutionStatus.FAILED,
+            ExecutionStatus.CANCELLED,
+        }:
             raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
-        if cancellation is not None:
-            raise cancellation
+
+    def _detach(
+        self,
+        task: "asyncio.Task[object]",
+        label: str,
+    ) -> None:
+        if task.done():
+            self._consume_done(task, label)
+            return
+        if task in self._detached_tasks:
+            return
+        self._detached_tasks.add(task)
+
+        def consume(done: "asyncio.Task[object]") -> None:
+            try:
+                self._consume_done(done, label)
+            finally:
+                self._detached_tasks.discard(done)
+
+        task.add_done_callback(consume)
+
+    @staticmethod
+    def _consume_done(
+        task: "asyncio.Task[object]",
+        label: str,
+    ) -> None:
+        try:
+            task.result()
+        except asyncio.CancelledError:
+            pass
+        except BaseException:  # noqa: BLE001
+            _logger.exception("detached %s failed", label)
 
 
 def _subagent_result(result: ExecutionResult) -> "dict[str, JsonValue]":

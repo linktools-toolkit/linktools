@@ -100,8 +100,6 @@ def _same_definition(left: AgentDefinition, right: AgentDefinition) -> bool:
             left.spec == right.spec
             and left.model.fingerprint == right.model.fingerprint
             and left_capabilities == right_capabilities
-            and left.local_runtime_capability_descriptors
-            == right.local_runtime_capability_descriptors
             and left.trusted_tool_classes == right.trusted_tool_classes
             and left.trusted_mcp_selectors == right.trusted_mcp_selectors
         )

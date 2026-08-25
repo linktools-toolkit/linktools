@@ -44,13 +44,12 @@ def _binding_snapshot() -> AgentBindingSnapshot:
         version=1,
         agent_spec=AgentSpec("agent", 1, "default"),
         agent_digest="b" * 64,
-        output_type_module=output.value_type.__module__,
-        output_type_qualname=output.value_type.__qualname__,
         output_schema_id=output.schema_id,
         output_schema_revision=output.schema_revision,
         output_schema_fingerprint=output.schema_fingerprint,
         local_runtime_capability_descriptors=(),
         binding_digest="a" * 64,
+        global_runtime_capability_descriptors=(),
     )
 
 
@@ -276,12 +275,10 @@ def test_v1_dataclass_reader_tolerates_ordinary_shape_changes() -> None:
     )
     task_fields = dict(task_wire["fields"])
     task_fields["extra"] = None
-    _assert_integrity(
-        lambda: decode_domain(
-            {"$dataclass": "task_node", "fields": task_fields},
-            TaskNode,
-        )
-    )
+    assert decode_domain(
+        {"$dataclass": "task_node", "fields": task_fields},
+        TaskNode,
+    ) == task
     _assert_integrity(lambda: decode_domain({"plain": 1}, Any))
     _assert_integrity(lambda: decode_domain({"$tuple": [], "$mapping": []}, Any))
     assert decode_domain(encode_domain({"value": 1}), Any) == {"value": 1}

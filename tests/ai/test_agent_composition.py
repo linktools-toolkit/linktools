@@ -67,20 +67,33 @@ def test_top_level_public_surface_is_exact() -> None:
     ]
 
 
-def test_runtime_capability_from_spec_requires_exact_importable_type() -> None:
-    shadow_type = type(
-        "_DurableCapability",
-        (_DurableCapability,),
-        {
-            "__module__": __name__,
-            "__qualname__": "_DurableCapability",
-        },
-    )
+def test_runtime_capability_from_spec_persists_importable_restore_locator() -> None:
+    value = RuntimeCapability.from_spec("local", _DurableCapability, config={})
+    descriptor = value.descriptor
+    assert descriptor is not None
+    assert descriptor["serialization_name"] == "test-durable-capability"
+    assert descriptor["restore_locator"] == {
+        "module": __name__,
+        "qualname": "_DurableCapability",
+    }
+    assert set(descriptor) == {
+        "id",
+        "revision",
+        "serialization_name",
+        "config",
+        "fingerprint",
+        "restore_locator",
+    }
+
+
+def test_runtime_capability_from_spec_rejects_local_restore_locator() -> None:
+    class LocalCapability(_DurableCapability):
+        pass
 
     with pytest.raises(AIError) as error:
-        RuntimeCapability.from_spec("local", shadow_type, config={})
-
+        RuntimeCapability.from_spec("local", LocalCapability, config={})
     assert error.value.code is ErrorCode.CAPABILITY_RESOLUTION_INVALID
+
 
 
 def test_agent_handle_does_not_expose_internal_definition() -> None:
@@ -92,8 +105,6 @@ def test_agent_binding_snapshot_is_deeply_immutable() -> None:
         version=1,
         agent_spec=AgentSpec("agent", 1, "model"),
         agent_digest="c" * 64,
-        output_type_module="example.output",
-        output_type_qualname="Output",
         output_schema_id="output",
         output_schema_revision=1,
         output_schema_fingerprint="b" * 64,
@@ -101,6 +112,7 @@ def test_agent_binding_snapshot_is_deeply_immutable() -> None:
             {"config": {"items": ["first"]}},
         ),
         binding_digest="a" * 64,
+        global_runtime_capability_descriptors=(),
     )
 
     descriptor = snapshot.local_runtime_capability_descriptors[0]
@@ -317,6 +329,7 @@ async def test_durable_session_survives_agent_micro_changes(tmp_path, change: st
             )
         )
         runtime._closed = False
+        runtime._closing = False
         runtime._local_coordinator = None
         runtime.session = service
         binding_digest = f"{1 + _MICRO_CHANGES.index(change):064x}"
@@ -606,7 +619,10 @@ async def test_agent_and_binding_identity_split_acceptance(tmp_path) -> None:
 
     workspace = Workspace.load(tmp_path)
     models = ModelRegistry.openai(model="gpt-test")
-    async with open_workspace_runtime(workspace, models=models) as runtime:
+    async with open_workspace_runtime(
+        workspace,
+        models=models,
+    ) as runtime:
         base = runtime.agent()
         text_binding = runtime._bind_agent(base._agent_digest)
         structured_binding = runtime._bind_agent(

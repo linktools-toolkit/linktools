@@ -60,6 +60,13 @@ class RuntimeRetentionController:
         self._execution_runtime_release = callback
 
     async def release_execution_handoff(self, execution_id: str, *, tenant_id: str) -> None:
+        if self._execution_runtime_release is not None:
+            await self._execution_runtime_release(execution_id, tenant_id=tenant_id)
+            _logger.debug(
+                "execution runtime ownership released: tenant=%s execution=%s",
+                tenant_id,
+                execution_id,
+            )
         execution = await self._execution.executions.get(execution_id, tenant_id=tenant_id)
         if execution is not None and execution.session_id is not None:
             await self._conversation.sessions.release_execution(
@@ -83,8 +90,6 @@ class RuntimeRetentionController:
             )
         for domain in self._transient_domains:
             await self._objects.release_object_scope(domain, owner_scope=f"execution:{execution_id}")
-        if self._execution_runtime_release is not None:
-            await self._execution_runtime_release(execution_id, tenant_id=tenant_id)
         _logger.info("execution transient handoff released: tenant=%s execution=%s", tenant_id, execution_id)
 
     async def release_session(

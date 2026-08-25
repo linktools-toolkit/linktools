@@ -10,7 +10,7 @@ from collections.abc import Callable, Mapping
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
-from enum import Enum
+from enum import StrEnum
 from functools import wraps
 from typing import Protocol
 
@@ -178,9 +178,7 @@ class ExecutionBackend(Protocol):
     def worker_installed(self, execution_id: str) -> bool: ...
 
 
-class CancelEffectOutcome(str, Enum):
-    __str__ = str.__str__
-    __format__ = str.__format__
+class CancelEffectOutcome(StrEnum):
     CONFIRMED = "CONFIRMED"
     UNKNOWN = "UNKNOWN"
 
@@ -1035,7 +1033,33 @@ class DefaultExecutionService:
         async def wait_once() -> ExecutionResult:
             while True:
                 view = await self.inspect(execution_id, principal=principal)
-                if view.status in {ExecutionStatus.SUCCEEDED, ExecutionStatus.FAILED, ExecutionStatus.CANCELLED}:
+                waiter = self._local_waiter
+                owns_execution = waiter is not None and waiter.owns_execution(
+                    execution_id,
+                    tenant_id=principal.tenant_id,
+                )
+                if view.status in {
+                    ExecutionStatus.SUCCEEDED,
+                    ExecutionStatus.FAILED,
+                    ExecutionStatus.CANCELLED,
+                }:
+                    if owns_execution:
+                        _logger.debug(
+                            "execution wait awaiting local terminal worker: execution=%s",
+                            execution_id,
+                        )
+                        await waiter.wait_terminal(
+                            execution_id,
+                            tenant_id=principal.tenant_id,
+                        )
+                        continue
+                    if self._backend is not None:
+                        failure = self._backend.worker_failure(
+                            execution_id,
+                            tenant_id=principal.tenant_id,
+                        )
+                        if failure is not None:
+                            raise failure
                     return await self.result(execution_id, principal=principal)
                 if self._backend is not None:
                     failure = self._backend.worker_failure(
@@ -1044,12 +1068,11 @@ class DefaultExecutionService:
                     )
                     if failure is not None:
                         raise failure
-                waiter = self._local_waiter
-                if waiter is not None and waiter.owns_execution(
-                    execution_id,
-                    tenant_id=principal.tenant_id,
-                ):
-                    await waiter.wait_terminal(execution_id, tenant_id=principal.tenant_id)
+                if owns_execution:
+                    await waiter.wait_terminal(
+                        execution_id,
+                        tenant_id=principal.tenant_id,
+                    )
                 else:
                     await asyncio.sleep(1.0)
 

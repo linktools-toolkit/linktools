@@ -4,7 +4,7 @@
 
 import asyncio
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -149,6 +149,7 @@ class _RuntimeStepPersistence(StepPersistence[None]):
         planning: bool = False,
         trusted_tool_classes: "tuple[tuple[str, str], ...]" = (),
         trusted_mcp_selectors: "tuple[str, ...]" = (),
+        background_tasks: "set[asyncio.Task[Any]] | None" = None,
         **kwargs: Any,
     ) -> None:
         if not isinstance(planning, bool):
@@ -161,6 +162,7 @@ class _RuntimeStepPersistence(StepPersistence[None]):
         self._trusted_tool_classes = trusted_tool_classes
         self._trusted_mcp_selectors = trusted_mcp_selectors
         self._calls: dict[tuple[str, str], _ToolCallState] = {}
+        self._background_tasks = set() if background_tasks is None else background_tasks
 
     async def before_tool_execute(
         self,
@@ -250,7 +252,7 @@ class _RuntimeStepPersistence(StepPersistence[None]):
                 heartbeat_error = heartbeat_task.exception()
                 if heartbeat_error is not None:
                     handler_task.cancel()
-                    await asyncio.gather(handler_task, return_exceptions=True)
+                    self._detach_task(handler_task, "tool handler after heartbeat loss")
                     if state.handler_entered and not state.decision.replay_safe:
                         await self._mark_unknown(state, heartbeat_error)
                         raise AIError(ErrorCode.TOOL_EFFECT_UNKNOWN) from heartbeat_error
@@ -328,7 +330,9 @@ class _RuntimeStepPersistence(StepPersistence[None]):
             await self._stop_heartbeat(state)
             if not handler_task.done():
                 handler_task.cancel()
-                await asyncio.gather(handler_task, return_exceptions=True)
+                self._detach_task(handler_task, "tool handler cleanup")
+            else:
+                self._consume_task(handler_task, "tool handler cleanup")
             if not keep_call_state:
                 self._calls.pop(key, None)
 
@@ -412,8 +416,37 @@ class _RuntimeStepPersistence(StepPersistence[None]):
             return
         if not task.done():
             task.cancel()
-        await asyncio.gather(task, return_exceptions=True)
+            self._detach_task(task, "tool heartbeat cleanup")
+        else:
+            self._consume_task(task, "tool heartbeat cleanup")
         state.heartbeat_task = None
+
+    def _detach_task(self, task: asyncio.Task[Any], label: str) -> None:
+        if task.done():
+            self._consume_task(task, label)
+            return
+        if task in self._background_tasks:
+            return
+        self._background_tasks.add(task)
+
+        def consume(done: asyncio.Task[Any]) -> None:
+            try:
+                self._consume_task(done, label)
+            finally:
+                self._background_tasks.discard(done)
+
+        task.add_done_callback(consume)
+
+    @staticmethod
+    def _consume_task(task: asyncio.Task[Any], label: str) -> None:
+        if not task.done():
+            return
+        try:
+            task.result()
+        except asyncio.CancelledError:
+            pass
+        except BaseException:  # noqa: BLE001
+            _logger.exception("detached %s failed", label)
 
     async def _record_failed_effect(
         self,
@@ -469,6 +502,7 @@ class AgentRunScope:
     parent_step_run_id: "str | None" = None
     subagent_delegate: "SubagentDelegate | None" = None
     tool_operations: "ToolOperationBridge | None" = None
+    background_tasks: "set[asyncio.Task[object]]" = field(default_factory=set)
 
 
 class SubagentDelegate(Protocol):
@@ -516,6 +550,7 @@ async def compose_platform_capabilities(
             planning=scope.planning,
             trusted_tool_classes=scope.trusted_tool_classes,
             trusted_mcp_selectors=scope.trusted_mcp_selectors,
+            background_tasks=scope.background_tasks,
         )
     )
     selected = frozenset(scope.platform_tool_names)

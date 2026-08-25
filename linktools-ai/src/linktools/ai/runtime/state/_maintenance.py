@@ -342,7 +342,7 @@ def _restore_projected_lease_fields(value: object) -> object:
 
 
 def _validate_read_model_record(value: Mapping[str, object]) -> None:
-    if frozenset(value) != _READ_MODEL_FIELDS:
+    if not _READ_MODEL_FIELDS.issubset(value):
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     version = value.get("model_version")
     if isinstance(version, bool) or not isinstance(version, int) or version < 1:
@@ -352,10 +352,12 @@ def _validate_read_model_record(value: Mapping[str, object]) -> None:
 
 
 def _validate_read_model_fact(value: Mapping[str, object]) -> None:
-    if set(value) != {"items"}:
+    if "items" not in value:
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     items = value.get("items")
-    if not isinstance(items, list) or any(not isinstance(item, Mapping) for item in items):
+    if not isinstance(items, list) or any(
+        not isinstance(item, Mapping) for item in items
+    ):
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
 
 

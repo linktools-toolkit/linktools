@@ -31,13 +31,12 @@ def _binding_snapshot() -> AgentBindingSnapshot:
         version=1,
         agent_spec=AgentSpec("default", 1, "default"),
         agent_digest="b" * 64,
-        output_type_module=output.value_type.__module__,
-        output_type_qualname=output.value_type.__qualname__,
         output_schema_id=output.schema_id,
         output_schema_revision=output.schema_revision,
         output_schema_fingerprint=output.schema_fingerprint,
         local_runtime_capability_descriptors=(),
         binding_digest="a" * 64,
+        global_runtime_capability_descriptors=(),
     )
 
 
@@ -228,12 +227,14 @@ async def test_session_prompt_replacement_requires_prior_conversation_history(
         error: Exception,
         *,
         run_id: str | None = None,
-    ) -> None:
+    ) -> ExecutionRecord:
         del error, run_id
-        backend._execution.executions.record = replace(
+        committed = replace(
             execution,
             status=ExecutionStatus.FAILED,
         )
+        backend._execution.executions.record = committed
+        return committed
 
     backend._commit_failure = commit_failure
     await backend._run(
@@ -276,13 +277,15 @@ async def test_local_business_failure_commits_failed_without_escaping() -> None:
         error: Exception,
         *,
         run_id: str | None = None,
-    ) -> None:
+    ) -> ExecutionRecord:
         del run_id
         failures.append(error)
-        backend._execution.executions.record = replace(
+        committed = replace(
             execution,
             status=ExecutionStatus.FAILED,
         )
+        backend._execution.executions.record = committed
+        return committed
 
     backend._commit_failure = commit_failure
     await backend._run(

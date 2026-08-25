@@ -13,10 +13,24 @@
   },
   "binding_digest": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
   "local_runtime_capability_descriptors": [],
-  "output_schema_fingerprint": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-  "output_schema_id": "runtime.persistence.fixture",
+  "output_schema_fingerprint": "d5e196516d7067c7ffbb0847d2f57bf3382199aea943681a5e5e1a0ead279e7f",
+  "output_schema_id": "assistant-text",
   "output_schema_revision": 1,
-  "output_type_module": "linktools.ai.runtime.fixture",
-  "output_type_qualname": "FixtureOutput",
+  "global_runtime_capability_descriptors": [],
+  "output_schema_definition": {
+    "additionalProperties": false,
+    "description": "Canonical default output containing assistant response text.",
+    "properties": {
+      "text": {
+        "title": "Text",
+        "type": "string"
+      }
+    },
+    "required": [
+      "text"
+    ],
+    "title": "AssistantTextOutput",
+    "type": "object"
+  },
   "version": 1
 }

@@ -240,6 +240,7 @@ def _tool_bridge() -> RuntimeToolOperationBridge:
         step_run_id="run",
         binding_fingerprint="a" * 64,
         owner="worker",
+        background_tasks=set(),
         payload_policy=PayloadPolicy(),
     )
 

@@ -6,7 +6,7 @@ import math
 from collections.abc import Hashable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime
-from enum import Enum
+from enum import StrEnum
 from typing import Generic, Protocol, TypeVar, runtime_checkable
 
 from ..core import JsonValue
@@ -41,17 +41,13 @@ class StorageRevision:
         return self.value
 
 
-class StorageEntryStatus(str, Enum):
-    __str__ = str.__str__
-    __format__ = str.__format__
+class StorageEntryStatus(StrEnum):
     NORMAL = "NORMAL"
     DELETED = "DELETED"
     RESET = "RESET"
 
 
-class StorageOperation(str, Enum):
-    __str__ = str.__str__
-    __format__ = str.__format__
+class StorageOperation(StrEnum):
     PUT = "PUT"
     DELETE = "DELETE"
     RESET = "RESET"
@@ -150,9 +146,7 @@ class StorageBatchResult(Generic[InfoT, KeyT]):
     results: "tuple[StoragePutResult[InfoT] | StorageDeleteResult[KeyT] | StorageResetResult[KeyT], ...]"
 
 
-class MetadataLoadMode(str, Enum):
-    __str__ = str.__str__
-    __format__ = str.__format__
+class MetadataLoadMode(StrEnum):
     REPLACE = "REPLACE"
     PATCH = "PATCH"
 

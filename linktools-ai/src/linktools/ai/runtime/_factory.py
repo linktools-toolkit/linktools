@@ -184,7 +184,14 @@ async def build_local_runtime(
             cursor_signer=_cursor_signer("artifact", grant_key),
         )
         local_coordinator = _LocalRuntimeCoordinator(execution, session, event, backend)
-        coordinator = _RuntimeCloseCoordinator((task_launcher.shutdown, backend.close, state.close))
+        coordinator = _RuntimeCloseCoordinator(
+            (
+                task.preflight_close,
+                task_launcher.shutdown,
+                backend.close,
+                state.close,
+            )
+        )
         runtime = Runtime(
             catalog,
             compiler,

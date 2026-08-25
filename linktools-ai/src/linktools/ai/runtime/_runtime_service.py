@@ -71,7 +71,9 @@ _AGENT_TASK_V1_FIELDS = frozenset(
 
 class _LocalRuntimeCoordinatorPort(Protocol):
     async def run(
-        self, binding_digest: str, request: ExecutionRequest
+        self,
+        binding_digest: str,
+        request: ExecutionRequest,
     ) -> ExecutionHandle: ...
 
     async def resume(
@@ -146,6 +148,7 @@ class Runtime:
         self._close_callback = close_callback
         self._local_coordinator = local_coordinator
         self._closed = False
+        self._closing = False
         self._close_lock = asyncio.Lock()
         self._close_task: asyncio.Task[None] | None = None
 
@@ -168,17 +171,27 @@ class Runtime:
         capabilities: "Sequence[RuntimeCapability]" = (),
     ) -> AgentHandle:
         self._ensure_open()
-        if any(not isinstance(capability, RuntimeCapability) for capability in capabilities):
+        if any(
+            not isinstance(capability, RuntimeCapability)
+            for capability in capabilities
+        ):
             raise TypeError("capabilities must contain RuntimeCapability values")
         if isinstance(agent, str):
             validate_agent_id(agent)
             base = self._catalog.root_definition(agent)
-            definition = base if not capabilities else self._compiler.compile(
-                base.spec,
-                capabilities=capabilities,
+            definition = (
+                base
+                if not capabilities
+                else self._compiler.compile(
+                    base.spec,
+                    capabilities=capabilities,
+                )
             )
         elif isinstance(agent, AgentSpec):
-            definition = self._compiler.compile(agent, capabilities=capabilities)
+            definition = self._compiler.compile(
+                agent,
+                capabilities=capabilities,
+            )
         else:
             raise TypeError("agent must be an Agent id or AgentSpec")
         definition = self._catalog.register_definition(definition)
@@ -196,7 +209,9 @@ class Runtime:
     ) -> AgentBinding:
         self._ensure_open()
         definition = self._catalog.definition(agent_digest)
-        return self._catalog.register_binding(self._compiler.bind(definition, output=output))
+        return self._catalog.register_binding(
+            self._compiler.bind(definition, output=output)
+        )
 
     def _restore_binding(self, snapshot: AgentBindingSnapshot) -> AgentBinding:
         self._ensure_open()
@@ -236,7 +251,9 @@ class Runtime:
         if not isinstance(planning, bool) or not isinstance(thinking, bool):
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
         definition = self._catalog.definition(agent_digest)
-        binding = self._catalog.register_binding(self._compiler.bind(definition, output=output))
+        binding = self._catalog.register_binding(
+            self._compiler.bind(definition, output=output)
+        )
         request = ExecutionRequest(
             user_prompt=user_prompt,
             principal=principal,
@@ -401,7 +418,10 @@ class Runtime:
         stream = (
             self.event.stream(handle.execution_id, principal=principal)
             if self._local_coordinator is None
-            else self._local_coordinator.stream(handle.execution_id, principal=principal)
+            else self._local_coordinator.stream(
+                handle.execution_id,
+                principal=principal,
+            )
         )
         async for event in stream:
             yield event
@@ -439,7 +459,11 @@ class Runtime:
         output: "type[BaseModel] | None",
     ) -> EvaluationHandle:
         binding = self._bind_agent(agent_digest, output=output)
-        return await self.evaluation.run(binding.digest, binding.output_schema_fingerprint, request)
+        return await self.evaluation.run(
+            binding.digest,
+            binding.output_schema_fingerprint,
+            request,
+        )
 
     async def _replay_evaluation_for_agent(
         self,
@@ -450,7 +474,11 @@ class Runtime:
         output: "type[BaseModel] | None",
     ) -> ExecutionHandle:
         binding = self._bind_agent(agent_digest, output=output)
-        return await self.evaluation.replay(binding.digest, snapshot_id, request)
+        return await self.evaluation.replay(
+            binding.digest,
+            snapshot_id,
+            request,
+        )
 
     async def run_graph(
         self,
@@ -505,9 +533,12 @@ class Runtime:
         agent_ids: set[str] = set()
         for node in graph.nodes:
             payload = node.input
-            if frozenset(payload) != _AGENT_TASK_V1_FIELDS:
+            if not _AGENT_TASK_V1_FIELDS.issubset(payload):
                 raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
-            if payload.get("type") != "linktools.ai.agent" or payload.get("version") != 1:
+            if (
+                payload.get("type") != "linktools.ai.agent"
+                or payload.get("version") != 1
+            ):
                 raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
             user_prompt = payload.get("user_prompt")
             planning = payload.get("planning")
@@ -519,7 +550,9 @@ class Runtime:
             ):
                 raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
             try:
-                snapshot = AgentBindingSnapshot.from_payload(payload.get("binding"))
+                snapshot = AgentBindingSnapshot.from_payload(
+                    payload.get("binding")
+                )
                 binding = self._restore_binding(snapshot)
             except AIError as error:
                 if error.code is ErrorCode.AGENT_DEFINITION_UNAVAILABLE:
@@ -550,7 +583,12 @@ class Runtime:
             tuple(sorted(agent_ids)),
             len(admitted.nodes),
         )
-        return TaskGraphRequest(admitted, principal, idempotency_key, selected_limits)
+        return TaskGraphRequest(
+            admitted,
+            principal,
+            idempotency_key,
+            selected_limits,
+        )
 
     async def _ensure_session(
         self,
@@ -561,7 +599,10 @@ class Runtime:
         try:
             session = await self.session.get(session_id, principal=principal)
         except AIError as error:
-            if error.code not in {ErrorCode.SESSION_NOT_FOUND, ErrorCode.AUTHORIZATION_DENIED}:
+            if error.code not in {
+                ErrorCode.SESSION_NOT_FOUND,
+                ErrorCode.AUTHORIZATION_DENIED,
+            }:
                 raise
             try:
                 await self.session.create(
@@ -578,14 +619,17 @@ class Runtime:
             except AIError as create_error:
                 if create_error.code is not ErrorCode.STORAGE_CONFLICT:
                     raise
-            session = await self.session.get(session_id, principal=principal)
+            session = await self.session.get(
+                session_id,
+                principal=principal,
+            )
         if session.status is not SessionStatus.OPEN:
             raise AIError(ErrorCode.SESSION_CONFLICT)
         if session.agent_id != definition.spec.id:
             raise AIError(ErrorCode.SESSION_BINDING_MISMATCH)
 
     def _ensure_open(self) -> None:
-        if self._closed:
+        if self._closed or self._closing:
             raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
 
     def _resolve_principal(self, principal: "Principal | None") -> Principal:
@@ -602,31 +646,60 @@ class Runtime:
         async with self._close_lock:
             if self._closed:
                 return
-            if self._close_task is None:
-                self._close_task = asyncio.create_task(
+            if not self._closing:
+                self._closing = True
+                _logger.info("runtime close started: tenant=%s", self._tenant_id)
+            task = self._close_task
+            retry = task is None
+            if task is not None and task.done():
+                try:
+                    task.result()
+                except (asyncio.CancelledError, Exception):
+                    retry = True
+                else:
+                    if self._closed:
+                        return
+                    retry = True
+            if retry:
+                task = asyncio.create_task(
                     self._cleanup(),
                     name="linktools-runtime-close",
                 )
-            task = self._close_task
-        cancelled = False
+                task.add_done_callback(self._consume_close_result)
+                self._close_task = task
         try:
             await asyncio.shield(task)
         except asyncio.CancelledError:
-            cancelled = True
-            await asyncio.shield(task)
+            if task.done():
+                try:
+                    task.result()
+                except asyncio.CancelledError:
+                    pass
+                except BaseException:  # noqa: BLE001
+                    _logger.exception(
+                        "runtime close failed after caller cancellation"
+                    )
+            raise
         except BaseException:
             async with self._close_lock:
                 if self._close_task is task:
                     self._close_task = None
             raise
-        if cancelled:
-            raise asyncio.CancelledError
+
+    def _consume_close_result(self, task: "asyncio.Task[None]") -> None:
+        try:
+            task.result()
+        except asyncio.CancelledError:
+            pass
+        except BaseException:  # noqa: BLE001
+            _logger.exception("runtime close task failed")
 
     async def _cleanup(self) -> None:
         if self._close_callback is not None:
             await self._close_callback()
         async with self._close_lock:
             self._closed = True
+            _logger.info("runtime close completed: tenant=%s", self._tenant_id)
 
 
 def _validate_memory_scope(value: "str | None") -> "str | None":

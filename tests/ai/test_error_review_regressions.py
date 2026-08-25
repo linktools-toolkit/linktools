@@ -32,13 +32,12 @@ def _binding_snapshot() -> AgentBindingSnapshot:
         version=1,
         agent_spec=AgentSpec("agent", 1, "default"),
         agent_digest="b" * 64,
-        output_type_module=output.value_type.__module__,
-        output_type_qualname=output.value_type.__qualname__,
         output_schema_id=output.schema_id,
         output_schema_revision=output.schema_revision,
         output_schema_fingerprint=output.schema_fingerprint,
         local_runtime_capability_descriptors=(),
         binding_digest="a" * 64,
+        global_runtime_capability_descriptors=(),
     )
 
 
@@ -130,7 +129,7 @@ async def test_agent_executor_reinjects_only_when_requested(
     binding = SimpleNamespace(
         definition=definition,
         output_binding=output_binding,
-        output_type=output_binding.value_type,
+        output_type=output_binding.runtime_output_type,
     )
     captured: dict[str, object] = {}
 

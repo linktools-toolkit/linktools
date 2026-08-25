@@ -53,13 +53,12 @@ def _binding() -> AgentBindingSnapshot:
         version=1,
         agent_spec=AgentSpec("agent", 1, "model"),
         agent_digest="c" * 64,
-        output_type_module="builtins",
-        output_type_qualname="str",
         output_schema_id="test-output",
         output_schema_revision=1,
         output_schema_fingerprint="b" * 64,
         local_runtime_capability_descriptors=(),
         binding_digest="a" * 64,
+        global_runtime_capability_descriptors=(),
     )
 
 
@@ -75,9 +74,9 @@ def _request(graph_id: str = "graph") -> TaskGraphRequest:
 @pytest.fixture(autouse=True)
 def temporal_activity_context(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
-        temporal_activity,
-        "_temporal_activity",
-        SimpleNamespace(info=lambda: SimpleNamespace(workflow_run_id="test-workflow-run")),
+        temporal_activity._temporal_activity,
+        "info",
+        lambda: SimpleNamespace(workflow_run_id="test-workflow-run"),
     )
 
 

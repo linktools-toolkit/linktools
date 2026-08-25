@@ -9,7 +9,6 @@ import os
 from bisect import bisect_right
 from collections.abc import (
     AsyncIterator,
-    Callable,
     Iterator,
     Mapping,
     MutableMapping,
@@ -655,6 +654,9 @@ class FilesystemStateStorageGroup:
         self._closed = False
         self._poisoned = False
         self._generation: int | None = None
+        self._initialization_task: asyncio.Task[None] | None = None
+        self._maintenance_tasks: set[asyncio.Task[None]] = set()
+        self._pending_physical: set[asyncio.Task[None]] = set()
 
     @property
     def _metadata_root(self) -> Path:
@@ -677,10 +679,40 @@ class FilesystemStateStorageGroup:
     async def initialize(self) -> None:
         if self._closed:
             raise AIError(ErrorCode.STORAGE_CLOSED)
+        if self._initialized:
+            return
+        task = self._initialization_task
+        if task is None:
+            task = asyncio.create_task(
+                self._initialize_owned(),
+                name=f"filesystem-initialize-{self._scope_digest}",
+            )
+            self._initialization_task = task
+            self._maintenance_tasks.add(task)
+            task.add_done_callback(self._initialization_done)
+        await asyncio.shield(task)
+
+    async def _initialize_owned(self) -> None:
         async with self._mutation_lock:
+            if self._closed:
+                raise AIError(ErrorCode.STORAGE_CLOSED)
             if self._initialized:
                 return
             await self._initialize_locked()
+
+    def _initialization_done(self, task: asyncio.Task[None]) -> None:
+        if self._initialization_task is task:
+            self._initialization_task = None
+        self._maintenance_tasks.discard(task)
+        try:
+            task.result()
+        except asyncio.CancelledError:
+            pass
+        except BaseException:  # noqa: BLE001
+            _logger.exception(
+                "filesystem initialization owner failed: scope=%s",
+                self._scope_digest,
+            )
 
     async def _initialize_locked(self) -> None:
         ordered = tuple(sorted(self._members, key=lambda member: member.root.as_posix()))
@@ -697,8 +729,8 @@ class FilesystemStateStorageGroup:
                 for member in ordered:
                     await member._writer_lock.acquire()
                     acquired.append(member._writer_lock)
-                await _await_thread(self._validate_roots_sync)
-            await _await_thread(self._initialize_sync)
+                await asyncio.to_thread(self._validate_roots_sync)
+            await asyncio.to_thread(self._initialize_sync)
             self._initialized = True
             _logger.info(
                 "filesystem StateStorageGroup initialized: scope=%s domains=%s",
@@ -713,9 +745,22 @@ class FilesystemStateStorageGroup:
     async def close(self) -> None:
         if self._closed or not self._members or not all(member._closed for member in self._members):
             return
+        if any(not task.done() for task in self._maintenance_tasks):
+            raise AIError(ErrorCode.STORAGE_COMMIT_UNKNOWN)
         async with self._mutation_lock:
             if self._closed:
                 return
+            if any(not task.done() for task in self._maintenance_tasks):
+                raise AIError(ErrorCode.STORAGE_COMMIT_UNKNOWN)
+            if (
+                any(not task.done() for task in self._pending_physical)
+                or any(
+                    not task.done()
+                    for member in self._members
+                    for task in member._pending_physical
+                )
+            ):
+                raise AIError(ErrorCode.STORAGE_COMMIT_UNKNOWN)
             self._closed = True
             self._initialized = False
             locks = tuple(sorted(self._members, key=lambda value: value.root.as_posix()))
@@ -754,6 +799,11 @@ class FilesystemStateStorageGroup:
             return await fn(active)
         started = monotonic()
         await store._consistency_lock.acquire()
+        try:
+            self._ensure_member(store)
+        except BaseException:
+            store._consistency_lock.release()
+            raise
         _logger.debug(
             "filesystem member lock acquired: domain=%s member_lock_wait_ms=%.3f",
             store._runtime_domain,
@@ -789,6 +839,12 @@ class FilesystemStateStorageGroup:
             return await fn(active_state_group_transaction(self, members))
         mutation_started = monotonic()
         await self._mutation_lock.acquire()
+        try:
+            for store in members:
+                self._ensure_member(store)
+        except BaseException:
+            self._mutation_lock.release()
+            raise
         _logger.debug(
             "filesystem group mutation lock acquired: scope=%s "
             "group_mutation_wait_ms=%.3f",
@@ -834,14 +890,27 @@ class FilesystemStateStorageGroup:
 
     async def validate_integrity(self) -> None:
         self._ensure_ready()
+        task = asyncio.create_task(
+            self._validate_integrity_owned(),
+            name=f"filesystem-validate-{self._scope_digest}",
+        )
+        _track_physical_task(
+            self._maintenance_tasks,
+            task,
+            f"filesystem integrity validation {self._scope_digest}",
+        )
+        await asyncio.shield(task)
+
+    async def _validate_integrity_owned(self) -> None:
         async with self._mutation_lock:
+            self._ensure_ready()
             ordered = tuple(sorted(self._members, key=lambda value: value.root.as_posix()))
             for member in ordered:
                 await member._consistency_lock.acquire()
             try:
                 for member in ordered:
                     member._ensure_ready()
-                    await _await_thread(member._validate_integrity_sync)
+                    await asyncio.to_thread(member._validate_integrity_sync)
             finally:
                 for member in reversed(ordered):
                     member._consistency_lock.release()
@@ -1005,20 +1074,37 @@ class FilesystemStateStorageGroup:
             asyncio.to_thread(self._commit_sync, writes, deletes, base, target),
             name=f"filesystem-group-commit-{self._scope_digest}",
         )
+        _track_physical_task(
+            self._pending_physical,
+            physical,
+            f"filesystem group commit {self._scope_digest}",
+        )
         cancellation: asyncio.CancelledError | None = None
         error: BaseException | None = None
         try:
             await asyncio.shield(physical)
         except asyncio.CancelledError as cancellation_error:
             cancellation = cancellation_error
+            if not physical.done():
+                self._poisoned = True
+                for member in self._members:
+                    member._poisoned = True
+                _logger.error(
+                    "filesystem group mutation cancelled with unknown outcome: "
+                    "scope=%s base=%s target=%s",
+                    self._scope_digest,
+                    base,
+                    target,
+                )
+                raise AIError(ErrorCode.STORAGE_COMMIT_UNKNOWN) from cancellation_error
             try:
-                await asyncio.shield(physical)
+                physical.result()
             except BaseException as commit_error:  # noqa: BLE001
                 error = commit_error
         except BaseException as commit_error:  # noqa: BLE001
             error = commit_error
         if error is not None:
-            outcome = await _await_thread(lambda: self._reconcile_sync(base, target))
+            outcome = await self._reconcile_commit(base, target)
             if outcome == "unknown":
                 self._poisoned = True
                 for member in self._members:
@@ -1053,6 +1139,26 @@ class FilesystemStateStorageGroup:
         self._write_generation(target)
         sync_directory(self._transaction_root)
         self._journal.complete()
+
+    async def _reconcile_commit(self, base: int, target: int) -> _CommitOutcome:
+        task = asyncio.create_task(
+            asyncio.to_thread(self._reconcile_sync, base, target),
+            name=f"filesystem-group-reconcile-{self._scope_digest}",
+        )
+        _track_physical_task(
+            self._pending_physical,
+            task,
+            f"filesystem group reconcile {self._scope_digest}",
+        )
+        try:
+            return await asyncio.shield(task)
+        except asyncio.CancelledError as error:
+            if not task.done():
+                self._poisoned = True
+                for member in self._members:
+                    member._poisoned = True
+                raise AIError(ErrorCode.STORAGE_COMMIT_UNKNOWN) from error
+            return task.result()
 
     def _reconcile_sync(self, base: int, target: int) -> _CommitOutcome:
         try:
@@ -1093,6 +1199,7 @@ class FilesystemStateStore:
         self._poisoned = False
         self._initialized = False
         self._close_task: asyncio.Task[None] | None = None
+        self._pending_physical: set[asyncio.Task[None]] = set()
         self._index: _FilesystemIndex | None = None
         self._index_generation: int | None = None
         self._storage_group = group or FilesystemStateStorageGroup(
@@ -1124,16 +1231,23 @@ class FilesystemStateStore:
         )
 
     async def close(self) -> None:
-        if self._close_task is None:
+        task = self._close_task
+        retry = task is None
+        if task is not None and task.done():
+            try:
+                task.result()
+            except (asyncio.CancelledError, Exception):
+                retry = True
+            else:
+                return
+        if retry:
             self._closed = True
             self._initialized = False
-            self._close_task = asyncio.create_task(self._close_inner())
-        task = self._close_task
-        try:
-            await asyncio.shield(task)
-        except asyncio.CancelledError:
-            await asyncio.shield(task)
-            raise
+            task = asyncio.create_task(self._close_inner())
+            self._close_task = task
+        if task is None:
+            raise RuntimeError("filesystem close task was not created")
+        await asyncio.shield(task)
 
     async def read(self, fn: StateCallback[ValueT]) -> ValueT:
         self._ensure_ready()
@@ -1382,14 +1496,29 @@ class FilesystemStateStore:
             asyncio.to_thread(self._commit_sync, transaction, base, target),
             name=f"filesystem-commit-{self._runtime_domain}",
         )
+        _track_physical_task(
+            self._pending_physical,
+            physical,
+            f"filesystem commit {self._runtime_domain}",
+        )
         cancellation: asyncio.CancelledError | None = None
         physical_error: BaseException | None = None
         try:
             await asyncio.shield(physical)
         except asyncio.CancelledError as error:
             cancellation = error
+            if not physical.done():
+                self._poisoned = True
+                _logger.error(
+                    "filesystem mutation cancelled with unknown outcome: "
+                    "domain=%s base=%s target=%s",
+                    self._runtime_domain,
+                    base,
+                    target,
+                )
+                raise AIError(ErrorCode.STORAGE_COMMIT_UNKNOWN) from error
             try:
-                await asyncio.shield(physical)
+                physical.result()
             except BaseException as commit_error:  # noqa: BLE001
                 physical_error = commit_error
         except BaseException as error:  # noqa: BLE001
@@ -1450,7 +1579,22 @@ class FilesystemStateStore:
         self._journal.complete()
 
     async def _reconcile_commit(self, base: int, target: int) -> _CommitOutcome:
-        return await _await_thread(lambda: self._reconcile_commit_sync(base, target))
+        task = asyncio.create_task(
+            asyncio.to_thread(self._reconcile_commit_sync, base, target),
+            name=f"filesystem-reconcile-{self._runtime_domain}",
+        )
+        _track_physical_task(
+            self._pending_physical,
+            task,
+            f"filesystem reconcile {self._runtime_domain}",
+        )
+        try:
+            return await asyncio.shield(task)
+        except asyncio.CancelledError as error:
+            if not task.done():
+                self._poisoned = True
+                raise AIError(ErrorCode.STORAGE_COMMIT_UNKNOWN) from error
+            return task.result()
 
     def _reconcile_commit_sync(self, base: int, target: int) -> _CommitOutcome:
         try:
@@ -2582,13 +2726,24 @@ def _require_layout_path(path: Path, root: Path, expected: str) -> None:
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
 
 
-async def _await_thread(fn: Callable[[], ValueT]) -> ValueT:
-    task = asyncio.create_task(asyncio.to_thread(fn))
-    try:
-        return await asyncio.shield(task)
-    except asyncio.CancelledError:
-        await asyncio.shield(task)
-        raise
+def _track_physical_task(
+    tasks: set[asyncio.Task[None]],
+    task: asyncio.Task[None],
+    label: str,
+) -> None:
+    tasks.add(task)
+
+    def consume(done: asyncio.Task[None]) -> None:
+        try:
+            done.result()
+        except asyncio.CancelledError:
+            pass
+        except BaseException:  # noqa: BLE001
+            _logger.exception("detached %s failed", label)
+        finally:
+            tasks.discard(done)
+
+    task.add_done_callback(consume)
 
 
 __all__ = ["FilesystemStateStorageGroup", "FilesystemStateStore"]

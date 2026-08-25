@@ -11,7 +11,7 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
-from enum import Enum
+from enum import StrEnum
 from typing import TYPE_CHECKING, Protocol
 
 from pydantic_ai.messages import ModelMessage
@@ -109,16 +109,12 @@ class ConversationHistoryIndexNodeRecord:
             raise ValueError("leaf index node cannot have children")
 
 
-class TranscriptOrigin(str, Enum):
-    __str__ = str.__str__
-    __format__ = str.__format__
+class TranscriptOrigin(StrEnum):
     RAW = "raw"
     UNKNOWN = "unknown"
 
 
-class TranscriptOwnerDomain(str, Enum):
-    __str__ = str.__str__
-    __format__ = str.__format__
+class TranscriptOwnerDomain(StrEnum):
     CONVERSATION = "conversation"
     EXECUTION = "execution"
     RECOVERY = "recovery"
@@ -142,9 +138,7 @@ class TranscriptChunk:
     content: RuntimePayloadRef
 
 
-class TranscriptSeekDimension(str, Enum):
-    __str__ = str.__str__
-    __format__ = str.__format__
+class TranscriptSeekDimension(StrEnum):
     MESSAGE = "message"
     SESSION_HISTORY_ITEM = "session_history_item"
     EXECUTION_TRANSCRIPT_ITEM = "execution_transcript_item"
@@ -262,6 +256,15 @@ class ContextProjection:
     items: tuple[ContextProjectionItem, ...]
     digest: str
 
+    def __post_init__(self) -> None:
+        if not isinstance(self.items, tuple) or any(
+            not isinstance(item, (TranscriptSpanRef, InlineContextBlock))
+            for item in self.items
+        ):
+            raise TypeError("context projection items are invalid")
+        if not isinstance(self.digest, str) or not self.digest:
+            raise ValueError("context projection digest is invalid")
+
 
 @dataclass(frozen=True, slots=True)
 class StoredStepSnapshot:
@@ -272,9 +275,7 @@ class StoredStepSnapshot:
     projection_digest: str
 
 
-class HistoryQuality(str, Enum):
-    __str__ = str.__str__
-    __format__ = str.__format__
+class HistoryQuality(StrEnum):
     COMPLETE = "complete"
     CONSERVATIVE = "conservative"
 
@@ -458,9 +459,7 @@ class ExecutionHistorySealRecord:
             raise ValueError("execution history seal heads must be sorted and unique")
 
 
-class ExecutionHistoryState(str, Enum):
-    __str__ = str.__str__
-    __format__ = str.__format__
+class ExecutionHistoryState(StrEnum):
     OPEN = "open"
     SEALED = "sealed"
 
@@ -810,9 +809,7 @@ class RecoveryStateRecord:
     updated_at: datetime
 
 
-class RecoveryCheckpointState(str, Enum):
-    __str__ = str.__str__
-    __format__ = str.__format__
+class RecoveryCheckpointState(StrEnum):
     ADMITTED = "admitted"
     ACTIVE = "active"
     WAITING = "waiting"
@@ -820,9 +817,7 @@ class RecoveryCheckpointState(str, Enum):
     COMPLETED = "completed"
 
 
-class RecoveryHandoffPhase(str, Enum):
-    __str__ = str.__str__
-    __format__ = str.__format__
+class RecoveryHandoffPhase(StrEnum):
     NONE = "none"
     PREPARED = "prepared"
     CONVERSATION_RESOLVED = "conversation_resolved"

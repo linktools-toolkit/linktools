@@ -7,7 +7,7 @@ from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequenc
 from contextlib import asynccontextmanager
 from contextvars import ContextVar, Token
 from dataclasses import dataclass, replace
-from enum import Enum
+from enum import StrEnum
 from time import monotonic
 from typing import Protocol, runtime_checkable
 from uuid import uuid4
@@ -216,9 +216,7 @@ def _chunk_message_groups(
     return groups
 
 
-class _RunDurabilityKind(str, Enum):
-    __str__ = str.__str__
-    __format__ = str.__format__
+class _RunDurabilityKind(StrEnum):
     PROJECTION = "projection"
     SNAPSHOT = "snapshot"
     TOOL_EFFECT = "tool_effect"
@@ -2212,6 +2210,7 @@ class RuntimeStepStore(StepStore):
         self._projection_offsets: dict[str, _ProjectionOffset] = {}
         self._projection_dirty: set[str] = set()
         self._durability_flights: dict[str, _RunDurabilityFlight] = {}
+        self._background_tasks: set[asyncio.Task[object]] = set()
         self._terminal_seals: dict[str, _LocalExecutionTerminalSeal] = {}
         self._history_lock = _RunHistoryLock()
         for archive in self._archives.values():
@@ -2863,6 +2862,7 @@ class RuntimeStepStore(StepStore):
                 ):
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                 del self._durability_flights[projection.run.run_id]
+                del self._terminal_seals[projection.run.run_id]
                 completion = flight.completion
                 offset = self._projection_offsets.setdefault(
                     projection.run.run_id,
@@ -3091,7 +3091,11 @@ class RuntimeStepStore(StepStore):
                     return CommitObservation(DurableCommitState.NOT_COMMITTED)
                 return CommitObservation(DurableCommitState.COMMITTED)
 
-            result = await run_durable_commit(operation, readback)
+            result = await run_durable_commit(
+                operation,
+                readback,
+                background_tasks=self._background_tasks,
+            )
             if result.state is DurableCommitState.COMMITTED:
                 await self.finalize_execution_projection(flight, captured)
                 if result.cancelled:
@@ -3209,7 +3213,11 @@ class RuntimeStepStore(StepStore):
                 ),
             )
 
-        result = await run_durable_commit(operation, readback)
+        result = await run_durable_commit(
+            operation,
+            readback,
+            background_tasks=self._background_tasks,
+        )
         if result.state is DurableCommitState.COMMITTED:
             if result.value is None:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -3480,7 +3488,11 @@ class RuntimeStepStore(StepStore):
         operation: Callable[[], Awaitable[None]],
         readback: Callable[[], Awaitable[CommitObservation[None]]],
     ) -> None:
-        result = await run_durable_commit(operation, readback)
+        result = await run_durable_commit(
+            operation,
+            readback,
+            background_tasks=self._background_tasks,
+        )
         if result.state is DurableCommitState.COMMITTED:
             await self._finalize_durability_flight(flight)
             if result.cancelled:
@@ -3512,6 +3524,19 @@ class RuntimeStepStore(StepStore):
         raise unknown from result.error
 
     async def preflight_close(self) -> None:
+        pending_tasks = tuple(
+            task for task in self._background_tasks if not task.done()
+        )
+        if self._durability_flights or pending_tasks or self._terminal_seals:
+            raise AIError(
+                ErrorCode.STORAGE_RECOVERY_REQUIRED,
+                safe_details={
+                    "phase": "step_preflight_close",
+                    "pending_flights": len(self._durability_flights),
+                    "pending_tasks": len(pending_tasks),
+                    "pending_terminal_seals": len(self._terminal_seals),
+                },
+            )
         self._preflight = True
 
     async def close(self) -> None:

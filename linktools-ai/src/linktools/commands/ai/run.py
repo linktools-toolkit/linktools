@@ -111,14 +111,14 @@ async def _open_runtime_state(
     await asyncio.to_thread(path.parent.mkdir, parents=True, exist_ok=True)
     from sqlalchemy.ext.asyncio import create_async_engine
 
-    engine = create_async_engine(f"sqlite+aiosqlite:///{path}")
+    bootstrap_engine = create_async_engine(f"sqlite+aiosqlite:///{path}")
     try:
-        await provision_runtime_database(engine)
-        _logger.info("ai run storage selected: backend=sqlite path=%s", path)
-        yield RuntimeState.sql(engine)
+        await provision_runtime_database(bootstrap_engine)
     finally:
-        _logger.debug("ai run SQL engine disposing: path=%s", path)
-        await engine.dispose()
+        _logger.debug("ai run SQL bootstrap engine disposing: path=%s", path)
+        await bootstrap_engine.dispose()
+    _logger.info("ai run storage selected: backend=sqlite path=%s", path)
+    yield RuntimeState.sqlite(path)
 
 
 async def _emit_result(

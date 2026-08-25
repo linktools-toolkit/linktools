@@ -88,6 +88,7 @@ class RuntimeStateCommands:
         conversation_steps: StateStepArchive | None = None,
         execution_steps: StateStepArchive | None = None,
         recovery_steps: StateStepArchive | None = None,
+        background_tasks: "set[asyncio.Task[object]]",
     ) -> None:
         self._execution = execution
         self._namespace = namespace
@@ -100,13 +101,18 @@ class RuntimeStateCommands:
         self._conversation_steps = conversation_steps
         self._execution_steps = execution_steps
         self._recovery_steps = recovery_steps
+        self._background_tasks = background_tasks
 
     async def _commit_or_raise(
         self,
         operation: Callable[[], Awaitable[object]],
         readback: Callable[[], Awaitable[CommitObservation[object]]],
     ) -> None:
-        result = await run_durable_commit(operation, readback)
+        result = await run_durable_commit(
+            operation,
+            readback,
+            background_tasks=self._background_tasks,
+        )
         if result.state is DurableCommitState.COMMITTED:
             if result.cancelled:
                 raise asyncio.CancelledError
@@ -160,6 +166,7 @@ class RuntimeStateCommands:
         *,
         expected_status: ExecutionStatus,
         audit_events: Sequence[ExecutionEventAppend] = (),
+        background_tasks: "set[asyncio.Task[object]] | None" = None,
     ) -> ExecutionRecord:
         expected_events = tuple(audit_events) + (
             ExecutionEventAppend(
@@ -265,7 +272,16 @@ class RuntimeStateCommands:
                     )
                 return CommitObservation(DurableCommitState.UNRESOLVED, error=error)
 
-        outcome = await run_durable_commit(operation, readback)
+        owner_tasks = (
+            self._background_tasks
+            if background_tasks is None
+            else background_tasks
+        )
+        outcome = await run_durable_commit(
+            operation,
+            readback,
+            background_tasks=owner_tasks,
+        )
         if outcome.state is DurableCommitState.COMMITTED:
             if outcome.value is None:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -643,6 +659,7 @@ class RuntimeStateCommands:
         result = await run_durable_commit(
             lambda: stores[0].storage_group.mutate(stores, callback),
             readback,
+            background_tasks=self._background_tasks,
         )
         if result.state is DurableCommitState.COMMITTED:
             if result.value is None:
@@ -722,6 +739,7 @@ class RuntimeStateCommands:
         execution_snapshots: Sequence[ContinuableSnapshot] = (),
         execution_projections: Sequence[PreparedExecutionProjection] = (),
         audit_events: Sequence[ExecutionEventAppend] = (),
+        background_tasks: "set[asyncio.Task[object]] | None" = None,
     ) -> ExecutionTerminalCommitResult:
         if execution_projections and (
             self._execution_steps is None or execution_run is None
@@ -959,9 +977,15 @@ class RuntimeStateCommands:
                         error=error,
                     )
 
+            owner_tasks = (
+                self._background_tasks
+                if background_tasks is None
+                else background_tasks
+            )
             result = await run_durable_commit(
                 lambda: stores[0].storage_group.mutate(stores, callback),
                 readback,
+                background_tasks=owner_tasks,
             )
             if result.state is DurableCommitState.COMMITTED:
                 if result.value is None:
@@ -1264,6 +1288,7 @@ class RuntimeStateCommands:
                     commit_execution,
                 ),
                 readback,
+                background_tasks=self._background_tasks,
             )
             if outcome.state is DurableCommitState.COMMITTED:
                 if outcome.value is None:
@@ -1650,7 +1675,11 @@ class RuntimeStateCommands:
                 else DurableCommitState.NOT_COMMITTED
             )
 
-        result = await run_durable_commit(operation, readback)
+        result = await run_durable_commit(
+            operation,
+            readback,
+            background_tasks=self._background_tasks,
+        )
         if result.state is DurableCommitState.COMMITTED:
             if result.cancelled:
                 raise asyncio.CancelledError
@@ -2073,10 +2102,13 @@ class ExecutionStateCommands:
         state_store: StateStore,
         executions: ExecutionRepositoryImpl,
         steps: StateStepArchive | None,
+        *,
+        background_tasks: "set[asyncio.Task[object]]",
     ) -> None:
         self._state_store = state_store
         self._executions = executions
         self._steps = steps
+        self._background_tasks = background_tasks
 
     async def commit_terminal_checkpoint(
         self,
@@ -2219,6 +2251,7 @@ class ExecutionStateCommands:
         outcome = await run_durable_commit(
             lambda: self._state_store.mutate(mutate),
             readback,
+            background_tasks=self._background_tasks,
         )
         if outcome.state is DurableCommitState.COMMITTED:
             if outcome.value is None:
