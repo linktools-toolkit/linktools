@@ -34,6 +34,7 @@ class AgentDefinition:
     local_runtime_capability_descriptors: "tuple[Mapping[str, JsonValue], ...]"
     trusted_tool_classes: "tuple[tuple[str, str], ...]" = ()
     trusted_mcp_selectors: "tuple[str, ...]" = ()
+    global_runtime_capability_descriptors: "tuple[Mapping[str, JsonValue], ...]" = ()
 
     def __post_init__(self) -> None:
         validate_fingerprint(self.digest)
@@ -44,15 +45,28 @@ class AgentDefinition:
                 (capability.provider, capability.id)
                 for capability in self.effective_capabilities
             )
-            descriptors = tuple(
+            local_descriptors = tuple(
                 ImmutableJsonMapping(value)
                 for value in self.local_runtime_capability_descriptors
+            )
+            global_descriptors = tuple(
+                ImmutableJsonMapping(value)
+                for value in self.global_runtime_capability_descriptors
             )
         except (AttributeError, TypeError, ValueError) as error:
             raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID) from error
         if len(set(identities)) != len(identities):
             raise AIError(ErrorCode.CAPABILITY_CONFLICT)
-        object.__setattr__(self, "local_runtime_capability_descriptors", descriptors)
+        object.__setattr__(
+            self,
+            "local_runtime_capability_descriptors",
+            local_descriptors,
+        )
+        object.__setattr__(
+            self,
+            "global_runtime_capability_descriptors",
+            global_descriptors,
+        )
         selectors: set[str] = set()
         previous_selector: str | None = None
         for selector in self.trusted_mcp_selectors:

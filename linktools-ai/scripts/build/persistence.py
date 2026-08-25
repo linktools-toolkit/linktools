@@ -24,7 +24,6 @@ from linktools.ai.runtime._message import (
 from linktools.ai.runtime.state import _codec as runtime_codec
 from linktools.ai.runtime.state._contracts import (
     ContextProjection,
-    ContextProjectionItem,
     IdempotencyTerminalUpdate,
     OperationTerminalUpdate,
 )
@@ -66,13 +65,12 @@ def _binding_fixture_value() -> AgentBindingSnapshot:
         version=1,
         agent_spec=AgentSpec("runtime-persistence-v1"),
         agent_digest="a" * 64,
-        output_type_module="linktools.ai.runtime.fixture",
-        output_type_qualname="FixtureOutput",
         output_schema_id="runtime.persistence.fixture",
         output_schema_revision=1,
         output_schema_fingerprint="b" * 64,
         local_runtime_capability_descriptors=(),
         binding_digest="c" * 64,
+        global_runtime_capability_descriptors=(),
     )
 
 
@@ -87,7 +85,9 @@ def validate_agent_binding_fixture(matrix_dir: str | Path) -> tuple[str, ...]:
     try:
         value = _load_json(path)
         decoded = AgentBindingSnapshot.from_payload(value)
-    except (AIError, KeyError, TypeError, ValueError) as error:
+    except ValueError as error:
+        return (str(error),)
+    except (AIError, KeyError, TypeError) as error:
         return (f"AgentBindingSnapshot fixture is not readable: {error}",)
     if decoded != expected or decoded.to_payload() != value:
         return ("AgentBindingSnapshot fixture semantics changed",)
@@ -177,10 +177,7 @@ def _decode_custom_wire_values(
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     task_payload = dict(task_wire)
     task_payload.pop("schema")
-    task = runtime_codec.decode_domain(
-        cast(JsonValue, task_payload),
-        TaskNode,
-    )
+    task = runtime_codec.decode_domain(cast(JsonValue, task_payload), TaskNode)
     idempotency = runtime_codec.decode_domain(
         cast(
             JsonValue,
@@ -226,47 +223,64 @@ def validate_custom_wire_fixture(matrix_dir: str | Path) -> tuple[str, ...]:
         or operation != expected_operation
     ):
         return ("Custom wire fixture semantics changed",)
+
+    additive = {key: value for key, value in expected.items()}
+    task_wire = cast(
+        dict[str, object],
+        dict(
+            cast(
+                Mapping[str, object],
+                additive[f"task_node@{runtime_codec.CURRENT_DATA_VERSION}"],
+            )
+        ),
+    )
+    task_fields = cast(
+        dict[str, object],
+        dict(cast(Mapping[str, object], task_wire["fields"])),
+    )
+    task_fields["future_field"] = {"$future_v2": ["must", "not", "decode"]}
+    task_wire["fields"] = task_fields
+    additive[f"task_node@{runtime_codec.CURRENT_DATA_VERSION}"] = cast(JsonValue, task_wire)
+    try:
+        additive_task, _, _ = _decode_custom_wire_values(additive)
+    except (AIError, KeyError, TypeError, ValueError) as error:
+        return (f"custom V1 semantic additive field is not tolerated: {error}",)
+    if additive_task != expected_task:
+        return ("custom V1 additive field changed TaskNode semantics",)
     return ()
 
 
-def _validate_generic_writer_closure() -> tuple[str, ...]:
-    valid = ContextProjection((), "d" * 64)
+def _validate_generic_compatibility() -> tuple[str, ...]:
+    value = ContextProjection((), "d" * 64)
     try:
-        payload = runtime_codec._encode_persisted_domain(valid)
+        payload = runtime_codec._encode_persisted_domain(value)
+        canonical_json_bytes(payload)
+    except (AIError, TypeError, ValueError) as error:
+        return (f"generic persistence writer rejected a valid value: {error}",)
+    if not isinstance(payload, Mapping):
+        return ("generic persistence writer returned a non-object dataclass",)
+    fields_value = payload.get("fields")
+    if not isinstance(fields_value, Mapping):
+        return ("generic persistence writer omitted dataclass fields",)
+    additive = dict(payload)
+    additive_fields = dict(fields_value)
+    additive_fields["future_field"] = {"$future_v2": ["must", "not", "decode"]}
+    additive["fields"] = additive_fields
+    try:
         decoded = runtime_codec._decode_enveloped_domain(
             runtime_codec.encode_envelope(
                 {
-                    "type": runtime_codec.wire_type_id(valid),
-                    "payload": payload,
+                    "type": runtime_codec.wire_type_id(value),
+                    "payload": cast(JsonValue, additive),
                 }
             ),
             ContextProjection,
         )
-    except (AIError, KeyError, TypeError, ValueError):
-        return ("generic persistence writer failed valid round-trip",)
-    if decoded != valid:
-        return ("generic persistence writer failed valid round-trip",)
-
-    invalid = ContextProjection(
-        cast("tuple[ContextProjectionItem, ...]", ("invalid",)),
-        "d" * 64,
-    )
-    try:
-        runtime_codec._encode_persisted_domain(invalid)
-    except AIError as error:
-        if (
-            error.code is ErrorCode.INTERNAL_ERROR
-            and error.retryable is False
-            and error.safe_details == {
-                "phase": "persistence_encode",
-                "domain_type": "ContextProjection",
-            }
-        ):
-            return ()
-        return ("generic persistence writer returned the wrong failure contract",)
-    except Exception:
-        return ("generic persistence writer returned the wrong failure type",)
-    return ("generic persistence writer accepted unreadable runtime value",)
+    except (AIError, TypeError, ValueError) as error:
+        return (f"generic V1 additive field is not tolerated: {error}",)
+    if decoded != value:
+        return ("generic V1 additive field changed semantics",)
+    return ()
 
 
 def validate_exact_fixtures(matrix_dir: str | Path) -> tuple[str, ...]:
@@ -275,7 +289,7 @@ def validate_exact_fixtures(matrix_dir: str | Path) -> tuple[str, ...]:
         *validate_agent_binding_fixture(root),
         *validate_custom_wire_fixture(root),
         *validate_model_message_fixture(root),
-        *_validate_generic_writer_closure(),
+        *_validate_generic_compatibility(),
     )
 
 

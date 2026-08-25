@@ -176,7 +176,10 @@ async def load_execution_request(
         tenant_id=state.tenant_id,
         request_ref=state.request_ref,
     )
-    if request.principal.tenant_id != state.tenant_id or binding.binding_digest != state.binding_digest:
+    if (
+        request.principal.tenant_id != state.tenant_id
+        or binding.binding_digest != state.binding_digest
+    ):
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     _logger.debug(
         "execution request loaded: execution=%s request_ref=%s",
@@ -264,7 +267,7 @@ def _reject_constant(value: str) -> None:
 
 
 def _mapping(value: object, fields: frozenset[str]) -> dict[str, object]:
-    if not isinstance(value, dict) or set(value) != fields:
+    if not isinstance(value, dict) or not fields.issubset(value):
         raise ValueError("request payload fields are invalid")
     return value
 

@@ -9,24 +9,20 @@ from typing import Protocol, TypeVar, cast
 
 import yaml
 
-from ..core import canonical_string_tuple
+from ..core import JsonValue, canonical_string_tuple
 from ..errors import AIError, ErrorCode
 from ._contract import AgentSpec, AgentUsageLimits, MCPServerSpec, SkillSpec
 
 SpecT = TypeVar("SpecT")
-_AGENT_FIELDS = frozenset(
-    {
-        "id",
-        "revision",
-        "model",
-        "system_prompt",
-        "instructions",
-        "allow_tools",
-        "usage_limits",
-    }
-)
 _SKILL_FIELDS = frozenset({"id", "revision", "content"})
 _MCP_FIELDS = frozenset({"id", "revision", "command", "args"})
+_USAGE_LIMIT_FIELDS = (
+    "model_requests",
+    "tool_calls",
+    "input_tokens",
+    "output_tokens",
+    "total_tokens",
+)
 
 
 class SpecCodec(Protocol[SpecT]):
@@ -35,34 +31,28 @@ class SpecCodec(Protocol[SpecT]):
 
 
 class AgentSpecCodec:
-    def encode(self, value: AgentSpec) -> bytes:
-        return _encode(
-            {
-                "id": value.id,
-                "revision": value.revision,
-                "model": value.model,
-                "system_prompt": value.system_prompt,
-                "instructions": list(value.instructions),
-                "allow_tools": list(value.allow_tools),
-                "usage_limits": None
-                if value.usage_limits is None
-                else {
-                    "model_requests": value.usage_limits.model_requests,
-                    "tool_calls": value.usage_limits.tool_calls,
-                    "input_tokens": value.usage_limits.input_tokens,
-                    "output_tokens": value.usage_limits.output_tokens,
-                    "total_tokens": value.usage_limits.total_tokens,
-                },
-            }
-        )
+    def to_payload(self, value: AgentSpec) -> "dict[str, JsonValue]":
+        if not isinstance(value, AgentSpec):
+            raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID, "agent spec is invalid")
+        return {
+            "id": value.id,
+            "revision": value.revision,
+            "model": value.model,
+            "system_prompt": value.system_prompt,
+            "instructions": list(value.instructions),
+            "allow_tools": list(value.allow_tools),
+            "usage_limits": None
+            if value.usage_limits is None
+            else {
+                "model_requests": value.usage_limits.model_requests,
+                "tool_calls": value.usage_limits.tool_calls,
+                "input_tokens": value.usage_limits.input_tokens,
+                "output_tokens": value.usage_limits.output_tokens,
+                "total_tokens": value.usage_limits.total_tokens,
+            },
+        }
 
-    def decode(self, data: bytes) -> AgentSpec:
-        try:
-            raw = _decode(data)
-        except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as error:
-            raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID, "agent spec is invalid") from error
-        if set(raw) - _AGENT_FIELDS:
-            raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID, "agent spec fields are invalid")
+    def from_payload(self, raw: Mapping[str, object]) -> AgentSpec:
         if "id" not in raw:
             raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID, "agent spec requires id")
         identity = raw["id"]
@@ -94,6 +84,16 @@ class AgentSpecCodec:
             raise
         except (TypeError, ValueError) as error:
             raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID, "agent spec is invalid") from error
+
+    def encode(self, value: AgentSpec) -> bytes:
+        return _encode(cast("dict[str, object]", self.to_payload(value)))
+
+    def decode(self, data: bytes) -> AgentSpec:
+        try:
+            raw = _decode(data)
+        except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as error:
+            raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID, "agent spec is invalid") from error
+        return self.from_payload(raw)
 
 
 class SkillSpecCodec:
@@ -245,17 +245,9 @@ def _decode_usage_limits(value: object) -> "AgentUsageLimits | None":
         return None
     if not isinstance(value, Mapping):
         raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID, "usage_limits must be an object or null")
-    names = {
-        "model_requests",
-        "tool_calls",
-        "input_tokens",
-        "output_tokens",
-        "total_tokens",
-    }
-    if set(value) != names:
-        raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID, "usage_limits fields are invalid")
+    kwargs = {name: value[name] for name in _USAGE_LIMIT_FIELDS if name in value}
     try:
-        return AgentUsageLimits(**{name: value[name] for name in names})
+        return AgentUsageLimits(**kwargs)
     except (TypeError, ValueError) as error:
         raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID, "usage_limits values are invalid") from error
 

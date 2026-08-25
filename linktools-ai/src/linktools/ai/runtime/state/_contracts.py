@@ -256,6 +256,15 @@ class ContextProjection:
     items: tuple[ContextProjectionItem, ...]
     digest: str
 
+    def __post_init__(self) -> None:
+        if not isinstance(self.items, tuple) or any(
+            not isinstance(item, (TranscriptSpanRef, InlineContextBlock))
+            for item in self.items
+        ):
+            raise TypeError("context projection items are invalid")
+        if not isinstance(self.digest, str) or not self.digest:
+            raise ValueError("context projection digest is invalid")
+
 
 @dataclass(frozen=True, slots=True)
 class StoredStepSnapshot:

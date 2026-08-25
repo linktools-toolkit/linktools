@@ -151,6 +151,8 @@ async def test_task_runner_preserves_cancellation_when_child_cleanup_fails() -> 
     class Execution:
         def __init__(self) -> None:
             self.wait_started = asyncio.Event()
+            self.cancel_started = asyncio.Event()
+            self.finish_cancel = asyncio.Event()
 
         async def run(self, *args, **kwargs):
             del args, kwargs
@@ -163,11 +165,14 @@ async def test_task_runner_preserves_cancellation_when_child_cleanup_fails() -> 
 
         async def cancel(self, *args, **kwargs):
             del args, kwargs
+            self.cancel_started.set()
+            await self.finish_cancel.wait()
             raise RuntimeError("cleanup failed")
 
     execution = Execution()
     runner = object.__new__(RuntimeTaskNodeRunner)
     runner._execution = execution
+    runner._detached_tasks = set()
 
     async def prepare(*args, **kwargs):
         del args, kwargs
@@ -185,11 +190,15 @@ async def test_task_runner_preserves_cancellation_when_child_cleanup_fails() -> 
     await execution.wait_started.wait()
     task.cancel()
 
-    with pytest.raises(asyncio.CancelledError) as error:
+    with pytest.raises(asyncio.CancelledError):
         await task
 
-    assert isinstance(error.value.__cause__, AIError)
-    assert error.value.__cause__.code is ErrorCode.STORAGE_RECOVERY_REQUIRED
+    await execution.cancel_started.wait()
+    pending = runner.pending_background_tasks
+    assert pending
+    execution.finish_cancel.set()
+    await asyncio.gather(*pending, return_exceptions=True)
+    assert runner.pending_background_tasks == ()
 
 
 @pytest.mark.asyncio
@@ -212,6 +221,7 @@ async def test_subagent_child_cleanup_failure_does_not_replace_cancellation() ->
     execution = Execution()
     dispatcher = object.__new__(SubagentDispatcher)
     dispatcher._execution = execution
+    dispatcher._detached_tasks = set()
     task = asyncio.create_task(
         dispatcher.cancel_child(
             "execution",
@@ -221,9 +231,12 @@ async def test_subagent_child_cleanup_failure_does_not_replace_cancellation() ->
     )
     await execution.cancel_started.wait()
     task.cancel()
-    execution.finish_cancel.set()
 
-    with pytest.raises(asyncio.CancelledError) as error:
+    with pytest.raises(asyncio.CancelledError):
         await task
 
-    assert isinstance(error.value.__cause__, RuntimeError)
+    pending = dispatcher.pending_background_tasks
+    assert pending
+    execution.finish_cancel.set()
+    await asyncio.gather(*pending, return_exceptions=True)
+    assert dispatcher.pending_background_tasks == ()

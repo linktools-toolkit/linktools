@@ -5,6 +5,7 @@
 import asyncio
 import json
 from collections.abc import Mapping
+from typing import cast
 
 from linktools.core import environ
 
@@ -30,6 +31,7 @@ from ..task import (
 )
 from .service_api import (
     CancelExecutionRequest,
+    ExecutionHandle,
     ExecutionRequest,
     ExecutionResult,
     ExecutionService,
@@ -54,6 +56,11 @@ class RuntimeTaskNodeRunner:
         self._execution = execution
         self._catalog = catalog
         self._compiler = compiler
+        self._detached_tasks: set[asyncio.Task[object]] = set()
+
+    @property
+    def pending_background_tasks(self) -> tuple[asyncio.Task[object], ...]:
+        return tuple(task for task in self._detached_tasks if not task.done())
 
     async def prepare(
         self,
@@ -64,7 +71,7 @@ class RuntimeTaskNodeRunner:
         dependency_results: "Mapping[str, TaskDependencyResult]",
     ) -> "tuple[str, ExecutionRequest]":
         payload = node.input
-        if set(payload) != _AGENT_TASK_FIELDS:
+        if not _AGENT_TASK_FIELDS.issubset(payload):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         if payload["type"] != "linktools.ai.agent" or payload["version"] != 1:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -79,13 +86,21 @@ class RuntimeTaskNodeRunner:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         try:
             snapshot = AgentBindingSnapshot.from_payload(payload["binding"])
-            binding = self._catalog.register_binding(self._compiler.restore(snapshot))
+            binding = self._catalog.register_binding(
+                self._compiler.restore(snapshot)
+            )
         except AIError as error:
             if error.code is ErrorCode.STORAGE_INTEGRITY_ERROR:
                 raise
             raise AIError(
                 ErrorCode.AGENT_DEFINITION_UNAVAILABLE,
-                safe_details={"binding_digest": snapshot.binding_digest if "snapshot" in locals() else None},
+                safe_details={
+                    "binding_digest": (
+                        snapshot.binding_digest
+                        if "snapshot" in locals()
+                        else None
+                    )
+                },
             ) from error
         if binding.snapshot != snapshot or binding.digest != snapshot.binding_digest:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -98,7 +113,10 @@ class RuntimeTaskNodeRunner:
             dependency = dependency_results[dependency_id]
             if dependency.execution_id is None:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            result = await self._execution.result(dependency.execution_id, principal=principal)
+            result = await self._execution.result(
+                dependency.execution_id,
+                principal=principal,
+            )
             _validate_dependency_result(result, dependency.result_digest)
             dependency_payload[dependency_id] = result.output
         if dependency_payload:
@@ -120,7 +138,9 @@ class RuntimeTaskNodeRunner:
                 "dependencies": [
                     {
                         "node_id": dependency_id,
-                        "result_digest": dependency_results[dependency_id].result_digest,
+                        "result_digest": dependency_results[
+                            dependency_id
+                        ].result_digest,
                     }
                     for dependency_id in sorted(node.dependencies)
                 ],
@@ -143,15 +163,29 @@ class RuntimeTaskNodeRunner:
         *,
         principal: Principal,
     ) -> ExecutionResult:
-        return await self._execution.result(execution_id, principal=principal)
+        return await self._execution.result(
+            execution_id,
+            principal=principal,
+        )
 
-    async def result(self, execution_id: str, *, principal: Principal) -> TaskNodeRunResult:
-        result = await self.terminal_result(execution_id, principal=principal)
+    async def result(
+        self,
+        execution_id: str,
+        *,
+        principal: Principal,
+    ) -> TaskNodeRunResult:
+        result = await self.terminal_result(
+            execution_id,
+            principal=principal,
+        )
         if result.status is not ExecutionStatus.SUCCEEDED:
             raise _execution_failure(result)
         if result.output is None:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        return TaskNodeRunResult(canonical_sha256(result.output), result.execution_id)
+        return TaskNodeRunResult(
+            canonical_sha256(result.output),
+            result.execution_id,
+        )
 
     async def run(
         self,
@@ -167,41 +201,147 @@ class RuntimeTaskNodeRunner:
             principal=principal,
             dependency_results=dependency_results,
         )
-        launch_task = asyncio.create_task(self._execution.run(binding_digest, request))
+        launch_task = asyncio.create_task(
+            self._execution.run(binding_digest, request),
+            name=f"task-execution-launch-{graph_id}-{node.node_id}",
+        )
         try:
             handle = await asyncio.shield(launch_task)
-        except asyncio.CancelledError as cancellation:
-            try:
-                handle = await asyncio.shield(launch_task)
-            except BaseException as error:
-                _logger.warning(
-                    "task execution launch failed during cancellation: graph=%s task=%s error=%s",
+        except asyncio.CancelledError:
+            continuation = asyncio.create_task(
+                self._cancel_after_launch(
+                    launch_task,
+                    principal,
                     graph_id,
                     node.node_id,
-                    type(error).__name__,
-                )
-                raise cancellation from error
-            try:
-                await _cancel_execution(self._execution, handle.execution_id, principal, graph_id, node.node_id)
-            except BaseException as cleanup_error:
-                raise cancellation from cleanup_error
+                ),
+                name=f"task-execution-launch-cleanup-{graph_id}-{node.node_id}",
+            )
+            self._detach(
+                cast("asyncio.Task[object]", continuation),
+                "task execution launch cleanup",
+            )
             raise
-        wait_task = asyncio.create_task(self._execution.wait(handle.execution_id, principal=principal))
+        wait_task = asyncio.create_task(
+            self._execution.wait(
+                handle.execution_id,
+                principal=principal,
+            ),
+            name=f"task-execution-wait-{graph_id}-{node.node_id}",
+        )
         try:
             await asyncio.shield(wait_task)
-        except asyncio.CancelledError as cancellation:
-            cleanup_error: BaseException | None = None
-            try:
-                await _cancel_execution(self._execution, handle.execution_id, principal, graph_id, node.node_id)
-            except BaseException as error:  # noqa: BLE001
-                cleanup_error = error
+        except asyncio.CancelledError:
             if not wait_task.done():
                 wait_task.cancel()
-                await asyncio.gather(wait_task, return_exceptions=True)
-            if cleanup_error is not None:
-                raise cancellation from cleanup_error
+                self._detach(
+                    cast("asyncio.Task[object]", wait_task),
+                    "task execution wait cleanup",
+                )
+            else:
+                self._consume_done(
+                    cast("asyncio.Task[object]", wait_task),
+                    "task execution wait cleanup",
+                )
+            cleanup = asyncio.create_task(
+                _cancel_execution(
+                    self._execution,
+                    handle.execution_id,
+                    principal,
+                    graph_id,
+                    node.node_id,
+                ),
+                name=f"task-execution-cancel-{graph_id}-{node.node_id}",
+            )
+            self._detach(
+                cast("asyncio.Task[object]", cleanup),
+                "task execution cancellation",
+            )
             raise
-        return await self.result(handle.execution_id, principal=principal)
+        return await self.result(
+            handle.execution_id,
+            principal=principal,
+        )
+
+    async def _cancel_after_launch(
+        self,
+        launch_task: "asyncio.Task[ExecutionHandle]",
+        principal: Principal,
+        graph_id: str,
+        node_id: str,
+    ) -> None:
+        try:
+            handle = await launch_task
+        except asyncio.CancelledError:
+            return
+        except BaseException as error:  # noqa: BLE001
+            _logger.warning(
+                "task execution launch failed during cancellation: "
+                "graph=%s task=%s error=%s",
+                graph_id,
+                node_id,
+                type(error).__name__,
+            )
+            return
+        execution_id = handle.execution_id
+        if not execution_id:
+            _logger.error(
+                "task execution launch returned invalid handle during cancellation: "
+                "graph=%s task=%s",
+                graph_id,
+                node_id,
+            )
+            return
+        try:
+            await _cancel_execution(
+                self._execution,
+                execution_id,
+                principal,
+                graph_id,
+                node_id,
+            )
+        except BaseException as error:  # noqa: BLE001
+            _logger.warning(
+                "task execution cancellation requires recovery: "
+                "graph=%s task=%s error=%s",
+                graph_id,
+                node_id,
+                type(error).__name__,
+            )
+
+    def _detach(
+        self,
+        task: "asyncio.Task[object]",
+        label: str,
+    ) -> None:
+        if task.done():
+            self._consume_done(task, label)
+            return
+        if task in self._detached_tasks:
+            return
+        self._detached_tasks.add(task)
+
+        def consume(done: "asyncio.Task[object]") -> None:
+            try:
+                self._consume_done(done, label)
+            finally:
+                self._detached_tasks.discard(done)
+
+        task.add_done_callback(consume)
+
+    @staticmethod
+    def _consume_done(
+        task: "asyncio.Task[object]",
+        label: str,
+    ) -> None:
+        if not task.done():
+            return
+        try:
+            task.result()
+        except asyncio.CancelledError:
+            pass
+        except BaseException:  # noqa: BLE001
+            _logger.exception("detached %s failed", label)
 
 
 class WorkflowTaskGraphLauncher:
@@ -217,18 +357,28 @@ class WorkflowTaskGraphLauncher:
         )
         return await self._gateway.start_task_graph(workflow_id, request)
 
-    async def cancel(self, graph_id: str, request: CancelGraphRequest) -> TaskGraphView:
+    async def cancel(
+        self,
+        graph_id: str,
+        request: CancelGraphRequest,
+    ) -> TaskGraphView:
         workflow_id = "task-" + canonical_sha256(
             {
                 "tenant_id": request.principal.tenant_id,
                 "graph_id": graph_id,
             }
         )
-        return await self._gateway.cancel_task_graph(workflow_id, request.idempotency_key)
+        return await self._gateway.cancel_task_graph(
+            workflow_id,
+            request.idempotency_key,
+        )
 
 
 def _execution_failure(result: ExecutionResult) -> AIError:
-    if result.status not in {ExecutionStatus.FAILED, ExecutionStatus.CANCELLED}:
+    if result.status not in {
+        ExecutionStatus.FAILED,
+        ExecutionStatus.CANCELLED,
+    }:
         return AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     if result.error_code is None:
         return AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -239,7 +389,10 @@ def _execution_failure(result: ExecutionResult) -> AIError:
     return AIError(code, safe_details=result.safe_error_details)
 
 
-def _validate_dependency_result(result: ExecutionResult, expected_digest: str) -> None:
+def _validate_dependency_result(
+    result: ExecutionResult,
+    expected_digest: str,
+) -> None:
     if result.status is not ExecutionStatus.SUCCEEDED or result.output is None:
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     if canonical_sha256(result.output) != expected_digest:
@@ -247,7 +400,13 @@ def _validate_dependency_result(result: ExecutionResult, expected_digest: str) -
 
 
 def _canonical_json(value: object) -> str:
-    return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False)
+    return json.dumps(
+        value,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    )
 
 
 async def _cancel_execution(
@@ -259,23 +418,30 @@ async def _cancel_execution(
 ) -> None:
     request = CancelExecutionRequest(
         principal,
-        canonical_sha256({"task_graph": graph_id, "node_id": node_id, "execution_id": execution_id}),
+        canonical_sha256(
+            {
+                "task_graph": graph_id,
+                "node_id": node_id,
+                "execution_id": execution_id,
+            }
+        ),
     )
-    cleanup = asyncio.create_task(execution.cancel(execution_id, request))
     try:
-        result = await asyncio.shield(cleanup)
+        result = await execution.cancel(execution_id, request)
     except asyncio.CancelledError:
-        try:
-            result = await cleanup
-        except BaseException as error:
-            raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED) from error
-    except BaseException as error:
+        raise
+    except BaseException as error:  # noqa: BLE001
         raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED) from error
     if result.cancelled:
         return
     try:
-        current = await execution.inspect(execution_id, principal=principal)
-    except BaseException as error:
+        current = await execution.inspect(
+            execution_id,
+            principal=principal,
+        )
+    except asyncio.CancelledError:
+        raise
+    except BaseException as error:  # noqa: BLE001
         raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED) from error
     if current.status not in {
         ExecutionStatus.SUCCEEDED,
@@ -285,4 +451,8 @@ async def _cancel_execution(
         raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
 
 
-__all__ = ["DefaultTaskService", "RuntimeTaskNodeRunner", "WorkflowTaskGraphLauncher"]
+__all__ = [
+    "DefaultTaskService",
+    "RuntimeTaskNodeRunner",
+    "WorkflowTaskGraphLauncher",
+]

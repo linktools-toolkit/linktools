@@ -4,7 +4,7 @@
 
 import asyncio
 import uuid
-from collections.abc import Awaitable, Callable, Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
@@ -110,6 +110,9 @@ from .state._repositories import (
 
 
 class _SubagentDispatcher(Protocol):
+    @property
+    def pending_background_tasks(self) -> tuple[asyncio.Task[object], ...]: ...
+
     def delegate_for(
         self,
         *,
@@ -127,22 +130,6 @@ _logger = environ.get_logger("ai.runtime.local")
 
 
 _CheckpointT = TypeVar("_CheckpointT")
-
-
-async def _settle_local_checkpoint(
-    operation: Awaitable[_CheckpointT],
-) -> tuple[_CheckpointT, asyncio.CancelledError | None]:
-    task = asyncio.create_task(operation)
-    cancellation: asyncio.CancelledError | None = None
-    while not task.done():
-        try:
-            await asyncio.shield(task)
-        except asyncio.CancelledError as error:
-            if task.done():
-                break
-            if cancellation is None:
-                cancellation = error
-    return task.result(), cancellation
 
 
 _HANDOFF_PHASE_RANK = {
@@ -257,6 +244,7 @@ class LocalExecutionBackend:
         self._pending_audit_events: dict[str, list[ExecutionEventAppend]] = {}
         self._pending_audit_locks: dict[str, asyncio.Lock] = {}
         self._recovery_relaunch_ids: set[str] = set()
+        self._checkpoint_tasks: set[asyncio.Task[object]] = set()
         self._accepting = True
         execution_steps = self._step_reads[RuntimeDomain.EXECUTION]
         conversation_steps = self._step_reads[RuntimeDomain.CONVERSATION]
@@ -312,7 +300,50 @@ class LocalExecutionBackend:
 
 
 
-    async def commit_terminal_checkpoint(
+    def _track_checkpoint_task(
+        self,
+        task: "asyncio.Task[object]",
+        label: str,
+    ) -> None:
+        self._checkpoint_tasks.add(task)
+
+        def consume(done: "asyncio.Task[object]") -> None:
+            try:
+                done.result()
+            except asyncio.CancelledError:
+                pass
+            except BaseException as error:  # noqa: BLE001
+                _logger.warning(
+                    "local durable checkpoint owner failed: label=%s error=%s",
+                    label,
+                    type(error).__name__,
+                )
+            finally:
+                self._checkpoint_tasks.discard(done)
+
+        task.add_done_callback(consume)
+
+    async def _await_checkpoint_task(
+        self,
+        task: "asyncio.Task[_CheckpointT]",
+        *,
+        label: str,
+    ) -> "tuple[_CheckpointT, asyncio.CancelledError | None]":
+        self._track_checkpoint_task(cast("asyncio.Task[object]", task), label)
+        try:
+            return await asyncio.shield(task), None
+        except asyncio.CancelledError as cancellation:
+            if not task.done():
+                raise AIError(
+                    ErrorCode.STORAGE_COMMIT_UNKNOWN,
+                    safe_details={"phase": "local_checkpoint", "operation": label},
+                ) from cancellation
+            try:
+                return task.result(), cancellation
+            except BaseException as error:  # noqa: BLE001
+                raise error from cancellation
+
+    async def _commit_terminal_checkpoint_owned(
         self,
         commit: ExecutionTerminalCommit,
         *,
@@ -321,12 +352,10 @@ class LocalExecutionBackend:
         execution_id = commit.execution.execution_id
         async with self._audit_lock(execution_id):
             pending = tuple(self._pending_audit_events.get(execution_id, ()))
-            committed, cancellation = await _settle_local_checkpoint(
-                self._runtime_commands.commit_terminal_checkpoint(
-                    commit,
-                    session_id=session_id,
-                    audit_events=pending,
-                )
+            committed = await self._runtime_commands.commit_terminal_checkpoint(
+                commit,
+                session_id=session_id,
+                audit_events=pending,
             )
             self._pending_audit_events.pop(execution_id, None)
             self._publish_committed_events(
@@ -337,12 +366,30 @@ class LocalExecutionBackend:
                 durable_sequence=committed.execution.event_sequence,
             )
             self._terminal_events.setdefault(execution_id, asyncio.Event()).set()
+            return committed
+
+    async def commit_terminal_checkpoint(
+        self,
+        commit: ExecutionTerminalCommit,
+        *,
+        session_id: str | None,
+    ) -> ExecutionTerminalCommitResult:
+        task = asyncio.create_task(
+            self._commit_terminal_checkpoint_owned(
+                commit,
+                session_id=session_id,
+            ),
+            name=f"local-terminal-checkpoint-{commit.execution.execution_id}",
+        )
+        committed, cancellation = await self._await_checkpoint_task(
+            task,
+            label="terminal",
+        )
         if cancellation is not None:
             raise cancellation
         return committed
 
-
-    async def commit_cancel_checkpoint(
+    async def _commit_cancel_checkpoint_owned(
         self,
         commit: ExecutionCancelRequestCommit,
         *,
@@ -350,12 +397,10 @@ class LocalExecutionBackend:
     ) -> ExecutionRecord:
         async with self._audit_lock(commit.execution_id):
             pending = tuple(self._pending_audit_events.get(commit.execution_id, ()))
-            committed, cancellation = await _settle_local_checkpoint(
-                self._runtime_commands.commit_cancel_checkpoint(
-                    commit,
-                    expected_status=expected_status,
-                    audit_events=pending,
-                )
+            committed = await self._runtime_commands.commit_cancel_checkpoint(
+                commit,
+                expected_status=expected_status,
+                audit_events=pending,
             )
             self._pending_audit_events.pop(commit.execution_id, None)
             cancel_sequence = commit.expected_event_sequence + len(pending) + 1
@@ -366,9 +411,29 @@ class LocalExecutionBackend:
                 payload={"operation_id": commit.operation_id},
                 durable_sequence=cancel_sequence,
             )
+            return committed
+
+    async def commit_cancel_checkpoint(
+        self,
+        commit: ExecutionCancelRequestCommit,
+        *,
+        expected_status: ExecutionStatus,
+    ) -> ExecutionRecord:
+        task = asyncio.create_task(
+            self._commit_cancel_checkpoint_owned(
+                commit,
+                expected_status=expected_status,
+            ),
+            name=f"local-cancel-checkpoint-{commit.execution_id}",
+        )
+        committed, cancellation = await self._await_checkpoint_task(
+            task,
+            label="cancel",
+        )
         if cancellation is not None:
             raise cancellation
         return committed
+
 
     async def prepare_start(
         self,
@@ -759,7 +824,9 @@ class LocalExecutionBackend:
                 return CancelEffectOutcome.CONFIRMED
             return CancelEffectOutcome.UNKNOWN
         task.cancel()
-        await asyncio.gather(task, return_exceptions=True)
+        await asyncio.sleep(0)
+        if not task.done():
+            return CancelEffectOutcome.UNKNOWN
         self._task_done(execution.execution_id, task)
         current = await self._execution.executions.get(
             execution.execution_id,
@@ -1757,9 +1824,31 @@ class LocalExecutionBackend:
                 )
             cancel_tasks.append(task)
         if cancel_tasks:
-            await asyncio.gather(
-                *cancel_tasks,
-                return_exceptions=True,
+            await asyncio.sleep(0)
+        pending = tuple(task for task in cancel_tasks if not task.done())
+        background = self._executor.pending_background_tasks
+        dispatcher_background = (
+            ()
+            if self._subagent_dispatcher is None
+            else self._subagent_dispatcher.pending_background_tasks
+        )
+        checkpoint_background = tuple(
+            task for task in self._checkpoint_tasks if not task.done()
+        )
+        pending_background = tuple(
+            task
+            for task in (*background, *dispatcher_background, *checkpoint_background)
+            if isinstance(task, asyncio.Task) and not task.done()
+        )
+        if pending or pending_background:
+            raise AIError(
+                ErrorCode.STORAGE_RECOVERY_REQUIRED,
+                safe_details={
+                    "phase": "local_execution_close",
+                    "pending_workers": len(pending),
+                    "pending_background_tasks": len(pending_background),
+                    "pending_checkpoint_tasks": len(checkpoint_background),
+                },
             )
         for execution_id, task in tasks:
             self._task_done(execution_id, task)
@@ -1769,6 +1858,7 @@ class LocalExecutionBackend:
         self._worker_failures.clear()
         self._pending_audit_events.clear()
         self._pending_audit_locks.clear()
+        self._checkpoint_tasks.clear()
 
     async def release_runtime_execution(
         self,

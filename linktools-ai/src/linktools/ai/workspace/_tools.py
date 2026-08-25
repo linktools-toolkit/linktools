@@ -22,6 +22,7 @@ if TYPE_CHECKING:
 
 
 _logger = environ.get_logger("ai.workspace.tools")
+_DETACHED_PROCESS_WAITS: set[asyncio.Task[int]] = set()
 
 
 class WorkspaceTool(Protocol):
@@ -108,20 +109,14 @@ def build_workspace_tools(root: 'str | Path') -> 'tuple[WorkspaceTool, ...]':
                     timeout=timeout_value / 1000,
                 )
             except asyncio.TimeoutError:
-                _terminate_process_group(process.pid)
-                try:
-                    await asyncio.wait_for(process.wait(), timeout=5)
-                except asyncio.TimeoutError:
-                    _kill_process_group(process.pid)
-                    await process.wait()
-                return {"exit_code": None, "status": "TIMEOUT", "truncated": stdout_truncated or stderr_truncated}
+                await _terminate_and_reap(process)
+                return {
+                    "exit_code": None,
+                    "status": "TIMEOUT",
+                    "truncated": stdout_truncated or stderr_truncated,
+                }
             except asyncio.CancelledError:
-                _terminate_process_group(process.pid)
-                try:
-                    await asyncio.wait_for(process.wait(), timeout=5)
-                except asyncio.TimeoutError:
-                    _kill_process_group(process.pid)
-                    await process.wait()
+                await _terminate_and_reap(process)
                 raise
             _logger.debug("local tool completed name=bash exit_code=%s", process.returncode)
             return {
@@ -233,6 +228,49 @@ def _kill_process_group(pid: int) -> None:
         os.killpg(pid, signal.SIGKILL)
     except ProcessLookupError:
         return
+
+
+async def _terminate_and_reap(process: asyncio.subprocess.Process) -> None:
+    _terminate_process_group(process.pid)
+    wait_task = asyncio.create_task(process.wait())
+    try:
+        await asyncio.wait_for(asyncio.shield(wait_task), timeout=5)
+        return
+    except asyncio.TimeoutError:
+        _kill_process_group(process.pid)
+    except asyncio.CancelledError:
+        _kill_process_group(process.pid)
+        _detach_process_wait(wait_task)
+        raise
+    try:
+        await asyncio.wait_for(asyncio.shield(wait_task), timeout=5)
+    except asyncio.TimeoutError:
+        _detach_process_wait(wait_task)
+    except asyncio.CancelledError:
+        _detach_process_wait(wait_task)
+        raise
+
+
+def _detach_process_wait(task: asyncio.Task[int]) -> None:
+    if task.done():
+        try:
+            task.result()
+        except BaseException:  # noqa: BLE001
+            pass
+        return
+    _DETACHED_PROCESS_WAITS.add(task)
+
+    def consume(done: asyncio.Task[int]) -> None:
+        try:
+            done.result()
+        except asyncio.CancelledError:
+            pass
+        except BaseException:  # noqa: BLE001
+            _logger.exception("detached shell process reap failed")
+        finally:
+            _DETACHED_PROCESS_WAITS.discard(done)
+
+    task.add_done_callback(consume)
 
 
 __all__ = ["WorkspaceTool", "build_workspace_capabilities", "build_workspace_tool_map", "build_workspace_tools"]

@@ -72,13 +72,12 @@ def _binding_snapshot_payload() -> dict[str, object]:
         version=1,
         agent_spec=AgentSpec("agent", 1, "default"),
         agent_digest="b" * 64,
-        output_type_module=output.value_type.__module__,
-        output_type_qualname=output.value_type.__qualname__,
         output_schema_id=output.schema_id,
         output_schema_revision=output.schema_revision,
         output_schema_fingerprint=output.schema_fingerprint,
         local_runtime_capability_descriptors=(),
         binding_digest="a" * 64,
+        global_runtime_capability_descriptors=(),
     )
     return snapshot.to_payload()
 
@@ -111,20 +110,12 @@ def test_context_projection_persisted_writer_round_trips() -> None:
     ) == projection
 
 
-def test_context_projection_persisted_writer_rejects_runtime_type_mismatch() -> None:
-    projection = ContextProjection(
-        cast("tuple[ContextProjectionItem, ...]", ("invalid",)),
-        "d" * 64,
-    )
-
-    with pytest.raises(AIError) as raised:
-        _encode_persisted_domain(projection)
-    assert raised.value.code is ErrorCode.INTERNAL_ERROR
-    assert raised.value.retryable is False
-    assert raised.value.safe_details == {
-        "phase": "persistence_encode",
-        "domain_type": "ContextProjection",
-    }
+def test_context_projection_rejects_runtime_type_mismatch_at_construction() -> None:
+    with pytest.raises(TypeError):
+        ContextProjection(
+            cast("tuple[ContextProjectionItem, ...]", ("invalid",)),
+            "d" * 64,
+        )
 
 
 def test_persisted_writer_rejects_mutated_stored_payload() -> None:
@@ -260,13 +251,11 @@ def test_current_enum_value_round_trip_and_unknown_value_boundary() -> None:
     assert raised.value.code is ErrorCode.STORAGE_VERSION_UNSUPPORTED
 
 
-def test_explicit_custom_task_node_shape_remains_strict() -> None:
+def test_explicit_custom_task_node_tolerates_additive_field() -> None:
     node = TaskNode("node", (), input={"key": "value"}, budget_cost=1)
     payload = encode_domain(node)
-    payload["fields"]["extra"] = None
-    with pytest.raises(AIError) as raised:
-        decode_domain(payload, TaskNode)
-    assert raised.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
+    payload["fields"]["extra"] = {"must": "not be decoded"}
+    assert decode_domain(payload, TaskNode) == node
 
 
 def test_agent_binding_snapshot_shape_remains_strict() -> None:

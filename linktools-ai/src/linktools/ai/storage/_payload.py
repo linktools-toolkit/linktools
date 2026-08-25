@@ -94,9 +94,19 @@ class StoredPayload:
             "size": self.size,
         }
         if self.kind == "inline":
+            if self.encoding is None:
+                raise ValueError("inline payload encoding is missing")
+            actual_digest, actual_size = _inline_digest_size(
+                self.encoding,
+                self.value,
+            )
+            if actual_digest != self.digest or actual_size != self.size:
+                raise ValueError("inline payload digest or size does not match value")
             value["value"] = self.value  # type: ignore[assignment]
         else:
             assert self.ref is not None
+            if self.ref.digest != self.digest or self.ref.size != self.size:
+                raise ValueError("object payload descriptor does not match reference")
             value["ref"] = {
                 "store_id": self.ref.store_id,
                 "key": self.ref.key,

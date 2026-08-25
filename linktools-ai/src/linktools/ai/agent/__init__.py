@@ -28,8 +28,17 @@ from ._executor import (
     LiveDelta,
     UsageSink,
 )
+from ._output import (
+    ASSISTANT_TEXT_OUTPUT_SCHEMA_ID,
+    ASSISTANT_TEXT_OUTPUT_SCHEMA_REVISION,
+    AssistantTextOutput,
+    OutputBinding,
+    bind_output,
+)
 
 __all__ = [
+    "ASSISTANT_TEXT_OUTPUT_SCHEMA_ID",
+    "ASSISTANT_TEXT_OUTPUT_SCHEMA_REVISION",
     "MEMORY_TOOL_NAMES",
     "PLANNING_TOOL_NAMES",
     "SUBAGENT_TOOL_NAMES",
@@ -43,13 +52,16 @@ __all__ = [
     "AgentDefinition",
     "AgentExecutionResult",
     "AgentExecutor",
+    "AssistantTextOutput",
     "DurableBoundary",
     "EventSink",
     "LiveDelta",
+    "OutputBinding",
     "SubagentDelegate",
     "ToolOperationBridge",
     "ToolOperationDecision",
     "UsageSink",
+    "bind_output",
     "build_pydantic_agent",
     "select_platform_tool_names",
     "tool_name_allowed",

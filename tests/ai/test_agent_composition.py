@@ -67,20 +67,32 @@ def test_top_level_public_surface_is_exact() -> None:
     ]
 
 
-def test_runtime_capability_from_spec_requires_exact_importable_type() -> None:
-    shadow_type = type(
-        "_DurableCapability",
-        (_DurableCapability,),
+def test_runtime_capability_from_spec_uses_serialization_identity() -> None:
+    class RelocatableCapability(_DurableCapability):
+        @classmethod
+        def get_serialization_name(cls) -> "str | None":
+            return "test-relocatable-capability"
+
+    relocated_type = type(
+        "RelocatedCapability",
+        (RelocatableCapability,),
         {
-            "__module__": __name__,
-            "__qualname__": "_DurableCapability",
+            "__module__": "example.moved",
+            "__qualname__": "RelocatedCapability",
         },
     )
+    value = RuntimeCapability.from_spec("local", relocated_type, config={})
+    descriptor = value.descriptor
+    assert descriptor is not None
+    assert descriptor["serialization_name"] == "test-relocatable-capability"
+    assert set(descriptor) == {
+        "id",
+        "revision",
+        "serialization_name",
+        "config",
+        "fingerprint",
+    }
 
-    with pytest.raises(AIError) as error:
-        RuntimeCapability.from_spec("local", shadow_type, config={})
-
-    assert error.value.code is ErrorCode.CAPABILITY_RESOLUTION_INVALID
 
 
 def test_agent_handle_does_not_expose_internal_definition() -> None:
@@ -92,8 +104,6 @@ def test_agent_binding_snapshot_is_deeply_immutable() -> None:
         version=1,
         agent_spec=AgentSpec("agent", 1, "model"),
         agent_digest="c" * 64,
-        output_type_module="example.output",
-        output_type_qualname="Output",
         output_schema_id="output",
         output_schema_revision=1,
         output_schema_fingerprint="b" * 64,
@@ -101,6 +111,7 @@ def test_agent_binding_snapshot_is_deeply_immutable() -> None:
             {"config": {"items": ["first"]}},
         ),
         binding_digest="a" * 64,
+        global_runtime_capability_descriptors=(),
     )
 
     descriptor = snapshot.local_runtime_capability_descriptors[0]

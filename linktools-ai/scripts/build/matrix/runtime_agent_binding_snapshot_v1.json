@@ -16,7 +16,6 @@
   "output_schema_fingerprint": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
   "output_schema_id": "runtime.persistence.fixture",
   "output_schema_revision": 1,
-  "output_type_module": "linktools.ai.runtime.fixture",
-  "output_type_qualname": "FixtureOutput",
+  "global_runtime_capability_descriptors": [],
   "version": 1
 }

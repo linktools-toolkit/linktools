@@ -47,13 +47,12 @@ def _binding_snapshot() -> AgentBindingSnapshot:
         version=1,
         agent_spec=AgentSpec("default", 1, "default"),
         agent_digest="b" * 64,
-        output_type_module=output.value_type.__module__,
-        output_type_qualname=output.value_type.__qualname__,
         output_schema_id=output.schema_id,
         output_schema_revision=output.schema_revision,
         output_schema_fingerprint=output.schema_fingerprint,
         local_runtime_capability_descriptors=(),
         binding_digest="a" * 64,
+        global_runtime_capability_descriptors=(),
     )
 
 
@@ -306,6 +305,7 @@ async def test_cancel_local_bookkeeping_survives_caller_cancellation() -> None:
     backend = object.__new__(LocalExecutionBackend)
     backend._pending_audit_events = {"execution": [pending]}
     backend._pending_audit_locks = {}
+    backend._checkpoint_tasks = set()
     backend._live_broker = broker
     backend._runtime_commands = commands
     commit = ExecutionCancelRequestCommit(
@@ -321,9 +321,15 @@ async def test_cancel_local_bookkeeping_survives_caller_cancellation() -> None:
     )
     await commands.started.wait()
     task.cancel()
-    commands.release.set()
-    with pytest.raises(asyncio.CancelledError):
+    with pytest.raises(AIError) as raised:
         await task
+    assert raised.value.code is ErrorCode.STORAGE_COMMIT_UNKNOWN
+    owners = tuple(backend._checkpoint_tasks)
+    assert len(owners) == 1
+    assert "execution" in backend._pending_audit_events
+    commands.release.set()
+    await asyncio.gather(*owners)
+    assert not backend._checkpoint_tasks
     assert "execution" not in backend._pending_audit_events
     live = broker.subscribe("execution")
     first = await live.__anext__()
@@ -392,15 +398,22 @@ async def test_terminal_local_bookkeeping_survives_caller_cancellation() -> None
     backend = object.__new__(LocalExecutionBackend)
     backend._pending_audit_events = {"execution": [pending]}
     backend._pending_audit_locks = {}
+    backend._checkpoint_tasks = set()
     backend._live_broker = broker
     backend._runtime_commands = commands
     backend._terminal_events = {}
     task = asyncio.create_task(backend.commit_terminal_checkpoint(commit, session_id=None))
     await commands.started.wait()
     task.cancel()
-    commands.release.set()
-    with pytest.raises(asyncio.CancelledError):
+    with pytest.raises(AIError) as raised:
         await task
+    assert raised.value.code is ErrorCode.STORAGE_COMMIT_UNKNOWN
+    owners = tuple(backend._checkpoint_tasks)
+    assert len(owners) == 1
+    assert "execution" in backend._pending_audit_events
+    commands.release.set()
+    await asyncio.gather(*owners)
+    assert not backend._checkpoint_tasks
     assert "execution" not in backend._pending_audit_events
     live = broker.subscribe("execution")
     first = await live.__anext__()
