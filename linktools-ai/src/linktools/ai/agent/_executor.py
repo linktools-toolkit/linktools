@@ -10,7 +10,7 @@ from typing import Any, Protocol
 
 from linktools.core import environ
 from openai import APIError as OpenAIAPIError
-from pydantic import ValidationError
+from pydantic import BaseModel, ValidationError
 from pydantic_ai import AgentRunResultEvent, ModelSettings
 from pydantic_ai.capabilities import AbstractCapability, ReinjectSystemPrompt
 from pydantic_ai.capabilities import AgentCapability as PydanticAgentCapability
@@ -55,7 +55,6 @@ from ..errors import AIError, ErrorCode
 from ..spec import AgentUsageLimits
 from ._binding import AgentBinding
 from ._builder import build_pydantic_agent
-from ._output import AssistantTextOutput
 from ._capabilities import (
     MEMORY_READ_TOOL_NAMES,
     MEMORY_TOOL_NAMES,
@@ -70,6 +69,7 @@ from ._capabilities import (
     tool_name_allowed,
 )
 from ._definition import AgentDefinition
+from ._output import AssistantTextOutput
 
 
 @dataclass(frozen=True, slots=True)
@@ -232,7 +232,7 @@ class AgentExecutor:
                 done.result()
             except asyncio.CancelledError:
                 pass
-            except BaseException:  # noqa: BLE001
+            except BaseException:
                 _logger.exception(
                     "detached usage sink failed: step=%s",
                     step_run_id,
@@ -366,6 +366,8 @@ class AgentExecutor:
             if not isinstance(output, AssistantTextOutput):
                 raise AIError(ErrorCode.OUTPUT_VALIDATION_FAILED)
             output_payload: object = output.model_dump(mode="json")
+        elif isinstance(output, BaseModel):
+            output_payload = output.model_dump(mode="json")
         elif isinstance(output, Mapping):
             output_payload = dict(output)
         else:

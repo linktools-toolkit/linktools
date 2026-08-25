@@ -755,6 +755,11 @@ class RuntimeStateCommands:
             session_id,
             recovery_checkpoint is not None,
         )
+        owner_tasks = (
+            self._background_tasks
+            if background_tasks is None
+            else background_tasks
+        )
         prepared_conversation = ()
         if (
             self._conversation_steps is not None
@@ -977,11 +982,6 @@ class RuntimeStateCommands:
                         error=error,
                     )
 
-            owner_tasks = (
-                self._background_tasks
-                if background_tasks is None
-                else background_tasks
-            )
             result = await run_durable_commit(
                 lambda: stores[0].storage_group.mutate(stores, callback),
                 readback,
@@ -1288,7 +1288,7 @@ class RuntimeStateCommands:
                     commit_execution,
                 ),
                 readback,
-                background_tasks=self._background_tasks,
+                background_tasks=owner_tasks,
             )
             if outcome.state is DurableCommitState.COMMITTED:
                 if outcome.value is None:

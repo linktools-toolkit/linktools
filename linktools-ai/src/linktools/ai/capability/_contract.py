@@ -381,10 +381,7 @@ def _resolve_capability_type(
             target = getattr(target, part)
     except Exception as error:
         raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID) from error
-    if (
-        not isinstance(target, type)
-        or not issubclass(target, AbstractCapability)
-    ):
+    if not isinstance(target, type) or not issubclass(target, AbstractCapability):
         raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
     return cast("type[AbstractCapability[None]]", target)
 
@@ -397,6 +394,7 @@ def _validate_restore_locator(value: object) -> None:
     if (
         not isinstance(module, str)
         or not module.strip()
+        or module in {"__main__", "__mp_main__"}
         or not isinstance(qualname, str)
         or not qualname.strip()
         or "<locals>" in qualname

@@ -195,7 +195,7 @@ agent = runtime.agent("audit")
 result = await agent.run("inspect the patch", output=Finding)
 ```
 
-Durable state stores the output Python type module/qualname and schema identity in `AgentBindingSnapshot`. Recovery imports the same public type, verifies the schema fingerprint, rebuilds the Agent definition, recomputes both digests, and fails closed on drift.
+The binding persists the exact JSON Schema and its fingerprint, not a Python import path. Normal executions use the supplied `BaseModel` and keep Pydantic's validation, coercion, defaults, and validators. Recovery can reconstruct the durable schema contract from the persisted snapshot without registering or importing that Python output type.
 
 ## 7. Sessions and history
 
@@ -266,11 +266,10 @@ Every current V1 execution and recovery input carries a mandatory `AgentBindingS
 - canonical `AgentSpec`
 - `agent_digest`
 - ordered Agent-local Runtime capability descriptors
-- output Python type module/qualname
-- output schema id, revision, and fingerprint
+- output schema definition, id, revision, and fingerprint
 - `binding_digest`
 
-Restore is exact: the Runtime restores local capability descriptors, recompiles the Agent, verifies `agent_digest`, restores the output type/schema, rebuilds the binding, verifies `binding_digest`, and requires the reconstructed snapshot to equal the persisted snapshot. There is no root-definition fallback and no partial or null-binding V1 path.
+Restore is exact for durable identity: the Runtime restores local capability descriptors, recompiles the Agent, verifies `agent_digest`, reconstructs the persisted output schema contract, rebuilds the binding, verifies `binding_digest`, and requires the reconstructed snapshot to equal the persisted snapshot. Python-only output validation behavior is intentionally process-local and is not persisted as durable identity. There is no root-definition fallback and no partial or null-binding V1 path.
 
 Planning and thinking are mandatory durable execution-mode fields. Retry and fork use the source exact binding and source modes.
 

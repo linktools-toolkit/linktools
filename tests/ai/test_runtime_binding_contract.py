@@ -3,17 +3,69 @@
 """Regression coverage for durable execution binding invariants."""
 
 from datetime import datetime, timezone
+from typing import Annotated
 
 import pytest
-from linktools.ai.agent import AgentBindingSnapshot
+from linktools.ai.agent import AgentBindingSnapshot, AgentCompiler
+from linktools.ai.agent._catalog import AgentCatalog
 from linktools.ai.agent._output import bind_output
 from linktools.ai.core import ExecutionLineageKind, ExecutionStatus
+from linktools.ai.errors import AIError, ErrorCode
+from linktools.ai.model import ModelRegistry
 from linktools.ai.runtime.state._contracts import (
     ExecutionRecord,
     RecoveryExecutionInput,
     RecoveryIdempotencyInput,
 )
 from linktools.ai.spec import AgentSpec
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    TypeAdapter,
+    ValidationError,
+    field_validator,
+)
+
+
+class _PydanticOutput(BaseModel):
+    value: int
+    evidence: list[str] = Field(default_factory=list)
+
+
+class _PythonValidatedOutput(BaseModel):
+    value: int
+
+    @field_validator("value")
+    @classmethod
+    def reject_seven(cls, value: int) -> int:
+        if value == 7:
+            raise ValueError("python-only rule")
+        return value
+
+
+class _SchemaTwinA(BaseModel):
+    model_config = ConfigDict(title="SharedOutput")
+    value: Annotated[int, Field(ge=0)]
+
+    @field_validator("value")
+    @classmethod
+    def require_even(cls, value: int) -> int:
+        if value % 2:
+            raise ValueError("value must be even")
+        return value
+
+
+class _SchemaTwinB(BaseModel):
+    model_config = ConfigDict(title="SharedOutput")
+    value: Annotated[int, Field(ge=0)]
+
+    @field_validator("value")
+    @classmethod
+    def require_odd(cls, value: int) -> int:
+        if value % 2 == 0:
+            raise ValueError("value must be odd")
+        return value
 
 
 def _snapshot(*, binding_digest: str = "a" * 64) -> AgentBindingSnapshot:
@@ -90,6 +142,13 @@ def _recovery(
     )
 
 
+def _compiler() -> AgentCompiler:
+    return AgentCompiler(
+        model_resolver=ModelRegistry.openai(model="gpt-test").snapshot(),
+        runtime_fingerprint="a" * 64,
+    )
+
+
 def test_current_binding_snapshot_persists_schema_without_python_path() -> None:
     output = bind_output()
     snapshot = AgentBindingSnapshot(
@@ -117,6 +176,49 @@ def test_current_binding_snapshot_persists_schema_without_python_path() -> None:
         "global_runtime_capability_descriptors",
         "output_schema_definition",
     }
+
+
+def test_custom_output_keeps_pydantic_runtime_semantics() -> None:
+    binding = bind_output(_PydanticOutput)
+    assert binding.runtime_output_type is _PydanticOutput
+    parsed = TypeAdapter(binding.runtime_output_type).validate_python({"value": "50"})
+    assert isinstance(parsed, _PydanticOutput)
+    assert parsed.value == 50
+    assert parsed.evidence == []
+
+
+def test_custom_output_keeps_python_validator_semantics() -> None:
+    binding = bind_output(_PythonValidatedOutput)
+    with pytest.raises(ValidationError):
+        TypeAdapter(binding.runtime_output_type).validate_python({"value": 7})
+
+
+def test_catalog_rejects_same_durable_schema_with_different_python_semantics() -> None:
+    compiler = _compiler()
+    definition = compiler.compile(AgentSpec("agent", model="default"))
+    first = compiler.bind(definition, output=_SchemaTwinA)
+    second = compiler.bind(definition, output=_SchemaTwinB)
+    assert first.digest == second.digest
+    assert first.output_binding.schema_definition == second.output_binding.schema_definition
+
+    catalog = AgentCatalog({})
+    assert catalog.register_binding(first) is first
+    with pytest.raises(AIError) as error:
+        catalog.register_binding(second)
+    assert error.value.code is ErrorCode.BINDING_CONFLICT
+
+
+def test_catalog_upgrades_restored_schema_binding_to_current_python_type() -> None:
+    compiler = _compiler()
+    definition = compiler.compile(AgentSpec("agent", model="default"))
+    current = compiler.bind(definition, output=_SchemaTwinA)
+    restored = compiler.restore(current.snapshot)
+    assert restored.output_type is not _SchemaTwinA
+
+    catalog = AgentCatalog({})
+    assert catalog.register_binding(restored) is restored
+    assert catalog.register_binding(current) is current
+    assert catalog.binding(current.digest).output_type is _SchemaTwinA
 
 
 def test_execution_requires_exact_binding_snapshot() -> None:

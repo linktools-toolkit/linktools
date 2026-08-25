@@ -31,23 +31,16 @@ from linktools.ai.runtime.state._contracts import (
 from linktools.ai.spec import AgentSpec
 from linktools.ai.task import TaskNode
 from pydantic_ai.messages import ModelRequest, UserPromptPart
-from pydantic_ai.capabilities import AbstractCapability
+
+try:
+    from .persistence_fixture import PersistenceCapability
+except ImportError:  # Direct script execution.
+    from persistence_fixture import PersistenceCapability
 
 _BINDING_FIXTURE = "runtime_agent_binding_snapshot_v1.json"
 _CUSTOM_WIRE_FIXTURE = "runtime_custom_wire_v1.json"
 _MODEL_MESSAGE_FIXTURE = "runtime_model_messages_v1.json"
 _MATRIX_DIR = Path(__file__).with_name("matrix")
-
-
-class _PersistenceCapability(AbstractCapability[None]):
-    @classmethod
-    def get_serialization_name(cls) -> "str | None":
-        return "runtime-persistence-fixture"
-
-    @classmethod
-    def from_spec(cls, **kwargs: object) -> "_PersistenceCapability":
-        del kwargs
-        return cls()
 
 
 def _load_json(path: Path) -> object:
@@ -133,7 +126,7 @@ def _validate_output_descriptor() -> tuple[str, ...]:
 def _validate_runtime_capability_descriptor() -> tuple[str, ...]:
     capability = RuntimeCapability.from_spec(
         "runtime-persistence-fixture",
-        _PersistenceCapability,
+        PersistenceCapability,
         config={},
     )
     descriptor = capability.descriptor
