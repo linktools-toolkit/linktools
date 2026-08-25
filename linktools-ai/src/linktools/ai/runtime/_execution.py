@@ -1033,7 +1033,26 @@ class DefaultExecutionService:
         async def wait_once() -> ExecutionResult:
             while True:
                 view = await self.inspect(execution_id, principal=principal)
-                if view.status in {ExecutionStatus.SUCCEEDED, ExecutionStatus.FAILED, ExecutionStatus.CANCELLED}:
+                waiter = self._local_waiter
+                owns_execution = waiter is not None and waiter.owns_execution(
+                    execution_id,
+                    tenant_id=principal.tenant_id,
+                )
+                if view.status in {
+                    ExecutionStatus.SUCCEEDED,
+                    ExecutionStatus.FAILED,
+                    ExecutionStatus.CANCELLED,
+                }:
+                    if owns_execution:
+                        _logger.debug(
+                            "execution wait awaiting local terminal worker: execution=%s",
+                            execution_id,
+                        )
+                        await waiter.wait_terminal(
+                            execution_id,
+                            tenant_id=principal.tenant_id,
+                        )
+                        continue
                     return await self.result(execution_id, principal=principal)
                 if self._backend is not None:
                     failure = self._backend.worker_failure(
@@ -1042,12 +1061,11 @@ class DefaultExecutionService:
                     )
                     if failure is not None:
                         raise failure
-                waiter = self._local_waiter
-                if waiter is not None and waiter.owns_execution(
-                    execution_id,
-                    tenant_id=principal.tenant_id,
-                ):
-                    await waiter.wait_terminal(execution_id, tenant_id=principal.tenant_id)
+                if owns_execution:
+                    await waiter.wait_terminal(
+                        execution_id,
+                        tenant_id=principal.tenant_id,
+                    )
                 else:
                     await asyncio.sleep(1.0)
 

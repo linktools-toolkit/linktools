@@ -8,10 +8,11 @@ from types import SimpleNamespace
 import pytest
 from linktools.ai.agent import AgentCompiler, bind_output
 from linktools.ai.capability import RuntimeCapability
-from linktools.ai.core import Principal, ResourceKind, ResourceRef, TaskStatus
+from linktools.ai.core import ExecutionStatus, Principal, ResourceKind, ResourceRef, TaskStatus
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.model import ModelRegistry
 from linktools.ai.runtime._factory import _RuntimeCloseCoordinator
+from linktools.ai.runtime._execution import DefaultExecutionService
 from linktools.ai.runtime._local import LocalExecutionBackend
 from linktools.ai.runtime.state._durability import (
     DurableCommitState,
@@ -19,6 +20,7 @@ from linktools.ai.runtime.state._durability import (
 )
 from linktools.ai.runtime.state._materializer import _RuntimeObjectRouter
 from linktools.ai.runtime.state._plan import RuntimeDomain
+from linktools.ai.runtime.state._retention import RuntimeRetentionController
 from linktools.ai.runtime.state._steps import RuntimeStepStore
 from linktools.ai.storage import FilesystemObjectStore, SqlObjectStore
 from linktools.ai.task._api import open_local_task_api
@@ -249,7 +251,10 @@ async def test_runtime_object_preflight_rejects_pending_filesystem_work(
     tmp_path,
 ) -> None:
     store = FilesystemObjectStore(tmp_path)
-    router = _RuntimeObjectRouter({RuntimeDomain.EXECUTION: store})
+    router = _RuntimeObjectRouter(
+        {RuntimeDomain.EXECUTION: store},
+        close_guard_stores=(store,),
+    )
     release = asyncio.Event()
     task = asyncio.create_task(release.wait())
     store._background_tasks.add(task)
@@ -262,10 +267,57 @@ async def test_runtime_object_preflight_rejects_pending_filesystem_work(
 
 
 @pytest.mark.asyncio
+async def test_runtime_object_preflight_ignores_external_filesystem_work(
+    tmp_path,
+) -> None:
+    store = FilesystemObjectStore(tmp_path)
+    router = _RuntimeObjectRouter(
+        {RuntimeDomain.EXECUTION: store},
+        close_guard_stores=(),
+    )
+    release = asyncio.Event()
+    task = asyncio.create_task(release.wait())
+    store._background_tasks.add(task)
+    try:
+        await router.preflight_close()
+    finally:
+        release.set()
+        await task
+
+
+@pytest.mark.asyncio
+async def test_execution_retention_requires_runtime_release_before_cleanup() -> None:
+    calls: list[str] = []
+
+    async def runtime_release(execution_id: str, *, tenant_id: str) -> None:
+        calls.append(f"runtime:{execution_id}:{tenant_id}")
+        raise AIError(ErrorCode.STORAGE_CONFLICT)
+
+    async def execution_get(execution_id: str, *, tenant_id: str) -> object:
+        calls.append(f"execution:{execution_id}:{tenant_id}")
+        return object()
+
+    controller = object.__new__(RuntimeRetentionController)
+    controller._execution_runtime_release = runtime_release
+    controller._execution = SimpleNamespace(
+        executions=SimpleNamespace(get=execution_get),
+    )
+
+    with pytest.raises(AIError) as error:
+        await controller.release_execution_handoff("execution", tenant_id="tenant")
+
+    assert error.value.code is ErrorCode.STORAGE_CONFLICT
+    assert calls == ["runtime:execution:tenant"]
+
+
+@pytest.mark.asyncio
 async def test_runtime_object_preflight_rejects_pending_sql_work(tmp_path) -> None:
     engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'objects.db'}")
     store = SqlObjectStore(engine)
-    router = _RuntimeObjectRouter({RuntimeDomain.EXECUTION: store})
+    router = _RuntimeObjectRouter(
+        {RuntimeDomain.EXECUTION: store},
+        close_guard_stores=(store,),
+    )
     release = asyncio.Event()
     task = asyncio.create_task(release.wait())
     store._background_tasks.add(task)
@@ -277,6 +329,26 @@ async def test_runtime_object_preflight_rejects_pending_sql_work(tmp_path) -> No
         await task
         await router.preflight_close()
     finally:
+        await store._context.close()
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_runtime_object_preflight_ignores_external_sql_work(tmp_path) -> None:
+    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'objects.db'}")
+    store = SqlObjectStore(engine)
+    router = _RuntimeObjectRouter(
+        {RuntimeDomain.EXECUTION: store},
+        close_guard_stores=(),
+    )
+    release = asyncio.Event()
+    task = asyncio.create_task(release.wait())
+    store._background_tasks.add(task)
+    try:
+        await router.preflight_close()
+    finally:
+        release.set()
+        await task
         await store._context.close()
         await engine.dispose()
 
@@ -332,6 +404,53 @@ async def test_local_execution_close_rejects_pending_command_owned_work() -> Non
     await backend.close()
 
 
+@pytest.mark.asyncio
+async def test_execution_wait_rechecks_after_local_worker_quiescence() -> None:
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    class Waiter:
+        owned = True
+
+        def owns_execution(self, execution_id: str, *, tenant_id: str) -> bool:
+            del execution_id, tenant_id
+            return self.owned
+
+        async def wait_terminal(self, execution_id: str, *, tenant_id: str) -> None:
+            del execution_id, tenant_id
+            started.set()
+            await release.wait()
+            self.owned = False
+
+    service = object.__new__(DefaultExecutionService)
+    service._local_waiter = Waiter()
+    service._backend = None
+
+    async def inspect(execution_id: str, *, principal: Principal) -> object:
+        del execution_id, principal
+        return SimpleNamespace(status=ExecutionStatus.SUCCEEDED)
+
+    async def result(execution_id: str, *, principal: Principal) -> str:
+        del execution_id, principal
+        return "terminal"
+
+    service.inspect = inspect
+    service.result = result
+    wait = DefaultExecutionService.wait.__wrapped__
+    task = asyncio.create_task(
+        wait(
+            service,
+            "execution",
+            principal=Principal("principal", "tenant", "service"),
+            timeout_seconds=1,
+        )
+    )
+    await started.wait()
+    assert not task.done()
+    release.set()
+    assert await task == "terminal"
+
+
 class _RunningTaskRepository:
     async def get_header(
         self,
@@ -364,6 +483,97 @@ class _LostTaskWaiter:
     async def wait_graph_activity(self, graph_id: str, *, tenant_id: str) -> None:
         del graph_id, tenant_id
         raise AssertionError("lost owner must not wait for local activity")
+
+
+class _TerminalTaskRepository:
+    async def get_header(
+        self,
+        graph_id: str,
+        *,
+        tenant_id: str,
+    ) -> ResourceRef:
+        return ResourceRef(ResourceKind.TASK_GRAPH, graph_id, tenant_id)
+
+    async def reconcile_graph(
+        self,
+        graph_id: str,
+        *,
+        tenant_id: str,
+    ) -> object:
+        return SimpleNamespace(
+            graph_id=graph_id,
+            tenant_id=tenant_id,
+            status=TaskStatus.SUCCEEDED,
+        )
+
+
+class _TerminalTaskWaiter:
+    def __init__(self, error: AIError | None = None) -> None:
+        self.error = error
+        self.started = asyncio.Event()
+        self.release = asyncio.Event()
+        self.owned = True
+
+    def owns_graph(self, graph_id: str, *, tenant_id: str) -> bool:
+        del graph_id, tenant_id
+        return self.owned
+
+    async def wait_graph_activity(self, graph_id: str, *, tenant_id: str) -> None:
+        del graph_id, tenant_id
+        self.started.set()
+        if self.error is not None:
+            raise self.error
+        await self.release.wait()
+        self.owned = False
+
+
+def _terminal_task_service(waiter: _TerminalTaskWaiter) -> DefaultTaskService:
+    service = DefaultTaskService(
+        SimpleNamespace(tasks=_TerminalTaskRepository()),
+        _AllowAuthorization(),
+        local_waiter=waiter,
+    )
+
+    async def result(view: object, tenant_id: str) -> object:
+        del tenant_id
+        return view
+
+    async def request_release(graph_id: str, tenant_id: str) -> None:
+        del graph_id, tenant_id
+
+    service._result = result
+    service._request_graph_release = request_release
+    return service
+
+
+@pytest.mark.asyncio
+async def test_task_wait_rechecks_terminal_after_local_scheduler_quiescence() -> None:
+    waiter = _TerminalTaskWaiter()
+    service = _terminal_task_service(waiter)
+    task = asyncio.create_task(
+        service.wait_graph(
+            "graph",
+            principal=Principal("principal", "tenant", "service"),
+            timeout_seconds=1,
+        )
+    )
+    await waiter.started.wait()
+    assert not task.done()
+    waiter.release.set()
+    result = await task
+    assert result.status is TaskStatus.SUCCEEDED
+
+
+@pytest.mark.asyncio
+async def test_task_wait_prefers_terminal_truth_after_scheduler_failure() -> None:
+    waiter = _TerminalTaskWaiter(AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED))
+    service = _terminal_task_service(waiter)
+    result = await service.wait_graph(
+        "graph",
+        principal=Principal("principal", "tenant", "service"),
+        timeout_seconds=1,
+    )
+    assert result.status is TaskStatus.SUCCEEDED
 
 
 @pytest.mark.asyncio

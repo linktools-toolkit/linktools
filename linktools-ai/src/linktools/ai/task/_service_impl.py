@@ -322,21 +322,45 @@ class DefaultTaskService(TaskApi):
                         graph_id,
                         tenant_id=principal.tenant_id,
                     )
+                    waiter = self._local_waiter
+                    owns_graph = waiter is not None and waiter.owns_graph(
+                        graph_id,
+                        tenant_id=principal.tenant_id,
+                    )
                     if _terminal(view.status):
+                        if owns_graph:
+                            try:
+                                await waiter.wait_graph_activity(
+                                    graph_id,
+                                    tenant_id=principal.tenant_id,
+                                )
+                            except Exception as error:
+                                latest = await self._persistence.tasks.reconcile_graph(
+                                    graph_id,
+                                    tenant_id=principal.tenant_id,
+                                )
+                                if _terminal(latest.status):
+                                    result = await self._result(
+                                        latest,
+                                        principal.tenant_id,
+                                    )
+                                    await self._request_graph_release(
+                                        graph_id,
+                                        principal.tenant_id,
+                                    )
+                                    return result
+                                raise error
+                            continue
                         result = await self._result(view, principal.tenant_id)
                         await self._request_graph_release(
                             graph_id,
                             principal.tenant_id,
                         )
                         return result
-                    waiter = self._local_waiter
                     if waiter is None:
                         await asyncio.sleep(1.0)
                         continue
-                    if waiter.owns_graph(
-                        graph_id,
-                        tenant_id=principal.tenant_id,
-                    ):
+                    if owns_graph:
                         await waiter.wait_graph_activity(
                             graph_id,
                             tenant_id=principal.tenant_id,

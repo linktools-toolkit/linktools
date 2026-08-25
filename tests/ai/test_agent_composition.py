@@ -329,6 +329,7 @@ async def test_durable_session_survives_agent_micro_changes(tmp_path, change: st
             )
         )
         runtime._closed = False
+        runtime._closing = False
         runtime._local_coordinator = None
         runtime.session = service
         binding_digest = f"{1 + _MICRO_CHANGES.index(change):064x}"

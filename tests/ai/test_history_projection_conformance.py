@@ -401,12 +401,20 @@ async def test_terminal_commit_cancellation_still_finalizes_after_durable_commit
             del plan
             self.finalized.set()
 
+        async def discard_execution_terminal_seal(self, plan: object) -> None:
+            del plan
+
+        async def prepare_execution_terminal_seal(self, **kwargs: object) -> ExecutionTerminalSealPlan:
+            del kwargs
+            return plan
+
     lifecycle = Lifecycle()
     backend = object.__new__(LocalExecutionBackend)
     backend._step_reads = {
         RuntimeDomain.EXECUTION: object.__new__(StateStepArchive),
     }
     backend._step_lifecycle = lifecycle
+    backend._checkpoint_tasks = set()
     started = asyncio.Event()
 
     async def commit(*args: object, **kwargs: object) -> object:
@@ -416,21 +424,23 @@ async def test_terminal_commit_cancellation_still_finalizes_after_durable_commit
         return object()
 
     backend._commit_execution_terminal_checkpoint_locked = commit
-    current = _record(ExecutionStatus.SUCCEEDED, 1)
+    current = _record(ExecutionStatus.SUCCEEDED, 0)
     plan = ExecutionTerminalSealPlan("execution", "a" * 64, (), ())
     task = asyncio.create_task(
         backend._commit_execution_terminal_checkpoint(
             current,
             object(),
             run_id=None,
-            terminal_plan=plan,
         )
     )
     await started.wait()
     task.cancel()
-    with pytest.raises(asyncio.CancelledError):
+    with pytest.raises(AIError) as error:
         await task
-    assert lifecycle.finalized.is_set()
+    assert error.value.code is ErrorCode.STORAGE_COMMIT_UNKNOWN
+    await lifecycle.finalized.wait()
+    await asyncio.sleep(0)
+    assert not backend._checkpoint_tasks
 
 
 @pytest.mark.asyncio

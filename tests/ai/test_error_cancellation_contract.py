@@ -16,7 +16,6 @@ from linktools.ai.core import ExecutionStatus, ResourceKind, ResourceRef
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.runtime._evaluation import DefaultEvaluationService
 from linktools.ai.runtime._execution import DefaultExecutionService
-from linktools.ai.runtime._local import LocalExecutionBackend
 from linktools.ai.runtime._planner import RuntimeTaskNodeRunner
 from linktools.ai.runtime._session import DefaultSessionService
 from linktools.ai.runtime._subagent import SubagentDispatcher
@@ -125,25 +124,6 @@ async def test_transient_handoff_cleanup_preserves_cancellation(
     state = service._handoff_states[key]
     assert state.release_in_progress is False
     assert state.release_requested is True
-
-
-@pytest.mark.asyncio
-async def test_local_terminal_admission_cleanup_preserves_cancellation() -> None:
-    class Sessions:
-        async def release_execution(self, *args, **kwargs) -> None:
-            del args, kwargs
-            raise asyncio.CancelledError
-
-    backend = object.__new__(LocalExecutionBackend)
-    backend._conversation = SimpleNamespace(sessions=Sessions())
-    execution = SimpleNamespace(
-        session_id="session",
-        tenant_id="tenant",
-        execution_id="execution",
-    )
-
-    with pytest.raises(asyncio.CancelledError):
-        await backend._release_session_admission_best_effort(execution)
 
 
 @pytest.mark.asyncio

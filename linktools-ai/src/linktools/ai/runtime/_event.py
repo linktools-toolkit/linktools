@@ -167,6 +167,10 @@ class LiveExecutionEventBroker:
         self._completed: set[str] = set()
         self._base_sequences: dict[str, int] = {}
         self._prepared: dict[str, _PreparedStreamLease] = {}
+        self._durable_events: dict[
+            tuple[str, int],
+            tuple[ExecutionEventType, JsonValue],
+        ] = {}
 
     def register_local_producer(self, execution_id: str, base_sequence: int) -> None:
         if base_sequence < 0:
@@ -255,6 +259,23 @@ class LiveExecutionEventBroker:
     ) -> None:
         if execution_id not in self._base_sequences:
             return
+        if durable_sequence is not None:
+            if durable_sequence < 1:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            key = (execution_id, durable_sequence)
+            previous = self._durable_events.get(key)
+            if previous is not None:
+                if previous != (event_type, payload):
+                    raise AIError(
+                        ErrorCode.STORAGE_INTEGRITY_ERROR,
+                        safe_details={
+                            "phase": "live_durable_event_dedupe",
+                            "execution_id": execution_id,
+                            "durable_sequence": durable_sequence,
+                        },
+                    )
+                return
+            self._durable_events[key] = (event_type, payload)
         event = _LiveEvent(execution_id, event_type, payload, durable_sequence)
         self._buffers.setdefault(execution_id, deque()).append(event)
         self._buffer_bytes.setdefault(execution_id, 0)
@@ -410,6 +431,9 @@ class LiveExecutionEventBroker:
         self._base_sequences.pop(execution_id, None)
         self._activity.pop(execution_id, None)
         self._prepared.pop(execution_id, None)
+        for key in tuple(self._durable_events):
+            if key[0] == execution_id:
+                self._durable_events.pop(key, None)
 
 
 def _bounded_delta(delta: ExecutionDelta, max_bytes: int) -> ExecutionDelta:

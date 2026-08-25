@@ -175,6 +175,40 @@ async def test_live_semantic_events_keep_agent_source_order() -> None:
 
 
 @pytest.mark.asyncio
+async def test_live_durable_terminal_publication_is_idempotent() -> None:
+    broker = LiveExecutionEventBroker()
+    lease = broker.prepare_local_producer("execution")
+    broker.register_local_producer("execution", 0)
+    live = broker.claim_local_producer(lease)
+    payload = {"run_id": "run"}
+
+    broker.publish_event(
+        "execution",
+        ExecutionEventType.EXECUTION_SUCCEEDED,
+        payload,
+        durable_sequence=1,
+    )
+    broker.publish_event(
+        "execution",
+        ExecutionEventType.EXECUTION_SUCCEEDED,
+        payload,
+        durable_sequence=1,
+    )
+    with pytest.raises(AIError) as error:
+        broker.publish_event(
+            "execution",
+            ExecutionEventType.EXECUTION_FAILED,
+            {"error_code": "internal_error"},
+            durable_sequence=1,
+        )
+    assert error.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
+
+    broker.complete("execution")
+    items = [item async for item in live]
+    assert len(items) == 1
+
+
+@pytest.mark.asyncio
 async def test_cancel_batches_pending_audit_in_one_filesystem_mutation(tmp_path: Path) -> None:
     state = RuntimeState.filesystem(tmp_path / "runtime")
     await state.initialize(namespace="stream-order", tenant_id="tenant")

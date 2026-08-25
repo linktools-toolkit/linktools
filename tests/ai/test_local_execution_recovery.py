@@ -227,12 +227,14 @@ async def test_session_prompt_replacement_requires_prior_conversation_history(
         error: Exception,
         *,
         run_id: str | None = None,
-    ) -> None:
+    ) -> ExecutionRecord:
         del error, run_id
-        backend._execution.executions.record = replace(
+        committed = replace(
             execution,
             status=ExecutionStatus.FAILED,
         )
+        backend._execution.executions.record = committed
+        return committed
 
     backend._commit_failure = commit_failure
     await backend._run(
@@ -275,13 +277,15 @@ async def test_local_business_failure_commits_failed_without_escaping() -> None:
         error: Exception,
         *,
         run_id: str | None = None,
-    ) -> None:
+    ) -> ExecutionRecord:
         del run_id
         failures.append(error)
-        backend._execution.executions.record = replace(
+        committed = replace(
             execution,
             status=ExecutionStatus.FAILED,
         )
+        backend._execution.executions.record = committed
+        return committed
 
     backend._commit_failure = commit_failure
     await backend._run(

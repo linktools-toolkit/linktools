@@ -309,7 +309,9 @@ async def test_cli_sql_state_context_owns_one_engine_on_failure(
         async with run_module._open_runtime_state(
             SimpleNamespace(storage_root=tmp_path),
             "sqlite",
-        ):
+        ) as state:
+            assert state.plan.route(RuntimeDomain.EXECUTION).kind == "sqlite"
+            assert disposed == created
             raise RuntimeError("request failed")
 
     assert len(created) == 1

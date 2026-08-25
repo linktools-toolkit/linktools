@@ -17,7 +17,7 @@ from linktools.ai.core import (
     SessionStatus,
 )
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.runtime import CloseSessionRequest, DefaultSessionService
+from linktools.ai.runtime import CloseSessionRequest, DefaultSessionService, Runtime
 from linktools.ai.storage import create_sql_storage_context, provision_sql, validate_sql
 from sqlalchemy.ext.asyncio import create_async_engine
 
@@ -101,6 +101,45 @@ async def test_close_completion_rethrows_valid_pending_conflict() -> None:
 
     assert raised.value.code is ErrorCode.STORAGE_CONFLICT
     assert repository.compare_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_runtime_close_failure_enters_close_only_and_can_retry() -> None:
+    attempts = 0
+
+    async def close_callback() -> None:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
+
+    runtime = Runtime(
+        object(),
+        object(),
+        object(),
+        object(),
+        object(),
+        object(),
+        object(),
+        object(),
+        object(),
+        object(),
+        close_callback=close_callback,
+    )
+
+    with pytest.raises(AIError) as error:
+        await runtime.close()
+    assert error.value.code is ErrorCode.STORAGE_RECOVERY_REQUIRED
+    with pytest.raises(AIError) as rejected:
+        runtime._ensure_open()
+    assert rejected.value.code is ErrorCode.RUNTIME_DEPENDENCY_NOT_READY
+    with pytest.raises(AIError) as rejected_agent:
+        runtime.agent()
+    assert rejected_agent.value.code is ErrorCode.RUNTIME_DEPENDENCY_NOT_READY
+
+    await runtime.close()
+    assert runtime._closed is True
+    assert attempts == 2
 
 
 @pytest.mark.asyncio

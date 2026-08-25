@@ -359,15 +359,18 @@ class LocalExecutionBackend:
                 audit_events=pending,
             )
             self._pending_audit_events.pop(execution_id, None)
-            self._publish_committed_events(
+            self._confirm_committed_events(
                 execution_id,
                 pending_count=len(pending),
-                event_type=commit.terminal_event_type,
-                payload=dict(commit.terminal_event_payload),
                 durable_sequence=committed.execution.event_sequence,
             )
-            self._terminal_events.setdefault(execution_id, asyncio.Event()).set()
-            return committed
+        self._publish_terminal_event(
+            execution_id,
+            event_type=commit.terminal_event_type,
+            payload=dict(commit.terminal_event_payload),
+            durable_sequence=committed.execution.event_sequence,
+        )
+        return committed
 
     async def commit_terminal_checkpoint(
         self,
@@ -404,13 +407,16 @@ class LocalExecutionBackend:
                 audit_events=pending,
             )
             self._pending_audit_events.pop(commit.execution_id, None)
-            cancel_sequence = commit.expected_event_sequence + len(pending) + 1
-            self._publish_committed_events(
+            self._confirm_committed_events(
                 commit.execution_id,
                 pending_count=len(pending),
+                durable_sequence=commit.expected_event_sequence + len(pending) + 1,
+            )
+            self._live_broker.publish_event(
+                commit.execution_id,
                 event_type=ExecutionEventType.CANCEL_REQUESTED,
                 payload={"operation_id": commit.operation_id},
-                durable_sequence=cancel_sequence,
+                durable_sequence=commit.expected_event_sequence + len(pending) + 1,
             )
             return committed
 
@@ -748,6 +754,10 @@ class LocalExecutionBackend:
         self._tasks.pop(execution_id, None)
         self._captured_usage.pop(execution_id, None)
         try:
+            self._terminal_events.setdefault(execution_id, asyncio.Event()).set()
+        except AttributeError:
+            pass
+        try:
             live_broker = self._live_broker
         except AttributeError:
             live_broker = None
@@ -771,10 +781,6 @@ class LocalExecutionBackend:
             failure.code.value,
             exc_info=environ.debug,
         )
-        try:
-            self._terminal_events.setdefault(execution_id, asyncio.Event()).set()
-        except AttributeError:
-            pass
         if live_broker is not None:
             live_broker.complete(execution_id)
 
@@ -1139,7 +1145,7 @@ class LocalExecutionBackend:
         store = self._recovery_objects if source is RuntimeDomain.RECOVERY else self._execution_objects
         await read_runtime_object(store, reference)
 
-    async def _reconcile_handoff(self, checkpoint: RecoveryCheckpoint) -> None:
+    async def _reconcile_handoff(self, checkpoint: RecoveryCheckpoint) -> ExecutionRecord:
         handoff = checkpoint.terminal_handoff
         if handoff is None:
             raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
@@ -1229,14 +1235,8 @@ class LocalExecutionBackend:
                     stop_reason=StopReason.ERROR,
                 )
                 return await self._reconcile_handoff(checkpoint)
-            await self._commit_reconciled_terminal(checkpoint)
+            execution = await self._commit_reconciled_terminal(checkpoint)
             await self._validate_committed_handoff(checkpoint)
-            execution = await self._execution.executions.get(
-                checkpoint.execution_id,
-                tenant_id=checkpoint.tenant_id,
-            )
-            if execution is None:
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             if execution.session_id is not None:
                 await self._conversation.sessions.release_execution(
                     execution.session_id,
@@ -1244,25 +1244,25 @@ class LocalExecutionBackend:
                     execution_id=execution.execution_id,
                 )
             await self._complete_handoff(checkpoint)
+            self._publish_terminal_event(
+                execution.execution_id,
+                event_type=outcome.terminal_event_type,
+                payload=dict(outcome.terminal_event_payload),
+                durable_sequence=execution.event_sequence,
+            )
             _logger.info(
                 "recovery handoff completed: execution=%s",
                 checkpoint.execution_id,
             )
-            return
+            return execution
         if checkpoint.handoff_phase is RecoveryHandoffPhase.CONVERSATION_RESOLVED:
-            await self._commit_reconciled_terminal(checkpoint)
+            execution = await self._commit_reconciled_terminal(checkpoint)
             checkpoint = await self._advance_handoff(
                 checkpoint,
                 RecoveryHandoffPhase.EXECUTION_COMMITTED,
             )
         if checkpoint.handoff_phase is RecoveryHandoffPhase.EXECUTION_COMMITTED:
             await self._validate_committed_handoff(checkpoint)
-            execution = await self._execution.executions.get(
-                checkpoint.execution_id,
-                tenant_id=checkpoint.tenant_id,
-            )
-            if execution is None:
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             if execution.session_id is not None:
                 await self._conversation.sessions.release_execution(
                     execution.session_id,
@@ -1274,6 +1274,18 @@ class LocalExecutionBackend:
                     execution.execution_id,
                 )
             await self._complete_handoff(checkpoint)
+            self._publish_terminal_event(
+                execution.execution_id,
+                event_type=outcome.terminal_event_type,
+                payload=dict(outcome.terminal_event_payload),
+                durable_sequence=execution.event_sequence,
+            )
+            _logger.info(
+                "recovery handoff completed: execution=%s",
+                checkpoint.execution_id,
+            )
+            return execution
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
 
     async def _create_recovery_execution(self, checkpoint: RecoveryCheckpoint) -> ExecutionRecord:
         recovery_input = checkpoint.input
@@ -1612,7 +1624,7 @@ class LocalExecutionBackend:
     async def _commit_reconciled_terminal(
         self,
         checkpoint: RecoveryCheckpoint,
-    ) -> None:
+    ) -> ExecutionRecord:
         handoff = checkpoint.terminal_handoff
         if handoff is None:
             raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
@@ -1631,7 +1643,7 @@ class LocalExecutionBackend:
         }:
             if current.status is not outcome.terminal_status:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            return
+            return current
         execution_ref = None
         if outcome.terminal_status is ExecutionStatus.SUCCEEDED:
             if outcome.output is None:
@@ -1703,7 +1715,7 @@ class LocalExecutionBackend:
                     execution_id=current.execution_id,
                     segment_sequence=current.agent_run_sequence,
                 )
-            await self._commit_execution_terminal_checkpoint(
+            committed = await self._commit_execution_terminal_checkpoint(
                 current,
                 ExecutionTerminalCommit(
                     current.revision,
@@ -1715,8 +1727,7 @@ class LocalExecutionBackend:
                 ),
                 run_id=terminal_run_id,
             )
-            self._pending_audit_events.pop(current.execution_id, None)
-            self._terminal_events.setdefault(current.execution_id, asyncio.Event()).set()
+            current = committed.execution
         except AIError as error:
             if error.code not in {
                 ErrorCode.STORAGE_CONFLICT,
@@ -1729,11 +1740,13 @@ class LocalExecutionBackend:
             )
             if latest is None or latest.status is not outcome.terminal_status:
                 raise
+            current = latest
         _logger.info(
             "recovery execution terminal committed: execution=%s status=%s",
             current.execution_id,
             outcome.terminal_status.value,
         )
+        return current
 
     async def _validate_committed_handoff(
         self,
@@ -2201,13 +2214,20 @@ class LocalExecutionBackend:
                     execution_id,
                     tenant_id=original.tenant_id,
                 )
-                if current is not None and current.status not in {
+                if current is None:
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                if current.status not in {
                     ExecutionStatus.SUCCEEDED,
                     ExecutionStatus.FAILED,
                     ExecutionStatus.CANCELLED,
                 }:
                     try:
-                        await self._commit_failure(current, error, run_id=run_id)
+                        committed_failure = await self._commit_failure(
+                            current,
+                            error,
+                            run_id=run_id,
+                        )
+                        current = committed_failure
                     except asyncio.CancelledError:
                         raise
                     except Exception as commit_error:
@@ -2232,45 +2252,29 @@ class LocalExecutionBackend:
                             )
                             return
                         raise _secondary_execution_error(commit_error, error) from error
-                persisted = await self._execution.executions.get(
-                    execution_id,
-                    tenant_id=original.tenant_id,
-                )
-                if persisted is None:
-                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                operation_result = _execution_operation_result(persisted.status)
+                operation_result = _execution_operation_result(current.status)
                 _logger.exception(
                     "local execution failed: execution=%s",
                     execution_id,
                 )
                 return
-            await self._commit_success(
+            committed = await self._commit_success(
                 current,
                 binding,
                 result.output,
                 result.usage,
                 run_id,
             )
-            persisted = await self._execution.executions.get(
-                execution_id,
-                tenant_id=original.tenant_id,
-            )
-            if persisted is None:
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            operation_result = _execution_operation_result(persisted.status)
+            operation_result = _execution_operation_result(committed.status)
             _logger.debug("local execution completed: execution=%s run=%s", execution_id, run_id)
         except asyncio.CancelledError:
             current = await self._execution.executions.get(execution_id, tenant_id=original.tenant_id)
             if current is not None and current.status is ExecutionStatus.FINALIZING:
                 raise
             if current is not None and current.status not in {ExecutionStatus.SUCCEEDED, ExecutionStatus.FAILED, ExecutionStatus.CANCELLED}:
-                await self._commit_terminal(current, ExecutionStatus.CANCELLED, None, ErrorCode.EXECUTION_CANCELLED.value, StopReason.CANCELLED, run_id=run_id)
-            persisted = await self._execution.executions.get(
-                execution_id,
-                tenant_id=original.tenant_id,
-            )
-            if persisted is not None:
-                operation_result = _execution_operation_result(persisted.status)
+                current = await self._commit_terminal(current, ExecutionStatus.CANCELLED, None, ErrorCode.EXECUTION_CANCELLED.value, StopReason.CANCELLED, run_id=run_id)
+            if current is not None:
+                operation_result = _execution_operation_result(current.status)
             raise
         except Exception:
             _logger.exception(
@@ -2418,13 +2422,11 @@ class LocalExecutionBackend:
     def _audit_lock(self, execution_id: str) -> asyncio.Lock:
         return self._pending_audit_locks.setdefault(execution_id, asyncio.Lock())
 
-    def _publish_committed_events(
+    def _confirm_committed_events(
         self,
         execution_id: str,
         *,
         pending_count: int,
-        event_type: ExecutionEventType,
-        payload: JsonValue,
         durable_sequence: int,
     ) -> None:
         if pending_count:
@@ -2433,6 +2435,15 @@ class LocalExecutionBackend:
                 first_sequence=durable_sequence - pending_count,
                 count=pending_count,
             )
+
+    def _publish_terminal_event(
+        self,
+        execution_id: str,
+        *,
+        event_type: ExecutionEventType,
+        payload: JsonValue,
+        durable_sequence: int,
+    ) -> None:
         self._live_broker.publish_event(
             execution_id,
             event_type,
@@ -2450,7 +2461,19 @@ class LocalExecutionBackend:
         output: JsonValue,
         usage: UsageMetrics,
         run_id: str,
-    ) -> None:
+    ) -> ExecutionRecord:
+        current = await self._execution.executions.get(
+            execution.execution_id,
+            tenant_id=execution.tenant_id,
+        )
+        if current is None:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        if current.status in {
+            ExecutionStatus.SUCCEEDED,
+            ExecutionStatus.FAILED,
+            ExecutionStatus.CANCELLED,
+        }:
+            return current
         payload = canonical_json_bytes(output)
         inline = StoredPayload.inline_json(output)
         output_payload = inline
@@ -2463,18 +2486,8 @@ class LocalExecutionBackend:
                 payload,
             )
             output_payload = StoredPayload.object(object_ref)
-        current = await self._execution.executions.get(execution.execution_id, tenant_id=execution.tenant_id)
-        if current is None:
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        if current.status in {
-            ExecutionStatus.SUCCEEDED,
-            ExecutionStatus.FAILED,
-            ExecutionStatus.CANCELLED,
-        }:
-            await self._release_session_admission_best_effort(current)
-            return
         if self._recovery_enabled:
-            await self._commit_terminal(
+            return await self._commit_terminal(
                 current,
                 ExecutionStatus.SUCCEEDED,
                 output_payload,
@@ -2484,9 +2497,8 @@ class LocalExecutionBackend:
                 run_id=run_id,
                 usage=usage,
             )
-            return
         if current.status is ExecutionStatus.CANCELLING:
-            return
+            return current
         await self.verify_terminal_projection(current, ExecutionStatus.SUCCEEDED, run_id)
         if current.session_id is not None:
             expected_cursor = await self._expected_session_cursor(current)
@@ -2496,13 +2508,13 @@ class LocalExecutionBackend:
                     "session success lost to cancellation: execution=%s",
                     current.execution_id,
                 )
-                return
+                return current
             if current.status in {
                 ExecutionStatus.SUCCEEDED,
                 ExecutionStatus.FAILED,
                 ExecutionStatus.CANCELLED,
             }:
-                return
+                return current
             snapshot = await self._steps.latest_snapshot(run_id=run_id)
             step_run = await self._steps.get_run(run_id=run_id)
             if snapshot is None or snapshot.state != "complete" or step_run is None:
@@ -2511,7 +2523,7 @@ class LocalExecutionBackend:
             expected_cursor = None
             snapshot = None
             step_run = None
-        await self._commit_terminal(
+        return await self._commit_terminal(
             current,
             ExecutionStatus.SUCCEEDED,
             output_payload,
@@ -2524,7 +2536,6 @@ class LocalExecutionBackend:
             conversation_run=step_run,
             conversation_snapshot=snapshot,
         )
-        return
 
     async def _expected_session_cursor(
         self,
@@ -2717,11 +2728,17 @@ class LocalExecutionBackend:
             source_run_id,
         )
 
-    async def _commit_failure(self, execution: ExecutionRecord, error: Exception, *, run_id: str | None = None) -> None:
+    async def _commit_failure(
+        self,
+        execution: ExecutionRecord,
+        error: Exception,
+        *,
+        run_id: str | None = None,
+    ) -> ExecutionRecord:
         code = _execution_error_code(error)
         details = _execution_error_details(error)
         cancelled = code is ErrorCode.EXECUTION_CANCELLED
-        await self._commit_terminal(
+        return await self._commit_terminal(
             execution,
             ExecutionStatus.CANCELLED if cancelled else ExecutionStatus.FAILED,
             None,
@@ -2747,7 +2764,7 @@ class LocalExecutionBackend:
         conversation_run: RunRecord | None = None,
         conversation_snapshot: ContinuableSnapshot | None = None,
         recovery_checkpoint: RecoveryCheckpoint | None = None,
-    ) -> None:
+    ) -> ExecutionRecord:
         current = await self._execution.executions.get(
             execution.execution_id,
             tenant_id=execution.tenant_id,
@@ -2759,8 +2776,7 @@ class LocalExecutionBackend:
             ExecutionStatus.FAILED,
             ExecutionStatus.CANCELLED,
         }:
-            await self._release_session_admission_best_effort(current)
-            return
+            return current
         now = datetime.now(timezone.utc)
         captured_usage = usage or self._captured_usage.get(execution.execution_id, UsageMetrics())
         schema_id: str | None = None
@@ -2790,7 +2806,7 @@ class LocalExecutionBackend:
                     run_id=run_id,
                 )
             ):
-                await self._commit_same_group_recovery_terminal(
+                return await self._commit_same_group_recovery_terminal(
                     current,
                     recovery_checkpoint,
                     status=status,
@@ -2802,7 +2818,6 @@ class LocalExecutionBackend:
                     usage=captured_usage,
                     safe_error_details=safe_error_details,
                 )
-                return
             if recovery_checkpoint.handoff_phase is RecoveryHandoffPhase.NONE:
                 if status is ExecutionStatus.SUCCEEDED and run_id is None:
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -2917,8 +2932,7 @@ class LocalExecutionBackend:
                     current.execution_id,
                     run_id,
                 )
-            await self._reconcile_handoff(recovery_checkpoint)
-            return
+            return await self._reconcile_handoff(recovery_checkpoint)
         await self.verify_terminal_projection(
             current,
             status,
@@ -2962,7 +2976,7 @@ class LocalExecutionBackend:
                 }
             ),
         )
-        await self._commit_execution_terminal_checkpoint(
+        committed = await self._commit_execution_terminal_checkpoint(
             current,
             terminal_commit,
             run_id=run_id,
@@ -2971,12 +2985,18 @@ class LocalExecutionBackend:
             conversation_snapshot=conversation_snapshot,
             recovery_checkpoint=recovery_checkpoint,
         )
-        self._terminal_events.setdefault(current.execution_id, asyncio.Event()).set()
+        self._publish_terminal_event(
+            current.execution_id,
+            event_type=terminal_commit.terminal_event_type,
+            payload=dict(terminal_commit.terminal_event_payload),
+            durable_sequence=committed.execution.event_sequence,
+        )
         _logger.info(
             "execution terminal committed: execution=%s status=%s",
             current.execution_id,
             status.value,
         )
+        return committed.execution
 
     def _same_terminal_storage_group(
         self,
@@ -3015,7 +3035,13 @@ class LocalExecutionBackend:
         run_id: str | None,
         usage: UsageMetrics,
         safe_error_details: Mapping[str, JsonValue] | None,
-    ) -> None:
+    ) -> ExecutionRecord:
+        if current.status in {
+            ExecutionStatus.SUCCEEDED,
+            ExecutionStatus.FAILED,
+            ExecutionStatus.CANCELLED,
+        }:
+            return current
         self._validate_recovery_identity(current, checkpoint.input)
         recovery_run = None
         recovery_snapshot = None
@@ -3097,7 +3123,7 @@ class LocalExecutionBackend:
             expected_cursor = await self._expected_session_cursor(current)
             if conversation_run is None or conversation_snapshot is None:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        await self._commit_execution_terminal_checkpoint(
+        committed = await self._commit_execution_terminal_checkpoint(
             current,
             commit,
             run_id=run_id,
@@ -3108,15 +3134,18 @@ class LocalExecutionBackend:
             recovery_run=recovery_run,
             recovery_snapshot=recovery_snapshot,
         )
-        self._pending_audit_events.pop(current.execution_id, None)
-        self._terminal_events.setdefault(current.execution_id, asyncio.Event()).set()
+        self._publish_terminal_event(
+            current.execution_id,
+            event_type=commit.terminal_event_type,
+            payload=dict(commit.terminal_event_payload),
+            durable_sequence=committed.execution.event_sequence,
+        )
         _logger.info(
             "same-group terminal checkpoint committed: execution=%s status=%s",
             current.execution_id,
             status.value,
         )
-
-
+        return committed.execution
 
     async def _commit_execution_terminal_checkpoint(
         self,
@@ -3130,101 +3159,86 @@ class LocalExecutionBackend:
         recovery_checkpoint: RecoveryCheckpoint | None = None,
         recovery_run: RunRecord | None = None,
         recovery_snapshot: ContinuableSnapshot | None = None,
-        terminal_plan: ExecutionTerminalSealPlan | None = None,
     ) -> ExecutionTerminalCommitResult:
-        if isinstance(self._step_reads[RuntimeDomain.EXECUTION], StateStepArchive):
-            if terminal_plan is None:
-                candidate_run_ids = tuple(
-                    step_run_id(
-                        namespace=self._namespace,
-                        tenant_id=current.tenant_id,
-                        execution_id=current.execution_id,
-                        segment_sequence=sequence,
-                    )
-                    for sequence in range(1, current.agent_run_sequence + 1)
-                )
-                candidate_run_ids = await self._existing_execution_run_ids(
-                    candidate_run_ids
-                )
-                terminal_plan = await self._step_lifecycle.prepare_execution_terminal_seal(
-                    execution_id=current.execution_id,
-                    run_ids=candidate_run_ids,
-                    binding_digest=current.binding_digest,
-                )
+        async def commit_owned() -> ExecutionTerminalCommitResult:
+            plan: ExecutionTerminalSealPlan | None = None
             durable_commit = False
             try:
-                commit_task = asyncio.create_task(
-                    self._commit_execution_terminal_checkpoint_locked(
-                        current,
-                        commit,
-                        run_id=run_id,
-                        expected_cursor=expected_cursor,
-                        conversation_run=conversation_run,
-                        conversation_snapshot=conversation_snapshot,
-                        recovery_checkpoint=recovery_checkpoint,
-                        recovery_run=recovery_run,
-                        recovery_snapshot=recovery_snapshot,
-                        terminal_plan=terminal_plan,
-                    ),
-                    name=f"ai-terminal-commit-{current.execution_id}",
+                state_archive = isinstance(
+                    self._step_reads[RuntimeDomain.EXECUTION],
+                    StateStepArchive,
                 )
-                cancellation: asyncio.CancelledError | None = None
-                try:
-                    committed = await asyncio.shield(commit_task)
-                except asyncio.CancelledError as error:
-                    cancellation = error
-                    committed = await asyncio.shield(commit_task)
+                if state_archive:
+                    if plan is None:
+                        candidate_run_ids = tuple(
+                            step_run_id(
+                                namespace=self._namespace,
+                                tenant_id=current.tenant_id,
+                                execution_id=current.execution_id,
+                                segment_sequence=sequence,
+                            )
+                            for sequence in range(1, current.agent_run_sequence + 1)
+                        )
+                        candidate_run_ids = await self._existing_execution_run_ids(
+                            candidate_run_ids
+                        )
+                        plan = await self._step_lifecycle.prepare_execution_terminal_seal(
+                            execution_id=current.execution_id,
+                            run_ids=candidate_run_ids,
+                            binding_digest=current.binding_digest,
+                        )
+                if run_id is not None and not state_archive:
+                    await self._step_lifecycle.flush_execution_projection(
+                        run_id,
+                        execution_id=current.execution_id,
+                    )
+                committed = await self._commit_execution_terminal_checkpoint_locked(
+                    current,
+                    commit,
+                    run_id=run_id,
+                    expected_cursor=expected_cursor,
+                    conversation_run=conversation_run,
+                    conversation_snapshot=conversation_snapshot,
+                    recovery_checkpoint=recovery_checkpoint,
+                    recovery_run=recovery_run,
+                    recovery_snapshot=recovery_snapshot,
+                    terminal_plan=plan,
+                )
                 durable_commit = True
-                finalizer = asyncio.create_task(
-                    self._step_lifecycle.finalize_execution_terminal_seal(
-                        terminal_plan
-                    ),
-                    name=f"ai-terminal-seal-{current.execution_id}",
-                )
-                try:
-                    await asyncio.shield(finalizer)
-                except asyncio.CancelledError:
-                    _logger.warning(
-                        "terminal seal finalization continues after cancellation: execution=%s",
-                        current.execution_id,
-                    )
-                    raise
-                except BaseException:
-                    _logger.error(
-                        "terminal seal finalization failed after durable commit: execution=%s",
-                        current.execution_id,
-                        exc_info=environ.debug,
-                    )
-                    raise
-                if cancellation is not None:
-                    raise cancellation
+                if plan is not None:
+                    try:
+                        await self._step_lifecycle.finalize_execution_terminal_seal(plan)
+                    except BaseException:
+                        _logger.error(
+                            "terminal seal finalization failed after durable commit: execution=%s",
+                            current.execution_id,
+                            exc_info=environ.debug,
+                        )
+                        raise
                 return committed
             except BaseException as error:
-                if isinstance(error, asyncio.CancelledError):
-                    raise
-                if durable_commit:
-                    raise
-                if isinstance(error, AIError) and error.code is ErrorCode.STORAGE_COMMIT_UNKNOWN:
-                    raise
-                await self._step_lifecycle.discard_execution_terminal_seal(terminal_plan)
+                if (
+                    plan is not None
+                    and not durable_commit
+                    and not (
+                        isinstance(error, AIError)
+                        and error.code is ErrorCode.STORAGE_COMMIT_UNKNOWN
+                    )
+                ):
+                    await self._step_lifecycle.discard_execution_terminal_seal(plan)
                 raise
-        if run_id is not None:
-            await self._step_lifecycle.flush_execution_projection(
-                run_id,
-                execution_id=current.execution_id,
-            )
-        return await self._commit_execution_terminal_checkpoint_locked(
-            current,
-            commit,
-            run_id=run_id,
-            expected_cursor=expected_cursor,
-            conversation_run=conversation_run,
-            conversation_snapshot=conversation_snapshot,
-            recovery_checkpoint=recovery_checkpoint,
-            recovery_run=recovery_run,
-            recovery_snapshot=recovery_snapshot,
-            terminal_plan=terminal_plan,
+
+        task = asyncio.create_task(
+            commit_owned(),
+            name=f"ai-terminal-boundary-{current.execution_id}",
         )
+        committed, cancellation = await self._await_checkpoint_task(
+            task,
+            label="terminal",
+        )
+        if cancellation is not None:
+            raise cancellation
+        return committed
 
 
     async def _existing_execution_run_ids(
@@ -3277,11 +3291,9 @@ class LocalExecutionBackend:
                 recovery_snapshot=recovery_snapshot,
                 terminal_plan=terminal_plan,
             )
-            self._publish_committed_events(
+            self._confirm_committed_events(
                 current.execution_id,
                 pending_count=pending_count,
-                event_type=commit.terminal_event_type,
-                payload=dict(commit.terminal_event_payload),
                 durable_sequence=committed.execution.event_sequence,
             )
             return committed
@@ -3345,25 +3357,6 @@ class LocalExecutionBackend:
         )
         self._pending_audit_events.pop(current.execution_id, None)
         return committed
-
-    async def _release_session_admission_best_effort(
-        self,
-        execution: ExecutionRecord,
-    ) -> None:
-        if execution.session_id is None:
-            return
-        try:
-            await self._conversation.sessions.release_execution(
-                execution.session_id,
-                tenant_id=execution.tenant_id,
-                execution_id=execution.execution_id,
-            )
-        except Exception:
-            _logger.error(
-                "session admission release failed after terminal: execution=%s",
-                execution.execution_id,
-                exc_info=environ.debug,
-            )
 
     async def _capture_usage(self, execution_id: str, usage: UsageMetrics) -> None:
         self._captured_usage[execution_id] = usage

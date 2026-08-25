@@ -148,6 +148,7 @@ class Runtime:
         self._close_callback = close_callback
         self._local_coordinator = local_coordinator
         self._closed = False
+        self._closing = False
         self._close_lock = asyncio.Lock()
         self._close_task: asyncio.Task[None] | None = None
 
@@ -628,7 +629,7 @@ class Runtime:
             raise AIError(ErrorCode.SESSION_BINDING_MISMATCH)
 
     def _ensure_open(self) -> None:
-        if self._closed:
+        if self._closed or self._closing:
             raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
 
     def _resolve_principal(self, principal: "Principal | None") -> Principal:
@@ -645,6 +646,9 @@ class Runtime:
         async with self._close_lock:
             if self._closed:
                 return
+            if not self._closing:
+                self._closing = True
+                _logger.info("runtime close started: tenant=%s", self._tenant_id)
             task = self._close_task
             retry = task is None
             if task is not None and task.done():
@@ -695,6 +699,7 @@ class Runtime:
             await self._close_callback()
         async with self._close_lock:
             self._closed = True
+            _logger.info("runtime close completed: tenant=%s", self._tenant_id)
 
 
 def _validate_memory_scope(value: "str | None") -> "str | None":
