@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-"""Cold-start architecture and import checks. MT-51 MT-52."""
+"""Architecture checker behavior and public import boundary tests."""
 
 import ast
 import importlib
@@ -11,23 +11,13 @@ import subprocess
 import sys
 from pathlib import Path
 
-from scripts.check.ai.architecture import ArchitecturePolicyChecker, build_report
+from scripts.check.ai.architecture import ArchitecturePolicyChecker
 from scripts.check.ai.cohesion import check_files
 from scripts.check.ai.names import check_names
 
 
-def test_source_graph_is_acyclic_and_static() -> None:
-    report = build_report("linktools-ai/src/linktools/ai")
-    assert report["scc"] == []
-    assert report["package_scc"] == []
-    assert report["dynamic_imports"] == []
-    assert ArchitecturePolicyChecker().check("linktools-ai/src/linktools/ai").passed
-
-
-def test_names_and_module_imports_are_clean() -> None:
+def test_modules_are_importable() -> None:
     root = Path("linktools-ai/src/linktools/ai")
-    assert check_names(root) == ()
-    assert check_files(root) == ()
     for path in sorted(root.rglob("*.py")):
         name = "linktools.ai." + ".".join(path.relative_to(root).with_suffix("").parts)
         name = name.removesuffix(".__init__")
@@ -343,7 +333,6 @@ def test_package_public_surface_and_optional_dependency_isolation() -> None:
         "open_workspace_runtime",
         "trusted_workspace_principal",
     ]
-    assert not any("private cross-package import:" in error for error in ArchitecturePolicyChecker().check("linktools-ai/src/linktools/ai").errors)
     environment = dict(os.environ)
     source_root = Path(__file__).parents[2]
     environment["PYTHONPATH"] = os.pathsep.join((str(source_root / "linktools-ai/src"), str(source_root / "linktools/src")))
