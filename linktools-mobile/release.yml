@@ -1,1 +1,9 @@
-checks: {}
+checks:
+  ruff:
+    select:
+      - E4
+      - E7
+      - E9
+      - F
+    paths:
+      - src
