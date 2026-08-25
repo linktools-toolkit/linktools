@@ -39,7 +39,7 @@ def _fail_lifecycle_callback(monkeypatch, name):
 def _fail_hook_phase(monkeypatch, phase):
     def patched(self, called_phase, context=None, reverse=False):
         if called_phase == phase:
-            raise RuntimeError(f"{phase} boom")
+            raise RuntimeError(f"{phase.value} boom")
 
     monkeypatch.setattr(HookRegistry, "call", patched)
 
