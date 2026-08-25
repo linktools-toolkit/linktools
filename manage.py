@@ -10,34 +10,17 @@ import sys
 import typing
 
 import tomlkit
+import yaml
 from tomlkit.items import Array
 
 MODULE_NAME = "linktools"
 TEMPLATE_PATH = os.path.abspath(os.path.join(os.path.dirname(__file__), "templates"))
 PROJECT_PATH = os.path.abspath(os.path.dirname(__file__))
 
-_PROJECT_CHECKS = {
-    "linktools": {
-        "python": (3, 6),
-        "tests": ("tests/core", "tests/cli"),
-    },
-    "linktools-common": {
-        "python": (3, 6),
-        "tests": ("tests/common",),
-    },
-    "linktools-mobile": {
-        "python": (3, 6),
-        "tests": (),
-    },
-    "linktools-cntr": {
-        "python": (3, 6),
-        "tests": ("tests/cntr",),
-    },
-    "linktools-ai": {
-        "python": (3, 10),
-        "tests": ("tests/ai",),
-    },
-}
+_REQUIRES_PYTHON_PATTERN = re.compile(r"^>=(\d+)\.(\d+)$")
+_SUPPORTED_CHECKS = {"ruff", "pytest"}
+_RUFF_FIELDS = {"select", "paths"}
+_PYTEST_FIELDS = {"paths"}
 
 __missing__ = object()
 
@@ -65,6 +48,30 @@ class LazyChoices(typing.Iterable):
         if isinstance(item, (list, tuple)) and len(item) == 0:
             return True
         return item in self._load()
+
+
+class _UniqueKeyLoader(yaml.SafeLoader):
+    pass
+
+
+def _construct_unique_mapping(loader: _UniqueKeyLoader, node: yaml.nodes.MappingNode, deep: bool = False) -> dict:
+    mapping = {}
+    for key_node, value_node in node.value:
+        key = loader.construct_object(key_node, deep=deep)
+        try:
+            duplicated = key in mapping
+        except TypeError:
+            raise ValueError("mapping keys must be scalar values")
+        if duplicated:
+            raise ValueError("duplicate YAML key: %s" % key)
+        mapping[key] = loader.construct_object(value_node, deep=deep)
+    return mapping
+
+
+_UniqueKeyLoader.add_constructor(
+    yaml.resolver.BaseResolver.DEFAULT_MAPPING_TAG,
+    _construct_unique_mapping,
+)
 
 
 def get_modules() -> "typing.Dict[str, typing.Dict[str, str]]":
@@ -175,6 +182,11 @@ def build_parser() -> argparse.ArgumentParser:
 
     check_parser = subparsers.add_parser("check", help="Run source and test release gates")
     _add_project_argument(check_parser, modules)
+    check_parser.add_argument(
+        "--compatibility",
+        action="store_true",
+        help="Run Python compatibility gates only",
+    )
     check_parser.set_defaults(func=handle_check)
 
     build_command = subparsers.add_parser("build", help="Build project modules")
@@ -191,62 +203,145 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _selected_modules(args: argparse.Namespace) -> "typing.Tuple[str, ...]":
+def _selected_modules(args: argparse.Namespace, modules: "typing.Dict[str, typing.Dict[str, str]]") -> "typing.Tuple[str, ...]":
     if args.module:
         return tuple(dict.fromkeys(args.module))
-    return tuple(_PROJECT_CHECKS.keys())
+    return tuple(modules.keys())
 
 
-def _validate_project_registration() -> None:
-    discovered = set(get_modules())
-    registered = set(_PROJECT_CHECKS)
-    missing = sorted(discovered - registered)
-    stale = sorted(registered - discovered)
-    if not missing and not stale:
-        return
-    if missing:
-        print("[-] Unregistered projects: %s" % ", ".join(missing), file=sys.stderr)
-    if stale:
-        print("[-] Registered projects not found: %s" % ", ".join(stale), file=sys.stderr)
-    raise SystemExit(1)
-
-
-def _expected_requires_python(project: str) -> str:
-    version = _PROJECT_CHECKS[project]["python"]
-    return ">=%d.%d" % (version[0], version[1])
-
-
-def _read_requires_python(project: str) -> str:
-    path = os.path.join(PROJECT_PATH, project, "pyproject.toml")
+def _read_requires_python(project: str, project_path: str) -> "typing.Tuple[int, int]":
+    path = os.path.join(project_path, "pyproject.toml")
     with open(path, "r", encoding="utf-8") as file:
         data = tomlkit.parse(file.read())
     value = data.get("project", {}).get("requires-python")
-    return value if isinstance(value, str) else ""
+    match = _REQUIRES_PYTHON_PATTERN.match(value) if isinstance(value, str) else None
+    if not match:
+        print(
+            "[-] %s requires-python must use the exact >=X.Y form, got %r" % (project, value),
+            file=sys.stderr,
+        )
+        raise SystemExit(1)
+    return int(match.group(1)), int(match.group(2))
 
 
-def _validate_requires_python(projects: "typing.Tuple[str, ...]") -> None:
-    for project in projects:
-        actual = _read_requires_python(project)
-        expected = _expected_requires_python(project)
-        if actual != expected:
-            print(
-                "[-] %s requires-python is %r, expected %r" % (project, actual, expected),
-                file=sys.stderr,
-            )
+def _require_mapping(value: typing.Any, label: str) -> dict:
+    if not isinstance(value, dict):
+        print("[-] %s must be a mapping" % label, file=sys.stderr)
+        raise SystemExit(1)
+    return value
+
+
+def _unknown_fields(value: dict, allowed: "typing.Set[str]", label: str) -> "typing.Tuple[str, ...]":
+    if not all(isinstance(key, str) for key in value):
+        print("[-] %s field names must be strings" % label, file=sys.stderr)
+        raise SystemExit(1)
+    return tuple(sorted(set(value) - allowed))
+
+
+def _require_string_list(value: typing.Any, label: str) -> "typing.Tuple[str, ...]":
+    if not isinstance(value, list) or not value or not all(isinstance(item, str) and item for item in value):
+        print("[-] %s must be a non-empty list of strings" % label, file=sys.stderr)
+        raise SystemExit(1)
+    return tuple(value)
+
+
+def _resolve_paths(project: str, project_path: str, values: "typing.Tuple[str, ...]", label: str) -> "typing.Tuple[str, ...]":
+    resolved = []
+    for value in values:
+        if os.path.isabs(value):
+            print("[-] %s %s path must be relative: %s" % (project, label, value), file=sys.stderr)
             raise SystemExit(1)
+        path = os.path.realpath(os.path.join(project_path, value))
+        try:
+            inside_repository = os.path.commonpath((PROJECT_PATH, path)) == PROJECT_PATH
+        except ValueError:
+            inside_repository = False
+        if not inside_repository:
+            print("[-] %s %s path escapes repository: %s" % (project, label, value), file=sys.stderr)
+            raise SystemExit(1)
+        if not os.path.exists(path):
+            print("[-] %s %s path does not exist: %s" % (project, label, value), file=sys.stderr)
+            raise SystemExit(1)
+        resolved.append(path)
+    return tuple(resolved)
 
 
-def _validate_interpreter(projects: "typing.Tuple[str, ...]") -> None:
-    required = max(_PROJECT_CHECKS[project]["python"] for project in projects)
-    if sys.version_info[:2] >= required:
-        return
-    owners = [project for project in projects if _PROJECT_CHECKS[project]["python"] == required]
-    print(
-        "[-] Python %d.%d is required by %s; current interpreter is %d.%d"
-        % (required[0], required[1], ", ".join(owners), sys.version_info[0], sys.version_info[1]),
-        file=sys.stderr,
-    )
-    raise SystemExit(1)
+def _load_release_config(project: str, project_path: str) -> "typing.Dict[str, typing.Any]":
+    path = os.path.join(project_path, "release.yml")
+    if not os.path.isfile(path):
+        print("[-] %s release config is missing: %s" % (project, path), file=sys.stderr)
+        raise SystemExit(1)
+    try:
+        with open(path, "r", encoding="utf-8") as file:
+            data = yaml.load(file, Loader=_UniqueKeyLoader)
+    except (OSError, ValueError, yaml.YAMLError) as error:
+        print("[-] %s release config is invalid: %s" % (project, error), file=sys.stderr)
+        raise SystemExit(1)
+
+    root = _require_mapping(data, "%s release config" % project)
+    unknown_root = _unknown_fields(root, {"checks"}, "%s release config" % project)
+    if unknown_root:
+        print("[-] %s release config has unknown field(s): %s" % (project, ", ".join(unknown_root)), file=sys.stderr)
+        raise SystemExit(1)
+    checks = _require_mapping(root.get("checks"), "%s checks" % project)
+    if not checks:
+        print("[-] %s checks must not be empty" % project, file=sys.stderr)
+        raise SystemExit(1)
+    unknown_checks = _unknown_fields(checks, _SUPPORTED_CHECKS, "%s checks" % project)
+    if unknown_checks:
+        print("[-] %s has unknown check(s): %s" % (project, ", ".join(unknown_checks)), file=sys.stderr)
+        raise SystemExit(1)
+
+    result = {}
+    if "ruff" in checks:
+        ruff = _require_mapping(checks["ruff"], "%s checks.ruff" % project)
+        unknown = _unknown_fields(ruff, _RUFF_FIELDS, "%s checks.ruff" % project)
+        if unknown:
+            print("[-] %s checks.ruff has unknown field(s): %s" % (project, ", ".join(unknown)), file=sys.stderr)
+            raise SystemExit(1)
+        select = _require_string_list(ruff.get("select"), "%s checks.ruff.select" % project)
+        paths = _require_string_list(ruff.get("paths"), "%s checks.ruff.paths" % project)
+        result["ruff"] = {
+            "select": select,
+            "paths": _resolve_paths(project, project_path, paths, "ruff"),
+        }
+
+    if "pytest" in checks:
+        pytest = _require_mapping(checks["pytest"], "%s checks.pytest" % project)
+        unknown = _unknown_fields(pytest, _PYTEST_FIELDS, "%s checks.pytest" % project)
+        if unknown:
+            print("[-] %s checks.pytest has unknown field(s): %s" % (project, ", ".join(unknown)), file=sys.stderr)
+            raise SystemExit(1)
+        paths = _require_string_list(pytest.get("paths"), "%s checks.pytest.paths" % project)
+        result["pytest"] = {
+            "paths": _resolve_paths(project, project_path, paths, "pytest"),
+        }
+    return result
+
+
+def _compatible_projects(
+    args: argparse.Namespace,
+    projects: "typing.Tuple[str, ...]",
+    requirements: "typing.Dict[str, typing.Tuple[int, int]]",
+) -> "typing.Tuple[str, ...]":
+    current = sys.version_info[:2]
+    incompatible = [project for project in projects if current < requirements[project]]
+    if args.module and incompatible:
+        required = max(requirements[project] for project in incompatible)
+        owners = [project for project in incompatible if requirements[project] == required]
+        print(
+            "[-] Python %d.%d is required by %s; current interpreter is %d.%d"
+            % (required[0], required[1], ", ".join(owners), current[0], current[1]),
+            file=sys.stderr,
+        )
+        raise SystemExit(1)
+    for project in incompatible:
+        required = requirements[project]
+        print(
+            "[+] Skipping %s: requires Python >=%d.%d, current interpreter is %d.%d"
+            % (project, required[0], required[1], current[0], current[1])
+        )
+    return tuple(project for project in projects if project not in incompatible)
 
 
 def _check_environment() -> "typing.Dict[str, str]":
@@ -260,48 +355,38 @@ def _run_check(command: "typing.Sequence[str]", environment: "typing.Dict[str, s
     subprocess.check_call(list(command), cwd=PROJECT_PATH, env=environment)
 
 
-def _run_python36_gate(projects: "typing.Tuple[str, ...]", environment: "typing.Dict[str, str]") -> None:
-    compatible = [project for project in projects if _PROJECT_CHECKS[project]["python"] == (3, 6)]
+def _run_python36_gate(
+    projects: "typing.Tuple[str, ...]",
+    requirements: "typing.Dict[str, typing.Tuple[int, int]]",
+    modules: "typing.Dict[str, typing.Dict[str, str]]",
+    environment: "typing.Dict[str, str]",
+) -> None:
+    compatible = [project for project in projects if requirements[project] <= (3, 6)]
     if not compatible:
         return
     scanner = os.path.join(PROJECT_PATH, "scripts", "check", "python36.py")
     paths = [os.path.join(PROJECT_PATH, "manage.py"), scanner]
-    paths.extend(os.path.join(PROJECT_PATH, project, "src") for project in compatible)
+    paths.extend(os.path.join(modules[project]["path"], "src") for project in compatible)
+    print("[+] Python 3.6 compatibility: %s" % ", ".join(compatible))
     _run_check([sys.executable, scanner] + paths, environment)
 
 
-def _run_ai_ruff(environment: "typing.Dict[str, str]") -> None:
+def _run_ruff(project: str, check: "typing.Dict[str, typing.Any]", environment: "typing.Dict[str, str]") -> None:
     ruff = shutil.which("ruff")
     if not ruff:
-        print("[-] ruff is required; run `python manage.py install --editable` first", file=sys.stderr)
+        print("[-] ruff is required; install repository requirements first", file=sys.stderr)
         raise SystemExit(1)
-    _run_check(
-        [
-            ruff,
-            "check",
-            "--no-cache",
-            "--select",
-            "E4,E7,E9,F",
-            "scripts/check/ai",
-            "linktools-ai/src/linktools/ai",
-            "linktools-ai/src/linktools/commands/ai",
-            "tests/ai",
-        ],
-        environment,
-    )
+    print("[+] %s: ruff" % project)
+    command = [ruff, "check", "--no-cache", "--select", ",".join(check["select"])]
+    command.extend(check["paths"])
+    _run_check(command, environment)
 
 
-def _pytest_paths(args: argparse.Namespace, projects: "typing.Tuple[str, ...]") -> "typing.Tuple[str, ...]":
-    if not args.module:
-        return ("tests",)
-    result = []
-    seen = set()
-    for project in projects:
-        for path in _PROJECT_CHECKS[project]["tests"]:
-            if path not in seen:
-                seen.add(path)
-                result.append(path)
-    return tuple(result)
+def _run_pytest(project: str, check: "typing.Dict[str, typing.Any]", environment: "typing.Dict[str, str]") -> None:
+    print("[+] %s: pytest" % project)
+    command = [sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider"]
+    command.extend(check["paths"])
+    _run_check(command, environment)
 
 
 def handle_init(args: argparse.Namespace) -> None:
@@ -330,6 +415,11 @@ def handle_init(args: argparse.Namespace) -> None:
                 os.path.join(info["path"], "requirements.yml"),
                 exist_ok=False,
             )
+            sync_project_file(
+                os.path.join(TEMPLATE_PATH, "release.yml"),
+                os.path.join(info["path"], "release.yml"),
+                exist_ok=False,
+            )
 
 
 def handle_install(args: argparse.Namespace) -> None:
@@ -350,22 +440,29 @@ def handle_install(args: argparse.Namespace) -> None:
 
 
 def handle_check(args: argparse.Namespace) -> None:
-    _validate_project_registration()
-    projects = _selected_modules(args)
-    _validate_requires_python(projects)
-    _validate_interpreter(projects)
+    modules = get_modules()
+    projects = _selected_modules(args, modules)
+    requirements = {}
+    checks = {}
+    for project in projects:
+        project_path = modules[project]["path"]
+        requirements[project] = _read_requires_python(project, project_path)
+        checks[project] = _load_release_config(project, project_path)
+
+    compatible = _compatible_projects(args, projects, requirements)
     environment = _check_environment()
-    _run_python36_gate(projects, environment)
-    if "linktools-ai" in projects:
-        _run_ai_ruff(environment)
-    tests = _pytest_paths(args, projects)
-    if tests:
-        _run_check([sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider"] + list(tests), environment)
-    else:
-        for project in projects:
-            if not _PROJECT_CHECKS[project]["tests"]:
-                print("[+] %s: no dedicated test suite" % project)
-    print("[+] Check passed: %s" % ", ".join(projects))
+    _run_python36_gate(compatible, requirements, modules, environment)
+
+    if not args.compatibility:
+        for project in compatible:
+            project_checks = checks[project]
+            if "ruff" in project_checks:
+                _run_ruff(project, project_checks["ruff"], environment)
+            if "pytest" in project_checks:
+                _run_pytest(project, project_checks["pytest"], environment)
+
+    mode = "compatibility" if args.compatibility else "check"
+    print("[+] %s passed: %s" % (mode.capitalize(), ", ".join(compatible)))
 
 
 def handle_build(args: argparse.Namespace) -> None:
@@ -393,8 +490,7 @@ def handle_build(args: argparse.Namespace) -> None:
 
 
 def handle_verify(args: argparse.Namespace) -> None:
-    _validate_project_registration()
-    projects = _selected_modules(args)
+    projects = _selected_modules(args, get_modules())
     command = [sys.executable, os.path.join(PROJECT_PATH, "scripts", "verify.py")]
     command.extend(projects)
     subprocess.check_call(command, cwd=PROJECT_PATH)

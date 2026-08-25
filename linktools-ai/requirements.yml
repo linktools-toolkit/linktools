@@ -8,7 +8,6 @@ dev-dependencies:
   - linktools
   - pytest
   - pytest-asyncio
-  - "ruff>=0.16,<0.17"
   - sqlalchemy[asyncio]==2.0.51
   - aiosqlite==0.22.1
 

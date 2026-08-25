@@ -1,0 +1,15 @@
+checks:
+  ruff:
+    select:
+      - E4
+      - E7
+      - E9
+      - F
+    paths:
+      - ../scripts/check/ai
+      - src/linktools/ai
+      - src/linktools/commands/ai
+      - ../tests/ai
+  pytest:
+    paths:
+      - ../tests/ai
