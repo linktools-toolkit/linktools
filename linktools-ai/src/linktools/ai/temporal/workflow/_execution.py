@@ -5,7 +5,7 @@
 from collections.abc import Mapping
 from dataclasses import dataclass, replace
 from datetime import timedelta
-from enum import StrEnum
+from enum import Enum
 
 try:
     from temporalio import workflow as _temporal_workflow
@@ -29,7 +29,9 @@ from ...errors import AIError, ErrorCode
 CONTINUE_EVENT_THRESHOLD = 10000
 
 
-class WorkflowPhase(StrEnum):
+class WorkflowPhase(str, Enum):
+    __str__ = str.__str__
+    __format__ = str.__format__
     LOADING = "LOADING"
     RESERVING_BUDGET = "RESERVING_BUDGET"
     RUNNING_AGENT = "RUNNING_AGENT"

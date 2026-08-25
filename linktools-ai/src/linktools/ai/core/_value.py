@@ -4,7 +4,7 @@
 
 from collections.abc import Sequence
 from dataclasses import dataclass
-from enum import StrEnum
+from enum import Enum
 
 from ..errors import AIError, ErrorCode
 from ._paging import Page
@@ -30,7 +30,9 @@ def canonical_string_tuple(value: Sequence[str], *, field: str) -> "tuple[str, .
     return normalized
 
 
-class ResourceKind(StrEnum):
+class ResourceKind(str, Enum):
+    __str__ = str.__str__
+    __format__ = str.__format__
     SESSION = "SESSION"
     EXECUTION = "EXECUTION"
     TASK_GRAPH = "TASK_GRAPH"
@@ -43,7 +45,9 @@ class ResourceKind(StrEnum):
     DOWNLOAD_GRANT = "DOWNLOAD_GRANT"
 
 
-class ExecutionEventType(StrEnum):
+class ExecutionEventType(str, Enum):
+    __str__ = str.__str__
+    __format__ = str.__format__
     EXECUTION_CREATED = "EXECUTION_CREATED"
     EXECUTION_STARTED = "EXECUTION_STARTED"
     EXECUTION_START_UNKNOWN = "EXECUTION_START_UNKNOWN"
@@ -60,14 +64,18 @@ class ExecutionEventType(StrEnum):
     TOOL_CALL_FINISHED = "TOOL_CALL_FINISHED"
 
 
-class ExecutionDeltaType(StrEnum):
+class ExecutionDeltaType(str, Enum):
     """Process-local presentation updates that never enter durable state."""
+    __str__ = str.__str__
+    __format__ = str.__format__
 
     ASSISTANT_TEXT_DELTA = "ASSISTANT_TEXT_DELTA"
     ASSISTANT_THINKING_DELTA = "ASSISTANT_THINKING_DELTA"
 
 
-class ExecutionLineageKind(StrEnum):
+class ExecutionLineageKind(str, Enum):
+    __str__ = str.__str__
+    __format__ = str.__format__
     RUN = "RUN"
     SESSION_RESUME = "SESSION_RESUME"
     RETRY = "RETRY"
@@ -75,7 +83,9 @@ class ExecutionLineageKind(StrEnum):
     SUBAGENT = "SUBAGENT"
 
 
-class ExecutionStatus(StrEnum):
+class ExecutionStatus(str, Enum):
+    __str__ = str.__str__
+    __format__ = str.__format__
     PENDING_START = "PENDING_START"
     STARTED = "STARTED"
     FINALIZING = "FINALIZING"
@@ -88,14 +98,18 @@ class ExecutionStatus(StrEnum):
     CANCELLED = "CANCELLED"
 
 
-class SessionStatus(StrEnum):
+class SessionStatus(str, Enum):
+    __str__ = str.__str__
+    __format__ = str.__format__
     OPEN = "OPEN"
     CLOSING = "CLOSING"
     CLOSED = "CLOSED"
     CLEANUP_REQUIRED = "CLEANUP_REQUIRED"
 
 
-class TaskStatus(StrEnum):
+class TaskStatus(str, Enum):
+    __str__ = str.__str__
+    __format__ = str.__format__
     PENDING = "PENDING"
     READY = "READY"
     RUNNING = "RUNNING"
@@ -105,7 +119,9 @@ class TaskStatus(StrEnum):
     BLOCKED = "BLOCKED"
 
 
-class EvaluationStatus(StrEnum):
+class EvaluationStatus(str, Enum):
+    __str__ = str.__str__
+    __format__ = str.__format__
     PENDING = "PENDING"
     RUNNING = "RUNNING"
     SUCCEEDED = "SUCCEEDED"
@@ -113,7 +129,9 @@ class EvaluationStatus(StrEnum):
     CANCELLED = "CANCELLED"
 
 
-class ApprovalStatus(StrEnum):
+class ApprovalStatus(str, Enum):
+    __str__ = str.__str__
+    __format__ = str.__format__
     PENDING = "PENDING"
     APPROVED = "APPROVED"
     DENIED = "DENIED"
@@ -121,12 +139,16 @@ class ApprovalStatus(StrEnum):
     EXPIRED = "EXPIRED"
 
 
-class ApprovalDecision(StrEnum):
+class ApprovalDecision(str, Enum):
+    __str__ = str.__str__
+    __format__ = str.__format__
     APPROVE = "APPROVE"
     DENY = "DENY"
 
 
-class IdempotencyStatus(StrEnum):
+class IdempotencyStatus(str, Enum):
+    __str__ = str.__str__
+    __format__ = str.__format__
     RESERVED = "RESERVED"
     STARTED = "STARTED"
     START_UNKNOWN = "START_UNKNOWN"
@@ -135,7 +157,9 @@ class IdempotencyStatus(StrEnum):
     CANCELLED = "CANCELLED"
 
 
-class ToolOperationStatus(StrEnum):
+class ToolOperationStatus(str, Enum):
+    __str__ = str.__str__
+    __format__ = str.__format__
     PENDING = "PENDING"
     CLAIMED = "CLAIMED"
     COMPLETED = "COMPLETED"
@@ -144,14 +168,18 @@ class ToolOperationStatus(StrEnum):
     EFFECT_UNKNOWN = "EFFECT_UNKNOWN"
 
 
-class ExternalCallStatus(StrEnum):
+class ExternalCallStatus(str, Enum):
+    __str__ = str.__str__
+    __format__ = str.__format__
     PENDING = "PENDING"
     SUPPLIED = "SUPPLIED"
     CANCELLED = "CANCELLED"
     EXPIRED = "EXPIRED"
 
 
-class OperationKind(StrEnum):
+class OperationKind(str, Enum):
+    __str__ = str.__str__
+    __format__ = str.__format__
     EXECUTION_START = "EXECUTION_START"
     MODEL = "MODEL"
     TOOL = "TOOL"
@@ -172,7 +200,9 @@ class OperationKind(StrEnum):
     DOWNLOAD_GRANT = "DOWNLOAD_GRANT"
 
 
-class OperationStatus(StrEnum):
+class OperationStatus(str, Enum):
+    __str__ = str.__str__
+    __format__ = str.__format__
     PENDING = "PENDING"
     RUNNING = "RUNNING"
     SUCCEEDED = "SUCCEEDED"
@@ -182,7 +212,9 @@ class OperationStatus(StrEnum):
     COMPACTED = "COMPACTED"
 
 
-class StopReason(StrEnum):
+class StopReason(str, Enum):
+    __str__ = str.__str__
+    __format__ = str.__format__
     END_TURN = "END_TURN"
     REFUSAL = "REFUSAL"
     TURN_LIMIT = "TURN_LIMIT"
@@ -191,7 +223,9 @@ class StopReason(StrEnum):
     ERROR = "ERROR"
 
 
-class PrincipalKind(StrEnum):
+class PrincipalKind(str, Enum):
+    __str__ = str.__str__
+    __format__ = str.__format__
     USER = "user"
     SERVICE = "service"
     LOCAL_TRUSTED = "local_trusted"
