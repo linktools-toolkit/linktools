@@ -5,7 +5,7 @@
 import asyncio
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from enum import StrEnum
+from enum import Enum
 from typing import Generic, TypeVar, cast
 
 from linktools.core import environ
@@ -16,7 +16,9 @@ ValueT = TypeVar("ValueT")
 _logger = environ.get_logger("ai.runtime.state.durability")
 
 
-class DurableCommitState(StrEnum):
+class DurableCommitState(str, Enum):
+    __str__ = str.__str__
+    __format__ = str.__format__
     COMMITTED = "committed"
     NOT_COMMITTED = "not_committed"
     PARTIAL_INTEGRITY_ERROR = "partial_integrity_error"

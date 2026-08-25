@@ -10,7 +10,7 @@ from collections.abc import Callable, Mapping
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
-from enum import StrEnum
+from enum import Enum
 from functools import wraps
 from typing import Protocol
 
@@ -178,7 +178,9 @@ class ExecutionBackend(Protocol):
     def worker_installed(self, execution_id: str) -> bool: ...
 
 
-class CancelEffectOutcome(StrEnum):
+class CancelEffectOutcome(str, Enum):
+    __str__ = str.__str__
+    __format__ = str.__format__
     CONFIRMED = "CONFIRMED"
     UNKNOWN = "UNKNOWN"
 

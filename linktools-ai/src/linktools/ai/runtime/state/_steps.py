@@ -7,7 +7,7 @@ from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequenc
 from contextlib import asynccontextmanager
 from contextvars import ContextVar, Token
 from dataclasses import dataclass, replace
-from enum import StrEnum
+from enum import Enum
 from time import monotonic
 from typing import Protocol, runtime_checkable
 from uuid import uuid4
@@ -216,7 +216,9 @@ def _chunk_message_groups(
     return groups
 
 
-class _RunDurabilityKind(StrEnum):
+class _RunDurabilityKind(str, Enum):
+    __str__ = str.__str__
+    __format__ = str.__format__
     PROJECTION = "projection"
     SNAPSHOT = "snapshot"
     TOOL_EFFECT = "tool_effect"

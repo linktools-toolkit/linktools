@@ -7,7 +7,7 @@ import warnings
 from collections.abc import Callable
 from dataclasses import fields
 from datetime import date, datetime, timezone
-from enum import Enum, IntEnum, StrEnum
+from enum import Enum, IntEnum
 
 import pytest
 from linktools.ai.agent import AgentBindingSnapshot
@@ -79,7 +79,9 @@ class _JsonEnum(Enum):
     VALUE = "value"
 
 
-class _JsonStrEnum(StrEnum):
+class _JsonStrEnum(str, Enum):
+    __str__ = str.__str__
+    __format__ = str.__format__
     VALUE = "value"
 
 

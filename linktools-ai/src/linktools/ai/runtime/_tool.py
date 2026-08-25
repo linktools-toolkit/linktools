@@ -8,7 +8,7 @@ import json
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import datetime
-from enum import StrEnum
+from enum import Enum
 from typing import TYPE_CHECKING, Any, Protocol
 
 from linktools.core import environ
@@ -168,7 +168,9 @@ class ToolDescriptor:
     replay_safe: bool = False
 
 
-class ToolAuthorization(StrEnum):
+class ToolAuthorization(str, Enum):
+    __str__ = str.__str__
+    __format__ = str.__format__
     ALLOW = "ALLOW"
     DENY = "DENY"
     REQUIRE_APPROVAL = "REQUIRE_APPROVAL"

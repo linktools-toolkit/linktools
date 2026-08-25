@@ -11,9 +11,9 @@ import subprocess
 import sys
 from pathlib import Path
 
-from scripts.build.architecture import ArchitecturePolicyChecker, build_report
-from scripts.build.cohesion import check_files
-from scripts.build.names import check_names
+from scripts.check.ai.architecture import ArchitecturePolicyChecker, build_report
+from scripts.check.ai.cohesion import check_files
+from scripts.check.ai.names import check_names
 
 
 def test_source_graph_is_acyclic_and_static() -> None:
@@ -261,7 +261,7 @@ def test_private_conversion_tree_is_exact() -> None:
     assert (root / "errors.py").is_file()
     assert not (root / "core" / "errors.py").is_file()
     assert check_names(root) == ()
-    policy = json.loads(Path("linktools-ai/scripts/build/matrix/linktools-ai-package-policy.json").read_text(encoding="utf-8"))
+    policy = json.loads(Path("scripts/check/ai/matrix/linktools-ai-package-policy.json").read_text(encoding="utf-8"))
     assert policy["public_modules"] == [
         "errors",
         "acp",
@@ -366,7 +366,7 @@ def test_facade_launcher_boundary_is_class_scoped() -> None:
 
 
 def test_runtime_step_contract_matrix_is_current() -> None:
-    root = Path("linktools-ai/scripts/build/matrix")
+    root = Path("scripts/check/ai/matrix")
     requirements_path = root / "runtime-step-requirements.json"
     requirements = json.loads(requirements_path.read_text(encoding="utf-8"))
     entries = requirements["requirements"]

@@ -7,11 +7,11 @@ import sys
 from pathlib import Path
 
 import pytest
-from scripts.build import persistence
+from scripts.check.ai import persistence
 
 _MATRIX = (
     Path(__file__).resolve().parents[2]
-    / "linktools-ai/scripts/build/matrix"
+    / "scripts/check/ai/matrix"
 )
 
 
