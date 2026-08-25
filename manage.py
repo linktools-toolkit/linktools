@@ -18,7 +18,9 @@ TEMPLATE_PATH = os.path.abspath(os.path.join(os.path.dirname(__file__), "templat
 PROJECT_PATH = os.path.abspath(os.path.dirname(__file__))
 
 _REQUIRES_PYTHON_PATTERN = re.compile(r"^>=(\d+)\.(\d+)$")
-_SUPPORTED_CHECKS = {"ruff", "pytest"}
+_GATE_MODULE_PATTERN = re.compile(r"^scripts\.check(?:\.[A-Za-z_][A-Za-z0-9_]*)+$")
+_SUPPORTED_CHECKS = {"gate", "ruff", "pytest"}
+_GATE_FIELDS = {"modules"}
 _RUFF_FIELDS = {"select", "paths"}
 _PYTEST_FIELDS = {"paths"}
 
@@ -266,6 +268,26 @@ def _resolve_paths(project: str, project_path: str, values: "typing.Tuple[str, .
     return tuple(resolved)
 
 
+def _resolve_gate_modules(project: str, values: "typing.Tuple[str, ...]") -> "typing.Tuple[str, ...]":
+    for module in values:
+        if not _GATE_MODULE_PATTERN.match(module):
+            print(
+                "[-] %s gate module must be under scripts.check: %s" % (project, module),
+                file=sys.stderr,
+            )
+            raise SystemExit(1)
+        relative = module.replace(".", os.sep)
+        package_main = os.path.join(PROJECT_PATH, relative, "__main__.py")
+        module_file = os.path.join(PROJECT_PATH, relative + ".py")
+        if not os.path.isfile(package_main) and not os.path.isfile(module_file):
+            print(
+                "[-] %s gate module is not executable with python -m: %s" % (project, module),
+                file=sys.stderr,
+            )
+            raise SystemExit(1)
+    return values
+
+
 def _load_release_config(project: str, project_path: str) -> "typing.Dict[str, typing.Any]":
     path = os.path.join(project_path, "release.yml")
     if not os.path.isfile(path):
@@ -290,6 +312,17 @@ def _load_release_config(project: str, project_path: str) -> "typing.Dict[str, t
         raise SystemExit(1)
 
     result = {}
+    if "gate" in checks:
+        gate = _require_mapping(checks["gate"], "%s checks.gate" % project)
+        unknown = _unknown_fields(gate, _GATE_FIELDS, "%s checks.gate" % project)
+        if unknown:
+            print("[-] %s checks.gate has unknown field(s): %s" % (project, ", ".join(unknown)), file=sys.stderr)
+            raise SystemExit(1)
+        modules = _require_string_list(gate.get("modules"), "%s checks.gate.modules" % project)
+        result["gate"] = {
+            "modules": _resolve_gate_modules(project, modules),
+        }
+
     if "ruff" in checks:
         ruff = _require_mapping(checks["ruff"], "%s checks.ruff" % project)
         unknown = _unknown_fields(ruff, _RUFF_FIELDS, "%s checks.ruff" % project)
@@ -366,6 +399,12 @@ def _run_python36_gate(
     paths.extend(os.path.join(modules[project]["path"], "src") for project in compatible)
     print("[+] Python 3.6 compatibility: %s" % ", ".join(compatible))
     _run_check([sys.executable, scanner] + paths, environment)
+
+
+def _run_gate(project: str, check: "typing.Dict[str, typing.Any]", environment: "typing.Dict[str, str]") -> None:
+    for module in check["modules"]:
+        print("[+] %s: gate %s" % (project, module))
+        _run_check([sys.executable, "-m", module], environment)
 
 
 def _run_ruff(project: str, check: "typing.Dict[str, typing.Any]", environment: "typing.Dict[str, str]") -> None:
@@ -453,6 +492,8 @@ def handle_check(args: argparse.Namespace) -> None:
     if not args.compatibility:
         for project in compatible:
             project_checks = checks[project]
+            if "gate" in project_checks:
+                _run_gate(project, project_checks["gate"], environment)
             if "ruff" in project_checks:
                 _run_ruff(project, project_checks["ruff"], environment)
             if "pytest" in project_checks:
