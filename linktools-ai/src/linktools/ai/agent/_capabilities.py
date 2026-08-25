@@ -55,6 +55,7 @@ WORKSPACE_FILESYSTEM_READ_TOOL_NAMES = (
 )
 WORKSPACE_SHELL_TOOL_NAMES = ("check_command", "run_command", "start_command", "stop_command")
 PLAN_SAFE_METADATA_KEY = "linktools.ai.plan_safe"
+_REPLAY_SAFE_METADATA_KEY = "linktools.ai.replay_safe"
 _TRUSTED_TOOL_CLASSES = frozenset(
     {
         "control",
@@ -84,10 +85,19 @@ class ToolOperationDecision:
     cached_error: "BaseException | None" = None
 
 
+@dataclass(frozen=True, slots=True)
+class _ToolEffectPolicy:
+    replay_safe: bool
+    effect_free: bool
+
+
 @dataclass
 class _ToolCallState:
     decision: ToolOperationDecision
+    policy: _ToolEffectPolicy
     handler_entered: bool = False
+    handler_observed: bool = False
+    heartbeat_observed: bool = False
     operation_terminalized: bool = False
     preserve_started: bool = False
     cached_failure: bool = False
@@ -102,6 +112,7 @@ class ToolOperationBridge(Protocol):
         call: ToolCallPart,
         tool_def: ToolDefinition,
         args: dict[str, Any],
+        replay_safe: bool,
     ) -> ToolOperationDecision: ...
 
     async def renew(self, decision: ToolOperationDecision) -> ToolOperationDecision: ...
@@ -120,8 +131,9 @@ class _MissingToolOperationBridge:
         call: ToolCallPart,
         tool_def: ToolDefinition,
         args: dict[str, Any],
+        replay_safe: bool,
     ) -> ToolOperationDecision:
-        del ctx, call, tool_def, args
+        del ctx, call, tool_def, args, replay_safe
         raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
 
     async def renew(self, decision: ToolOperationDecision) -> ToolOperationDecision:
@@ -181,10 +193,23 @@ class _RuntimeStepPersistence(StepPersistence[None]):
                 ErrorCode.CAPABILITY_POLICY_CONFLICT,
                 safe_details={"tool_name": tool_def.name, "planning": True},
             )
-        decision = await self._tool_operations.begin(ctx, call, tool_def, args)
+        policy = _tool_effect_policy(
+            tool_def,
+            trusted_tool_classes=self._trusted_tool_classes,
+        )
+        decision = await self._tool_operations.begin(
+            ctx,
+            call,
+            tool_def,
+            args,
+            policy.replay_safe,
+        )
+        if decision.replay_safe is not policy.replay_safe:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         key = self._decision_key(ctx, call)
         state = _ToolCallState(
             decision=decision,
+            policy=policy,
             operation_terminalized=decision.has_cached_result or decision.cached_error is not None,
             cached_failure=decision.cached_error is not None,
         )
@@ -242,6 +267,7 @@ class _RuntimeStepPersistence(StepPersistence[None]):
             name=f"tool-heartbeat-{call.tool_call_id}",
         )
         state.heartbeat_task = heartbeat_task
+        handler_detached = False
         keep_call_state = True
         try:
             done, _ = await asyncio.wait(
@@ -249,16 +275,21 @@ class _RuntimeStepPersistence(StepPersistence[None]):
                 return_when=asyncio.FIRST_COMPLETED,
             )
             if heartbeat_task in done:
+                state.heartbeat_observed = True
                 heartbeat_error = heartbeat_task.exception()
                 if heartbeat_error is not None:
                     handler_task.cancel()
                     self._detach_task(handler_task, "tool handler after heartbeat loss")
-                    if state.handler_entered and not state.decision.replay_safe:
+                    handler_detached = True
+                    if state.handler_entered and not state.policy.replay_safe:
                         await self._mark_unknown(state, heartbeat_error)
                         raise AIError(ErrorCode.TOOL_EFFECT_UNKNOWN) from heartbeat_error
                     state.preserve_started = True
                     raise heartbeat_error
-            result = await handler_task
+            try:
+                result = await handler_task
+            finally:
+                state.handler_observed = True
             try:
                 cancelled = await self._tool_operations.complete(
                     state.decision,
@@ -275,39 +306,36 @@ class _RuntimeStepPersistence(StepPersistence[None]):
                 raise asyncio.CancelledError
             return result
         except (ModelRetry, ToolRetryError) as error:
-            if state.decision.replay_safe:
-                cancelled = await self._tool_operations.fail(
-                    state.decision,
-                    error,
+            cancelled = await self._tool_operations.fail(
+                state.decision,
+                error,
+            )
+            state.operation_terminalized = True
+            if cancelled:
+                state.preserve_started = False
+                keep_call_state = False
+                self._calls.pop(key, None)
+                raise asyncio.CancelledError
+            _logger.debug(
+                "tool effect marked failed: run=%s tool=%s call=%s",
+                self.run_id or ctx.run_id,
+                tool_def.name,
+                call.tool_call_id,
+            )
+            try:
+                await self._record_failed_effect(
+                    ctx,
+                    call=call,
+                    tool_def=tool_def,
+                    args=args,
+                    error=error,
+                    state=state,
                 )
-                state.operation_terminalized = True
-                if cancelled:
-                    state.preserve_started = False
-                    keep_call_state = False
-                    self._calls.pop(key, None)
-                    raise asyncio.CancelledError
-                _logger.debug(
-                    "tool effect marked failed: run=%s tool=%s call=%s",
-                    self.run_id or ctx.run_id,
-                    tool_def.name,
-                    call.tool_call_id,
-                )
-                try:
-                    await self._record_failed_effect(
-                        ctx,
-                        call=call,
-                        tool_def=tool_def,
-                        args=args,
-                        error=error,
-                        state=state,
-                    )
-                except (ModelRetry, ToolRetryError):
-                    keep_call_state = False
-                    self._calls.pop(key, None)
-                    raise
-                raise AssertionError("retry effect hook must raise")
-            await self._mark_unknown(state, error)
-            raise AIError(ErrorCode.TOOL_EFFECT_UNKNOWN) from error
+            except (ModelRetry, ToolRetryError):
+                keep_call_state = False
+                self._calls.pop(key, None)
+                raise
+            raise AssertionError("retry effect hook must raise")
         except asyncio.CancelledError as error:
             if state.operation_terminalized:
                 state.preserve_started = False
@@ -315,24 +343,30 @@ class _RuntimeStepPersistence(StepPersistence[None]):
                 self._calls.pop(key, None)
                 raise
             state.preserve_started = True
-            if state.handler_entered and not state.decision.replay_safe:
+            if state.handler_entered and not state.policy.replay_safe:
                 await self._mark_unknown(state, error)
             keep_call_state = False
             self._calls.pop(key, None)
             raise
         except Exception as error:
-            if not state.decision.replay_safe and state.handler_entered:
-                await self._mark_unknown(state, error)
-            elif not state.handler_entered:
+            if not state.handler_entered or state.policy.effect_free:
+                raise
+            if state.policy.replay_safe:
                 state.preserve_started = True
-            raise
+                raise AIError(
+                    ErrorCode.STORAGE_RECOVERY_REQUIRED,
+                    safe_details={"phase": "tool_effect_replay"},
+                ) from error
+            await self._mark_unknown(state, error)
+            raise AIError(ErrorCode.TOOL_EFFECT_UNKNOWN) from error
         finally:
             await self._stop_heartbeat(state)
-            if not handler_task.done():
-                handler_task.cancel()
-                self._detach_task(handler_task, "tool handler cleanup")
-            else:
-                self._consume_task(handler_task, "tool handler cleanup")
+            if not handler_detached:
+                if not handler_task.done():
+                    handler_task.cancel()
+                    self._detach_task(handler_task, "tool handler cleanup")
+                elif not state.handler_observed:
+                    self._consume_task(handler_task, "tool handler cleanup")
             if not keep_call_state:
                 self._calls.pop(key, None)
 
@@ -379,7 +413,13 @@ class _RuntimeStepPersistence(StepPersistence[None]):
         try:
             if state.operation_terminalized or state.cached_failure or state.preserve_started:
                 raise error
-            if not state.decision.replay_safe:
+            if state.handler_entered and not state.policy.effect_free:
+                if state.policy.replay_safe:
+                    state.preserve_started = True
+                    raise AIError(
+                        ErrorCode.STORAGE_RECOVERY_REQUIRED,
+                        safe_details={"phase": "tool_effect_replay"},
+                    ) from error
                 await self._mark_unknown(state, error)
                 raise AIError(ErrorCode.TOOL_EFFECT_UNKNOWN) from error
             cancelled = await self._tool_operations.fail(state.decision, error)
@@ -417,7 +457,7 @@ class _RuntimeStepPersistence(StepPersistence[None]):
         if not task.done():
             task.cancel()
             self._detach_task(task, "tool heartbeat cleanup")
-        else:
+        elif not state.heartbeat_observed:
             self._consume_task(task, "tool heartbeat cleanup")
         state.heartbeat_task = None
 
@@ -468,7 +508,7 @@ class _RuntimeStepPersistence(StepPersistence[None]):
                 args=args,
                 error=error,
             )
-        except (ModelRetry, ToolRetryError):
+        except BaseException:
             state.effect_terminalized = True
             raise
         state.effect_terminalized = True
@@ -752,6 +792,44 @@ def _trusted_tool_capability(name: str, tool_class: str) -> "str | None":
             return None
         return _MEMORY_CAPABILITY_ID
     return None
+
+
+def _tool_effect_policy(
+    tool_def: ToolDefinition,
+    *,
+    trusted_tool_classes: "tuple[tuple[str, str], ...]",
+) -> _ToolEffectPolicy:
+    _validate_trusted_tool_classes(trusted_tool_classes)
+    tool_class = dict(trusted_tool_classes).get(tool_def.name)
+    if tool_class is not None:
+        expected_capability = _trusted_tool_capability(tool_def.name, tool_class)
+        if expected_capability is None or tool_def.capability_id != expected_capability:
+            raise AIError(
+                ErrorCode.CAPABILITY_POLICY_CONFLICT,
+                safe_details={"tool_name": tool_def.name},
+            )
+        if tool_class in {"filesystem.read", "memory.read"}:
+            return _ToolEffectPolicy(True, True)
+        if tool_class == "memory.write":
+            return _ToolEffectPolicy(True, False)
+        if tool_class == "filesystem.write":
+            return _ToolEffectPolicy(False, False)
+        if tool_class == "shell":
+            return _ToolEffectPolicy(
+                tool_def.name == "check_command",
+                tool_def.name == "check_command",
+            )
+        if tool_class == "control":
+            if tool_def.name in SKILL_TOOL_NAMES or tool_def.name in PLANNING_TOOL_NAMES:
+                return _ToolEffectPolicy(True, True)
+            if tool_def.name in SUBAGENT_TOOL_NAMES:
+                return _ToolEffectPolicy(True, False)
+            raise AIError(ErrorCode.CAPABILITY_POLICY_CONFLICT)
+        raise AIError(ErrorCode.CAPABILITY_POLICY_CONFLICT)
+    metadata = (tool_def.metadata or {}).get(_REPLAY_SAFE_METADATA_KEY, False)
+    if not isinstance(metadata, bool):
+        raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+    return _ToolEffectPolicy(metadata, metadata)
 
 
 def tool_is_control(
