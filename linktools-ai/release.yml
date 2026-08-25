@@ -6,7 +6,6 @@ checks:
       - E9
       - F
     paths:
-      - ../scripts/check/ai
       - src/linktools/ai
       - src/linktools/commands/ai
   pytest:
