@@ -20,6 +20,7 @@ from pydantic_ai.messages import (
     ToolReturnPart,
 )
 from pydantic_ai.tools import RunContext, ToolDefinition
+
 from ..core import (
     Principal,
     ResourceRef,
@@ -99,7 +100,7 @@ class _ToolOperationRuntimeRepository(Protocol):
         tool_call_id: str,
         *,
         tenant_id: str,
-    ) -> ToolOperationRecord | None: ...
+    ) -> "ToolOperationRecord | None": ...
 
     async def mark_effect_unknown(
         self,
@@ -108,7 +109,7 @@ class _ToolOperationRuntimeRepository(Protocol):
         tenant_id: str,
         owner: str,
         fence: int,
-        error_code: str | None,
+        error_code: "str | None",
     ) -> ToolOperationRecord: ...
 
     async def renew(
@@ -139,7 +140,7 @@ class _ToolOperationRuntimeRepository(Protocol):
         owner: str,
         fence: int,
         error_code: str,
-        error_payload: StoredPayload | None,
+        error_payload: "StoredPayload | None",
     ) -> ToolOperationRecord: ...
 
 
@@ -156,9 +157,9 @@ class _ToolTerminalCommands(Protocol):
         tenant_id: str,
         owner: str,
         fence: int,
-        result_payload: StoredPayload | None = None,
-        error_code: str | None = None,
-        error_payload: StoredPayload | None = None,
+        result_payload: "StoredPayload | None" = None,
+        error_code: "str | None" = None,
+        error_payload: "StoredPayload | None" = None,
     ) -> ToolOperationRecord: ...
 
 
@@ -221,8 +222,8 @@ class RuntimeToolOperationBridge:
         owner: str,
         background_tasks: "set[asyncio.Task[object]]",
         payload_policy: PayloadPolicy,
-        recovery_step_run_id: str | None = None,
-        terminal_commands: _ToolTerminalCommands | None = None,
+        recovery_step_run_id: "str | None" = None,
+        terminal_commands: "_ToolTerminalCommands | None" = None,
     ) -> None:
         self._repository = repository
         self._recovery_objects = recovery_objects
@@ -245,11 +246,15 @@ class RuntimeToolOperationBridge:
         call: ToolCallPart,
         tool_def: ToolDefinition,
         args: dict[str, Any],
+        replay_safe: bool,
     ) -> "ToolOperationDecision":
-        replay_safe = _replay_safe(tool_def)
+        if not isinstance(replay_safe, bool):
+            raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
         key = (self._run_id(ctx), call.tool_call_id)
         prior = self._decisions.get(key)
         if prior is not None:
+            if prior.replay_safe is not replay_safe:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             return prior
         arguments_digest = canonical_sha256(args)
         replay_step_run_id = self._recovery_step_run_id or self._run_id(ctx)
@@ -303,6 +308,8 @@ class RuntimeToolOperationBridge:
     ) -> "ToolOperationDecision":
         from ..agent import ToolOperationDecision
 
+        if existing.replay_safe is not replay_safe:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         if existing.status is ToolOperationStatus.COMPLETED:
             return ToolOperationDecision(
                 existing.tool_operation_id,
@@ -550,7 +557,7 @@ class RuntimeToolOperationBridge:
         *,
         expected_status: ToolOperationStatus,
         expected_payload: StoredPayload,
-        expected_error: str | None = None,
+        expected_error: "str | None" = None,
     ) -> bool:
         async def readback() -> CommitObservation[ToolOperationRecord]:
             observed = await self._repository.get_operation(
@@ -608,7 +615,7 @@ class RuntimeToolOperationBridge:
         *,
         expected_status: ToolOperationStatus,
         expected_payload: StoredPayload,
-        expected_error: str | None = None,
+        expected_error: "str | None" = None,
     ) -> None:
         if expected_status is ToolOperationStatus.COMPLETED and record.result_payload != expected_payload:
             raise AIError(ErrorCode.TOOL_RESULT_CONFLICT)
@@ -653,14 +660,6 @@ class RuntimeToolOperationBridge:
     def _run_id(self, ctx: RunContext[None]) -> str:
         del ctx
         return self._step_run_id
-
-
-def _replay_safe(tool_def: ToolDefinition) -> bool:
-    metadata = tool_def.metadata or {}
-    value = metadata.get("linktools.ai.replay_safe", False)
-    if not isinstance(value, bool):
-        raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
-    return value
 
 
 def _decision_type(
