@@ -34,6 +34,8 @@ so ``from linktools.errors import *`` remains explicit and opt-in. No in-repo
 code catches the builtin forms (verified at refactor time). See ADR-013.
 """
 
+from typing import Any
+
 __all__ = [
     "Error",
     # Domain roots.
