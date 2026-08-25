@@ -9,7 +9,6 @@ checks:
       - ../scripts/check/ai
       - src/linktools/ai
       - src/linktools/commands/ai
-      - ../tests/ai
   pytest:
     paths:
       - ../tests/ai
