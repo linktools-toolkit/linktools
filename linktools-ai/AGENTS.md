@@ -22,7 +22,7 @@ Each package owns one concern:
 | `migrate` | Explicit database schema provisioning |
 | `src/linktools/commands/ai` | Thin CLI composition over public `linktools.ai` APIs |
 
-Repository-level architecture, import, dependency, and evidence gates live under root `scripts/check/ai`; they are release tooling, not part of the `linktools-ai` package architecture.
+Repository-level architecture, import, dependency, code-style, logging, comments, and evidence gates are inherited from the root `AGENTS.md`. Release tooling lives under root `scripts/check/ai`; it is not part of the `linktools-ai` package architecture.
 
 Normal library modules live directly under `linktools/ai/<package>/`. Only Temporal may use `workflow/` and `activity/` subpackages. A cross-package public boundary may live directly under `linktools/ai/` only when listed in the package policy's `public_modules`.
 
@@ -33,7 +33,6 @@ Normal library modules live directly under `linktools/ai/<package>/`. Only Tempo
 - `core` and `storage` stay independent of Asset, Spec, Model, Agent, Runtime, Temporal, and SDK semantics.
 - Imports inside `linktools.ai` use relative paths.
 - Consumers import public package exports, never another package's `_`-prefixed module or member.
-- Do not use reflection to bypass a public interface. Add a public method or protocol operation and implement it on every backend.
 - Runtime module dependencies must remain acyclic. Legitimate annotation-only back-references belong under `TYPE_CHECKING`.
 - `adapter` implements lower-level ports. It must not become a composition root or own Asset loading.
 - SQL dialect detection, SQLite pragmas, vendor statements, integrity classification, and coordination scope belong in `storage`.
@@ -72,6 +71,22 @@ Workspace composition defaults the Runtime tenant to `default`, but accepts an e
 All lifecycle objects use `initialize()`; do not add parallel lifecycle aliases. `StorageOverlay.initialize()` initializes each distinct backend once. SQL initialization validates owned metadata only. Runtime initialization never creates or alters SQL tables; only `migrate.provision_database()` performs explicit provisioning.
 
 Use `build_*` for pure composition in new APIs. `open_*`, `prepare_*`, and `initialize()` may perform documented I/O. Keep cleanup paired with opening through async context managers where ownership spans a scope.
+
+### 3.1 Persistent-state evolution
+
+Persistent state is long-lived. **Routine field-level evolution must never make an otherwise valid filesystem or SQL Runtime store globally unusable.** A minor DTO/dataclass field change must not force users to rebuild the whole database, discard unrelated records, or make unrelated Runtime domains fail to initialize.
+
+Apply these rules to both filesystem and SQL persistence:
+
+- Ordinary internal records use tolerant readers. Adding an optional/defaulted field, reordering fields, or adding a non-identity/non-state-machine field must keep previously persisted records readable. Unknown additive fields from a newer writer must not invalidate unrelated older readers when the record contract is explicitly tolerant.
+- Keep rapidly evolving, non-query/non-index fields inside the existing payload/metadata envelope when that preserves the contract cleanly. Do not add a physical database column merely because an internal dataclass gained a field.
+- Fields that participate in resource identity, authorization ownership, durable digests, idempotency keys, state-machine invariants, or exact execution/recovery binding remain fail-closed. If such a field changes meaning or representation, introduce an explicit contract version/revision and a deterministic decoder or migration path; never silently reinterpret old data.
+- Exact durable contracts and tolerant internal records must stay separate. Do not weaken exact binding, recovery, operation, checksum, or state-transition validation merely to obtain compatibility.
+- A malformed or incompatible individual business record should fail the operation reading that record with the appropriate integrity/compatibility error. It must not prevent unrelated domains or unrelated valid records from being opened unless the shared storage schema itself is genuinely incompatible.
+- Initialization validates backend/schema capabilities and owned metadata; it must not eagerly deserialize every persisted business record as a prerequisite for opening the Runtime.
+- Compatibility logic belongs in the canonical codec/version boundary. Do not scatter per-caller compatibility branches or ad-hoc migration fallbacks through services and repositories.
+
+When choosing between strictness and field-evolution tolerance, preserve strictness for **semantic identity/invariants** and preserve tolerance for **incidental representation fields**.
 
 ## 4. Asset rules
 
@@ -130,28 +145,22 @@ created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
     COMMENT 'Creation timestamp'
 ```
 
-## 6. Python and logging style
+## 6. Package-specific Python constraints
 
-- Python 3.10 or newer; do not use `from __future__ import annotations`.
-- Every Python file starts with the standard shebang and UTF-8 header.
-- Public functions and methods have parameter and return annotations.
-- Quote annotations containing `|` or `[...]`. Keep annotation-only imports under `TYPE_CHECKING`.
+Repository-wide Python style, public annotation, logging, module-structure, reflection, and comment-minimization rules come from the root `AGENTS.md`. `linktools-ai` adds only these stricter constraints:
+
+- Do not use `from __future__ import annotations`.
 - Public signatures do not use `Any`, `object`, untyped mappings, or unbounded `Callable` unless the value is genuinely untyped.
 - `__init__.py` files contain static imports and `__all__` only.
-- Obtain loggers through `from linktools.core import environ` and `environ.get_logger(...)` with a relative logger name.
-- Log state transitions and decisions, not raw secrets or large payloads. Guard only expensive debug formatting with `if environ.debug`.
-- Do not add compatibility shims, dynamic imports, migration fallbacks, or reflection-based adapters.
-- Comments explain constraints that naming and structure cannot express. All new or corrected comments must be in English.
-  Remove comments made stale by the current edit.
+- Do not add ad-hoc compatibility shims, dynamic imports, or service-level migration fallbacks. Required persistence compatibility belongs in the canonical codec/version boundary described in §3.1.
+- All new or corrected comments must be in English.
 - Keep lines readable by wrapping long signatures, expressions, and log calls instead of allowing dense overlong lines.
 
-## 6.1 Specification conformance
+### 6.1 Specification conformance
 
-- For specification-driven work, extract a requirement matrix before editing.
-  Keep module ownership, public contracts, logs, tests, and evidence aligned with it.
-- Perform a fresh cold-start review against the complete specification after implementation.
-  Repeat the review and verification loop until no Critical or Important gap remains.
-- Treat compatibility and migration as out of scope unless the specification explicitly requires a legacy decoder, first-read adapter, or rollback materialization path.
+- For specification-driven work, extract a requirement matrix before editing. Keep module ownership, public contracts, logs, tests, and evidence aligned with it.
+- Perform a fresh cold-start review against the complete specification after implementation. Repeat the review and verification loop until no Critical or Important gap remains.
+- Treat compatibility and migration as out of scope unless the specification explicitly requires a legacy decoder, first-read adapter, or rollback materialization path. This does not override the baseline tolerant-reader requirements in §3.1.
 
 ## 7. Temporal and external effects
 
