@@ -11,6 +11,10 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: unified-release-gates-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   python310:
     runs-on: ubuntu-latest
@@ -74,13 +78,11 @@ jobs:
             fi
           }
 
-          # 1. Missing wheel artifact.
           wheel="$(find dist -maxdepth 1 -type f -name '*.whl' | sort | head -n 1)"
           test -n "$wheel"
           rm "$wheel"
           expect_verify_failure
 
-          # 2. Duplicate selected wheel artifact with a valid wheel build tag.
           restore_dist
           python - <<'PY'
           from pathlib import Path
@@ -95,7 +97,6 @@ jobs:
           PY
           expect_verify_failure
 
-          # 3. Unknown-project but syntactically valid wheel artifact.
           restore_dist
           python - <<'PY'
           from pathlib import Path
@@ -122,13 +123,11 @@ jobs:
           PY
           expect_verify_failure
 
-          # 4. VERSION / .version mismatch.
           restore_dist
           printf '%s' 'v9.9.9' > linktools/.version
           expect_verify_failure
           cp "$baseline/linktools.version" linktools/.version
 
-          # 5. Missing required capability resource.
           restore_dist
           python - <<'PY'
           from pathlib import Path
@@ -158,10 +157,14 @@ jobs:
           restore_dist
           VERSION=v0.0.0 python manage.py verify
       - name: Verify legacy paths are absent
+        shell: bash
         run: |
-          ! git grep -n 'scripts\.build' -- .
-          ! git grep -n 'linktools-ai/scripts/build' -- .
-          ! git grep -n 'scripts/build/matrix' -- .
+          p1="scripts""\\.build"
+          p2="linktools-ai/scripts/""build"
+          p3="scripts/build/""matrix"
+          ! git grep -n "$p1" -- .
+          ! git grep -n "$p2" -- .
+          ! git grep -n "$p3" -- .
       - name: Restore clean source state
         if: always()
         run: |
