@@ -102,7 +102,7 @@ class AgentBindingSnapshot:
 
     @classmethod
     def from_payload(cls, value: object) -> "AgentBindingSnapshot":
-        if not isinstance(value, Mapping) or set(value) != _REQUIRED_FIELDS:
+        if not isinstance(value, Mapping) or not _REQUIRED_FIELDS.issubset(value):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         version = value["version"]
         revision = value["output_schema_revision"]

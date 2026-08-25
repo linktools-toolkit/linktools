@@ -9,6 +9,7 @@ from types import SimpleNamespace
 
 import pytest
 from linktools.ai.agent import AgentBindingSnapshot
+from linktools.ai.agent._output import bind_output
 from linktools.ai.capability import RuntimeCapability
 from linktools.ai.core import (
     HmacCursorSigner,
@@ -617,7 +618,12 @@ async def test_agent_and_binding_identity_split_acceptance(tmp_path) -> None:
 
     workspace = Workspace.load(tmp_path)
     models = ModelRegistry.openai(model="gpt-test")
-    async with open_workspace_runtime(workspace, models=models) as runtime:
+    async with open_workspace_runtime(
+        workspace,
+        models=models,
+        outputs=(bind_output(CompositionStructuredOutput),),
+        runtime_capability_types=(_DurableCapability,),
+    ) as runtime:
         base = runtime.agent()
         text_binding = runtime._bind_agent(base._agent_digest)
         structured_binding = runtime._bind_agent(

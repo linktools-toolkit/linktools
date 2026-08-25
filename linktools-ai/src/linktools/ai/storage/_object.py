@@ -270,6 +270,10 @@ class FilesystemObjectStore:
     def store_id(self) -> str:
         return self._store_id
 
+    @property
+    def pending_background_tasks(self) -> tuple[asyncio.Task[Any], ...]:
+        return tuple(task for task in self._background_tasks if not task.done())
+
     def _paths(self, key: str) -> tuple[Path, Path]:
         digest = _key_digest(self.store_id, key).hex()
         root = self._root / "objects" / digest[:2]
@@ -559,6 +563,10 @@ class SqlObjectStore:
     @property
     def store_id(self) -> str:
         return self._store_id
+
+    @property
+    def pending_background_tasks(self) -> tuple[asyncio.Task[Any], ...]:
+        return tuple(task for task in self._background_tasks if not task.done())
 
     async def put(
         self, key: str, chunks: AsyncIterator[bytes], *, expected_size: int, expected_digest: str

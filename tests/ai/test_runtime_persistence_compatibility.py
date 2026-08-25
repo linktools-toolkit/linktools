@@ -21,6 +21,7 @@ from linktools.ai.runtime.state._codec import (
     encode_domain,
     wire_type_id,
 )
+from linktools.ai.runtime.state._maintenance import _validate_enveloped_value
 from linktools.ai.runtime.state._contracts import (
     ContextProjection,
     ContextProjectionItem,
@@ -240,6 +241,15 @@ def test_envelope_metadata_is_not_accepted() -> None:
     assert raised.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
 
 
+def test_typed_envelope_rejects_extra_framing_field() -> None:
+    value = _envelope(_encode_persisted_domain(_session()))
+    typed = cast("dict[str, object]", value["value"])
+    typed["future_metadata"] = {"$future_v2": ["must", "not", "decode"]}
+    with pytest.raises(AIError) as raised:
+        _validate_enveloped_value(value)
+    assert raised.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
+
+
 def test_current_enum_value_round_trip_and_unknown_value_boundary() -> None:
     session = _session()
     payload = copy.deepcopy(_encode_persisted_domain(session))
@@ -258,9 +268,30 @@ def test_explicit_custom_task_node_tolerates_additive_field() -> None:
     assert decode_domain(payload, TaskNode) == node
 
 
-def test_agent_binding_snapshot_shape_remains_strict() -> None:
+def test_agent_binding_snapshot_ignores_unknown_ordinary_field() -> None:
     payload = _binding_snapshot_payload()
-    payload.pop("agent_digest")
+    payload["future_metadata"] = {"$future_v2": ["must", "not", "be", "interpreted"]}
+    decoded = AgentBindingSnapshot.from_payload(payload)
+    assert decoded.to_payload() == _binding_snapshot_payload()
+
+
+@pytest.mark.parametrize(
+    "missing",
+    (
+        "version",
+        "agent_spec",
+        "agent_digest",
+        "output_schema_id",
+        "output_schema_revision",
+        "output_schema_fingerprint",
+        "local_runtime_capability_descriptors",
+        "binding_digest",
+        "global_runtime_capability_descriptors",
+    ),
+)
+def test_agent_binding_snapshot_requires_current_fields(missing: str) -> None:
+    payload = _binding_snapshot_payload()
+    payload.pop(missing)
     with pytest.raises(AIError) as raised:
         AgentBindingSnapshot.from_payload(payload)
     assert raised.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR

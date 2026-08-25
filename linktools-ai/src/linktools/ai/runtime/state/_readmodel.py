@@ -623,7 +623,7 @@ class ExecutionReadModelRepository:
             "transcript_count",
             "revision",
         }
-        if set(data) != expected:
+        if not expected.issubset(data):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         try:
             execution_id = data["execution_id"]

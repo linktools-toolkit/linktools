@@ -170,7 +170,7 @@ def restore_output(
     outputs: "Mapping[tuple[str, int], OutputBinding] | None" = None,
 ) -> OutputBinding:
     required = {"version", "schema_id", "schema_revision", "schema_fingerprint"}
-    if set(descriptor) != required or descriptor.get("version") != 1:
+    if not required.issubset(descriptor) or descriptor.get("version") != 1:
         raise AIError(ErrorCode.AGENT_DEFINITION_UNAVAILABLE)
     schema_id = descriptor.get("schema_id")
     revision = descriptor.get("schema_revision")

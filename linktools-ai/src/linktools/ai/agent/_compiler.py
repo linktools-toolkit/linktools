@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Compile declarations and exact output bindings from frozen Runtime inputs."""
+"""Compile declarations and output bindings from frozen Runtime inputs."""
 
 from collections.abc import Mapping, Sequence
 from typing import cast
@@ -168,26 +168,25 @@ class AgentCompiler:
         restored: list[RuntimeCapability] = []
         for capability in local_capabilities:
             descriptor = _required_runtime_descriptor(capability)
-            candidate_types = dict(self._runtime_capability_types)
-            local_types = _build_runtime_capability_types(
-                (type(capability.capability),),
-                (),
-            )
-            for name, capability_type in local_types.items():
-                current_type = candidate_types.get(name)
-                if current_type is not None and current_type is not capability_type:
-                    raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
-                candidate_types[name] = capability_type
+            serialization_name = descriptor.get("serialization_name")
+            if not isinstance(serialization_name, str) or not serialization_name.strip():
+                raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
+            capability_type = self._runtime_capability_types.get(serialization_name)
+            if capability_type is None:
+                raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
             try:
                 value = RuntimeCapability.restore(
                     descriptor,
-                    capability_types=candidate_types,
+                    capability_types=self._runtime_capability_types,
                 )
             except AIError as error:
                 raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID) from error
-            if value.descriptor != descriptor:
+            if (
+                type(value.capability) is not type(capability.capability)
+                or capability_type is not type(capability.capability)
+                or value.descriptor != descriptor
+            ):
                 raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
-            self._runtime_capability_types = candidate_types
             restored.append(value)
         return tuple(restored)
 
@@ -204,20 +203,7 @@ class AgentCompiler:
             raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID)
         output_binding = self._outputs_by_type.get(selected_type)
         if output_binding is None:
-            output_binding = bind_output(selected_type)
-            key = (output_binding.schema_id, output_binding.schema_revision)
-            current = self._outputs_by_key.get(key)
-            if (
-                current is not None
-                and (
-                    current.schema_fingerprint != output_binding.schema_fingerprint
-                    or current.value_type is not selected_type
-                )
-            ):
-                raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID)
-            if current is None:
-                self._outputs_by_key[key] = output_binding
-            self._outputs_by_type[selected_type] = output_binding
+            raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID)
         binding_digest = _binding_digest(definition.digest, output_binding.fingerprint)
         snapshot = AgentBindingSnapshot(
             version=1,

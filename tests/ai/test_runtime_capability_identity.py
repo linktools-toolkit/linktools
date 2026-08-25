@@ -93,6 +93,48 @@ def test_invalid_identity_is_rejected_before_factory_execution() -> None:
     assert _RestorableCapability.factory_calls == before
 
 
+def test_restore_ignores_unknown_descriptor_field() -> None:
+    value = RuntimeCapability.from_spec(
+        "capability",
+        _RestorableCapability,
+        config={},
+    )
+    descriptor = value.descriptor
+    assert descriptor is not None
+    descriptor["future_metadata"] = {"$future_v2": ["must", "not", "decode"]}
+
+    restored = RuntimeCapability.restore(
+        descriptor,
+        capability_types={
+            "restorable-capability": _RestorableCapability,
+        },
+    )
+
+    assert restored.id == value.id
+    assert restored.revision == value.revision
+    assert restored.fingerprint == value.fingerprint
+
+
+def test_restore_rejects_missing_descriptor_field() -> None:
+    value = RuntimeCapability.from_spec(
+        "capability",
+        _RestorableCapability,
+        config={},
+    )
+    descriptor = value.descriptor
+    assert descriptor is not None
+    descriptor.pop("serialization_name")
+
+    with pytest.raises(AIError) as error:
+        RuntimeCapability.restore(
+            descriptor,
+            capability_types={
+                "restorable-capability": _RestorableCapability,
+            },
+        )
+    assert error.value.code is ErrorCode.AGENT_DEFINITION_UNAVAILABLE
+
+
 @pytest.mark.parametrize("revision", [0, -1, True])
 def test_invalid_revision_is_rejected_before_factory_execution(revision: object) -> None:
     before = _RestorableCapability.factory_calls

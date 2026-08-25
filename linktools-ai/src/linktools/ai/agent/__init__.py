@@ -34,6 +34,7 @@ from ._output import (
     AssistantTextOutput,
     OutputBinding,
     bind_output,
+    restore_output,
 )
 
 __all__ = [
@@ -63,6 +64,7 @@ __all__ = [
     "UsageSink",
     "bind_output",
     "build_pydantic_agent",
+    "restore_output",
     "select_platform_tool_names",
     "tool_name_allowed",
 ]

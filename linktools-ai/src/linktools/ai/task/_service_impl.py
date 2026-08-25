@@ -330,7 +330,10 @@ class DefaultTaskService(TaskApi):
                         )
                         return result
                     waiter = self._local_waiter
-                    if waiter is not None and waiter.owns_graph(
+                    if waiter is None:
+                        await asyncio.sleep(1.0)
+                        continue
+                    if waiter.owns_graph(
                         graph_id,
                         tenant_id=principal.tenant_id,
                     ):
@@ -338,8 +341,20 @@ class DefaultTaskService(TaskApi):
                             graph_id,
                             tenant_id=principal.tenant_id,
                         )
-                    else:
-                        await asyncio.sleep(1.0)
+                        continue
+                    _logger.error(
+                        "task graph local scheduler owner is unavailable: "
+                        "tenant=%s graph=%s",
+                        principal.tenant_id,
+                        graph_id,
+                    )
+                    raise AIError(
+                        ErrorCode.STORAGE_RECOVERY_REQUIRED,
+                        safe_details={
+                            "phase": "task_scheduler",
+                            "graph_id": graph_id,
+                        },
+                    )
 
             try:
                 return await asyncio.wait_for(poll(), timeout_seconds)
@@ -981,6 +996,23 @@ class DefaultTaskService(TaskApi):
                 self._detached_finalizers.discard(done)
 
         task.add_done_callback(consume)
+
+    async def preflight_close(self) -> None:
+        pending = tuple(
+            task for task in self._detached_finalizers if not task.done()
+        )
+        if pending:
+            _logger.warning(
+                "task service close blocked by detached finalizers: tasks=%s",
+                len(pending),
+            )
+            raise AIError(
+                ErrorCode.STORAGE_RECOVERY_REQUIRED,
+                safe_details={
+                    "phase": "task_service_preflight_close",
+                    "pending_finalizers": len(pending),
+                },
+            )
 
 
 def _graph_digest(request: TaskGraphRequest) -> str:

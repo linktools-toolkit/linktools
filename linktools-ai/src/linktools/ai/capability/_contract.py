@@ -335,7 +335,7 @@ def _validate_runtime_capability_descriptor(
     value: Mapping[str, JsonValue],
 ) -> None:
     required = {"id", "revision", "serialization_name", "config", "fingerprint"}
-    if set(value) != required:
+    if not required.issubset(value):
         raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
     identity = value.get("id")
     revision = value.get("revision")

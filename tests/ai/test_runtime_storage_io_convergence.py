@@ -317,7 +317,11 @@ async def test_cli_sql_state_context_owns_one_engine_on_failure(
     assert disposed == created
 
 
-def _runtime_commands(state: RuntimeState, namespace: str) -> RuntimeStateCommands:
+def _runtime_commands(
+    state: RuntimeState,
+    namespace: str,
+    background_tasks: "set[asyncio.Task[object]] | None" = None,
+) -> RuntimeStateCommands:
     return RuntimeStateCommands(
         state.execution.executions,
         namespace=namespace,
@@ -330,6 +334,7 @@ def _runtime_commands(state: RuntimeState, namespace: str) -> RuntimeStateComman
         conversation_steps=state.steps.read_store(RuntimeDomain.CONVERSATION),
         execution_steps=state.steps.read_store(RuntimeDomain.EXECUTION),
         recovery_steps=state.steps.read_store(RuntimeDomain.RECOVERY),
+        background_tasks=set() if background_tasks is None else background_tasks,
     )
 
 
@@ -346,7 +351,12 @@ async def test_sqlite_parallel_tool_lifecycle_uses_one_effect_writer(
     try:
         run_id = "run"
         await state.steps.register_run(_tool_run(run_id))
-        commands = _runtime_commands(state, "parallel-tools")
+        background_tasks: set[asyncio.Task[object]] = set()
+        commands = _runtime_commands(
+            state,
+            "parallel-tools",
+            background_tasks,
+        )
         bridge = RuntimeToolOperationBridge(
             state.recovery.tools,
             state.object_store(RuntimeDomain.RECOVERY),
@@ -356,6 +366,7 @@ async def test_sqlite_parallel_tool_lifecycle_uses_one_effect_writer(
             step_run_id=run_id,
             binding_fingerprint="a" * 64,
             owner="owner",
+            background_tasks=background_tasks,
             payload_policy=PayloadPolicy(),
             terminal_commands=commands,
         )

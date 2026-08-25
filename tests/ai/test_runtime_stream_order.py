@@ -251,7 +251,12 @@ async def test_cancel_terminal_race_is_conflict_not_integrity() -> None:
             )
             return Page((event,), None)
 
-    commands = RuntimeStateCommands(_ExecutionRepo(), namespace="stream-order", events=_Events())
+    commands = RuntimeStateCommands(
+        _ExecutionRepo(),
+        namespace="stream-order",
+        events=_Events(),
+        background_tasks=set(),
+    )
     with pytest.raises(AIError) as caught:
         await commands.commit_cancel_checkpoint(
             ExecutionCancelRequestCommit(
@@ -706,7 +711,12 @@ async def test_concurrent_cancel_winner_is_conflict_not_integrity() -> None:
                 None,
             )
 
-    commands = RuntimeStateCommands(_ExecutionRepo(), namespace="stream-order", events=_Events())
+    commands = RuntimeStateCommands(
+        _ExecutionRepo(),
+        namespace="stream-order",
+        events=_Events(),
+        background_tasks=set(),
+    )
     with pytest.raises(AIError) as caught:
         await commands.commit_cancel_checkpoint(
             ExecutionCancelRequestCommit(
@@ -756,7 +766,12 @@ async def test_revision_only_cancel_race_is_conflict_not_integrity() -> None:
             del execution_id, tenant_id, after_sequence, limit
             return Page((), None)
 
-    commands = RuntimeStateCommands(_ExecutionRepo(), namespace="stream-order", events=_Events())
+    commands = RuntimeStateCommands(
+        _ExecutionRepo(),
+        namespace="stream-order",
+        events=_Events(),
+        background_tasks=set(),
+    )
     with pytest.raises(AIError) as caught:
         await commands.commit_cancel_checkpoint(
             ExecutionCancelRequestCommit(
@@ -816,7 +831,12 @@ async def test_cancel_readback_accepts_own_suffix_after_revision_only_advance() 
                 None,
             )
 
-    commands = RuntimeStateCommands(_ExecutionRepo(), namespace="stream-order", events=_Events())
+    commands = RuntimeStateCommands(
+        _ExecutionRepo(),
+        namespace="stream-order",
+        events=_Events(),
+        background_tasks=set(),
+    )
     committed = await commands.commit_cancel_checkpoint(
         ExecutionCancelRequestCommit(
             "execution",

@@ -844,6 +844,7 @@ async def test_read_model_accepts_current_v1_record() -> None:
                         "history_count": 0,
                         "transcript_count": 0,
                         "revision": 1,
+                        "future_metadata": {"$future_v2": {"ignored": True}},
                     },
                 )
             )

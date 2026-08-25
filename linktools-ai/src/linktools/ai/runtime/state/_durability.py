@@ -14,7 +14,6 @@ from ...errors import AIError, ErrorCode
 
 ValueT = TypeVar("ValueT")
 _logger = environ.get_logger("ai.runtime.state.durability")
-_DETACHED_TASKS: set[asyncio.Task[object]] = set()
 
 
 class DurableCommitState(StrEnum):
@@ -46,6 +45,8 @@ class DurableCommitResult(Generic[ValueT]):
 async def run_durable_commit(
     operation: Callable[[], Awaitable[ValueT]],
     readback: Callable[[], Awaitable[CommitObservation[ValueT]]],
+    *,
+    background_tasks: "set[asyncio.Task[object]]",
 ) -> DurableCommitResult[ValueT]:
     """Resolve a durable commit without waiting indefinitely after cancellation."""
     task = asyncio.create_task(operation())
@@ -57,7 +58,11 @@ async def run_durable_commit(
     except asyncio.CancelledError as error:
         cancellation_requested = True
         if not task.done():
-            _detach_task(cast("asyncio.Task[object]", task), "durable commit")
+            _detach_task(
+                cast("asyncio.Task[object]", task),
+                background_tasks,
+                "durable commit",
+            )
             return DurableCommitResult(
                 DurableCommitState.UNRESOLVED,
                 error=error,
@@ -85,6 +90,7 @@ async def run_durable_commit(
         if not readback_task.done():
             _detach_task(
                 cast("asyncio.Task[object]", readback_task),
+                background_tasks,
                 "durable commit readback",
             )
             return DurableCommitResult(
@@ -141,8 +147,12 @@ def _readback_error_result(
     )
 
 
-def _detach_task(task: "asyncio.Task[object]", label: str) -> None:
-    _DETACHED_TASKS.add(task)
+def _detach_task(
+    task: "asyncio.Task[object]",
+    background_tasks: "set[asyncio.Task[object]]",
+    label: str,
+) -> None:
+    background_tasks.add(task)
 
     def consume(done: "asyncio.Task[object]") -> None:
         try:
@@ -152,7 +162,7 @@ def _detach_task(task: "asyncio.Task[object]", label: str) -> None:
         except BaseException:  # noqa: BLE001
             _logger.exception("detached %s failed", label)
         finally:
-            _DETACHED_TASKS.discard(done)
+            background_tasks.discard(done)
 
     task.add_done_callback(consume)
 

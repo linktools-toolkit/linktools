@@ -152,6 +152,28 @@ def test_agent_spec_codec_rejects_type_coercion(payload: dict[str, object]) -> N
     assert error.value.code is ErrorCode.OUTPUT_CONTRACT_INVALID
 
 
+def test_asset_spec_codecs_ignore_unknown_additive_fields() -> None:
+    skill_payload = {
+        "id": "skill",
+        "revision": 1,
+        "content": "skill content",
+        "future_metadata": {"$future_v2": ["ignored"]},
+    }
+    assert SkillSpecCodec().decode(
+        json.dumps(skill_payload).encode("utf-8")
+    ) == SkillSpec("skill", 1, "skill content")
+
+    mcp_payload = {
+        "id": "mcp",
+        "revision": 1,
+        "command": "echo",
+        "future_metadata": {"$future_v2": ["ignored"]},
+    }
+    assert MCPServerSpecCodec().decode(
+        json.dumps(mcp_payload).encode("utf-8")
+    ) == MCPServerSpec("mcp", 1, "echo")
+
+
 @pytest.mark.parametrize(
     ("codec", "payload"),
     (

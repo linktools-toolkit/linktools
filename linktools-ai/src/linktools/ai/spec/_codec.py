@@ -15,7 +15,6 @@ from ._contract import AgentSpec, AgentUsageLimits, MCPServerSpec, SkillSpec
 
 SpecT = TypeVar("SpecT")
 _SKILL_FIELDS = frozenset({"id", "revision", "content"})
-_MCP_FIELDS = frozenset({"id", "revision", "command", "args"})
 _USAGE_LIMIT_FIELDS = (
     "model_requests",
     "tool_calls",
@@ -103,7 +102,7 @@ class SkillSpecCodec:
     def decode(self, data: bytes) -> SkillSpec:
         try:
             raw = _decode(data)
-            if set(raw) != _SKILL_FIELDS:
+            if not _SKILL_FIELDS.issubset(raw):
                 raise ValueError("skill spec fields are invalid")
             identity = raw["id"]
             revision = raw["revision"]
@@ -198,7 +197,7 @@ class MCPServerSpecCodec:
     def decode(self, data: bytes) -> MCPServerSpec:
         try:
             raw = _decode(data)
-            if set(raw) - _MCP_FIELDS or any(name not in raw for name in ("id", "revision", "command")):
+            if not {"id", "revision", "command"}.issubset(raw):
                 raise ValueError("MCP server spec fields are invalid")
             identity = raw["id"]
             revision = raw["revision"]

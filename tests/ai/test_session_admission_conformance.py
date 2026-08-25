@@ -322,6 +322,7 @@ async def test_rejected_admission_terminalizes_pending_start() -> None:
                     namespace="session-admission-rejection",
                     tenant_id="tenant",
                 ),
+                background_tasks=set(),
             )
         )
         with pytest.raises(AIError) as error:

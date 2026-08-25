@@ -291,7 +291,7 @@ class OfflineRuntimeStorageMaintenance:
 
 def _validate_enveloped_value(value: Mapping[str, object]) -> None:
     envelope = decode_envelope(value)
-    if not {"type", "payload"}.issubset(envelope.value):
+    if set(envelope.value) != {"type", "payload"}:
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     codec = _VERSION_CODECS.get(envelope.version)
     if codec is None:

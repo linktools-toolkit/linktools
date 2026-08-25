@@ -119,6 +119,30 @@ class _RuntimeObjectRouter:
                 store.clear()
                 seen.add(id(store))
 
+    async def preflight_close(self) -> None:
+        pending: dict[int, asyncio.Task[object]] = {}
+        seen: set[int] = set()
+        for store in self._stores.values():
+            if id(store) in seen:
+                continue
+            seen.add(id(store))
+            if not isinstance(store, (FilesystemObjectStore, SqlObjectStore)):
+                continue
+            for task in store.pending_background_tasks:
+                pending[id(task)] = task
+        if pending:
+            _logger.warning(
+                "runtime object preflight found pending background work: tasks=%s",
+                len(pending),
+            )
+            raise AIError(
+                ErrorCode.STORAGE_RECOVERY_REQUIRED,
+                safe_details={
+                    "phase": "object_preflight_close",
+                    "pending_tasks": len(pending),
+                },
+            )
+
 
 async def materialize_runtime_state(
     plan: RuntimeStatePlan,
@@ -288,7 +312,12 @@ async def materialize_runtime_state(
             durable_domains=plan.durable_domains,
             state_validators=(steps.validate_integrity,),
         )
-        actions: list[Callable[[], Awaitable[None]]] = [steps.preflight_close, retention.close, steps.close]
+        actions: list[Callable[[], Awaitable[None]]] = [
+            steps.preflight_close,
+            objects.preflight_close,
+            retention.close,
+            steps.close,
+        ]
         actions.extend(cleanups)
         _logger.info(
             "runtime state materialized: namespace=%s domains=%s",

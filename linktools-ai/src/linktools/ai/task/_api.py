@@ -25,6 +25,7 @@ async def open_local_task_api(
     try:
         yield service
     finally:
+        await service.preflight_close()
         await launcher.shutdown()
 
 

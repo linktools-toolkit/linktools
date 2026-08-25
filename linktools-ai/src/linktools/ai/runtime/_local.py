@@ -277,6 +277,7 @@ class LocalExecutionBackend:
                 if isinstance(self._step_reads[RuntimeDomain.RECOVERY], StateStepArchive)
                 else None
             ),
+            background_tasks=self._checkpoint_tasks,
         )
 
     async def _validate_start(self, request: ExecutionRequest, execution: ExecutionRecord) -> None:
@@ -2074,6 +2075,7 @@ class LocalExecutionBackend:
                 step_run_id=run_id,
                 binding_fingerprint=current.binding_digest,
                 owner=tool_owner,
+                background_tasks=self._checkpoint_tasks,
                 payload_policy=self._payload_policy,
                 recovery_step_run_id=recovery_history_run_id,
                 terminal_commands=(
