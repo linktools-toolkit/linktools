@@ -32,7 +32,7 @@ def is_no_input() -> bool:
     return _no_input
 
 if TYPE_CHECKING:
-    from typing import TextIO
+    from typing import Dict, TextIO
     from collections.abc import Iterable
     from rich.console import ConsoleRenderable, Console
     from rich.prompt import PromptBase

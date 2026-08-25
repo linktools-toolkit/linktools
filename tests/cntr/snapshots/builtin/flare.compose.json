@@ -27,7 +27,7 @@
         "5000:5005"
       ],
       "restart": "unless-stopped",
-      "user": "1000:1001",
+      "user": "<DOCKER_UID>:<DOCKER_GID>",
       "volumes": [
         "<APP_DATA>/flare/app:/app"
       ]

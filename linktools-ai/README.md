@@ -344,11 +344,11 @@ Top-level `linktools.ai` remains intentionally small. Sibling packages use the p
 
 ## 13. Development checks
 
-From the repository root:
+Install the editable development environment once, then use the repository gate from the repository root:
 
 ```bash
-PYTHONPATH=linktools-ai:linktools-ai/src:linktools/src python3 -m compileall -q linktools-ai/src/linktools/ai
-PYTHONPATH=linktools-ai:linktools-ai/src:linktools/src python3 -m pytest -q tests/ai
-PYTHONPATH=linktools-ai:linktools-ai/src:linktools/src python3 -m ruff check linktools-ai/scripts/build linktools-ai/src/linktools/ai linktools-ai/src/linktools/commands/ai tests/ai
-python3 linktools-ai/scripts/build/architecture.py
+python manage.py install --editable
+python manage.py check linktools-ai
 ```
+
+The repository gate owns the AI-specific release checks; package-local release scripts are not a supported development entry point.

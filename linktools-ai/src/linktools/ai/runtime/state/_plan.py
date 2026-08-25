@@ -3,7 +3,7 @@
 """Declarative Runtime domain routing."""
 
 from dataclasses import dataclass, field
-from enum import StrEnum
+from enum import Enum
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -14,7 +14,9 @@ if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncEngine
 
 
-class RuntimeDomain(StrEnum):
+class RuntimeDomain(str, Enum):
+    __str__ = str.__str__
+    __format__ = str.__format__
     CONVERSATION = "conversation"
     EXECUTION = "execution"
     MEMORY = "memory"
@@ -24,13 +26,17 @@ class RuntimeDomain(StrEnum):
     RECOVERY = "recovery"
 
 
-class RuntimeRetentionMode(StrEnum):
+class RuntimeRetentionMode(str, Enum):
+    __str__ = str.__str__
+    __format__ = str.__format__
     DURABLE = "durable"
     VOLATILE = "volatile"
     TRANSIENT = "transient"
 
 
-class _RuntimeStateBackendKind(StrEnum):
+class _RuntimeStateBackendKind(str, Enum):
+    __str__ = str.__str__
+    __format__ = str.__format__
     MEMORY = "memory"
     FILESYSTEM = "filesystem"
     SQLITE = "sqlite"

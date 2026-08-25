@@ -5,6 +5,8 @@ dependencies:
 
 dev-dependencies:
   - pyyaml
+  - "pytest<7; python_version < '3.7'"
+  - "pytest; python_version >= '3.7'"
 
 optional-dependencies:
 

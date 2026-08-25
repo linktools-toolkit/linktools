@@ -1,6 +1,8 @@
 dependencies: []
 
-dev-dependencies: []
+dev-dependencies:
+  - "pytest<7; python_version < '3.7'"
+  - "pytest; python_version >= '3.7'"
 
 release-dependencies: []
 

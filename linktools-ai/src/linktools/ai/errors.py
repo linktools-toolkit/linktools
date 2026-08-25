@@ -7,7 +7,7 @@ import json
 import math
 from collections.abc import Mapping
 from dataclasses import dataclass
-from enum import StrEnum
+from enum import Enum
 from typing import TypeAlias
 
 from linktools.errors import Error
@@ -74,7 +74,9 @@ def _safe_json_value(value: object, seen: set[int]) -> _SafeJsonValue:
     )
 
 
-class ErrorCode(StrEnum):
+class ErrorCode(str, Enum):
+    __str__ = str.__str__
+    __format__ = str.__format__
     AUTHORIZATION_DENIED = "AUTHORIZATION_DENIED"
     ACTIVITY_SCOPE_REQUIRED = "ACTIVITY_SCOPE_REQUIRED"
     AGENT_NOT_FOUND = "AGENT_NOT_FOUND"

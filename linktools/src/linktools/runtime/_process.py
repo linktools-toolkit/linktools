@@ -81,33 +81,33 @@ if is_unix_like():
             self._stderr = stderr
 
         def get(self, timeout: "Timeout") -> "Generator[tuple[int, AnyStr], Any, Any]":
-            import select
+            import selectors
 
-            fds = []
-            stdout, stderr = None, None
+            wrappers = []
             if self._stdout:
-                stdout = self.IOWrapper(self._stdout, STDOUT)
-                fds.append(stdout.fd)
+                wrappers.append(self.IOWrapper(self._stdout, STDOUT))
             if self._stderr:
-                stderr = self.IOWrapper(self._stderr, STDERR)
-                fds.append(stderr.fd)
+                wrappers.append(self.IOWrapper(self._stderr, STDERR))
 
-            while len(fds) > 0:
-                remain = _coalesce(timeout.remaining, 1)
-                if remain <= 0:
-                    break
-                rlist, wlist, xlist = select.select(fds, [], [], min(remain, 1))
-                if stdout.fd is not None and stdout.fd in rlist:
-                    yield from stdout.read_lines()
-                    if stdout.closed:
-                        fds.remove(stdout.fd)
-                if stderr.fd is not None and stderr.fd in rlist:
-                    yield from stderr.read_lines()
-                    if stderr.closed:
-                        fds.remove(stderr.fd)
+            selector = selectors.DefaultSelector()
+            try:
+                for wrapper in wrappers:
+                    selector.register(wrapper.fd, selectors.EVENT_READ, wrapper)
 
-            yield from stdout.read_remain_line()
-            yield from stderr.read_remain_line()
+                while selector.get_map():
+                    remain = _coalesce(timeout.remaining, 1)
+                    if remain <= 0:
+                        break
+                    for key, _ in selector.select(min(remain, 1)):
+                        wrapper = key.data
+                        yield from wrapper.read_lines()
+                        if wrapper.closed:
+                            selector.unregister(wrapper.fd)
+            finally:
+                selector.close()
+
+            for wrapper in wrappers:
+                yield from wrapper.read_remain_line()
 
         class IOWrapper:
 

@@ -3,13 +3,15 @@
 """Ordered storage read layers."""
 
 from dataclasses import dataclass
-from enum import StrEnum
+from enum import Enum
 from typing import Generic
 
 from ._contracts import InfoT, KeyT, ReadableStorageBackend, ValueT
 
 
-class LayerRefreshPolicy(StrEnum):
+class LayerRefreshPolicy(str, Enum):
+    __str__ = str.__str__
+    __format__ = str.__format__
     STATIC = "STATIC"
     REVISIONED = "REVISIONED"
     ALWAYS = "ALWAYS"

@@ -4,7 +4,7 @@
 
 import asyncio
 from collections.abc import Awaitable, Callable
-from enum import StrEnum
+from enum import Enum
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -36,7 +36,9 @@ if TYPE_CHECKING:
     from ._steps import RuntimeStepStore
 
 
-class _RuntimeStateLifecycle(StrEnum):
+class _RuntimeStateLifecycle(str, Enum):
+    __str__ = str.__str__
+    __format__ = str.__format__
     NEW = "new"
     INITIALIZING = "initializing"
     READY = "ready"

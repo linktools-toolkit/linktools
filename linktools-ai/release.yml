@@ -1,0 +1,15 @@
+checks:
+  gate:
+    modules:
+      - scripts.check.ai
+  ruff:
+    select:
+      - E9
+      - F63
+      - F7
+      - F82
+    paths:
+      - src
+  pytest:
+    paths:
+      - ../tests/ai

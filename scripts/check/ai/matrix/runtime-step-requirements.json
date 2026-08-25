@@ -8,7 +8,7 @@
       "requirement": "local 和 entry 根包不存在；",
       "evidence": [
         "tests/ai/persistence/test_architecture.py",
-        "linktools-ai/scripts/build/architecture.py"
+        "scripts/check/ai/architecture.py"
       ]
     },
     {
@@ -17,7 +17,7 @@
       "requirement": "根包精确等于 2.4 target manifest；",
       "evidence": [
         "tests/ai/persistence/test_architecture.py",
-        "linktools-ai/scripts/build/architecture.py"
+        "scripts/check/ai/architecture.py"
       ]
     },
     {
@@ -26,7 +26,7 @@
       "requirement": "architecture SCC=0，禁止依赖边=0；",
       "evidence": [
         "tests/ai/persistence/test_architecture.py",
-        "linktools-ai/scripts/build/architecture.py"
+        "scripts/check/ai/architecture.py"
       ]
     },
     {
@@ -218,7 +218,7 @@
       "requirement": "无 compatibility shim、dead re-export、orphan code、失真注释；",
       "evidence": [
         "tests/ai/persistence/test_architecture.py",
-        "linktools-ai/scripts/build/architecture.py"
+        "scripts/check/ai/architecture.py"
       ]
     },
     {
@@ -226,8 +226,8 @@
       "status": "complete",
       "requirement": "Source S 不自证最终 evidence；E 只能绑定可解析且为其 direct parent 的 exact S。",
       "evidence": [
-        "linktools-ai/scripts/build/matrix/linktools-ai-evidence.json",
-        "linktools-ai/scripts/build/matrix/linktools-ai-review-coverage.json"
+        "scripts/check/ai/matrix/linktools-ai-evidence.json",
+        "scripts/check/ai/matrix/linktools-ai-review-coverage.json"
       ]
     },
     {
@@ -235,7 +235,7 @@
       "status": "complete",
       "requirement": "E 记录 exact-S validation 与交付前 cold-start self-review；E 后的独立最终 Review 属于 release gate，发现问题必须进入新的 S/E 修复循环。",
       "evidence": [
-        "linktools-ai/scripts/build/matrix/linktools-ai-review-coverage.json"
+        "scripts/check/ai/matrix/linktools-ai-review-coverage.json"
       ]
     },
     {
@@ -344,7 +344,7 @@
       "requirement": "optional SQL driver 保持 lazy，依赖版本/lock 与本文一致；",
       "evidence": [
         "tests/ai/persistence/test_architecture.py",
-        "linktools-ai/scripts/build/architecture.py"
+        "scripts/check/ai/architecture.py"
       ]
     },
     {
@@ -353,7 +353,7 @@
       "requirement": "runtime domain 不依赖 app composition；Runtime/RuntimeAccess/build_runtime/build_runtime_access 由 runtime/_runtime_service.py 唯一拥有，runtime/__init__.py 不反向 re-export composition symbol。",
       "evidence": [
         "tests/ai/persistence/test_architecture.py",
-        "linktools-ai/scripts/build/architecture.py"
+        "scripts/check/ai/architecture.py"
       ]
     },
     {
@@ -452,7 +452,7 @@
       "requirement": "workspace/principal.py、workspace/sandbox.py 不存在；薄 helper/wrapper 已合并到已有 cohesive module；",
       "evidence": [
         "tests/ai/persistence/test_architecture.py",
-        "linktools-ai/scripts/build/architecture.py"
+        "scripts/check/ai/architecture.py"
       ]
     },
     {
@@ -531,7 +531,7 @@
       "requirement": "LocalSandbox -> WorkspaceSandbox 这类失真 rename 不存在；薄 sandbox facade 已删除并入 workspace/_tools.py；",
       "evidence": [
         "tests/ai/persistence/test_architecture.py",
-        "linktools-ai/scripts/build/architecture.py"
+        "scripts/check/ai/architecture.py"
       ]
     },
     {
@@ -540,7 +540,7 @@
       "requirement": "entry/worker.py 没有机械迁移成 app/worker.py；worker bootstrap 直接复用 temporal.worker；",
       "evidence": [
         "tests/ai/persistence/test_architecture.py",
-        "linktools-ai/scripts/build/architecture.py"
+        "scripts/check/ai/architecture.py"
       ]
     },
     {
@@ -549,7 +549,7 @@
       "requirement": "EntryServices/EntryRuntimeFactory 已改为 AppServices/RuntimeFactory，冗余 AgentServices/build_agent_services 已删除；",
       "evidence": [
         "tests/ai/persistence/test_architecture.py",
-        "linktools-ai/scripts/build/architecture.py"
+        "scripts/check/ai/architecture.py"
       ]
     },
     {
@@ -596,7 +596,7 @@
       "requirement": "runtime/__init__.py 不再 re-export Runtime/RuntimeAccess/RuntimeDependencies/build_runtime/build_runtime_access，这些 composition symbol 由 runtime/_runtime_service.py 拥有；",
       "evidence": [
         "tests/ai/persistence/test_architecture.py",
-        "linktools-ai/scripts/build/architecture.py"
+        "scripts/check/ai/architecture.py"
       ]
     },
     {
@@ -605,7 +605,7 @@
       "requirement": "顶层 linktools.ai 只显式 re-export稳定 public surface，不通过 app.__init__ broad import 引入 transport/optional dependency；",
       "evidence": [
         "tests/ai/persistence/test_architecture.py",
-        "linktools-ai/scripts/build/architecture.py"
+        "scripts/check/ai/architecture.py"
       ]
     },
     {
@@ -624,7 +624,7 @@
       "requirement": "workspace/_root.py 是 Workspace identity/config-file owner，workspace/project.py 不存在，provider OPENAI_* ConfigField 不属于 workspace；",
       "evidence": [
         "tests/ai/persistence/test_architecture.py",
-        "linktools-ai/scripts/build/architecture.py"
+        "scripts/check/ai/architecture.py"
       ]
     },
     {
@@ -673,7 +673,7 @@
       "requirement": "SqlSchemaPlan 是唯一 application schema plan，旧共享 SqlSchemaAssembly 不存在；",
       "evidence": [
         "tests/ai/persistence/test_architecture.py",
-        "linktools-ai/scripts/build/architecture.py"
+        "scripts/check/ai/architecture.py"
       ]
     },
     {
@@ -711,7 +711,7 @@
       "requirement": "requirements.yml 的 optional-dependencies 按兼容主版本约束，SQLAlchemy 保持 2.x，Harness/Slim wheel hash 与 lock evidence 一致；",
       "evidence": [
         "linktools-ai/requirements.yml",
-        "linktools-ai/scripts/build/matrix/requirements-lock.json"
+        "scripts/check/ai/matrix/requirements-lock.json"
       ]
     },
     {
@@ -720,7 +720,7 @@
       "requirement": "architecture test 与 requirement matrix 文件名不再固化旧版本，仓库内不存在本轮已废弃的版本化验证资产名称。",
       "evidence": [
         "tests/ai/persistence/test_architecture.py",
-        "linktools-ai/scripts/build/architecture.py"
+        "scripts/check/ai/architecture.py"
       ]
     },
     {
@@ -813,7 +813,7 @@
       "requirement": "所有 private implementation module 使用 `_` 前缀；所有 unprefixed module 精确属于 package policy public_modules。",
       "evidence": [
         "tests/ai/test_architecture.py::test_public_private_classification_gate_is_exact",
-        "linktools-ai/scripts/build/architecture.py"
+        "scripts/check/ai/architecture.py"
       ]
     },
     {
@@ -824,7 +824,7 @@
         "tests/ai/test_architecture.py::test_name_gate_includes_modules_and_packages_in_namespace_model",
         "tests/ai/test_architecture.py::test_name_gate_allows_parallel_names_and_rejects_namespace_collisions",
         "tests/ai/test_architecture.py::test_name_gate_treats_private_marker_as_semantic_only",
-        "linktools-ai/scripts/build/names.py"
+        "scripts/check/ai/names.py"
       ]
     },
     {
@@ -833,7 +833,7 @@
       "requirement": "跨 Python package directory 禁止 direct import `_private_module`；包括 nested package，跨目录消费必须经目标 package static re-export。",
       "evidence": [
         "tests/ai/test_architecture.py::test_private_cross_package_import_gate_covers_runtime_type_checking_and_nested_packages",
-        "linktools-ai/scripts/build/architecture.py"
+        "scripts/check/ai/architecture.py"
       ]
     },
     {
@@ -843,7 +843,7 @@
       "evidence": [
         "tests/ai/test_architecture.py::test_private_conversion_tree_is_exact",
         "tests/ai/test_architecture.py::test_package_public_surface_and_optional_dependency_isolation",
-        "linktools-ai/scripts/build/names.py"
+        "scripts/check/ai/names.py"
       ]
     },
     {
@@ -862,7 +862,7 @@
       "requirement": "release provenance 使用可解析的 logical/source revision；squash 后的 commit topology 不作为 correctness 条件。",
       "evidence": [
         "tests/ai/test_architecture.py::test_runtime_step_contract_matrix_is_current",
-        "linktools-ai/scripts/build/matrix/linktools-ai-review-coverage.json"
+        "scripts/check/ai/matrix/linktools-ai-review-coverage.json"
       ]
     }
   ],

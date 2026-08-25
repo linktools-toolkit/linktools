@@ -123,9 +123,17 @@ def make_manager(data_path, temp_path, name: str = "aio"):
 
 
 def _scrub_pairs(manager):
-    """(path, token) pairs to scrub from snapshot text, longest path first."""
+    """(value, token) pairs to scrub from snapshot text, longest value first."""
     from linktools.capabilities.cntr import __cap_cntr__
+
+    docker_uid = manager.env_config.get("DOCKER_UID", default=None)
+    docker_gid = manager.env_config.get("DOCKER_GID", default=None)
+    docker_identity = None
+    if docker_uid is not None and docker_gid is not None:
+        docker_identity = "%s:%s" % (docker_uid, docker_gid)
+
     raw = [
+        ("<DOCKER_UID>:<DOCKER_GID>", docker_identity),
         ("<APP_DATA>", getattr(manager, "app_data_path", None)),
         ("<APP>", getattr(manager, "app_path", None)),
         ("<USER_DATA>", manager.env_config.get("DOCKER_USER_DATA_PATH", default=None)),
@@ -134,7 +142,7 @@ def _scrub_pairs(manager):
         ("<TEMP>", str(manager.environ.temp_path)),
         ("<ASSETS>", str(__cap_cntr__.get_asset_path("containers"))),
     ]
-    pairs = [(str(path), token) for token, path in raw if path]
+    pairs = [(str(value), token) for token, value in raw if value]
     pairs.sort(key=lambda item: len(item[0]), reverse=True)
     return pairs
 
@@ -143,13 +151,13 @@ def normalize_compose(data, manager) -> str:
     """Render-independent normalized JSON of a compose dict (test-only).
 
     Eliminates key-order / whitespace differences and scrubs environment-specific
-    absolute paths so committed snapshots stay portable across machines and
-    install layouts.
+    absolute paths and host identity values so committed snapshots stay portable
+    across machines and install layouts.
     """
     text = json.dumps(
         yaml.safe_load(yaml.safe_dump(data, sort_keys=False, allow_unicode=True)),
         sort_keys=True, ensure_ascii=False, indent=2,
     )
-    for path, token in _scrub_pairs(manager):
-        text = text.replace(path, token)
+    for value, token in _scrub_pairs(manager):
+        text = text.replace(value, token)
     return text

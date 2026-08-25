@@ -11,7 +11,7 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
-from enum import StrEnum
+from enum import Enum
 from typing import TYPE_CHECKING, Protocol
 
 from pydantic_ai.messages import ModelMessage
@@ -109,12 +109,16 @@ class ConversationHistoryIndexNodeRecord:
             raise ValueError("leaf index node cannot have children")
 
 
-class TranscriptOrigin(StrEnum):
+class TranscriptOrigin(str, Enum):
+    __str__ = str.__str__
+    __format__ = str.__format__
     RAW = "raw"
     UNKNOWN = "unknown"
 
 
-class TranscriptOwnerDomain(StrEnum):
+class TranscriptOwnerDomain(str, Enum):
+    __str__ = str.__str__
+    __format__ = str.__format__
     CONVERSATION = "conversation"
     EXECUTION = "execution"
     RECOVERY = "recovery"
@@ -138,7 +142,9 @@ class TranscriptChunk:
     content: RuntimePayloadRef
 
 
-class TranscriptSeekDimension(StrEnum):
+class TranscriptSeekDimension(str, Enum):
+    __str__ = str.__str__
+    __format__ = str.__format__
     MESSAGE = "message"
     SESSION_HISTORY_ITEM = "session_history_item"
     EXECUTION_TRANSCRIPT_ITEM = "execution_transcript_item"
@@ -275,7 +281,9 @@ class StoredStepSnapshot:
     projection_digest: str
 
 
-class HistoryQuality(StrEnum):
+class HistoryQuality(str, Enum):
+    __str__ = str.__str__
+    __format__ = str.__format__
     COMPLETE = "complete"
     CONSERVATIVE = "conservative"
 
@@ -459,7 +467,9 @@ class ExecutionHistorySealRecord:
             raise ValueError("execution history seal heads must be sorted and unique")
 
 
-class ExecutionHistoryState(StrEnum):
+class ExecutionHistoryState(str, Enum):
+    __str__ = str.__str__
+    __format__ = str.__format__
     OPEN = "open"
     SEALED = "sealed"
 
@@ -809,7 +819,9 @@ class RecoveryStateRecord:
     updated_at: datetime
 
 
-class RecoveryCheckpointState(StrEnum):
+class RecoveryCheckpointState(str, Enum):
+    __str__ = str.__str__
+    __format__ = str.__format__
     ADMITTED = "admitted"
     ACTIVE = "active"
     WAITING = "waiting"
@@ -817,7 +829,9 @@ class RecoveryCheckpointState(StrEnum):
     COMPLETED = "completed"
 
 
-class RecoveryHandoffPhase(StrEnum):
+class RecoveryHandoffPhase(str, Enum):
+    __str__ = str.__str__
+    __format__ = str.__format__
     NONE = "none"
     PREPARED = "prepared"
     CONVERSATION_RESOLVED = "conversation_resolved"

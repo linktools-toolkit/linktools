@@ -19,13 +19,10 @@ permissions:
   contents: write
 
 jobs:
-  deploy:
-
+  validate:
     runs-on: ubuntu-latest
-
     steps:
     - uses: actions/checkout@v3
-
     - name: Validate version
       run: |
         VERSION="${{ inputs.version }}"
@@ -37,6 +34,19 @@ jobs:
           echo "::error::Tag $VERSION already exists"
           exit 1
         fi
+
+  checks:
+    needs: validate
+    uses: ./.github/workflows/python-check.yml
+
+  deploy:
+    needs:
+      - validate
+      - checks
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v3
 
     # build frida.min.js
     - name: Set up Node
@@ -66,13 +76,19 @@ jobs:
     - name: Set up Python
       uses: actions/setup-python@v3
       with:
-        python-version: '3.x'
+        python-version: '3.10'
     - name: Install dependencies
       run: |
         python -m pip install --upgrade pip
         pip install -U -r requirements.txt
+    - name: Install projects
+      run: python manage.py install --editable
+    - name: Clean package
+      run: python manage.py clean
     - name: Build package
       run: VERSION=${{ inputs.version }} RELEASE=true python manage.py build
+    - name: Verify package
+      run: VERSION=${{ inputs.version }} python manage.py verify
 
     # publish python package
     - name: Publish package

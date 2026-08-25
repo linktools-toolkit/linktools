@@ -74,9 +74,9 @@ def _request(graph_id: str = "graph") -> TaskGraphRequest:
 @pytest.fixture(autouse=True)
 def temporal_activity_context(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
-        temporal_activity._temporal_activity,
-        "info",
-        lambda: SimpleNamespace(workflow_run_id="test-workflow-run"),
+        temporal_activity,
+        "_temporal_activity",
+        SimpleNamespace(info=lambda: SimpleNamespace(workflow_run_id="test-workflow-run")),
     )
 
 

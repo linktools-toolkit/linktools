@@ -11,12 +11,8 @@ from typing import cast
 
 from linktools.ai.core import JsonValue
 
-if __package__:
-    from .cohesion import check_files
-    from .names import check_names
-else:
-    from cohesion import check_files
-    from names import check_names
+from .cohesion import check_files
+from .names import check_names
 
 _DURABLE_REFLECTION_FUNCTIONS = {
     "linktools.ai.agent._output": frozenset(
@@ -511,15 +507,18 @@ class ArchitecturePolicyChecker:
     def check(self, source_root: "str | Path") -> ArchitectureCheckResult:
         root = Path(source_root)
         report = build_report(root)
-        commands_root = root.parents[2] / "src" / "linktools" / "commands" / "ai"
+        package_root = root.parents[2]
+        repository_root = package_root.parent
+        commands_root = package_root / "src" / "linktools" / "commands" / "ai"
         source_roots = (
             (root, "linktools.ai"),
             (commands_root, "linktools.commands.ai"),
         )
         policy_path = (
-            root.parents[2]
+            repository_root
             / "scripts"
-            / "build"
+            / "check"
+            / "ai"
             / "matrix"
             / "linktools-ai-package-policy.json"
         )
