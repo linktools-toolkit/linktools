@@ -1053,6 +1053,13 @@ class DefaultExecutionService:
                             tenant_id=principal.tenant_id,
                         )
                         continue
+                    if self._backend is not None:
+                        failure = self._backend.worker_failure(
+                            execution_id,
+                            tenant_id=principal.tenant_id,
+                        )
+                        if failure is not None:
+                            raise failure
                     return await self.result(execution_id, principal=principal)
                 if self._backend is not None:
                     failure = self._backend.worker_failure(

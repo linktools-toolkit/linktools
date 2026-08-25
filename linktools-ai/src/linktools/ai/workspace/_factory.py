@@ -8,7 +8,6 @@ from collections.abc import AsyncIterator, Sequence
 from contextlib import asynccontextmanager
 
 from linktools.core import environ
-from pydantic_ai.capabilities import AbstractCapability
 
 from ..adapter import (
     PydanticMCPRuntime,
@@ -23,7 +22,6 @@ from ..agent import (
     AgentCatalog,
     AgentCompiler,
     AgentDefinition,
-    OutputBinding,
 )
 from ..asset import (
     AssetDiscoveryStatus,
@@ -362,8 +360,6 @@ async def open_workspace_runtime(
     models: ModelRegistry | None = None,
     capability_providers: Sequence[CapabilityProvider] = (),
     capabilities: Sequence[RuntimeCapability] = (),
-    outputs: Sequence[OutputBinding] = (),
-    runtime_capability_types: "Sequence[type[AbstractCapability[None]]]" = (),
 ) -> AsyncIterator[Runtime]:
     if not isinstance(workspace, Workspace):
         raise TypeError("workspace is required")
@@ -415,8 +411,6 @@ async def open_workspace_runtime(
         runtime_fingerprint=runtime_fingerprint,
         trusted_tool_classes=_trusted_tool_classes(asset_capabilities),
         trusted_mcp_selectors=_trusted_mcp_selectors(asset_capabilities),
-        outputs=outputs,
-        runtime_capability_types=runtime_capability_types,
     )
     catalog = _build_catalog(specs, compiler)
     if await selected_assets.current_revision() != initial_revision:

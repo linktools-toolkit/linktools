@@ -129,7 +129,7 @@ async def test_agent_executor_reinjects_only_when_requested(
     binding = SimpleNamespace(
         definition=definition,
         output_binding=output_binding,
-        output_type=output_binding.value_type,
+        output_type=output_binding.runtime_output_type,
     )
     captured: dict[str, object] = {}
 

@@ -3,6 +3,7 @@
 """Focused regressions for durable composition and close ownership."""
 
 import asyncio
+from dataclasses import replace
 from types import SimpleNamespace
 
 import pytest
@@ -35,6 +36,13 @@ class _RegisteredOutput(BaseModel):
     value: str
 
 
+class _RecursiveOutput(BaseModel):
+    child: "_RecursiveOutput | None" = None
+
+
+_RecursiveOutput.model_rebuild()
+
+
 class _RegisteredCapability(AbstractCapability[None]):
     @classmethod
     def get_serialization_name(cls) -> "str | None":
@@ -46,29 +54,14 @@ class _RegisteredCapability(AbstractCapability[None]):
         return cls()
 
 
-class _ConflictingCapability(AbstractCapability[None]):
-    @classmethod
-    def get_serialization_name(cls) -> "str | None":
-        return "durable-contract-capability"
-
-    @classmethod
-    def from_spec(cls, **kwargs: object) -> "_ConflictingCapability":
-        del kwargs
-        return cls()
-
-
 def _compiler(
     *,
-    outputs: tuple[object, ...] = (),
     capabilities: tuple[object, ...] = (),
-    runtime_capability_types: tuple[type[AbstractCapability[None]], ...] = (),
 ) -> AgentCompiler:
     return AgentCompiler(
         model_resolver=ModelRegistry.openai(model="gpt-test").snapshot(),
         capabilities=capabilities,
         runtime_fingerprint="a" * 64,
-        outputs=outputs,
-        runtime_capability_types=runtime_capability_types,
     )
 
 
@@ -76,56 +69,74 @@ def _spec() -> AgentSpec:
     return AgentSpec("durable-contract", model="default")
 
 
-def test_custom_output_restore_uses_frozen_composition_registry() -> None:
-    compiler = _compiler(
-        outputs=(bind_output(_RegisteredOutput, schema_id="durable.output"),),
-    )
+def test_custom_output_restore_uses_persisted_schema() -> None:
+    compiler = _compiler()
     definition = compiler.compile(_spec())
     binding = compiler.bind(definition, output=_RegisteredOutput)
     snapshot = binding.snapshot
+    assert snapshot.output_schema_definition == binding.output_binding.schema_definition
+    assert not hasattr(compiler, "_outputs_by_type")
 
-    fresh = _compiler(
-        outputs=(bind_output(_RegisteredOutput, schema_id="durable.output"),),
-    )
+    fresh = _compiler()
     restored = fresh.restore(snapshot)
     assert restored.snapshot == snapshot
-
-    unregistered = _compiler()
-    before = dict(unregistered._outputs_by_type)
-    with pytest.raises(AIError) as bind_error:
-        unregistered.bind(unregistered.compile(_spec()), output=_RegisteredOutput)
-    assert bind_error.value.code is ErrorCode.OUTPUT_CONTRACT_INVALID
-    assert dict(unregistered._outputs_by_type) == before
-
-    with pytest.raises(AIError) as restore_error:
-        unregistered.restore(snapshot)
-    assert restore_error.value.code is ErrorCode.AGENT_DEFINITION_UNAVAILABLE
+    assert restored.output_type is not _RegisteredOutput
+    assert not hasattr(fresh, "_outputs_by_type")
 
 
-def test_local_runtime_capability_restore_requires_frozen_type_registration() -> None:
+def test_custom_output_restore_rejects_missing_or_tampered_schema() -> None:
+    compiler = _compiler()
+    binding = compiler.bind(compiler.compile(_spec()), output=_RegisteredOutput)
+    snapshot = binding.snapshot
+    fresh = _compiler()
+
+    historical = replace(snapshot, output_schema_definition=None)
+    with pytest.raises(AIError) as missing_error:
+        fresh.restore(historical)
+    assert missing_error.value.code is ErrorCode.AGENT_DEFINITION_UNAVAILABLE
+
+    tampered_schema = dict(snapshot.output_schema_definition or {})
+    tampered_schema["title"] = "TamperedOutput"
+    tampered = replace(snapshot, output_schema_definition=tampered_schema)
+    with pytest.raises(AIError) as tampered_error:
+        fresh.restore(tampered)
+    assert tampered_error.value.code is ErrorCode.AGENT_DEFINITION_UNAVAILABLE
+
+
+def test_custom_output_rejects_non_durable_schema_at_bind_time() -> None:
+    with pytest.raises(AIError) as error:
+        bind_output(_RecursiveOutput)
+    assert error.value.code is ErrorCode.OUTPUT_CONTRACT_INVALID
+    assert error.value.safe_details == {"reason": "output_schema_not_durable"}
+
+
+def test_local_runtime_capability_restore_uses_persisted_locator() -> None:
     capability = RuntimeCapability.from_spec(
         "local",
         _RegisteredCapability,
         config={"mode": "strict"},
     )
-    compiler = _compiler(runtime_capability_types=(_RegisteredCapability,))
-    before = dict(compiler._runtime_capability_types)
+    compiler = _compiler()
     definition = compiler.compile(_spec(), capabilities=(capability,))
     binding = compiler.bind(definition)
-    assert dict(compiler._runtime_capability_types) == before
+    assert not hasattr(compiler, "_runtime_capability_types")
 
-    fresh = _compiler(runtime_capability_types=(_RegisteredCapability,))
+    fresh = _compiler()
     assert fresh.restore(binding.snapshot).snapshot == binding.snapshot
+    assert not hasattr(fresh, "_runtime_capability_types")
 
-    unregistered = _compiler()
+    descriptor = dict(binding.snapshot.local_runtime_capability_descriptors[0])
+    descriptor["restore_locator"] = {
+        "module": "missing.historical.module",
+        "qualname": "MovedCapability",
+    }
+    historical = replace(
+        binding.snapshot,
+        local_runtime_capability_descriptors=(descriptor,),
+    )
     with pytest.raises(AIError) as missing_error:
-        unregistered.compile(_spec(), capabilities=(capability,))
-    assert missing_error.value.code is ErrorCode.CAPABILITY_RESOLUTION_INVALID
-
-    conflicting = _compiler(runtime_capability_types=(_ConflictingCapability,))
-    with pytest.raises(AIError) as conflicting_error:
-        conflicting.compile(_spec(), capabilities=(capability,))
-    assert conflicting_error.value.code is ErrorCode.CAPABILITY_RESOLUTION_INVALID
+        fresh.restore(historical)
+    assert missing_error.value.code is ErrorCode.AGENT_DEFINITION_UNAVAILABLE
 
 
 def test_global_runtime_capability_is_restored_from_composition() -> None:
@@ -138,6 +149,17 @@ def test_global_runtime_capability_is_restored_from_composition() -> None:
     binding = compiler.bind(compiler.compile(_spec()))
     fresh = _compiler(capabilities=(capability,))
     assert fresh.restore(binding.snapshot).snapshot == binding.snapshot
+
+    descriptor = dict(binding.snapshot.global_runtime_capability_descriptors[0])
+    descriptor["restore_locator"] = {
+        "module": "missing.historical.module",
+        "qualname": "MovedCapability",
+    }
+    historical = replace(
+        binding.snapshot,
+        global_runtime_capability_descriptors=(descriptor,),
+    )
+    assert fresh.restore(historical).snapshot == historical
 
 
 @pytest.mark.asyncio
@@ -393,15 +415,44 @@ async def test_local_execution_close_rejects_pending_command_owned_work() -> Non
     release = asyncio.Event()
     task = asyncio.create_task(release.wait())
     backend._checkpoint_tasks = {task}
+    backend._execution_durable_tasks = {"execution": {task}}
 
     with pytest.raises(AIError) as error:
         await backend.close()
     assert error.value.code is ErrorCode.STORAGE_RECOVERY_REQUIRED
+    assert error.value.safe_details["pending_checkpoint_tasks"] == 1
+    assert error.value.safe_details["pending_execution_tasks"] == 1
+    assert error.value.safe_details["pending_background_tasks"] == 1
 
     release.set()
     await task
     await asyncio.sleep(0)
     await backend.close()
+    assert backend._execution_durable_tasks == {}
+
+
+@pytest.mark.asyncio
+async def test_runtime_release_waits_for_execution_scoped_durable_task() -> None:
+    backend = object.__new__(LocalExecutionBackend)
+    backend._tenant_id = "tenant"
+    backend._tasks = {}
+    backend._terminal_events = {}
+    backend._worker_failures = {}
+    backend._captured_usage = {}
+    backend._pending_audit_events = {}
+    backend._pending_audit_locks = {}
+    release = asyncio.Event()
+    task = asyncio.create_task(release.wait())
+    backend._execution_durable_tasks = {"execution": {task}}
+
+    with pytest.raises(AIError) as error:
+        await backend.release_runtime_execution("execution", tenant_id="tenant")
+    assert error.value.code is ErrorCode.STORAGE_CONFLICT
+
+    release.set()
+    await task
+    await backend.release_runtime_execution("execution", tenant_id="tenant")
+    assert backend._execution_durable_tasks == {}
 
 
 @pytest.mark.asyncio

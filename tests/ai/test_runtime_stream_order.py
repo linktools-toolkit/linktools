@@ -333,8 +333,9 @@ async def test_cancel_local_bookkeeping_survives_caller_cancellation() -> None:
             *,
             expected_status: ExecutionStatus,
             audit_events: tuple[ExecutionEventAppend, ...],
+            background_tasks: set[asyncio.Task[object]] | None = None,
         ) -> ExecutionRecord:
-            del commit, expected_status
+            del commit, expected_status, background_tasks
             assert audit_events == (pending,)
             self.started.set()
             await self.release.wait()
@@ -425,8 +426,9 @@ async def test_terminal_local_bookkeeping_survives_caller_cancellation() -> None
             *,
             session_id: str | None,
             audit_events: tuple[ExecutionEventAppend, ...],
+            background_tasks: set[asyncio.Task[object]] | None = None,
         ) -> ExecutionTerminalCommitResult:
-            del session_id
+            del session_id, background_tasks
             assert actual is commit
             assert audit_events == (pending,)
             self.started.set()

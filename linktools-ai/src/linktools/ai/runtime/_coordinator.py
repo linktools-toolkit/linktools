@@ -4,7 +4,9 @@
 
 from collections.abc import AsyncIterator
 
-from ..core import Principal
+from linktools.core import environ
+
+from ..core import ExecutionEventType, Principal
 from ._event import DefaultEventService, _PreparedStreamLease
 from ._execution import DefaultExecutionService
 from ._local import LocalExecutionBackend
@@ -15,6 +17,8 @@ from .service_api import (
     ExecutionStreamEvent,
     ResumeSessionRequest,
 )
+
+_logger = environ.get_logger("ai.runtime.coordinator")
 
 
 class _LocalRuntimeCoordinator:
@@ -107,25 +111,41 @@ class _LocalRuntimeCoordinator:
         after_sequence: int = 0,
     ) -> AsyncIterator[ExecutionStreamEvent]:
         lease = self._leases.pop(execution_id, None)
-        if lease is None:
-            async for event in self._event.stream(
-                execution_id,
-                principal=principal,
-                after_sequence=after_sequence,
-            ):
-                yield event
-            return
+        terminal_yielded = False
         try:
-            async for event in self._event._stream_claimed(
-                lease,
-                principal=principal,
-                after_sequence=after_sequence,
-            ):
+            events = (
+                self._event.stream(
+                    execution_id,
+                    principal=principal,
+                    after_sequence=after_sequence,
+                )
+                if lease is None
+                else self._event._stream_claimed(
+                    lease,
+                    principal=principal,
+                    after_sequence=after_sequence,
+                )
+            )
+            async for event in events:
+                if event.event_type in {
+                    ExecutionEventType.EXECUTION_SUCCEEDED,
+                    ExecutionEventType.EXECUTION_FAILED,
+                    ExecutionEventType.EXECUTION_CANCELLED,
+                }:
+                    terminal_yielded = True
                 yield event
         finally:
-            if lease.state == "PREPARED":
+            if lease is not None and lease.state == "PREPARED":
                 self._abort(lease)
-
+            if terminal_yielded:
+                _logger.debug(
+                    "local stream yielded terminal event; requesting execution handoff: execution=%s",
+                    execution_id,
+                )
+                await self._execution.request_terminal_handoff(
+                    execution_id,
+                    tenant_id=principal.tenant_id,
+                )
 
     def _abort(self, lease: _PreparedStreamLease) -> None:
         self._leases.pop(lease.execution_id, None)

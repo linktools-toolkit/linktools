@@ -5,6 +5,7 @@
 import asyncio
 from datetime import datetime, timezone
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from linktools.ai.adapter import StepExecutionHistoryReader
@@ -415,15 +416,18 @@ async def test_terminal_commit_cancellation_still_finalizes_after_durable_commit
     }
     backend._step_lifecycle = lifecycle
     backend._checkpoint_tasks = set()
+    backend._pending_audit_events = {}
+    backend._pending_audit_locks = {}
+    backend._execution_durable_tasks = {}
     started = asyncio.Event()
 
     async def commit(*args: object, **kwargs: object) -> object:
         del args, kwargs
         started.set()
         await asyncio.sleep(0.01)
-        return object()
+        return SimpleNamespace(execution=SimpleNamespace(event_sequence=0))
 
-    backend._commit_execution_terminal_checkpoint_locked = commit
+    backend._commit_execution_terminal_checkpoint_locked_body = commit
     current = _record(ExecutionStatus.SUCCEEDED, 0)
     plan = ExecutionTerminalSealPlan("execution", "a" * 64, (), ())
     task = asyncio.create_task(

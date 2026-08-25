@@ -3,11 +3,9 @@
 """Compile declarations and output bindings from frozen Runtime inputs."""
 
 from collections.abc import Mapping, Sequence
-from typing import cast
 
 from linktools.core import environ
 from pydantic import BaseModel
-from pydantic_ai.capabilities import AbstractCapability
 
 from ..capability import (
     CapabilityBinding,
@@ -26,13 +24,7 @@ from ..model import ModelResolver
 from ..spec import AgentSpec, AgentSpecCodec
 from ._binding import AgentBinding, AgentBindingSnapshot
 from ._definition import AgentDefinition
-from ._output import (
-    ASSISTANT_TEXT_OUTPUT_SCHEMA_ID,
-    AssistantTextOutput,
-    OutputBinding,
-    bind_output,
-    restore_output,
-)
+from ._output import bind_output, restore_output
 
 _logger = environ.get_logger("ai.agent.compiler")
 
@@ -49,8 +41,6 @@ class AgentCompiler:
         runtime_fingerprint: str,
         trusted_tool_classes: "Mapping[str, str] | None" = None,
         trusted_mcp_selectors: "Sequence[str]" = (),
-        outputs: "Sequence[OutputBinding]" = (),
-        runtime_capability_types: "Sequence[type[AbstractCapability[None]]]" = (),
     ) -> None:
         if model_resolver is None:
             raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
@@ -74,11 +64,6 @@ class AgentCompiler:
         self._runtime_fingerprint = runtime_fingerprint
         self._trusted_tool_classes = trusted
         self._trusted_mcp_selectors = selectors
-        self._outputs_by_key, self._outputs_by_type = _build_output_bindings(outputs)
-        self._runtime_capability_types = _build_runtime_capability_types(
-            runtime_capability_types,
-            global_capabilities,
-        )
 
     def compile(
         self,
@@ -168,22 +153,12 @@ class AgentCompiler:
         restored: list[RuntimeCapability] = []
         for capability in local_capabilities:
             descriptor = _required_runtime_descriptor(capability)
-            serialization_name = descriptor.get("serialization_name")
-            if not isinstance(serialization_name, str) or not serialization_name.strip():
-                raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
-            capability_type = self._runtime_capability_types.get(serialization_name)
-            if capability_type is None:
-                raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
             try:
-                value = RuntimeCapability.restore(
-                    descriptor,
-                    capability_types=self._runtime_capability_types,
-                )
+                value = RuntimeCapability.restore(descriptor)
             except AIError as error:
                 raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID) from error
             if (
                 type(value.capability) is not type(capability.capability)
-                or capability_type is not type(capability.capability)
                 or value.descriptor != descriptor
             ):
                 raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
@@ -198,12 +173,7 @@ class AgentCompiler:
     ) -> AgentBinding:
         if not isinstance(definition, AgentDefinition):
             raise TypeError("definition must be AgentDefinition")
-        selected_type = AssistantTextOutput if output is None else output
-        if not isinstance(selected_type, type) or not issubclass(selected_type, BaseModel):
-            raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID)
-        output_binding = self._outputs_by_type.get(selected_type)
-        if output_binding is None:
-            raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID)
+        output_binding = bind_output(output)
         binding_digest = _binding_digest(definition.digest, output_binding.fingerprint)
         snapshot = AgentBindingSnapshot(
             version=1,
@@ -215,6 +185,7 @@ class AgentCompiler:
             local_runtime_capability_descriptors=definition.local_runtime_capability_descriptors,
             binding_digest=binding_digest,
             global_runtime_capability_descriptors=definition.global_runtime_capability_descriptors,
+            output_schema_definition=output_binding.schema_definition,
         )
         binding = AgentBinding(
             binding_digest,
@@ -235,10 +206,7 @@ class AgentCompiler:
             raise TypeError("snapshot must be AgentBindingSnapshot")
         try:
             local_capabilities = tuple(
-                RuntimeCapability.restore(
-                    descriptor,
-                    capability_types=self._runtime_capability_types,
-                )
+                RuntimeCapability.restore(descriptor)
                 for descriptor in snapshot.local_runtime_capability_descriptors
             )
             global_overrides, global_descriptors = self._restore_global_capabilities(
@@ -249,11 +217,9 @@ class AgentCompiler:
                 "schema_id": snapshot.output_schema_id,
                 "schema_revision": snapshot.output_schema_revision,
                 "schema_fingerprint": snapshot.output_schema_fingerprint,
+                "schema_definition": snapshot.output_schema_definition,
             }
-            output_binding = restore_output(
-                output_descriptor,
-                outputs=self._outputs_by_key,
-            )
+            output_binding = restore_output(output_descriptor)
             definition = self._compile_definition(
                 snapshot.agent_spec,
                 local_capabilities,
@@ -289,97 +255,62 @@ class AgentCompiler:
         current_by_id = {capability.id: capability for capability in current}
         if len(current_by_id) != len(current):
             raise AIError(ErrorCode.AGENT_DEFINITION_UNAVAILABLE)
-        restored_values = tuple(
-            RuntimeCapability.restore(
-                descriptor,
-                capability_types=self._runtime_capability_types,
-            )
-            for descriptor in snapshot.global_runtime_capability_descriptors
-        )
-        restored_by_id = {capability.id: capability for capability in restored_values}
-        if (
-            len(restored_by_id) != len(restored_values)
-            or set(restored_by_id) != set(current_by_id)
-        ):
+        if len(snapshot.global_runtime_capability_descriptors) != len(current):
             raise AIError(ErrorCode.AGENT_DEFINITION_UNAVAILABLE)
-        for identity, restored in restored_by_id.items():
-            if _runtime_capability_semantics(restored) != _runtime_capability_semantics(
-                current_by_id[identity]
+        restored_by_id: dict[str, RuntimeCapability] = {}
+        for descriptor in snapshot.global_runtime_capability_descriptors:
+            identity = descriptor.get("id")
+            if not isinstance(identity, str) or identity in restored_by_id:
+                raise AIError(ErrorCode.AGENT_DEFINITION_UNAVAILABLE)
+            current_capability = current_by_id.get(identity)
+            if current_capability is None:
+                raise AIError(ErrorCode.AGENT_DEFINITION_UNAVAILABLE)
+            if _runtime_capability_semantics(descriptor) != _runtime_capability_semantics(
+                current_capability
             ):
                 raise AIError(ErrorCode.AGENT_DEFINITION_UNAVAILABLE)
+            restored_by_id[identity] = current_capability
+        if set(restored_by_id) != set(current_by_id):
+            raise AIError(ErrorCode.AGENT_DEFINITION_UNAVAILABLE)
         return restored_by_id, snapshot.global_runtime_capability_descriptors
 
 
-def _build_output_bindings(
-    outputs: "Sequence[OutputBinding]",
-) -> "tuple[dict[tuple[str, int], OutputBinding], dict[type[BaseModel], OutputBinding]]":
-    builtin = bind_output()
-    selected = (builtin, *tuple(outputs))
-    by_key: dict[tuple[str, int], OutputBinding] = {}
-    by_type: dict[type[BaseModel], OutputBinding] = {}
-    for index, binding in enumerate(selected):
-        if not isinstance(binding, OutputBinding):
-            raise TypeError("outputs must contain OutputBinding values")
-        if index > 0 and binding.schema_id == ASSISTANT_TEXT_OUTPUT_SCHEMA_ID:
-            raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID)
-        key = (binding.schema_id, binding.schema_revision)
-        if key in by_key or binding.value_type in by_type:
-            raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID)
-        by_key[key] = binding
-        by_type[binding.value_type] = binding
-    return by_key, by_type
-
-
-def _build_runtime_capability_types(
-    values: "Sequence[type[AbstractCapability[None]]]",
-    capabilities: "Sequence[CapabilityBinding]",
-) -> "dict[str, type[AbstractCapability[None]]]":
-    selected: list[type[AbstractCapability[None]]] = list(values)
-    selected.extend(
-        type(capability.capability)
-        for capability in capabilities
-        if isinstance(capability, RuntimeCapability) and capability.durable
-    )
-    result: dict[str, type[AbstractCapability[None]]] = {}
-    type_names: dict[type[AbstractCapability[None]], str] = {}
-    for capability_type in selected:
-        if (
-            not isinstance(capability_type, type)
-            or not issubclass(capability_type, AbstractCapability)
-        ):
-            raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
-        try:
-            name = capability_type.get_serialization_name()
-        except Exception as error:
-            raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID) from error
-        if not isinstance(name, str) or not name.strip():
-            raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
-        previous_type = result.get(name)
-        previous_name = type_names.get(capability_type)
-        if (
-            previous_type is not None and previous_type is not capability_type
-        ) or (
-            previous_name is not None and previous_name != name
-        ):
-            raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
-        result[name] = capability_type
-        type_names[capability_type] = name
-    return result
-
-
 def _runtime_capability_semantics(
-    capability: RuntimeCapability,
+    capability: "RuntimeCapability | Mapping[str, JsonValue]",
 ) -> "tuple[str, int, str, JsonValue]":
-    descriptor = _required_runtime_descriptor(capability)
+    descriptor = (
+        _required_runtime_descriptor(capability)
+        if isinstance(capability, RuntimeCapability)
+        else capability
+    )
+    identity = descriptor.get("id")
+    revision = descriptor.get("revision")
     serialization_name = descriptor.get("serialization_name")
     config = descriptor.get("config")
-    if not isinstance(serialization_name, str) or not isinstance(config, dict):
+    fingerprint = descriptor.get("fingerprint")
+    if (
+        not isinstance(identity, str)
+        or not isinstance(revision, int)
+        or isinstance(revision, bool)
+        or not isinstance(serialization_name, str)
+        or not isinstance(config, dict)
+        or not isinstance(fingerprint, str)
+        or canonical_sha256(
+            {
+                "id": identity,
+                "revision": revision,
+                "serialization_name": serialization_name,
+                "config": config,
+            }
+        )
+        != fingerprint
+    ):
         raise AIError(ErrorCode.AGENT_DEFINITION_UNAVAILABLE)
     return (
-        capability.id,
-        capability.revision,
+        identity,
+        revision,
         serialization_name,
-        cast(JsonValue, config),
+        config,
     )
 
 

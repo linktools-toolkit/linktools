@@ -3,7 +3,7 @@
 """Pydantic AI execution adapter for frozen AgentDefinitions."""
 
 import asyncio
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol
@@ -55,6 +55,7 @@ from ..errors import AIError, ErrorCode
 from ..spec import AgentUsageLimits
 from ._binding import AgentBinding
 from ._builder import build_pydantic_agent
+from ._output import AssistantTextOutput
 from ._capabilities import (
     MEMORY_READ_TOOL_NAMES,
     MEMORY_TOOL_NAMES,
@@ -135,6 +136,7 @@ class AgentExecutor:
         event_sink: EventSink,
         usage_sink: "UsageSink | None" = None,
         tool_operations: "ToolOperationBridge | None" = None,
+        background_tasks: "set[asyncio.Task[Any]] | None" = None,
         replace_history_system_prompt: bool = False,
     ) -> AgentExecutionResult:
         if (
@@ -148,6 +150,9 @@ class AgentExecutor:
         usage_limits = _to_usage_limits(definition.spec.usage_limits)
         result: AgentExecutionResult | None = None
         primary_error: BaseException | None = None
+        detached_tasks = (
+            self._detached_tasks if background_tasks is None else background_tasks
+        )
         try:
             try:
                 result = await self._execute(
@@ -171,6 +176,7 @@ class AgentExecutor:
                     run_usage=run_usage,
                     usage_limits=usage_limits,
                     tool_operations=tool_operations,
+                    background_tasks=detached_tasks,
                     replace_history_system_prompt=replace_history_system_prompt,
                 )
                 return result
@@ -196,7 +202,7 @@ class AgentExecutor:
                         usage_sink(usage),
                         name=f"agent-usage-{step_run_id}",
                     )
-                    self._detach_task(task, step_run_id)
+                    self._detach_task(task, step_run_id, detached_tasks)
                 else:
                     try:
                         await usage_sink(usage)
@@ -213,8 +219,13 @@ class AgentExecutor:
     def pending_background_tasks(self) -> tuple[asyncio.Task[Any], ...]:
         return tuple(task for task in self._detached_tasks if not task.done())
 
-    def _detach_task(self, task: asyncio.Task[Any], step_run_id: str) -> None:
-        self._detached_tasks.add(task)
+    def _detach_task(
+        self,
+        task: asyncio.Task[Any],
+        step_run_id: str,
+        background_tasks: "set[asyncio.Task[Any]]",
+    ) -> None:
+        background_tasks.add(task)
 
         def consume(done: asyncio.Task[Any]) -> None:
             try:
@@ -227,7 +238,7 @@ class AgentExecutor:
                     step_run_id,
                 )
             finally:
-                self._detached_tasks.discard(done)
+                background_tasks.discard(done)
 
         task.add_done_callback(consume)
 
@@ -254,6 +265,7 @@ class AgentExecutor:
         run_usage: RunUsage,
         usage_limits: UsageLimits,
         tool_operations: "ToolOperationBridge | None",
+        background_tasks: "set[asyncio.Task[Any]]",
         replace_history_system_prompt: bool,
     ) -> AgentExecutionResult:
         definition = binding.definition
@@ -292,7 +304,7 @@ class AgentExecutor:
             parent_step_run_id=parent_step_run_id,
             subagent_delegate=subagent_delegate,
             tool_operations=tool_operations,
-            background_tasks=self._detached_tasks,
+            background_tasks=background_tasks,
         )
         platform = await compose_platform_capabilities(
             scope,
@@ -350,10 +362,16 @@ class AgentExecutor:
         if run is None or snapshot is None or unresolved or run.conversation_id != conversation_id:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         output = final_result.output
-        if not isinstance(output, binding.output_type):
+        if binding.output_type is AssistantTextOutput:
+            if not isinstance(output, AssistantTextOutput):
+                raise AIError(ErrorCode.OUTPUT_VALIDATION_FAILED)
+            output_payload: object = output.model_dump(mode="json")
+        elif isinstance(output, Mapping):
+            output_payload = dict(output)
+        else:
             raise AIError(ErrorCode.OUTPUT_VALIDATION_FAILED)
         try:
-            payload = normalize_json_value(output.model_dump(mode="json"))
+            payload = normalize_json_value(output_payload)
         except (TypeError, ValueError) as error:
             _logger.warning(
                 "agent output validation failed: step=%s",

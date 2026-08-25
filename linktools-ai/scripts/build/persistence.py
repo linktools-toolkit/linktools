@@ -74,16 +74,18 @@ def _compare_fixture(
 
 
 def _binding_fixture_value() -> AgentBindingSnapshot:
+    output = bind_output()
     return AgentBindingSnapshot(
         version=1,
         agent_spec=AgentSpec("runtime-persistence-v1"),
         agent_digest="a" * 64,
-        output_schema_id="runtime.persistence.fixture",
-        output_schema_revision=1,
-        output_schema_fingerprint="b" * 64,
+        output_schema_id=output.schema_id,
+        output_schema_revision=output.schema_revision,
+        output_schema_fingerprint=output.schema_fingerprint,
         local_runtime_capability_descriptors=(),
         binding_digest="c" * 64,
         global_runtime_capability_descriptors=(),
+        output_schema_definition=output.schema_definition,
     )
 
 
@@ -140,12 +142,7 @@ def _validate_runtime_capability_descriptor() -> tuple[str, ...]:
     additive = dict(descriptor)
     additive["future_metadata"] = {"$future_v2": ["must", "not", "decode"]}
     try:
-        restored = RuntimeCapability.restore(
-            additive,
-            capability_types={
-                _PersistenceCapability.get_serialization_name(): _PersistenceCapability,
-            },
-        )
+        restored = RuntimeCapability.restore(additive)
     except (AIError, KeyError, TypeError, ValueError) as error:
         return (
             "RuntimeCapability descriptor additive field is not tolerated: "

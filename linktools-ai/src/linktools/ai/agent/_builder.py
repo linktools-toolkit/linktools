@@ -4,7 +4,6 @@
 
 from typing import cast
 
-from pydantic import BaseModel
 from pydantic_ai import Agent, TextOutput
 from pydantic_ai.models import Model
 
@@ -18,7 +17,7 @@ def build_pydantic_agent(
     model: Model,
 ) -> "Agent[None, object]":
     definition = binding.definition
-    output_type: type[BaseModel] | TextOutput = binding.output_type
+    output_type: "type[object] | TextOutput" = binding.output_type
     if output_type is AssistantTextOutput:
         output_type = TextOutput(_assistant_text_output)
     return cast(

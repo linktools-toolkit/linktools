@@ -90,7 +90,7 @@ def _recovery(
     )
 
 
-def test_current_binding_snapshot_does_not_persist_python_path() -> None:
+def test_current_binding_snapshot_persists_schema_without_python_path() -> None:
     output = bind_output()
     snapshot = AgentBindingSnapshot(
         version=1,
@@ -102,6 +102,7 @@ def test_current_binding_snapshot_does_not_persist_python_path() -> None:
         local_runtime_capability_descriptors=(),
         binding_digest="a" * 64,
         global_runtime_capability_descriptors=(),
+        output_schema_definition=output.schema_definition,
     )
     payload = snapshot.to_payload()
     assert set(payload) == {
@@ -114,6 +115,7 @@ def test_current_binding_snapshot_does_not_persist_python_path() -> None:
         "local_runtime_capability_descriptors",
         "binding_digest",
         "global_runtime_capability_descriptors",
+        "output_schema_definition",
     }
 
 

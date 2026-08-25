@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Agent output binding helpers."""
+"""Agent output bindings backed by durable JSON schemas."""
 
 import json
 from collections.abc import Mapping
@@ -8,6 +8,7 @@ from dataclasses import dataclass, field
 from typing import cast
 
 from pydantic import BaseModel, ConfigDict
+from pydantic_ai import StructuredDict
 
 from ..core import JsonValue, canonical_json_bytes, canonical_sha256
 from ..errors import AIError, ErrorCode
@@ -27,14 +28,16 @@ ASSISTANT_TEXT_OUTPUT_SCHEMA_REVISION = 1
 
 @dataclass(frozen=True, slots=True)
 class OutputBinding:
-    value_type: "type[BaseModel]"
+    """Bind a runtime output representation to one durable JSON schema."""
+
+    runtime_output_type: "type[object]"
     schema_id: str
     schema_revision: int
     schema_fingerprint: str
     _schema_payload: bytes = field(repr=False, compare=True)
 
     def __post_init__(self) -> None:
-        if not isinstance(self.value_type, type) or not issubclass(self.value_type, BaseModel):
+        if not isinstance(self.runtime_output_type, type):
             raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID)
         if not isinstance(self.schema_id, str) or not self.schema_id.strip():
             raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID)
@@ -56,32 +59,18 @@ class OutputBinding:
     def create(
         cls,
         schema_id: str,
-        value_type: "type[BaseModel]",
+        runtime_output_type: "type[object]",
+        schema: Mapping[str, JsonValue],
         *,
         schema_revision: int = 1,
     ) -> "OutputBinding":
-        if not isinstance(schema_id, str) or not schema_id.strip():
-            raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID)
-        if not isinstance(value_type, type) or not issubclass(value_type, BaseModel):
-            raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID)
-        if (
-            not isinstance(schema_revision, int)
-            or isinstance(schema_revision, bool)
-            or schema_revision < 1
-        ):
-            raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID)
-        try:
-            schema = value_type.model_json_schema()
-        except Exception as error:
-            raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID) from error
-        if not isinstance(schema, dict):
-            raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID)
+        normalized_schema = _normalize_schema(schema)
         return cls(
-            value_type,
+            runtime_output_type,
             schema_id,
             schema_revision,
-            canonical_sha256(schema),
-            canonical_json_bytes(schema),
+            canonical_sha256(normalized_schema),
+            canonical_json_bytes(normalized_schema),
         )
 
     @property
@@ -117,13 +106,19 @@ def bind_output(
     schema_id: "str | None" = None,
     schema_revision: int = 1,
 ) -> OutputBinding:
-    """Bind an output type to a stable durable schema identity."""
+    """Bind one output class to a self-contained durable schema contract."""
+    if not isinstance(schema_revision, int) or isinstance(schema_revision, bool):
+        raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID)
     if output is None:
-        if schema_id is not None:
+        if (
+            schema_id is not None
+            or schema_revision != ASSISTANT_TEXT_OUTPUT_SCHEMA_REVISION
+        ):
             raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID)
         return OutputBinding.create(
             ASSISTANT_TEXT_OUTPUT_SCHEMA_ID,
             AssistantTextOutput,
+            AssistantTextOutput.model_json_schema(),
             schema_revision=ASSISTANT_TEXT_OUTPUT_SCHEMA_REVISION,
         )
     if not isinstance(output, type) or not issubclass(output, BaseModel):
@@ -133,42 +128,37 @@ def bind_output(
             raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID)
         if schema_revision != ASSISTANT_TEXT_OUTPUT_SCHEMA_REVISION:
             raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID)
-        return OutputBinding.create(
-            ASSISTANT_TEXT_OUTPUT_SCHEMA_ID,
-            AssistantTextOutput,
-            schema_revision=ASSISTANT_TEXT_OUTPUT_SCHEMA_REVISION,
-        )
-    if schema_id is None:
-        try:
-            schema = output.model_json_schema()
-        except Exception as error:
-            raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID) from error
-        if not isinstance(schema, dict):
-            raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID)
-        schema_fingerprint = canonical_sha256(schema)
-        return OutputBinding(
-            output,
-            f"schema:{schema_fingerprint}",
-            schema_revision,
-            schema_fingerprint,
-            canonical_json_bytes(schema),
-        )
-    if not isinstance(schema_id, str) or not schema_id.strip():
+        return bind_output()
+    if (
+        schema_id is not None
+        or schema_revision != 1
+    ):
         raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID)
-    if schema_id == ASSISTANT_TEXT_OUTPUT_SCHEMA_ID:
-        raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID)
-    return OutputBinding.create(
-        schema_id,
-        output,
-        schema_revision=schema_revision,
+    try:
+        schema = _normalize_schema(output.model_json_schema())
+    except AIError:
+        raise
+    except Exception as error:
+        raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID) from error
+    fingerprint = canonical_sha256(schema)
+    try:
+        runtime_output_type = StructuredDict(cast(object, schema))
+    except Exception as error:
+        raise AIError(
+            ErrorCode.OUTPUT_CONTRACT_INVALID,
+            safe_details={"reason": "output_schema_not_durable"},
+        ) from error
+    return OutputBinding(
+        runtime_output_type,
+        f"schema:{fingerprint}",
+        1,
+        fingerprint,
+        canonical_json_bytes(schema),
     )
 
 
-def restore_output(
-    descriptor: Mapping[str, JsonValue],
-    *,
-    outputs: "Mapping[tuple[str, int], OutputBinding] | None" = None,
-) -> OutputBinding:
+def restore_output(descriptor: Mapping[str, JsonValue]) -> OutputBinding:
+    """Restore an output binding from its persisted schema definition."""
     required = {"version", "schema_id", "schema_revision", "schema_fingerprint"}
     if not required.issubset(descriptor) or descriptor.get("version") != 1:
         raise AIError(ErrorCode.AGENT_DEFINITION_UNAVAILABLE)
@@ -184,16 +174,57 @@ def restore_output(
         or not isinstance(schema_fingerprint, str)
     ):
         raise AIError(ErrorCode.AGENT_DEFINITION_UNAVAILABLE)
-    selected_outputs = outputs
-    if selected_outputs is None:
+    schema_value = descriptor.get("schema_definition")
+    if schema_id == ASSISTANT_TEXT_OUTPUT_SCHEMA_ID:
         builtin = bind_output()
-        selected_outputs = {
-            (builtin.schema_id, builtin.schema_revision): builtin,
-        }
-    current = selected_outputs.get((schema_id, revision))
-    if current is None or current.schema_fingerprint != schema_fingerprint:
+        if (
+            revision != builtin.schema_revision
+            or schema_fingerprint != builtin.schema_fingerprint
+        ):
+            raise AIError(ErrorCode.AGENT_DEFINITION_UNAVAILABLE)
+        if schema_value is not None:
+            try:
+                schema = _normalize_schema(cast(Mapping[str, JsonValue], schema_value))
+            except (AIError, TypeError, ValueError) as error:
+                raise AIError(ErrorCode.AGENT_DEFINITION_UNAVAILABLE) from error
+            if schema != builtin.schema_definition:
+                raise AIError(ErrorCode.AGENT_DEFINITION_UNAVAILABLE)
+        return builtin
+    if (
+        revision != 1
+        or not schema_id.startswith("schema:")
+        or schema_id != f"schema:{schema_fingerprint}"
+        or not isinstance(schema_value, Mapping)
+    ):
         raise AIError(ErrorCode.AGENT_DEFINITION_UNAVAILABLE)
-    return current
+    try:
+        schema = _normalize_schema(schema_value)
+        if canonical_sha256(schema) != schema_fingerprint:
+            raise ValueError("output schema fingerprint mismatch")
+        runtime_output_type = StructuredDict(cast(object, schema))
+        return OutputBinding(
+            runtime_output_type,
+            schema_id,
+            revision,
+            schema_fingerprint,
+            canonical_json_bytes(schema),
+        )
+    except Exception as error:
+        raise AIError(ErrorCode.AGENT_DEFINITION_UNAVAILABLE) from error
+
+
+def _normalize_schema(value: object) -> "dict[str, JsonValue]":
+    if not isinstance(value, Mapping):
+        raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID)
+    try:
+        schema = json.loads(
+            canonical_json_bytes(cast(JsonValue, dict(value))).decode("utf-8")
+        )
+    except (TypeError, ValueError) as error:
+        raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID) from error
+    if not isinstance(schema, dict):
+        raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID)
+    return cast("dict[str, JsonValue]", schema)
 
 
 def _validate_fingerprint(value: str) -> None:

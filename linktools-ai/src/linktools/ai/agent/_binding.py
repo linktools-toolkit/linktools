@@ -6,8 +6,6 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, cast
 
-from pydantic import BaseModel
-
 from ..core import ImmutableJsonMapping, JsonValue
 from ..errors import AIError, ErrorCode
 from ..spec import AgentSpec, AgentSpecCodec
@@ -44,6 +42,7 @@ class AgentBindingSnapshot:
     local_runtime_capability_descriptors: "tuple[Mapping[str, JsonValue], ...]"
     binding_digest: str
     global_runtime_capability_descriptors: "tuple[Mapping[str, JsonValue], ...]"
+    output_schema_definition: "Mapping[str, JsonValue] | None" = None
 
     def __post_init__(self) -> None:
         if self.version != 1 or isinstance(self.version, bool):
@@ -70,8 +69,20 @@ class AgentBindingSnapshot:
                 ImmutableJsonMapping(value)
                 for value in self.global_runtime_capability_descriptors
             )
-        except (TypeError, ValueError) as error:
+        except (AttributeError, TypeError, ValueError) as error:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
+        if self.output_schema_definition is not None:
+            try:
+                output_schema_definition = ImmutableJsonMapping(
+                    self.output_schema_definition
+                )
+            except (AttributeError, TypeError, ValueError) as error:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
+            object.__setattr__(
+                self,
+                "output_schema_definition",
+                output_schema_definition,
+            )
         object.__setattr__(
             self,
             "local_runtime_capability_descriptors",
@@ -84,7 +95,7 @@ class AgentBindingSnapshot:
         )
 
     def to_payload(self) -> "dict[str, JsonValue]":
-        return {
+        payload: dict[str, JsonValue] = {
             "version": 1,
             "agent_spec": AgentSpecCodec().to_payload(self.agent_spec),
             "agent_digest": self.agent_digest,
@@ -99,6 +110,9 @@ class AgentBindingSnapshot:
                 dict(value) for value in self.global_runtime_capability_descriptors
             ],
         }
+        if self.output_schema_definition is not None:
+            payload["output_schema_definition"] = dict(self.output_schema_definition)
+        return payload
 
     @classmethod
     def from_payload(cls, value: object) -> "AgentBindingSnapshot":
@@ -116,6 +130,10 @@ class AgentBindingSnapshot:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         if not isinstance(local_descriptors, list) or not isinstance(global_descriptors, list):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        if "output_schema_definition" in value:
+            output_schema_definition = _normalize_mapping(value["output_schema_definition"])
+        else:
+            output_schema_definition = None
         try:
             agent_spec_payload = _require_mapping(value["agent_spec"])
             agent_spec = AgentSpecCodec().from_payload(agent_spec_payload)
@@ -139,6 +157,7 @@ class AgentBindingSnapshot:
             local_runtime_capability_descriptors=normalized_local,
             binding_digest=_require_digest(value["binding_digest"]),
             global_runtime_capability_descriptors=normalized_global,
+            output_schema_definition=output_schema_definition,
         )
 
 
@@ -173,12 +192,17 @@ class AgentBinding:
             != self.snapshot.output_schema_fingerprint
             or self.definition.global_runtime_capability_descriptors
             != self.snapshot.global_runtime_capability_descriptors
+            or (
+                self.snapshot.output_schema_definition is not None
+                and dict(self.snapshot.output_schema_definition)
+                != self.output_binding.schema_definition
+            )
         ):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
 
     @property
-    def output_type(self) -> type[BaseModel]:
-        return self.output_binding.value_type
+    def output_type(self) -> "type[object]":
+        return self.output_binding.runtime_output_type
 
     @property
     def output_schema_fingerprint(self) -> str:
@@ -190,7 +214,7 @@ def _normalize_mapping(value: object) -> "dict[str, JsonValue]":
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     try:
         return dict(ImmutableJsonMapping(cast("Mapping[str, JsonValue]", value)))
-    except (TypeError, ValueError) as error:
+    except (AttributeError, TypeError, ValueError) as error:
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
 
 

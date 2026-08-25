@@ -270,7 +270,6 @@ async def test_session_runtime_persists_and_reads_terminal_result(
             Workspace.load(workspace_root),
             models=_PersistenceTestModels(),
             state=state,
-            outputs=(bind_output(_PersistenceNestedOutput),),
         ) as runtime:
             created = await runtime.agent("default").create_session("session")
             loaded = await runtime.session.get(

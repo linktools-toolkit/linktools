@@ -103,12 +103,7 @@ def test_restore_ignores_unknown_descriptor_field() -> None:
     assert descriptor is not None
     descriptor["future_metadata"] = {"$future_v2": ["must", "not", "decode"]}
 
-    restored = RuntimeCapability.restore(
-        descriptor,
-        capability_types={
-            "restorable-capability": _RestorableCapability,
-        },
-    )
+    restored = RuntimeCapability.restore(descriptor)
 
     assert restored.id == value.id
     assert restored.revision == value.revision
@@ -126,12 +121,7 @@ def test_restore_rejects_missing_descriptor_field() -> None:
     descriptor.pop("serialization_name")
 
     with pytest.raises(AIError) as error:
-        RuntimeCapability.restore(
-            descriptor,
-            capability_types={
-                "restorable-capability": _RestorableCapability,
-            },
-        )
+        RuntimeCapability.restore(descriptor)
     assert error.value.code is ErrorCode.AGENT_DEFINITION_UNAVAILABLE
 
 

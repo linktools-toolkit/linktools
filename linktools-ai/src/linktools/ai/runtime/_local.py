@@ -245,6 +245,10 @@ class LocalExecutionBackend:
         self._pending_audit_locks: dict[str, asyncio.Lock] = {}
         self._recovery_relaunch_ids: set[str] = set()
         self._checkpoint_tasks: set[asyncio.Task[object]] = set()
+        self._execution_durable_tasks: dict[
+            str,
+            set[asyncio.Task[object]],
+        ] = {}
         self._accepting = True
         execution_steps = self._step_reads[RuntimeDomain.EXECUTION]
         conversation_steps = self._step_reads[RuntimeDomain.CONVERSATION]
@@ -299,14 +303,36 @@ class LocalExecutionBackend:
         ):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
 
+    def _execution_task_map(
+        self,
+    ) -> "dict[str, set[asyncio.Task[object]]]":
+        try:
+            return self._execution_durable_tasks
+        except AttributeError:
+            task_map: dict[str, set[asyncio.Task[object]]] = {}
+            self._execution_durable_tasks = task_map
+            return task_map
 
+    def _execution_task_set(
+        self,
+        execution_id: str,
+    ) -> set[asyncio.Task[object]]:
+        return self._execution_task_map().setdefault(execution_id, set())
 
     def _track_checkpoint_task(
         self,
         task: "asyncio.Task[object]",
         label: str,
+        execution_id: str | None = None,
     ) -> None:
         self._checkpoint_tasks.add(task)
+        execution_tasks = (
+            None
+            if execution_id is None
+            else self._execution_task_set(execution_id)
+        )
+        if execution_tasks is not None:
+            execution_tasks.add(task)
 
         def consume(done: "asyncio.Task[object]") -> None:
             try:
@@ -321,6 +347,8 @@ class LocalExecutionBackend:
                 )
             finally:
                 self._checkpoint_tasks.discard(done)
+                if execution_tasks is not None:
+                    execution_tasks.discard(done)
 
         task.add_done_callback(consume)
 
@@ -329,8 +357,13 @@ class LocalExecutionBackend:
         task: "asyncio.Task[_CheckpointT]",
         *,
         label: str,
+        execution_id: str | None = None,
     ) -> "tuple[_CheckpointT, asyncio.CancelledError | None]":
-        self._track_checkpoint_task(cast("asyncio.Task[object]", task), label)
+        self._track_checkpoint_task(
+            cast("asyncio.Task[object]", task),
+            label,
+            execution_id,
+        )
         try:
             return await asyncio.shield(task), None
         except asyncio.CancelledError as cancellation:
@@ -357,6 +390,7 @@ class LocalExecutionBackend:
                 commit,
                 session_id=session_id,
                 audit_events=pending,
+                background_tasks=self._execution_task_set(execution_id),
             )
             self._pending_audit_events.pop(execution_id, None)
             self._confirm_committed_events(
@@ -388,6 +422,7 @@ class LocalExecutionBackend:
         committed, cancellation = await self._await_checkpoint_task(
             task,
             label="terminal",
+            execution_id=commit.execution.execution_id,
         )
         if cancellation is not None:
             raise cancellation
@@ -405,6 +440,7 @@ class LocalExecutionBackend:
                 commit,
                 expected_status=expected_status,
                 audit_events=pending,
+                background_tasks=self._execution_task_set(commit.execution_id),
             )
             self._pending_audit_events.pop(commit.execution_id, None)
             self._confirm_committed_events(
@@ -436,6 +472,7 @@ class LocalExecutionBackend:
         committed, cancellation = await self._await_checkpoint_task(
             task,
             label="cancel",
+            execution_id=commit.execution_id,
         )
         if cancellation is not None:
             raise cancellation
@@ -1849,11 +1886,24 @@ class LocalExecutionBackend:
         checkpoint_background = tuple(
             task for task in self._checkpoint_tasks if not task.done()
         )
-        pending_background = tuple(
+        execution_task_map = self._execution_task_map()
+        execution_background = tuple(
             task
-            for task in (*background, *dispatcher_background, *checkpoint_background)
+            for tasks_for_execution in execution_task_map.values()
+            for task in tasks_for_execution
             if isinstance(task, asyncio.Task) and not task.done()
         )
+        pending_background_by_identity = {
+            id(task): task
+            for task in (
+                *background,
+                *dispatcher_background,
+                *checkpoint_background,
+                *execution_background,
+            )
+            if isinstance(task, asyncio.Task) and not task.done()
+        }
+        pending_background = tuple(pending_background_by_identity.values())
         if pending or pending_background:
             raise AIError(
                 ErrorCode.STORAGE_RECOVERY_REQUIRED,
@@ -1862,6 +1912,7 @@ class LocalExecutionBackend:
                     "pending_workers": len(pending),
                     "pending_background_tasks": len(pending_background),
                     "pending_checkpoint_tasks": len(checkpoint_background),
+                    "pending_execution_tasks": len(execution_background),
                 },
             )
         for execution_id, task in tasks:
@@ -1873,6 +1924,7 @@ class LocalExecutionBackend:
         self._pending_audit_events.clear()
         self._pending_audit_locks.clear()
         self._checkpoint_tasks.clear()
+        execution_task_map.clear()
 
     async def release_runtime_execution(
         self,
@@ -1885,6 +1937,19 @@ class LocalExecutionBackend:
         task = self._tasks.get(execution_id)
         if task is not None and not task.done():
             raise AIError(ErrorCode.STORAGE_CONFLICT)
+        execution_tasks = self._execution_task_map().get(execution_id)
+        pending_execution_tasks = tuple(
+            task
+            for task in (() if execution_tasks is None else execution_tasks)
+            if not task.done()
+        )
+        if pending_execution_tasks:
+            _logger.debug(
+                "local execution release blocked by durable tasks: execution=%s count=%s",
+                execution_id,
+                len(pending_execution_tasks),
+            )
+            raise AIError(ErrorCode.STORAGE_CONFLICT)
         if task is not None:
             self._tasks.pop(execution_id, None)
         self._terminal_events.pop(execution_id, None)
@@ -1892,6 +1957,7 @@ class LocalExecutionBackend:
         self._captured_usage.pop(execution_id, None)
         self._pending_audit_events.pop(execution_id, None)
         self._pending_audit_locks.pop(execution_id, None)
+        self._execution_task_map().pop(execution_id, None)
         _logger.debug(
             "local execution runtime cache released: tenant=%s execution=%s",
             tenant_id,
@@ -1945,6 +2011,7 @@ class LocalExecutionBackend:
 
     async def _run(self, request: ExecutionRequest, original: ExecutionRecord) -> None:
         execution_id = original.execution_id
+        execution_tasks = self._execution_task_set(execution_id)
         checkpoint: RecoveryCheckpoint | None = None
         run_id: str | None = None
         recovery_history_run_id: str | None = None
@@ -2088,7 +2155,7 @@ class LocalExecutionBackend:
                 step_run_id=run_id,
                 binding_fingerprint=current.binding_digest,
                 owner=tool_owner,
-                background_tasks=self._checkpoint_tasks,
+                background_tasks=execution_tasks,
                 payload_policy=self._payload_policy,
                 recovery_step_run_id=recovery_history_run_id,
                 terminal_commands=(
@@ -2203,6 +2270,7 @@ class LocalExecutionBackend:
                     event_sink=sink,
                     usage_sink=lambda usage: self._capture_usage(execution_id, usage),
                     tool_operations=tool_operations,
+                    background_tasks=execution_tasks,
                     replace_history_system_prompt=(
                         session_history_start and not exact_recovery_context
                     ),
@@ -2420,7 +2488,12 @@ class LocalExecutionBackend:
         )
 
     def _audit_lock(self, execution_id: str) -> asyncio.Lock:
-        return self._pending_audit_locks.setdefault(execution_id, asyncio.Lock())
+        try:
+            pending_locks = self._pending_audit_locks
+        except AttributeError:
+            pending_locks = {}
+            self._pending_audit_locks = pending_locks
+        return pending_locks.setdefault(execution_id, asyncio.Lock())
 
     def _confirm_committed_events(
         self,
@@ -3192,19 +3265,28 @@ class LocalExecutionBackend:
                         run_id,
                         execution_id=current.execution_id,
                     )
-                committed = await self._commit_execution_terminal_checkpoint_locked(
-                    current,
-                    commit,
-                    run_id=run_id,
-                    expected_cursor=expected_cursor,
-                    conversation_run=conversation_run,
-                    conversation_snapshot=conversation_snapshot,
-                    recovery_checkpoint=recovery_checkpoint,
-                    recovery_run=recovery_run,
-                    recovery_snapshot=recovery_snapshot,
-                    terminal_plan=plan,
-                )
-                durable_commit = True
+                async with self._audit_lock(current.execution_id):
+                    pending_count = len(
+                        self._pending_audit_events.get(current.execution_id, ())
+                    )
+                    committed = await self._commit_execution_terminal_checkpoint_locked_body(
+                        current,
+                        commit,
+                        run_id=run_id,
+                        expected_cursor=expected_cursor,
+                        conversation_run=conversation_run,
+                        conversation_snapshot=conversation_snapshot,
+                        recovery_checkpoint=recovery_checkpoint,
+                        recovery_run=recovery_run,
+                        recovery_snapshot=recovery_snapshot,
+                        terminal_plan=plan,
+                    )
+                    durable_commit = True
+                    self._confirm_committed_events(
+                        current.execution_id,
+                        pending_count=pending_count,
+                        durable_sequence=committed.execution.event_sequence,
+                    )
                 if plan is not None:
                     try:
                         await self._step_lifecycle.finalize_execution_terminal_seal(plan)
@@ -3235,6 +3317,7 @@ class LocalExecutionBackend:
         committed, cancellation = await self._await_checkpoint_task(
             task,
             label="terminal",
+            execution_id=current.execution_id,
         )
         if cancellation is not None:
             raise cancellation
@@ -3261,43 +3344,6 @@ class LocalExecutionBackend:
                 if head != (0, 0, 0, "empty"):
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         return tuple(existing)
-
-
-    async def _commit_execution_terminal_checkpoint_locked(
-        self,
-        current: ExecutionRecord,
-        commit: ExecutionTerminalCommit,
-        *,
-        run_id: str | None,
-        expected_cursor: ConversationCursor | None = None,
-        conversation_run: RunRecord | None = None,
-        conversation_snapshot: ContinuableSnapshot | None = None,
-        recovery_checkpoint: RecoveryCheckpoint | None = None,
-        recovery_run: RunRecord | None = None,
-        recovery_snapshot: ContinuableSnapshot | None = None,
-        terminal_plan: ExecutionTerminalSealPlan | None,
-    ) -> ExecutionTerminalCommitResult:
-        async with self._audit_lock(current.execution_id):
-            pending_count = len(self._pending_audit_events.get(current.execution_id, ()))
-            committed = await self._commit_execution_terminal_checkpoint_locked_body(
-                current,
-                commit,
-                run_id=run_id,
-                expected_cursor=expected_cursor,
-                conversation_run=conversation_run,
-                conversation_snapshot=conversation_snapshot,
-                recovery_checkpoint=recovery_checkpoint,
-                recovery_run=recovery_run,
-                recovery_snapshot=recovery_snapshot,
-                terminal_plan=terminal_plan,
-            )
-            self._confirm_committed_events(
-                current.execution_id,
-                pending_count=pending_count,
-                durable_sequence=committed.execution.event_sequence,
-            )
-            return committed
-
 
     async def _commit_execution_terminal_checkpoint_locked_body(
         self,
@@ -3354,6 +3400,7 @@ class LocalExecutionBackend:
             execution_snapshots=snapshots,
             execution_projections=execution_projections,
             audit_events=pending_audit,
+            background_tasks=self._execution_task_set(current.execution_id),
         )
         self._pending_audit_events.pop(current.execution_id, None)
         return committed

@@ -9,7 +9,6 @@ from types import SimpleNamespace
 
 import pytest
 from linktools.ai.agent import AgentBindingSnapshot
-from linktools.ai.agent._output import bind_output
 from linktools.ai.capability import RuntimeCapability
 from linktools.ai.core import (
     HmacCursorSigner,
@@ -68,31 +67,32 @@ def test_top_level_public_surface_is_exact() -> None:
     ]
 
 
-def test_runtime_capability_from_spec_uses_serialization_identity() -> None:
-    class RelocatableCapability(_DurableCapability):
-        @classmethod
-        def get_serialization_name(cls) -> "str | None":
-            return "test-relocatable-capability"
-
-    relocated_type = type(
-        "RelocatedCapability",
-        (RelocatableCapability,),
-        {
-            "__module__": "example.moved",
-            "__qualname__": "RelocatedCapability",
-        },
-    )
-    value = RuntimeCapability.from_spec("local", relocated_type, config={})
+def test_runtime_capability_from_spec_persists_importable_restore_locator() -> None:
+    value = RuntimeCapability.from_spec("local", _DurableCapability, config={})
     descriptor = value.descriptor
     assert descriptor is not None
-    assert descriptor["serialization_name"] == "test-relocatable-capability"
+    assert descriptor["serialization_name"] == "test-durable-capability"
+    assert descriptor["restore_locator"] == {
+        "module": __name__,
+        "qualname": "_DurableCapability",
+    }
     assert set(descriptor) == {
         "id",
         "revision",
         "serialization_name",
         "config",
         "fingerprint",
+        "restore_locator",
     }
+
+
+def test_runtime_capability_from_spec_rejects_local_restore_locator() -> None:
+    class LocalCapability(_DurableCapability):
+        pass
+
+    with pytest.raises(AIError) as error:
+        RuntimeCapability.from_spec("local", LocalCapability, config={})
+    assert error.value.code is ErrorCode.CAPABILITY_RESOLUTION_INVALID
 
 
 
@@ -622,8 +622,6 @@ async def test_agent_and_binding_identity_split_acceptance(tmp_path) -> None:
     async with open_workspace_runtime(
         workspace,
         models=models,
-        outputs=(bind_output(CompositionStructuredOutput),),
-        runtime_capability_types=(_DurableCapability,),
     ) as runtime:
         base = runtime.agent()
         text_binding = runtime._bind_agent(base._agent_digest)
