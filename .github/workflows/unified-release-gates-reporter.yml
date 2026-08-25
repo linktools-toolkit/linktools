@@ -10,6 +10,10 @@ permissions:
   issues: write
   pull-requests: write
 
+concurrency:
+  group: unified-release-gate-reporter-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   report:
     runs-on: ubuntu-latest
@@ -58,7 +62,12 @@ jobs:
             printf '\n===== verify =====\nSKIPPED: check failed\nEXIT=125\n' >> "$report"
           fi
 
-          run_stage legacy-paths bash -c "! git grep -n 'scripts\\.build' -- . && ! git grep -n 'linktools-ai/scripts/build' -- . && ! git grep -n 'scripts/build/matrix' -- ."
+          run_stage legacy-paths bash -c '
+            p1="scripts""\\.build"
+            p2="linktools-ai/scripts/""build"
+            p3="scripts/build/""matrix"
+            ! git grep -n "$p1" -- . && ! git grep -n "$p2" -- . && ! git grep -n "$p3" -- .
+          '
           cat "$RUNNER_TEMP/release-gates-status.txt" >> "$report"
           cp "$report" release-gates-report.txt
       - name: Comment result
