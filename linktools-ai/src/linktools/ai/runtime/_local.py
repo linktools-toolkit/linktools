@@ -2313,12 +2313,10 @@ class LocalExecutionBackend:
                             ExecutionStatus.FAILED,
                             ExecutionStatus.CANCELLED,
                         }:
-                            operation_result = _execution_operation_result(persisted.status)
                             _logger.exception(
                                 "terminal finalization failed after durable execution terminal: execution=%s",
                                 execution_id,
                             )
-                            return
                         raise _secondary_execution_error(commit_error, error) from error
                 operation_result = _execution_operation_result(current.status)
                 _logger.exception(

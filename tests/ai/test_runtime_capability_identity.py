@@ -93,6 +93,23 @@ def test_invalid_identity_is_rejected_before_factory_execution() -> None:
     assert _RestorableCapability.factory_calls == before
 
 
+def test_process_entrypoint_locator_is_rejected_before_factory_execution(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    before = _RestorableCapability.factory_calls
+    for module_name in ("__main__", "__mp_main__"):
+        with monkeypatch.context() as patch:
+            patch.setattr(_RestorableCapability, "__module__", module_name)
+            with pytest.raises(AIError) as error:
+                RuntimeCapability.from_spec(
+                    "capability",
+                    _RestorableCapability,
+                    config={},
+                )
+            assert error.value.code is ErrorCode.CAPABILITY_RESOLUTION_INVALID
+    assert _RestorableCapability.factory_calls == before
+
+
 def test_restore_ignores_unknown_descriptor_field() -> None:
     value = RuntimeCapability.from_spec(
         "capability",

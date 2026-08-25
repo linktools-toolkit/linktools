@@ -5,10 +5,14 @@
 import json
 from collections.abc import Mapping
 from dataclasses import dataclass, field
-from typing import cast
+from typing import Any, cast
 
+from jsonschema import Draft202012Validator
+from jsonschema.exceptions import SchemaError
+from jsonschema.exceptions import ValidationError as JsonSchemaValidationError
 from pydantic import BaseModel, ConfigDict
 from pydantic_ai import StructuredDict
+from pydantic_core import core_schema
 
 from ..core import JsonValue, canonical_json_bytes, canonical_sha256
 from ..errors import AIError, ErrorCode
@@ -54,6 +58,7 @@ class OutputBinding:
             raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID) from error
         if not isinstance(schema, dict) or canonical_sha256(schema) != self.schema_fingerprint:
             raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID)
+        _validate_schema_definition(schema)
 
     @classmethod
     def create(
@@ -129,27 +134,18 @@ def bind_output(
         if schema_revision != ASSISTANT_TEXT_OUTPUT_SCHEMA_REVISION:
             raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID)
         return bind_output()
-    if (
-        schema_id is not None
-        or schema_revision != 1
-    ):
+    if schema_id is not None or schema_revision != 1:
         raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID)
     try:
         schema = _normalize_schema(output.model_json_schema())
+        _durable_runtime_type(schema)
     except AIError:
         raise
     except Exception as error:
         raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID) from error
     fingerprint = canonical_sha256(schema)
-    try:
-        runtime_output_type = StructuredDict(cast(object, schema))
-    except Exception as error:
-        raise AIError(
-            ErrorCode.OUTPUT_CONTRACT_INVALID,
-            safe_details={"reason": "output_schema_not_durable"},
-        ) from error
     return OutputBinding(
-        runtime_output_type,
+        output,
         f"schema:{fingerprint}",
         1,
         fingerprint,
@@ -201,9 +197,8 @@ def restore_output(descriptor: Mapping[str, JsonValue]) -> OutputBinding:
         schema = _normalize_schema(schema_value)
         if canonical_sha256(schema) != schema_fingerprint:
             raise ValueError("output schema fingerprint mismatch")
-        runtime_output_type = StructuredDict(cast(object, schema))
         return OutputBinding(
-            runtime_output_type,
+            _durable_runtime_type(schema),
             schema_id,
             revision,
             schema_fingerprint,
@@ -211,6 +206,59 @@ def restore_output(descriptor: Mapping[str, JsonValue]) -> OutputBinding:
         )
     except Exception as error:
         raise AIError(ErrorCode.AGENT_DEFINITION_UNAVAILABLE) from error
+
+
+def _durable_runtime_type(
+    schema: Mapping[str, JsonValue],
+) -> "type[object]":
+    normalized = _normalize_schema(schema)
+    validator = _schema_validator(normalized)
+    try:
+        structured_type = StructuredDict(cast(object, normalized))
+    except Exception as error:
+        raise AIError(
+            ErrorCode.OUTPUT_CONTRACT_INVALID,
+            safe_details={"reason": "output_schema_not_durable"},
+        ) from error
+
+    def validate(value: object) -> object:
+        try:
+            validator.validate(value)
+        except JsonSchemaValidationError as error:
+            raise ValueError("output does not match durable JSON schema") from error
+        return value
+
+    class DurableStructuredOutput(structured_type):  # type: ignore[misc, valid-type]
+        @classmethod
+        def __get_pydantic_core_schema__(
+            cls,
+            source_type: Any,
+            handler: Any,
+        ) -> core_schema.CoreSchema:
+            del cls, source_type, handler
+            return core_schema.no_info_after_validator_function(
+                validate,
+                core_schema.dict_schema(
+                    keys_schema=core_schema.str_schema(),
+                    values_schema=core_schema.any_schema(),
+                ),
+            )
+
+    return cast("type[object]", DurableStructuredOutput)
+
+
+def _schema_validator(
+    schema: Mapping[str, JsonValue],
+) -> Draft202012Validator:
+    _validate_schema_definition(schema)
+    return Draft202012Validator(dict(schema))
+
+
+def _validate_schema_definition(schema: Mapping[str, JsonValue]) -> None:
+    try:
+        Draft202012Validator.check_schema(schema)
+    except SchemaError as error:
+        raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID) from error
 
 
 def _normalize_schema(value: object) -> "dict[str, JsonValue]":

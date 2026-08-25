@@ -5,6 +5,8 @@
 from collections.abc import Mapping
 from types import MappingProxyType
 
+from pydantic import BaseModel
+
 from ..core import validate_agent_id
 from ..errors import AIError, ErrorCode
 from ._binding import AgentBinding
@@ -70,6 +72,15 @@ class AgentCatalog:
         if existing is not None:
             if not _same_binding(existing, binding):
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            existing_type = existing.output_binding.runtime_output_type
+            incoming_type = binding.output_binding.runtime_output_type
+            existing_model = issubclass(existing_type, BaseModel)
+            incoming_model = issubclass(incoming_type, BaseModel)
+            if existing_model and incoming_model and existing_type is not incoming_type:
+                raise AIError(ErrorCode.BINDING_CONFLICT)
+            if not existing_model and incoming_model:
+                self._bindings[binding.digest] = binding
+                return binding
             return existing
         self._bindings[binding.digest] = binding
         return binding

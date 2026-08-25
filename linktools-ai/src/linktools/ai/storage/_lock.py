@@ -89,15 +89,21 @@ class ProcessLeaseCoordinator:
         self._locks = KeyedAsyncLock()
         self._fences: dict[str, int] = {}
         self._active: dict[str, Lease] = {}
+        self._lock_owners: dict[str, asyncio.Task[object]] = {}
 
     async def acquire(self, key: str) -> Lease:
         if not key:
             raise ValueError("lease key must not be empty")
+        owner = asyncio.current_task()
+        if owner is None:
+            raise RuntimeError("process lease requires an asyncio task")
+        owner = cast("asyncio.Task[object]", owner)
         await self._locks.acquire(key)
         fence = self._fences.get(key, 0) + 1
         lease = Lease(key, fence, uuid4().hex)
         self._fences[key] = fence
         self._active[key] = lease
+        self._lock_owners[key] = owner
         return lease
 
     async def renew(self, lease: Lease) -> Lease:
@@ -110,8 +116,11 @@ class ProcessLeaseCoordinator:
         active = self._active.get(lease.key)
         if active != lease:
             return
+        owner = self._lock_owners.pop(lease.key, None)
+        if owner is None:
+            raise RuntimeError(f"process lease owner missing: {lease.key}")
         self._active.pop(lease.key, None)
-        await self._locks.release(lease.key)
+        await self._locks._release_owned(lease.key, owner)
 
 
 class FilesystemLeaseCoordinator:
@@ -124,7 +133,7 @@ class FilesystemLeaseCoordinator:
         self.lease_seconds = lease_seconds
         self._locks = KeyedAsyncLock()
         self._active: dict[str, Lease] = {}
-        self._lock_owners: dict[str, "asyncio.Task[object]"] = {}
+        self._lock_owners: dict[str, asyncio.Task[object]] = {}
 
     async def acquire(self, key: str, *, timeout: float = 30.0) -> Lease:
         if not key:
@@ -222,8 +231,14 @@ class FilesystemLeaseCoordinator:
         if self._active.get(lease.key) != lease:
             return lease
         renewed = await asyncio.to_thread(self._renew, lease)
-        if not renewed:
-            self._active.pop(lease.key, None)
+        if renewed or self._active.get(lease.key) != lease:
+            return lease
+        owner = self._lock_owners.get(lease.key)
+        if owner is None:
+            raise RuntimeError(f"filesystem lease owner missing: {lease.key}")
+        await self._locks._release_owned(lease.key, owner)
+        self._active.pop(lease.key, None)
+        self._lock_owners.pop(lease.key, None)
         return lease
 
     async def _finish_cancelled_release(
@@ -246,10 +261,10 @@ class FilesystemLeaseCoordinator:
     async def release(self, lease: Lease) -> None:
         if self._active.get(lease.key) != lease:
             return
-        self._active.pop(lease.key, None)
         owner = self._lock_owners.pop(lease.key, None)
         if owner is None:
-            raise RuntimeError(f"filesystem lease lock owner missing: {lease.key}")
+            raise RuntimeError(f"filesystem lease owner missing: {lease.key}")
+        self._active.pop(lease.key, None)
         release_task = asyncio.create_task(asyncio.to_thread(self._release, lease))
         try:
             await asyncio.shield(release_task)
