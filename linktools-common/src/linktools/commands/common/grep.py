@@ -17,6 +17,7 @@ from linktools.core import environ
 from linktools.cli import BaseCommand, CommandError
 
 if TYPE_CHECKING:
+    import lief
     from typing import Any
     from argparse import Namespace
     from collections.abc import Callable
