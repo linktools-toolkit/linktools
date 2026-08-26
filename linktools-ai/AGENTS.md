@@ -160,6 +160,7 @@ Apply these during design, not after implementation:
 - Persisted or replayed data is a versioned contract. Use an explicit codec/version discriminator; never overload ordinary text with magic prefixes.
 - Integrity checks validate stored bytes and structure. Never require a dependency upgrade to re-encode old data byte-for-byte identically.
 - Stable hashes and idempotency identities must not change because a dependency adds optional/default fields.
+- If codec, version, or provenance changes semantics, include that discriminator in stable hashes and idempotency identities; never hash only the opaque payload.
 - Internal transport encoders, durable wire types, and implementation protocols stay private unless they are intentional extension points.
 - A public Protocol change is an API change. Keep runtime-only bridges private instead of leaking internal policy parameters downstream.
 - Serializable provider references are not automatically durable. Define lifetime/recovery semantics before persisting remote file IDs, URLs, handles, or tokens.
