@@ -1,0 +1,49 @@
+name: _tmp apply complete ai refactor
+
+on:
+  push:
+    branches:
+      - tmp/ai-runtime-capabilitygroup-agent-transport-v3
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Verify complete implementation payload
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(find .github/_transport/ai-runtime-capabilitygroup-agent-v3 -type f -name 'part-*' | wc -l)" -eq 16
+          cat .github/_transport/ai-runtime-capabilitygroup-agent-v3/part-* \
+            | base64 -d \
+            | gzip -d \
+            > /tmp/ai-refactor.patch
+          echo '22d56e31382148450833adff37deb066e42b36161034eef6ae48f61fd0e5a6ca  /tmp/ai-refactor.patch' \
+            | sha256sum -c -
+
+      - name: Apply from exact implementation baseline
+        shell: bash
+        run: |
+          set -euo pipefail
+          baseline='77ce66cc3a68938181ec752cd30d9be5ab24d63b'
+          target='refactor/ai-runtime-capabilitygroup-agent'
+          remote_sha="$(git ls-remote origin "refs/heads/${target}" | cut -f1)"
+          test "${remote_sha}" = "${baseline}"
+          git checkout -B "${target}" "${baseline}"
+          git apply --check /tmp/ai-refactor.patch
+          git apply /tmp/ai-refactor.patch
+          git diff --check
+          python -m compileall -q linktools-ai/src scripts/check/ai
+          git add -A
+          test -n "$(git status --porcelain)"
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git commit -m 'refactor(ai): unify runtime capability composition'
+          git push origin "HEAD:refs/heads/${target}"
