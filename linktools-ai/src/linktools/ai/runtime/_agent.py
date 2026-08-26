@@ -2,13 +2,14 @@
 # -*- coding: utf-8 -*-
 """Runtime-bound Agent execution handle."""
 
-from collections.abc import AsyncIterator, Mapping
+from collections.abc import AsyncIterator, Mapping, Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from pydantic import BaseModel
+from pydantic_ai.messages import UserContent
 
-from ..agent import UserPromptInput, prepare_user_prompt
+from ..agent import prepare_user_prompt
 from ..core import JsonValue, Principal
 from .service_api import (
     EvaluationHandle,
@@ -33,7 +34,7 @@ class AgentHandle:
 
     async def start(
         self,
-        user_prompt: UserPromptInput,
+        user_prompt: "str | Sequence[UserContent]",
         *,
         output: "type[BaseModel] | None" = None,
         principal: "Principal | None" = None,
@@ -57,7 +58,7 @@ class AgentHandle:
 
     async def run(
         self,
-        user_prompt: UserPromptInput,
+        user_prompt: "str | Sequence[UserContent]",
         *,
         output: "type[BaseModel] | None" = None,
         principal: "Principal | None" = None,
@@ -83,7 +84,7 @@ class AgentHandle:
 
     def stream(
         self,
-        user_prompt: UserPromptInput,
+        user_prompt: "str | Sequence[UserContent]",
         *,
         output: "type[BaseModel] | None" = None,
         principal: "Principal | None" = None,
@@ -150,7 +151,7 @@ class AgentHandle:
     def task(
         self,
         node_id: str,
-        user_prompt: UserPromptInput,
+        user_prompt: "str | Sequence[UserContent]",
         *,
         dependencies: tuple[str, ...] = (),
         budget_cost: int = 1,
