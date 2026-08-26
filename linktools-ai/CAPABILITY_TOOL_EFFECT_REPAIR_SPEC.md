@@ -37,6 +37,7 @@
 21. Prompt transport integrity is owned by the existing durable container (`StoredPayload` / ObjectStore content digest) plus structural codec validation. Do not add a second digest inside prompt text and do not require a newer Pydantic version to re-encode historical content byte-for-byte identically after decoding it.
 22. Provider-owned `UploadedFile` references are not accepted as durable Agent input until provider lifetime, portability and recovery semantics are defined. Inline `BinaryContent` and other self-contained or durable URL content remain governed by the Pydantic message codec and existing Runtime size limits.
 23. Durable prompt compatibility requires frozen historical fixtures. Same-version encode/decode tests are insufficient; legacy records without codec fields and historical rich payloads must remain readable according to their frozen codec contract.
+24. Any discriminator that changes semantic identity must participate in stable hashes and idempotency identities. Rich prompts therefore hash `{codec,value}` while historical `text` prompts retain the original raw-string digest shape.
 
 ## Built-in policy matrix
 
@@ -79,5 +80,6 @@ The repair is complete only when all of the following hold:
 - TaskGraph-style runtime suffix text preserves the rich codec and restores as an additional text content part;
 - TaskGraph admission, Temporal request persistence and Recovery checkpoints preserve explicit codec information, while frozen legacy records without codec fields remain readable as text;
 - prompt compatibility includes frozen historical fixtures rather than only current encode/decode round trips;
+- text prompt request digests remain backward-stable, while identical payload bytes with different semantic codecs produce distinct request digests;
 - Runtime public request schemas remain string-based and no Linktools attachment DTO hierarchy is introduced;
 - `python manage.py check linktools-ai` passes on the repository CI Python matrix.
