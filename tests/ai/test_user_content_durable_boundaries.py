@@ -18,7 +18,11 @@ from linktools.ai.runtime import ExecutionRequest, RuntimeObjectKeyFactory
 from linktools.ai.runtime._local import _recovery_prompt_payload, _recovery_prompt_text
 from linktools.ai.spec import AgentSpec
 from linktools.ai.storage import InMemoryObjectStore, StoredPayload
-from linktools.ai.temporal._request import put_execution_request, read_execution_request
+from linktools.ai.temporal._request import (
+    _execution_request_from_payload,
+    put_execution_request,
+    read_execution_request,
+)
 
 
 def _binding() -> AgentBindingSnapshot:
@@ -46,6 +50,23 @@ def _rich_prompt() -> UserPromptTransport:
             ),
         )
     )
+
+
+def _legacy_temporal_payload(user_prompt: str) -> dict[str, object]:
+    return {
+        "version": 1,
+        "user_prompt": user_prompt,
+        "principal": {
+            "principal_id": "user",
+            "tenant_id": "tenant",
+            "kind": "service",
+        },
+        "idempotency_key": "legacy-temporal-prompt",
+        "memory_scope": None,
+        "planning": False,
+        "thinking": False,
+        "binding": _binding().to_payload(),
+    }
 
 
 @pytest.mark.asyncio
@@ -79,6 +100,29 @@ async def test_temporal_execution_request_preserves_rich_prompt_codec() -> None:
     assert restored[0] == "Inspect this attachment"
     assert isinstance(restored[1], BinaryContent)
     assert restored[1].identifier == "input.log"
+
+
+def test_temporal_legacy_request_without_codec_defaults_to_text() -> None:
+    value = "linktools.ai:user-content:v1:" + "0" * 64 + "\n{}"
+
+    request, binding = _execution_request_from_payload(
+        _legacy_temporal_payload(value)
+    )
+
+    assert binding == _binding()
+    assert isinstance(request.user_prompt, UserPromptTransport)
+    assert request.user_prompt.codec == "text"
+    assert _restore_user_prompt(request.user_prompt) == value
+
+
+def test_temporal_unknown_prompt_codec_is_unsupported() -> None:
+    payload = _legacy_temporal_payload("payload")
+    payload["user_prompt_codec"] = "future-user-content-v2"
+
+    with pytest.raises(AIError) as raised:
+        _execution_request_from_payload(payload)
+
+    assert raised.value.code is ErrorCode.STORAGE_VERSION_UNSUPPORTED
 
 
 def test_recovery_prompt_payload_preserves_rich_codec() -> None:
