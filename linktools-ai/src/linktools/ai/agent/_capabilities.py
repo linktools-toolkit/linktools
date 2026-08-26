@@ -368,10 +368,22 @@ class _RuntimeStepPersistence(StepPersistence[None]):
             if state.handler_entered and not state.policy.replay_safe and not state.policy.effect_free:
                 await self._mark_unknown(state, signal)
                 raise AIError(ErrorCode.TOOL_EFFECT_UNKNOWN) from signal
-            state.preserve_started = True
-            keep_call_state = False
-            self._calls.pop(key, None)
-            raise
+            unsupported = AIError(
+                ErrorCode.CAPABILITY_POLICY_CONFLICT,
+                safe_details={
+                    "tool_name": tool_def.name,
+                    "reason": "dynamic_deferred_unsupported",
+                },
+            )
+            await self._fail_known_effect(
+                ctx,
+                call=call,
+                tool_def=tool_def,
+                args=args,
+                error=unsupported,
+                state=state,
+            )
+            raise AssertionError("dynamic deferred failure hook must raise")
         except asyncio.CancelledError as error:
             if state.operation_terminalized:
                 state.preserve_started = False
@@ -954,7 +966,7 @@ def _durable_failure_error(
     call: ToolCallPart,
     tool_def: ToolDefinition,
 ) -> Exception:
-    if isinstance(error, (ToolRetryError, ToolFailedError)):
+    if isinstance(error, (ToolRetryError, ToolFailedError, AIError)):
         return error
     if isinstance(error, (ValidationError, ModelRetry)):
         return ToolRetryError(
