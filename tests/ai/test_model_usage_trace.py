@@ -61,6 +61,15 @@ def test_model_response_trace_contains_request_usage() -> None:
     }
 
 
+def test_model_response_trace_defaults_missing_cache_usage_to_zero() -> None:
+    assert _project_usage(RequestUsage(input_tokens=100, output_tokens=20)) == {
+        "input_tokens": 100,
+        "output_tokens": 20,
+        "cache_read_tokens": 0,
+        "cache_write_tokens": 0,
+    }
+
+
 def test_model_response_trace_keeps_each_request_usage_separate() -> None:
     first = _response_usage(
         input_tokens=100,
