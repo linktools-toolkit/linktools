@@ -2,12 +2,14 @@
 # -*- coding: utf-8 -*-
 """Runtime-bound Agent execution handle."""
 
-from collections.abc import AsyncIterator, Mapping
+from collections.abc import AsyncIterator, Mapping, Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from pydantic import BaseModel
+from pydantic_ai.messages import UserContent
 
+from ..agent import _prepare_user_prompt
 from ..core import JsonValue, Principal, validate_user_prompt
 from .service_api import (
     EvaluationHandle,
@@ -32,7 +34,7 @@ class AgentHandle:
 
     async def start(
         self,
-        user_prompt: str,
+        user_prompt: "str | Sequence[UserContent]",
         *,
         output: "type[BaseModel] | None" = None,
         principal: "Principal | None" = None,
@@ -44,7 +46,7 @@ class AgentHandle:
     ) -> ExecutionHandle:
         return await self._runtime._start_for_agent(
             self._agent_digest,
-            user_prompt,
+            _prepare_user_prompt(user_prompt),
             output=output,
             principal=principal,
             session_id=session_id,
@@ -56,7 +58,7 @@ class AgentHandle:
 
     async def run(
         self,
-        user_prompt: str,
+        user_prompt: "str | Sequence[UserContent]",
         *,
         output: "type[BaseModel] | None" = None,
         principal: "Principal | None" = None,
@@ -69,7 +71,7 @@ class AgentHandle:
     ) -> ExecutionResult:
         return await self._runtime._run_for_agent(
             self._agent_digest,
-            user_prompt,
+            _prepare_user_prompt(user_prompt),
             output=output,
             principal=principal,
             session_id=session_id,
@@ -82,7 +84,7 @@ class AgentHandle:
 
     def stream(
         self,
-        user_prompt: str,
+        user_prompt: "str | Sequence[UserContent]",
         *,
         output: "type[BaseModel] | None" = None,
         principal: "Principal | None" = None,
@@ -94,7 +96,7 @@ class AgentHandle:
     ) -> AsyncIterator[ExecutionStreamEvent]:
         return self._runtime._stream_for_agent(
             self._agent_digest,
-            user_prompt,
+            _prepare_user_prompt(user_prompt),
             output=output,
             principal=principal,
             session_id=session_id,
