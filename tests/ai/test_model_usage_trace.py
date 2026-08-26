@@ -13,7 +13,8 @@ from linktools.ai.agent._capabilities import (
 )
 from linktools.ai.runtime import ExecutionTraceItem
 from pydantic_ai import Agent, ModelRetry
-from pydantic_ai.messages import ModelResponse
+from pydantic_ai.messages import ModelMessage, ModelResponse, TextPart
+from pydantic_ai.models.function import AgentInfo, FunctionModel
 from pydantic_ai.models.test import TestModel
 from pydantic_ai.usage import RequestUsage, RunUsage
 from pydantic_ai_harness.step_persistence import InMemoryStepStore, StepEvent
@@ -43,6 +44,11 @@ class _ToolOperations:
     async def unknown(self, decision, error):
         del decision, error
         raise AssertionError("unexpected unknown tool effect")
+
+
+async def _text_model(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+    del messages, info
+    return ModelResponse(parts=[TextPart("done")])
 
 
 def _response_usage(
@@ -212,7 +218,7 @@ def test_failed_model_response_trace_has_no_request_usage() -> None:
 async def test_model_retry_records_each_request_usage() -> None:
     store = InMemoryStepStore()
     agent = Agent(
-        TestModel(custom_output_text="done"),
+        FunctionModel(_text_model),
         capabilities=[_persistence(store, "retry-run")],
     )
     attempts = 0
