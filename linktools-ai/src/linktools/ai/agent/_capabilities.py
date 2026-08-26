@@ -891,21 +891,12 @@ def _workspace_file_key(part: ToolCallPart) -> "str | None":
 
 def _model_usage_metadata(response: ModelResponse) -> dict[str, str]:
     usage = response.usage
-    values = {
+    return {
         _MODEL_USAGE_INPUT_METADATA_KEY: _model_usage_token(usage.input_tokens),
         _MODEL_USAGE_OUTPUT_METADATA_KEY: _model_usage_token(usage.output_tokens),
+        _MODEL_USAGE_CACHE_READ_METADATA_KEY: _model_usage_token(usage.cache_read_tokens),
+        _MODEL_USAGE_CACHE_WRITE_METADATA_KEY: _model_usage_token(usage.cache_write_tokens),
     }
-    # RequestUsage class defaults collapse a provider-omitted cache field to zero.
-    # Pydantic AI 2.27+ preserves actual provider field presence on the instance.
-    # Keep this compatibility-sensitive check here and pin it with regression tests.
-    present = usage.__dict__
-    for field_name, metadata_key in (
-        ("cache_read_tokens", _MODEL_USAGE_CACHE_READ_METADATA_KEY),
-        ("cache_write_tokens", _MODEL_USAGE_CACHE_WRITE_METADATA_KEY),
-    ):
-        if field_name in present:
-            values[metadata_key] = _model_usage_token(present[field_name])
-    return values
 
 
 def _model_usage_token(value: object) -> str:
