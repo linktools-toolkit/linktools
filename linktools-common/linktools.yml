@@ -31,3 +31,16 @@ convert:
   - type: yml2json
     source: src/linktools/assets/develop/tools/linktools-common.yml
     dest: src/linktools/assets/tools/linktools-common.json
+
+checks:
+  ruff:
+    select:
+      - E9
+      - F63
+      - F7
+      - F82
+    paths:
+      - src
+  pytest:
+    paths:
+      - ../tests/common
