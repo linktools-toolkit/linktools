@@ -47,18 +47,6 @@ def prepare_user_prompt(value: _UserPromptInput) -> str:
     return wire
 
 
-def append_user_prompt_text(value: str, text: str) -> str:
-    """Append generated text without exposing the durable rich-content representation."""
-    if not isinstance(text, str):
-        raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
-    if not text:
-        return value
-    restored = _restore_user_prompt(value)
-    if isinstance(restored, str):
-        return prepare_user_prompt(restored + text)
-    return prepare_user_prompt((*restored, text))
-
-
 def _restore_user_prompt(value: str) -> str | tuple[UserContent, ...]:
     """Restore durable text transport into the prompt shape Pydantic AI accepts."""
     validate_user_prompt(value)
@@ -81,20 +69,22 @@ def _decode_user_content_wire(value: str) -> tuple[UserContent, ...]:
         or any(character not in "0123456789abcdef" for character in digest)
     ):
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-    raw = payload_text.encode("utf-8")
-    if hashlib.sha256(raw).hexdigest() != digest:
-        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     try:
-        payload = json.loads(payload_text)
+        payload, end = json.JSONDecoder().raw_decode(payload_text)
     except json.JSONDecodeError as error:
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
+    payload_raw = payload_text[:end].encode("utf-8")
+    if hashlib.sha256(payload_raw).hexdigest() != digest:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     try:
         normalized = normalize_json_value(payload)
     except (TypeError, ValueError) as error:
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
-    if not isinstance(normalized, dict) or canonical_json_bytes(normalized) != raw:
+    if not isinstance(normalized, dict) or canonical_json_bytes(normalized) != payload_raw:
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-    return _decode_user_content(normalized)
+    content = _decode_user_content(normalized)
+    suffix = payload_text[end:]
+    return (*content, suffix) if suffix else content
 
 
 def _encode_user_content(content: Sequence[UserContent]) -> dict[str, JsonValue]:
@@ -160,4 +150,4 @@ def _decode_user_content(payload: dict[str, JsonValue]) -> tuple[UserContent, ..
     return content
 
 
-__all__ = ["append_user_prompt_text", "prepare_user_prompt"]
+__all__ = ["prepare_user_prompt"]
