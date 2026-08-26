@@ -22,6 +22,7 @@ _WIRE_TIMESTAMP = datetime(1970, 1, 1, tzinfo=timezone.utc)
 _DIGEST_SIZE = 64
 
 UserPromptInput: TypeAlias = str | Sequence[UserContent]
+_RuntimeUserPrompt: TypeAlias = str
 
 
 def prepare_user_prompt(value: UserPromptInput) -> str:
