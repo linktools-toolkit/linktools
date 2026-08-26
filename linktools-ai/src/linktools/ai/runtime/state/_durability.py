@@ -96,21 +96,26 @@ async def _await_owned_task(
     """Keep a shielded durable task owned until its outcome is observable."""
     cancelled = False
     owned = False
-    current = asyncio.current_task()
     tracked = cast("asyncio.Task[object]", task)
     try:
         while True:
             try:
                 return await asyncio.shield(task), None, cancelled
-            except asyncio.CancelledError as error:
-                caller_cancelled = current is not None and current.cancelling() > 0
+            except asyncio.CancelledError:
                 if task.done():
+                    caller_cancelled = not task.cancelled()
                     try:
-                        return task.result(), None, cancelled or caller_cancelled
+                        return (
+                            task.result(),
+                            None,
+                            cancelled or caller_cancelled,
+                        )
                     except BaseException as task_error:  # noqa: BLE001
-                        return None, task_error, cancelled or caller_cancelled
-                if not caller_cancelled:
-                    return None, error, cancelled
+                        return (
+                            None,
+                            task_error,
+                            cancelled or caller_cancelled,
+                        )
                 cancelled = True
                 if not owned:
                     background_tasks.add(tracked)
