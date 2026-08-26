@@ -1,169 +1,81 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Compile declarations and output bindings from frozen Runtime inputs."""
+"""Deterministic Agent selection, binding, and exact historical recovery."""
 
 from collections.abc import Mapping, Sequence
+from typing import Literal, cast
 
-from linktools.core import environ
 from pydantic import BaseModel
 
 from ..capability import (
-    CapabilityBinding,
-    CapabilityRefResolution,
-    RuntimeCapability,
-    validate_fingerprint,
+    CapabilityContribution,
+    capability_fingerprint,
+    contribution_semantic_contract,
+    mcp_selector_server,
+    mcp_server_namespace,
+    mcp_server_selector,
 )
-from ..core import (
-    JsonValue,
-    canonical_sha256,
-    validate_agent_id,
-    validate_capability_provider,
-)
+from ..core import JsonValue, canonical_sha256
 from ..errors import AIError, ErrorCode
-from ..model import ModelResolver
-from ..spec import AgentSpec, AgentSpecCodec
-from ._binding import AgentBinding, AgentBindingSnapshot
+from ..model import ModelBinding, ModelResolver
+from ..spec import AgentSpec, AgentSpecCodec, MCPServerSpec, MCPServerSpecCodec, SkillSpec, SkillSpecCodec
+from ._binding import AgentBinding, AgentBindingSnapshot, SemanticPin, SubagentRef
 from ._definition import AgentDefinition
 from ._output import bind_output, restore_output
 
-_logger = environ.get_logger("ai.agent.compiler")
-
 
 class AgentCompiler:
-    """Pure compiler over already-frozen Runtime composition inputs."""
+    """Own the single Agent-level selection boundary for a frozen candidate set."""
 
     def __init__(
         self,
         *,
         model_resolver: ModelResolver,
-        capabilities: "Sequence[CapabilityBinding]" = (),
-        platform_capabilities: "Sequence[CapabilityBinding]" = (),
-        runtime_fingerprint: str,
-        trusted_tool_classes: "Mapping[str, str] | None" = None,
-        trusted_mcp_selectors: "Sequence[str]" = (),
+        candidates: Sequence[CapabilityContribution[object]],
+        agent_ids: Sequence[str],
     ) -> None:
         if model_resolver is None:
             raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
-        validate_fingerprint(runtime_fingerprint)
-        global_capabilities = tuple(capabilities)
-        platform = tuple(platform_capabilities)
-        _validate_bindings((*global_capabilities, *platform))
-        trusted = tuple(sorted((trusted_tool_classes or {}).items()))
-        selectors = tuple(sorted(trusted_mcp_selectors))
-        if len(selectors) != len(set(selectors)) or any(
-            not isinstance(selector, str)
-            or not selector.startswith("mcp__")
-            or selector == "mcp__"
-            or "__" in selector[5:]
-            for selector in selectors
-        ):
-            raise AIError(ErrorCode.CAPABILITY_POLICY_CONFLICT)
-        self._model_resolver = model_resolver
-        self._capabilities = global_capabilities
-        self._platform_capabilities = platform
-        self._runtime_fingerprint = runtime_fingerprint
-        self._trusted_tool_classes = trusted
-        self._trusted_mcp_selectors = selectors
-
-    def compile(
-        self,
-        spec: AgentSpec,
-        *,
-        capabilities: "Sequence[RuntimeCapability]" = (),
-    ) -> AgentDefinition:
-        local_capabilities = self._restore_local_capabilities(capabilities)
-        return self._compile_definition(spec, local_capabilities)
-
-    def _compile_definition(
-        self,
-        spec: AgentSpec,
-        local_capabilities: "tuple[RuntimeCapability, ...]",
-        *,
-        global_runtime_overrides: "Mapping[str, RuntimeCapability] | None" = None,
-        global_runtime_descriptors: "tuple[Mapping[str, JsonValue], ...] | None" = None,
-    ) -> AgentDefinition:
-        validate_agent_id(spec.id)
-        globals_effective: list[CapabilityBinding] = []
-        overrides = dict(global_runtime_overrides or {})
-        for capability in self._capabilities:
-            if isinstance(capability, RuntimeCapability) and capability.durable:
-                replacement = overrides.pop(capability.id, None)
-                globals_effective.append(capability if replacement is None else replacement)
-            else:
-                globals_effective.append(capability)
-        if overrides:
-            raise AIError(ErrorCode.AGENT_DEFINITION_UNAVAILABLE)
-        effective: tuple[CapabilityBinding, ...] = (
-            *globals_effective,
-            *local_capabilities,
-            *self._platform_capabilities,
-        )
-        _validate_bindings(effective)
-        local_descriptors = tuple(
-            _required_runtime_descriptor(capability)
-            for capability in local_capabilities
-        )
-        if global_runtime_descriptors is None:
-            selected_global_descriptors = tuple(
-                _required_runtime_descriptor(capability)
-                for capability in globals_effective
-                if isinstance(capability, RuntimeCapability) and capability.durable
-            )
-        else:
-            selected_global_descriptors = global_runtime_descriptors
-        model = self._model_resolver.resolve(spec.model)
-        digest = _definition_digest(
-            spec,
-            model.fingerprint,
-            effective,
-            self._runtime_fingerprint,
-        )
-        definition = AgentDefinition(
-            digest=digest,
-            spec=spec,
-            model=model,
-            effective_capabilities=effective,
-            local_runtime_capability_descriptors=local_descriptors,
-            trusted_tool_classes=self._trusted_tool_classes,
-            trusted_mcp_selectors=self._trusted_mcp_selectors,
-            global_runtime_capability_descriptors=selected_global_descriptors,
-        )
-        _logger.debug(
-            "agent definition compiled: agent=%s digest=%s capabilities=%s",
-            spec.id,
-            digest,
-            tuple((capability.provider, capability.id) for capability in effective),
-        )
-        return definition
-
-    def _restore_local_capabilities(
-        self,
-        capabilities: "Sequence[RuntimeCapability]",
-    ) -> "tuple[RuntimeCapability, ...]":
-        local_capabilities = tuple(capabilities)
-        if any(
-            not isinstance(capability, RuntimeCapability)
-            for capability in local_capabilities
-        ):
-            raise TypeError(
-                "agent-local capabilities must contain RuntimeCapability values"
-            )
-        if any(not capability.durable for capability in local_capabilities):
+        ordered = tuple(sorted(candidates, key=lambda item: (item.kind, item.id)))
+        if len({(item.kind, item.id) for item in ordered}) != len(ordered):
+            raise AIError(ErrorCode.CAPABILITY_CONFLICT)
+        self._models = model_resolver
+        self._candidates = ordered
+        self._by_identity = {(item.kind, item.id): item for item in ordered}
+        self._agent_ids = tuple(sorted(set(agent_ids)))
+        if not self._agent_ids:
             raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
-        restored: list[RuntimeCapability] = []
-        for capability in local_capabilities:
-            descriptor = _required_runtime_descriptor(capability)
-            try:
-                value = RuntimeCapability.restore(descriptor)
-            except AIError as error:
-                raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID) from error
-            if (
-                type(value.capability) is not type(capability.capability)
-                or value.descriptor != descriptor
-            ):
-                raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
-            restored.append(value)
-        return tuple(restored)
+        self._mcp_by_namespace: dict[str, CapabilityContribution[object]] = {}
+        for candidate in ordered:
+            if candidate.kind != "mcp":
+                continue
+            namespace = mcp_server_namespace(candidate.id)
+            if namespace in self._mcp_by_namespace:
+                raise AIError(ErrorCode.CAPABILITY_CONFLICT)
+            self._mcp_by_namespace[namespace] = candidate
+
+    def compile(self, spec: AgentSpec) -> AgentDefinition:
+        """Compile one current declaration from the frozen candidate universe."""
+        if not isinstance(spec, AgentSpec):
+            raise TypeError("spec must be AgentSpec")
+        model = self._models.resolve(spec.model)
+        selected_tools, selected_mcp, ordinary_policy, mcp_policy = self._select_tools(spec)
+        selected_skills = self._select_exact_kind("skill", spec.allow_skills)
+        selected_subagents = self._select_subagents(spec)
+        selected_capabilities = tuple(
+            candidate for candidate in self._candidates if candidate.kind == "capability"
+        )
+        return self._build_definition(
+            spec,
+            model=model,
+            selected_tools=selected_tools,
+            selected_skills=selected_skills,
+            selected_mcp=selected_mcp,
+            selected_capabilities=selected_capabilities,
+            selected_subagents=selected_subagents,
+            ordinary_policy=ordinary_policy,
+            mcp_policy=mcp_policy,
+        )
 
     def bind(
         self,
@@ -171,237 +83,277 @@ class AgentCompiler:
         *,
         output: "type[BaseModel] | None" = None,
     ) -> AgentBinding:
+        """Bind one current Definition to the exact durable output contract."""
         if not isinstance(definition, AgentDefinition):
             raise TypeError("definition must be AgentDefinition")
         output_binding = bind_output(output)
-        binding_digest = _binding_digest(definition.digest, output_binding.fingerprint)
+        digest = _binding_digest(definition.digest, output_binding.fingerprint)
         snapshot = AgentBindingSnapshot(
             version=1,
             agent_spec=definition.spec,
-            agent_digest=definition.digest,
-            output_schema_id=output_binding.schema_id,
-            output_schema_revision=output_binding.schema_revision,
-            output_schema_fingerprint=output_binding.schema_fingerprint,
-            local_runtime_capability_descriptors=definition.local_runtime_capability_descriptors,
-            binding_digest=binding_digest,
-            global_runtime_capability_descriptors=definition.global_runtime_capability_descriptors,
-            output_schema_definition=output_binding.schema_definition,
+            model=dict(definition.model.semantic_payload),
+            selected=tuple(
+                sorted(
+                    (_pin(candidate) for candidate in _semantic_candidates(definition)),
+                    key=lambda item: (item.kind, item.id),
+                )
+            ),
+            subagents=tuple(SubagentRef("agent", agent_id) for agent_id in definition.selected_subagents),
+            output_mode=output_binding.mode,
+            output_schema=output_binding.schema_definition,
+            binding_digest=digest,
         )
-        binding = AgentBinding(
-            binding_digest,
-            definition,
-            output_binding,
-            snapshot,
-        )
-        _logger.debug(
-            "agent binding compiled: agent=%s agent_digest=%s binding_digest=%s",
-            definition.spec.id,
-            definition.digest,
-            binding_digest,
-        )
-        return binding
+        return AgentBinding(digest, definition, output_binding, snapshot)
 
     def restore(self, snapshot: AgentBindingSnapshot) -> AgentBinding:
+        """Restore exact historical semantics without expanding current selectors."""
         if not isinstance(snapshot, AgentBindingSnapshot):
             raise TypeError("snapshot must be AgentBindingSnapshot")
         try:
-            local_capabilities = tuple(
-                RuntimeCapability.restore(descriptor)
-                for descriptor in snapshot.local_runtime_capability_descriptors
-            )
-            global_overrides, global_descriptors = self._restore_global_capabilities(
-                snapshot
-            )
-            output_descriptor: dict[str, JsonValue] = {
-                "version": 1,
-                "schema_id": snapshot.output_schema_id,
-                "schema_revision": snapshot.output_schema_revision,
-                "schema_fingerprint": snapshot.output_schema_fingerprint,
-                "schema_definition": snapshot.output_schema_definition,
-            }
-            output_binding = restore_output(output_descriptor)
-            definition = self._compile_definition(
+            model = self._models.restore(snapshot.model, route_id=snapshot.agent_spec.model)
+            selected = self._restore_selected(snapshot.selected)
+            ordinary_policy, mcp_policy = self._restore_policies(
                 snapshot.agent_spec,
-                local_capabilities,
-                global_runtime_overrides=global_overrides,
-                global_runtime_descriptors=global_descriptors,
+                selected["mcp"],
             )
+            definition = self._build_definition(
+                snapshot.agent_spec,
+                model=model,
+                selected_tools=selected["tool"],
+                selected_skills=selected["skill"],
+                selected_mcp=selected["mcp"],
+                selected_capabilities=selected["capability"],
+                selected_subagents=snapshot.subagent_ids,
+                ordinary_policy=ordinary_policy,
+                mcp_policy=mcp_policy,
+            )
+            output_binding = restore_output(snapshot.output_mode, snapshot.output_schema)
         except AIError as error:
-            if error.code is ErrorCode.AGENT_DEFINITION_UNAVAILABLE:
+            if error.code is ErrorCode.STORAGE_INTEGRITY_ERROR:
                 raise
             raise AIError(ErrorCode.AGENT_DEFINITION_UNAVAILABLE) from error
-        binding_digest = _binding_digest(definition.digest, output_binding.fingerprint)
-        if (
-            definition.digest != snapshot.agent_digest
-            or binding_digest != snapshot.binding_digest
-        ):
+        digest = _binding_digest(definition.digest, output_binding.fingerprint)
+        if digest != snapshot.binding_digest:
             raise AIError(ErrorCode.AGENT_DEFINITION_UNAVAILABLE)
-        return AgentBinding(
-            snapshot.binding_digest,
-            definition,
-            output_binding,
-            snapshot,
-        )
+        return AgentBinding(digest, definition, output_binding, snapshot)
 
-    def _restore_global_capabilities(
+    def _restore_selected(
         self,
-        snapshot: AgentBindingSnapshot,
-    ) -> "tuple[dict[str, RuntimeCapability], tuple[Mapping[str, JsonValue], ...]]":
-        current = tuple(
-            capability
-            for capability in self._capabilities
-            if isinstance(capability, RuntimeCapability) and capability.durable
+        pins: Sequence[SemanticPin],
+    ) -> "dict[str, tuple[CapabilityContribution[object], ...]]":
+        selected: dict[str, list[CapabilityContribution[object]]] = {
+            "tool": [],
+            "skill": [],
+            "mcp": [],
+            "capability": [],
+        }
+        for pin in pins:
+            if capability_fingerprint(pin.kind, pin.id, pin.contract) != pin.fingerprint:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            if pin.kind == "skill":
+                value = SkillSpecCodec().from_payload(cast("Mapping[str, object]", pin.contract))
+                candidate = CapabilityContribution("skill", pin.id, pin.fingerprint, value)
+            elif pin.kind == "mcp":
+                value = MCPServerSpecCodec().from_payload(cast("Mapping[str, object]", pin.contract))
+                candidate = CapabilityContribution("mcp", pin.id, pin.fingerprint, value)
+            else:
+                current = self._by_identity.get((pin.kind, pin.id))
+                if current is None or current.fingerprint != pin.fingerprint:
+                    raise AIError(ErrorCode.AGENT_DEFINITION_UNAVAILABLE)
+                if current.semantic_contract != dict(pin.contract):
+                    raise AIError(ErrorCode.AGENT_DEFINITION_UNAVAILABLE)
+                candidate = current
+            selected[pin.kind].append(candidate)
+        return {
+            kind: tuple(sorted(values, key=lambda item: item.id))
+            for kind, values in selected.items()
+        }
+
+    def _select_tools(
+        self,
+        spec: AgentSpec,
+    ) -> "tuple[tuple[CapabilityContribution[object], ...], tuple[CapabilityContribution[object], ...], tuple[str, ...], tuple[str, ...]]":
+        tools = {
+            candidate.id: candidate
+            for candidate in self._candidates
+            if candidate.kind == "tool"
+        }
+        if spec.allow_tools == ("*",):
+            selected_tools = tuple(tools[name] for name in sorted(tools))
+            selected_mcp = tuple(
+                sorted(self._mcp_by_namespace.values(), key=lambda item: item.id)
+            )
+            return (
+                selected_tools,
+                selected_mcp,
+                ("*",),
+                tuple(f"{mcp_server_selector(item.id)}__*" for item in selected_mcp),
+            )
+        selected_tool_ids: set[str] = set()
+        selected_mcp_by_id: dict[str, CapabilityContribution[object]] = {}
+        ordinary_policy: list[str] = []
+        mcp_policy: list[str] = []
+        for selector in spec.allow_tools:
+            parsed = mcp_selector_server(selector)
+            if parsed is None:
+                ordinary_policy.append(selector)
+                if selector in tools:
+                    selected_tool_ids.add(selector)
+                continue
+            namespace, _tool = parsed
+            candidate = self._mcp_by_namespace.get(namespace)
+            if candidate is None:
+                raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
+            selected_mcp_by_id[candidate.id] = candidate
+            mcp_policy.append(selector)
+        return (
+            tuple(tools[name] for name in sorted(selected_tool_ids)),
+            tuple(selected_mcp_by_id[name] for name in sorted(selected_mcp_by_id)),
+            tuple(sorted(set(ordinary_policy))),
+            tuple(sorted(set(mcp_policy))),
         )
-        current_by_id = {capability.id: capability for capability in current}
-        if len(current_by_id) != len(current):
-            raise AIError(ErrorCode.AGENT_DEFINITION_UNAVAILABLE)
-        if len(snapshot.global_runtime_capability_descriptors) != len(current):
-            raise AIError(ErrorCode.AGENT_DEFINITION_UNAVAILABLE)
-        restored_by_id: dict[str, RuntimeCapability] = {}
-        for descriptor in snapshot.global_runtime_capability_descriptors:
-            identity = descriptor.get("id")
-            if not isinstance(identity, str) or identity in restored_by_id:
-                raise AIError(ErrorCode.AGENT_DEFINITION_UNAVAILABLE)
-            current_capability = current_by_id.get(identity)
-            if current_capability is None:
-                raise AIError(ErrorCode.AGENT_DEFINITION_UNAVAILABLE)
-            if _runtime_capability_semantics(descriptor) != _runtime_capability_semantics(
-                current_capability
-            ):
-                raise AIError(ErrorCode.AGENT_DEFINITION_UNAVAILABLE)
-            restored_by_id[identity] = current_capability
-        if set(restored_by_id) != set(current_by_id):
-            raise AIError(ErrorCode.AGENT_DEFINITION_UNAVAILABLE)
-        return restored_by_id, snapshot.global_runtime_capability_descriptors
 
+    def _select_exact_kind(
+        self,
+        kind: Literal["skill"],
+        selectors: Sequence[str],
+    ) -> "tuple[CapabilityContribution[object], ...]":
+        values = {
+            candidate.id: candidate
+            for candidate in self._candidates
+            if candidate.kind == kind
+        }
+        if tuple(selectors) == ("*",):
+            return tuple(values[name] for name in sorted(values))
+        selected: list[CapabilityContribution[object]] = []
+        for selector in selectors:
+            candidate = values.get(selector)
+            if candidate is None:
+                raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
+            selected.append(candidate)
+        return tuple(sorted(selected, key=lambda item: item.id))
 
-def _runtime_capability_semantics(
-    capability: "RuntimeCapability | Mapping[str, JsonValue]",
-) -> "tuple[str, int, str, JsonValue]":
-    descriptor = (
-        _required_runtime_descriptor(capability)
-        if isinstance(capability, RuntimeCapability)
-        else capability
-    )
-    identity = descriptor.get("id")
-    revision = descriptor.get("revision")
-    serialization_name = descriptor.get("serialization_name")
-    config = descriptor.get("config")
-    fingerprint = descriptor.get("fingerprint")
-    if (
-        not isinstance(identity, str)
-        or not isinstance(revision, int)
-        or isinstance(revision, bool)
-        or not isinstance(serialization_name, str)
-        or not isinstance(config, dict)
-        or not isinstance(fingerprint, str)
-        or canonical_sha256(
+    def _select_subagents(self, spec: AgentSpec) -> "tuple[str, ...]":
+        available = set(self._agent_ids)
+        if spec.allow_subagents == ("*",):
+            return tuple(sorted(available.difference({spec.id})))
+        selected = set(spec.allow_subagents)
+        if spec.id in selected or not selected.issubset(available):
+            raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
+        return tuple(sorted(selected))
+
+    def _restore_policies(
+        self,
+        spec: AgentSpec,
+        selected_mcp: Sequence[CapabilityContribution[object]],
+    ) -> "tuple[tuple[str, ...], tuple[str, ...]]":
+        if spec.allow_tools == ("*",):
+            return (
+                ("*",),
+                tuple(
+                    f"{mcp_server_selector(item.id)}__*"
+                    for item in sorted(selected_mcp, key=lambda item: item.id)
+                ),
+            )
+        ordinary = tuple(
+            sorted(selector for selector in spec.allow_tools if not selector.startswith("mcp__"))
+        )
+        allowed_namespaces = {mcp_server_namespace(item.id) for item in selected_mcp}
+        mcp_policy = []
+        for selector in spec.allow_tools:
+            parsed = mcp_selector_server(selector)
+            if parsed is None:
+                continue
+            if parsed[0] not in allowed_namespaces:
+                raise AIError(ErrorCode.AGENT_DEFINITION_UNAVAILABLE)
+            mcp_policy.append(selector)
+        return ordinary, tuple(sorted(set(mcp_policy)))
+
+    def _build_definition(
+        self,
+        spec: AgentSpec,
+        *,
+        model: ModelBinding,
+        selected_tools: Sequence[CapabilityContribution[object]],
+        selected_skills: Sequence[CapabilityContribution[object]],
+        selected_mcp: Sequence[CapabilityContribution[object]],
+        selected_capabilities: Sequence[CapabilityContribution[object]],
+        selected_subagents: Sequence[str],
+        ordinary_policy: Sequence[str],
+        mcp_policy: Sequence[str],
+    ) -> AgentDefinition:
+        semantic = tuple(
+            sorted(
+                (*selected_tools, *selected_skills, *selected_mcp, *selected_capabilities),
+                key=lambda item: (item.kind, item.id),
+            )
+        )
+        digest = canonical_sha256(
             {
-                "id": identity,
-                "revision": revision,
-                "serialization_name": serialization_name,
-                "config": config,
+                "contract": "agent-definition-v1",
+                "agent": AgentSpecCodec().to_payload(spec),
+                "model_fingerprint": model.fingerprint,
+                "selected": [
+                    {"kind": item.kind, "id": item.id, "fingerprint": item.fingerprint}
+                    for item in semantic
+                ],
+                "subagents": [
+                    {"kind": "agent", "id": agent_id}
+                    for agent_id in sorted(set(selected_subagents))
+                ],
             }
         )
-        != fingerprint
-    ):
-        raise AIError(ErrorCode.AGENT_DEFINITION_UNAVAILABLE)
-    return (
-        identity,
-        revision,
-        serialization_name,
-        config,
+        return AgentDefinition(
+            digest=digest,
+            spec=spec,
+            model=model,
+            selected_tools=tuple(sorted(selected_tools, key=lambda item: item.id)),
+            selected_skills=tuple(sorted(selected_skills, key=lambda item: item.id)),
+            selected_mcp=tuple(sorted(selected_mcp, key=lambda item: item.id)),
+            selected_capabilities=tuple(sorted(selected_capabilities, key=lambda item: item.id)),
+            selected_subagents=tuple(sorted(set(selected_subagents))),
+            ordinary_tool_policy=tuple(ordinary_policy),
+            mcp_selector_policy=tuple(mcp_policy),
+        )
+
+
+def _semantic_candidates(
+    definition: AgentDefinition,
+) -> "tuple[CapabilityContribution[object], ...]":
+    return tuple(
+        sorted(
+            (
+                *definition.selected_tools,
+                *definition.selected_skills,
+                *definition.selected_mcp,
+                *definition.selected_capabilities,
+            ),
+            key=lambda item: (item.kind, item.id),
+        )
     )
 
 
-def _required_runtime_descriptor(
-    capability: RuntimeCapability,
-) -> Mapping[str, JsonValue]:
-    descriptor = capability.descriptor
-    if descriptor is None:
+def _pin(candidate: CapabilityContribution[object]) -> SemanticPin:
+    contract = candidate.semantic_contract
+    if capability_fingerprint(candidate.kind, candidate.id, contract) != candidate.fingerprint:
         raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
-    return descriptor
+    return SemanticPin(
+        cast(Literal["tool", "skill", "mcp", "capability"], candidate.kind),
+        candidate.id,
+        1,
+        candidate.fingerprint,
+        contract,
+    )
 
 
-def _validate_bindings(bindings: "Sequence[CapabilityBinding]") -> None:
-    identities: list[tuple[str, str]] = []
-    for binding in bindings:
-        _validate_binding_shape(binding)
-        identities.append((binding.provider, binding.id))
-    if len(identities) != len(set(identities)):
-        raise AIError(ErrorCode.CAPABILITY_CONFLICT)
-
-
-def _validate_binding_shape(binding: CapabilityBinding) -> None:
-    try:
-        provider = binding.provider
-        binding_id = binding.id
-        resolutions = binding.resolutions
-        fingerprint = binding.fingerprint
-    except (AttributeError, TypeError) as error:
-        raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID) from error
-    try:
-        validate_capability_provider(provider)
-    except AIError as error:
-        raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID) from error
-    if (
-        not isinstance(binding_id, str)
-        or not binding_id.strip()
-        or not isinstance(resolutions, tuple)
-    ):
-        raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
-    validate_fingerprint(fingerprint)
-    if any(
-        not isinstance(resolution, CapabilityRefResolution)
-        for resolution in resolutions
-    ):
-        raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
-
-
-def _definition_digest(
-    spec: AgentSpec,
-    model_fingerprint: str,
-    capabilities: "Sequence[CapabilityBinding]",
-    runtime_fingerprint: str,
-) -> str:
+def _binding_digest(agent_definition_digest: str, output_fingerprint: str) -> str:
     return canonical_sha256(
         {
-            "version": 1,
-            "agent": AgentSpecCodec().to_payload(spec),
-            "model_fingerprint": model_fingerprint,
-            "capabilities": [
-                _binding_payload(binding) for binding in capabilities
-            ],
-            "runtime_fingerprint": runtime_fingerprint,
+            "contract": "agent-binding-v1",
+            "agent_definition_digest": agent_definition_digest,
+            "output_fingerprint": output_fingerprint,
         }
     )
-
-
-def _binding_digest(agent_digest: str, output_fingerprint: str) -> str:
-    return canonical_sha256(
-        {
-            "version": 1,
-            "agent_digest": agent_digest,
-            "output_binding_fingerprint": output_fingerprint,
-        }
-    )
-
-
-def _binding_payload(binding: CapabilityBinding) -> "dict[str, object]":
-    return {
-        "id": binding.id,
-        "provider": binding.provider,
-        "fingerprint": binding.fingerprint,
-        "resolutions": [
-            {
-                "kind": resolution.ref.kind,
-                "id": resolution.ref.id,
-                "resolved_revision": resolution.resolved_revision,
-                "fingerprint": resolution.fingerprint,
-            }
-            for resolution in binding.resolutions
-        ],
-    }
 
 
 __all__ = ["AgentCompiler"]

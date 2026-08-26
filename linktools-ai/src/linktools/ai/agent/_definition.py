@@ -1,99 +1,68 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Immutable executable Agent definitions."""
+"""Immutable output-independent Agent semantics."""
 
-from collections.abc import Mapping
 from dataclasses import dataclass
 
-from ..capability import CapabilityBinding, validate_fingerprint
-from ..core import ImmutableJsonMapping, JsonValue
+from ..capability import CapabilityContribution
 from ..errors import AIError, ErrorCode
 from ..model import ModelBinding
-from ..spec import AgentSpec
+from ..spec import AgentSpec, MCPServerSpec, SkillSpec
 
-_TRUSTED_TOOL_CLASSES = frozenset(
-    {
-        "control",
-        "filesystem.read",
-        "filesystem.write",
-        "shell",
-        "memory.read",
-        "memory.write",
-    }
-)
+
+def _is_digest(value: object) -> bool:
+    return isinstance(value, str) and len(value) == 64 and all(
+        character in "0123456789abcdef" for character in value
+    )
 
 
 @dataclass(frozen=True, slots=True)
 class AgentDefinition:
-    """Freeze the output-independent identity of one executable Agent."""
-
     digest: str
     spec: AgentSpec
     model: ModelBinding
-    effective_capabilities: "tuple[CapabilityBinding, ...]"
-    local_runtime_capability_descriptors: "tuple[Mapping[str, JsonValue], ...]"
-    trusted_tool_classes: "tuple[tuple[str, str], ...]" = ()
-    trusted_mcp_selectors: "tuple[str, ...]" = ()
-    global_runtime_capability_descriptors: "tuple[Mapping[str, JsonValue], ...]" = ()
+    selected_tools: "tuple[CapabilityContribution[object], ...]"
+    selected_skills: "tuple[CapabilityContribution[object], ...]"
+    selected_mcp: "tuple[CapabilityContribution[object], ...]"
+    selected_capabilities: "tuple[CapabilityContribution[object], ...]"
+    selected_subagents: "tuple[str, ...]"
+    ordinary_tool_policy: "tuple[str, ...]"
+    mcp_selector_policy: "tuple[str, ...]"
 
     def __post_init__(self) -> None:
-        validate_fingerprint(self.digest)
-        if any(capability is None for capability in self.effective_capabilities):
+        if not _is_digest(self.digest) or not isinstance(self.spec, AgentSpec):
             raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
-        try:
-            identities = tuple(
-                (capability.provider, capability.id)
-                for capability in self.effective_capabilities
-            )
-            local_descriptors = tuple(
-                ImmutableJsonMapping(value)
-                for value in self.local_runtime_capability_descriptors
-            )
-            global_descriptors = tuple(
-                ImmutableJsonMapping(value)
-                for value in self.global_runtime_capability_descriptors
-            )
-        except (AttributeError, TypeError, ValueError) as error:
-            raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID) from error
-        if len(set(identities)) != len(identities):
-            raise AIError(ErrorCode.CAPABILITY_CONFLICT)
-        object.__setattr__(
-            self,
-            "local_runtime_capability_descriptors",
-            local_descriptors,
+        groups = (
+            ("tool", self.selected_tools),
+            ("skill", self.selected_skills),
+            ("mcp", self.selected_mcp),
+            ("capability", self.selected_capabilities),
         )
-        object.__setattr__(
-            self,
-            "global_runtime_capability_descriptors",
-            global_descriptors,
-        )
-        selectors: set[str] = set()
-        previous_selector: str | None = None
-        for selector in self.trusted_mcp_selectors:
-            if (
-                not isinstance(selector, str)
-                or not selector.startswith("mcp__")
-                or selector == "mcp__"
-                or "__" in selector[5:]
-                or selector in selectors
-                or (previous_selector is not None and selector < previous_selector)
-            ):
-                raise AIError(ErrorCode.CAPABILITY_POLICY_CONFLICT)
-            selectors.add(selector)
-            previous_selector = selector
-        names: set[str] = set()
-        previous: str | None = None
-        for name, tool_class in self.trusted_tool_classes:
-            if (
-                not isinstance(name, str)
-                or not name.strip()
-                or tool_class not in _TRUSTED_TOOL_CLASSES
-                or name in names
-                or (previous is not None and name < previous)
-            ):
-                raise AIError(ErrorCode.CAPABILITY_POLICY_CONFLICT)
-            names.add(name)
-            previous = name
+        identities: set[tuple[str, str]] = set()
+        for expected_kind, values in groups:
+            previous: str | None = None
+            for value in values:
+                if value.kind != expected_kind or (previous is not None and value.id < previous):
+                    raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
+                identity = (value.kind, value.id)
+                if identity in identities:
+                    raise AIError(ErrorCode.CAPABILITY_CONFLICT)
+                identities.add(identity)
+                previous = value.id
+        if tuple(sorted(set(self.selected_subagents))) != self.selected_subagents:
+            raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
+
+    @property
+    def skill_specs(self) -> "tuple[SkillSpec, ...]":
+        return tuple(value.value for value in self.selected_skills if isinstance(value.value, SkillSpec))
+
+    @property
+    def mcp_servers(self) -> "tuple[MCPServerSpec, ...]":
+        return tuple(value.value for value in self.selected_mcp if isinstance(value.value, MCPServerSpec))
+
+    @property
+    def static_tool_names(self) -> "tuple[str, ...]":
+        return tuple(value.id for value in self.selected_tools)
 
 
 __all__ = ["AgentDefinition"]

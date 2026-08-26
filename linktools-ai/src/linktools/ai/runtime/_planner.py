@@ -13,11 +13,12 @@ from ..agent import (
     AgentBindingSnapshot,
     AgentCatalog,
     AgentCompiler,
-    user_prompt_transport,
 )
 from ..core import (
     ExecutionStatus,
     Principal,
+    normalize_execution_mode,
+    normalize_thinking,
     canonical_sha256,
     principal_identity_payload,
     validate_agent_id,
@@ -34,6 +35,7 @@ from ..task import (
     TaskNode,
     TaskNodeRunResult,
 )
+from ._input import user_prompt_transport
 from .service_api import (
     CancelExecutionRequest,
     ExecutionHandle,
@@ -45,7 +47,16 @@ from .service_api import (
 
 _logger = environ.get_logger("ai.runtime.planner")
 _AGENT_TASK_FIELDS = frozenset(
-    {"type", "version", "binding", "user_prompt", "planning", "thinking"}
+    {
+        "type",
+        "version",
+        "binding",
+        "user_prompt",
+        "user_prompt_codec",
+        "mode",
+        "planning",
+        "thinking",
+    }
 )
 
 
@@ -76,19 +87,19 @@ class RuntimeTaskNodeRunner:
         dependency_results: "Mapping[str, TaskDependencyResult]",
     ) -> "tuple[str, ExecutionRequest]":
         payload = node.input
-        if not _AGENT_TASK_FIELDS.issubset(payload):
+        if set(payload) != _AGENT_TASK_FIELDS:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         if payload["type"] != "linktools.ai.agent" or payload["version"] != 1:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         base_user_prompt = payload["user_prompt"]
-        user_prompt_codec = payload.get("user_prompt_codec", "text")
+        user_prompt_codec = payload["user_prompt_codec"]
+        mode = payload["mode"]
         planning = payload["planning"]
         thinking = payload["thinking"]
         if (
             not isinstance(base_user_prompt, str)
             or not isinstance(user_prompt_codec, str)
             or not isinstance(planning, bool)
-            or not isinstance(thinking, bool)
         ):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         try:
@@ -100,6 +111,13 @@ class RuntimeTaskNodeRunner:
             if error.code is ErrorCode.STORAGE_VERSION_UNSUPPORTED:
                 raise
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
+        try:
+            mode = normalize_execution_mode(mode)
+            thinking = normalize_thinking(thinking)
+        except AIError as error:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
+        if mode != "run":
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         try:
             snapshot = AgentBindingSnapshot.from_payload(payload["binding"])
             binding = self._catalog.register_binding(
@@ -164,10 +182,12 @@ class RuntimeTaskNodeRunner:
             }
         )
         request = ExecutionRequest(
-            user_prompt=effective_user_prompt,
+            user_prompt=str(effective_user_prompt),
+            user_prompt_codec=effective_user_prompt.codec,
             principal=principal,
             idempotency_key=idempotency_key,
             memory_scope=None,
+            mode=mode,
             planning=planning,
             thinking=thinking,
         )

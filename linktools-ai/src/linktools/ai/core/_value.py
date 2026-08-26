@@ -5,6 +5,7 @@
 from collections.abc import Sequence
 from dataclasses import dataclass
 from enum import Enum
+from typing import Literal, TypeAlias
 
 from ..errors import AIError, ErrorCode
 from ._paging import Page
@@ -13,6 +14,26 @@ from ._validation import (
     validate_principal_kind,
     validate_tenant_id,
 )
+
+
+ExecutionMode: TypeAlias = Literal["run", "plan"]
+ThinkingEffort: TypeAlias = Literal["minimal", "low", "medium", "high", "xhigh"]
+ThinkingValue: TypeAlias = bool | ThinkingEffort
+_THINKING_EFFORTS = frozenset({"minimal", "low", "medium", "high", "xhigh"})
+
+
+def normalize_execution_mode(value: object) -> ExecutionMode:
+    if value in {"run", "plan"}:
+        return value  # type: ignore[return-value]
+    raise AIError(ErrorCode.REQUEST_FIELD_INVALID, "execution mode is invalid")
+
+
+def normalize_thinking(value: object) -> ThinkingValue:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str) and value in _THINKING_EFFORTS:
+        return value  # type: ignore[return-value]
+    raise AIError(ErrorCode.REQUEST_FIELD_INVALID, "thinking is invalid")
 
 
 def canonical_string_tuple(value: Sequence[str], *, field: str) -> "tuple[str, ...]":
@@ -248,9 +269,10 @@ class Principal:
 
 __all__ = [
     "ApprovalDecision", "ApprovalStatus", "EvaluationStatus",
-    "ExecutionDeltaType", "ExecutionEventType", "ExecutionLineageKind",
+    "ExecutionDeltaType", "ExecutionEventType", "ExecutionLineageKind", "ExecutionMode",
     "ExecutionStatus", "ExternalCallStatus",
     "IdempotencyStatus", "OperationKind", "OperationStatus", "Page", "Principal",
     "PrincipalKind", "ResourceKind", "SessionStatus", "StopReason", "TaskStatus",
-    "ToolOperationStatus",
+    "ThinkingEffort", "ThinkingValue", "ToolOperationStatus",
+    "normalize_execution_mode", "normalize_thinking",
 ]

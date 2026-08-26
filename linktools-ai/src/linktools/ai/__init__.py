@@ -1,16 +1,17 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Public boundaries for the LinkTools AI runtime."""
+"""Public LinkTools AI composition and runtime API."""
 
-from .asset import AssetRef
-from .capability import RuntimeCapability
-from .runtime import AgentHandle, Runtime
-from .spec import AgentSpec
+from .capability import CapabilityGroup, RunContext
+from .runtime import Agent, Execution, Runtime, Session
+from .workspace import Workspace
 
 __all__ = [
-    "AgentHandle",
-    "AgentSpec",
-    "AssetRef",
+    "Agent",
+    "CapabilityGroup",
+    "Execution",
+    "RunContext",
     "Runtime",
-    "RuntimeCapability",
+    "Session",
+    "Workspace",
 ]

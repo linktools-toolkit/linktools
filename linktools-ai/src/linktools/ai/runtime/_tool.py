@@ -61,7 +61,7 @@ class ToolOperationRecord:
     idempotency_key_digest: str
     tool_name: str
     arguments_digest: str
-    binding_fingerprint: str
+    binding_digest: str
     replay_safe: bool
     status: ToolOperationStatus
     owner: "str | None"
@@ -218,7 +218,7 @@ class RuntimeToolOperationBridge:
         tenant_id: str,
         execution_id: str,
         step_run_id: str,
-        binding_fingerprint: str,
+        binding_digest: str,
         owner: str,
         background_tasks: "set[asyncio.Task[object]]",
         payload_policy: PayloadPolicy,
@@ -231,7 +231,7 @@ class RuntimeToolOperationBridge:
         self._tenant_id = validate_tenant_id(tenant_id)
         self._execution_id = execution_id
         self._step_run_id = step_run_id
-        self._binding_fingerprint = binding_fingerprint
+        self._binding_digest = binding_digest
         self._owner = owner
         self._background_tasks = background_tasks
         self._payload_policy = payload_policy
@@ -265,7 +265,7 @@ class RuntimeToolOperationBridge:
                 "tool_call_id": call.tool_call_id,
                 "tool_name": tool_def.name,
                 "arguments_digest": arguments_digest,
-                "binding_fingerprint": self._binding_fingerprint,
+                "binding_digest": self._binding_digest,
             }
         )
         admission = ToolOperationAdmission(
@@ -279,7 +279,7 @@ class RuntimeToolOperationBridge:
             ),
             tool_name=tool_def.name,
             arguments_digest=arguments_digest,
-            binding_fingerprint=self._binding_fingerprint,
+            binding_digest=self._binding_digest,
             replay_safe=replay_safe,
             owner=self._owner,
             lease_seconds=self._lease_seconds,
