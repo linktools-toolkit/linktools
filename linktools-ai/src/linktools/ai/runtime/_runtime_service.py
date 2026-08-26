@@ -478,7 +478,6 @@ class Runtime:
             binding.digest,
             snapshot_id,
             request,
-            output=output,
         )
 
     async def run_graph(
