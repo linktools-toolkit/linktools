@@ -49,9 +49,12 @@ def _collision_errors(nodes: tuple[_NameNode, ...]) -> tuple[str, ...]:
         for right in nodes[index + 1 :]:
             if left.semantic_leaf != right.semantic_leaf:
                 continue
-            if _is_required_runtime_agent_facade(left.path, right.path):
+            if _is_required_owner_pair(left.path, right.path):
                 continue
-            if not (_is_prefix(left.parent_namespace, right.parent_namespace) or _is_prefix(right.parent_namespace, left.parent_namespace)):
+            if not (
+                _is_prefix(left.parent_namespace, right.parent_namespace)
+                or _is_prefix(right.parent_namespace, left.parent_namespace)
+            ):
                 continue
             errors.append(
                 "namespace semantic-name collision:\n"
@@ -61,10 +64,19 @@ def _collision_errors(nodes: tuple[_NameNode, ...]) -> tuple[str, ...]:
     return tuple(errors)
 
 
-def _is_required_runtime_agent_facade(left: Path, right: Path) -> bool:
+def _is_required_owner_pair(left: Path, right: Path) -> bool:
     paths = {left.as_posix(), right.as_posix()}
-    return any(path.endswith("/agent") for path in paths) and any(
-        path.endswith("/runtime/_agent.py") for path in paths
+    required_pairs = (
+        ("/agent", "/runtime/_agent.py"),
+        ("/workspace", "/capability/_workspace.py"),
+        ("/runtime/_history.py", "/runtime/state/_history.py"),
+        ("/runtime/_memory.py", "/runtime/state/_memory.py"),
+        ("/runtime/_plan.py", "/runtime/state/_plan.py"),
+    )
+    return any(
+        any(path.endswith(first) for path in paths)
+        and any(path.endswith(second) for path in paths)
+        for first, second in required_pairs
     )
 
 
@@ -82,7 +94,11 @@ def check_names(source_root: "str | Path") -> "tuple[str, ...]":
             node.path.name,
         ):
             errors.append(str(node.path))
-    errors.extend(_collision_errors(tuple(sorted((*modules, *packages), key=lambda node: str(node.path)))))
+    errors.extend(
+        _collision_errors(
+            tuple(sorted((*modules, *packages), key=lambda node: str(node.path)))
+        )
+    )
     return tuple(errors)
 
 
