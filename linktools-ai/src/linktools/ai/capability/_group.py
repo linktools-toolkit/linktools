@@ -8,7 +8,7 @@ import inspect
 import re
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
-from typing import Generic, Literal, Protocol, TypeVar, cast, overload
+from typing import Generic, Literal, Protocol, TypeAlias, TypeVar, cast, overload
 
 from pydantic_ai import Tool
 from pydantic_ai.capabilities import AbstractCapability
@@ -33,6 +33,9 @@ from ._context import RunContext
 
 AppT = TypeVar("AppT")
 ContributionKind = Literal["tool", "agent", "skill", "mcp", "capability"]
+ContributionSemanticValue: TypeAlias = (
+    Tool | AgentSpec | SkillSpec | MCPServerSpec | AbstractCapability
+)
 _RESERVED_TOOL_NAMES = frozenset(
     {
         "list_skills",
@@ -80,10 +83,14 @@ class CapabilityContribution(Generic[AppT]):
             raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
         if self.kind == "tool" and cast(Tool, self.value).name != self.id:
             raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
-        if self.kind in {"agent", "skill", "mcp"} and getattr(self.value, "id", None) != self.id:
+        if self.kind == "agent" and cast(AgentSpec, self.value).id != self.id:
+            raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
+        if self.kind == "skill" and cast(SkillSpec, self.value).id != self.id:
+            raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
+        if self.kind == "mcp" and cast(MCPServerSpec, self.value).id != self.id:
             raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
         if self.kind == "capability":
-            capability_id = getattr(self.value, "id", None)
+            capability_id = cast(AbstractCapability, self.value).id  # type: ignore[attr-defined]
             if not isinstance(capability_id, str) or capability_id != self.id:
                 raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
         if self.fingerprint != capability_fingerprint(
@@ -363,7 +370,11 @@ def _adapt_tool(function: Callable[..., object], *, name: str) -> Tool:
         raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID, "tool requires RunContext")
 
     @functools.wraps(function)
-    async def invoke(ctx: PydanticRunContext[RunContext[object]], *args: object, **kwargs: object) -> object:
+    async def invoke(
+        ctx: PydanticRunContext[RunContext[object]],
+        *args: object,
+        **kwargs: object,
+    ) -> object:
         result = function(ctx.deps, *args, **kwargs)
         if inspect.isawaitable(result):
             return await cast(Awaitable[object], result)
@@ -381,7 +392,7 @@ def _adapt_tool(function: Callable[..., object], *, name: str) -> Tool:
 def contribution_semantic_contract(
     kind: ContributionKind,
     identity: str,
-    value: object,
+    value: ContributionSemanticValue,
     *,
     semantic_revision: "int | None" = None,
 ) -> "dict[str, JsonValue]":
