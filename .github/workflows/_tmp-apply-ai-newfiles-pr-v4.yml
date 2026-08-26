@@ -1,0 +1,52 @@
+name: _tmp apply ai new owner files pr v4
+
+on:
+  pull_request:
+    branches:
+      - master
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    if: github.head_ref == 'tmp/ai-runtime-capabilitygroup-agent-newfiles-v4'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
+
+      - name: Verify new owner payload
+        shell: bash
+        run: |
+          set -euo pipefail
+          path='.github/_transport/ai-runtime-capabilitygroup-agent-newfiles-v4'
+          cat "${path}"/part-00 "${path}"/part-01 "${path}"/part-02 "${path}"/part-03 "${path}"/part-04 "${path}"/part-05 "${path}"/part-06 "${path}"/part-07 "${path}"/part-08 "${path}"/part-09 "${path}"/part-10 \
+            | base64 -d \
+            | gzip -d \
+            > /tmp/ai-newfiles.patch
+          echo '767420f45dd27ceb1ebbc3035a8da56061c1df7685ea5213564e27d66bb9061a  /tmp/ai-newfiles.patch' | sha256sum -c -
+
+      - name: Apply and squash exact implementation
+        shell: bash
+        run: |
+          set -euo pipefail
+          baseline='77ce66cc3a68938181ec752cd30d9be5ab24d63b'
+          current='4e446fe3d09f049e2a624c87f7804ef5c16745f7'
+          target='refactor/ai-runtime-capabilitygroup-agent'
+          remote_sha="$(git ls-remote origin "refs/heads/${target}" | cut -f1)"
+          test "${remote_sha}" = "${current}"
+          git checkout -B "${target}" "${current}"
+          git apply --check /tmp/ai-newfiles.patch
+          git apply /tmp/ai-newfiles.patch
+          git diff --check
+          python -m compileall -q linktools-ai/src scripts/check/ai
+          git add -A
+          git reset --soft "${baseline}"
+          test -n "$(git diff --cached --name-only)"
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git commit -m 'refactor(ai): unify runtime capability composition'
+          git push --force-with-lease="refs/heads/${target}:${current}" origin "HEAD:refs/heads/${target}"
