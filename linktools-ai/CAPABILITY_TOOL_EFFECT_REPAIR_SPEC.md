@@ -12,7 +12,7 @@
 ## Required invariants
 
 1. Linktools is the single owner of built-in tool provenance and durable effect policy. Runtime persistence must not independently infer built-in replay safety from optional tool metadata.
-2. Model-visible known failures (`ValidationError`, `ModelRetry`, `ToolRetryError`, `ToolFailed`, `ToolFailedError`) are durable `FAILED` tool attempts independently of replay safety. They must never become `TOOL_EFFECT_UNKNOWN` solely because the tool is effectful.
+2. Model-visible failures (`ValidationError`, `ModelRetry`, `ToolRetryError`, `ToolFailed`, `ToolFailedError`) describe what the model should observe; they do **not** by themselves prove that the handler produced no side effect. They become durable `FAILED` attempts only when the handler did not enter, the tool is effect-free, or the operation is explicitly replay-safe. An entered replay-unsafe effectful handler fails closed as `EFFECT_UNKNOWN` / `TOOL_EFFECT_UNKNOWN`.
 3. A durable failure commit that is itself uncertain remains a storage/recovery error. It must not be reclassified as tool-effect uncertainty.
 4. `SkipToolExecution` is an intentional successful short-circuit: persist the supplied result as `COMPLETED` and complete the Step tool-effect record exactly once.
 5. Dynamic `CallDeferred` / `ApprovalRequired` keeps a non-terminal claimed operation only when the handler did not enter or exact replay is safe. If an unsafe effectful handler already entered, fail closed as `TOOL_EFFECT_UNKNOWN`.
@@ -23,7 +23,7 @@
 7. Cancellation must not weaken effect truth: an entered replay-unsafe operation remains unknown; replay-safe operations remain recoverable.
 8. Tool-operation result/failure cache replay must preserve Pydantic AI control-flow semantics. New `ToolRetryError` and `ToolFailedError` payloads preserve their complete message parts; historical payload formats remain readable.
 9. Trusted built-in names are provenance-checked. A custom capability cannot acquire built-in safety by reusing a trusted tool name.
-10. MCP and custom RuntimeCapability tools remain unsafe by default; existing `linktools.ai.replay_safe=True` remains the explicit strong opt-in for custom tools.
+10. MCP and custom RuntimeCapability tools remain unsafe by default; existing `linktools.ai.replay_safe=True` remains the explicit strong opt-in for replay safety, but does not imply that the tool is effect-free.
 11. Linktools plan mode exposes only the Linktools-owned planning surface. Harness dependency expansion must not silently add new planning tools; currently the surface is `write_plan` only.
 12. Unknown Skill IDs are model-correctable and raise `ModelRetry`, not a generic infrastructure exception.
 13. Normal handled tool failures must not emit duplicate detached-handler cleanup errors.
@@ -41,30 +41,27 @@
 | Memory `read_memory/search_memory` | yes | yes |
 | Memory `write_memory/delete_memory` | yes | no |
 | Skill `list_skills/load_skill` | yes | yes |
-| Planning `write_plan` | yes | yes |
+| Planning `write_plan` | yes | no |
 | Subagent `delegate_task` | yes | no |
 | MCP/custom default | no | no |
-| MCP/custom explicit replay-safe metadata | yes | yes |
+| MCP/custom explicit replay-safe metadata | yes | no |
 
-`effect-free` here means that an ordinary handler exception cannot leave an externally relevant mutation that Linktools must reconcile. It does not mean the tool has no in-process bookkeeping.
-
-## Persistence evolution constraint
-
-Minor representation changes must not make an existing Runtime store globally unreadable. Tolerant internal-record evolution and exact durable contracts remain separate: identity, authorization, digest, idempotency, state-machine and exact execution/recovery binding changes still fail closed and require explicit versioning or migration when semantics change.
+`effect-free` means that an ordinary handler failure cannot leave an externally relevant mutation that Linktools must reconcile. `replay-safe` means Linktools may safely repeat the operation after an uncertain attempt. These are separate properties and must not be inferred from each other.
 
 ## Validation gates
 
 The repair is complete only when all of the following hold:
 
 - missing Harness `read_file` -> failed tool effect + model retry, never `TOOL_EFFECT_UNKNOWN`;
-- known failure matrix passes for replay-safe and replay-unsafe tools;
+- model-visible failure matrix respects effect/replay policy instead of exception type alone;
+- replay-unsafe effectful handlers remain fail-closed even when they raise `ModelRetry` / `ToolFailed`;
 - generic effect-free / replay-safe effectful / replay-unsafe effectful state transitions pass;
 - failure-commit uncertainty is not reclassified;
-- SkipToolExecution success is terminalized exactly once;
+- `SkipToolExecution` success is terminalized exactly once;
 - deferred-control paths satisfy the safe replay rule;
-- ToolRetryError and ToolFailedError durable payload round-trip tests pass;
+- `ToolRetryError` and `ToolFailedError` durable payload round-trip tests pass;
 - Planning exposes no accidental Harness granular tools;
-- Skill missing-ID regression passes;
+- Skill missing-ID regression passes through the public capability binding/materialization surface;
 - cancellation tests pass;
 - repository search finds no second built-in replay-safety truth source;
 - `python manage.py check linktools-ai` passes on the repository CI Python matrix.
