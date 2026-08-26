@@ -1,64 +1,55 @@
-name: _tmp apply ai new owner files v4
+name: _tmp finalize ai runtime refactor v4
 
 on:
-  push:
+  pull_request:
     branches:
-      - tmp/ai-runtime-capabilitygroup-agent-newfiles-v4
+      - master
 
 permissions:
   contents: write
 
 jobs:
-  apply:
+  finalize:
+    if: github.head_ref == 'tmp/ai-runtime-capabilitygroup-agent-newfiles-v4'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
-      - name: Verify new owner payload
+      - name: Verify payload
         shell: bash
         run: |
           set -euo pipefail
           cd .github/_transport/ai-runtime-capabilitygroup-agent-newfiles-v4
-          cat > /tmp/part-sha256 <<'EOF'
-          d5e2d1ca86549a3d3342d7d6a7fc11193070bf8fcfb9718b771853a5cd1b97c4  part-00
-          77d9df4a5b7a29f61b1f12559d9f441f131de5c39c54d2e2928128254f0abf6b  part-01
-          986a20ea87d409018bf0d132178732656b8b22e519e90d389f9cfe8472d4354a  part-02
-          7b056d98a72c6b86b929408b517ab5e7b866bc3ce905c085aebf340cf7ef479e  part-03
-          0e0cf3f4deb28ba5aa7efe7f68492b977ec087e6264b5c9ab01ac5035315e77f  part-04
-          48dbfc982f332e67f156027021cb70a3dec9601a49b13e94d08faf588581821c  part-05
-          7c187f0f5081163cffd3bc8fbae1ce9649f96ba08cf0a0502f25e071afdf6f66  part-06
-          a69a4f8496693e8d68d907d2853374b84465ede94d1d75cc8da47ad9e43bd2c2  part-07
-          be41184ebbe8e642f2b0e0518e5cbc6215e1897915d79617be11af57cc5cd044  part-08
-          bff4558f62e61e5993c60f82f68a808f2cd50b83705e3ea7163bff9e68728bd6  part-09
-          9e8c698d64c9f4d071a68d4acb49166aae7aa1b09bae3b58a411f4c540b8a1fc  part-10
-          EOF
-          sed -i 's/^          //' /tmp/part-sha256
-          sha256sum -c /tmp/part-sha256
           cat part-00 part-01 part-02 part-03 part-04 part-05 part-06 part-07 part-08 part-09 part-10 \
             | base64 -d \
             | gzip -d \
             > /tmp/ai-newfiles.patch
-          echo '767420f45dd27ceb1ebbc3035a8da56061c1df7685ea5213564e27d66bb9061a  /tmp/ai-newfiles.patch' \
-            | sha256sum -c -
+          echo '767420f45dd27ceb1ebbc3035a8da56061c1df7685ea5213564e27d66bb9061a  /tmp/ai-newfiles.patch' | sha256sum -c -
 
-      - name: Apply and squash exact implementation
+      - name: Apply remaining owners and squash formal branch
         shell: bash
         run: |
           set -euo pipefail
           baseline='77ce66cc3a68938181ec752cd30d9be5ab24d63b'
-          current='4e446fe3d09f049e2a624c87f7804ef5c16745f7'
           target='refactor/ai-runtime-capabilitygroup-agent'
-          remote_sha="$(git ls-remote origin "refs/heads/${target}" | cut -f1)"
-          test "${remote_sha}" = "${current}"
+          git fetch origin "refs/heads/${target}:refs/remotes/origin/${target}"
+          current="$(git rev-parse "refs/remotes/origin/${target}")"
           git checkout -B "${target}" "${current}"
-          git apply --check /tmp/ai-newfiles.patch
-          git apply /tmp/ai-newfiles.patch
+          args=(
+            --include=linktools-ai/src/linktools/ai/runtime/_agent_executor.py
+            --include=linktools-ai/src/linktools/ai/runtime/_capabilities.py
+            --include=linktools-ai/src/linktools/ai/runtime/_history.py
+          )
+          git apply --check "${args[@]}" /tmp/ai-newfiles.patch
+          git apply "${args[@]}" /tmp/ai-newfiles.patch
+          rm -f .github/workflows/_tmp-finalize-ai-runtime-refactor.yml
           git diff --check
           python -m compileall -q linktools-ai/src scripts/check/ai
           git add -A
           git reset --soft "${baseline}"
+          git add -A
           test -n "$(git diff --cached --name-only)"
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
