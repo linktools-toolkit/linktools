@@ -30,16 +30,15 @@ from ..core import (
     validate_tenant_id,
 )
 from ..errors import AIError, ErrorCode
-from ..runtime import (
-    RuntimeDomain,
+from ._object import (
     RuntimeObjectKeyFactory,
     put_runtime_object,
     read_runtime_object,
 )
-from ..runtime.state import MemoryRecord, MemoryState
+from .state import MemoryRecord, MemoryState, RuntimeDomain
 from ..storage import ObjectStore, PayloadPolicy, StoredPayload, payload_fits_inline
 
-_logger = environ.get_logger("ai.adapter.memory")
+_logger = environ.get_logger("ai.runtime.memory")
 _MEMORY_PATH_SEGMENT = re.compile(r"[A-Za-z0-9_.-]{1,200}")
 
 

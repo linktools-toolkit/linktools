@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Canonical transport for Pydantic AI user content."""
+"""Runtime-owned canonical transport for Pydantic AI user content."""
 
 import json
 from collections.abc import Sequence

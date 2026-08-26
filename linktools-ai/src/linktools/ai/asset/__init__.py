@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Raw Asset file storage."""
+"""Raw Asset byte storage and backend contracts."""
 
 from ..errors import (
     AssetConflictError,
@@ -17,43 +17,16 @@ from ._directory import (
     PrefixAssetPathAdapter,
     directory_root,
 )
-from ._domain import (
-    AssetBackend,
-    AssetInfo,
-    AssetKey,
-    AssetRoot,
-    WritableAssetBackend,
-)
+from ._domain import AssetBackend, AssetInfo, AssetKey, AssetRoot, WritableAssetBackend
 from ._filesystem import FilesystemAssetBackend, filesystem_root
-from ._logical import (
-    AssetCodec,
-    AssetDiscoveryStatus,
-    AssetEntry,
-    AssetRef,
-    AssetResource,
-    AssetRetargeter,
-    AssetTypeBinding,
-    AssetValueAdapter,
-    AssetVariantBinding,
-    DirectoryLayout,
-    ResolvedAsset,
-    SingleFileLayout,
-)
 from ._object import AssetObjectKeyFactory
-from ._repository import AssetRepository, AssetScope
-from ._sql import (
-    SqlAssetBackend,
-    build_asset_sql_metadata,
-)
+from ._sql import SqlAssetBackend, build_asset_sql_metadata
 from ._store import AssetCacheAdapter, AssetStore
 
 __all__ = [
     "AssetBackend",
     "AssetCacheAdapter",
-    "AssetCodec",
     "AssetConflictError",
-    "AssetDiscoveryStatus",
-    "AssetEntry",
     "AssetError",
     "AssetInfo",
     "AssetKey",
@@ -61,24 +34,13 @@ __all__ = [
     "AssetObjectKeyFactory",
     "AssetParseError",
     "AssetPathAdapter",
-    "AssetRef",
-    "AssetRepository",
-    "AssetResource",
-    "AssetRetargeter",
     "AssetRoot",
-    "AssetScope",
     "AssetStore",
-    "AssetTypeBinding",
-    "AssetValueAdapter",
-    "AssetVariantBinding",
     "DirectoryAssetBackend",
-    "DirectoryLayout",
     "FilesystemAssetBackend",
     "InMemoryAssetBackend",
     "InvalidAssetError",
     "PrefixAssetPathAdapter",
-    "ResolvedAsset",
-    "SingleFileLayout",
     "SqlAssetBackend",
     "StrictConfigReader",
     "WritableAssetBackend",

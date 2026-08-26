@@ -8,6 +8,7 @@ from types import MappingProxyType
 
 from linktools.core import environ
 
+from ..core import JsonValue
 from ..errors import AIError, ErrorCode
 from ._contract import ModelBinding, ModelResolver
 from ._openai import _OpenAIModelBinding
@@ -76,6 +77,26 @@ class _ModelRegistrySnapshot:
             return self._bindings[route_id]
         except KeyError as error:
             raise AIError(ErrorCode.MODEL_CONNECTION_NOT_FOUND) from error
+
+    def restore(
+        self,
+        payload: "Mapping[str, JsonValue]",
+        *,
+        route_id: "str | None" = None,
+    ) -> ModelBinding:
+        semantic = dict(payload)
+        if route_id is not None:
+            preferred = self._bindings.get(route_id)
+            if preferred is not None and dict(preferred.semantic_payload) == semantic:
+                return preferred
+        matches = tuple(
+            binding
+            for _name, binding in sorted(self._bindings.items())
+            if dict(binding.semantic_payload) == semantic
+        )
+        if not matches:
+            raise AIError(ErrorCode.MODEL_CONNECTION_NOT_FOUND)
+        return matches[0]
 
 
 __all__ = ["ModelRegistry"]

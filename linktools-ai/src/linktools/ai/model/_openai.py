@@ -10,7 +10,7 @@ from pydantic_ai.models import Model
 from pydantic_ai.models.openai import OpenAIChatModel
 from pydantic_ai.providers.openai import OpenAIProvider
 
-from ..core import canonical_sha256
+from ..core import JsonValue, canonical_sha256
 
 _logger = environ.get_logger("ai.model.openai")
 
@@ -38,13 +38,17 @@ class _OpenAIModelBinding:
         return f"openai:{self.model}"
 
     @property
-    def connection_identity(self) -> str:
-        credential_id = "openai-api-key" if self.api_key is not None else None
-        return canonical_sha256({"provider": self.provider, "base_url": self.base_url, "credential_id": credential_id})
+    def semantic_payload(self) -> "dict[str, JsonValue]":
+        return {
+            "version": 1,
+            "provider": self.provider,
+            "model_identity": self.model_identity,
+            "settings": {},
+        }
 
     @property
     def fingerprint(self) -> str:
-        return canonical_sha256({"route_id": self.route_id, "provider": self.provider, "model_identity": self.model_identity, "connection_identity": self.connection_identity})
+        return canonical_sha256({"contract": "model-v1", **self.semantic_payload})
 
     def materialize(self) -> Model:
         model = OpenAIChatModel(self.model.removeprefix("openai:"), provider=OpenAIProvider(base_url=self.base_url, api_key=self.api_key))

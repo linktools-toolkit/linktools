@@ -1,19 +1,18 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Pydantic AI execution adapter for frozen AgentDefinitions."""
+"""Runtime-owned Pydantic AI execution driver."""
 
 import asyncio
 from collections.abc import Awaitable, Callable, Mapping
-from dataclasses import dataclass
-from pathlib import Path
-from typing import Any, Protocol
+from dataclasses import dataclass, field
+from typing import Any, Protocol, cast
 
 from linktools.core import environ
 from openai import APIError as OpenAIAPIError
-from pydantic import BaseModel, ValidationError
-from pydantic_ai import AgentRunResultEvent, ModelSettings
+from pydantic import ValidationError
+from pydantic_ai import Agent as PydanticAgent
+from pydantic_ai import AgentRunResultEvent, ModelSettings, TextOutput, Tool
 from pydantic_ai.capabilities import AbstractCapability, ReinjectSystemPrompt
-from pydantic_ai.capabilities import AgentCapability as PydanticAgentCapability
 from pydantic_ai.exceptions import (
     ConcurrencyLimitExceeded,
     ContentFilterError,
@@ -37,54 +36,63 @@ from pydantic_ai.messages import (
     ThinkingPartDelta,
     ToolReturnPart,
 )
-from pydantic_ai.tools import RunContext, ToolDefinition
+from pydantic_ai.models import Model
+from pydantic_ai.tools import RunContext as PydanticRunContext, ToolDefinition
 from pydantic_ai.usage import RunUsage, UsageLimitExceeded, UsageLimits
 from pydantic_ai_harness.memory import SearchableMemoryStore
+from pydantic_ai_harness.planning import PlanStore
 from pydantic_ai_harness.step_persistence import StepStore
 
-from ..capability import CapabilityMaterializationContext
+from ..agent import AgentBinding, AgentDefinition, AssistantTextOutput
+from ..capability import (
+    RunContext,
+    SKILL_TOOL_NAMES,
+    SkillCapability,
+    materialize_mcp_servers,
+    mcp_server_selector,
+    workspace_capabilities,
+    workspace_tool_class,
+)
 from ..core import (
     ExecutionDeltaType,
     ExecutionEventType,
+    ExecutionMode,
     JsonValue,
+    ResourceKind,
+    ResourceRef,
+    ThinkingValue,
     UsageMetrics,
     canonical_sha256,
     normalize_json_value,
 )
 from ..errors import AIError, ErrorCode
 from ..spec import AgentUsageLimits
-from ._binding import AgentBinding
-from ._builder import build_pydantic_agent
 from ._capabilities import (
     MEMORY_READ_TOOL_NAMES,
     MEMORY_TOOL_NAMES,
     PLANNING_TOOL_NAMES,
     SUBAGENT_TOOL_NAMES,
-    AgentRunScope,
     SubagentDelegate,
     ToolOperationBridge,
     compose_platform_capabilities,
+    select_runtime_tool_names,
     tool_allowed_in_planning,
     tool_is_control,
     tool_name_allowed,
 )
-from ._definition import AgentDefinition
 from ._input import _RuntimeUserPrompt, _restore_user_prompt
-from ._output import AssistantTextOutput
+
+_logger = environ.get_logger("ai.runtime.agent_executor")
 
 
 @dataclass(frozen=True, slots=True)
 class LiveDelta:
-    """An ephemeral model presentation update."""
-
     kind: ExecutionDeltaType
     content: str
 
 
 @dataclass(frozen=True, slots=True)
 class DurableBoundary:
-    """A semantic boundary that is safe to persist in the execution audit."""
-
     kind: ExecutionEventType
     payload: JsonValue
 
@@ -97,89 +105,72 @@ class UsageSink(Protocol):
     async def __call__(self, usage: UsageMetrics) -> None: ...
 
 
-_logger = environ.get_logger("ai.agent.executor")
-
-
 @dataclass(frozen=True, slots=True)
 class AgentExecutionResult:
     run_id: str
     output: JsonValue
-    messages: "list[ModelMessage]"
+    messages: list[ModelMessage]
     usage: UsageMetrics
 
 
-class AgentExecutor:
-    """Execute one immutable definition without loading declarations or committing runtime state."""
+@dataclass(frozen=True, slots=True)
+class _RunScope:
+    binding: AgentBinding
+    context: RunContext[object]
+    user_prompt: _RuntimeUserPrompt
+    history: list[ModelMessage]
+    conversation_id: str
+    step_store: StepStore
+    step_run_id: str
+    segment_sequence: int
+    history_id: str | None = None
+    memory_scope: str | None = None
+    memory_store: SearchableMemoryStore | None = None
+    plan_store_resolver: Callable[[PydanticRunContext[object]], PlanStore] | None = None
+    mode: ExecutionMode = "run"
+    planning: bool = False
+    thinking: ThinkingValue = False
+    parent_step_run_id: str | None = None
+    subagent_available: bool = False
+    subagent_delegate: SubagentDelegate | None = None
+    event_sink: EventSink | None = None
+    usage_sink: UsageSink | None = None
+    tool_operations: ToolOperationBridge | None = None
+    background_tasks: set[asyncio.Task[object]] = field(default_factory=set, compare=False)
+    replace_history_system_prompt: bool = False
+    context_target_tokens: int | None = None
 
-    def __init__(self, *, execution_root: Path) -> None:
-        self._execution_root = execution_root.expanduser().resolve()
+    def __post_init__(self) -> None:
+        if self.mode not in {"run", "plan"} or not isinstance(self.planning, bool):
+            raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+        if self.mode == "plan" and not self.planning:
+            raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+        if not isinstance(self.subagent_available, bool) or not isinstance(self.replace_history_system_prompt, bool):
+            raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+        if self.event_sink is None:
+            raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+
+
+class AgentExecutor:
+    """Execute one exact Agent binding inside a Runtime-owned execution scope."""
+
+    def __init__(self) -> None:
         self._detached_tasks: set[asyncio.Task[Any]] = set()
 
-    async def execute(
-        self,
-        binding: AgentBinding,
-        user_prompt: _RuntimeUserPrompt,
-        history: "list[ModelMessage]",
-        conversation_id: str,
-        *,
-        step_store: StepStore,
-        step_run_id: str,
-        segment_sequence: int,
-        history_id: "str | None" = None,
-        capability_context: CapabilityMaterializationContext,
-        memory_scope: "str | None" = None,
-        memory_store: "SearchableMemoryStore | None" = None,
-        platform_tool_names: "tuple[str, ...]" = (),
-        planning: bool = False,
-        thinking: bool = False,
-        parent_step_run_id: "str | None" = None,
-        subagent_delegate: "SubagentDelegate | None" = None,
-        event_sink: EventSink,
-        usage_sink: "UsageSink | None" = None,
-        tool_operations: "ToolOperationBridge | None" = None,
-        background_tasks: "set[asyncio.Task[Any]] | None" = None,
-        replace_history_system_prompt: bool = False,
-    ) -> AgentExecutionResult:
-        if (
-            not isinstance(planning, bool)
-            or not isinstance(thinking, bool)
-            or not isinstance(replace_history_system_prompt, bool)
-        ):
-            raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+    @property
+    def pending_background_tasks(self) -> tuple[asyncio.Task[Any], ...]:
+        return tuple(task for task in self._detached_tasks if not task.done())
+
+    async def execute(self, scope: _RunScope) -> AgentExecutionResult:
+        binding = scope.binding
         definition = binding.definition
         run_usage = RunUsage()
         usage_limits = _to_usage_limits(definition.spec.usage_limits)
         result: AgentExecutionResult | None = None
         primary_error: BaseException | None = None
-        detached_tasks = (
-            self._detached_tasks if background_tasks is None else background_tasks
-        )
         try:
             try:
-                result = await self._execute(
-                    binding,
-                    user_prompt,
-                    history,
-                    conversation_id,
-                    step_store=step_store,
-                    step_run_id=step_run_id,
-                    segment_sequence=segment_sequence,
-                    history_id=history_id,
-                    capability_context=capability_context,
-                    memory_scope=memory_scope,
-                    memory_store=memory_store,
-                    platform_tool_names=platform_tool_names,
-                    planning=planning,
-                    thinking=thinking,
-                    parent_step_run_id=parent_step_run_id,
-                    subagent_delegate=subagent_delegate,
-                    event_sink=event_sink,
-                    run_usage=run_usage,
-                    usage_limits=usage_limits,
-                    tool_operations=tool_operations,
-                    background_tasks=detached_tasks,
-                    replace_history_system_prompt=replace_history_system_prompt,
-                )
+                result = await self._execute(scope, run_usage=run_usage, usage_limits=usage_limits)
                 return result
             except asyncio.CancelledError as error:
                 primary_error = error
@@ -188,45 +179,38 @@ class AgentExecutor:
                 primary_error = error
                 raise
             except Exception as error:
-                mapped = _execution_error(
-                    error,
-                    usage_limits=usage_limits,
-                    run_usage=run_usage,
-                )
+                mapped = _execution_error(error, usage_limits=usage_limits, run_usage=run_usage)
                 primary_error = mapped
                 raise mapped from error
         finally:
-            if usage_sink is not None:
+            if scope.usage_sink is not None:
                 usage = result.usage if result is not None else _usage_metrics(run_usage)
                 if isinstance(primary_error, asyncio.CancelledError):
                     task = asyncio.create_task(
-                        usage_sink(usage),
-                        name=f"agent-usage-{step_run_id}",
+                        scope.usage_sink(usage),
+                        name=f"agent-usage-{scope.step_run_id}",
                     )
-                    self._detach_task(task, step_run_id, detached_tasks)
+                    self._detach_task(task, scope.step_run_id, scope.background_tasks)
                 else:
                     try:
-                        await usage_sink(usage)
+                        await scope.usage_sink(usage)
                     except Exception:
                         if primary_error is None:
                             raise
                         _logger.error(
                             "usage sink failed after agent execution failure: step=%s",
-                            step_run_id,
+                            scope.step_run_id,
                             exc_info=False,
                         )
-
-    @property
-    def pending_background_tasks(self) -> tuple[asyncio.Task[Any], ...]:
-        return tuple(task for task in self._detached_tasks if not task.done())
 
     def _detach_task(
         self,
         task: asyncio.Task[Any],
         step_run_id: str,
-        background_tasks: "set[asyncio.Task[Any]]",
+        background_tasks: set[asyncio.Task[object]],
     ) -> None:
-        background_tasks.add(task)
+        background_tasks.add(cast("asyncio.Task[object]", task))
+        self._detached_tasks.add(task)
 
         def consume(done: asyncio.Task[Any]) -> None:
             try:
@@ -234,112 +218,59 @@ class AgentExecutor:
             except asyncio.CancelledError:
                 pass
             except BaseException:
-                _logger.exception(
-                    "detached usage sink failed: step=%s",
-                    step_run_id,
-                )
+                _logger.exception("detached usage sink failed: step=%s", step_run_id)
             finally:
-                background_tasks.discard(done)
+                background_tasks.discard(cast("asyncio.Task[object]", done))
+                self._detached_tasks.discard(done)
 
         task.add_done_callback(consume)
 
     async def _execute(
         self,
-        binding: AgentBinding,
-        user_prompt: _RuntimeUserPrompt,
-        history: "list[ModelMessage]",
-        conversation_id: str,
+        scope: _RunScope,
         *,
-        step_store: StepStore,
-        step_run_id: str,
-        segment_sequence: int,
-        history_id: "str | None",
-        capability_context: CapabilityMaterializationContext,
-        memory_scope: "str | None",
-        memory_store: "SearchableMemoryStore | None",
-        platform_tool_names: "tuple[str, ...]",
-        planning: bool,
-        thinking: bool,
-        parent_step_run_id: "str | None",
-        subagent_delegate: "SubagentDelegate | None",
-        event_sink: EventSink,
         run_usage: RunUsage,
         usage_limits: UsageLimits,
-        tool_operations: "ToolOperationBridge | None",
-        background_tasks: "set[asyncio.Task[Any]]",
-        replace_history_system_prompt: bool,
     ) -> AgentExecutionResult:
+        binding = scope.binding
         definition = binding.definition
-        if not self._execution_root.is_dir():
-            raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
-        if await step_store.get_run(run_id=step_run_id) is not None:
+        if await scope.step_store.get_run(run_id=scope.step_run_id) is not None:
             raise AIError(ErrorCode.STORAGE_CONFLICT)
         model = definition.model.materialize()
-        if thinking and not model.profile.get("supports_thinking", False):
-            raise AIError(
-                ErrorCode.REQUEST_FIELD_INVALID,
-                safe_details={"field": "thinking", "reason": "model_not_supported"},
-            )
-        agent = build_pydantic_agent(binding, model=model)
-        materialized: list[PydanticAgentCapability[None]] = []
-        for capability in definition.effective_capabilities:
-            materialized.extend(await capability.materialize(capability_context))
-        trusted_tool_classes = _trusted_tool_classes(
-            definition,
-            platform_tool_names=platform_tool_names,
-        )
-        scope = AgentRunScope(
-            root=self._execution_root,
-            agent_name=definition.spec.id,
-            conversation_id=conversation_id,
-            step_run_id=step_run_id,
-            segment_sequence=segment_sequence,
-            history_id=history_id,
-            memory_scope=memory_scope,
-            step_store=step_store,
-            memory_store=memory_store,
-            platform_tool_names=platform_tool_names,
-            planning=planning,
-            trusted_tool_classes=trusted_tool_classes,
-            trusted_mcp_selectors=definition.trusted_mcp_selectors,
-            parent_step_run_id=parent_step_run_id,
-            subagent_delegate=subagent_delegate,
-            tool_operations=tool_operations,
-            background_tasks=background_tasks,
-        )
-        platform = await compose_platform_capabilities(
+        model_settings = _thinking_settings(model, scope.thinking)
+        agent, capabilities, runtime_tool_names, trusted_tool_classes, trusted_mcp_selectors = await _materialize_agent(
             scope,
-            model_factory=lambda _value: model,
-            parent_model=model,
+            model=model,
         )
-        capabilities = tuple(materialized) + platform
         capabilities = (
             *capabilities,
             _ToolPresentation(
-                definition.spec.allow_tools,
-                planning=planning,
+                definition.ordinary_tool_policy,
+                mcp_policy=definition.mcp_selector_policy,
+                plan_mode=scope.mode == "plan",
                 trusted_tool_classes=trusted_tool_classes,
-                trusted_mcp_selectors=definition.trusted_mcp_selectors,
+                trusted_mcp_selectors=trusted_mcp_selectors,
             ),
         )
-        if replace_history_system_prompt:
+        if scope.replace_history_system_prompt:
             capabilities = (*capabilities, ReinjectSystemPrompt(replace_existing=True))
         _logger.debug(
-            "agent execution started: agent=%s definition=%s step=%s capability_count=%s planning=%s thinking=%s",
+            "agent execution started: agent=%s definition=%s step=%s mode=%s planning=%s thinking=%s runtime_tools=%s",
             definition.spec.id,
             definition.digest,
-            step_run_id,
-            len(capabilities),
-            planning,
-            thinking,
+            scope.step_run_id,
+            scope.mode,
+            scope.planning,
+            scope.thinking,
+            runtime_tool_names,
         )
         final_result = None
-        model_settings = ModelSettings(thinking=True) if thinking else None
         async with agent.run_stream_events(
-            _restore_user_prompt(user_prompt),
-            message_history=history or None,
-            conversation_id=conversation_id,
-            run_id=step_run_id,
+            _restore_user_prompt(scope.user_prompt),
+            deps=scope.context,
+            message_history=scope.history or None,
+            conversation_id=scope.conversation_id,
+            run_id=scope.step_run_id,
             usage_limits=usage_limits,
             usage=run_usage,
             capabilities=capabilities,
@@ -351,24 +282,19 @@ class AgentExecutor:
                     continue
                 emission = _map_event(event)
                 if emission is not None:
-                    await event_sink(emission)
+                    await cast(EventSink, scope.event_sink)(emission)
         if final_result is None:
-            raise AIError(
-                ErrorCode.INTERNAL_ERROR,
-                safe_details={"phase": "agent_result"},
-            )
-        run = await step_store.get_run(run_id=step_run_id)
-        snapshot = await step_store.latest_snapshot(run_id=step_run_id)
-        unresolved = await step_store.list_unresolved_tool_effects(run_id=step_run_id)
-        if run is None or snapshot is None or unresolved or run.conversation_id != conversation_id:
+            raise AIError(ErrorCode.INTERNAL_ERROR, safe_details={"phase": "agent_result"})
+        run = await scope.step_store.get_run(run_id=scope.step_run_id)
+        snapshot = await scope.step_store.latest_snapshot(run_id=scope.step_run_id)
+        unresolved = await scope.step_store.list_unresolved_tool_effects(run_id=scope.step_run_id)
+        if run is None or snapshot is None or unresolved or run.conversation_id != scope.conversation_id:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         output = final_result.output
-        if binding.output_type is AssistantTextOutput:
+        if binding.output_binding.mode == "text":
             if not isinstance(output, AssistantTextOutput):
                 raise AIError(ErrorCode.OUTPUT_VALIDATION_FAILED)
             output_payload: object = output.model_dump(mode="json")
-        elif isinstance(output, BaseModel):
-            output_payload = output.model_dump(mode="json")
         elif isinstance(output, Mapping):
             output_payload = dict(output)
         else:
@@ -376,52 +302,181 @@ class AgentExecutor:
         try:
             payload = normalize_json_value(output_payload)
         except (TypeError, ValueError) as error:
-            _logger.warning(
-                "agent output validation failed: step=%s",
-                step_run_id,
-            )
-            raise AIError(
-                ErrorCode.OUTPUT_VALIDATION_FAILED,
-                retryable=False,
-            ) from error
-        _logger.debug("agent execution completed: definition=%s step=%s", definition.digest, step_run_id)
+            raise AIError(ErrorCode.OUTPUT_VALIDATION_FAILED, retryable=False) from error
         usage = _usage_metrics(run_usage)
         return AgentExecutionResult(final_result.run_id, payload, final_result.all_messages(), usage)
 
 
-class _ToolPresentation(AbstractCapability[None]):
+async def _materialize_agent(
+    scope: _RunScope,
+    *,
+    model: Model,
+) -> tuple[
+    PydanticAgent[RunContext[object], object],
+    tuple[AbstractCapability[RunContext[object]], ...],
+    tuple[str, ...],
+    tuple[tuple[str, str], ...],
+    tuple[str, ...],
+]:
+    definition = scope.binding.definition
+    business_tools: list[Tool[RunContext[object]]] = []
+    workspace_names: list[str] = []
+    trusted: dict[str, str] = {}
+    for candidate in definition.selected_tools:
+        tool = candidate.value
+        if not isinstance(tool, Tool):
+            raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
+        tool_class = workspace_tool_class(tool)
+        if tool_class is None:
+            business_tools.append(cast("Tool[RunContext[object]]", tool))
+        else:
+            workspace_names.append(candidate.id)
+            trusted[candidate.id] = tool_class
+
+    runtime_tool_names = select_runtime_tool_names(
+        ordinary_tool_policy=definition.ordinary_tool_policy,
+        memory_scope=scope.memory_scope,
+        planning=scope.planning,
+        subagent_available=scope.subagent_available and bool(definition.selected_subagents),
+    )
+    for name in runtime_tool_names:
+        if name in MEMORY_TOOL_NAMES:
+            trusted[name] = "memory.read" if name in MEMORY_READ_TOOL_NAMES else "memory.write"
+        elif name in PLANNING_TOOL_NAMES or name in SUBAGENT_TOOL_NAMES:
+            trusted[name] = "control"
+        else:
+            raise AIError(ErrorCode.CAPABILITY_POLICY_CONFLICT)
+    if definition.skill_specs:
+        for name in SKILL_TOOL_NAMES:
+            trusted[name] = "control"
+    trusted_tool_classes = tuple(sorted(trusted.items()))
+    trusted_mcp_selectors = tuple(
+        sorted(mcp_server_selector(server.id) for server in definition.mcp_servers)
+    )
+
+    capabilities: list[AbstractCapability[RunContext[object]]] = []
+    capabilities.extend(workspace_capabilities(scope.context.workspace, workspace_names))
+    for candidate in definition.selected_capabilities:
+        if not isinstance(candidate.value, AbstractCapability):
+            raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
+        capabilities.append(cast("AbstractCapability[RunContext[object]]", candidate.value))
+    if definition.skill_specs:
+        capabilities.append(SkillCapability(definition.skill_specs))
+    if definition.mcp_servers:
+        capabilities.extend(
+            cast(
+                "tuple[AbstractCapability[RunContext[object]], ...]",
+                await materialize_mcp_servers(
+                    definition.mcp_servers,
+                    definition.mcp_selector_policy,
+                    principal=scope.context.principal,
+                    execution=ResourceRef(
+                        ResourceKind.EXECUTION,
+                        scope.context.execution_id,
+                        scope.context.principal.tenant_id,
+                    ),
+                    execution_root=str(scope.context.workspace.root),
+                ),
+            )
+        )
+    platform = await compose_platform_capabilities(
+        agent_name=definition.spec.id,
+        conversation_id=scope.conversation_id,
+        step_run_id=scope.step_run_id,
+        segment_sequence=scope.segment_sequence,
+        history_id=scope.history_id,
+        memory_scope=scope.memory_scope,
+        step_store=scope.step_store,
+        memory_store=scope.memory_store,
+        runtime_tool_names=runtime_tool_names,
+        plan_mode=scope.mode == "plan",
+        trusted_tool_classes=trusted_tool_classes,
+        trusted_mcp_selectors=trusted_mcp_selectors,
+        context_target_tokens=scope.context_target_tokens,
+        parent_step_run_id=scope.parent_step_run_id,
+        subagent_delegate=scope.subagent_delegate,
+        tool_operations=scope.tool_operations,
+        background_tasks=scope.background_tasks,
+        plan_store_resolver=scope.plan_store_resolver,
+    )
+    capabilities.extend(cast("tuple[AbstractCapability[RunContext[object]], ...]", platform))
+
+    output_type: object
+    if scope.binding.output_binding.mode == "text":
+        output_type = TextOutput(_assistant_text_output)
+    else:
+        output_type = scope.binding.output_type
+    agent = cast(
+        "PydanticAgent[RunContext[object], object]",
+        PydanticAgent(
+            model,
+            name=definition.spec.id,
+            system_prompt=definition.spec.system_prompt,
+            instructions="\n".join(definition.spec.instructions),
+            output_type=output_type,
+            deps_type=RunContext,
+            tools=tuple(business_tools),
+        ),
+    )
+    return agent, tuple(capabilities), runtime_tool_names, trusted_tool_classes, trusted_mcp_selectors
+
+
+def _assistant_text_output(value: str) -> AssistantTextOutput:
+    return AssistantTextOutput(text=value)
+
+
+def _thinking_settings(model: Model, thinking: ThinkingValue) -> ModelSettings:
+    profile = model.profile
+    supports = bool(profile.get("supports_thinking", False))
+    always = bool(profile.get("thinking_always_enabled", False))
+    if thinking is False:
+        if always:
+            raise AIError(
+                ErrorCode.REQUEST_FIELD_INVALID,
+                safe_details={"field": "thinking", "reason": "model_always_enabled"},
+            )
+        return ModelSettings(thinking=False)
+    if not supports:
+        raise AIError(
+            ErrorCode.REQUEST_FIELD_INVALID,
+            safe_details={"field": "thinking", "reason": "model_not_supported"},
+        )
+    return ModelSettings(thinking=thinking)
+
+
+class _ToolPresentation(AbstractCapability[RunContext[object]]):
     def __init__(
         self,
-        allow_tools: "tuple[str, ...]",
+        ordinary_policy: tuple[str, ...],
         *,
-        planning: bool,
-        trusted_tool_classes: "tuple[tuple[str, str], ...]",
-        trusted_mcp_selectors: "tuple[str, ...]",
+        mcp_policy: tuple[str, ...],
+        plan_mode: bool,
+        trusted_tool_classes: tuple[tuple[str, str], ...],
+        trusted_mcp_selectors: tuple[str, ...],
     ) -> None:
-        self._allow_tools = allow_tools
-        self._planning = planning
+        self._ordinary_policy = ordinary_policy
+        self._mcp_policy = mcp_policy
+        self._plan_mode = plan_mode
         self._trusted_tool_classes = trusted_tool_classes
         self._trusted_mcp_selectors = trusted_mcp_selectors
 
     async def prepare_tools(
         self,
-        _ctx: RunContext[None],
-        tool_defs: "list[ToolDefinition]",
-    ) -> "list[ToolDefinition]":
+        _ctx: PydanticRunContext[RunContext[object]],
+        tool_defs: list[ToolDefinition],
+    ) -> list[ToolDefinition]:
         names = [tool.name for tool in tool_defs]
         if len(names) != len(set(names)):
             raise AIError(ErrorCode.CAPABILITY_CONFLICT)
         selected: list[ToolDefinition] = []
         for tool in tool_defs:
-            if not tool_is_control(
-                tool,
-                trusted_tool_classes=self._trusted_tool_classes,
-            ) and not _function_tool_allowed(
-                tool.name,
-                self._allow_tools,
-            ):
-                continue
-            if self._planning and not tool_allowed_in_planning(
+            if not tool_is_control(tool, trusted_tool_classes=self._trusted_tool_classes):
+                if tool.name.startswith("mcp__"):
+                    if not _mcp_tool_allowed(tool.name, self._mcp_policy):
+                        continue
+                elif not tool_name_allowed(tool.name, self._ordinary_policy):
+                    continue
+            if self._plan_mode and not tool_allowed_in_planning(
                 tool,
                 trusted_tool_classes=self._trusted_tool_classes,
                 trusted_mcp_selectors=self._trusted_mcp_selectors,
@@ -431,40 +486,21 @@ class _ToolPresentation(AbstractCapability[None]):
         return selected
 
     @classmethod
-    def get_serialization_name(cls) -> "str | None":
+    def get_serialization_name(cls) -> str | None:
         return None
 
 
-def _trusted_tool_classes(
-    definition: AgentDefinition,
-    *,
-    platform_tool_names: "tuple[str, ...]",
-) -> "tuple[tuple[str, str], ...]":
-    values = dict(definition.trusted_tool_classes)
-    for name in platform_tool_names:
-        if name in MEMORY_TOOL_NAMES:
-            tool_class = "memory.read" if name in MEMORY_READ_TOOL_NAMES else "memory.write"
-        elif name in PLANNING_TOOL_NAMES or name in SUBAGENT_TOOL_NAMES:
-            tool_class = "control"
-        else:
-            raise AIError(ErrorCode.CAPABILITY_POLICY_CONFLICT)
-        previous = values.get(name)
-        if previous is not None and previous != tool_class:
-            raise AIError(ErrorCode.CAPABILITY_POLICY_CONFLICT)
-        values[name] = tool_class
-    return tuple(sorted(values.items()))
-
-
-def _function_tool_allowed(name: str, allow_tools: "tuple[str, ...]") -> bool:
-    if tool_name_allowed(name, allow_tools):
-        return True
+def _mcp_tool_allowed(name: str, selectors: tuple[str, ...]) -> bool:
     if not name.startswith("mcp__"):
         return False
-    server, separator, tool = name[5:].partition("__")
-    if not separator or not server or not tool:
-        return False
-    selector = f"mcp__{server}"
-    return selector in allow_tools or f"{selector}__*" in allow_tools
+    for selector in selectors:
+        if selector.endswith("__*") and name.startswith(selector[:-1]):
+            return True
+        if "__" not in selector[5:] and name.startswith(f"{selector}__"):
+            return True
+        if selector == name:
+            return True
+    return False
 
 
 def _map_event(event: object) -> "AgentEmission | None":

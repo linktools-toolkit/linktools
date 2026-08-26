@@ -23,6 +23,7 @@ from ...core import (
     EvaluationStatus,
     ExecutionEventType,
     ExecutionLineageKind,
+    ExecutionMode,
     ExecutionStatus,
     ExternalCallStatus,
     IdempotencyStatus,
@@ -35,7 +36,10 @@ from ...core import (
     ResourceRef,
     SessionStatus,
     StopReason,
+    ThinkingValue,
     UsageMetrics,
+    normalize_execution_mode,
+    normalize_thinking,
 )
 from ...storage import ObjectRef, StoredPayload
 from ...task import (
@@ -412,16 +416,23 @@ class ExecutionRecord:
     safe_error_details: Mapping[str, JsonValue]
     created_at: datetime
     updated_at: datetime
+    mode: ExecutionMode
     planning: bool
-    thinking: bool
+    thinking: ThinkingValue
     binding: AgentBindingSnapshot
     memory_scope: str | None = None
     conversation_step_run_id: str | None = None
     result: ResultRecord | None = None
 
     def __post_init__(self) -> None:
-        if not isinstance(self.planning, bool) or not isinstance(self.thinking, bool):
-            raise TypeError("execution modes must be boolean")
+        mode = normalize_execution_mode(self.mode)
+        thinking = normalize_thinking(self.thinking)
+        if not isinstance(self.planning, bool):
+            raise TypeError("execution planning must be bool")
+        if mode == "plan" and not self.planning:
+            raise ValueError("plan mode requires planning")
+        object.__setattr__(self, "mode", mode)
+        object.__setattr__(self, "thinking", thinking)
         if not isinstance(self.binding, AgentBindingSnapshot) or self.binding.binding_digest != self.binding_digest:
             raise ValueError("execution binding snapshot does not match binding digest")
 
@@ -586,22 +597,12 @@ class IdempotencyRecord:
 class ResultRecord:
     execution_id: str
     tenant_id: str
-    output_schema_id: str | None
-    output_schema_revision: int | None
-    output_schema_fingerprint: str | None
     output: StoredPayload | None
     stop_reason: StopReason
     usage: UsageMetrics
     created_at: datetime
 
     def __post_init__(self) -> None:
-        output_fields = (self.output_schema_id, self.output_schema_revision, self.output_schema_fingerprint)
-        if any(value is None for value in output_fields) and any(value is not None for value in output_fields):
-            raise ValueError("result output schema fields must be all null or all present")
-        if self.output is not None and any(value is None for value in output_fields):
-            raise ValueError("result object requires output schema")
-        if self.output is None and any(value is not None for value in output_fields):
-            raise ValueError("result schema requires output")
         if self.created_at.tzinfo is None:
             raise ValueError("result requires an aware timestamp")
 
@@ -628,7 +629,6 @@ class EvaluationRecord:
     evaluator_id: str
     evaluator_revision: int
     binding_digest: str
-    output_schema_fingerprint: str
     artifact_digest: str | None
     status: EvaluationStatus
     revision: int
@@ -667,16 +667,9 @@ class ExecutionTerminalCommit:
             raise ValueError("terminal commit requires a terminal Execution")
         if self.result.execution_id != self.execution.execution_id or self.result.tenant_id != self.execution.tenant_id:
             raise ValueError("terminal result identity mismatch")
-        output_fields = (
-            self.result.output_schema_id,
-            self.result.output_schema_revision,
-            self.result.output_schema_fingerprint,
-        )
-        has_output = all(value is not None for value in output_fields) and self.result.output is not None
-        partial_output = any(value is not None for value in output_fields) or self.result.output is not None
-        if status is ExecutionStatus.SUCCEEDED and not has_output:
+        if status is ExecutionStatus.SUCCEEDED and self.result.output is None:
             raise ValueError("successful terminal result requires output")
-        if status is not ExecutionStatus.SUCCEEDED and partial_output:
+        if status is not ExecutionStatus.SUCCEEDED and self.result.output is not None:
             raise ValueError("failed terminal result cannot contain output")
 
 
@@ -842,6 +835,7 @@ class RecoveryHandoffPhase(str, Enum):
 @dataclass(frozen=True, slots=True)
 class RecoveryExecutionInput:
     user_prompt: StoredPayload | str
+    user_prompt_codec: str
     principal_id: str
     principal_kind: str
     session_id: str | None
@@ -854,8 +848,9 @@ class RecoveryExecutionInput:
     base_execution_id: str | None
     conversation_step_run_id: str | None
     idempotency: RecoveryIdempotencyInput
+    mode: ExecutionMode
     planning: bool
-    thinking: bool
+    thinking: ThinkingValue
     binding: AgentBindingSnapshot
 
     def __post_init__(self) -> None:
@@ -864,8 +859,16 @@ class RecoveryExecutionInput:
             object.__setattr__(self, "user_prompt", StoredPayload.inline_text(prompt))
         elif not isinstance(prompt, StoredPayload):
             raise TypeError("recovery prompt payload is invalid")
-        if not isinstance(self.planning, bool) or not isinstance(self.thinking, bool):
-            raise TypeError("recovery execution modes must be boolean")
+        if not isinstance(self.user_prompt_codec, str) or not self.user_prompt_codec:
+            raise TypeError("recovery prompt codec is required")
+        mode = normalize_execution_mode(self.mode)
+        thinking = normalize_thinking(self.thinking)
+        if not isinstance(self.planning, bool):
+            raise TypeError("recovery planning must be bool")
+        if mode == "plan" and not self.planning:
+            raise ValueError("plan mode requires planning")
+        object.__setattr__(self, "mode", mode)
+        object.__setattr__(self, "thinking", thinking)
         if not isinstance(self.binding, AgentBindingSnapshot) or self.binding.binding_digest != self.binding_digest:
             raise ValueError("recovery binding snapshot does not match execution identity")
 
@@ -889,9 +892,6 @@ class RecoveryTerminalOutcome:
     error_code: str | None
     safe_error_details: Mapping[str, JsonValue]
     stop_reason: StopReason
-    output_schema_id: str | None
-    output_schema_revision: int | None
-    output_schema_fingerprint: str | None
     output: StoredPayload | None
     object_source_domain: RuntimeDomain | None
     usage: UsageMetrics
@@ -900,12 +900,9 @@ class RecoveryTerminalOutcome:
     result_created_at: datetime
 
     def __post_init__(self) -> None:
-        output_fields = (self.output_schema_id, self.output_schema_revision, self.output_schema_fingerprint)
-        has_output = all(value is not None for value in output_fields) and self.output is not None
-        partial_output = any(value is not None for value in output_fields) or self.output is not None
-        if self.terminal_status is ExecutionStatus.SUCCEEDED and not has_output:
+        if self.terminal_status is ExecutionStatus.SUCCEEDED and self.output is None:
             raise ValueError("successful recovery outcome requires output")
-        if self.terminal_status is not ExecutionStatus.SUCCEEDED and partial_output:
+        if self.terminal_status is not ExecutionStatus.SUCCEEDED and self.output is not None:
             raise ValueError("failed terminal result cannot contain output")
         if self.output is None and self.object_source_domain is not None:
             raise ValueError("recovery object source requires output")
@@ -1264,7 +1261,7 @@ class ToolOperationAdmission:
     idempotency_key_digest: str
     tool_name: str
     arguments_digest: str
-    binding_fingerprint: str
+    binding_digest: str
     replay_safe: bool
     owner: str
     lease_seconds: int

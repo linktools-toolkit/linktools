@@ -13,7 +13,13 @@ from ..agent import (
     UserPromptTransport,
     user_prompt_transport,
 )
-from ..core import JsonValue, Principal, canonical_json_bytes
+from ..core import (
+    JsonValue,
+    Principal,
+    canonical_json_bytes,
+    normalize_execution_mode,
+    normalize_thinking,
+)
 from ..errors import AIError, ErrorCode
 from ..runtime import (
     ExecutionRequest,
@@ -36,9 +42,11 @@ _EXECUTION_V1_FIELDS = frozenset(
     {
         "version",
         "user_prompt",
+        "user_prompt_codec",
         "principal",
         "idempotency_key",
         "memory_scope",
+        "mode",
         "planning",
         "thinking",
         "binding",
@@ -124,18 +132,14 @@ async def put_execution_request(
 ) -> str:
     if not isinstance(binding, AgentBindingSnapshot):
         raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
-    user_prompt_codec = (
-        request.user_prompt.codec
-        if isinstance(request.user_prompt, UserPromptTransport)
-        else "text"
-    )
     payload: dict[str, JsonValue] = {
         "version": 1,
-        "user_prompt": str(request.user_prompt),
-        "user_prompt_codec": user_prompt_codec,
+        "user_prompt": request.user_prompt,
+        "user_prompt_codec": request.user_prompt_codec,
         "principal": _principal_payload(request.principal),
         "idempotency_key": request.idempotency_key,
         "memory_scope": request.memory_scope,
+        "mode": request.mode,
         "planning": request.planning,
         "thinking": request.thinking,
         "binding": binding.to_payload(),
@@ -332,15 +336,21 @@ def _execution_request_from_payload(
 ) -> tuple[ExecutionRequest, AgentBindingSnapshot]:
     payload = _mapping(value, _EXECUTION_V1_FIELDS)
     _require_version(payload["version"], 1)
+    mode = payload["mode"]
     planning = payload["planning"]
     thinking = payload["thinking"]
-    if not isinstance(planning, bool) or not isinstance(thinking, bool):
-        raise ValueError("execution mode fields are invalid")  # noqa: TRY004
+    if not isinstance(planning, bool):
+        raise ValueError("execution planning field is invalid")  # noqa: TRY004
+    try:
+        resolved_mode = normalize_execution_mode(mode)
+        resolved_thinking = normalize_thinking(thinking)
+    except AIError as error:
+        raise ValueError("execution policy fields are invalid") from error
     binding = AgentBindingSnapshot.from_payload(payload["binding"])
     memory_scope = payload["memory_scope"]
     if memory_scope is not None and not isinstance(memory_scope, str):
         raise ValueError("execution memory scope is invalid")
-    user_prompt_codec = payload.get("user_prompt_codec", "text")
+    user_prompt_codec = payload["user_prompt_codec"]
     if not isinstance(user_prompt_codec, str) or not user_prompt_codec:
         raise ValueError("execution user prompt codec is invalid")
     user_prompt = user_prompt_transport(
@@ -348,12 +358,14 @@ def _execution_request_from_payload(
         user_prompt_codec,
     )
     request = ExecutionRequest(
-        user_prompt,
+        str(user_prompt),
+        user_prompt.codec,
         _principal_from_payload(payload["principal"]),
         _require_string(payload["idempotency_key"]),
         memory_scope,
+        resolved_mode,
         planning,
-        thinking,
+        resolved_thinking,
     )
     return request, binding
 

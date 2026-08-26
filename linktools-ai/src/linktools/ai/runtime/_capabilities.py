@@ -32,37 +32,24 @@ from pydantic_ai_harness.compaction import (
     TieredCompaction,
 )
 from pydantic_ai_harness.memory import Memory, SearchableMemoryStore
-from pydantic_ai_harness.planning import Planning
+from pydantic_ai_harness.planning import PlanStore, Planning
 from pydantic_ai_harness.step_persistence import StepEvent, StepPersistence, StepStore
 
-from ..capability import SKILL_TOOL_NAMES
+from ..capability import (
+    SKILL_TOOL_NAMES,
+    WORKSPACE_FILESYSTEM_READ_TOOL_NAMES,
+    WORKSPACE_FILESYSTEM_TOOL_NAMES,
+    WORKSPACE_SHELL_TOOL_NAMES,
+)
 from ..core import JsonValue
 from ..errors import AIError, ErrorCode
 
-_logger = environ.get_logger("ai.agent.capabilities")
+_logger = environ.get_logger("ai.runtime.capabilities")
 
 MEMORY_TOOL_NAMES = ("delete_memory", "read_memory", "search_memory", "write_memory")
 MEMORY_READ_TOOL_NAMES = ("read_memory", "search_memory")
 PLANNING_TOOL_NAMES = ("write_plan",)
 SUBAGENT_TOOL_NAMES = ("delegate_task",)
-WORKSPACE_FILESYSTEM_TOOL_NAMES = (
-    "create_directory",
-    "edit_file",
-    "file_info",
-    "find_files",
-    "list_directory",
-    "read_file",
-    "search_files",
-    "write_file",
-)
-WORKSPACE_FILESYSTEM_READ_TOOL_NAMES = (
-    "file_info",
-    "find_files",
-    "list_directory",
-    "read_file",
-    "search_files",
-)
-WORKSPACE_SHELL_TOOL_NAMES = ("check_command", "run_command", "start_command", "stop_command")
 PLAN_SAFE_METADATA_KEY = "linktools.ai.plan_safe"
 _REPLAY_SAFE_METADATA_KEY = "linktools.ai.replay_safe"
 _MODEL_USAGE_INPUT_METADATA_KEY = "linktools.ai.model_usage.input_tokens"
@@ -171,19 +158,19 @@ class _RuntimeStepPersistence(StepPersistence[None]):
         self,
         *,
         tool_operations: ToolOperationBridge,
-        planning: bool = False,
+        plan_mode: bool = False,
         trusted_tool_classes: "tuple[tuple[str, str], ...]" = (),
         trusted_mcp_selectors: "tuple[str, ...]" = (),
         background_tasks: "set[asyncio.Task[Any]] | None" = None,
         **kwargs: Any,
     ) -> None:
-        if not isinstance(planning, bool):
+        if not isinstance(plan_mode, bool):
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
         _validate_trusted_tool_classes(trusted_tool_classes)
         _validate_trusted_mcp_selectors(trusted_mcp_selectors)
         super().__init__(**kwargs)
         self._tool_operations = tool_operations
-        self._planning = planning
+        self._plan_mode = plan_mode
         self._trusted_tool_classes = trusted_tool_classes
         self._trusted_mcp_selectors = trusted_mcp_selectors
         self._calls: dict[tuple[str, str], _ToolCallState] = {}
@@ -223,14 +210,14 @@ class _RuntimeStepPersistence(StepPersistence[None]):
         tool_def: ToolDefinition,
         args: dict[str, Any],
     ) -> dict[str, Any]:
-        if self._planning and not tool_allowed_in_planning(
+        if self._plan_mode and not tool_allowed_in_planning(
             tool_def,
             trusted_tool_classes=self._trusted_tool_classes,
             trusted_mcp_selectors=self._trusted_mcp_selectors,
         ):
             raise AIError(
                 ErrorCode.CAPABILITY_POLICY_CONFLICT,
-                safe_details={"tool_name": tool_def.name, "planning": True},
+                safe_details={"tool_name": tool_def.name, "mode": "plan"},
             )
         policy = _tool_effect_policy(
             tool_def,
@@ -676,28 +663,6 @@ class _RuntimeStepPersistence(StepPersistence[None]):
         return self._effective_run_id(ctx), call.tool_call_id
 
 
-@dataclass(frozen=True, slots=True)
-class AgentRunScope:
-    root: Path
-    agent_name: str
-    conversation_id: "str | None"
-    step_run_id: str
-    segment_sequence: "int | None"
-    memory_scope: "str | None"
-    step_store: StepStore
-    memory_store: "SearchableMemoryStore | None"
-    history_id: "str | None" = None
-    platform_tool_names: "tuple[str, ...]" = ()
-    planning: bool = False
-    trusted_tool_classes: "tuple[tuple[str, str], ...]" = ()
-    trusted_mcp_selectors: "tuple[str, ...]" = ()
-    context_target_tokens: "int | None" = None
-    parent_step_run_id: "str | None" = None
-    subagent_delegate: "SubagentDelegate | None" = None
-    tool_operations: "ToolOperationBridge | None" = None
-    background_tasks: "set[asyncio.Task[object]]" = field(default_factory=set)
-
-
 class SubagentDelegate(Protocol):
     async def __call__(
         self,
@@ -709,52 +674,58 @@ class SubagentDelegate(Protocol):
 
 
 async def compose_platform_capabilities(
-    scope: AgentRunScope,
     *,
-    model_factory: Callable[["str | Model | None"], "str | Model"],
-    parent_model: "str | Model",
+    agent_name: str,
+    conversation_id: "str | None",
+    step_run_id: str,
+    segment_sequence: "int | None",
+    history_id: "str | None",
+    memory_scope: "str | None",
+    step_store: StepStore,
+    memory_store: "SearchableMemoryStore | None",
+    runtime_tool_names: "tuple[str, ...]",
+    plan_mode: bool,
+    trusted_tool_classes: "tuple[tuple[str, str], ...]",
+    trusted_mcp_selectors: "tuple[str, ...]",
+    context_target_tokens: "int | None",
+    parent_step_run_id: "str | None",
+    subagent_delegate: "SubagentDelegate | None",
+    tool_operations: "ToolOperationBridge | None",
+    background_tasks: "set[asyncio.Task[object]]",
+    plan_store_resolver: "Callable[[RunContext[None]], PlanStore] | None",
 ) -> "tuple[PydanticAgentCapability[None], ...]":
-    del model_factory, parent_model
-    _validate_compaction_target(scope.context_target_tokens)
-    _validate_trusted_tool_classes(scope.trusted_tool_classes)
-    _validate_trusted_mcp_selectors(scope.trusted_mcp_selectors)
+    _validate_compaction_target(context_target_tokens)
+    _validate_trusted_tool_classes(trusted_tool_classes)
+    _validate_trusted_mcp_selectors(trusted_mcp_selectors)
     capabilities: list[PydanticAgentCapability[None]] = []
     capabilities.append(
         _RuntimeStepPersistence(
-            store=scope.step_store,
-            agent_name=scope.agent_name,
-            run_id=scope.step_run_id,
-            parent_run_id=scope.parent_step_run_id,
+            store=step_store,
+            agent_name=agent_name,
+            run_id=step_run_id,
+            parent_run_id=parent_step_run_id,
             metadata={
                 "capability_scope": "parent",
-                "agent_name": scope.agent_name,
-                **(
-                    {}
-                    if scope.history_id is None
-                    else {"history_id": scope.history_id}
-                ),
-                **(
-                    {}
-                    if scope.segment_sequence is None
-                    else {"segment_sequence": str(scope.segment_sequence)}
-                ),
+                "agent_name": agent_name,
+                **({} if history_id is None else {"history_id": history_id}),
+                **({} if segment_sequence is None else {"segment_sequence": str(segment_sequence)}),
             },
-            tool_operations=scope.tool_operations or _MissingToolOperationBridge(),
-            planning=scope.planning,
-            trusted_tool_classes=scope.trusted_tool_classes,
-            trusted_mcp_selectors=scope.trusted_mcp_selectors,
-            background_tasks=scope.background_tasks,
+            tool_operations=tool_operations or _MissingToolOperationBridge(),
+            plan_mode=plan_mode,
+            trusted_tool_classes=trusted_tool_classes,
+            trusted_mcp_selectors=trusted_mcp_selectors,
+            background_tasks=background_tasks,
         )
     )
-    selected = frozenset(scope.platform_tool_names)
+    selected = frozenset(runtime_tool_names)
     selected_memory = tuple(name for name in MEMORY_TOOL_NAMES if name in selected)
     if selected_memory:
-        if scope.memory_store is None or scope.memory_scope is None:
+        if memory_store is None or memory_scope is None:
             raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
         capabilities.append(
             _SelectedMemory(
-                store=scope.memory_store,
-                namespace=scope.memory_scope,
+                store=memory_store,
+                namespace=memory_scope,
                 agent_name="memory",
                 inject_memory=False,
                 guidance=_memory_guidance(selected_memory),
@@ -763,24 +734,27 @@ async def compose_platform_capabilities(
             )
         )
     if any(name in selected for name in PLANNING_TOOL_NAMES):
+        if plan_store_resolver is None:
+            raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
         capabilities.append(
             Planning(
                 id=_PLANNING_CAPABILITY_ID,
                 tools=PLANNING_TOOL_NAMES,
+                store_resolver=plan_store_resolver,
             )
         )
     if "delegate_task" in selected:
-        if scope.subagent_delegate is None:
+        if subagent_delegate is None:
             raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
-        capabilities.append(_SubagentCapability(scope.subagent_delegate))
+        capabilities.append(_SubagentCapability(subagent_delegate))
     capabilities.append(
         _build_compaction(None)
-        if scope.context_target_tokens is None
+        if context_target_tokens is None
         else _CompactionCapability(
-            scope.context_target_tokens,
-            step_store=scope.step_store,
-            conversation_id=scope.conversation_id,
-            step_run_id=scope.step_run_id,
+            context_target_tokens,
+            step_store=step_store,
+            conversation_id=conversation_id,
+            step_run_id=step_run_id,
         )
     )
     return tuple(capabilities)
@@ -1083,28 +1057,20 @@ def tool_allowed_in_planning(
     return metadata
 
 
-def select_platform_tool_names(
+def select_runtime_tool_names(
     *,
-    allow_tools: "tuple[str, ...]",
+    ordinary_tool_policy: "tuple[str, ...]",
     memory_scope: "str | None",
     subagent_available: bool = False,
     planning: bool = False,
-    workspace_filesystem: bool = False,
-    workspace_filesystem_write: bool = False,
-    workspace_shell: bool = False,
 ) -> "tuple[str, ...]":
     names: set[str] = set()
     if memory_scope is not None:
-        names.update(MEMORY_TOOL_NAMES)
-    if subagent_available:
-        names.update(SUBAGENT_TOOL_NAMES)
-    if planning:
-        names.update(PLANNING_TOOL_NAMES)
-    if workspace_filesystem:
-        names.update(WORKSPACE_FILESYSTEM_TOOL_NAMES if workspace_filesystem_write else WORKSPACE_FILESYSTEM_READ_TOOL_NAMES)
-    if workspace_shell:
-        names.update(WORKSPACE_SHELL_TOOL_NAMES)
-    names = {name for name in names if tool_name_allowed(name, allow_tools)}
+        names.update(
+            name
+            for name in MEMORY_TOOL_NAMES
+            if tool_name_allowed(name, ordinary_tool_policy)
+        )
     if planning:
         names.update(PLANNING_TOOL_NAMES)
     if subagent_available:
@@ -1121,12 +1087,11 @@ __all__ = [
     "WORKSPACE_FILESYSTEM_READ_TOOL_NAMES",
     "WORKSPACE_FILESYSTEM_TOOL_NAMES",
     "WORKSPACE_SHELL_TOOL_NAMES",
-    "AgentRunScope",
     "SubagentDelegate",
     "ToolOperationBridge",
     "ToolOperationDecision",
     "compose_platform_capabilities",
-    "select_platform_tool_names",
+    "select_runtime_tool_names",
     "tool_allowed_in_planning",
     "tool_is_control",
     "tool_name_allowed",

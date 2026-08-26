@@ -20,7 +20,7 @@ from ...ai.errors import AIError
 from ...ai.migrate import provision_runtime_database
 from ...ai.model import ModelRegistry
 from ...ai.runtime import ExecutionResult, Runtime, RuntimeState
-from ...ai.workspace import Workspace, open_workspace_runtime
+from ...ai.workspace import Workspace
 
 if TYPE_CHECKING:
     from linktools.cli import CommandParser
@@ -69,7 +69,7 @@ class Command(BaseCommand):
 
         async def execute() -> int:
             async with _open_runtime_state(workspace, args.storage) as state:
-                async with open_workspace_runtime(
+                async with Runtime.open(
                     workspace,
                     state=state,
                     models=ModelRegistry.openai(
@@ -201,9 +201,7 @@ def _result_payload(result: ExecutionResult) -> dict[str, object]:
         "execution_id": result.execution_id,
         "status": result.status.value,
         "output": result.output,
-        "output_schema_id": result.output_schema_id,
-        "output_schema_revision": result.output_schema_revision,
-        "output_schema_fingerprint": result.output_schema_fingerprint,
+        "output_fingerprint": result.output_fingerprint,
         "error_code": result.error_code,
         "safe_error_details": dict(result.safe_error_details),
     }

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Bytes codecs for declaration DTOs."""
+"""Versioned codecs for durable declaration DTOs."""
 
 import json
 import re
@@ -9,12 +9,29 @@ from typing import Protocol, TypeVar, cast
 
 import yaml
 
-from ..core import JsonValue, canonical_string_tuple
+from ..core import JsonValue
 from ..errors import AIError, ErrorCode
-from ._contract import AgentSpec, AgentUsageLimits, MCPServerSpec, SkillSpec
+from ._contract import AgentSpec, AgentUsageLimits, MCPServerSpec, SkillSpec, normalize_thinking
 
 SpecT = TypeVar("SpecT")
-_SKILL_FIELDS = frozenset({"id", "revision", "content"})
+_VERSION = 1
+_AGENT_FIELDS = frozenset(
+    {
+        "version",
+        "id",
+        "model",
+        "system_prompt",
+        "instructions",
+        "allow_tools",
+        "allow_skills",
+        "allow_subagents",
+        "usage_limits",
+        "planning",
+        "thinking",
+    }
+)
+_SKILL_FIELDS = frozenset({"version", "id", "content"})
+_MCP_FIELDS = frozenset({"version", "id", "command", "args"})
 _USAGE_LIMIT_FIELDS = (
     "model_requests",
     "tool_calls",
@@ -31,15 +48,18 @@ class SpecCodec(Protocol[SpecT]):
 
 class AgentSpecCodec:
     def to_payload(self, value: AgentSpec) -> "dict[str, JsonValue]":
+        """Return the canonical semantic v1 payload used by durable identity."""
         if not isinstance(value, AgentSpec):
             raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID, "agent spec is invalid")
         return {
+            "version": _VERSION,
             "id": value.id,
-            "revision": value.revision,
             "model": value.model,
             "system_prompt": value.system_prompt,
             "instructions": list(value.instructions),
             "allow_tools": list(value.allow_tools),
+            "allow_skills": list(value.allow_skills),
+            "allow_subagents": list(value.allow_subagents),
             "usage_limits": None
             if value.usage_limits is None
             else {
@@ -49,75 +69,99 @@ class AgentSpecCodec:
                 "output_tokens": value.usage_limits.output_tokens,
                 "total_tokens": value.usage_limits.total_tokens,
             },
+            "planning": value.planning,
+            "thinking": value.thinking,
         }
 
+    def to_wire_payload(self, value: AgentSpec) -> "dict[str, JsonValue]":
+        payload = dict(value._extensions)
+        payload.update(self.to_payload(value))
+        return payload
+
     def from_payload(self, raw: Mapping[str, object]) -> AgentSpec:
-        if "id" not in raw:
-            raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID, "agent spec requires id")
-        identity = raw["id"]
-        revision = raw.get("revision", 1)
+        _require_v1(raw)
+        identity = raw.get("id")
         model = raw.get("model", "default")
+        system_prompt = raw.get("system_prompt", "")
+        instructions = raw.get("instructions", [])
+        allow_tools = raw.get("allow_tools", ["*"])
+        allow_skills = raw.get("allow_skills", ["*"])
+        allow_subagents = raw.get("allow_subagents", ["*"])
+        planning = raw.get("planning", False)
+        thinking = raw.get("thinking", False)
         if not isinstance(identity, str) or not identity.strip():
             raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID, "agent id must be a non-empty string")
-        if not isinstance(revision, int) or isinstance(revision, bool) or revision < 1:
-            raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID, "agent revision must be a positive integer")
         if not isinstance(model, str) or not model.strip():
             raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID, "agent model must be a non-empty string")
-        system_prompt = raw.get("system_prompt", "")
         if not isinstance(system_prompt, str):
             raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID, "system_prompt must be a string")
-        instructions = raw.get("instructions", [])
         if not isinstance(instructions, list) or any(not isinstance(item, str) for item in instructions):
             raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID, "instructions must be a string array")
+        for name, value in (
+            ("allow_tools", allow_tools),
+            ("allow_skills", allow_skills),
+            ("allow_subagents", allow_subagents),
+        ):
+            if not isinstance(value, list) or any(not isinstance(item, str) for item in value):
+                raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID, f"{name} must be a string array")
+        if not isinstance(planning, bool):
+            raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID, "planning must be bool")
         try:
+            normalized_thinking = normalize_thinking(thinking)
             return AgentSpec(
                 id=identity,
-                revision=revision,
                 model=model,
                 system_prompt=system_prompt,
                 instructions=tuple(instructions),
-                allow_tools=_strict_allowlist(raw, "allow_tools", ("*",)),
+                allow_tools=tuple(cast("list[str]", allow_tools)),
+                allow_skills=tuple(cast("list[str]", allow_skills)),
+                allow_subagents=tuple(cast("list[str]", allow_subagents)),
                 usage_limits=_decode_usage_limits(raw.get("usage_limits")),
+                planning=planning,
+                thinking=normalized_thinking,
+                _extensions=_extensions(raw, _AGENT_FIELDS),
             )
-        except AIError:
-            raise
+        except AIError as error:
+            if error.code in {ErrorCode.STORAGE_INTEGRITY_ERROR, ErrorCode.STORAGE_VERSION_UNSUPPORTED}:
+                raise
+            raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID, "agent spec is invalid") from error
         except (TypeError, ValueError) as error:
             raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID, "agent spec is invalid") from error
 
     def encode(self, value: AgentSpec) -> bytes:
-        return _encode(cast("dict[str, object]", self.to_payload(value)))
+        return _encode(cast("dict[str, object]", self.to_wire_payload(value)))
 
     def decode(self, data: bytes) -> AgentSpec:
-        try:
-            raw = _decode(data)
-        except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as error:
-            raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID, "agent spec is invalid") from error
-        return self.from_payload(raw)
+        return self.from_payload(_decode(data))
 
 
 class SkillSpecCodec:
+    def to_payload(self, value: SkillSpec) -> "dict[str, JsonValue]":
+        if not isinstance(value, SkillSpec):
+            raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID, "skill spec is invalid")
+        return {"version": _VERSION, "id": value.id, "content": value.content}
+
+    def to_wire_payload(self, value: SkillSpec) -> "dict[str, JsonValue]":
+        payload = dict(value._extensions)
+        payload.update(self.to_payload(value))
+        return payload
+
+    def from_payload(self, raw: Mapping[str, object]) -> SkillSpec:
+        _require_v1(raw)
+        identity = raw.get("id")
+        content = raw.get("content")
+        if not isinstance(identity, str) or not identity.strip() or not isinstance(content, str):
+            raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID, "skill spec is invalid")
+        try:
+            return SkillSpec(identity, content, _extensions(raw, _SKILL_FIELDS))
+        except (TypeError, ValueError) as error:
+            raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID, "skill spec is invalid") from error
+
     def encode(self, value: SkillSpec) -> bytes:
-        return _encode({"id": value.id, "revision": value.revision, "content": value.content})
+        return _encode(cast("dict[str, object]", self.to_wire_payload(value)))
 
     def decode(self, data: bytes) -> SkillSpec:
-        try:
-            raw = _decode(data)
-            if not _SKILL_FIELDS.issubset(raw):
-                raise ValueError("skill spec fields are invalid")
-            identity = raw["id"]
-            revision = raw["revision"]
-            content = raw["content"]
-            if not isinstance(identity, str):
-                raise ValueError("skill id must be a string")  # noqa: TRY004
-            if not isinstance(revision, int) or isinstance(revision, bool):
-                raise ValueError("skill revision must be an integer")  # noqa: TRY004
-            if not isinstance(content, str):
-                raise ValueError("skill content must be a string")  # noqa: TRY004
-            return SkillSpec(identity, revision, content)
-        except AIError:
-            raise
-        except (KeyError, TypeError, UnicodeDecodeError, json.JSONDecodeError, ValueError) as error:
-            raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID, "skill spec is invalid") from error
+        return self.from_payload(_decode(data))
 
 
 class SkillMarkdownSpecCodec:
@@ -125,30 +169,23 @@ class SkillMarkdownSpecCodec:
 
     def encode(self, value: SkillSpec) -> bytes:
         try:
-            frontmatter, revision = _parse_skill_markdown(value.content)
-        except AIError:
-            raise
+            frontmatter = _parse_skill_markdown(value.content)
         except Exception as error:
+            if isinstance(error, AIError):
+                raise
             raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID) from error
         if frontmatter["name"] != value.id:
             raise AIError(ErrorCode.ASSET_CONTENT_MISMATCH)
-        if (
-            not isinstance(value.revision, int)
-            or isinstance(value.revision, bool)
-            or value.revision < 1
-            or revision != value.revision
-        ):
-            raise AIError(ErrorCode.ASSET_CONTENT_MISMATCH)
         try:
             return value.content.encode("utf-8")
-        except Exception as error:
+        except UnicodeEncodeError as error:
             raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID) from error
 
     def decode(self, data: bytes) -> SkillSpec:
         try:
             content = data.decode("utf-8")
-            frontmatter, revision = _parse_skill_markdown(content)
-            return SkillSpec(cast(str, frontmatter["name"]), revision, content)
+            frontmatter = _parse_skill_markdown(content)
+            return SkillSpec(cast(str, frontmatter["name"]), content)
         except AIError:
             raise
         except Exception as error:
@@ -162,60 +199,58 @@ class SkillMarkdownSpecAdapter:
         local_name = logical_id.rsplit("/", 1)[-1]
         if value.id != local_name:
             raise AIError(ErrorCode.ASSET_CONTENT_MISMATCH)
-        return SkillSpec(logical_id, value.revision, value.content)
+        return SkillSpec(logical_id, value.content, value._extensions)
 
     def to_storage(self, logical_id: str, value: SkillSpec) -> SkillSpec:
         if value.id != logical_id:
             raise AIError(ErrorCode.ASSET_CONTENT_MISMATCH)
-        return SkillSpec(logical_id.rsplit("/", 1)[-1], value.revision, value.content)
+        return SkillSpec(logical_id.rsplit("/", 1)[-1], value.content, value._extensions)
 
 
 def retarget_skill_markdown(content: str, local_name: str) -> str:
     """Rewrite the canonical frontmatter name during a logical rename."""
     lines = content.splitlines(keepends=True)
-    closing = next(
-        (index for index, line in enumerate(lines[1:], 1) if line.rstrip("\r\n") == "---"),
-        None,
-    )
+    closing = next((index for index, line in enumerate(lines[1:], 1) if line.rstrip("\r\n") == "---"), None)
     if closing is None:
         raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID)
-    frontmatter, _ = _parse_skill_markdown(content)
+    frontmatter = _parse_skill_markdown(content)
     frontmatter["name"] = local_name
-    encoded = yaml.safe_dump(
-        frontmatter,
-        allow_unicode=True,
-        default_flow_style=False,
-        sort_keys=True,
-    )
+    encoded = yaml.safe_dump(frontmatter, allow_unicode=True, default_flow_style=False, sort_keys=True)
     return f"---\n{encoded}---\n{''.join(lines[closing + 1:])}"
 
 
 class MCPServerSpecCodec:
+    def to_payload(self, value: MCPServerSpec) -> "dict[str, JsonValue]":
+        if not isinstance(value, MCPServerSpec):
+            raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID, "MCP server spec is invalid")
+        return {"version": _VERSION, "id": value.id, "command": value.command, "args": list(value.args)}
+
+    def to_wire_payload(self, value: MCPServerSpec) -> "dict[str, JsonValue]":
+        payload = dict(value._extensions)
+        payload.update(self.to_payload(value))
+        return payload
+
+    def from_payload(self, raw: Mapping[str, object]) -> MCPServerSpec:
+        _require_v1(raw)
+        identity = raw.get("id")
+        command = raw.get("command")
+        args = raw.get("args", [])
+        if not isinstance(identity, str) or not identity.strip():
+            raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID, "MCP server id must be a non-empty string")
+        if not isinstance(command, str) or not command.strip():
+            raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID, "MCP server command must be a non-empty string")
+        if not isinstance(args, list) or any(not isinstance(item, str) for item in args):
+            raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID, "MCP server args must be a string array")
+        try:
+            return MCPServerSpec(identity, command, tuple(cast("list[str]", args)), _extensions(raw, _MCP_FIELDS))
+        except (TypeError, ValueError) as error:
+            raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID, "MCP server spec is invalid") from error
+
     def encode(self, value: MCPServerSpec) -> bytes:
-        return _encode({"id": value.id, "revision": value.revision, "command": value.command, "args": list(value.args)})
+        return _encode(cast("dict[str, object]", self.to_wire_payload(value)))
 
     def decode(self, data: bytes) -> MCPServerSpec:
-        try:
-            raw = _decode(data)
-            if not {"id", "revision", "command"}.issubset(raw):
-                raise ValueError("MCP server spec fields are invalid")
-            identity = raw["id"]
-            revision = raw["revision"]
-            command = raw["command"]
-            args = raw.get("args", [])
-            if not isinstance(identity, str):
-                raise ValueError("MCP server id must be a string")  # noqa: TRY004
-            if not isinstance(revision, int) or isinstance(revision, bool):
-                raise ValueError("MCP server revision must be an integer")  # noqa: TRY004
-            if not isinstance(command, str):
-                raise ValueError("MCP server command must be a string")  # noqa: TRY004
-            if not isinstance(args, list) or any(not isinstance(item, str) for item in args):
-                raise ValueError("MCP server args must be a string array")
-            return MCPServerSpec(identity, revision, command, tuple(args))
-        except AIError:
-            raise
-        except (KeyError, TypeError, UnicodeDecodeError, json.JSONDecodeError, ValueError) as error:
-            raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID, "MCP server spec is invalid") from error
+        return self.from_payload(_decode(data))
 
 
 def _encode(value: "dict[str, object]") -> bytes:
@@ -223,20 +258,38 @@ def _encode(value: "dict[str, object]") -> bytes:
 
 
 def _decode(data: bytes) -> "dict[str, object]":
-    value = json.loads(data.decode("utf-8"))
+    try:
+        value = json.loads(data.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as error:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
     if not isinstance(value, dict):
-        raise ValueError("spec payload must be a JSON object")  # noqa: TRY004
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     return value
 
 
-def _strict_allowlist(raw: Mapping[str, object], name: str, default: "tuple[str, ...]") -> "tuple[str, ...]":
-    value = raw.get(name, list(default))
-    if not isinstance(value, list):
-        raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID, f"{name} must be a JSON array")
-    try:
-        return canonical_string_tuple(value, field=name)
-    except AIError as error:
-        raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID, f"{name} is invalid") from error
+def _require_v1(raw: Mapping[str, object]) -> None:
+    version = raw.get("version")
+    if version is None:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    if not isinstance(version, int) or isinstance(version, bool) or version < 1:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    if version != 1:
+        raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
+
+
+def _extensions(raw: Mapping[str, object], known: frozenset[str]) -> "dict[str, JsonValue]":
+    result: dict[str, JsonValue] = {}
+    for key, value in raw.items():
+        if key in known:
+            continue
+        if not isinstance(key, str):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        try:
+            json.dumps(value, allow_nan=False)
+        except (TypeError, ValueError) as error:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
+        result[key] = cast(JsonValue, value)
+    return result
 
 
 def _decode_usage_limits(value: object) -> "AgentUsageLimits | None":
@@ -244,6 +297,9 @@ def _decode_usage_limits(value: object) -> "AgentUsageLimits | None":
         return None
     if not isinstance(value, Mapping):
         raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID, "usage_limits must be an object or null")
+    unknown = set(value).difference(_USAGE_LIMIT_FIELDS)
+    if unknown:
+        raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID, "usage_limits contains unknown fields")
     kwargs = {name: value[name] for name in _USAGE_LIMIT_FIELDS if name in value}
     try:
         return AgentUsageLimits(**kwargs)
@@ -271,14 +327,11 @@ def _construct_mapping(loader: _StrictSafeLoader, node: yaml.nodes.MappingNode, 
 _StrictSafeLoader.add_constructor(yaml.resolver.BaseResolver.DEFAULT_MAPPING_TAG, _construct_mapping)
 
 
-def _parse_skill_markdown(content: str) -> tuple[dict[str, object], int]:
+def _parse_skill_markdown(content: str) -> dict[str, object]:
     lines = content.splitlines(keepends=True)
     if not lines or lines[0].rstrip("\r\n") != "---":
         raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID)
-    closing = next(
-        (index for index, line in enumerate(lines[1:], 1) if line.rstrip("\r\n") == "---"),
-        None,
-    )
+    closing = next((index for index, line in enumerate(lines[1:], 1) if line.rstrip("\r\n") == "---"), None)
     if closing is None:
         raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID)
     raw = yaml.load("".join(lines[1:closing]), Loader=_StrictSafeLoader)
@@ -292,32 +345,20 @@ def _parse_skill_markdown(content: str) -> tuple[dict[str, object], int]:
     if not isinstance(description, str) or not 1 <= len(description) <= 1024:
         raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID)
     for key, maximum in (("compatibility", 500),):
-        if key in frontmatter and (
-            not isinstance(frontmatter[key], str) or not 1 <= len(cast(str, frontmatter[key])) <= maximum
-        ):
+        if key in frontmatter and (not isinstance(frontmatter[key], str) or not 1 <= len(cast(str, frontmatter[key])) <= maximum):
             raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID)
     for key in ("license", "allowed-tools"):
         if key in frontmatter and not isinstance(frontmatter[key], str):
             raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID)
-    metadata_present = "metadata" in frontmatter
     metadata = frontmatter.get("metadata")
-    if metadata_present and (
+    if metadata is not None and (
         not isinstance(metadata, Mapping)
         or any(not isinstance(key, str) or not isinstance(value, str) for key, value in metadata.items())
     ):
         raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID)
-    revision_value = None if not metadata_present else cast(Mapping[str, str], metadata).get("linktools-revision")
-    if revision_value is None:
-        revision = 1
-    elif (
-        not isinstance(revision_value, str)
-        or not revision_value.isdecimal()
-        or int(revision_value) < 1
-    ):
+    if isinstance(metadata, Mapping) and "linktools-revision" in metadata:
         raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID)
-    else:
-        revision = int(revision_value)
-    return frontmatter, revision
+    return frontmatter
 
 
 __all__ = [
