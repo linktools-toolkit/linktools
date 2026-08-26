@@ -18,3 +18,13 @@ convert:
   - type: jinja2
     source: capability.jinja2
     dest: src/linktools/capabilities/{name}.py
+
+checks:
+  ruff:
+    select:
+      - E9
+      - F63
+      - F7
+      - F82
+    paths:
+      - src
