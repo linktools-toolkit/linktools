@@ -4,6 +4,19 @@
 
 from dataclasses import dataclass
 
+MODEL_USAGE_INPUT_METADATA_KEY = "linktools.ai.model_usage.input_tokens"
+MODEL_USAGE_OUTPUT_METADATA_KEY = "linktools.ai.model_usage.output_tokens"
+MODEL_USAGE_CACHE_READ_METADATA_KEY = "linktools.ai.model_usage.cache_read_tokens"
+MODEL_USAGE_CACHE_WRITE_METADATA_KEY = "linktools.ai.model_usage.cache_write_tokens"
+MODEL_USAGE_METADATA_KEYS = frozenset(
+    {
+        MODEL_USAGE_INPUT_METADATA_KEY,
+        MODEL_USAGE_OUTPUT_METADATA_KEY,
+        MODEL_USAGE_CACHE_READ_METADATA_KEY,
+        MODEL_USAGE_CACHE_WRITE_METADATA_KEY,
+    }
+)
+
 
 @dataclass(frozen=True, slots=True)
 class UsageMetrics:
@@ -31,4 +44,11 @@ class UsageMetrics:
         return self.input_tokens + self.output_tokens
 
 
-__all__ = ["UsageMetrics"]
+__all__ = [
+    "MODEL_USAGE_CACHE_READ_METADATA_KEY",
+    "MODEL_USAGE_CACHE_WRITE_METADATA_KEY",
+    "MODEL_USAGE_INPUT_METADATA_KEY",
+    "MODEL_USAGE_METADATA_KEYS",
+    "MODEL_USAGE_OUTPUT_METADATA_KEY",
+    "UsageMetrics",
+]
