@@ -30,10 +30,13 @@
 14. Existing ToolOperation, Session, Execution, Step and database/file schemas remain unchanged.
 15. This correctness repair does not bump the runtime contract revision.
 16. Agent callers may supply the same `str | Sequence[UserContent]` shape accepted by Pydantic AI. Linktools must not define parallel attachment classes.
-17. Rich user content is converted once at the Agent boundary into deterministic, self-delimiting durable text transport using Pydantic AI's own model-message codec. Identical content must produce identical transport and therefore stable idempotency identity.
-18. The Runtime, Temporal, Recovery and TaskGraph persistence contracts remain text-based. They carry the opaque transport without learning attachment-specific fields or types. Runtime-generated text may be appended after the self-delimiting rich payload and must restore as additional `UserContent` text rather than corrupting the attachment payload.
-19. `AgentExecutor` is the sole restoration point: immediately before `run_stream_events()`, rich transport is validated and restored to native Pydantic AI `UserContent`; plain strings remain plain strings.
-20. Plain strings retain their existing identity. Strings beginning with the reserved transport prefix are escaped at the public Agent boundary, and malformed/tampered rich transport fails closed as `STORAGE_INTEGRITY_ERROR`.
+17. The Agent boundary converts rich user content once to canonical Pydantic model-message JSON and tags it with the explicit internal codec `pydantic-user-content-v1`. Plain strings use codec `text`. Ordinary text is never interpreted by content prefix or other magic bytes.
+18. Runtime request contracts remain string-based. Every durable boundary that can erase the in-memory string subtype must persist the codec explicitly: TaskGraph stores `user_prompt_codec`, Temporal request objects store `user_prompt_codec`, and Recovery uses its existing `StoredPayload` discriminator (`utf-8` for text; JSON `{codec,value}` for rich content). Historical records without the new optional discriminator read as `text`.
+19. Runtime-generated TaskGraph suffix text must preserve the original codec and restore as an additional textual `UserContent` item. Planner code must not understand attachment types.
+20. `AgentExecutor` is the sole native restoration point: immediately before `run_stream_events()`, rich transport is structurally validated and restored to native Pydantic AI `UserContent`; plain strings remain plain strings.
+21. Prompt transport integrity is owned by the existing durable container (`StoredPayload` / ObjectStore content digest) plus structural codec validation. Do not add a second digest inside prompt text and do not require a newer Pydantic version to re-encode historical content byte-for-byte identically after decoding it.
+22. Provider-owned `UploadedFile` references are not accepted as durable Agent input until provider lifetime, portability and recovery semantics are defined. Inline `BinaryContent` and other self-contained or durable URL content remain governed by the Pydantic message codec and existing Runtime size limits.
+23. Durable prompt compatibility requires frozen historical fixtures. Same-version encode/decode tests are insufficient; legacy records without codec fields and historical rich payloads must remain readable according to their frozen codec contract.
 
 ## Built-in policy matrix
 
@@ -69,8 +72,12 @@ The repair is complete only when all of the following hold:
 - Skill missing-ID regression passes without expanding the capability package public API;
 - cancellation tests pass;
 - repository search finds no second built-in replay-safety truth source;
-- Pydantic `BinaryContent` user input round-trips deterministically through the durable prompt transport;
-- plain text retains identity, reserved-prefix text is escaped, and tampered rich transport fails closed;
-- TaskGraph-style runtime suffix text can be appended without corrupting rich content and restores as an additional text content part;
-- `ExecutionRequest` continues to persist rich input as text while Executor restoration returns native `UserContent`;
+- Pydantic `BinaryContent` user input produces deterministic `pydantic-user-content-v1` transport and restores natively;
+- ordinary text, including text resembling historical transport prefixes, remains codec `text` and is never reinterpreted;
+- malformed rich payloads fail closed as `STORAGE_INTEGRITY_ERROR`, while unknown codecs fail as `STORAGE_VERSION_UNSUPPORTED`;
+- provider-owned `UploadedFile` input is rejected with an explicit durable-lifecycle reason;
+- TaskGraph-style runtime suffix text preserves the rich codec and restores as an additional text content part;
+- TaskGraph admission, Temporal request persistence and Recovery checkpoints preserve explicit codec information, while frozen legacy records without codec fields remain readable as text;
+- prompt compatibility includes frozen historical fixtures rather than only current encode/decode round trips;
+- Runtime public request schemas remain string-based and no Linktools attachment DTO hierarchy is introduced;
 - `python manage.py check linktools-ai` passes on the repository CI Python matrix.
