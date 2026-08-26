@@ -94,9 +94,15 @@ async def test_missing_harness_file_is_failed_retry_not_unknown(tmp_path: Path) 
         tool_def=definition,
         args=args,
     )
+    tools = await toolset.get_tools(context)
 
-    async def handler(_args: dict[str, Any]) -> Any:
-        return await toolset.read_file("missing.json")
+    async def handler(validated_args: dict[str, Any]) -> Any:
+        return await toolset.call_tool(
+            "read_file",
+            validated_args,
+            context,
+            tools["read_file"],
+        )
 
     with pytest.raises(ModelRetry):
         await capability.wrap_tool_execute(
