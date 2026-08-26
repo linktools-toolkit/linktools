@@ -478,6 +478,7 @@ class Runtime:
             binding.digest,
             snapshot_id,
             request,
+            output=output,
         )
 
     async def run_graph(
@@ -541,10 +542,13 @@ class Runtime:
             ):
                 raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
             user_prompt = payload.get("user_prompt")
+            user_prompt_codec = payload.get("user_prompt_codec", "text")
             planning = payload.get("planning")
             thinking = payload.get("thinking")
             if (
                 not isinstance(user_prompt, str)
+                or not isinstance(user_prompt_codec, str)
+                or not user_prompt_codec
                 or not isinstance(planning, bool)
                 or not isinstance(thinking, bool)
             ):
@@ -569,6 +573,7 @@ class Runtime:
                         "version": 1,
                         "binding": binding.snapshot.to_payload(),
                         "user_prompt": user_prompt,
+                        "user_prompt_codec": user_prompt_codec,
                         "planning": planning,
                         "thinking": thinking,
                     },
