@@ -6,7 +6,11 @@ from collections.abc import AsyncIterator, Mapping
 from dataclasses import dataclass, field
 from typing import Protocol
 
-from ..agent import AgentBindingSnapshot
+from ..agent import (
+    AgentBindingSnapshot,
+    _RuntimeUserPrompt,
+    _normalize_runtime_user_prompt,
+)
 from ..core import (
     ApprovalDecision,
     ApprovalStatus,
@@ -22,7 +26,6 @@ from ..core import (
     validate_idempotency_key,
     validate_memory_scope,
     validate_resource_id,
-    validate_user_prompt,
 )
 from ..errors import AIError, ErrorCode
 from ..observe import RunSnapshot
@@ -38,7 +41,7 @@ from ..task import (
 
 @dataclass(frozen=True, slots=True)
 class ExecutionRequest:
-    user_prompt: str
+    user_prompt: _RuntimeUserPrompt
     principal: Principal
     idempotency_key: "str | None" = None
     memory_scope: "str | None" = None
@@ -46,7 +49,11 @@ class ExecutionRequest:
     thinking: bool = False
 
     def __post_init__(self) -> None:
-        validate_user_prompt(self.user_prompt)
+        object.__setattr__(
+            self,
+            "user_prompt",
+            _normalize_runtime_user_prompt(self.user_prompt),
+        )
         if self.idempotency_key is None:
             raise AIError(ErrorCode.IDEMPOTENCY_KEY_INVALID)
         validate_idempotency_key(self.idempotency_key)
@@ -58,23 +65,31 @@ class ExecutionRequest:
 
 @dataclass(frozen=True, slots=True)
 class RetryExecutionRequest:
-    user_prompt: str
+    user_prompt: _RuntimeUserPrompt
     principal: Principal
     idempotency_key: str
 
     def __post_init__(self) -> None:
-        validate_user_prompt(self.user_prompt)
+        object.__setattr__(
+            self,
+            "user_prompt",
+            _normalize_runtime_user_prompt(self.user_prompt),
+        )
         validate_idempotency_key(self.idempotency_key)
 
 
 @dataclass(frozen=True, slots=True)
 class ForkExecutionRequest:
-    user_prompt: str
+    user_prompt: _RuntimeUserPrompt
     principal: Principal
     idempotency_key: str
 
     def __post_init__(self) -> None:
-        validate_user_prompt(self.user_prompt)
+        object.__setattr__(
+            self,
+            "user_prompt",
+            _normalize_runtime_user_prompt(self.user_prompt),
+        )
         validate_idempotency_key(self.idempotency_key)
 
 
@@ -261,14 +276,18 @@ class ListSessionRequest:
 @dataclass(frozen=True, slots=True)
 class ResumeSessionRequest:
     principal: Principal
-    user_prompt: str
+    user_prompt: _RuntimeUserPrompt
     idempotency_key: str = ""
     memory_scope: "str | None" = None
     planning: bool = False
     thinking: bool = False
 
     def __post_init__(self) -> None:
-        validate_user_prompt(self.user_prompt)
+        object.__setattr__(
+            self,
+            "user_prompt",
+            _normalize_runtime_user_prompt(self.user_prompt),
+        )
         validate_idempotency_key(self.idempotency_key)
         if self.memory_scope is not None:
             validate_memory_scope(self.memory_scope)
