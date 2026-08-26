@@ -89,12 +89,15 @@ def bind_output(output: "type[BaseModel] | None" = None) -> OutputBinding:
     return OutputBinding.create("structured", schema)
 
 
-def restore_output(mode: object, schema: object) -> OutputBinding:
+def restore_output(mode: JsonValue, schema: JsonValue) -> OutputBinding:
     """Restore an output binding only from its historical v1 semantics."""
     if mode not in {"text", "structured"} or not isinstance(schema, Mapping):
         raise AIError(ErrorCode.AGENT_DEFINITION_UNAVAILABLE)
     try:
-        binding = OutputBinding.create(cast(OutputMode, mode), cast(Mapping[str, JsonValue], schema))
+        binding = OutputBinding.create(
+            cast(OutputMode, mode),
+            cast(Mapping[str, JsonValue], schema),
+        )
         if binding.mode == "text" and binding.schema_definition != bind_output().schema_definition:
             raise AIError(ErrorCode.AGENT_DEFINITION_UNAVAILABLE)
         if binding.mode == "structured":
@@ -178,7 +181,6 @@ def _validate_fingerprint(value: str) -> None:
         character not in "0123456789abcdef" for character in value
     ):
         raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID)
-
 
 
 __all__ = [
