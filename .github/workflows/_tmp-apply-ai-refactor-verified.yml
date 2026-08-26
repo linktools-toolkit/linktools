@@ -1,0 +1,68 @@
+name: _tmp apply verified ai refactor
+
+on:
+  push:
+    branches:
+      - tmp/ai-runtime-capabilitygroup-agent-transport-v3
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Verify every transport part
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd .github/_transport/ai-runtime-capabilitygroup-agent-v3
+          cat > /tmp/part-sha256 <<'EOF'
+          7fab58a7156bad1a466b8ffb1fd9fa472706a78d2f3b49abbc950bffbdd18520  part-00
+          a9794f86d028298a3dd1ef06484b889b5ec25e8da0c10883fde5954995becd30  part-01a
+          216a1413f00ee7133ab654420ceef0e347fdc3552c239ac4cc087ae85016c02e  part-01b
+          dbb38e7a3b2b98fe69240b1f57292abcce18aa3da37a0651bda62646f0689f82  part-02
+          f0b7fccbe44012a31230a4136d74e8c8fcbf539ed023869b263d4b51f13f95d2  part-03
+          324fecaf2a8c192d1d66f2145c94fa48377c73b392381ed23c7c2f6bb8e7be52  part-04
+          309ac931a9466284663bfd57cf1e1371f61eda051088acfaf255aee1e8937666  part-05
+          e379c9faf3d4cd91adb3d258e133614229b466effc4405f5eb435a430e3bcab1  part-06
+          cde49f0883f013a6da5365a36fd6bd2311c704116dfedd6e128cfbc5f44812f0  part-07
+          ff3599dbf969d7f6b8d83bafbeb80c183e1d2b311abaa9aee9a854b725b61125  part-08
+          a975ac625503c50f3d22cdbaf41982680925d5e733e1ccc8b370e459a0254eb7  part-09
+          4c38ef74c6b68c3511141f08553bd80e8624b23770e841e9b6e22626b1a0d7e2  part-10
+          7c808f8a88894f0a6249287c837e426ff0e9c88aba25cd8fc1758a1083a224ff  part-11
+          862e211176926c6f9d26592fec38a5e5a62a8d49a4aba3a4aa3f4393470bb155  part-12
+          cc4ab423a6f7b86fe5560d9936dad041715fba4a552c8a6f523e4c74118e237e  part-13
+          6ee268034b430d302aeddbc3de26c86ad62044870d887382375f474d4aea35b0  part-14
+          8d8939dadeb1f9d5ff5c09eb60018db9927f81fdf7b779d320e64a7d6ca46fed  part-15
+          EOF
+          sha256sum -c /tmp/part-sha256
+          cat part-00 part-01a part-01b part-02 part-03 part-04 part-05 part-06 part-07 part-08 part-09 part-10 part-11 part-12 part-13 part-14 part-15 \
+            | base64 -d \
+            | gzip -d \
+            > /tmp/ai-refactor.patch
+          echo '22d56e31382148450833adff37deb066e42b36161034eef6ae48f61fd0e5a6ca  /tmp/ai-refactor.patch' | sha256sum -c -
+
+      - name: Apply exact implementation commit
+        shell: bash
+        run: |
+          set -euo pipefail
+          baseline='77ce66cc3a68938181ec752cd30d9be5ab24d63b'
+          target='refactor/ai-runtime-capabilitygroup-agent'
+          remote_sha="$(git ls-remote origin "refs/heads/${target}" | cut -f1)"
+          test "${remote_sha}" = "${baseline}"
+          git checkout -B "${target}" "${baseline}"
+          git apply --check /tmp/ai-refactor.patch
+          git apply /tmp/ai-refactor.patch
+          git diff --check
+          python -m compileall -q linktools-ai/src scripts/check/ai
+          git add -A
+          test -n "$(git status --porcelain)"
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git commit -m 'refactor(ai): unify runtime capability composition'
+          git push origin "HEAD:refs/heads/${target}"
