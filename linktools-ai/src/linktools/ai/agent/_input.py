@@ -21,12 +21,12 @@ _USER_TEXT_ESCAPE_PREFIX = "linktools.ai:user-content:text:"
 _WIRE_TIMESTAMP = datetime(1970, 1, 1, tzinfo=timezone.utc)
 _DIGEST_SIZE = 64
 
-UserPromptInput: TypeAlias = str | Sequence[UserContent]
+_UserPromptInput: TypeAlias = str | Sequence[UserContent]
 _RuntimeUserPrompt: TypeAlias = str
 
 
-def prepare_user_prompt(value: UserPromptInput) -> str:
-    """Convert the public Pydantic-native prompt surface into durable text transport."""
+def prepare_user_prompt(value: _UserPromptInput) -> str:
+    """Convert Pydantic-native user content into durable text transport."""
     if isinstance(value, str):
         validate_user_prompt(value)
         if value.startswith((_USER_CONTENT_PREFIX, _USER_TEXT_ESCAPE_PREFIX)):
@@ -148,4 +148,4 @@ def _decode_user_content(payload: dict[str, JsonValue]) -> tuple[UserContent, ..
     return content
 
 
-__all__ = ["UserPromptInput", "prepare_user_prompt"]
+__all__ = ["prepare_user_prompt"]
