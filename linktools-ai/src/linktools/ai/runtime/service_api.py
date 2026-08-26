@@ -160,6 +160,12 @@ class ExecutionTraceItem:
     sequence: int
     payload: JsonValue
 
+    def __post_init__(self) -> None:
+        if isinstance(self.payload, dict) and self.payload.get("kind") == "MODEL_RESPONSE" and "token_usage" not in self.payload:
+            payload = dict(self.payload)
+            payload["token_usage"] = None
+            object.__setattr__(self, "payload", payload)
+
 
 @dataclass(frozen=True, slots=True)
 class TranscriptItem:

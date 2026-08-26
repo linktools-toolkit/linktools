@@ -16,6 +16,7 @@ from linktools.ai.runtime._factory import _RuntimeCloseCoordinator
 from linktools.ai.runtime._execution import DefaultExecutionService
 from linktools.ai.runtime._local import LocalExecutionBackend
 from linktools.ai.runtime.state._durability import (
+    CommitObservation,
     DurableCommitState,
     run_durable_commit,
 )
@@ -163,7 +164,7 @@ def test_global_runtime_capability_is_restored_from_composition() -> None:
 
 
 @pytest.mark.asyncio
-async def test_durable_commit_cancellation_keeps_operation_owned_until_done() -> None:
+async def test_durable_commit_cancellation_settles_operation_before_returning() -> None:
     started = asyncio.Event()
     release = asyncio.Event()
     owner: set[asyncio.Task[object]] = set()
@@ -174,30 +175,27 @@ async def test_durable_commit_cancellation_keeps_operation_owned_until_done() ->
         return "committed"
 
     async def readback() -> object:
-        raise AssertionError("readback is not used for a pending operation")
+        raise AssertionError("readback is not used after a committed operation")
 
     caller = asyncio.create_task(
         run_durable_commit(operation, readback, background_tasks=owner)
     )
     await started.wait()
     caller.cancel()
-    result = await caller
-    assert result.state is DurableCommitState.UNRESOLVED
-    assert result.cancelled
+    await asyncio.sleep(0)
+    assert not caller.done()
     assert len(owner) == 1
-    owned = next(iter(owner))
-    assert not owned.done()
 
     release.set()
-    await owned
-    await asyncio.sleep(0)
+    result = await caller
+    assert result.state is DurableCommitState.COMMITTED
+    assert result.value == "committed"
+    assert result.cancelled
     assert owner == set()
 
 
 @pytest.mark.asyncio
-async def test_durable_commit_cancellation_owns_failed_readback_until_done(
-    caplog: pytest.LogCaptureFixture,
-) -> None:
+async def test_durable_commit_cancellation_settles_readback_before_unknown() -> None:
     started = asyncio.Event()
     release = asyncio.Event()
     owner: set[asyncio.Task[object]] = set()
@@ -215,19 +213,46 @@ async def test_durable_commit_cancellation_owns_failed_readback_until_done(
     )
     await started.wait()
     caller.cancel()
-    result = await caller
-    assert result.state is DurableCommitState.UNRESOLVED
+    await asyncio.sleep(0)
+    assert not caller.done()
     assert len(owner) == 1
-    readback_task = next(iter(owner))
 
     release.set()
-    await asyncio.gather(readback_task, return_exceptions=True)
-    await asyncio.sleep(0)
+    result = await caller
+    assert result.state is DurableCommitState.UNRESOLVED
+    assert isinstance(result.error, RuntimeError)
+    assert result.cancelled
     assert owner == set()
-    assert any(
-        "detached durable commit readback failed" in record.message
-        for record in caplog.records
+
+
+@pytest.mark.asyncio
+async def test_durable_commit_cancellation_accepts_committed_readback() -> None:
+    started = asyncio.Event()
+    release = asyncio.Event()
+    owner: set[asyncio.Task[object]] = set()
+
+    async def operation() -> None:
+        raise RuntimeError("commit response lost")
+
+    async def readback() -> CommitObservation[str]:
+        started.set()
+        await release.wait()
+        return CommitObservation(DurableCommitState.COMMITTED, value="reconciled")
+
+    caller = asyncio.create_task(
+        run_durable_commit(operation, readback, background_tasks=owner)
     )
+    await started.wait()
+    caller.cancel()
+    await asyncio.sleep(0)
+    assert not caller.done()
+
+    release.set()
+    result = await caller
+    assert result.state is DurableCommitState.COMMITTED
+    assert result.value == "reconciled"
+    assert result.cancelled
+    assert owner == set()
 
 
 def _step_store_for_preflight() -> RuntimeStepStore:
@@ -261,6 +286,7 @@ async def test_step_preflight_rejects_flights_tasks_and_terminal_seals() -> None
     with pytest.raises(AIError) as task_error:
         await store.preflight_close()
     assert task_error.value.code is ErrorCode.STORAGE_RECOVERY_REQUIRED
+    assert not store._preflight
     assert task_error.value.safe_details["pending_tasks"] == 1
     release.set()
     await task

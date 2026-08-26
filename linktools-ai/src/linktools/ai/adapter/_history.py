@@ -49,6 +49,18 @@ from ..runtime.state import (
 )
 
 _logger = environ.get_logger("ai.adapter.history")
+_MODEL_USAGE_INPUT_METADATA_KEY = "linktools.ai.model_usage.input_tokens"
+_MODEL_USAGE_OUTPUT_METADATA_KEY = "linktools.ai.model_usage.output_tokens"
+_MODEL_USAGE_CACHE_READ_METADATA_KEY = "linktools.ai.model_usage.cache_read_tokens"
+_MODEL_USAGE_CACHE_WRITE_METADATA_KEY = "linktools.ai.model_usage.cache_write_tokens"
+_MODEL_USAGE_METADATA_KEYS = frozenset(
+    {
+        _MODEL_USAGE_INPUT_METADATA_KEY,
+        _MODEL_USAGE_OUTPUT_METADATA_KEY,
+        _MODEL_USAGE_CACHE_READ_METADATA_KEY,
+        _MODEL_USAGE_CACHE_WRITE_METADATA_KEY,
+    }
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -527,7 +539,7 @@ class StepExecutionHistoryReader:
             )
         source_digest = canonical_sha256(
             {
-                "model_version": 2,
+                "model_version": 3,
                 "root_execution_id": root.execution_id,
                 "seals": seals,
             }
@@ -787,6 +799,8 @@ def _trace_item(record: ExecutionRecord, segment_sequence: int, depth: int, ordi
         return None
     kind, status = value
     payload = {"kind": kind, "status": status, "step_index": event.step_index, "segment_sequence": segment_sequence, "scope": "root" if depth == 0 else "subagent", "depth": depth}
+    if kind == "MODEL_RESPONSE":
+        payload["token_usage"] = _model_token_usage(event) if status == "SUCCEEDED" else None
     if event.agent_name is not None:
         payload["agent_name"] = event.agent_name
     if event.tool_call_id is not None:
@@ -796,6 +810,48 @@ def _trace_item(record: ExecutionRecord, segment_sequence: int, depth: int, ordi
     if depth > 0:
         payload["child_execution_id"] = record.execution_id
     return ExecutionTraceItem(record.execution_id, ordinal, payload)
+
+
+def _model_token_usage(event: StepEvent) -> "dict[str, JsonValue] | None":
+    metadata = event.metadata
+    present = _MODEL_USAGE_METADATA_KEYS.intersection(metadata)
+    if not present:
+        return None
+    if (
+        _MODEL_USAGE_INPUT_METADATA_KEY not in metadata
+        or _MODEL_USAGE_OUTPUT_METADATA_KEY not in metadata
+    ):
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    return {
+        "input_tokens": _metadata_token(metadata, _MODEL_USAGE_INPUT_METADATA_KEY),
+        "output_tokens": _metadata_token(metadata, _MODEL_USAGE_OUTPUT_METADATA_KEY),
+        "cache_read_tokens": _metadata_token(
+            metadata,
+            _MODEL_USAGE_CACHE_READ_METADATA_KEY,
+            required=False,
+        ),
+        "cache_write_tokens": _metadata_token(
+            metadata,
+            _MODEL_USAGE_CACHE_WRITE_METADATA_KEY,
+            required=False,
+        ),
+    }
+
+
+def _metadata_token(
+    metadata: Mapping[str, str],
+    key: str,
+    *,
+    required: bool = True,
+) -> "int | None":
+    raw = metadata.get(key)
+    if raw is None:
+        if required:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        return None
+    if not raw.isdigit():
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    return int(raw)
 
 
 def _merge_history_refs(

@@ -161,6 +161,8 @@ Apply these during design, not after implementation:
 - Integrity checks validate stored bytes and structure. Never require a dependency upgrade to re-encode old data byte-for-byte identically.
 - Stable hashes and idempotency identities must not change because a dependency adds optional/default fields.
 - If codec, version, or provenance changes semantics, include that discriminator in stable hashes and idempotency identities; never hash only the opaque payload.
+- Caller cancellation does not determine durable truth. Keep shielded commits owned until operation/readback settles; use `STORAGE_COMMIT_UNKNOWN` only when final readback cannot resolve the outcome.
+- Per-request model observations belong at the model-response boundary. Persist them before aggregation and derive run totals from the same request facts; never reconstruct single-call data from cumulative usage.
 - Internal transport encoders, durable wire types, and implementation protocols stay private unless they are intentional extension points.
 - A public Protocol change is an API change. Keep runtime-only bridges private instead of leaking internal policy parameters downstream.
 - Serializable provider references are not automatically durable. Define lifetime/recovery semantics before persisting remote file IDs, URLs, handles, or tokens.

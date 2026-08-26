@@ -21,7 +21,7 @@ from pydantic_ai.exceptions import (
     ToolFailedError,
     ToolRetryError,
 )
-from pydantic_ai.messages import RetryPromptPart, ToolCallPart, ToolReturnPart
+from pydantic_ai.messages import ModelResponse, RetryPromptPart, ToolCallPart, ToolReturnPart
 from pydantic_ai.models import Model, ModelRequestContext
 from pydantic_ai.tools import RunContext, ToolDefinition
 from pydantic_ai.toolsets import AbstractToolset, FunctionToolset
@@ -33,7 +33,7 @@ from pydantic_ai_harness.compaction import (
 )
 from pydantic_ai_harness.memory import Memory, SearchableMemoryStore
 from pydantic_ai_harness.planning import Planning
-from pydantic_ai_harness.step_persistence import StepPersistence, StepStore
+from pydantic_ai_harness.step_persistence import StepEvent, StepPersistence, StepStore
 
 from ..capability import SKILL_TOOL_NAMES
 from ..core import JsonValue
@@ -65,6 +65,10 @@ WORKSPACE_FILESYSTEM_READ_TOOL_NAMES = (
 WORKSPACE_SHELL_TOOL_NAMES = ("check_command", "run_command", "start_command", "stop_command")
 PLAN_SAFE_METADATA_KEY = "linktools.ai.plan_safe"
 _REPLAY_SAFE_METADATA_KEY = "linktools.ai.replay_safe"
+_MODEL_USAGE_INPUT_METADATA_KEY = "linktools.ai.model_usage.input_tokens"
+_MODEL_USAGE_OUTPUT_METADATA_KEY = "linktools.ai.model_usage.output_tokens"
+_MODEL_USAGE_CACHE_READ_METADATA_KEY = "linktools.ai.model_usage.cache_read_tokens"
+_MODEL_USAGE_CACHE_WRITE_METADATA_KEY = "linktools.ai.model_usage.cache_write_tokens"
 _TRUSTED_TOOL_CLASSES = frozenset(
     {
         "control",
@@ -184,6 +188,32 @@ class _RuntimeStepPersistence(StepPersistence[None]):
         self._trusted_mcp_selectors = trusted_mcp_selectors
         self._calls: dict[tuple[str, str], _ToolCallState] = {}
         self._background_tasks = set() if background_tasks is None else background_tasks
+
+    async def after_model_request(
+        self,
+        ctx: "RunContext[None]",
+        *,
+        request_context: ModelRequestContext,
+        response: ModelResponse,
+    ) -> ModelResponse:
+        del request_context
+        run_id = self.run_id or ctx.run_id
+        if not run_id:
+            raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+        metadata = dict(self.metadata)
+        metadata.update(_model_usage_metadata(response))
+        await self.store.append_event(
+            StepEvent(
+                run_id=run_id,
+                kind="model_request_completed",
+                step_index=ctx.run_step,
+                conversation_id=ctx.conversation_id,
+                parent_run_id=self.parent_run_id,
+                agent_name=self.agent_name,
+                metadata=metadata,
+            )
+        )
+        return response
 
     async def before_tool_execute(
         self,
@@ -857,6 +887,22 @@ def _workspace_file_key(part: ToolCallPart) -> "str | None":
         return None
     path = arguments.get("path")
     return path if isinstance(path, str) else None
+
+
+def _model_usage_metadata(response: ModelResponse) -> dict[str, str]:
+    usage = response.usage
+    return {
+        _MODEL_USAGE_INPUT_METADATA_KEY: _model_usage_token(usage.input_tokens),
+        _MODEL_USAGE_OUTPUT_METADATA_KEY: _model_usage_token(usage.output_tokens),
+        _MODEL_USAGE_CACHE_READ_METADATA_KEY: _model_usage_token(usage.cache_read_tokens),
+        _MODEL_USAGE_CACHE_WRITE_METADATA_KEY: _model_usage_token(usage.cache_write_tokens),
+    }
+
+
+def _model_usage_token(value: object) -> str:
+    if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+        raise AIError(ErrorCode.MODEL_RESPONSE_INVALID)
+    return str(value)
 
 
 def _validate_compaction_target(value: "int | None") -> None:
