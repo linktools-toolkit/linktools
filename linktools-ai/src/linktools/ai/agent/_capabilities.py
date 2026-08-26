@@ -346,6 +346,9 @@ class _RuntimeStepPersistence(StepPersistence[None]):
             ToolFailed,
             ToolFailedError,
         ) as error:
+            if state.handler_entered and not state.policy.effect_free and not state.policy.replay_safe:
+                await self._mark_unknown(state, error)
+                raise AIError(ErrorCode.TOOL_EFFECT_UNKNOWN) from error
             try:
                 await self._fail_known_effect(
                     ctx,
@@ -450,6 +453,9 @@ class _RuntimeStepPersistence(StepPersistence[None]):
                 error,
                 (ValidationError, ModelRetry, ToolRetryError, ToolFailed, ToolFailedError),
             ):
+                if state.handler_entered and not state.policy.effect_free and not state.policy.replay_safe:
+                    await self._mark_unknown(state, error)
+                    raise AIError(ErrorCode.TOOL_EFFECT_UNKNOWN) from error
                 return await self._fail_known_effect(
                     ctx,
                     call=call,
@@ -930,16 +936,16 @@ def _tool_effect_policy(
                 tool_def.name == "check_command",
             )
         if tool_class == "control":
-            if tool_def.name in SKILL_TOOL_NAMES or tool_def.name in PLANNING_TOOL_NAMES:
+            if tool_def.name in SKILL_TOOL_NAMES:
                 return _ToolEffectPolicy(True, True)
-            if tool_def.name in SUBAGENT_TOOL_NAMES:
+            if tool_def.name in PLANNING_TOOL_NAMES or tool_def.name in SUBAGENT_TOOL_NAMES:
                 return _ToolEffectPolicy(True, False)
             raise AIError(ErrorCode.CAPABILITY_POLICY_CONFLICT)
         raise AIError(ErrorCode.CAPABILITY_POLICY_CONFLICT)
     metadata = (tool_def.metadata or {}).get(_REPLAY_SAFE_METADATA_KEY, False)
     if not isinstance(metadata, bool):
         raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
-    return _ToolEffectPolicy(metadata, metadata)
+    return _ToolEffectPolicy(metadata, False)
 
 
 def _durable_failure_error(
