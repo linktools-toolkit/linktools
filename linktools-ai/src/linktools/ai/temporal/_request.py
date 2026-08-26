@@ -8,7 +8,11 @@ from collections.abc import Mapping
 
 from linktools.core import environ
 
-from ..agent import AgentBindingSnapshot
+from ..agent import (
+    AgentBindingSnapshot,
+    UserPromptTransport,
+    user_prompt_transport,
+)
 from ..core import JsonValue, Principal, canonical_json_bytes
 from ..errors import AIError, ErrorCode
 from ..runtime import (
@@ -120,9 +124,15 @@ async def put_execution_request(
 ) -> str:
     if not isinstance(binding, AgentBindingSnapshot):
         raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+    user_prompt_codec = (
+        request.user_prompt.codec
+        if isinstance(request.user_prompt, UserPromptTransport)
+        else "text"
+    )
     payload: dict[str, JsonValue] = {
         "version": 1,
-        "user_prompt": request.user_prompt,
+        "user_prompt": str(request.user_prompt),
+        "user_prompt_codec": user_prompt_codec,
         "principal": _principal_payload(request.principal),
         "idempotency_key": request.idempotency_key,
         "memory_scope": request.memory_scope,
@@ -209,6 +219,8 @@ async def _read_execution_transport(
             raise ValueError("execution request tenant does not match its object key")
         return request, binding
     except AIError as error:
+        if error.code is ErrorCode.STORAGE_VERSION_UNSUPPORTED:
+            raise
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
     except (KeyError, TypeError, ValueError, json.JSONDecodeError) as error:
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
@@ -328,8 +340,15 @@ def _execution_request_from_payload(
     memory_scope = payload["memory_scope"]
     if memory_scope is not None and not isinstance(memory_scope, str):
         raise ValueError("execution memory scope is invalid")
-    request = ExecutionRequest(
+    user_prompt_codec = payload.get("user_prompt_codec", "text")
+    if not isinstance(user_prompt_codec, str) or not user_prompt_codec:
+        raise ValueError("execution user prompt codec is invalid")
+    user_prompt = user_prompt_transport(
         _require_string(payload["user_prompt"]),
+        user_prompt_codec,
+    )
+    request = ExecutionRequest(
+        user_prompt,
         _principal_from_payload(payload["principal"]),
         _require_string(payload["idempotency_key"]),
         memory_scope,
