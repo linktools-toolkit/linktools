@@ -1,0 +1,21 @@
+name: _tmp diagnose ai refactor parts
+
+on:
+  push:
+    branches:
+      - tmp/ai-runtime-capabilitygroup-agent-transport-v3
+
+permissions:
+  contents: read
+
+jobs:
+  diagnose:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Print transport hashes
+        shell: bash
+        run: |
+          set -euo pipefail
+          wc -c .github/_transport/ai-runtime-capabilitygroup-agent-v3/part-*
+          sha256sum .github/_transport/ai-runtime-capabilitygroup-agent-v3/part-*
