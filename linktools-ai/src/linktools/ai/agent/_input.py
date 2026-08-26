@@ -47,6 +47,18 @@ def prepare_user_prompt(value: _UserPromptInput) -> str:
     return wire
 
 
+def append_user_prompt_text(value: str, text: str) -> str:
+    """Append generated text without exposing the durable rich-content representation."""
+    if not isinstance(text, str):
+        raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+    if not text:
+        return value
+    restored = _restore_user_prompt(value)
+    if isinstance(restored, str):
+        return prepare_user_prompt(restored + text)
+    return prepare_user_prompt((*restored, text))
+
+
 def _restore_user_prompt(value: str) -> str | tuple[UserContent, ...]:
     """Restore durable text transport into the prompt shape Pydantic AI accepts."""
     validate_user_prompt(value)
@@ -148,4 +160,4 @@ def _decode_user_content(payload: dict[str, JsonValue]) -> tuple[UserContent, ..
     return content
 
 
-__all__ = ["prepare_user_prompt"]
+__all__ = ["append_user_prompt_text", "prepare_user_prompt"]
