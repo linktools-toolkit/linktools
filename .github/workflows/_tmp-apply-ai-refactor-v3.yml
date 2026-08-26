@@ -16,35 +16,38 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Verify and reconstruct implementation patch
+      - name: Reconstruct verified missing owner patch
         shell: bash
         run: |
           set -euo pipefail
-          cat .github/_transport/ai-runtime-capabilitygroup-agent-v3/part-* \
-            | base64 -d \
-            | gzip -d \
-            > /tmp/ai-refactor-v3.patch
-          echo '22d56e31382148450833adff37deb066e42b36161034eef6ae48f61fd0e5a6ca  /tmp/ai-refactor-v3.patch' \
-            | sha256sum -c -
+          source_ref='origin/tmp/ai-runtime-capabilitygroup-agent-newfiles-v4'
+          path='.github/_transport/ai-runtime-capabilitygroup-agent-newfiles-v4'
+          git fetch origin tmp/ai-runtime-capabilitygroup-agent-newfiles-v4
+          : > /tmp/newfiles.b64
+          for i in 00 01 02 03 04 05 06 07 08 09 10; do
+            git show "${source_ref}:${path}/part-${i}" >> /tmp/newfiles.b64
+          done
+          base64 -d /tmp/newfiles.b64 | gzip -d > /tmp/ai-newfiles.patch
+          echo '767420f45dd27ceb1ebbc3035a8da56061c1df7685ea5213564e27d66bb9061a  /tmp/ai-newfiles.patch' | sha256sum -c -
 
-      - name: Apply implementation from exact master baseline
+      - name: Apply missing owners and squash exact implementation
         shell: bash
         run: |
           set -euo pipefail
           baseline='77ce66cc3a68938181ec752cd30d9be5ab24d63b'
+          current='4e446fe3d09f049e2a624c87f7804ef5c16745f7'
           target='refactor/ai-runtime-capabilitygroup-agent'
           remote_sha="$(git ls-remote origin "refs/heads/${target}" | cut -f1)"
-          test "${remote_sha}" = "${baseline}"
-          git checkout -B "${target}" "${baseline}"
-          git apply --check /tmp/ai-refactor-v3.patch
-          git apply /tmp/ai-refactor-v3.patch
+          test "${remote_sha}" = "${current}"
+          git checkout -B "${target}" "${current}"
+          git apply --check /tmp/ai-newfiles.patch
+          git apply /tmp/ai-newfiles.patch
           git diff --check
           python -m compileall -q linktools-ai/src scripts/check/ai
           git add -A
-          test -n "$(git status --porcelain)"
+          git reset --soft "${baseline}"
+          test -n "$(git diff --cached --name-only)"
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           git commit -m 'refactor(ai): unify runtime capability composition'
-          git push origin "HEAD:refs/heads/${target}"
-
-# trigger after all 16 transport parts are present
+          git push --force-with-lease="refs/heads/${target}:${current}" origin "HEAD:refs/heads/${target}"
