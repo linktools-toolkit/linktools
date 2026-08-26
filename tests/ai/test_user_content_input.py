@@ -37,6 +37,19 @@ def test_native_user_content_transport_is_deterministic_and_round_trips() -> Non
     assert restored[1].identifier == "error.log"
 
 
+def test_rich_transport_survives_runtime_text_suffix() -> None:
+    transport = prepare_user_prompt(_attachment_prompt())
+    suffix = "\n\nUpstream task results (JSON, keyed by task id):\n{\"scan\":{\"ok\":true}}"
+
+    restored = _restore_user_prompt(transport + suffix)
+
+    assert isinstance(restored, tuple)
+    assert restored[0] == "Inspect this attachment"
+    assert isinstance(restored[1], BinaryContent)
+    assert restored[1].identifier == "error.log"
+    assert restored[2] == suffix
+
+
 def test_plain_text_keeps_identity_and_reserved_prefixes_are_escaped() -> None:
     plain = "normal prompt"
     assert prepare_user_prompt(plain) == plain
