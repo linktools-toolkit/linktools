@@ -1,21 +1,21 @@
-name: _tmp apply ai new owner files pr v4
+name: _tmp apply remaining ai owners pr v4
 
 on:
   pull_request:
     branches:
-      - master
+      - tmp/ai-runtime-capabilitygroup-agent-newfiles-v4
 
 permissions:
   contents: write
 
 jobs:
   apply:
-    if: github.head_ref == 'tmp/ai-runtime-capabilitygroup-agent-newfiles-v4'
+    if: github.head_ref == 'tmp/ai-runtime-capabilitygroup-agent-newfiles-v4-trigger'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ github.event.pull_request.head.sha }}
+          ref: ${{ github.event.pull_request.base.sha }}
           fetch-depth: 0
 
       - name: Verify new owner payload
@@ -29,22 +29,31 @@ jobs:
             > /tmp/ai-newfiles.patch
           echo '767420f45dd27ceb1ebbc3035a8da56061c1df7685ea5213564e27d66bb9061a  /tmp/ai-newfiles.patch' | sha256sum -c -
 
-      - name: Apply and squash exact implementation
+      - name: Apply remaining owners and squash exact implementation
         shell: bash
         run: |
           set -euo pipefail
           baseline='77ce66cc3a68938181ec752cd30d9be5ab24d63b'
-          current='4e446fe3d09f049e2a624c87f7804ef5c16745f7'
           target='refactor/ai-runtime-capabilitygroup-agent'
-          remote_sha="$(git ls-remote origin "refs/heads/${target}" | cut -f1)"
-          test "${remote_sha}" = "${current}"
+          current="$(git ls-remote origin "refs/heads/${target}" | cut -f1)"
           git checkout -B "${target}" "${current}"
-          git apply --check /tmp/ai-newfiles.patch
-          git apply /tmp/ai-newfiles.patch
+          rm -f \
+            linktools-ai/src/linktools/ai/runtime/_agent_executor.py \
+            linktools-ai/src/linktools/ai/runtime/_capabilities.py \
+            linktools-ai/src/linktools/ai/runtime/_history.py
+          args=(
+            --include=linktools-ai/src/linktools/ai/runtime/_agent_executor.py
+            --include=linktools-ai/src/linktools/ai/runtime/_capabilities.py
+            --include=linktools-ai/src/linktools/ai/runtime/_history.py
+          )
+          git apply --check "${args[@]}" /tmp/ai-newfiles.patch
+          git apply "${args[@]}" /tmp/ai-newfiles.patch
+          rm -f .github/workflows/_tmp-finalize-ai-runtime-refactor.yml
           git diff --check
           python -m compileall -q linktools-ai/src scripts/check/ai
           git add -A
           git reset --soft "${baseline}"
+          git add -A
           test -n "$(git diff --cached --name-only)"
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
