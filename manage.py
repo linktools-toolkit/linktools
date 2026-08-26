@@ -314,23 +314,19 @@ def _resolve_gate_modules(project: str, values: "typing.Tuple[str, ...]") -> "ty
     return values
 
 
-def _load_release_config(project: str, project_path: str) -> "typing.Dict[str, typing.Any]":
-    path = os.path.join(project_path, "release.yml")
+def _load_project_checks(project: str, project_path: str) -> "typing.Dict[str, typing.Any]":
+    path = os.path.join(project_path, "linktools.yml")
     if not os.path.isfile(path):
-        print("[-] %s release config is missing: %s" % (project, path), file=sys.stderr)
+        print("[-] %s Linktools config is missing: %s" % (project, path), file=sys.stderr)
         raise SystemExit(1)
     try:
         with open(path, "r", encoding="utf-8") as file:
             data = yaml.load(file, Loader=_UniqueKeyLoader)
     except (OSError, ValueError, yaml.YAMLError) as error:
-        print("[-] %s release config is invalid: %s" % (project, error), file=sys.stderr)
+        print("[-] %s Linktools config is invalid: %s" % (project, error), file=sys.stderr)
         raise SystemExit(1)
 
-    root = _require_mapping(data, "%s release config" % project)
-    unknown_root = _unknown_fields(root, {"checks"}, "%s release config" % project)
-    if unknown_root:
-        print("[-] %s release config has unknown field(s): %s" % (project, ", ".join(unknown_root)), file=sys.stderr)
-        raise SystemExit(1)
+    root = _require_mapping(data, "%s Linktools config" % project)
     checks = _require_mapping(root.get("checks"), "%s checks" % project)
     unknown_checks = _unknown_fields(checks, _SUPPORTED_CHECKS, "%s checks" % project)
     if unknown_checks:
@@ -507,11 +503,6 @@ def handle_init(args: argparse.Namespace) -> None:
                 os.path.join(info["path"], "capability.jinja2"),
                 exist_ok=True,
             )
-            sync_project_file(
-                os.path.join(TEMPLATE_PATH, "release.yml"),
-                os.path.join(info["path"], "release.yml"),
-                exist_ok=False,
-            )
 
 
 def handle_install(args: argparse.Namespace) -> None:
@@ -539,7 +530,7 @@ def handle_check(args: argparse.Namespace) -> None:
     for project in projects:
         project_path = modules[project]["path"]
         requirements[project] = _read_requires_python(project, project_path)
-        checks[project] = _load_release_config(project, project_path)
+        checks[project] = _load_project_checks(project, project_path)
 
     compatible = _compatible_projects(args, projects, requirements)
     environment = _check_environment()
