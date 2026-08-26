@@ -5,9 +5,11 @@
 import argparse
 import json
 import os
+import posixpath
 import re
 import subprocess
 import sys
+import tarfile
 import tempfile
 import venv
 import zipfile
@@ -15,6 +17,7 @@ from pathlib import Path
 
 import pkginfo
 import tomlkit
+import yaml
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 _DIST = _REPO_ROOT / "dist"
@@ -37,6 +40,10 @@ class _Artifact:
 
 def _normalize_name(value):
     return re.sub(r"[-_.]+", "-", value).lower()
+
+
+def _normalize_version(value):
+    return value[1:] if value.startswith("v") else value
 
 
 def _project_directories():
@@ -119,6 +126,22 @@ def _source_metadata(project_path):
     return name, requires_python
 
 
+def _linktools_config(project_path):
+    path = project_path / "linktools.yml"
+    if not path.is_file():
+        raise ValueError("missing Linktools config: %s" % path)
+    try:
+        value = yaml.safe_load(path.read_text(encoding="utf-8"))
+    except yaml.YAMLError as error:
+        raise ValueError("invalid Linktools config %s: %s" % (path, error))
+    if not isinstance(value, dict):
+        raise ValueError("Linktools config must be a mapping: %s" % path)
+    version = value.get("version")
+    if not isinstance(version, str) or not version:
+        raise ValueError("Linktools config version is missing: %s" % path)
+    return value
+
+
 def _selected_pairs(artifacts, selected, project_paths):
     pairs = {}
     for project in selected:
@@ -152,18 +175,119 @@ def _validate_full_artifact_set(artifacts, known_projects, selected):
 
 def _validate_version(pairs, project_paths):
     version = os.environ.get("VERSION")
-    if version is None:
-        return
-    expected = version[1:] if version.startswith("v") else version
+    expected = _normalize_version(version) if version is not None else None
     for project, pair in pairs.items():
         wheel, sdist = pair
-        if wheel.version != expected or sdist.version != expected:
-            raise ValueError("VERSION metadata mismatch for %s: expected %s" % (project, expected))
-        version_file = project_paths[project] / ".version"
-        if not version_file.is_file():
-            raise ValueError("missing version file: %s" % version_file)
-        if version_file.read_text(encoding="utf-8") != version:
-            raise ValueError(".version mismatch for %s" % project)
+        config_version = _linktools_config(project_paths[project])["version"]
+        if wheel.version != config_version or sdist.version != config_version:
+            raise ValueError(
+                "artifact/linktools.yml Version mismatch for %s: config=%s wheel=%s sdist=%s"
+                % (project, config_version, wheel.version, sdist.version)
+            )
+        if expected is not None and config_version != expected:
+            raise ValueError(
+                "VERSION/linktools.yml mismatch for %s: expected %s, got %s"
+                % (project, expected, config_version)
+            )
+
+
+def _safe_sdist_members(archive):
+    members = archive.getmembers()
+    for member in members:
+        name = member.name
+        normalized = posixpath.normpath(name)
+        if name.startswith("/") or normalized == ".." or normalized.startswith("../"):
+            raise ValueError("unsafe sdist member: %s" % name)
+    return members
+
+
+def _sdist_root_and_config(sdist):
+    with tarfile.open(str(sdist.path), "r:gz") as archive:
+        members = _safe_sdist_members(archive)
+        files = {member.name: member for member in members if member.isfile()}
+        config_names = [
+            name
+            for name in files
+            if len(name.split("/")) == 2 and name.endswith("/linktools.yml")
+        ]
+        if len(config_names) != 1:
+            raise ValueError("%s must contain exactly one top-level linktools.yml" % sdist.path.name)
+        config_name = config_names[0]
+        root = config_name.rsplit("/", 1)[0]
+        payload = archive.extractfile(files[config_name])
+        if payload is None:
+            raise ValueError("cannot read %s from %s" % (config_name, sdist.path.name))
+        try:
+            config = yaml.safe_load(payload.read().decode("utf-8"))
+        except (UnicodeDecodeError, yaml.YAMLError) as error:
+            raise ValueError("invalid %s in %s: %s" % (config_name, sdist.path.name, error))
+        if not isinstance(config, dict):
+            raise ValueError("%s must contain a mapping" % config_name)
+        return root, config, set(files)
+
+
+def _validate_sdist_inputs(pairs):
+    roots = {}
+    for project, pair in pairs.items():
+        sdist = pair[1]
+        root, config, files = _sdist_root_and_config(sdist)
+        convert = config.get("convert", [])
+        if not isinstance(convert, list):
+            raise ValueError("%s convert must be a list" % sdist.path.name)
+        for index, item in enumerate(convert):
+            if not isinstance(item, dict):
+                raise ValueError("%s convert[%d] must be a mapping" % (sdist.path.name, index))
+            source = item.get("source")
+            if not isinstance(source, str) or not source or source.startswith("/"):
+                raise ValueError("%s convert[%d].source is invalid" % (sdist.path.name, index))
+            normalized = posixpath.normpath(source.replace("\\", "/"))
+            if normalized == ".." or normalized.startswith("../"):
+                raise ValueError("%s convert[%d].source escapes project" % (sdist.path.name, index))
+            member = "%s/%s" % (root, normalized)
+            if member not in files:
+                raise ValueError("%s is missing build input %s" % (sdist.path.name, source))
+        roots[project] = root
+    return roots
+
+
+def _validate_sdist_rebuild(pairs, roots):
+    with tempfile.TemporaryDirectory(prefix="linktools-sdist-rebuild-") as temporary:
+        temporary_root = Path(temporary)
+        for project, pair in pairs.items():
+            wheel, sdist = pair
+            project_root = temporary_root / project
+            project_root.mkdir()
+            with tarfile.open(str(sdist.path), "r:gz") as archive:
+                _safe_sdist_members(archive)
+                archive.extractall(str(project_root))
+            source = project_root / roots[project]
+            output = project_root / "wheel"
+            output.mkdir()
+            environment = dict(os.environ)
+            environment["RELEASE"] = "true"
+            subprocess.check_call(
+                [
+                    sys.executable,
+                    "-m",
+                    "build",
+                    "--wheel",
+                    "--outdir",
+                    str(output),
+                    str(source),
+                ],
+                cwd=str(_REPO_ROOT),
+                env=environment,
+            )
+            rebuilt_paths = list(output.glob("*.whl"))
+            if len(rebuilt_paths) != 1:
+                raise ValueError("%s sdist rebuild produced %d wheel(s)" % (project, len(rebuilt_paths)))
+            rebuilt = _read_artifact(rebuilt_paths[0])
+            if rebuilt.name != wheel.name:
+                raise ValueError("%s rebuilt wheel Name mismatch" % project)
+            if rebuilt.version != wheel.version:
+                raise ValueError("%s rebuilt wheel Version mismatch" % project)
+            if rebuilt.requires_python != wheel.requires_python:
+                raise ValueError("%s rebuilt wheel Requires-Python mismatch" % project)
 
 
 def _wheel_resource(wheel, resource):
@@ -273,7 +397,11 @@ def main() -> int:
         project_paths = _project_directories()
         if not project_paths:
             raise ValueError("no LinkTools projects found")
-        selected = tuple(_normalize_name(project) for project in args.projects) if args.projects else tuple(project_paths)
+        selected = (
+            tuple(_normalize_name(project) for project in args.projects)
+            if args.projects
+            else tuple(project_paths)
+        )
         unknown_selected = sorted(set(selected) - set(project_paths))
         if unknown_selected:
             raise ValueError("unknown selected project(s): %s" % ", ".join(unknown_selected))
@@ -281,9 +409,11 @@ def main() -> int:
         _validate_full_artifact_set(artifacts, project_paths, selected)
         pairs = _selected_pairs(artifacts, selected, project_paths)
         _validate_version(pairs, project_paths)
+        roots = _validate_sdist_inputs(pairs)
+        _validate_sdist_rebuild(pairs, roots)
         resources = _validate_capability_resources(pairs)
         _validate_install_isolation(pairs, resources)
-    except (OSError, ValueError, subprocess.CalledProcessError, zipfile.BadZipFile) as error:
+    except (OSError, ValueError, subprocess.CalledProcessError, tarfile.TarError, zipfile.BadZipFile) as error:
         print("[-] Artifact verification failed: %s" % error, file=sys.stderr)
         return 1
     print("[+] Artifact verification passed: %s" % ", ".join(selected))

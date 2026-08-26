@@ -1,5 +1,5 @@
 [build-system]
-requires = ["linktools-setup>=0.0.2"]
+requires = ["linktools-setup @ git+https://github.com/linktools-toolkit/linktools-setup.git@009c4a57ab5df0010f0e79b968fd3f7e56796730"]
 build-backend = "linktools_setup.build_meta"
 
 [project]
@@ -24,12 +24,3 @@ include-package-data = true
 
 [tool.setuptools.package-data]
 linktools = ["**/assets/**"]
-
-[tool.linktools]
-name = "{name}"
-version = {file = ".version"}
-dependencies = {file = "requirements.yml"}
-convert = [{type = "jinja2", source = "capability.jinja2", dest = "src/linktools/capabilities/{name}.py"}]
-
-[tool.linktools.scripts]
-capability = "linktools.capabilities.{name}:__cap_{name}__"

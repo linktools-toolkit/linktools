@@ -1,0 +1,20 @@
+name: "{name}"
+version: "0.0.1"
+
+dependencies: []
+
+dev-dependencies:
+  - "pytest<7; python_version < '3.7'"
+  - "pytest; python_version >= '3.7'"
+
+release-dependencies: []
+
+optional-dependencies: {}
+
+scripts:
+  capability: linktools.capabilities.{name}:__cap_{name}__
+
+convert:
+  - type: jinja2
+    source: capability.jinja2
+    dest: src/linktools/capabilities/{name}.py

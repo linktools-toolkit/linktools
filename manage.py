@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 
 import argparse
+import json
 import os
 import re
 import shutil
@@ -19,6 +20,7 @@ PROJECT_PATH = os.path.abspath(os.path.dirname(__file__))
 
 _REQUIRES_PYTHON_PATTERN = re.compile(r"^>=(\d+)\.(\d+)$")
 _GATE_MODULE_PATTERN = re.compile(r"^scripts\.check(?:\.[A-Za-z_][A-Za-z0-9_]*)+$")
+_VERSION_LINE_PATTERN = re.compile(r"(?m)^version:[^\r\n]*$")
 _SUPPORTED_CHECKS = {"gate", "ruff", "pytest"}
 _GATE_FIELDS = {"modules"}
 _RUFF_FIELDS = {"select", "paths"}
@@ -154,6 +156,22 @@ def sync_project_file(source_path: str, target_path: str, exist_ok: bool = True)
         print("[-] Skipping existing file: %s" % target_path)
 
 
+def sync_project_template(
+    source_path: str,
+    target_path: str,
+    exist_ok: bool = True,
+    **format_vars: typing.Any
+) -> None:
+    if os.path.exists(target_path) and not exist_ok:
+        print("[-] Skipping existing file: %s" % target_path)
+        return
+    print("[+] Syncing project template: %s -> %s" % (source_path, target_path))
+    with open(source_path, "r", encoding="utf-8") as source_file:
+        content = source_file.read().format(**format_vars)
+    with open(target_path, "w", encoding="utf-8") as target_file:
+        target_file.write(content)
+
+
 def _add_project_argument(parser: argparse.ArgumentParser, modules: "typing.Dict[str, typing.Dict[str, str]]") -> None:
     parser.add_argument(
         "module",
@@ -205,7 +223,10 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _selected_modules(args: argparse.Namespace, modules: "typing.Dict[str, typing.Dict[str, str]]") -> "typing.Tuple[str, ...]":
+def _selected_modules(
+    args: argparse.Namespace,
+    modules: "typing.Dict[str, typing.Dict[str, str]]",
+) -> "typing.Tuple[str, ...]":
     if args.module:
         return tuple(dict.fromkeys(args.module))
     return tuple(modules.keys())
@@ -247,7 +268,12 @@ def _require_string_list(value: typing.Any, label: str) -> "typing.Tuple[str, ..
     return tuple(value)
 
 
-def _resolve_paths(project: str, project_path: str, values: "typing.Tuple[str, ...]", label: str) -> "typing.Tuple[str, ...]":
+def _resolve_paths(
+    project: str,
+    project_path: str,
+    values: "typing.Tuple[str, ...]",
+    label: str,
+) -> "typing.Tuple[str, ...]":
     resolved = []
     for value in values:
         if os.path.isabs(value):
@@ -425,6 +451,40 @@ def _run_pytest(project: str, check: "typing.Dict[str, typing.Any]", environment
     _run_check(command, environment)
 
 
+def _normalize_version(value: str) -> str:
+    version = value[1:] if value.startswith("v") else value
+    if not version:
+        raise ValueError("VERSION must not be empty")
+    return version
+
+
+def _replace_linktools_version(path: str, version: str) -> None:
+    with open(path, "r", encoding="utf-8") as file:
+        content = file.read()
+    try:
+        data = yaml.load(content, Loader=_UniqueKeyLoader)
+    except (ValueError, yaml.YAMLError) as error:
+        raise ValueError("invalid Linktools config %s: %s" % (path, error))
+    if not isinstance(data, dict):
+        raise ValueError("Linktools config must be a mapping: %s" % path)
+    current = data.get("version")
+    if not isinstance(current, str) or not current:
+        raise ValueError("Linktools config version is missing: %s" % path)
+    matches = list(_VERSION_LINE_PATTERN.finditer(content))
+    if len(matches) != 1:
+        raise ValueError("Linktools config must contain exactly one top-level version line: %s" % path)
+    replacement = "version: %s" % json.dumps(version)
+    updated = content[:matches[0].start()] + replacement + content[matches[0].end():]
+    with open(path, "w", encoding="utf-8") as file:
+        file.write(updated)
+
+
+def _restore_files(backups: "typing.Dict[str, str]") -> None:
+    for path, content in backups.items():
+        with open(path, "w", encoding="utf-8") as file:
+            file.write(content)
+
+
 def handle_init(args: argparse.Namespace) -> None:
     for name, info in get_modules().items():
         if name == MODULE_NAME:
@@ -436,20 +496,16 @@ def handle_init(args: argparse.Namespace) -> None:
                 os.path.join(info["path"], "pyproject.toml"),
                 **info
             )
+            sync_project_template(
+                os.path.join(TEMPLATE_PATH, "linktools.yml"),
+                os.path.join(info["path"], "linktools.yml"),
+                exist_ok=False,
+                **info
+            )
             sync_project_file(
                 os.path.join(TEMPLATE_PATH, "capability.jinja2"),
                 os.path.join(info["path"], "capability.jinja2"),
                 exist_ok=True,
-            )
-            sync_project_file(
-                os.path.join(TEMPLATE_PATH, "MANIFEST.in"),
-                os.path.join(info["path"], "MANIFEST.in"),
-                exist_ok=True,
-            )
-            sync_project_file(
-                os.path.join(TEMPLATE_PATH, "requirements.yml"),
-                os.path.join(info["path"], "requirements.yml"),
-                exist_ok=False,
             )
             sync_project_file(
                 os.path.join(TEMPLATE_PATH, "release.yml"),
@@ -504,10 +560,25 @@ def handle_check(args: argparse.Namespace) -> None:
 
 
 def handle_build(args: argparse.Namespace) -> None:
-    version = os.environ.get("VERSION")
-    for name, info in get_modules().items():
-        if not args.module or name in args.module:
-            print("[+] Building project: %s, path: %s" % (name, info["path"]))
+    modules = get_modules()
+    projects = _selected_modules(args, modules)
+    version_value = os.environ.get("VERSION")
+    backups = {}
+    try:
+        if version_value is not None:
+            version = _normalize_version(version_value)
+            for project in projects:
+                path = os.path.join(modules[project]["path"], "linktools.yml")
+                with open(path, "r", encoding="utf-8") as file:
+                    backups[path] = file.read()
+            for project in projects:
+                path = os.path.join(modules[project]["path"], "linktools.yml")
+                print("[+] Setting version for project: %s to %s" % (project, version))
+                _replace_linktools_version(path, version)
+
+        for project in projects:
+            info = modules[project]
+            print("[+] Building project: %s, path: %s" % (project, info["path"]))
             subprocess.check_call(
                 [
                     sys.executable,
@@ -521,10 +592,10 @@ def handle_build(args: argparse.Namespace) -> None:
                 ],
                 cwd=PROJECT_PATH,
             )
-            if version is not None:
-                print("[+] Setting version for project: %s to %s" % (name, version))
-                with open(os.path.join(info["path"], ".version"), "wt", encoding="utf-8") as file:
-                    file.write(version)
+    except BaseException:
+        if backups:
+            _restore_files(backups)
+        raise
 
 
 def handle_verify(args: argparse.Namespace) -> None:

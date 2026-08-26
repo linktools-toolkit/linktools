@@ -1,6 +1,5 @@
 [build-system]
-requires = ["linktools-setup>=0.0.2"]
-# requires = ["linktools-setup @ git+https://github.com/linktools-toolkit/linktools-setup.git@master"]
+requires = ["linktools-setup @ git+https://github.com/linktools-toolkit/linktools-setup.git@009c4a57ab5df0010f0e79b968fd3f7e56796730"]
 build-backend = "linktools_setup.build_meta"
 
 [project]
@@ -28,16 +27,3 @@ linktools = ["assets/**"]
 
 [tool.setuptools.exclude-package-data]
 linktools = ["assets/develop/**"]
-
-[tool.linktools]
-version = {file = ".version"}
-dependencies = {file = "requirements.yml"}
-convert = [
-  {type = "jinja2", source = "metadata.jinja2", dest = "src/linktools/metadata.py"},
-  {type = "yml2json", source = "src/linktools/assets/develop/tools/linktools.yml", dest = "src/linktools/assets/tools/linktools.json"},
-]
-
-[tool.linktools.scripts]
-capability = "linktools.core:Capability"
-console = {name = "lt", module = "linktools.__main__"}
-commands = {path = "src/linktools/commands", module = "linktools.commands"}

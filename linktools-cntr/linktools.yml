@@ -1,3 +1,6 @@
+name: cntr
+version: "0.9.1"
+
 dependencies:
   - jinja2
   - pyyaml
@@ -16,3 +19,14 @@ release-dependencies:
   - linktools[cli,git]>=0.9.1
 
 optional-dependencies: {}
+
+scripts:
+  capability: linktools.capabilities.cntr:__cap_cntr__
+  commands:
+    name: ct-cntr
+    module: linktools.cntr.__main__
+
+convert:
+  - type: jinja2
+    source: capability.jinja2
+    dest: src/linktools/capabilities/cntr.py

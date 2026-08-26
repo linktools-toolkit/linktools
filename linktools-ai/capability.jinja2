@@ -15,7 +15,7 @@ class Capability(_Capability):
 
     @property
     def name(self) -> str:
-        return "{{ config.get('project', 'name') }}"
+        return "{{ metadata.name }}"
 
     @property
     def version(self) -> str:
@@ -34,4 +34,4 @@ class Capability(_Capability):
         return self._root_path
 
 
-__cap_{{ config.get('tool', 'linktools', 'name') }}__ = Capability()
+__cap_{{ config.get("name") }}__ = Capability()

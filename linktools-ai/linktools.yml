@@ -1,3 +1,6 @@
+name: ai
+version: "0.10.0"
+
 dependencies:
   - filelock>=3.4.0
   - jsonschema>=4.23.0,<5.0.0
@@ -25,3 +28,14 @@ optional-dependencies:
     - pydantic-evals>=0.1.0
   temporal:
     - pydantic-ai-slim[temporal]>=2.27.0,<3.0.0
+
+scripts:
+  capability: linktools.capabilities.ai:__cap_ai__
+  console:
+    path: src/linktools/commands
+    module: linktools.commands
+
+convert:
+  - type: jinja2
+    source: capability.jinja2
+    dest: src/linktools/capabilities/ai.py
