@@ -15,7 +15,7 @@
 2. Model-visible failures (`ValidationError`, `ModelRetry`, `ToolRetryError`, `ToolFailed`, `ToolFailedError`) describe what the model should observe; they do **not** by themselves prove that the handler produced no side effect. They become durable `FAILED` attempts only when the handler did not enter, the tool is effect-free, or the operation is explicitly replay-safe. An entered replay-unsafe effectful handler fails closed as `EFFECT_UNKNOWN` / `TOOL_EFFECT_UNKNOWN`.
 3. A durable failure commit that is itself uncertain remains a storage/recovery error. It must not be reclassified as tool-effect uncertainty.
 4. `SkipToolExecution` is an intentional successful short-circuit: persist the supplied result as `COMPLETED` and complete the Step tool-effect record exactly once.
-5. Dynamic `CallDeferred` / `ApprovalRequired` keeps a non-terminal claimed operation only when the handler did not enter or exact replay is safe. If an unsafe effectful handler already entered, fail closed as `TOOL_EFFECT_UNKNOWN`.
+5. Linktools does not currently implement Pydantic AI dynamic-deferred resume/result handoff. A resolvable `CallDeferred` / `ApprovalRequired` raised after entering the execution hook is terminalized as `FAILED` with `CAPABILITY_POLICY_CONFLICT` and `reason=dynamic_deferred_unsupported`; if a replay-unsafe effectful handler has already entered, fail closed as `TOOL_EFFECT_UNKNOWN` instead. Static/declarative deferral that Pydantic handles before execution hooks is unaffected.
 6. Generic handler errors use the effective tool policy:
    - effect-free -> `FAILED`;
    - replay-safe and effectful -> preserve `CLAIMED`, raise `STORAGE_RECOVERY_REQUIRED`;
@@ -58,10 +58,10 @@ The repair is complete only when all of the following hold:
 - generic effect-free / replay-safe effectful / replay-unsafe effectful state transitions pass;
 - failure-commit uncertainty is not reclassified;
 - `SkipToolExecution` success is terminalized exactly once;
-- deferred-control paths satisfy the safe replay rule;
+- dynamic deferred-control paths are explicitly rejected without leaving unresolved claimed effects, while unsafe entered effects remain unknown;
 - `ToolRetryError` and `ToolFailedError` durable payload round-trip tests pass;
 - Planning exposes no accidental Harness granular tools;
-- Skill missing-ID regression passes through the public capability binding/materialization surface;
+- Skill missing-ID regression passes without expanding the public capability API;
 - cancellation tests pass;
 - repository search finds no second built-in replay-safety truth source;
 - `python manage.py check linktools-ai` passes on the repository CI Python matrix.
