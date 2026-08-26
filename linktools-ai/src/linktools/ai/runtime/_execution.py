@@ -16,7 +16,13 @@ from typing import Protocol
 
 from linktools.core import environ
 
-from ..agent import AgentBinding, AgentBindingSnapshot, AgentCatalog, AgentCompiler
+from ..agent import (
+    AgentBinding,
+    AgentBindingSnapshot,
+    AgentCatalog,
+    AgentCompiler,
+    UserPromptTransport,
+)
 from ..core import (
     AuthorizationAction,
     AuthorizationPolicy,
@@ -1522,9 +1528,18 @@ def _request_digest(
     root_execution_id: str | None,
     lineage_kind: ExecutionLineageKind,
 ) -> str:
+    user_prompt_identity: JsonValue = str(request.user_prompt)
+    if (
+        isinstance(request.user_prompt, UserPromptTransport)
+        and request.user_prompt.codec != "text"
+    ):
+        user_prompt_identity = {
+            "codec": request.user_prompt.codec,
+            "value": str(request.user_prompt),
+        }
     return canonical_sha256(
         {
-            "user_prompt": request.user_prompt,
+            "user_prompt": user_prompt_identity,
             "binding_digest": binding_digest,
             "scope": session_id or "execution",
             "principal": principal_identity_payload(request.principal),

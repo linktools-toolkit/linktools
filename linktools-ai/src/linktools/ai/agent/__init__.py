@@ -12,7 +12,6 @@ from ._capabilities import (
     WORKSPACE_FILESYSTEM_TOOL_NAMES,
     WORKSPACE_SHELL_TOOL_NAMES,
     SubagentDelegate,
-    ToolOperationBridge,
     ToolOperationDecision,
     select_platform_tool_names,
     tool_name_allowed,
@@ -28,6 +27,7 @@ from ._executor import (
     LiveDelta,
     UsageSink,
 )
+from ._input import UserPromptTransport, prepare_user_prompt, user_prompt_transport
 from ._output import (
     ASSISTANT_TEXT_OUTPUT_SCHEMA_ID,
     ASSISTANT_TEXT_OUTPUT_SCHEMA_REVISION,
@@ -59,7 +59,6 @@ __all__ = [
     "LiveDelta",
     "OutputBinding",
     "SubagentDelegate",
-    "ToolOperationBridge",
     "ToolOperationDecision",
     "UsageSink",
     "bind_output",

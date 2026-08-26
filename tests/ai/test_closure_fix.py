@@ -11,6 +11,7 @@ import pytest
 from linktools.ai.agent._capabilities import (
     ToolOperationDecision,
     _RuntimeStepPersistence,
+    _tool_effect_policy,
 )
 from linktools.ai.core import Principal, TaskStatus, ToolOperationStatus
 from linktools.ai.errors import AIError, ErrorCode
@@ -68,23 +69,36 @@ class _ToolBridge:
     def __init__(self, decision: ToolOperationDecision) -> None:
         self.decision = decision
         self.calls: list[tuple[str, str]] = []
+        self.replay_safe_values: list[bool] = []
 
-    async def begin(self, *args: Any) -> ToolOperationDecision:
-        del args
+    async def begin(
+        self,
+        ctx: RunContext[None],
+        call: ToolCallPart,
+        tool_def: ToolDefinition,
+        args: dict[str, Any],
+        replay_safe: bool,
+    ) -> ToolOperationDecision:
+        del ctx, call, tool_def, args
         self.calls.append(("begin", ""))
+        self.replay_safe_values.append(replay_safe)
+        if self.decision.replay_safe is not replay_safe:
+            return replace(self.decision, replay_safe=replay_safe)
         return self.decision
 
     async def renew(self, decision: ToolOperationDecision) -> ToolOperationDecision:
         self.calls.append(("renew", decision.operation_id))
         return decision
 
-    async def complete(self, decision: ToolOperationDecision, result: Any) -> None:
+    async def complete(self, decision: ToolOperationDecision, result: Any) -> bool:
         del result
         self.calls.append(("complete", decision.operation_id))
+        return False
 
-    async def fail(self, decision: ToolOperationDecision, error: BaseException) -> None:
+    async def fail(self, decision: ToolOperationDecision, error: BaseException) -> bool:
         del error
         self.calls.append(("fail", decision.operation_id))
+        return False
 
     async def unknown(self, decision: ToolOperationDecision, error: BaseException) -> None:
         del error
@@ -241,9 +255,16 @@ async def test_tool_operation_uses_runtime_step_id_for_admission() -> None:
         payload_policy=PayloadPolicy(),
     )
 
-    await bridge.begin(_context(), _call(), _definition(replay_safe=True), {})
+    await bridge.begin(
+        _context(),
+        _call(),
+        _definition(replay_safe=True),
+        {},
+        True,
+    )
 
     assert repository.request.step_run_id == "runtime-step"
+    assert repository.request.replay_safe is True
 
 
 async def test_tool_terminal_bridge_only_commits_operation_state() -> None:
@@ -268,6 +289,7 @@ async def test_tool_terminal_bridge_only_commits_operation_state() -> None:
         _call("success-call"),
         _definition(replay_safe=True),
         {},
+        True,
     )
     await bridge.complete(success, {"ok": True})
     completed = repository.record
@@ -279,6 +301,7 @@ async def test_tool_terminal_bridge_only_commits_operation_state() -> None:
         _call("failed-call"),
         _definition(replay_safe=True),
         {"failed": True},
+        True,
     )
     await bridge.fail(failed, ValueError("failure"))
     assert repository.record is not None
@@ -287,8 +310,83 @@ async def test_tool_terminal_bridge_only_commits_operation_state() -> None:
     assert all(result or error for _, result, error in commands.calls)
 
 
+@pytest.mark.parametrize(
+    ("name", "capability_id", "tool_class", "replay_safe", "effect_free"),
+    [
+        ("read_file", "workspace-filesystem", "filesystem.read", True, True),
+        ("write_file", "workspace-filesystem", "filesystem.write", False, False),
+        ("check_command", "workspace-shell", "shell", True, True),
+        ("run_command", "workspace-shell", "shell", False, False),
+        ("read_memory", "linktools-memory", "memory.read", True, True),
+        ("write_memory", "linktools-memory", "memory.write", True, False),
+        ("list_skills", "linktools-skill", "control", True, True),
+        ("write_plan", "linktools-planning", "control", True, False),
+        ("delegate_task", "linktools-subagent", "control", True, False),
+    ],
+)
+async def test_trusted_tool_effect_policy_matrix(
+    name: str,
+    capability_id: str,
+    tool_class: str,
+    replay_safe: bool,
+    effect_free: bool,
+) -> None:
+    policy = _tool_effect_policy(
+        ToolDefinition(name=name, capability_id=capability_id),
+        trusted_tool_classes=((name, tool_class),),
+    )
+
+    assert policy.replay_safe is replay_safe
+    assert policy.effect_free is effect_free
+
+
+async def test_trusted_tool_effect_policy_rejects_spoofed_capability() -> None:
+    with pytest.raises(AIError) as raised:
+        _tool_effect_policy(
+            ToolDefinition(name="read_file", capability_id="custom"),
+            trusted_tool_classes=(("read_file", "filesystem.read"),),
+        )
+
+    assert raised.value.code is ErrorCode.CAPABILITY_POLICY_CONFLICT
+
+
+async def test_custom_tool_replay_metadata_remains_strong_opt_in() -> None:
+    safe = _tool_effect_policy(
+        ToolDefinition(
+            name="custom",
+            metadata={"linktools.ai.replay_safe": True},
+        ),
+        trusted_tool_classes=(),
+    )
+    unsafe = _tool_effect_policy(
+        ToolDefinition(name="custom"),
+        trusted_tool_classes=(),
+    )
+
+    assert safe.replay_safe is True
+    assert safe.effect_free is False
+    assert unsafe.replay_safe is False
+    assert unsafe.effect_free is False
+
+
+async def test_custom_tool_invalid_replay_metadata_fails_closed() -> None:
+    with pytest.raises(AIError) as raised:
+        _tool_effect_policy(
+            ToolDefinition(
+                name="custom",
+                metadata={"linktools.ai.replay_safe": "yes"},
+            ),
+            trusted_tool_classes=(),
+        )
+
+    assert raised.value.code is ErrorCode.REQUEST_FIELD_INVALID
+
+
 async def _capability(
     decision: ToolOperationDecision,
+    *,
+    definition: ToolDefinition | None = None,
+    trusted_tool_classes: tuple[tuple[str, str], ...] = (),
 ) -> tuple[_RuntimeStepPersistence, _ToolBridge, _StepStore, RunContext[None], ToolCallPart, ToolDefinition]:
     bridge = _ToolBridge(decision)
     store = _StepStore()
@@ -297,12 +395,18 @@ async def _capability(
         store=store,
         agent_name="agent",
         run_id="run",
+        trusted_tool_classes=trusted_tool_classes,
     )
     context = _context()
     call = _call()
-    definition = _definition(decision.replay_safe)
-    await capability.before_tool_execute(context, call=call, tool_def=definition, args={})
-    return capability, bridge, store, context, call, definition
+    selected_definition = definition or _definition(decision.replay_safe)
+    await capability.before_tool_execute(
+        context,
+        call=call,
+        tool_def=selected_definition,
+        args={},
+    )
+    return capability, bridge, store, context, call, selected_definition
 
 
 async def test_tool_success_terminalizes_once_before_effect_completion() -> None:
@@ -333,7 +437,7 @@ async def test_tool_success_terminalizes_once_before_effect_completion() -> None
 
 
 @pytest.mark.parametrize("replay_safe", [True, False])
-async def test_retry_error_uses_replay_safety_not_exception_type(replay_safe: bool) -> None:
+async def test_model_retry_respects_effect_replay_safety(replay_safe: bool) -> None:
     capability, bridge, store, context, call, definition = await _capability(
         ToolOperationDecision("operation", "owner", 1, replay_safe)
     )
@@ -357,7 +461,7 @@ async def test_retry_error_uses_replay_safety_not_exception_type(replay_safe: bo
     else:
         assert isinstance(raised.value, AIError)
         assert raised.value.code is ErrorCode.TOOL_EFFECT_UNKNOWN
-        with pytest.raises(AIError):
+        with pytest.raises(AIError) as propagated:
             await capability.on_tool_execute_error(
                 context,
                 call=call,
@@ -365,13 +469,20 @@ async def test_retry_error_uses_replay_safety_not_exception_type(replay_safe: bo
                 args={},
                 error=raised.value,
             )
+        assert propagated.value.code is ErrorCode.TOOL_EFFECT_UNKNOWN
         assert [kind for kind, _ in bridge.calls] == ["begin", "unknown"]
         assert [effect.status for effect in store.effects] == ["started"]
 
 
-async def test_generic_replay_safe_failure_is_failed_by_error_hook_once() -> None:
+async def test_generic_effect_free_failure_is_failed_by_error_hook_once() -> None:
+    definition = ToolDefinition(
+        name="read_file",
+        capability_id="workspace-filesystem",
+    )
     capability, bridge, store, context, call, definition = await _capability(
-        ToolOperationDecision("operation", "owner", 1, True)
+        ToolOperationDecision("operation", "owner", 1, True),
+        definition=definition,
+        trusted_tool_classes=(("read_file", "filesystem.read"),),
     )
 
     async def handler(_args: dict[str, Any]) -> None:
@@ -399,15 +510,21 @@ async def test_generic_replay_safe_failure_is_failed_by_error_hook_once() -> Non
     assert not capability._calls
 
 
-async def test_generic_replay_unsafe_failure_preserves_started_effect() -> None:
+async def test_generic_replay_safe_effectful_failure_requires_recovery() -> None:
+    definition = ToolDefinition(
+        name="write_memory",
+        capability_id="linktools-memory",
+    )
     capability, bridge, store, context, call, definition = await _capability(
-        ToolOperationDecision("operation", "owner", 1, False)
+        ToolOperationDecision("operation", "owner", 1, True),
+        definition=definition,
+        trusted_tool_classes=(("write_memory", "memory.write"),),
     )
 
     async def handler(_args: dict[str, Any]) -> None:
-        raise ValueError("unknown effect")
+        raise ValueError("commit outcome unknown")
 
-    with pytest.raises(ValueError) as raised:
+    with pytest.raises(AIError) as raised:
         await capability.wrap_tool_execute(
             context,
             call=call,
@@ -415,7 +532,9 @@ async def test_generic_replay_unsafe_failure_preserves_started_effect() -> None:
             args={},
             handler=handler,
         )
-    with pytest.raises(ValueError):
+    assert raised.value.code is ErrorCode.STORAGE_RECOVERY_REQUIRED
+
+    with pytest.raises(AIError) as propagated:
         await capability.on_tool_execute_error(
             context,
             call=call,
@@ -423,7 +542,39 @@ async def test_generic_replay_unsafe_failure_preserves_started_effect() -> None:
             args={},
             error=raised.value,
         )
+    assert propagated.value.code is ErrorCode.STORAGE_RECOVERY_REQUIRED
+    assert [kind for kind, _ in bridge.calls] == ["begin"]
+    assert [effect.status for effect in store.effects] == ["started"]
+    assert not capability._calls
 
+
+async def test_generic_replay_unsafe_failure_surfaces_unknown_effect() -> None:
+    capability, bridge, store, context, call, definition = await _capability(
+        ToolOperationDecision("operation", "owner", 1, False)
+    )
+
+    async def handler(_args: dict[str, Any]) -> None:
+        raise ValueError("unknown effect")
+
+    with pytest.raises(AIError) as raised:
+        await capability.wrap_tool_execute(
+            context,
+            call=call,
+            tool_def=definition,
+            args={},
+            handler=handler,
+        )
+    assert raised.value.code is ErrorCode.TOOL_EFFECT_UNKNOWN
+
+    with pytest.raises(AIError) as propagated:
+        await capability.on_tool_execute_error(
+            context,
+            call=call,
+            tool_def=definition,
+            args={},
+            error=raised.value,
+        )
+    assert propagated.value.code is ErrorCode.TOOL_EFFECT_UNKNOWN
     assert [kind for kind, _ in bridge.calls] == ["begin", "unknown"]
     assert [effect.status for effect in store.effects] == ["started"]
 

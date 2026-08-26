@@ -151,7 +151,20 @@ created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
   Keep module ownership, public contracts, logs, tests, and evidence aligned with it.
 - Perform a fresh cold-start review against the complete specification after implementation.
   Repeat the review and verification loop until no Critical or Important gap remains.
-- Treat compatibility and migration as out of scope unless the specification explicitly requires a legacy decoder, first-read adapter, or rollback materialization path.
+- Legacy migration remains out of scope unless explicitly required, but every newly introduced persisted, replayed, cross-process, or public contract must be forward-compatible by design.
+
+## 6.2 Compatibility design rules
+
+Apply these during design, not after implementation:
+
+- Persisted or replayed data is a versioned contract. Use an explicit codec/version discriminator; never overload ordinary text with magic prefixes.
+- Integrity checks validate stored bytes and structure. Never require a dependency upgrade to re-encode old data byte-for-byte identically.
+- Stable hashes and idempotency identities must not change because a dependency adds optional/default fields.
+- If codec, version, or provenance changes semantics, include that discriminator in stable hashes and idempotency identities; never hash only the opaque payload.
+- Internal transport encoders, durable wire types, and implementation protocols stay private unless they are intentional extension points.
+- A public Protocol change is an API change. Keep runtime-only bridges private instead of leaking internal policy parameters downstream.
+- Serializable provider references are not automatically durable. Define lifetime/recovery semantics before persisting remote file IDs, URLs, handles, or tokens.
+- Add frozen old-version/golden fixtures for durable codecs and test every public ingress path; same-version encode/decode tests are insufficient.
 
 ## 7. Temporal and external effects
 

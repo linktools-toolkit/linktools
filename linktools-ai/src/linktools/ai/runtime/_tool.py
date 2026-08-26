@@ -12,7 +12,7 @@ from enum import Enum
 from typing import TYPE_CHECKING, Any, Protocol
 
 from linktools.core import environ
-from pydantic_ai.exceptions import ModelRetry, ToolRetryError
+from pydantic_ai.exceptions import ModelRetry, ToolFailedError, ToolRetryError
 from pydantic_ai.messages import (
     ModelRequest,
     RetryPromptPart,
@@ -20,6 +20,7 @@ from pydantic_ai.messages import (
     ToolReturnPart,
 )
 from pydantic_ai.tools import RunContext, ToolDefinition
+
 from ..core import (
     Principal,
     ResourceRef,
@@ -99,7 +100,7 @@ class _ToolOperationRuntimeRepository(Protocol):
         tool_call_id: str,
         *,
         tenant_id: str,
-    ) -> ToolOperationRecord | None: ...
+    ) -> "ToolOperationRecord | None": ...
 
     async def mark_effect_unknown(
         self,
@@ -108,7 +109,7 @@ class _ToolOperationRuntimeRepository(Protocol):
         tenant_id: str,
         owner: str,
         fence: int,
-        error_code: str | None,
+        error_code: "str | None",
     ) -> ToolOperationRecord: ...
 
     async def renew(
@@ -139,7 +140,7 @@ class _ToolOperationRuntimeRepository(Protocol):
         owner: str,
         fence: int,
         error_code: str,
-        error_payload: StoredPayload | None,
+        error_payload: "StoredPayload | None",
     ) -> ToolOperationRecord: ...
 
 
@@ -156,9 +157,9 @@ class _ToolTerminalCommands(Protocol):
         tenant_id: str,
         owner: str,
         fence: int,
-        result_payload: StoredPayload | None = None,
-        error_code: str | None = None,
-        error_payload: StoredPayload | None = None,
+        result_payload: "StoredPayload | None" = None,
+        error_code: "str | None" = None,
+        error_payload: "StoredPayload | None" = None,
     ) -> ToolOperationRecord: ...
 
 
@@ -221,8 +222,8 @@ class RuntimeToolOperationBridge:
         owner: str,
         background_tasks: "set[asyncio.Task[object]]",
         payload_policy: PayloadPolicy,
-        recovery_step_run_id: str | None = None,
-        terminal_commands: _ToolTerminalCommands | None = None,
+        recovery_step_run_id: "str | None" = None,
+        terminal_commands: "_ToolTerminalCommands | None" = None,
     ) -> None:
         self._repository = repository
         self._recovery_objects = recovery_objects
@@ -245,11 +246,15 @@ class RuntimeToolOperationBridge:
         call: ToolCallPart,
         tool_def: ToolDefinition,
         args: dict[str, Any],
+        replay_safe: bool,
     ) -> "ToolOperationDecision":
-        replay_safe = _replay_safe(tool_def)
+        if not isinstance(replay_safe, bool):
+            raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
         key = (self._run_id(ctx), call.tool_call_id)
         prior = self._decisions.get(key)
         if prior is not None:
+            if prior.replay_safe is not replay_safe:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             return prior
         arguments_digest = canonical_sha256(args)
         replay_step_run_id = self._recovery_step_run_id or self._run_id(ctx)
@@ -303,6 +308,8 @@ class RuntimeToolOperationBridge:
     ) -> "ToolOperationDecision":
         from ..agent import ToolOperationDecision
 
+        if existing.replay_safe is not replay_safe:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         if existing.status is ToolOperationStatus.COMPLETED:
             return ToolOperationDecision(
                 existing.tool_operation_id,
@@ -495,6 +502,20 @@ class RuntimeToolOperationBridge:
                     tool_call_id=str(value.get("tool_call_id", "")),
                 )
             )
+        if kind == "tool_retry_message":
+            if record.error_code != ErrorCode.TOOL_RETRY_REQUIRED.value:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            part = self._decode_error_part(value)
+            if not isinstance(part, RetryPromptPart):
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            return ToolRetryError(part)
+        if kind == "tool_failed_message":
+            if record.error_code != ErrorCode.TOOL_EXECUTION_FAILED.value:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            part = self._decode_error_part(value)
+            if not isinstance(part, ToolReturnPart) or part.outcome != "failed":
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            return ToolFailedError(part)
         if kind == "error" and isinstance(value.get("code"), str):
             try:
                 code = ErrorCode(value["code"])
@@ -516,13 +537,15 @@ class RuntimeToolOperationBridge:
             value = {"kind": "model_retry", "message": error.message}
             return ErrorCode.TOOL_RETRY_REQUIRED.value, await self._json_payload(value)
         if isinstance(error, ToolRetryError):
-            retry = error.tool_retry
-            value = {
-                "kind": "tool_retry",
-                "content": str(retry.content),
-                "tool_call_id": retry.tool_call_id,
-            }
-            return ErrorCode.TOOL_RETRY_REQUIRED.value, await self._json_payload(value)
+            return (
+                ErrorCode.TOOL_RETRY_REQUIRED.value,
+                await self._message_error_payload("tool_retry_message", error.tool_retry),
+            )
+        if isinstance(error, ToolFailedError):
+            return (
+                ErrorCode.TOOL_EXECUTION_FAILED.value,
+                await self._message_error_payload("tool_failed_message", error.tool_failed),
+            )
         if isinstance(error, AIError):
             return error.code.value, await self._json_payload(
                 {
@@ -543,6 +566,36 @@ class RuntimeToolOperationBridge:
             }
         )
 
+    async def _message_error_payload(
+        self,
+        kind: str,
+        part: RetryPromptPart | ToolReturnPart,
+    ) -> StoredPayload:
+        encoded = encode_model_messages((ModelRequest(parts=[part]),))
+        try:
+            messages = json.loads(encoded.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as error:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
+        return await self._json_payload({"kind": kind, "messages": messages})
+
+    @staticmethod
+    def _decode_error_part(value: dict[str, object]) -> object:
+        messages = value.get("messages")
+        if not isinstance(messages, list):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        try:
+            encoded = json.dumps(
+                messages,
+                ensure_ascii=False,
+                separators=(",", ":"),
+            ).encode("utf-8")
+            decoded = decode_model_messages(encoded)
+        except Exception as error:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
+        if len(decoded) != 1 or not isinstance(decoded[0], ModelRequest) or len(decoded[0].parts) != 1:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        return decoded[0].parts[0]
+
     async def _finish_with_readback(
         self,
         operation: Callable[[], Awaitable[ToolOperationRecord]],
@@ -550,7 +603,7 @@ class RuntimeToolOperationBridge:
         *,
         expected_status: ToolOperationStatus,
         expected_payload: StoredPayload,
-        expected_error: str | None = None,
+        expected_error: "str | None" = None,
     ) -> bool:
         async def readback() -> CommitObservation[ToolOperationRecord]:
             observed = await self._repository.get_operation(
@@ -608,7 +661,7 @@ class RuntimeToolOperationBridge:
         *,
         expected_status: ToolOperationStatus,
         expected_payload: StoredPayload,
-        expected_error: str | None = None,
+        expected_error: "str | None" = None,
     ) -> None:
         if expected_status is ToolOperationStatus.COMPLETED and record.result_payload != expected_payload:
             raise AIError(ErrorCode.TOOL_RESULT_CONFLICT)
@@ -653,14 +706,6 @@ class RuntimeToolOperationBridge:
     def _run_id(self, ctx: RunContext[None]) -> str:
         del ctx
         return self._step_run_id
-
-
-def _replay_safe(tool_def: ToolDefinition) -> bool:
-    metadata = tool_def.metadata or {}
-    value = metadata.get("linktools.ai.replay_safe", False)
-    if not isinstance(value, bool):
-        raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
-    return value
 
 
 def _decision_type(

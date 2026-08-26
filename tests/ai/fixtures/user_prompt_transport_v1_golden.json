@@ -1,0 +1,23 @@
+{
+  "legacy_text": {
+    "codec": "text",
+    "value": "linktools.ai:user-content:v1:0000000000000000000000000000000000000000000000000000000000000000\n{}"
+  },
+  "rich_v1_minimal": {
+    "codec": "pydantic-user-content-v1",
+    "value": {
+      "message": {
+        "kind": "request",
+        "parts": [
+          {
+            "content": [
+              "Inspect historical input"
+            ],
+            "part_kind": "user-prompt",
+            "timestamp": "1970-01-01T00:00:00Z"
+          }
+        ]
+      }
+    }
+  }
+}

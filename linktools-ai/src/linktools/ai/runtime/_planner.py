@@ -9,7 +9,12 @@ from typing import cast
 
 from linktools.core import environ
 
-from ..agent import AgentBindingSnapshot, AgentCatalog, AgentCompiler
+from ..agent import (
+    AgentBindingSnapshot,
+    AgentCatalog,
+    AgentCompiler,
+    user_prompt_transport,
+)
 from ..core import (
     ExecutionStatus,
     Principal,
@@ -76,14 +81,25 @@ class RuntimeTaskNodeRunner:
         if payload["type"] != "linktools.ai.agent" or payload["version"] != 1:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         base_user_prompt = payload["user_prompt"]
+        user_prompt_codec = payload.get("user_prompt_codec", "text")
         planning = payload["planning"]
         thinking = payload["thinking"]
         if (
             not isinstance(base_user_prompt, str)
+            or not isinstance(user_prompt_codec, str)
             or not isinstance(planning, bool)
             or not isinstance(thinking, bool)
         ):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        try:
+            base_user_prompt = user_prompt_transport(
+                base_user_prompt,
+                user_prompt_codec,
+            )
+        except AIError as error:
+            if error.code is ErrorCode.STORAGE_VERSION_UNSUPPORTED:
+                raise
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
         try:
             snapshot = AgentBindingSnapshot.from_payload(payload["binding"])
             binding = self._catalog.register_binding(

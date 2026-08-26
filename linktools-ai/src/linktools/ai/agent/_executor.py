@@ -69,6 +69,7 @@ from ._capabilities import (
     tool_name_allowed,
 )
 from ._definition import AgentDefinition
+from ._input import _RuntimeUserPrompt, _restore_user_prompt
 from ._output import AssistantTextOutput
 
 
@@ -117,7 +118,7 @@ class AgentExecutor:
     async def execute(
         self,
         binding: AgentBinding,
-        user_prompt: str,
+        user_prompt: _RuntimeUserPrompt,
         history: "list[ModelMessage]",
         conversation_id: str,
         *,
@@ -245,7 +246,7 @@ class AgentExecutor:
     async def _execute(
         self,
         binding: AgentBinding,
-        user_prompt: str,
+        user_prompt: _RuntimeUserPrompt,
         history: "list[ModelMessage]",
         conversation_id: str,
         *,
@@ -335,7 +336,7 @@ class AgentExecutor:
         final_result = None
         model_settings = ModelSettings(thinking=True) if thinking else None
         async with agent.run_stream_events(
-            user_prompt,
+            _restore_user_prompt(user_prompt),
             message_history=history or None,
             conversation_id=conversation_id,
             run_id=step_run_id,

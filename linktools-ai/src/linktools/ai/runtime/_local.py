@@ -32,7 +32,9 @@ from ..agent import (
     DurableBoundary,
     LiveDelta,
     SubagentDelegate,
+    UserPromptTransport,
     select_platform_tool_names,
+    user_prompt_transport,
 )
 from ..capability import CapabilityMaterializationContext
 from ..core import (
@@ -478,7 +480,6 @@ class LocalExecutionBackend:
             raise cancellation
         return committed
 
-
     async def prepare_start(
         self,
         request: ExecutionRequest,
@@ -493,7 +494,7 @@ class LocalExecutionBackend:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         now = datetime.now(timezone.utc)
         recovery_input = RecoveryExecutionInput(
-            user_prompt=request.user_prompt,
+            user_prompt=_recovery_prompt_payload(request.user_prompt),
             principal_id=request.principal.principal_id,
             principal_kind=request.principal.kind,
             session_id=execution.session_id,
@@ -1023,7 +1024,7 @@ class LocalExecutionBackend:
         else:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         request = ExecutionRequest(
-            user_prompt=recovery_input.prompt_text(),
+            user_prompt=_recovery_prompt_text(recovery_input),
             principal=principal,
             idempotency_key=f"recovery:{checkpoint.execution_id}",
             memory_scope=recovery_input.memory_scope,
@@ -2460,7 +2461,6 @@ class LocalExecutionBackend:
         except LookupError as error:
             raise AIError(ErrorCode.EXECUTION_HISTORY_UNAVAILABLE) from error
 
-
     async def _append_event(
         self,
         execution: ExecutionRecord,
@@ -3321,7 +3321,6 @@ class LocalExecutionBackend:
             raise cancellation
         return committed
 
-
     async def _existing_execution_run_ids(
         self,
         candidate_run_ids: Sequence[str],
@@ -3427,6 +3426,45 @@ class LocalExecutionBackend:
             candidate_step_run_ids=candidates,
             required_step_run_id=run_id if status is ExecutionStatus.SUCCEEDED else None,
         )
+
+
+def _recovery_prompt_payload(value: str) -> StoredPayload:
+    if isinstance(value, UserPromptTransport) and value.codec != "text":
+        return StoredPayload.inline_json(
+            {"codec": value.codec, "value": str(value)}
+        )
+    return StoredPayload.inline_text(str(value))
+
+
+def _recovery_prompt_text(recovery_input: RecoveryExecutionInput) -> str:
+    payload = recovery_input.user_prompt
+    if not isinstance(payload, StoredPayload) or payload.kind != "inline":
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    try:
+        decoded = payload.decode()
+    except (TypeError, ValueError) as error:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
+    if payload.encoding == "utf-8":
+        if not isinstance(decoded, str):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        try:
+            return user_prompt_transport(decoded, "text")
+        except AIError as error:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
+    if payload.encoding != "json" or not isinstance(decoded, dict):
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    if set(decoded) != {"codec", "value"}:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    codec = decoded.get("codec")
+    value = decoded.get("value")
+    if not isinstance(codec, str) or not isinstance(value, str):
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    try:
+        return user_prompt_transport(value, codec)
+    except AIError as error:
+        if error.code is ErrorCode.STORAGE_VERSION_UNSUPPORTED:
+            raise
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
 
 
 def _terminal_record(

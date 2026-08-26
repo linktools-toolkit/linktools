@@ -9,10 +9,19 @@ from pathlib import Path
 from typing import Any, Protocol
 
 from linktools.core import environ
+from pydantic import ValidationError
 from pydantic_ai.capabilities import AbstractCapability, WrapToolExecuteHandler
 from pydantic_ai.capabilities import AgentCapability as PydanticAgentCapability
-from pydantic_ai.exceptions import ModelRetry, ToolRetryError
-from pydantic_ai.messages import ToolCallPart
+from pydantic_ai.exceptions import (
+    ApprovalRequired,
+    CallDeferred,
+    ModelRetry,
+    SkipToolExecution,
+    ToolFailed,
+    ToolFailedError,
+    ToolRetryError,
+)
+from pydantic_ai.messages import RetryPromptPart, ToolCallPart, ToolReturnPart
 from pydantic_ai.models import Model, ModelRequestContext
 from pydantic_ai.tools import RunContext, ToolDefinition
 from pydantic_ai.toolsets import AbstractToolset, FunctionToolset
@@ -55,6 +64,7 @@ WORKSPACE_FILESYSTEM_READ_TOOL_NAMES = (
 )
 WORKSPACE_SHELL_TOOL_NAMES = ("check_command", "run_command", "start_command", "stop_command")
 PLAN_SAFE_METADATA_KEY = "linktools.ai.plan_safe"
+_REPLAY_SAFE_METADATA_KEY = "linktools.ai.replay_safe"
 _TRUSTED_TOOL_CLASSES = frozenset(
     {
         "control",
@@ -84,10 +94,19 @@ class ToolOperationDecision:
     cached_error: "BaseException | None" = None
 
 
+@dataclass(frozen=True, slots=True)
+class _ToolEffectPolicy:
+    replay_safe: bool
+    effect_free: bool
+
+
 @dataclass
 class _ToolCallState:
     decision: ToolOperationDecision
+    policy: _ToolEffectPolicy
     handler_entered: bool = False
+    handler_observed: bool = False
+    heartbeat_observed: bool = False
     operation_terminalized: bool = False
     preserve_started: bool = False
     cached_failure: bool = False
@@ -102,6 +121,7 @@ class ToolOperationBridge(Protocol):
         call: ToolCallPart,
         tool_def: ToolDefinition,
         args: dict[str, Any],
+        replay_safe: bool,
     ) -> ToolOperationDecision: ...
 
     async def renew(self, decision: ToolOperationDecision) -> ToolOperationDecision: ...
@@ -120,8 +140,9 @@ class _MissingToolOperationBridge:
         call: ToolCallPart,
         tool_def: ToolDefinition,
         args: dict[str, Any],
+        replay_safe: bool,
     ) -> ToolOperationDecision:
-        del ctx, call, tool_def, args
+        del ctx, call, tool_def, args, replay_safe
         raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
 
     async def renew(self, decision: ToolOperationDecision) -> ToolOperationDecision:
@@ -181,10 +202,23 @@ class _RuntimeStepPersistence(StepPersistence[None]):
                 ErrorCode.CAPABILITY_POLICY_CONFLICT,
                 safe_details={"tool_name": tool_def.name, "planning": True},
             )
-        decision = await self._tool_operations.begin(ctx, call, tool_def, args)
+        policy = _tool_effect_policy(
+            tool_def,
+            trusted_tool_classes=self._trusted_tool_classes,
+        )
+        decision = await self._tool_operations.begin(
+            ctx,
+            call,
+            tool_def,
+            args,
+            policy.replay_safe,
+        )
+        if decision.replay_safe is not policy.replay_safe:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         key = self._decision_key(ctx, call)
         state = _ToolCallState(
             decision=decision,
+            policy=policy,
             operation_terminalized=decision.has_cached_result or decision.cached_error is not None,
             cached_failure=decision.cached_error is not None,
         )
@@ -207,17 +241,19 @@ class _RuntimeStepPersistence(StepPersistence[None]):
         key = self._decision_key(ctx, call)
         state = self._calls[key]
         if state.decision.cached_error is not None:
+            error = state.decision.cached_error
             try:
                 await self._record_failed_effect(
                     ctx,
                     call=call,
                     tool_def=tool_def,
                     args=args,
-                    error=state.decision.cached_error,
+                    error=error,
                     state=state,
                 )
-            except (ModelRetry, ToolRetryError):
-                self._calls.pop(key, None)
+            except BaseException as raised:
+                if _bypasses_tool_error_hook(raised):
+                    self._calls.pop(key, None)
                 raise
             raise AssertionError("cached failure effect hook must raise")
         if state.decision.has_cached_result:
@@ -242,6 +278,7 @@ class _RuntimeStepPersistence(StepPersistence[None]):
             name=f"tool-heartbeat-{call.tool_call_id}",
         )
         state.heartbeat_task = heartbeat_task
+        handler_detached = False
         keep_call_state = True
         try:
             done, _ = await asyncio.wait(
@@ -249,16 +286,21 @@ class _RuntimeStepPersistence(StepPersistence[None]):
                 return_when=asyncio.FIRST_COMPLETED,
             )
             if heartbeat_task in done:
+                state.heartbeat_observed = True
                 heartbeat_error = heartbeat_task.exception()
                 if heartbeat_error is not None:
                     handler_task.cancel()
                     self._detach_task(handler_task, "tool handler after heartbeat loss")
-                    if state.handler_entered and not state.decision.replay_safe:
+                    handler_detached = True
+                    if state.handler_entered and not state.policy.replay_safe:
                         await self._mark_unknown(state, heartbeat_error)
                         raise AIError(ErrorCode.TOOL_EFFECT_UNKNOWN) from heartbeat_error
                     state.preserve_started = True
                     raise heartbeat_error
-            result = await handler_task
+            try:
+                result = await handler_task
+            finally:
+                state.handler_observed = True
             try:
                 cancelled = await self._tool_operations.complete(
                     state.decision,
@@ -274,40 +316,74 @@ class _RuntimeStepPersistence(StepPersistence[None]):
                 self._calls.pop(key, None)
                 raise asyncio.CancelledError
             return result
-        except (ModelRetry, ToolRetryError) as error:
-            if state.decision.replay_safe:
-                cancelled = await self._tool_operations.fail(
-                    state.decision,
-                    error,
+        except SkipToolExecution as signal:
+            state.preserve_started = True
+            cancelled = await self._tool_operations.complete(
+                state.decision,
+                signal.result,
+            )
+            state.operation_terminalized = True
+            state.preserve_started = False
+            if cancelled:
+                keep_call_state = False
+                self._calls.pop(key, None)
+                raise asyncio.CancelledError
+            await self._record_completed_effect(
+                ctx,
+                call=call,
+                tool_def=tool_def,
+                args=args,
+                result=signal.result,
+                state=state,
+            )
+            keep_call_state = False
+            self._calls.pop(key, None)
+            raise
+        except (
+            ValidationError,
+            ModelRetry,
+            ToolRetryError,
+            ToolFailed,
+            ToolFailedError,
+        ) as error:
+            if state.handler_entered and not state.policy.effect_free and not state.policy.replay_safe:
+                await self._mark_unknown(state, error)
+                raise AIError(ErrorCode.TOOL_EFFECT_UNKNOWN) from error
+            try:
+                await self._fail_known_effect(
+                    ctx,
+                    call=call,
+                    tool_def=tool_def,
+                    args=args,
+                    error=error,
+                    state=state,
                 )
-                state.operation_terminalized = True
-                if cancelled:
-                    state.preserve_started = False
+            except BaseException as raised:
+                if state.operation_terminalized and _bypasses_tool_error_hook(raised):
                     keep_call_state = False
                     self._calls.pop(key, None)
-                    raise asyncio.CancelledError
-                _logger.debug(
-                    "tool effect marked failed: run=%s tool=%s call=%s",
-                    self.run_id or ctx.run_id,
-                    tool_def.name,
-                    call.tool_call_id,
-                )
-                try:
-                    await self._record_failed_effect(
-                        ctx,
-                        call=call,
-                        tool_def=tool_def,
-                        args=args,
-                        error=error,
-                        state=state,
-                    )
-                except (ModelRetry, ToolRetryError):
-                    keep_call_state = False
-                    self._calls.pop(key, None)
-                    raise
-                raise AssertionError("retry effect hook must raise")
-            await self._mark_unknown(state, error)
-            raise AIError(ErrorCode.TOOL_EFFECT_UNKNOWN) from error
+                raise
+            raise AssertionError("known failure effect hook must raise")
+        except (CallDeferred, ApprovalRequired) as signal:
+            if state.handler_entered and not state.policy.replay_safe and not state.policy.effect_free:
+                await self._mark_unknown(state, signal)
+                raise AIError(ErrorCode.TOOL_EFFECT_UNKNOWN) from signal
+            unsupported = AIError(
+                ErrorCode.CAPABILITY_POLICY_CONFLICT,
+                safe_details={
+                    "tool_name": tool_def.name,
+                    "reason": "dynamic_deferred_unsupported",
+                },
+            )
+            await self._fail_known_effect(
+                ctx,
+                call=call,
+                tool_def=tool_def,
+                args=args,
+                error=unsupported,
+                state=state,
+            )
+            raise AssertionError("dynamic deferred failure hook must raise")
         except asyncio.CancelledError as error:
             if state.operation_terminalized:
                 state.preserve_started = False
@@ -315,24 +391,30 @@ class _RuntimeStepPersistence(StepPersistence[None]):
                 self._calls.pop(key, None)
                 raise
             state.preserve_started = True
-            if state.handler_entered and not state.decision.replay_safe:
+            if state.handler_entered and not state.policy.replay_safe:
                 await self._mark_unknown(state, error)
             keep_call_state = False
             self._calls.pop(key, None)
             raise
         except Exception as error:
-            if not state.decision.replay_safe and state.handler_entered:
-                await self._mark_unknown(state, error)
-            elif not state.handler_entered:
+            if not state.handler_entered or state.policy.effect_free:
+                raise
+            if state.policy.replay_safe:
                 state.preserve_started = True
-            raise
+                raise AIError(
+                    ErrorCode.STORAGE_RECOVERY_REQUIRED,
+                    safe_details={"phase": "tool_effect_replay"},
+                ) from error
+            await self._mark_unknown(state, error)
+            raise AIError(ErrorCode.TOOL_EFFECT_UNKNOWN) from error
         finally:
             await self._stop_heartbeat(state)
-            if not handler_task.done():
-                handler_task.cancel()
-                self._detach_task(handler_task, "tool handler cleanup")
-            else:
-                self._consume_task(handler_task, "tool handler cleanup")
+            if not handler_detached:
+                if not handler_task.done():
+                    handler_task.cancel()
+                    self._detach_task(handler_task, "tool handler cleanup")
+                elif not state.handler_observed:
+                    self._consume_task(handler_task, "tool handler cleanup")
             if not keep_call_state:
                 self._calls.pop(key, None)
 
@@ -379,11 +461,34 @@ class _RuntimeStepPersistence(StepPersistence[None]):
         try:
             if state.operation_terminalized or state.cached_failure or state.preserve_started:
                 raise error
-            if not state.decision.replay_safe:
+            if isinstance(
+                error,
+                (ValidationError, ModelRetry, ToolRetryError, ToolFailed, ToolFailedError),
+            ):
+                if state.handler_entered and not state.policy.effect_free and not state.policy.replay_safe:
+                    await self._mark_unknown(state, error)
+                    raise AIError(ErrorCode.TOOL_EFFECT_UNKNOWN) from error
+                return await self._fail_known_effect(
+                    ctx,
+                    call=call,
+                    tool_def=tool_def,
+                    args=args,
+                    error=error,
+                    state=state,
+                )
+            if state.handler_entered and not state.policy.effect_free:
+                if state.policy.replay_safe:
+                    state.preserve_started = True
+                    raise AIError(
+                        ErrorCode.STORAGE_RECOVERY_REQUIRED,
+                        safe_details={"phase": "tool_effect_replay"},
+                    ) from error
                 await self._mark_unknown(state, error)
                 raise AIError(ErrorCode.TOOL_EFFECT_UNKNOWN) from error
+            state.preserve_started = True
             cancelled = await self._tool_operations.fail(state.decision, error)
             state.operation_terminalized = True
+            state.preserve_started = False
             if cancelled:
                 self._calls.pop(key, None)
                 raise asyncio.CancelledError
@@ -417,7 +522,7 @@ class _RuntimeStepPersistence(StepPersistence[None]):
         if not task.done():
             task.cancel()
             self._detach_task(task, "tool heartbeat cleanup")
-        else:
+        elif not state.heartbeat_observed:
             self._consume_task(task, "tool heartbeat cleanup")
         state.heartbeat_task = None
 
@@ -448,6 +553,38 @@ class _RuntimeStepPersistence(StepPersistence[None]):
         except BaseException:  # noqa: BLE001
             _logger.exception("detached %s failed", label)
 
+    async def _fail_known_effect(
+        self,
+        ctx: "RunContext[None]",
+        *,
+        call: ToolCallPart,
+        tool_def: ToolDefinition,
+        args: dict[str, Any],
+        error: Exception,
+        state: _ToolCallState,
+    ) -> Any:
+        state.preserve_started = True
+        durable_error = _durable_failure_error(error, call=call, tool_def=tool_def)
+        cancelled = await self._tool_operations.fail(state.decision, durable_error)
+        state.operation_terminalized = True
+        state.preserve_started = False
+        if cancelled:
+            raise asyncio.CancelledError
+        _logger.debug(
+            "tool effect marked failed: run=%s tool=%s call=%s",
+            self.run_id or ctx.run_id,
+            tool_def.name,
+            call.tool_call_id,
+        )
+        return await self._record_failed_effect(
+            ctx,
+            call=call,
+            tool_def=tool_def,
+            args=args,
+            error=error,
+            state=state,
+        )
+
     async def _record_failed_effect(
         self,
         ctx: "RunContext[None]",
@@ -468,11 +605,37 @@ class _RuntimeStepPersistence(StepPersistence[None]):
                 args=args,
                 error=error,
             )
-        except (ModelRetry, ToolRetryError):
+        except BaseException:
             state.effect_terminalized = True
             raise
         state.effect_terminalized = True
         return result
+
+    async def _record_completed_effect(
+        self,
+        ctx: "RunContext[None]",
+        *,
+        call: ToolCallPart,
+        tool_def: ToolDefinition,
+        args: dict[str, Any],
+        result: Any,
+        state: _ToolCallState,
+    ) -> Any:
+        if state.effect_terminalized:
+            return result
+        try:
+            value = await super().after_tool_execute(
+                ctx,
+                call=call,
+                tool_def=tool_def,
+                args=args,
+                result=result,
+            )
+        except BaseException:
+            state.effect_terminalized = True
+            raise
+        state.effect_terminalized = True
+        return value
 
     async def _mark_unknown(self, state: _ToolCallState, error: BaseException) -> None:
         state.preserve_started = True
@@ -570,7 +733,12 @@ async def compose_platform_capabilities(
             )
         )
     if any(name in selected for name in PLANNING_TOOL_NAMES):
-        capabilities.append(Planning(id=_PLANNING_CAPABILITY_ID))
+        capabilities.append(
+            Planning(
+                id=_PLANNING_CAPABILITY_ID,
+                tools=PLANNING_TOOL_NAMES,
+            )
+        )
     if "delegate_task" in selected:
         if scope.subagent_delegate is None:
             raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
@@ -752,6 +920,79 @@ def _trusted_tool_capability(name: str, tool_class: str) -> "str | None":
             return None
         return _MEMORY_CAPABILITY_ID
     return None
+
+
+def _tool_effect_policy(
+    tool_def: ToolDefinition,
+    *,
+    trusted_tool_classes: "tuple[tuple[str, str], ...]",
+) -> _ToolEffectPolicy:
+    _validate_trusted_tool_classes(trusted_tool_classes)
+    tool_class = dict(trusted_tool_classes).get(tool_def.name)
+    if tool_class is not None:
+        expected_capability = _trusted_tool_capability(tool_def.name, tool_class)
+        if expected_capability is None or tool_def.capability_id != expected_capability:
+            raise AIError(
+                ErrorCode.CAPABILITY_POLICY_CONFLICT,
+                safe_details={"tool_name": tool_def.name},
+            )
+        if tool_class in {"filesystem.read", "memory.read"}:
+            return _ToolEffectPolicy(True, True)
+        if tool_class == "memory.write":
+            return _ToolEffectPolicy(True, False)
+        if tool_class == "filesystem.write":
+            return _ToolEffectPolicy(False, False)
+        if tool_class == "shell":
+            return _ToolEffectPolicy(
+                tool_def.name == "check_command",
+                tool_def.name == "check_command",
+            )
+        if tool_class == "control":
+            if tool_def.name in SKILL_TOOL_NAMES:
+                return _ToolEffectPolicy(True, True)
+            if tool_def.name in PLANNING_TOOL_NAMES or tool_def.name in SUBAGENT_TOOL_NAMES:
+                return _ToolEffectPolicy(True, False)
+            raise AIError(ErrorCode.CAPABILITY_POLICY_CONFLICT)
+        raise AIError(ErrorCode.CAPABILITY_POLICY_CONFLICT)
+    metadata = (tool_def.metadata or {}).get(_REPLAY_SAFE_METADATA_KEY, False)
+    if not isinstance(metadata, bool):
+        raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+    return _ToolEffectPolicy(metadata, False)
+
+
+def _durable_failure_error(
+    error: Exception,
+    *,
+    call: ToolCallPart,
+    tool_def: ToolDefinition,
+) -> Exception:
+    if isinstance(error, (ToolRetryError, ToolFailedError, AIError)):
+        return error
+    if isinstance(error, (ValidationError, ModelRetry)):
+        return ToolRetryError(
+            RetryPromptPart.from_error(
+                error,
+                tool_name=tool_def.name,
+                tool_call_id=call.tool_call_id,
+            )
+        )
+    if isinstance(error, ToolFailed):
+        return ToolFailedError(
+            ToolReturnPart(
+                tool_def.name,
+                error.message,
+                tool_call_id=call.tool_call_id,
+                outcome="failed",
+            )
+        )
+    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+
+
+def _bypasses_tool_error_hook(error: BaseException) -> bool:
+    return isinstance(
+        error,
+        (ModelRetry, ToolRetryError, ToolFailed, ToolFailedError, SkipToolExecution, CallDeferred, ApprovalRequired),
+    )
 
 
 def tool_is_control(
