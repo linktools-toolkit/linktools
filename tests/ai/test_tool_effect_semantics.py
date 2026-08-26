@@ -7,9 +7,9 @@ from datetime import datetime, timezone
 from typing import Any
 
 import pytest
-from linktools.ai.agent._capabilities import ToolOperationDecision, _RuntimeStepPersistence
 from linktools.ai.core import ToolOperationStatus
 from linktools.ai.errors import AIError, ErrorCode
+from linktools.ai.runtime._capabilities import ToolOperationDecision, _RuntimeStepPersistence
 from linktools.ai.runtime._tool import RuntimeToolOperationBridge, ToolOperationRecord
 from linktools.ai.storage import PayloadPolicy
 from pydantic_ai.exceptions import CallDeferred, ModelRetry, SkipToolExecution, ToolFailedError, ToolRetryError
@@ -237,7 +237,7 @@ def _runtime_bridge() -> RuntimeToolOperationBridge:
         tenant_id="tenant",
         execution_id="execution",
         step_run_id="run",
-        binding_fingerprint="binding",
+        binding_digest="binding",
         owner="owner",
         background_tasks=set(),
         payload_policy=PayloadPolicy(),
@@ -264,7 +264,7 @@ async def test_tool_failed_error_payload_round_trips_structured_content() -> Non
         idempotency_key_digest="idempotency",
         tool_name="tool",
         arguments_digest="arguments",
-        binding_fingerprint="binding",
+        binding_digest="binding",
         replay_safe=True,
         status=ToolOperationStatus.FAILED,
         owner=None,
@@ -300,7 +300,7 @@ async def test_tool_retry_error_payload_round_trips_retry_part() -> None:
         idempotency_key_digest="idempotency",
         tool_name="read_file",
         arguments_digest="arguments",
-        binding_fingerprint="binding",
+        binding_digest="binding",
         replay_safe=True,
         status=ToolOperationStatus.FAILED,
         owner=None,
