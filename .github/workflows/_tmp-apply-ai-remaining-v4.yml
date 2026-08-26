@@ -31,6 +31,10 @@ jobs:
           target='refactor/ai-runtime-capabilitygroup-agent'
           current="$(git ls-remote origin "refs/heads/${target}" | cut -f1)"
           git checkout -B "${target}" "${current}"
+          rm -f \
+            linktools-ai/src/linktools/ai/runtime/_agent_executor.py \
+            linktools-ai/src/linktools/ai/runtime/_capabilities.py \
+            linktools-ai/src/linktools/ai/runtime/_history.py
           args=(
             --include=linktools-ai/src/linktools/ai/runtime/_agent_executor.py
             --include=linktools-ai/src/linktools/ai/runtime/_capabilities.py
