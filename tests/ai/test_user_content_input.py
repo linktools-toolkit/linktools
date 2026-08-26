@@ -1,6 +1,9 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
+import json
+from pathlib import Path
+
 import pytest
 from pydantic_ai.messages import BinaryContent, UploadedFile
 
@@ -10,9 +13,11 @@ from linktools.ai.agent._input import (
     prepare_user_prompt,
     user_prompt_transport,
 )
-from linktools.ai.core import Principal
+from linktools.ai.core import Principal, canonical_json_bytes
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.runtime import ExecutionRequest
+
+_FIXTURE = Path(__file__).with_name("fixtures") / "user_prompt_transport_v1_golden.json"
 
 
 def _attachment_prompt():
@@ -41,6 +46,24 @@ def test_native_user_content_transport_is_deterministic_and_round_trips() -> Non
     assert restored[1].data == b"level=error message=boom\n"
     assert restored[1].media_type == "text/plain"
     assert restored[1].identifier == "error.log"
+
+
+def test_frozen_v1_prompt_fixtures_remain_readable() -> None:
+    fixture = json.loads(_FIXTURE.read_text(encoding="utf-8"))
+
+    legacy_text = fixture["legacy_text"]
+    text_transport = user_prompt_transport(
+        legacy_text["value"],
+        legacy_text["codec"],
+    )
+    assert _restore_user_prompt(text_transport) == legacy_text["value"]
+
+    rich_v1 = fixture["rich_v1_minimal"]
+    rich_transport = user_prompt_transport(
+        canonical_json_bytes(rich_v1["value"]).decode("utf-8"),
+        rich_v1["codec"],
+    )
+    assert _restore_user_prompt(rich_transport) == ("Inspect historical input",)
 
 
 def test_rich_transport_survives_runtime_text_suffix() -> None:
