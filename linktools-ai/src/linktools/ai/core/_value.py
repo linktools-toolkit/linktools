@@ -8,6 +8,7 @@ from enum import Enum
 from typing import Literal, TypeAlias
 
 from ..errors import AIError, ErrorCode
+from ._json import JsonValue
 from ._paging import Page
 from ._validation import (
     validate_principal_id,
@@ -22,13 +23,13 @@ ThinkingValue: TypeAlias = bool | ThinkingEffort
 _THINKING_EFFORTS = frozenset({"minimal", "low", "medium", "high", "xhigh"})
 
 
-def normalize_execution_mode(value: object) -> ExecutionMode:
+def normalize_execution_mode(value: JsonValue) -> ExecutionMode:
     if value in {"run", "plan"}:
         return value  # type: ignore[return-value]
     raise AIError(ErrorCode.REQUEST_FIELD_INVALID, "execution mode is invalid")
 
 
-def normalize_thinking(value: object) -> ThinkingValue:
+def normalize_thinking(value: JsonValue) -> ThinkingValue:
     if isinstance(value, bool):
         return value
     if isinstance(value, str) and value in _THINKING_EFFORTS:
