@@ -4,9 +4,9 @@
 
 - Branch: `fix/ai-capability-tool-effect-semantics`
 - Scope: `linktools-ai`
-- Repair type: runtime correctness and durable-recovery contract repair
+- Repair type: runtime correctness, durable-recovery contract repair, and Pydantic-native user-content restoration
 - No database schema migration
-- No new public API
+- Public input extension: `AgentHandle.start/run/stream/task` accept Pydantic AI `UserContent` sequences in addition to plain strings
 - No pessimistic locking
 
 ## Required invariants
@@ -29,6 +29,11 @@
 13. Normal handled tool failures must not emit duplicate detached-handler cleanup errors.
 14. Existing ToolOperation, Session, Execution, Step and database/file schemas remain unchanged.
 15. This correctness repair does not bump the runtime contract revision.
+16. Agent callers may supply the same `str | Sequence[UserContent]` shape accepted by Pydantic AI. Linktools must not define parallel attachment classes.
+17. Rich user content is converted once at the Agent boundary into deterministic durable text transport using Pydantic AI's own model-message codec. Identical content must produce identical transport and therefore stable idempotency identity.
+18. The Runtime, Temporal, Recovery and TaskGraph persistence contracts remain text-based. They carry the opaque transport without learning attachment-specific fields or types.
+19. `AgentExecutor` is the sole restoration point: immediately before `run_stream_events()`, rich transport is validated and restored to native Pydantic AI `UserContent`; plain strings remain plain strings.
+20. Plain strings retain their existing identity. Strings beginning with the reserved transport prefix are escaped at the public Agent boundary, and malformed/tampered rich transport fails closed as `STORAGE_INTEGRITY_ERROR`.
 
 ## Built-in policy matrix
 
@@ -61,7 +66,10 @@ The repair is complete only when all of the following hold:
 - dynamic deferred-control paths are explicitly rejected without leaving unresolved claimed effects, while unsafe entered effects remain unknown;
 - `ToolRetryError` and `ToolFailedError` durable payload round-trip tests pass;
 - Planning exposes no accidental Harness granular tools;
-- Skill missing-ID regression passes without expanding the public capability API;
+- Skill missing-ID regression passes without expanding the capability package public API;
 - cancellation tests pass;
 - repository search finds no second built-in replay-safety truth source;
+- Pydantic `BinaryContent` user input round-trips deterministically through the durable prompt transport;
+- plain text retains identity, reserved-prefix text is escaped, and tampered rich transport fails closed;
+- `ExecutionRequest` continues to persist rich input as text while Executor restoration returns native `UserContent`;
 - `python manage.py check linktools-ai` passes on the repository CI Python matrix.
