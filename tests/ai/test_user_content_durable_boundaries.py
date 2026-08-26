@@ -11,10 +11,12 @@ from linktools.ai.agent._input import (
     UserPromptTransport,
     _restore_user_prompt,
     prepare_user_prompt,
+    user_prompt_transport,
 )
-from linktools.ai.core import Principal
+from linktools.ai.core import ExecutionLineageKind, Principal
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.runtime import ExecutionRequest, RuntimeObjectKeyFactory
+from linktools.ai.runtime._execution import _request_digest
 from linktools.ai.runtime._local import _recovery_prompt_payload, _recovery_prompt_text
 from linktools.ai.spec import AgentSpec
 from linktools.ai.storage import InMemoryObjectStore, StoredPayload
@@ -67,6 +69,19 @@ def _legacy_temporal_payload(user_prompt: str) -> dict[str, object]:
         "thinking": False,
         "binding": _binding().to_payload(),
     }
+
+
+def _execution_request_digest(request: ExecutionRequest) -> str:
+    return _request_digest(
+        request,
+        _binding().binding_digest,
+        session_id=None,
+        source_execution_id=None,
+        base_execution_id=None,
+        parent_execution_id=None,
+        root_execution_id=None,
+        lineage_kind=ExecutionLineageKind.RUN,
+    )
 
 
 @pytest.mark.asyncio
@@ -163,3 +178,30 @@ def test_recovery_unknown_prompt_codec_is_unsupported() -> None:
         _recovery_prompt_text(SimpleNamespace(user_prompt=payload))
 
     assert raised.value.code is ErrorCode.STORAGE_VERSION_UNSUPPORTED
+
+
+def test_text_transport_keeps_historical_request_digest_identity() -> None:
+    principal = Principal("user", "tenant", "service")
+    value = '{"message":{"kind":"request"}}'
+    historical = ExecutionRequest(value, principal, "same-key")
+    explicit_text = ExecutionRequest(
+        user_prompt_transport(value, "text"),
+        principal,
+        "same-key",
+    )
+
+    assert _execution_request_digest(explicit_text) == _execution_request_digest(
+        historical
+    )
+
+
+def test_prompt_codec_participates_in_rich_request_digest_identity() -> None:
+    principal = Principal("user", "tenant", "service")
+    rich = _rich_prompt()
+    rich_request = ExecutionRequest(rich, principal, "same-key")
+    same_bytes_as_text = ExecutionRequest(str(rich), principal, "same-key")
+
+    assert str(rich_request.user_prompt) == same_bytes_as_text.user_prompt
+    assert _execution_request_digest(rich_request) != _execution_request_digest(
+        same_bytes_as_text
+    )
