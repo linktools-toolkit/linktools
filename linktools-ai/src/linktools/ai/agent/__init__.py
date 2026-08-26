@@ -28,6 +28,13 @@ from ._executor import (
     LiveDelta,
     UsageSink,
 )
+from ._input import (
+    _RuntimeUserPrompt,
+    _UserPromptInput,
+    _normalize_runtime_user_prompt,
+    _prepare_user_prompt,
+    _restore_user_prompt,
+)
 from ._output import (
     ASSISTANT_TEXT_OUTPUT_SCHEMA_ID,
     ASSISTANT_TEXT_OUTPUT_SCHEMA_REVISION,
