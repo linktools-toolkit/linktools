@@ -2,88 +2,102 @@
 # -*- coding: utf-8 -*-
 """Canonical transport for Pydantic AI user content."""
 
-import hashlib
 import json
 from collections.abc import Sequence
 from datetime import datetime, timezone
 from typing import TypeAlias, cast
 
 from pydantic_ai import ModelMessagesTypeAdapter
-from pydantic_ai.messages import ModelRequest, UserContent, UserPromptPart
+from pydantic_ai.messages import ModelRequest, UploadedFile, UserContent, UserPromptPart
 
 from ..core import JsonValue, canonical_json_bytes, normalize_json_value, validate_user_prompt
 from ..errors import AIError, ErrorCode
 
-_USER_CONTENT_KIND = "pydantic-user-content"
-_USER_CONTENT_VERSION = 1
-_USER_CONTENT_PREFIX = "linktools.ai:user-content:v1:"
-_USER_TEXT_ESCAPE_PREFIX = "linktools.ai:user-content:text:"
+_TEXT_CODEC = "text"
+_USER_CONTENT_CODEC = "pydantic-user-content-v1"
 _WIRE_TIMESTAMP = datetime(1970, 1, 1, tzinfo=timezone.utc)
-_DIGEST_SIZE = 64
 
 _UserPromptInput: TypeAlias = str | Sequence[UserContent]
 _RuntimeUserPrompt: TypeAlias = str
 
 
-def prepare_user_prompt(value: _UserPromptInput) -> str:
+class UserPromptTransport(str):
+    """Internal text value carrying its explicit durable codec."""
+
+    __slots__ = ("codec",)
+
+    def __new__(cls, value: str, codec: str) -> "UserPromptTransport":
+        if not isinstance(value, str) or not isinstance(codec, str) or not codec:
+            raise TypeError("user prompt transport is invalid")
+        instance = str.__new__(cls, value)
+        instance.codec = codec
+        return instance
+
+    def __add__(self, other: object) -> "UserPromptTransport":
+        if not isinstance(other, str):
+            return NotImplemented
+        return UserPromptTransport(str.__add__(self, other), self.codec)
+
+
+def prepare_user_prompt(value: _UserPromptInput) -> UserPromptTransport:
     """Convert Pydantic-native user content into durable text transport."""
     if isinstance(value, str):
         validate_user_prompt(value)
-        if value.startswith((_USER_CONTENT_PREFIX, _USER_TEXT_ESCAPE_PREFIX)):
-            escaped = f"{_USER_TEXT_ESCAPE_PREFIX}{value}"
-            validate_user_prompt(escaped)
-            return escaped
-        return value
+        return UserPromptTransport(value, _TEXT_CODEC)
     if not isinstance(value, Sequence) or isinstance(value, (bytes, bytearray)):
         raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
     content = tuple(value)
     if not content:
         raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+    if any(isinstance(item, UploadedFile) for item in content):
+        raise AIError(
+            ErrorCode.REQUEST_FIELD_INVALID,
+            safe_details={
+                "field": "user_prompt",
+                "reason": "uploaded_file_not_durable",
+            },
+        )
     payload = _encode_user_content(content)
-    raw = canonical_json_bytes(payload)
-    digest = hashlib.sha256(raw).hexdigest()
-    wire = f"{_USER_CONTENT_PREFIX}{digest}\n{raw.decode('utf-8')}"
+    wire = canonical_json_bytes(payload).decode("utf-8")
     validate_user_prompt(wire)
-    return wire
+    return UserPromptTransport(wire, _USER_CONTENT_CODEC)
+
+
+def user_prompt_transport(value: str, codec: str = _TEXT_CODEC) -> UserPromptTransport:
+    """Restore an internal prompt transport after a durable boundary."""
+    validate_user_prompt(value)
+    if codec not in {_TEXT_CODEC, _USER_CONTENT_CODEC}:
+        raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
+    return UserPromptTransport(value, codec)
 
 
 def _restore_user_prompt(value: str) -> str | tuple[UserContent, ...]:
     """Restore durable text transport into the prompt shape Pydantic AI accepts."""
     validate_user_prompt(value)
-    if value.startswith(_USER_TEXT_ESCAPE_PREFIX):
-        restored = value[len(_USER_TEXT_ESCAPE_PREFIX) :]
-        validate_user_prompt(restored)
-        return restored
-    if not value.startswith(_USER_CONTENT_PREFIX):
-        return value
-    return _decode_user_content_wire(value)
+    codec = value.codec if isinstance(value, UserPromptTransport) else _TEXT_CODEC
+    if codec == _TEXT_CODEC:
+        return str(value)
+    if codec != _USER_CONTENT_CODEC:
+        raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
+    return _decode_user_content_wire(str(value))
 
 
 def _decode_user_content_wire(value: str) -> tuple[UserContent, ...]:
-    encoded = value[len(_USER_CONTENT_PREFIX) :]
-    digest, separator, payload_text = encoded.partition("\n")
-    if (
-        not separator
-        or len(digest) != _DIGEST_SIZE
-        or digest.lower() != digest
-        or any(character not in "0123456789abcdef" for character in digest)
-    ):
-        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     try:
-        payload, end = json.JSONDecoder().raw_decode(payload_text)
+        payload, end = json.JSONDecoder().raw_decode(value)
     except json.JSONDecodeError as error:
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
-    payload_raw = payload_text[:end].encode("utf-8")
-    if hashlib.sha256(payload_raw).hexdigest() != digest:
-        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    payload_text = value[:end]
     try:
         normalized = normalize_json_value(payload)
     except (TypeError, ValueError) as error:
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
-    if not isinstance(normalized, dict) or canonical_json_bytes(normalized) != payload_raw:
+    if not isinstance(normalized, dict):
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    if canonical_json_bytes(normalized) != payload_text.encode("utf-8"):
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     content = _decode_user_content(normalized)
-    suffix = payload_text[end:]
+    suffix = value[end:]
     return (*content, suffix) if suffix else content
 
 
@@ -107,20 +121,11 @@ def _encode_user_content(content: Sequence[UserContent]) -> dict[str, JsonValue]
         or not isinstance(normalized[0], dict)
     ):
         raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
-    return {
-        "kind": _USER_CONTENT_KIND,
-        "version": _USER_CONTENT_VERSION,
-        "message": normalized[0],
-    }
+    return {"message": normalized[0]}
 
 
 def _decode_user_content(payload: dict[str, JsonValue]) -> tuple[UserContent, ...]:
-    if set(payload) != {"kind", "version", "message"}:
-        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-    if (
-        payload["kind"] != _USER_CONTENT_KIND
-        or payload["version"] != _USER_CONTENT_VERSION
-    ):
+    if set(payload) != {"message"}:
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     message = payload["message"]
     if not isinstance(message, dict):
@@ -139,15 +144,9 @@ def _decode_user_content(payload: dict[str, JsonValue]) -> tuple[UserContent, ..
     if part.timestamp != _WIRE_TIMESTAMP or isinstance(part.content, str):
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     content = tuple(cast(Sequence[UserContent], part.content))
-    if not content:
-        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-    try:
-        canonical = _encode_user_content(content)
-    except AIError as error:
-        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
-    if canonical != payload:
+    if not content or any(isinstance(item, UploadedFile) for item in content):
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     return content
 
 
-__all__ = ["prepare_user_prompt"]
+__all__: tuple[str, ...] = ()
