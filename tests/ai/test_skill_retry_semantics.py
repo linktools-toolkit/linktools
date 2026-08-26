@@ -25,7 +25,7 @@ def _context() -> RunContext[None]:
 async def test_missing_skill_id_is_model_retry() -> None:
     catalog = SkillCatalogSnapshot(
         (SkillDescriptor("known", 1, "Known skill"),),
-        (SkillSpec("known", content="instructions"),),
+        (SkillSpec("known", 1, content="instructions"),),
     )
     capability = SkillCapability(catalog, id="linktools-skill")
     toolset = capability.get_toolset()
