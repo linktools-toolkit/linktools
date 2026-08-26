@@ -28,13 +28,7 @@ from ._executor import (
     LiveDelta,
     UsageSink,
 )
-from ._input import (
-    _RuntimeUserPrompt,
-    _UserPromptInput,
-    _normalize_runtime_user_prompt,
-    _prepare_user_prompt,
-    _restore_user_prompt,
-)
+from ._input import UserPromptInput, prepare_user_prompt
 from ._output import (
     ASSISTANT_TEXT_OUTPUT_SCHEMA_ID,
     ASSISTANT_TEXT_OUTPUT_SCHEMA_REVISION,
@@ -69,8 +63,10 @@ __all__ = [
     "ToolOperationBridge",
     "ToolOperationDecision",
     "UsageSink",
+    "UserPromptInput",
     "bind_output",
     "build_pydantic_agent",
+    "prepare_user_prompt",
     "restore_output",
     "select_platform_tool_names",
     "tool_name_allowed",
