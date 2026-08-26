@@ -8,12 +8,9 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Generic, TypeVar, cast
 
-from linktools.core import environ
-
 from ...errors import AIError, ErrorCode
 
 ValueT = TypeVar("ValueT")
-_logger = environ.get_logger("ai.runtime.state.durability")
 
 
 class DurableCommitState(str, Enum):
@@ -50,32 +47,13 @@ async def run_durable_commit(
     *,
     background_tasks: "set[asyncio.Task[object]]",
 ) -> DurableCommitResult[ValueT]:
-    """Resolve a durable commit without waiting indefinitely after cancellation."""
+    """Resolve durable truth before propagating caller cancellation."""
     task = asyncio.create_task(operation())
-    cancellation_requested = False
-    operation_error: BaseException | None = None
-    value: ValueT | None = None
-    try:
-        value = await asyncio.shield(task)
-    except asyncio.CancelledError as error:
-        cancellation_requested = True
-        if not task.done():
-            _detach_task(
-                cast("asyncio.Task[object]", task),
-                background_tasks,
-                "durable commit",
-            )
-            return DurableCommitResult(
-                DurableCommitState.UNRESOLVED,
-                error=error,
-                cancelled=True,
-            )
-        try:
-            value = task.result()
-        except BaseException as task_error:  # noqa: BLE001
-            operation_error = task_error
-    except BaseException as error:  # noqa: BLE001
-        operation_error = error
+    value, operation_error, operation_cancelled = await _await_owned_task(
+        task,
+        background_tasks,
+    )
+    cancellation_requested = operation_cancelled
 
     if operation_error is None:
         return DurableCommitResult(
@@ -85,46 +63,22 @@ async def run_durable_commit(
         )
 
     readback_task = asyncio.create_task(readback())
-    try:
-        observation = await asyncio.shield(readback_task)
-    except asyncio.CancelledError as error:
-        cancellation_requested = True
-        if not readback_task.done():
-            _detach_task(
-                cast("asyncio.Task[object]", readback_task),
-                background_tasks,
-                "durable commit readback",
-            )
-            return DurableCommitResult(
-                DurableCommitState.UNRESOLVED,
-                error=error,
-                cancelled=True,
-            )
-        try:
-            observation = readback_task.result()
-        except AIError as readback_error:
+    observation, readback_error, readback_cancelled = await _await_owned_task(
+        readback_task,
+        background_tasks,
+    )
+    cancellation_requested = cancellation_requested or readback_cancelled
+    if readback_error is not None:
+        if isinstance(readback_error, AIError):
             return _readback_error_result(
                 readback_error,
-                cancelled=True,
+                cancelled=cancellation_requested,
             )
-        except BaseException as readback_error:  # noqa: BLE001
-            return DurableCommitResult(
-                DurableCommitState.UNRESOLVED,
-                error=readback_error,
-                cancelled=True,
-            )
-    except AIError as error:
-        return _readback_error_result(
-            error,
-            cancelled=cancellation_requested,
-        )
-    except BaseException as error:  # noqa: BLE001
         return DurableCommitResult(
             DurableCommitState.UNRESOLVED,
-            error=error,
+            error=readback_error,
             cancelled=cancellation_requested,
         )
-
     if not isinstance(observation, CommitObservation):
         raise TypeError("durable commit readback returned an invalid observation")
     return DurableCommitResult(
@@ -133,6 +87,39 @@ async def run_durable_commit(
         error=observation.error or operation_error,
         cancelled=cancellation_requested,
     )
+
+
+async def _await_owned_task(
+    task: "asyncio.Task[ValueT]",
+    background_tasks: "set[asyncio.Task[object]]",
+) -> "tuple[ValueT | None, BaseException | None, bool]":
+    """Keep a shielded durable task owned until its outcome is observable."""
+    cancelled = False
+    owned = False
+    current = asyncio.current_task()
+    tracked = cast("asyncio.Task[object]", task)
+    try:
+        while True:
+            try:
+                return await asyncio.shield(task), None, cancelled
+            except asyncio.CancelledError as error:
+                caller_cancelled = current is not None and current.cancelling() > 0
+                if task.done():
+                    try:
+                        return task.result(), None, cancelled or caller_cancelled
+                    except BaseException as task_error:  # noqa: BLE001
+                        return None, task_error, cancelled or caller_cancelled
+                if not caller_cancelled:
+                    return None, error, cancelled
+                cancelled = True
+                if not owned:
+                    background_tasks.add(tracked)
+                    owned = True
+            except BaseException as error:  # noqa: BLE001
+                return None, error, cancelled
+    finally:
+        if owned:
+            background_tasks.discard(tracked)
 
 
 def _readback_error_result(
@@ -147,26 +134,6 @@ def _readback_error_result(
         error=error,
         cancelled=cancelled,
     )
-
-
-def _detach_task(
-    task: "asyncio.Task[object]",
-    background_tasks: "set[asyncio.Task[object]]",
-    label: str,
-) -> None:
-    background_tasks.add(task)
-
-    def consume(done: "asyncio.Task[object]") -> None:
-        try:
-            done.result()
-        except asyncio.CancelledError:
-            pass
-        except BaseException:  # noqa: BLE001
-            _logger.exception("detached %s failed", label)
-        finally:
-            background_tasks.discard(done)
-
-    task.add_done_callback(consume)
 
 
 __all__ = [
