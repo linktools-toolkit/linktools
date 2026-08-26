@@ -1,5 +1,5 @@
 [build-system]
-requires = ["linktools-setup @ git+https://github.com/linktools-toolkit/linktools-setup.git@2512922900cc12d794a0481d2d322e965eda5631"]
+requires = ["linktools-setup @ git+https://github.com/linktools-toolkit/linktools-setup.git@5ccad5de52f906c788629e1410c52f319c029a4d"]
 build-backend = "linktools_setup.build_meta"
 
 [project]
