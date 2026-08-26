@@ -1,4 +1,4 @@
-name: _tmp diagnose ai refactor parts
+name: _tmp finalize ai runtime refactor from v3
 
 on:
   push:
@@ -6,16 +6,51 @@ on:
       - tmp/ai-runtime-capabilitygroup-agent-transport-v3
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
-  diagnose:
+  finalize:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Print transport hashes
+        with:
+          fetch-depth: 0
+
+      - name: Reconstruct remaining-owner payload
         shell: bash
         run: |
           set -euo pipefail
-          wc -c .github/_transport/ai-runtime-capabilitygroup-agent-v3/part-*
-          sha256sum .github/_transport/ai-runtime-capabilitygroup-agent-v3/part-*
+          transport='tmp/ai-runtime-capabilitygroup-agent-newfiles-v4'
+          dir='.github/_transport/ai-runtime-capabilitygroup-agent-newfiles-v4'
+          git fetch origin "refs/heads/${transport}:refs/remotes/origin/${transport}"
+          for part in 00 01 02 03 04 05 06 07 08 09 10; do
+            git show "origin/${transport}:${dir}/part-${part}"
+          done | base64 -d | gzip -d > /tmp/ai-newfiles.patch
+          echo '767420f45dd27ceb1ebbc3035a8da56061c1df7685ea5213564e27d66bb9061a  /tmp/ai-newfiles.patch' | sha256sum -c -
+
+      - name: Apply remaining owners and squash
+        shell: bash
+        run: |
+          set -euo pipefail
+          baseline='77ce66cc3a68938181ec752cd30d9be5ab24d63b'
+          target='refactor/ai-runtime-capabilitygroup-agent'
+          current="$(git ls-remote origin "refs/heads/${target}" | cut -f1)"
+          git checkout -B "${target}" "${current}"
+          args=(
+            --include=linktools-ai/src/linktools/ai/runtime/_agent_executor.py
+            --include=linktools-ai/src/linktools/ai/runtime/_capabilities.py
+            --include=linktools-ai/src/linktools/ai/runtime/_history.py
+          )
+          git apply --check "${args[@]}" /tmp/ai-newfiles.patch
+          git apply "${args[@]}" /tmp/ai-newfiles.patch
+          rm -f .github/workflows/_tmp-finalize-ai-runtime-refactor.yml
+          git diff --check
+          python -m compileall -q linktools-ai/src scripts/check/ai
+          git add -A
+          git reset --soft "${baseline}"
+          git add -A
+          test -n "$(git diff --cached --name-only)"
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git commit -m 'refactor(ai): unify runtime capability composition'
+          git push --force-with-lease="refs/heads/${target}:${current}" origin "HEAD:refs/heads/${target}"
