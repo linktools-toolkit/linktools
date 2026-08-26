@@ -6,6 +6,7 @@ import asyncio
 
 import pytest
 
+from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.runtime.state._durability import CommitObservation, DurableCommitState
 from linktools.ai.runtime.state._steps import (
     RuntimeStepStore,
@@ -97,10 +98,12 @@ async def test_step_flight_fences_only_after_real_unresolved_readback() -> None:
             error=RuntimeError("readback unavailable"),
         )
 
-    with pytest.raises(Exception) as raised:
+    with pytest.raises(AIError) as raised:
         await store._settle_durability_flight(flight, operation, readback)
 
-    assert type(raised.value).__name__ == "AIError"
+    assert raised.value.code is ErrorCode.STORAGE_COMMIT_UNKNOWN
     assert flight.run_id in store._durability_flights
     assert flight.completion.done()
-    assert type(flight.completion.exception()).__name__ == "AIError"
+    completion_error = flight.completion.exception()
+    assert isinstance(completion_error, AIError)
+    assert completion_error.code is ErrorCode.STORAGE_COMMIT_UNKNOWN
