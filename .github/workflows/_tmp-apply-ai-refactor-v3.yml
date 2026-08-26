@@ -46,3 +46,5 @@ jobs:
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           git commit -m 'refactor(ai): unify runtime capability composition'
           git push origin "HEAD:refs/heads/${target}"
+
+# trigger after all 16 transport parts are present
