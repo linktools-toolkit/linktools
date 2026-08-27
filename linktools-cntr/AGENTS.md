@@ -1,47 +1,24 @@
 # AGENTS.md (linktools-cntr)
 
-Architecture guidance for the container-management sub-package. Shared concerns
-(monorepo structure, `manage.py`, config system, code style) live in the
-[repo-root AGENTS.md](../AGENTS.md). User-facing usage is in
-[README.md](README.md).
+Package instructions for `linktools-cntr`. Repository-wide rules in [../AGENTS.md](../AGENTS.md) also apply. User-facing usage lives in [README.md](README.md).
 
-## Container Sub-package (`linktools-cntr/src/linktools/cntr/`)
+## Required Rules
 
-Docker/Compose container lifecycle management (prefix `ct-cntr`). Built on the core
-CLI framework.
+- `linktools-cntr` targets Docker / Docker Compose only. Do not add Podman compatibility paths.
+- `.linktools.json` / `linktools.json` is the generic `linktools.core.ProjectProfile`, not a cntr-specific format.
+- Enforce `requires.linktools-cntr` before an external repo's `container.py` is imported. `runtime:docker-engine` and `runtime:docker-compose` gate `up`, `restart`, and `compose`; `down`, `status`, and `doctor` stay outside those runtime-version gates.
+- Keep lifecycle ordering in the lifecycle/manager layer. Container definitions contribute hooks but do not bypass dependency ordering or create a parallel Compose execution path.
+- Docker/Compose command construction stays behind the runtime/process abstraction so planning and execution share the same command semantics.
 
-- **`commands/`** — CLI surface: `root.py` (the `ct-cntr` command group + help-order
-  contract), `config.py` (config get/set/unset/edit/reload), `repo.py` (external
-  repo add/update/remove), `compose.py` (render the resolved Docker Compose model),
-  `status.py` (live container state via `docker inspect`), `plan.py`/`exec_.py`.
-- **`container.py` / `context.py`** — `ContainerManager` + per-container `Container`
-  abstraction; resolves dependencies, renders Dockerfile/Compose templates, drives
-  the lifecycle event hooks.
-- **`lifecycle/`** — event dispatcher + hooks (`on_init`, `on_prepare`, `on_check`,
-  `on_starting`/`on_started`, `on_stopping`/`on_stopped`, `on_removed`). `up` /
-  `restart` (= down + up) / `down` run hooks in dependency order, then hand off to
-  `docker compose`. See the sequence diagram in `README.md`.
-- **`_container/`** — low-level Docker/Compose interaction: `compose.py` (Compose
-  model render + `--check` validation), `template.py` (Jinja2 template engine for
-  Dockerfile/Compose/env), `expose.py` (service-link extraction), `actions.py`.
-- **`doctor.py`** — diagnostics: config sanity, requirement checks, optional runtime
-  Compose validation (`--runtime`).
-- **`artifacts.py`** — built-in container definitions (nginx, lldap, authelia,
-  safeline, portainer).
+## Guidance
 
-## `.linktools.json` (project profile)
+`linktools-cntr/src/linktools/cntr/` is organized around:
 
-`.linktools.json` / `linktools.json` is a generic project manifest
-(`linktools.core.ProjectProfile`), not a cntr-specific format. It layers user-level
-(`~/.linktools/linktools.json`) and local (`<root>/.linktools.json`) files into the
-existing ConfigResolver. A container repo can declare its `linktools-cntr` version
-requirement under `requires` plus per-container default env values. cntr enforces
-`requires.linktools-cntr` at `repo add` / `repo update` / load time (before the
-repo's `container.py` is imported); other `requires` keys it ignores.
+- `commands/`: `ct-cntr` CLI surface.
+- manager/container/context: dependency resolution and lifecycle orchestration.
+- `lifecycle/`: lifecycle hooks and ordering.
+- `_container/`: Compose rendering/templates/actions.
+- `runtime/`: Docker/Compose process construction.
+- `doctor.py`: diagnostics; `artifacts.py`: built-in containers.
 
-## No pessimistic coupling
-
-cntr does not hardcode a runtime — it drives Docker/Podman via the configured
-container engine and Compose. `requires` declaring `runtime:docker-engine` /
-`runtime:docker-compose` versions actually gates `up` / `restart` / `compose`
-(`down` / `status` / `doctor` are read-only and unaffected).
+Project-profile values layer user `~/.linktools/linktools.json` and local `<root>/.linktools.json` configuration through the core resolver.

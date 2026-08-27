@@ -1,30 +1,30 @@
 # AGENTS.md (linktools core)
 
-Architecture guidance for the core framework package. Shared concerns (monorepo
-structure, `manage.py`, config system, code style) live in the
-[repo-root AGENTS.md](../AGENTS.md).
+Package instructions for the core framework. Repository-wide rules in [../AGENTS.md](../AGENTS.md) also apply.
 
-## Core Framework (`linktools/src/linktools/`)
+## Required Rules
 
-- **`core/`** — Four main subsystems:
-  - `_environ.py` (`environ` singleton) — manages data/temp directories, logging, config access
-  - `_config.py` (`Config`) — multi-layer config system with `Property`, `Alias`, `Prompt`, `Confirm`, `Lazy`, `Error` descriptors chained via `|` operator
-  - `_tools.py` (`Tools`, `Tool`) — declarative tool definitions from `assets/tools.json`; handles download, extraction, and execution
-  - `_capability.py` (`BaseCapability`) — sub-package self-registration with version and path info
-- **`cli/`** — CLI framework: `BaseCommand`, `BaseCommandGroup`, `CommandParser` (enhanced `ArgumentParser`). All commands in all sub-packages inherit from these.
-- **`types.py`** — `Stoppable` (context manager pattern), `Timeout`, shared TypeVars/sentinels (`T`, `PathType`, `MISSING`)
-- **`errors.py`** — error hierarchy (`Error → ConfigError → ToolError → ToolNotFound/ToolNotSupport/ToolExecError`)
-- **`platform.py`** — OS/user/network helpers (`get_system`, `get_user`, `get_uid`/`get_gid`, `get_lan_ip`, `wait_process`, etc.)
-- **`runtime/`** — `Process`/`popen` (subprocess wrapper), `Reactor` (event loop), `Proxy`/`IterProxy` (lazy proxies), `EventHandlerMixin` (event dispatch mixin)
-- **`decorator.py`** — `@singleton`, `@cached_property`, `@try_except`, `@timeoutable`
-- **`rich.py`** — terminal UI: logging, progress bars, `prompt`/`confirm`/`choose`
+- Downstream commands use the core CLI, environment, configuration, logging, and tool-management infrastructure instead of reimplementing it.
+- CLI-oriented packages use the established `commands/`, `capabilities/`, and `assets/` roles; do not add a second registration or command-discovery mechanism.
+- `linktools-ai` is library-first and is not required to follow the normal CLI package layout.
 
-## Sub-package Layout
+## Guidance
 
-Each CLI sub-package follows the same pattern under `{pkg}/src/linktools/`:
+### Core map (`linktools/src/linktools/`)
+
+| Area | Responsibility |
+| --- | --- |
+| `core/` | Environment, configuration, tools, capabilities |
+| `cli/` | Command framework and parsers |
+| `runtime/` | Process, reactor, proxy, event primitives |
+| `types.py` / `errors.py` / `platform.py` | Shared types, errors, OS/user/network helpers |
+| `decorator.py` | Shared decorators |
+| `rich.py` | Terminal logging, progress, prompts |
+
+Typical CLI package layout:
+
+```text
+commands/        # CLI implementations
+capabilities/    # package registration
+assets/          # static/generated assets
 ```
-commands/        — CLI command implementations (one file per command)
-capabilities/    — registers the sub-package with the core framework (auto-generated via jinja2)
-assets/          — static assets: config templates, built JS/APK artifacts
-```
-`linktools-ai/` is library-first (it has an optional `cli/` but no `commands/` entry-point group).

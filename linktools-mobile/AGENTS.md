@@ -1,34 +1,20 @@
 # AGENTS.md (linktools-mobile)
 
-Architecture guidance for the mobile-tools sub-package. Shared concerns (monorepo
-structure, `manage.py`, config system, code style) live in the
-[repo-root AGENTS.md](../AGENTS.md).
+Package instructions for `linktools-mobile`. Repository-wide rules in [../AGENTS.md](../AGENTS.md) also apply.
 
-## Mobile Sub-package (`linktools-mobile/src/linktools/mobile/`)
+## Required Rules
 
-- **`android/`** — `_adb.py` (ADB wrapper with multi-device selection), `_scrcpy.py` (scrcpy bridge), `_types.py` (Android-specific types)
-- **`ios/`** — `_ios.py` (go-ios wrapper), `_ipa.py` (IPA parser), `_sib.py`, `_types.py`
-- **`frida/`** — Frida integration: `_app.py` (`FridaApplication`, `FridaSession`, `FridaScript`, `FridaReactor`), `_server.py` (`FridaServer`, `FridaAndroidServer`, `FridaIOSServer`), `_script.py` (`FridaUserScript`, `FridaEvalCode`, `FridaScriptFile`)
+- Keep Android, iOS, and Frida responsibilities in their existing package boundaries; shared behavior belongs in the appropriate core/common owner.
+- Changes under `agents/frida/` must rebuild the committed `frida.js` / `frida-*.js` assets under `src/linktools/assets/`.
+- Changes under `agents/android/` must rebuild the committed `android-tools.*` artifact under `src/linktools/assets/`.
 
-## Frida TypeScript Agents (`agents/frida/`)
+## Guidance
 
-TypeScript source for the built-in Frida scripts. The compiled output (`frida.js`,
-`frida-*.js`) is committed to `src/linktools/assets/` as a build artifact. Key library
-in `lib/java.ts` provides `JavaHelper` with `hookMethod`, `hookMethods`,
-`hookAllMethods`, `bypassSslPinning`, etc.
+`linktools-mobile/src/linktools/mobile/` is split into `android/`, `ios/`, and `frida/`.
+
+Build generated assets with:
 
 ```bash
-cd agents/frida
-npm install
-npm run build
-```
-
-## Android APK Agent (`agents/android/`)
-
-Gradle/Android project that builds `android-tools.apk`. The built APK is committed to
-`src/linktools/assets/android-tools.*` as a build artifact.
-
-```bash
-cd agents/android
-./gradlew --no-daemon :tools:buildTools
+cd agents/frida && npm install && npm run build
+cd agents/android && ./gradlew --no-daemon :tools:buildTools
 ```
