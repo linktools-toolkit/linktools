@@ -210,6 +210,7 @@ class _RuntimeStepPersistence(StepPersistence[None]):
         tool_def: ToolDefinition,
         args: dict[str, Any],
     ) -> dict[str, Any]:
+        del ctx, call
         if self._plan_mode and not tool_allowed_in_planning(
             tool_def,
             trusted_tool_classes=self._trusted_tool_classes,
@@ -219,6 +220,18 @@ class _RuntimeStepPersistence(StepPersistence[None]):
                 ErrorCode.CAPABILITY_POLICY_CONFLICT,
                 safe_details={"tool_name": tool_def.name, "mode": "plan"},
             )
+        # Effect admission starts only after every before-hook has settled.
+        return args
+
+    async def wrap_tool_execute(
+        self,
+        ctx: "RunContext[None]",
+        *,
+        call: ToolCallPart,
+        tool_def: ToolDefinition,
+        args: dict[str, Any],
+        handler: WrapToolExecuteHandler,
+    ) -> Any:
         policy = _tool_effect_policy(
             tool_def,
             trusted_tool_classes=self._trusted_tool_classes,
@@ -241,22 +254,10 @@ class _RuntimeStepPersistence(StepPersistence[None]):
         )
         self._calls[key] = state
         try:
-            return await super().before_tool_execute(ctx, call=call, tool_def=tool_def, args=args)
+            await super().before_tool_execute(ctx, call=call, tool_def=tool_def, args=args)
         except BaseException:
             self._calls.pop(key, None)
             raise
-
-    async def wrap_tool_execute(
-        self,
-        ctx: "RunContext[None]",
-        *,
-        call: ToolCallPart,
-        tool_def: ToolDefinition,
-        args: dict[str, Any],
-        handler: WrapToolExecuteHandler,
-    ) -> Any:
-        key = self._decision_key(ctx, call)
-        state = self._calls[key]
         if state.decision.cached_error is not None:
             error = state.decision.cached_error
             try:
