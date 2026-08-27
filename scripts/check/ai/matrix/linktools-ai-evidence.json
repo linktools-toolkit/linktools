@@ -1,33 +1,27 @@
 {
-  "baseline_commit": "9156a804dca0e9af3aa9028e401bca4ae5adda14",
-  "validated_source_commit": "21299844f1425d477f37cc09d8ae280ee6c6e112",
-  "status": "VERIFIED",
-  "open_findings": [],
-  "environment": {
-    "python": "3.11",
-    "debug": "false",
-    "pydantic_ai_harness": "0.24.0",
-    "pydantic_ai_slim": "2.33.0",
-    "ruff": "0.16.4",
-    "mysql_server": "not_run_no_environment_accepted",
-    "postgresql_server": "not_run_no_environment_accepted"
-  },
+  "baseline_commit": "77ce66cc3a68938181ec752cd30d9be5ab24d63b",
+  "validated_source_commit": null,
+  "status": "PENDING_VERIFICATION",
+  "open_findings": [
+    "Run python manage.py check linktools-ai on the final branch head before marking this evidence verified."
+  ],
+  "environment": {},
   "runtime_backends": {
-    "memory": "passed",
-    "file": "passed",
-    "sqlite": "passed",
+    "memory": "pending",
+    "file": "pending",
+    "sqlite": "pending",
     "mysql": "not_run_no_environment_accepted",
     "postgresql": "not_run_no_environment_accepted"
   },
   "mandatory": {
-    "conformance": "passed",
-    "cancellation": "passed",
-    "concurrency": "passed",
-    "fault_injection": "passed",
-    "public_api": "passed",
-    "architecture": "passed",
-    "schema": "passed",
-    "provenance": "passed"
+    "conformance": "pending",
+    "cancellation": "pending",
+    "concurrency": "pending",
+    "fault_injection": "pending",
+    "public_api": "pending",
+    "architecture": "pending",
+    "schema": "pending",
+    "provenance": "pending"
   },
   "spec_revision": "linktools-ai-spec-capability-agent-runtime-refactor",
   "review_scope": "linktools-ai-spec-capability-agent-runtime-refactor"
