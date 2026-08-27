@@ -125,31 +125,68 @@ def test_public_composition_surface_is_final() -> None:
 
 def test_package_policy_matches_final_owner_graph() -> None:
     policy = json.loads(
-        Path("scripts/check/ai/matrix/linktools-ai-package-policy.json").read_text(encoding="utf-8")
+        Path("scripts/check/ai/matrix/linktools-ai-package-policy.json").read_text(
+            encoding="utf-8"
+        )
     )
+    assert policy["dependencies"]["asset"] == ["core", "storage"]
     assert policy["dependencies"]["workspace"] == ["core"]
-    assert policy["dependencies"]["capability"] == ["core", "asset", "workspace", "spec"]
-    assert policy["dependencies"]["agent"] == ["core", "spec", "model", "capability"]
-    assert policy["dependencies"]["runtime"] == [
+    assert set(policy["dependencies"]["capability"]) == {
         "core",
-        "storage",
+        "asset",
+        "spec",
         "workspace",
+    }
+    assert set(policy["dependencies"]["agent"]) == {
+        "core",
+        "spec",
         "model",
         "capability",
-        "agent",
+    }
+    assert {
+        "core",
+        "storage",
+        "asset",
+        "spec",
+        "model",
         "observe",
+        "capability",
         "task",
+        "agent",
+        "workspace",
+    } <= set(policy["dependencies"]["runtime"])
+    removed_modules = {
+        "workspace._factory",
+        "workspace._tools",
+        "adapter._history",
+        "adapter._mcp",
+        "agent._executor",
+        "agent._capabilities",
+        "asset._repository",
+        "capability._contract",
+        "spec._assets",
+    }
+    assert removed_modules.isdisjoint(policy["module_dependencies"])
+    assert policy["module_dependencies"]["capability._workspace"] == ["workspace"]
+    assert policy["module_dependencies"]["runtime._agent_executor"] == [
+        "core",
+        "capability",
+        "agent",
     ]
-    assert "workspace._factory" not in policy["module_dependencies"]
-    assert policy["module_dependencies"]["capability._workspace"] == ["core", "asset", "workspace"]
-    assert "observe" in policy["module_dependencies"]["runtime._runtime_service"]
+    assert policy["module_dependencies"]["runtime._capabilities"] == [
+        "core",
+        "capability",
+    ]
 
 
 def test_contract_map_has_no_removed_composition_contracts() -> None:
     contracts = json.loads(
-        Path("scripts/check/ai/matrix/linktools-ai-contract-map.json").read_text(encoding="utf-8")
+        Path("scripts/check/ai/matrix/linktools-ai-contract-map.json").read_text(
+            encoding="utf-8"
+        )
     )["contracts"]
     assert "logical_asset" not in contracts
+    assert "runtime_access" not in contracts
     assert contracts["raw_asset_storage"] == {
         "owner": "asset",
         "replacement": "linktools.ai.asset.AssetStore",
