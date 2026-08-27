@@ -5,13 +5,13 @@
 from types import SimpleNamespace
 
 import pytest
-from linktools.ai.adapter._history import _trace_item
-from linktools.ai.agent._capabilities import (
+from linktools.ai.runtime import ExecutionTraceItem
+from linktools.ai.runtime._capabilities import (
     ToolOperationDecision,
     _RuntimeStepPersistence,
     _model_usage_metadata,
 )
-from linktools.ai.runtime import ExecutionTraceItem
+from linktools.ai.runtime._history import _trace_item
 from pydantic_ai import Agent, ModelRetry
 from pydantic_ai.messages import ModelMessage, ModelResponse, TextPart
 from pydantic_ai.models.function import AgentInfo, FunctionModel
