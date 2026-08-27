@@ -99,6 +99,10 @@ class AssetBackend(ReadableStorageBackend[AssetKey, bytes, AssetInfo], Protocol)
     @property
     def root(self) -> AssetRoot: ...
 
+    async def initialize(self) -> None: ...
+
+    async def close(self) -> None: ...
+
 
 @runtime_checkable
 class WritableAssetBackend(AssetBackend, StorageWriter[AssetKey, bytes, AssetInfo], Protocol):
