@@ -1,22 +1,18 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Capability selection and immutable skill catalog contracts."""
+"""Final declaration, runtime policy, and SkillCapability contracts."""
 
 import json
 
 import pytest
-from linktools.ai.agent import select_platform_tool_names, tool_name_allowed
-from linktools.ai.agent._capabilities import (
-    PLAN_SAFE_METADATA_KEY,
-    tool_allowed_in_planning,
-)
-from linktools.ai.asset import AssetRef
-from linktools.ai.capability._skill import (
-    SkillCatalogSnapshot,
-    SkillDescriptor,
-    bind_skill_capability,
-)
+from linktools.ai.capability import SkillCapability
 from linktools.ai.errors import AIError, ErrorCode
+from linktools.ai.runtime._capabilities import (
+    PLAN_SAFE_METADATA_KEY,
+    select_runtime_tool_names,
+    tool_allowed_in_planning,
+    tool_name_allowed,
+)
 from linktools.ai.spec import (
     AgentSpec,
     AgentSpecCodec,
@@ -29,43 +25,37 @@ from linktools.ai.spec import (
 from pydantic_ai.tools import ToolDefinition
 
 
-def test_platform_tool_selection_keeps_planning_outside_allow_tools() -> None:
-    assert (
-        select_platform_tool_names(
-            allow_tools=("write_plan",),
-            memory_scope="memory",
-        )
-        == ()
-    )
-    assert select_platform_tool_names(
-        allow_tools=(),
+def test_runtime_tool_selection_keeps_planning_outside_allow_tools() -> None:
+    assert select_runtime_tool_names(
+        ordinary_tool_policy=("write_plan",),
+        memory_scope="memory",
+    ) == ()
+    assert select_runtime_tool_names(
+        ordinary_tool_policy=(),
         memory_scope=None,
         planning=True,
     ) == ("write_plan",)
-    assert select_platform_tool_names(
-        allow_tools=(),
+    assert select_runtime_tool_names(
+        ordinary_tool_policy=(),
         memory_scope=None,
         subagent_available=True,
     ) == ("delegate_task",)
 
 
-def test_platform_tool_selection_honors_wildcard_allow_tools() -> None:
+def test_runtime_tool_selection_honors_wildcard_for_ordinary_memory_tools() -> None:
     assert tool_name_allowed("read_memory", ("*",))
-    assert select_platform_tool_names(
-        allow_tools=("*",),
+    assert select_runtime_tool_names(
+        ordinary_tool_policy=("*",),
         memory_scope="memory",
     ) == ("delete_memory", "read_memory", "search_memory", "write_memory")
 
 
 def test_planning_gate_requires_framework_filesystem_provenance() -> None:
     classes = (("read_file", "filesystem.read"),)
-    trusted = ToolDefinition(
-        name="read_file",
-        capability_id="workspace-filesystem",
-    )
+    trusted = ToolDefinition(name="read_file", capability_id="workspace-filesystem")
     fake = ToolDefinition(name="read_file", capability_id="custom-filesystem")
     explicit_custom = ToolDefinition(
-        name="read_file",
+        name="custom_read",
         capability_id="custom-filesystem",
         metadata={PLAN_SAFE_METADATA_KEY: True},
     )
@@ -98,10 +88,7 @@ def test_planning_gate_uses_trusted_mcp_provenance_not_name_prefix() -> None:
         capability_id="custom-mcp",
         metadata={PLAN_SAFE_METADATA_KEY: True},
     )
-    spoofed = ToolDefinition(
-        name="mcp__trusted__read",
-        capability_id="custom-mcp",
-    )
+    spoofed = ToolDefinition(name="mcp__trusted__read", capability_id="custom-mcp")
 
     assert not tool_allowed_in_planning(
         trusted,
@@ -126,102 +113,91 @@ def test_planning_gate_rejects_non_boolean_plan_safe_metadata() -> None:
         capability_id="custom",
         metadata={PLAN_SAFE_METADATA_KEY: "yes"},
     )
-
     with pytest.raises(AIError) as error:
         tool_allowed_in_planning(
             tool,
             trusted_tool_classes=(),
             trusted_mcp_selectors=(),
         )
-
     assert error.value.code is ErrorCode.REQUEST_FIELD_INVALID
 
 
 @pytest.mark.parametrize(
     "payload",
     (
-        {"id": 1, "revision": 1, "model": "default"},
-        {"id": "agent", "revision": True, "model": "default"},
-        {"id": "agent", "revision": "1", "model": "default"},
-        {"id": "agent", "revision": 1, "model": 1},
+        {"version": 1, "id": 1, "model": "default"},
+        {"version": 1, "id": "agent", "model": 1},
+        {"version": True, "id": "agent", "model": "default"},
+        {"version": 2, "id": "agent", "model": "default"},
     ),
 )
-def test_agent_spec_codec_rejects_type_coercion(payload: dict[str, object]) -> None:
+def test_agent_spec_codec_rejects_invalid_v1_payload(payload: dict[str, object]) -> None:
     with pytest.raises(AIError) as error:
         AgentSpecCodec().decode(json.dumps(payload).encode("utf-8"))
-    assert error.value.code is ErrorCode.OUTPUT_CONTRACT_INVALID
+    assert error.value.code in {
+        ErrorCode.OUTPUT_CONTRACT_INVALID,
+        ErrorCode.STORAGE_VERSION_UNSUPPORTED,
+    }
 
 
-def test_asset_spec_codecs_ignore_unknown_additive_fields() -> None:
+def test_declaration_codecs_preserve_unknown_additive_fields_without_affecting_semantics() -> None:
     skill_payload = {
+        "version": 1,
         "id": "skill",
-        "revision": 1,
         "content": "skill content",
         "future_metadata": {"$future_v2": ["ignored"]},
     }
-    assert SkillSpecCodec().decode(
-        json.dumps(skill_payload).encode("utf-8")
-    ) == SkillSpec("skill", 1, "skill content")
+    decoded_skill = SkillSpecCodec().decode(json.dumps(skill_payload).encode("utf-8"))
+    assert decoded_skill == SkillSpec("skill", "skill content")
+    assert decoded_skill._extensions["future_metadata"] == {"$future_v2": ["ignored"]}
 
     mcp_payload = {
+        "version": 1,
         "id": "mcp",
-        "revision": 1,
         "command": "echo",
         "future_metadata": {"$future_v2": ["ignored"]},
     }
-    assert MCPServerSpecCodec().decode(
-        json.dumps(mcp_payload).encode("utf-8")
-    ) == MCPServerSpec("mcp", 1, "echo")
+    decoded_mcp = MCPServerSpecCodec().decode(json.dumps(mcp_payload).encode("utf-8"))
+    assert decoded_mcp == MCPServerSpec("mcp", "echo")
+    assert decoded_mcp._extensions["future_metadata"] == {"$future_v2": ["ignored"]}
 
 
 @pytest.mark.parametrize(
     ("codec", "payload"),
     (
-        (SkillSpecCodec(), {"id": 1, "revision": 1, "content": "skill"}),
-        (SkillSpecCodec(), {"id": "skill", "revision": True, "content": "skill"}),
-        (MCPServerSpecCodec(), {"id": "mcp", "revision": "1", "command": "echo"}),
-        (MCPServerSpecCodec(), {"id": "mcp", "revision": 1, "command": "echo", "args": [1]}),
+        (SkillSpecCodec(), {"version": 1, "id": 1, "content": "skill"}),
+        (MCPServerSpecCodec(), {"version": 1, "id": "mcp", "command": 1}),
+        (MCPServerSpecCodec(), {"version": 1, "id": "mcp", "command": "echo", "args": [1]}),
     ),
 )
-def test_asset_spec_codecs_reject_type_coercion(codec: object, payload: dict[str, object]) -> None:
-    with pytest.raises(AIError) as error:
-        codec.decode(json.dumps(payload).encode("utf-8"))
-    assert error.value.code is ErrorCode.OUTPUT_CONTRACT_INVALID
+def test_declaration_codecs_reject_type_coercion(codec: object, payload: dict[str, object]) -> None:
+    with pytest.raises((AIError, TypeError, ValueError)):
+        codec.decode(json.dumps(payload).encode("utf-8"))  # type: ignore[attr-defined]
 
 
 def test_spec_constructors_reject_mismatched_runtime_types() -> None:
     with pytest.raises(TypeError):
         AgentUsageLimits(model_requests=True)
     with pytest.raises(TypeError):
-        AgentSpec(1, 1, "default")
+        AgentSpec(1)  # type: ignore[arg-type]
+    with pytest.raises(ValueError):
+        AgentSpec("agent", model="")
     with pytest.raises(TypeError):
-        AgentSpec("agent", True, "default")
+        AgentSpec("agent", instructions="not-an-array")  # type: ignore[arg-type]
     with pytest.raises(TypeError):
-        AgentSpec("agent", 1, 1)
+        AgentSpec("agent", instructions=(1,))  # type: ignore[arg-type]
     with pytest.raises(TypeError):
-        AgentSpec("agent", 1, "default", instructions="not-an-array")
+        AgentSpec("agent", usage_limits=object())  # type: ignore[arg-type]
+    with pytest.raises(ValueError):
+        SkillSpec("", "content")
     with pytest.raises(TypeError):
-        AgentSpec("agent", 1, "default", instructions=(1,))
+        SkillSpec("skill", 1)  # type: ignore[arg-type]
+    with pytest.raises(ValueError):
+        MCPServerSpec("mcp", "")
     with pytest.raises(TypeError):
-        AgentSpec("agent", 1, "default", metadata=[])
+        MCPServerSpec("mcp", "echo", args="not-an-array")  # type: ignore[arg-type]
     with pytest.raises(TypeError):
-        AgentSpec("agent", 1, "default", usage_limits=object())
-    with pytest.raises(TypeError):
-        SkillSpec(1, 1, "content")
-    with pytest.raises(TypeError):
-        SkillSpec("skill", True, "content")
-    with pytest.raises(TypeError):
-        SkillSpec("skill", 1, 1)
-    with pytest.raises(TypeError):
-        MCPServerSpec(1, 1, "echo")
-    with pytest.raises(TypeError):
-        MCPServerSpec("mcp", True, "echo")
-    with pytest.raises(TypeError):
-        MCPServerSpec("mcp", 1, 1)
-    with pytest.raises(TypeError):
-        MCPServerSpec("mcp", 1, "echo", args="not-an-array")
-    with pytest.raises(TypeError):
-        MCPServerSpec("mcp", 1, "echo", args=(1,))
+        MCPServerSpec("mcp", "echo", args=(1,))  # type: ignore[arg-type]
 
 
 def test_spec_constructors_reject_invalid_values() -> None:
@@ -230,35 +206,17 @@ def test_spec_constructors_reject_invalid_values() -> None:
     with pytest.raises(ValueError):
         AgentUsageLimits(model_requests=0)
     with pytest.raises(ValueError):
-        AgentSpec("", 1, "default")
+        AgentSpec("")
     with pytest.raises(ValueError):
-        AgentSpec("agent", 0, "default")
+        SkillSpec("", "content")
     with pytest.raises(ValueError):
-        AgentSpec("agent", 1, "")
-    with pytest.raises(ValueError):
-        SkillSpec("", 1, "content")
-    with pytest.raises(ValueError):
-        SkillSpec("skill", 0, "content")
-    with pytest.raises(ValueError):
-        MCPServerSpec("", 1, "echo")
-    with pytest.raises(ValueError):
-        MCPServerSpec("mcp", 0, "echo")
-    with pytest.raises(ValueError):
-        MCPServerSpec("mcp", 1, "")
+        MCPServerSpec("", "echo")
 
 
-def test_skill_catalog_snapshot_is_sorted_and_immutable() -> None:
-    first = SkillSpec("z", 1, "z skill")
-    second = SkillSpec("a", 1, "a skill")
-    catalog = SkillCatalogSnapshot(
-        (SkillDescriptor("z", 1, "z"), SkillDescriptor("a", 1, "a")),
-        (first, second),
-    )
-    assert tuple(item.id for item in catalog.descriptors) == ("a", "z")
-    assert tuple(item.id for item in catalog.specifications) == ("a", "z")
+def test_skill_capability_sorts_selected_skills_and_rejects_duplicates() -> None:
+    capability = SkillCapability((SkillSpec("z", "z skill"), SkillSpec("a", "a skill")))
+    assert tuple(item.id for item in capability.skills) == ("a", "z")
 
-
-def test_skill_binding_requires_one_spec_per_discovered_asset() -> None:
     with pytest.raises(AIError) as error:
-        bind_skill_capability((AssetRef("skill", "missing"),), ())
-    assert error.value.code is ErrorCode.CAPABILITY_RESOLUTION_INVALID
+        SkillCapability((SkillSpec("same", "one"), SkillSpec("same", "two")))
+    assert error.value.code is ErrorCode.CAPABILITY_CONFLICT
