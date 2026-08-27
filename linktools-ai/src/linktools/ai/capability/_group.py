@@ -112,18 +112,26 @@ class CapabilityContribution(Generic[AppT]):
             raise AIError(ErrorCode.CAPABILITY_FINGERPRINT_INVALID)
 
     @classmethod
-    def from_semantic_contract(
+    def from_opaque(
         cls,
-        kind: ContributionKind,
+        kind: Literal["tool", "capability"],
         identity: str,
-        value: "Tool[RunContext[AppT]] | AgentSpec | SkillSpec | MCPServerSpec | AbstractCapability[RunContext[AppT]]",
-        semantic_contract: Mapping[str, JsonValue],
+        value: "Tool[RunContext[AppT]] | AbstractCapability[RunContext[AppT]]",
+        *,
+        revision: int = 1,
+        semantic_config: "Mapping[str, JsonValue] | None" = None,
     ) -> "CapabilityContribution[AppT]":
-        """Create a contribution from an explicit canonical semantic source."""
-        try:
-            contract = ImmutableJsonMapping(semantic_contract)
-        except (TypeError, ValueError) as error:
-            raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID) from error
+        """Create an opaque Python Tool or Capability from its public semantic inputs."""
+        if kind not in {"tool", "capability"}:
+            raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
+        _validate_revision(revision)
+        contract = contribution_semantic_contract(
+            kind,
+            identity,
+            value,
+            semantic_revision=revision,
+            semantic_config=semantic_config,
+        )
         return _SemanticContribution(
             kind,
             identity,
@@ -205,18 +213,12 @@ class CapabilityGroup(Generic[AppT]):
         tool_name = name or function.__name__
         _validate_business_tool_name(tool_name)
         adapted = _adapt_tool(function, name=tool_name)
-        contract = contribution_semantic_contract(
-            "tool",
-            tool_name,
-            adapted,
-            semantic_revision=revision,
-        )
         self._contributions.append(
-            CapabilityContribution.from_semantic_contract(
+            CapabilityContribution.from_opaque(
                 "tool",
                 tool_name,
                 adapted,
-                contract,
+                revision=revision,
             )
         )
         return adapted
@@ -237,19 +239,13 @@ class CapabilityGroup(Generic[AppT]):
         if not isinstance(capability_id, str) or not capability_id.strip():
             raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
         _validate_external_capability_id(capability_id)
-        contract = contribution_semantic_contract(
-            "capability",
-            capability_id,
-            capability,
-            semantic_revision=revision,
-            semantic_config=semantic_config,
-        )
         self._contributions.append(
-            CapabilityContribution.from_semantic_contract(
+            CapabilityContribution.from_opaque(
                 "capability",
                 capability_id,
                 capability,
-                contract,
+                revision=revision,
+                semantic_config=semantic_config,
             )
         )
         return capability
