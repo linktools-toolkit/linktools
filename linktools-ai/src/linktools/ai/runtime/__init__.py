@@ -8,6 +8,7 @@ from ._artifact import DefaultArtifactService
 from ._evaluation import DefaultEvaluationService
 from ._event import DefaultEventService, ExecutionDelta, LiveExecutionEventBroker
 from ._execution import DefaultExecutionService
+from ._input import user_prompt_transport
 from ._local import LocalExecutionBackend
 from ._object import RuntimeObjectKeyFactory, put_runtime_object, read_runtime_object
 from ._planner import DefaultTaskService, RuntimeTaskNodeRunner
@@ -157,4 +158,5 @@ __all__ = [
     "WorkflowUpdateResult",
     "put_runtime_object",
     "read_runtime_object",
+    "user_prompt_transport",
 ]
