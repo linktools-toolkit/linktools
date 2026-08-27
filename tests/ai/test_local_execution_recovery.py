@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Local execution failure and worker supervision coverage."""
+"""Local execution recovery and worker-supervision contracts."""
 
 import asyncio
 from dataclasses import replace
 from datetime import datetime, timezone
-from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -15,104 +14,49 @@ from linktools.ai.core import ExecutionLineageKind, ExecutionStatus, Principal
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.runtime import ExecutionRequest
 from linktools.ai.runtime._execution import CancelEffectOutcome, ExecutionStartIdentity
-from linktools.ai.runtime._local import LocalExecutionBackend
-from linktools.ai.runtime.state import (
-    ExecutionRecord,
-    LoadedContextMessage,
-    LoadedModelContext,
-)
+from linktools.ai.runtime._local import LocalExecutionBackend, _is_infrastructure_error
+from linktools.ai.runtime.state import ExecutionRecord
 from linktools.ai.spec import AgentSpec
-from pydantic_ai.messages import ModelRequest, UserPromptPart
 
 
 def _binding_snapshot() -> AgentBindingSnapshot:
     output = bind_output()
     return AgentBindingSnapshot(
         version=1,
-        agent_spec=AgentSpec("default", 1, "default"),
-        agent_digest="b" * 64,
-        output_schema_id=output.schema_id,
-        output_schema_revision=output.schema_revision,
-        output_schema_fingerprint=output.schema_fingerprint,
-        local_runtime_capability_descriptors=(),
+        agent_spec=AgentSpec("default"),
+        model={"route_id": "default", "model_identity": "test:model"},
+        selected=(),
+        subagents=(),
+        output_mode=output.mode,
+        output_schema=output.schema_definition,
         binding_digest="a" * 64,
-        global_runtime_capability_descriptors=(),
     )
 
 
 def _binding() -> object:
     snapshot = _binding_snapshot()
     definition = SimpleNamespace(
-        digest=snapshot.agent_digest,
-        spec=SimpleNamespace(id="default", allow_tools=()),
+        digest="b" * 64,
+        spec=SimpleNamespace(id="default"),
     )
     return SimpleNamespace(
-        digest=snapshot.binding_digest, snapshot=snapshot, definition=definition
+        digest=snapshot.binding_digest,
+        snapshot=snapshot,
+        definition=definition,
     )
 
 
-class _Executions:
-    def __init__(self, record: ExecutionRecord) -> None:
-        self.record = record
-
-    async def get(self, execution_id: str, *, tenant_id: str) -> ExecutionRecord:
-        del execution_id, tenant_id
-        return self.record
-
-    async def claim_next_agent_run(
-        self,
-        execution_id: str,
-        *,
-        tenant_id: str,
-        expected_revision: int,
-        expected_agent_run_sequence: int,
-    ) -> ExecutionRecord:
-        del execution_id, tenant_id, expected_revision, expected_agent_run_sequence
-        self.record = replace(
-            self.record,
-            agent_run_sequence=self.record.agent_run_sequence + 1,
-        )
-        return self.record
-
-
-class _ExecutionState:
-    def __init__(self, record: ExecutionRecord) -> None:
-        self.executions = _Executions(record)
-
-
-class _Metrics:
-    def count(self, metric: str, **labels: str) -> None:
-        del metric, labels
-
-    def operation(self, domain: str, target: str, result: str, started_at: float) -> None:
-        del domain, target, result, started_at
-
-
-class _Executor:
-    def __init__(self, error: Exception) -> None:
-        self.error = error
-
-    async def execute(self, *args: object, **kwargs: object) -> object:
-        del args, kwargs
-        raise self.error
-
-
-class _StartCommands:
-    def __init__(self, execution: ExecutionRecord) -> None:
-        self.execution = execution
-        self.recovery_checkpoint = None
-
-    async def commit_start_attempt_checkpoint(
-        self,
-        claim: object,
-        *,
-        recovery_checkpoint: object,
-        session_id: str | None,
-        expected_cursor: object,
-    ) -> ExecutionRecord:
-        del claim, session_id, expected_cursor
-        self.recovery_checkpoint = recovery_checkpoint
-        return replace(self.execution, status=ExecutionStatus.STARTED)
+def _request() -> ExecutionRequest:
+    return ExecutionRequest(
+        user_prompt="prompt",
+        user_prompt_codec="text",
+        principal=Principal("owner", "tenant"),
+        idempotency_key="idempotency",
+        memory_scope=None,
+        mode="run",
+        planning=False,
+        thinking=False,
+    )
 
 
 def _record() -> ExecutionRecord:
@@ -135,127 +79,76 @@ def _record() -> ExecutionRecord:
         safe_error_details={},
         created_at=now,
         updated_at=now,
+        mode="run",
         planning=False,
         thinking=False,
         binding=_binding_snapshot(),
     )
 
 
-def _backend(error: Exception) -> LocalExecutionBackend:
+class _Executions:
+    def __init__(self, record: ExecutionRecord) -> None:
+        self.record = record
+
+    async def get(self, execution_id: str, *, tenant_id: str) -> ExecutionRecord:
+        del execution_id, tenant_id
+        return self.record
+
+
+class _ExecutionState:
+    def __init__(self, record: ExecutionRecord) -> None:
+        self.executions = _Executions(record)
+
+
+class _Metrics:
+    def count(self, metric: str, **labels: str) -> None:
+        del metric, labels
+
+
+class _StartCommands:
+    def __init__(self, execution: ExecutionRecord) -> None:
+        self.execution = execution
+        self.recovery_checkpoint = None
+
+    async def commit_start_attempt_checkpoint(
+        self,
+        claim: object,
+        *,
+        recovery_checkpoint: object,
+        session_id: str | None,
+        expected_cursor: object,
+    ) -> ExecutionRecord:
+        del claim, session_id, expected_cursor
+        self.recovery_checkpoint = recovery_checkpoint
+        return replace(self.execution, status=ExecutionStatus.STARTED)
+
+
+def _backend() -> LocalExecutionBackend:
     record = _record()
     backend = object.__new__(LocalExecutionBackend)
     backend._execution = _ExecutionState(record)
     binding = _binding()
-    backend._catalog = SimpleNamespace(
-        root_ids=("default",),
-        binding=lambda digest: binding,
-    )
+    backend._catalog = SimpleNamespace(binding=lambda digest: binding)
+    backend._accepting = True
     backend._recovery_enabled = False
-    backend._namespace = "test"
     backend._tenant_id = "tenant"
-    backend._steps = object()
-    backend._executor = _Executor(error)
-    backend._execution_root = Path(".")
-    backend._memory_store_factory = None
-    backend._subagent_dispatcher = None
-    backend._metrics = _Metrics()
     backend._tasks = {}
-    backend._worker_failures = {}
     backend._captured_usage = {}
-    backend._history = lambda execution: _empty_history(execution)
+    backend._worker_failures = {}
+    backend._metrics = _Metrics()
     return backend
 
 
-async def _empty_history(execution: ExecutionRecord) -> list[object]:
-    del execution
-    return []
-
-
 @pytest.mark.asyncio
-@pytest.mark.parametrize(
-    ("messages", "expected_replacement"),
-    (
-        ((), False),
-        ((ModelRequest(parts=(UserPromptPart(content="prior"),)),), True),
-    ),
-)
-async def test_session_prompt_replacement_requires_prior_conversation_history(
-    messages: tuple[ModelRequest, ...],
-    expected_replacement: bool,
-) -> None:
-    backend = _backend(ValueError("model output failed"))
-    record = replace(
-        _record(),
-        session_id="session",
-        lineage_kind=ExecutionLineageKind.SESSION_RESUME,
-    )
-    backend._execution.executions.record = record
-
-    async def session_get(session_id: str, *, tenant_id: str) -> object:
-        del session_id, tenant_id
-        return SimpleNamespace(history_id="history")
-
-    class _Steps:
-        async def load_loaded_model_context(
-            self,
-            domain: object,
-            owner_id: str,
-        ) -> LoadedModelContext:
-            del domain, owner_id
-            return LoadedModelContext(
-                tuple(LoadedContextMessage(message, None) for message in messages)
-            )
-
-    class _Executor:
-        def __init__(self) -> None:
-            self.replacement: bool | None = None
-
-        async def execute(self, *args: object, **kwargs: object) -> object:
-            del args
-            self.replacement = kwargs["replace_history_system_prompt"]
-            raise ValueError("model output failed")
-
-    executor = _Executor()
-    backend._conversation = SimpleNamespace(
-        sessions=SimpleNamespace(get=session_get),
-    )
-    backend._steps = _Steps()
-    backend._executor = executor
-
-    async def commit_failure(
-        execution: ExecutionRecord,
-        error: Exception,
-        *,
-        run_id: str | None = None,
-    ) -> ExecutionRecord:
-        del error, run_id
-        committed = replace(
-            execution,
-            status=ExecutionStatus.FAILED,
-        )
-        backend._execution.executions.record = committed
-        return committed
-
-    backend._commit_failure = commit_failure
-    await backend._run(
-        ExecutionRequest("prompt", Principal("owner", "tenant"), "idempotency"),
-        record,
-    )
-
-    assert executor.replacement is expected_replacement
-
-
-@pytest.mark.asyncio
-async def test_prepare_start_persists_binding_identity_in_recovery_input() -> None:
-    backend = _backend(ValueError("unused"))
+async def test_prepare_start_persists_exact_binding_and_execution_policy() -> None:
+    backend = _backend()
     execution = replace(_record(), status=ExecutionStatus.PENDING_START)
     commands = _StartCommands(execution)
-    backend._accepting = True
     backend._recovery_enabled = True
     backend._runtime_commands = commands
 
     started = await backend.prepare_start(
-        ExecutionRequest("prompt", Principal("owner", "tenant"), "idempotency"),
+        _request(),
         execution,
         ExecutionStartIdentity("scope", "key", "request"),
     )
@@ -265,67 +158,34 @@ async def test_prepare_start_persists_binding_identity_in_recovery_input() -> No
     assert checkpoint is not None
     assert checkpoint.input.binding_digest == execution.binding_digest
     assert checkpoint.input.binding == execution.binding
+    assert checkpoint.input.user_prompt_codec == "text"
+    assert checkpoint.input.mode == execution.mode
+    assert checkpoint.input.planning is execution.planning
+    assert checkpoint.input.thinking == execution.thinking
 
 
-@pytest.mark.asyncio
-async def test_local_business_failure_commits_failed_without_escaping() -> None:
-    backend = _backend(ValueError("model output failed"))
-    failures: list[Exception] = []
-
-    async def commit_failure(
-        execution: ExecutionRecord,
-        error: Exception,
-        *,
-        run_id: str | None = None,
-    ) -> ExecutionRecord:
-        del run_id
-        failures.append(error)
-        committed = replace(
-            execution,
-            status=ExecutionStatus.FAILED,
-        )
-        backend._execution.executions.record = committed
-        return committed
-
-    backend._commit_failure = commit_failure
-    await backend._run(
-        ExecutionRequest("prompt", Principal("owner", "tenant"), "idempotency"),
-        _record(),
-    )
-
-    assert len(failures) == 1
-    assert isinstance(failures[0], ValueError)
-    assert backend._execution.executions.record.agent_run_sequence == 1
-
-
-@pytest.mark.asyncio
-async def test_local_infrastructure_failure_escapes_without_failed_commit() -> None:
-    backend = _backend(AIError(ErrorCode.STORAGE_INTEGRITY_ERROR))
-    committed = False
-
-    async def commit_failure(*args: object, **kwargs: object) -> None:
-        nonlocal committed
-        del args, kwargs
-        committed = True
-
-    backend._commit_failure = commit_failure
-    with pytest.raises(AIError) as error:
-        await backend._run(
-            ExecutionRequest("prompt", Principal("owner", "tenant"), "idempotency"),
-            _record(),
-        )
-
-    assert error.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
-    assert not committed
+@pytest.mark.parametrize(
+    ("error", "expected"),
+    (
+        (ValueError("business"), False),
+        (AIError(ErrorCode.OUTPUT_VALIDATION_FAILED), False),
+        (AIError(ErrorCode.STORAGE_INTEGRITY_ERROR), True),
+        (AIError(ErrorCode.AGENT_DEFINITION_UNAVAILABLE), True),
+        (AIError(ErrorCode.EXECUTION_HISTORY_UNAVAILABLE), True),
+        (AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY), True),
+        (AIError(ErrorCode.SERVICE_NOT_READY), True),
+    ),
+)
+def test_local_infrastructure_failure_classification(
+    error: Exception,
+    expected: bool,
+) -> None:
+    assert _is_infrastructure_error(error) is expected
 
 
 @pytest.mark.asyncio
 async def test_local_worker_failure_is_consumed_and_observable() -> None:
-    backend = object.__new__(LocalExecutionBackend)
-    backend._tenant_id = "tenant"
-    backend._tasks = {}
-    backend._captured_usage = {}
-    backend._worker_failures = {}
+    backend = _backend()
 
     async def fail() -> None:
         raise RuntimeError("worker failed")
@@ -341,14 +201,15 @@ async def test_local_worker_failure_is_consumed_and_observable() -> None:
     failure = backend.worker_failure("execution", tenant_id="tenant")
     assert failure is not None
     assert failure.code is ErrorCode.INTERNAL_ERROR
+    assert failure.safe_details == {
+        "phase": "local_execution_worker",
+        "execution_id": "execution",
+    }
 
 
 @pytest.mark.asyncio
 async def test_local_old_worker_callback_cannot_clear_new_owner() -> None:
-    backend = object.__new__(LocalExecutionBackend)
-    backend._tasks = {}
-    backend._captured_usage = {}
-    backend._worker_failures = {}
+    backend = _backend()
 
     async def fail() -> None:
         raise RuntimeError("old worker failed")
@@ -377,21 +238,36 @@ async def test_local_old_worker_callback_cannot_clear_new_owner() -> None:
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     "status",
-    (ExecutionStatus.SUCCEEDED, ExecutionStatus.CANCELLED, ExecutionStatus.CANCELLING),
+    (
+        ExecutionStatus.SUCCEEDED,
+        ExecutionStatus.FAILED,
+        ExecutionStatus.CANCELLED,
+        ExecutionStatus.CANCELLING,
+        ExecutionStatus.FINALIZING,
+    ),
 )
-async def test_local_cancel_without_worker_confirms_durable_terminal_state(
+async def test_local_cancel_without_worker_confirms_terminal_or_finalizing_state(
     status: ExecutionStatus,
 ) -> None:
-    backend = _backend(ValueError("unused"))
+    backend = _backend()
     current = replace(_record(), status=status)
     backend._execution.executions.record = current
 
-    assert await backend.cancel(current) == CancelEffectOutcome.CONFIRMED
+    assert await backend.cancel(current) is CancelEffectOutcome.CONFIRMED
 
 
 @pytest.mark.asyncio
-async def test_local_cancel_before_worker_coroutine_starts_confirms_side_effect_stop() -> None:
-    backend = _backend(ValueError("unused"))
+async def test_local_cancel_without_worker_is_unknown_for_active_execution() -> None:
+    backend = _backend()
+    current = _record()
+    backend._execution.executions.record = current
+
+    assert await backend.cancel(current) is CancelEffectOutcome.UNKNOWN
+
+
+@pytest.mark.asyncio
+async def test_local_cancel_before_worker_coroutine_starts_confirms_cancelling_state() -> None:
+    backend = _backend()
     current = replace(_record(), status=ExecutionStatus.CANCELLING)
     backend._execution.executions.record = current
 
