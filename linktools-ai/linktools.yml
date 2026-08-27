@@ -4,8 +4,8 @@ version: "0.10.0"
 dependencies:
   - filelock>=3.4.0
   - jsonschema>=4.23.0,<5.0.0
-  - pydantic-ai-slim[mcp,openai]>=2.27.0,<3.0.0
-  - pydantic-ai-harness[skills,dynamic-workflow]>=0.13.0
+  - pydantic-ai-slim[mcp,openai]>=2.33.0,<3.0.0
+  - pydantic-ai-harness[skills,dynamic-workflow]>=0.26.0
   - PyYAML>=6.0,<7.0
 
 dev-dependencies:

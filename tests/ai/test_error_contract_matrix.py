@@ -3,10 +3,13 @@
 """Required error-contract matrix coverage."""
 
 import json
+from collections.abc import AsyncIterator
 from types import SimpleNamespace
 
 import pytest
 from linktools.ai.core import (
+    ExecutionDeltaType,
+    ExecutionEventType,
     ExecutionStatus,
     JsonValue,
     Principal,
@@ -18,7 +21,7 @@ from linktools.ai.core import (
 )
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.model import ModelRegistry
-from linktools.ai.runtime import DefaultExecutionService, ExecutionResult
+from linktools.ai.runtime import DefaultExecutionService, ExecutionResult, ExecutionStreamEvent
 from linktools.ai.runtime._agent_executor import DurableBoundary, _execution_error, _map_event
 from linktools.ai.runtime._planner import _execution_failure
 from linktools.ai.runtime._subagent import _subagent_result
@@ -257,6 +260,46 @@ class _FailedRuntime:
         return self._agent
 
 
+class _StreamingExecution:
+    execution_id = "streaming-execution"
+
+    def stream(self) -> AsyncIterator[ExecutionStreamEvent]:
+        async def events() -> AsyncIterator[ExecutionStreamEvent]:
+            yield ExecutionStreamEvent(
+                self.execution_id,
+                1,
+                ExecutionDeltaType.ASSISTANT_TEXT_DELTA,
+                {"text": "hello"},
+            )
+            yield ExecutionStreamEvent(
+                self.execution_id,
+                2,
+                ExecutionEventType.EXECUTION_SUCCEEDED,
+                {},
+            )
+
+        return events()
+
+
+class _StreamingAgent:
+    async def start(
+        self,
+        prompt: str,
+        *,
+        session_id: str,
+        memory_scope: str,
+        planning: bool,
+        thinking: bool,
+    ) -> _StreamingExecution:
+        del prompt, session_id, memory_scope, planning, thinking
+        return _StreamingExecution()
+
+
+class _StreamingRuntime:
+    def agent(self) -> _StreamingAgent:
+        return _StreamingAgent()
+
+
 @pytest.mark.asyncio
 async def test_cli_json_failed_result_uses_result_contract_without_event_scan(
     capsys: pytest.CaptureFixture[str],
@@ -276,3 +319,20 @@ async def test_cli_json_failed_result_uses_result_contract_without_event_scan(
     assert payload["error_code"] == ErrorCode.MODEL_RATE_LIMITED.value
     assert payload["safe_error_details"] == {"status_code": 429}
     assert payload["output_fingerprint"] is None
+
+
+@pytest.mark.asyncio
+async def test_cli_streaming_uses_execution_handle(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    result = await _emit_result(
+        _StreamingRuntime(),  # type: ignore[arg-type]
+        "prompt",
+        "session",
+        "memory",
+        False,
+        False,
+        False,
+    )
+    assert result == 0
+    assert capsys.readouterr().out == "hello\n"
