@@ -21,11 +21,6 @@ _DURABLE_REFLECTION_FUNCTIONS = {
             "_validate_importable_type",
         }
     ),
-    "linktools.ai.capability._contract": frozenset(
-        {
-            "_resolve_capability_type",
-        }
-    ),
 }
 
 
