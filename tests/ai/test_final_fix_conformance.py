@@ -123,7 +123,8 @@ async def test_runtime_close_failure_enters_close_only_and_can_retry() -> None:
         object(),
         object(),
         object(),
-        object(),
+        workspace=object(),
+        app=None,
         close_callback=close_callback,
     )
 
