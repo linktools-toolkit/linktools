@@ -289,18 +289,6 @@ def _layout_errors(
             continue
         if not relative or relative[0] not in packages:
             errors.append(f"module outside package: {path}")
-        elif relative[0] == "temporal":
-            if len(relative) == 2 and relative[1] in {
-                "_activity.py",
-                "_context.py",
-                "_gateway.py",
-                "_request.py",
-                "_task_operation.py",
-                "_worker.py",
-            }:
-                continue
-            if len(relative) != 3 or relative[1] != "workflow":
-                errors.append(f"invalid temporal depth: {path}")
         elif (
             relative[0] == "runtime"
             and len(relative) == 3

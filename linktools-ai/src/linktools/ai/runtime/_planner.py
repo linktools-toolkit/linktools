@@ -17,24 +17,15 @@ from ..agent import (
 from ..core import (
     ExecutionStatus,
     Principal,
+    canonical_sha256,
     normalize_execution_mode,
     normalize_thinking,
-    canonical_sha256,
     principal_identity_payload,
     validate_agent_id,
     validate_user_prompt,
 )
 from ..errors import AIError, ErrorCode
-from ..task import (
-    CancelGraphRequest,
-    DefaultTaskService,
-    TaskDependencyResult,
-    TaskGraphHandle,
-    TaskGraphRequest,
-    TaskGraphView,
-    TaskNode,
-    TaskNodeRunResult,
-)
+from ..task import DefaultTaskService, TaskDependencyResult, TaskNode, TaskNodeRunResult
 from ._input import user_prompt_transport
 from .service_api import (
     CancelExecutionRequest,
@@ -42,7 +33,6 @@ from .service_api import (
     ExecutionRequest,
     ExecutionResult,
     ExecutionService,
-    WorkflowGateway,
 )
 
 _logger = environ.get_logger("ai.runtime.planner")
@@ -120,9 +110,7 @@ class RuntimeTaskNodeRunner:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         try:
             snapshot = AgentBindingSnapshot.from_payload(payload["binding"])
-            binding = self._catalog.register_binding(
-                self._compiler.restore(snapshot)
-            )
+            binding = self._catalog.register_binding(self._compiler.restore(snapshot))
         except AIError as error:
             if error.code is ErrorCode.STORAGE_INTEGRITY_ERROR:
                 raise
@@ -130,9 +118,7 @@ class RuntimeTaskNodeRunner:
                 ErrorCode.AGENT_DEFINITION_UNAVAILABLE,
                 safe_details={
                     "binding_digest": (
-                        snapshot.binding_digest
-                        if "snapshot" in locals()
-                        else None
+                        snapshot.binding_digest if "snapshot" in locals() else None
                     )
                 },
             ) from error
@@ -380,36 +366,6 @@ class RuntimeTaskNodeRunner:
             _logger.exception("detached %s failed", label)
 
 
-class WorkflowTaskGraphLauncher:
-    def __init__(self, gateway: WorkflowGateway) -> None:
-        self._gateway = gateway
-
-    async def start(self, request: TaskGraphRequest) -> TaskGraphHandle:
-        workflow_id = "task-" + canonical_sha256(
-            {
-                "tenant_id": request.principal.tenant_id,
-                "graph_id": request.graph.graph_id,
-            }
-        )
-        return await self._gateway.start_task_graph(workflow_id, request)
-
-    async def cancel(
-        self,
-        graph_id: str,
-        request: CancelGraphRequest,
-    ) -> TaskGraphView:
-        workflow_id = "task-" + canonical_sha256(
-            {
-                "tenant_id": request.principal.tenant_id,
-                "graph_id": graph_id,
-            }
-        )
-        return await self._gateway.cancel_task_graph(
-            workflow_id,
-            request.idempotency_key,
-        )
-
-
 def _execution_failure(result: ExecutionResult) -> AIError:
     if result.status not in {
         ExecutionStatus.FAILED,
@@ -490,5 +446,4 @@ async def _cancel_execution(
 __all__ = [
     "DefaultTaskService",
     "RuntimeTaskNodeRunner",
-    "WorkflowTaskGraphLauncher",
 ]

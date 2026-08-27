@@ -5,15 +5,10 @@
 import hashlib
 from datetime import datetime, timezone
 
-from ..core import (
-    AuthorizationAction,
-    AuthorizationPolicy,
-    ExternalCallStatus,
-    canonical_json_bytes,
-)
+from ..core import AuthorizationAction, AuthorizationPolicy, ExternalCallStatus
 from ..errors import AIError, ErrorCode
 from ..storage import ObjectRef
-from .service_api import ExternalSupplyRequest, ExternalSupplyResult, WorkflowGateway
+from .service_api import ExternalSupplyRequest, ExternalSupplyResult
 from .state._contracts import ExternalCallRecord, RecoveryState
 
 
@@ -22,11 +17,9 @@ class DefaultExternalService:
         self,
         state: RecoveryState,
         authorization: AuthorizationPolicy,
-        workflow_gateway: "WorkflowGateway | None" = None,
     ) -> None:
         self._state = state
         self._authorization = authorization
-        self._workflow_gateway = workflow_gateway
 
     async def supply(
         self,
@@ -82,19 +75,6 @@ class DefaultExternalService:
                 raise
         if updated.object_ref is None or updated.payload_digest is None:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        if self._workflow_gateway is not None:
-            await self._workflow_gateway.update_execution(
-                execution_id,
-                "supply_external_result",
-                {
-                    "operation_id": updated.operation_id,
-                    "call_id": updated.call_id,
-                    "idempotency_key": request.idempotency_key,
-                    "object_ref": _object_ref_token(updated.object_ref),
-                    "payload_digest": updated.payload_digest,
-                    "principal_id": request.principal.principal_id,
-                },
-            )
         return ExternalSupplyResult(
             updated.call_id,
             request.idempotency_key,
@@ -119,17 +99,6 @@ def _is_exact_replay(
         and record.object_ref == object_ref
         and record.payload_digest == payload_digest
     )
-
-
-def _object_ref_token(reference: ObjectRef) -> str:
-    return canonical_json_bytes(
-        {
-            "store_id": reference.store_id,
-            "key": reference.key,
-            "digest": reference.digest,
-            "size": reference.size,
-        }
-    ).decode("utf-8")
 
 
 def _is_digest(value: object) -> bool:
