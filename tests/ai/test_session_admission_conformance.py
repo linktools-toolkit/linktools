@@ -310,7 +310,7 @@ async def test_rejected_admission_terminalizes_pending_start() -> None:
         backend = _RejectingBackend(state.execution.executions)
         service = DefaultExecutionService(
             state.execution,
-            state._object_store(RuntimeDomain.EXECUTION),
+            state.object_store(RuntimeDomain.EXECUTION),
             TenantAuthorizationPolicy(),
             sessions=state.conversation.sessions,
             catalog=_DefinitionCatalog(),
