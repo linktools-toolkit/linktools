@@ -16,7 +16,7 @@ dev-dependencies:
   - "pytest; python_version >= '3.7'"
 
 release-dependencies:
-  - linktools[cli,git]>=0.9.1
+  - linktools[cli,git]>=0.10.0
 
 optional-dependencies: {}
 
