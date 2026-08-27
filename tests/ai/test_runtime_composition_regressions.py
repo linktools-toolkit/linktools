@@ -79,14 +79,13 @@ def _binding() -> AgentBindingSnapshot:
     output = bind_output()
     return AgentBindingSnapshot(
         version=1,
-        agent_spec=AgentSpec("agent", 1, "model"),
-        agent_digest="b" * 64,
-        output_schema_id=output.schema_id,
-        output_schema_revision=output.schema_revision,
-        output_schema_fingerprint=output.schema_fingerprint,
-        local_runtime_capability_descriptors=(),
+        agent_spec=AgentSpec("agent", model="model"),
+        model={"route_id": "model", "model_identity": "test:model"},
+        selected=(),
+        subagents=(),
+        output_mode=output.mode,
+        output_schema=output.schema_definition,
         binding_digest="a" * 64,
-        global_runtime_capability_descriptors=(),
     )
 
 
@@ -111,6 +110,7 @@ def _execution(*, binding: AgentBindingSnapshot | None = None) -> ExecutionRecor
         safe_error_details={},
         created_at=now,
         updated_at=now,
+        mode="run",
         planning=False,
         thinking=False,
         binding=selected,
@@ -124,6 +124,7 @@ def _recovery(
     selected = binding or _binding()
     return RecoveryExecutionInput(
         user_prompt="prompt",
+        user_prompt_codec="text",
         principal_id="principal",
         principal_kind="service",
         session_id=None,
@@ -136,6 +137,7 @@ def _recovery(
         base_execution_id=None,
         conversation_step_run_id=None,
         idempotency=RecoveryIdempotencyInput("scope", "key", "request"),
+        mode="run",
         planning=False,
         thinking=False,
         binding=selected,
@@ -161,26 +163,21 @@ async def test_approval_list_authorizes_before_reading_pending_records() -> None
     assert approvals.list_calls == 0
 
 
-def test_output_contract_maps_bind_and_restore_failures() -> None:
+def test_output_contract_restores_only_mode_and_schema() -> None:
     class LocalOutput(BaseModel):
         value: str
 
     automatic = bind_output(LocalOutput)
-    assert automatic.schema_id == f"schema:{automatic.schema_fingerprint}"
+    restored = restore_output(automatic.mode, automatic.schema_definition)
 
-    with pytest.raises(AIError) as bind_error:
-        bind_output(LocalOutput, schema_id="assistant-text")
-    assert bind_error.value.code is ErrorCode.OUTPUT_CONTRACT_INVALID
+    assert automatic.mode == "structured"
+    assert restored.mode == automatic.mode
+    assert restored.schema_definition == automatic.schema_definition
+    assert restored.fingerprint == automatic.fingerprint
 
-    descriptor = bind_output().descriptor
-    descriptor["future_metadata"] = {"$future_v2": ["ignored"]}
-    assert restore_output(descriptor).schema_id == bind_output().schema_id
-
-    missing = bind_output().descriptor
-    missing.pop("schema_fingerprint")
     with pytest.raises(AIError) as restore_error:
-        restore_output(missing)
-    assert restore_error.value.code is ErrorCode.AGENT_DEFINITION_UNAVAILABLE
+        restore_output("structured", {"type": "not-a-json-schema-type"})
+    assert restore_error.value.code is ErrorCode.OUTPUT_CONTRACT_INVALID
 
 
 @pytest.mark.parametrize(
