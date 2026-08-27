@@ -16,6 +16,7 @@ if TYPE_CHECKING:
     from ._definition import AgentDefinition
 
 _PIN_KINDS = frozenset({"tool", "skill", "mcp", "capability"})
+_PIN_FIELDS = frozenset({"kind", "id", "contract_version", "contract"})
 _REQUIRED_FIELDS = frozenset(
     {
         "version",
@@ -35,7 +36,6 @@ class SemanticPin:
     kind: Literal["tool", "skill", "mcp", "capability"]
     id: str
     contract_version: int
-    fingerprint: str
     contract: Mapping[str, JsonValue]
 
     def __post_init__(self) -> None:
@@ -45,7 +45,6 @@ class SemanticPin:
             or not self.id.strip()
             or self.contract_version != 1
             or isinstance(self.contract_version, bool)
-            or not _is_digest(self.fingerprint)
         ):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         try:
@@ -53,33 +52,32 @@ class SemanticPin:
         except (TypeError, ValueError) as error:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
         object.__setattr__(self, "contract", contract)
-        if capability_fingerprint(self.kind, self.id, contract) != self.fingerprint:
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+
+    @property
+    def fingerprint(self) -> str:
+        return capability_fingerprint(self.kind, self.id, self.contract)
 
     def to_payload(self) -> "dict[str, JsonValue]":
         return {
             "kind": self.kind,
             "id": self.id,
             "contract_version": self.contract_version,
-            "fingerprint": self.fingerprint,
             "contract": dict(self.contract),
         }
 
     @classmethod
     def from_payload(cls, value: object) -> "SemanticPin":
-        if not isinstance(value, Mapping):
+        if not isinstance(value, Mapping) or set(value) != _PIN_FIELDS:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        kind = value.get("kind")
-        identity = value.get("id")
-        version = value.get("contract_version")
-        fingerprint = value.get("fingerprint")
-        contract = value.get("contract")
+        kind = value["kind"]
+        identity = value["id"]
+        version = value["contract_version"]
+        contract = value["contract"]
         if (
             kind not in _PIN_KINDS
             or not isinstance(identity, str)
             or not isinstance(version, int)
             or isinstance(version, bool)
-            or not isinstance(fingerprint, str)
             or not isinstance(contract, Mapping)
         ):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -87,7 +85,6 @@ class SemanticPin:
             cast(Literal["tool", "skill", "mcp", "capability"], kind),
             identity,
             version,
-            fingerprint,
             _normalize_mapping(contract),
         )
 
