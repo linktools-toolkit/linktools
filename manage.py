@@ -21,6 +21,9 @@ PROJECT_PATH = os.path.abspath(os.path.dirname(__file__))
 _REQUIRES_PYTHON_PATTERN = re.compile(r"^>=(\d+)\.(\d+)$")
 _GATE_MODULE_PATTERN = re.compile(r"^scripts\.check(?:\.[A-Za-z_][A-Za-z0-9_]*)+$")
 _VERSION_LINE_PATTERN = re.compile(r"(?m)^version:[^\r\n]*$")
+_INSTALL_MODULE_PATTERN = re.compile(
+    r"^([A-Za-z0-9_-]+)(?:\[([A-Za-z0-9_.-]+(?:,[A-Za-z0-9_.-]+)*)\])?$"
+)
 _SUPPORTED_CHECKS = {"gate", "ruff", "pytest"}
 _GATE_FIELDS = {"modules"}
 _RUFF_FIELDS = {"select", "paths"}
@@ -195,7 +198,12 @@ def build_parser() -> argparse.ArgumentParser:
     init_parser.set_defaults(func=handle_init)
 
     install_parser = subparsers.add_parser("install", help="Install project modules")
-    _add_project_argument(install_parser, modules)
+    install_parser.add_argument(
+        "module",
+        nargs="*",
+        metavar="MODULE[EXTRAS]",
+        help="Project modules, optionally with extras",
+    )
     install_parser.add_argument("-e", "--editable", action="store_true", help="Install in editable mode")
     install_parser.add_argument("--no-isolation", action="store_true", help="Disable build isolation")
     install_parser.set_defaults(func=handle_install)
@@ -481,6 +489,40 @@ def _restore_files(backups: "typing.Dict[str, str]") -> None:
             file.write(content)
 
 
+def _install_requirements(
+    args: argparse.Namespace,
+    modules: "typing.Dict[str, typing.Dict[str, str]]",
+) -> "typing.List[typing.Tuple[str, str]]":
+    if not args.module:
+        return [(name, info["path"]) for name, info in modules.items()]
+
+    order = []
+    extras_by_module = {}
+    for value in args.module:
+        match = _INSTALL_MODULE_PATTERN.match(value)
+        name = match.group(1) if match else None
+        if name not in modules:
+            print("[-] Unknown project module: %s" % value, file=sys.stderr)
+            raise SystemExit(2)
+        if name not in extras_by_module:
+            order.append(name)
+            extras_by_module[name] = []
+        extras = match.group(2)
+        if extras:
+            for extra in extras.split(","):
+                if extra not in extras_by_module[name]:
+                    extras_by_module[name].append(extra)
+
+    result = []
+    for name in order:
+        requirement = modules[name]["path"]
+        extras = extras_by_module[name]
+        if extras:
+            requirement = "%s[%s]" % (requirement, ",".join(extras))
+        result.append((name, requirement))
+    return result
+
+
 def handle_init(args: argparse.Namespace) -> None:
     for name, info in get_modules().items():
         if name == MODULE_NAME:
@@ -506,16 +548,13 @@ def handle_init(args: argparse.Namespace) -> None:
 
 
 def handle_install(args: argparse.Namespace) -> None:
-    paths = []
-    for name, info in get_modules().items():
-        if not args.module or name in args.module:
-            print("[+] Adding module to install list: %s" % name)
-            paths.append(info["path"])
+    requirements = _install_requirements(args, get_modules())
     pip_args = [sys.executable, "-m", "pip", "install"]
-    for path in paths:
+    for name, requirement in requirements:
+        print("[+] Adding module to install list: %s" % name)
         if args.editable:
             pip_args.append("-e")
-        pip_args.append(path)
+        pip_args.append(requirement)
     if args.no_isolation:
         pip_args.append("--no-build-isolation")
     print("[+] Running pip install with arguments: %s" % " ".join(pip_args))
