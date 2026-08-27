@@ -8,16 +8,16 @@ Each package owns one concern:
 |---|---|
 | `core` | Pure values, IDs, JSON, paging, principals, and canonical hashing |
 | `storage` | Generic overlays, caches, revisions, files, locks, SQL dialects, ObjectStore, and SQL validation primitives |
-| `asset` | Raw Asset keys, metadata, logical bindings, `AssetStore`, `AssetRepository`, and Asset backends |
+| `asset` | Raw Asset keys, metadata, `AssetStore`, and Asset backends; no declaration interpretation |
 | `spec` | Agent, Skill, and MCP declaration DTOs and codecs |
 | `model` | Model routes, connections, credentials, registries, and materializers |
 | `observe` | Vendor-neutral run context, middleware, traces, and snapshots |
-| `capability` | Capability resolution, grants, bindings, and Pydantic AI materialization contracts |
+| `capability` | `CapabilityGroup`, loaders, candidate semantics, Skill/MCP materialization, and workspace tool projection |
 | `task` | Generic TaskGraph, DAG, lease, and local launcher contracts |
-| `agent` | Agent compilation, output schemas, execution binding, and the Pydantic AI runner |
-| `runtime` | Persistence contracts and the execution, session, task, evaluation, approval, event, and artifact APIs |
-| `workspace` | Workspace discovery, local tools, persistence selection, and the library composition root |
-| `adapter` | Runtime, step, provider, identity, NATS, and history adapters; never Asset storage |
+| `agent` | Agent compilation, immutable definitions, output contracts, and execution binding |
+| `runtime` | Composition root, Pydantic AI execution infrastructure, persistence contracts, and service APIs |
+| `workspace` | Workspace discovery, identity, paths, policy, configuration, and sandbox contracts |
+| `adapter` | External provider, identity, and transport adapters; never Asset storage or Runtime composition |
 | `temporal` | Durable workflows, activities, gateway, worker, and launcher |
 | `migrate` | Explicit database schema provisioning |
 | `src/linktools/commands/ai` | Thin CLI composition over public `linktools.ai` APIs |
@@ -26,7 +26,7 @@ Repository-level architecture, import, dependency, and evidence gates live under
 
 Normal library modules live directly under `linktools/ai/<package>/`. Only Temporal may use `workflow/` and `activity/` subpackages. A cross-package public boundary may live directly under `linktools/ai/` only when listed in the package policy's `public_modules`.
 
-`AssetStore` owns raw files, `AssetRepository` owns logical Asset resolution, `spec` owns declaration codecs, `capability` owns provider resolution, `agent` owns compilation and executable binding, and `runtime` owns service behavior. Keep those boundaries visible in names and imports.
+`AssetStore` owns raw files, `CapabilityGroup` owns registration and declaration discovery, `spec` owns declaration codecs, `agent` owns compilation and executable binding, `runtime` owns composition and execution/service behavior, and `workspace` owns workspace identity and policy. Keep those boundaries visible in names and imports.
 
 ## 2. Dependency boundaries
 
@@ -43,14 +43,18 @@ Normal library modules live directly under `linktools/ai/<package>/`. Only Tempo
 
 Keep common construction paths short. Callers should pass `RuntimeState` and domain inputs; they should not assemble registries, table collections, manifests, or internal storage bundles.
 
-The SQL lifecycle follows this rule:
+SQL-backed Runtime composition follows this rule:
 
 ```python
 await provision_database(engine)
-context = create_sql_storage_context(engine)
-await context.initialize(metadata=owned_metadata)
-domain = await open_sql_runtime(context, persist=frozenset({StorageDomain.CONVERSATION}))
-assets = build_sql_asset_backend(context)
+state = RuntimeState.sql(engine)
+
+async with Runtime.open(
+    workspace,
+    models=models,
+    state=state,
+) as runtime:
+    ...
 ```
 
 Schema owners expose public builders for migration and evidence generation. Runtime constructors validate their own metadata; normal callers do not assemble schema registries.
@@ -60,9 +64,9 @@ Keep classification identities distinct:
 - Persistence `namespace` partitions Runtime records inside a backend.
 - `tenant_id` is the authorization and resource ownership boundary within a persistence namespace.
 - `memory_scope` selects a memory collection within a tenant; persistence stores only its derived `memory_scope_digest`.
-- Asset `namespace` partitions raw Asset storage independently from Runtime persistence; Asset `kind` selects the logical representation.
+- Asset `kind` partitions raw Asset keys independently from Runtime persistence.
 - Task and tool lease records use `owner`; schema registries and storage overlays also use `owner` because each declaring type makes the role explicit.
-- `StorageDomain` selects durable business domains; Blob, Media, StepStore, Idempotency, OperationLedger, Approval, ExternalResult, ToolState, and Repository remain implementation details of those domains.
+- `RuntimeDomain` selects Runtime persistence domains; lower-level Step, ObjectStore, Idempotency, OperationLedger, Approval, external result, and tool-state records remain implementation details of those domains.
 - Prefer short object-local fields when the declaring type supplies the domain, including `Principal.kind`, `AssetKey.kind`, `OperationLedgerRecord.kind`, and `TaskLease.owner`. Add a qualifier when the same type or flattened boundary contains another plausible meaning, as with `resource_kind`, `lineage_kind`, `asset_kind`, and `memory_scope_digest`, or when it preserves an authorization identity domain, as with `owner_principal_id`.
 - Free functions have no declaring-object context, so their names retain the domain they validate, such as `validate_persistence_namespace()` and `validate_lease_owner()`.
 - Observation and Runtime trace records are distinct contracts: use `RecordedTraceItem` for recorder facts and `ExecutionTraceItem` for Runtime query projections.
@@ -73,13 +77,13 @@ All lifecycle objects use `initialize()`; do not add parallel lifecycle aliases.
 
 Use `build_*` for pure composition in new APIs. `open_*`, `prepare_*`, and `initialize()` may perform documented I/O. Keep cleanup paired with opening through async context managers where ownership spans a scope.
 
-## 4. Asset rules
+## 4. Asset and capability rules
 
-`AssetBackend` and the public storage protocols are the extension boundary for custom loading. Compose backends with `StorageOverlay`, wrap the overlay in `AssetStore`, call `initialize()`, then create an `AssetRepository` from a frozen `AssetTypeRegistry` snapshot.
+`AssetBackend` and the public storage protocols are the extension boundary for raw Asset loading. Compose backends with `StorageOverlay`, wrap the overlay in `AssetStore`, and call `initialize()`. Asset backends store bytes and metadata only; they do not import Spec, Capability, or Agent types.
 
-The default workspace loader reads `<workspace>/.linktools` through a read-only `DirectoryAssetBackend`. `PrefixAssetPathAdapter` maps Agent, Skill, and MCP kinds to their nested physical directories; only the workspace-owned repository bootstraps `agent/default`. Do not hard-code that policy into generic Asset or Storage code.
+The default Runtime workspace source reads `<workspace>/.linktools` through a read-only `DirectoryAssetBackend`. `PrefixAssetPathAdapter` maps `agent`, `skill`, and `mcp` kinds to their nested physical directories. Runtime wraps that store with `CapabilityGroup.from_store("workspace", store)`, freezes one immutable candidate snapshot, and synthesizes `AgentSpec("default")` only when no `default` Agent declaration is present.
 
-Register custom logical representations with `AssetTypeBinding` and `AssetVariantBinding`. Codecs validate bytes at the repository boundary. Backends store bytes and metadata only; they do not import Spec, Capability, or Agent types.
+For downstream declaration formats or custom kinds such as `worker` or `audit`, implement `CapabilityLoader` and register it with `CapabilityGroup.loader()`. The loader converts frozen Asset metadata and bytes into normal `CapabilityContribution` values. Do not reintroduce a parallel Repository, Provider, Registry, or logical Asset-binding layer.
 
 Layer precedence is primary first, followed by declared fallback layers. Tombstones hide lower values; reset entries reveal them. Writer routing, cache validation, revisions, and owner-aware reads stay in `StorageOverlay`.
 

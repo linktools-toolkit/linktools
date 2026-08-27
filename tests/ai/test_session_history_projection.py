@@ -5,7 +5,6 @@
 from datetime import datetime, timezone
 
 import pytest
-from linktools.ai.adapter import StepSessionHistoryReader
 from linktools.ai.core import (
     HmacCursorSigner,
     Principal,
@@ -21,6 +20,7 @@ from linktools.ai.runtime import (
     ForkSessionRequest,
     RuntimeState,
 )
+from linktools.ai.runtime._history import StepSessionHistoryReader
 from linktools.ai.runtime.state import RuntimeDomain
 from linktools.ai.runtime.state._contracts import ConversationCursor, SessionRecord
 from pydantic_ai.messages import (

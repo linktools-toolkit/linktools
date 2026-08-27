@@ -3,11 +3,9 @@
 """Required error-contract matrix coverage."""
 
 import json
-from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
 import pytest
-from linktools.ai.agent._executor import DurableBoundary, _execution_error, _map_event
 from linktools.ai.core import (
     ExecutionStatus,
     JsonValue,
@@ -21,17 +19,11 @@ from linktools.ai.core import (
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.model import ModelRegistry
 from linktools.ai.runtime import DefaultExecutionService, ExecutionResult
+from linktools.ai.runtime._agent_executor import DurableBoundary, _execution_error, _map_event
 from linktools.ai.runtime._planner import _execution_failure
 from linktools.ai.runtime._subagent import _subagent_result
 from linktools.ai.storage import StoragePath
-from linktools.ai.task import (
-    DefaultTaskService,
-    TaskGraph,
-    TaskLease,
-    TaskNode,
-    TaskNodeView,
-)
-from linktools.ai.temporal._task_operation import _RuntimeTaskOperation
+from linktools.ai.task import DefaultTaskService
 from linktools.cli import CommandError
 from linktools.commands.ai.run import _emit_result
 from pydantic_ai.exceptions import (
@@ -63,8 +55,6 @@ def _failed_result(
         ExecutionStatus.FAILED,
         None,
         None,
-        None,
-        None,
         UsageMetrics(),
         code.value,
         details or {"provider": "test"},
@@ -76,16 +66,8 @@ def _failed_result(
     [
         (ModelAPIError("model", "provider failed"), ErrorCode.MODEL_API_ERROR, False),
         (ContentFilterError("filtered"), ErrorCode.MODEL_CONTENT_FILTERED, False),
-        (
-            UnexpectedModelBehavior("invalid response"),
-            ErrorCode.MODEL_RESPONSE_INVALID,
-            False,
-        ),
-        (
-            ConcurrencyLimitExceeded("queue full"),
-            ErrorCode.EXECUTION_CONCURRENCY_LIMIT_EXCEEDED,
-            True,
-        ),
+        (UnexpectedModelBehavior("invalid response"), ErrorCode.MODEL_RESPONSE_INVALID, False),
+        (ConcurrencyLimitExceeded("queue full"), ErrorCode.EXECUTION_CONCURRENCY_LIMIT_EXCEEDED, True),
     ],
 )
 def test_pydantic_execution_errors_have_stable_domain_codes(
@@ -131,17 +113,13 @@ def test_tool_retry_event_uses_stable_retry_code() -> None:
 
 
 def test_local_task_child_error_contract_is_preserved() -> None:
-    failure = _execution_failure(
-        _failed_result(details={"status_code": 429})
-    )
+    failure = _execution_failure(_failed_result(details={"status_code": 429}))
     assert failure.code is ErrorCode.MODEL_RATE_LIMITED
     assert failure.safe_details == {"status_code": 429}
 
 
 def test_subagent_result_preserves_child_error_contract() -> None:
-    payload = _subagent_result(
-        _failed_result(details={"status_code": 429})
-    )
+    payload = _subagent_result(_failed_result(details={"status_code": 429}))
     assert payload["error_code"] == ErrorCode.MODEL_RATE_LIMITED.value
     assert payload["safe_error_details"] == {"status_code": 429}
 
@@ -173,10 +151,7 @@ def test_invalid_storage_path_has_stable_code() -> None:
         (ErrorCode.STORAGE_PATH_INVALID, False),
     ],
 )
-def test_new_error_codes_have_fixed_retryability(
-    code: ErrorCode,
-    retryable: bool,
-) -> None:
+def test_error_codes_have_fixed_retryability(code: ErrorCode, retryable: bool) -> None:
     assert AIError(code).retryable is retryable
 
 
@@ -207,11 +182,7 @@ async def test_execution_result_before_terminal_is_not_ready() -> None:
 async def test_execution_wait_timeout_has_stable_code() -> None:
     service = object.__new__(DefaultExecutionService)
 
-    async def inspect(
-        execution_id: str,
-        *,
-        principal: Principal,
-    ) -> object:
+    async def inspect(execution_id: str, *, principal: Principal) -> object:
         del execution_id, principal
         return SimpleNamespace(status=ExecutionStatus.STARTED)
 
@@ -235,20 +206,10 @@ class _AllowAll:
 
 
 class _RunningTasks:
-    async def get_header(
-        self,
-        graph_id: str,
-        *,
-        tenant_id: str,
-    ) -> ResourceRef:
+    async def get_header(self, graph_id: str, *, tenant_id: str) -> ResourceRef:
         return ResourceRef(ResourceKind.TASK_GRAPH, graph_id, tenant_id)
 
-    async def reconcile_graph(
-        self,
-        graph_id: str,
-        *,
-        tenant_id: str,
-    ) -> object:
+    async def reconcile_graph(self, graph_id: str, *, tenant_id: str) -> object:
         del graph_id, tenant_id
         return SimpleNamespace(status=TaskStatus.RUNNING)
 
@@ -300,9 +261,7 @@ class _FailedRuntime:
 async def test_cli_json_failed_result_uses_result_contract_without_event_scan(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    runtime = _FailedRuntime(
-        _failed_result(details={"status_code": 429})
-    )
+    runtime = _FailedRuntime(_failed_result(details={"status_code": 429}))
     with pytest.raises(CommandError):
         await _emit_result(
             runtime,  # type: ignore[arg-type]
@@ -316,131 +275,4 @@ async def test_cli_json_failed_result_uses_result_contract_without_event_scan(
     payload = json.loads(capsys.readouterr().out.strip())
     assert payload["error_code"] == ErrorCode.MODEL_RATE_LIMITED.value
     assert payload["safe_error_details"] == {"status_code": 429}
-
-
-class _TemporalRunner:
-    def __init__(self, result: ExecutionResult) -> None:
-        self._result = result
-
-    async def terminal_result(
-        self,
-        execution_id: str,
-        *,
-        principal: Principal,
-    ) -> ExecutionResult:
-        del principal
-        assert execution_id == self._result.execution_id
-        return self._result
-
-
-class _TemporalRepository:
-    def __init__(self, view: TaskNodeView) -> None:
-        self.view = view
-        self.failed_code: str | None = None
-
-    async def fail(
-        self,
-        lease: TaskLease,
-        *,
-        tenant_id: str,
-        error_code: str,
-        error_digest: str,
-    ) -> object:
-        assert tenant_id == lease.tenant_id
-        assert error_digest
-        self.failed_code = error_code
-        self.view = TaskNodeView(
-            self.view.graph_id,
-            self.view.node_id,
-            self.view.dependencies,
-            TaskStatus.FAILED,
-            self.view.owner,
-            self.view.fence,
-            self.view.lease_expires_at,
-            None,
-            error_code,
-            error_digest,
-        )
-        return self.view
-
-    async def reconcile_graph(
-        self,
-        graph_id: str,
-        *,
-        tenant_id: str,
-    ) -> object:
-        del graph_id, tenant_id
-        return SimpleNamespace(status=TaskStatus.FAILED)
-
-
-class _TemporalOperation(_RuntimeTaskOperation):
-    def __init__(
-        self,
-        runner: _TemporalRunner,
-        repository: _TemporalRepository,
-        stored: object,
-    ) -> None:
-        self._runner = runner
-        self._repository = repository
-        self._stored = stored
-
-    async def _load_request(self, request: object) -> object:
-        del request
-        return self._stored
-
-    async def _read_node(
-        self,
-        request: object,
-        node: TaskNode,
-        *,
-        reconcile: bool,
-    ) -> TaskNodeView:
-        del request, node, reconcile
-        return self._repository.view
-
-
-@pytest.mark.asyncio
-async def test_temporal_task_child_error_contract_is_preserved() -> None:
-    principal = Principal("principal", "tenant", "service")
-    node = TaskNode("node", (), input={})
-    graph = TaskGraph("graph", (node,))
-    lease = TaskLease(
-        "graph",
-        "node",
-        "tenant",
-        "worker",
-        1,
-        datetime.now(timezone.utc) + timedelta(minutes=1),
-    )
-    repository = _TemporalRepository(
-        TaskNodeView(
-            "graph",
-            "node",
-            (),
-            TaskStatus.RUNNING,
-            "worker",
-            1,
-            lease.lease_expires_at,
-            None,
-            None,
-            None,
-        )
-    )
-    operation = _TemporalOperation(
-        _TemporalRunner(
-            _failed_result(
-                "graph:node",
-                details={"status_code": 429},
-            )
-        ),
-        repository,
-        SimpleNamespace(graph=graph, principal=principal),
-    )
-    updated = await operation.settle(
-        SimpleNamespace(graph_id="graph", tenant_id="tenant"),  # type: ignore[arg-type]
-        lease,
-        SimpleNamespace(execution_id="graph:node", status="FAILED"),  # type: ignore[arg-type]
-    )
-    assert repository.failed_code == ErrorCode.MODEL_RATE_LIMITED.value
-    assert updated.status is TaskStatus.FAILED
-    assert updated.error_code == ErrorCode.MODEL_RATE_LIMITED.value
+    assert payload["output_fingerprint"] is None

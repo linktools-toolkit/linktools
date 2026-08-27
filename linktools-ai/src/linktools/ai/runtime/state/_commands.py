@@ -2066,7 +2066,7 @@ def _tool_admission_matches(
         and operation.idempotency_key_digest == request.idempotency_key_digest
         and operation.tool_name == request.tool_name
         and operation.arguments_digest == request.arguments_digest
-        and operation.binding_fingerprint == request.binding_fingerprint
+        and operation.binding_digest == request.binding_digest
         and operation.replay_safe is request.replay_safe
     )
 

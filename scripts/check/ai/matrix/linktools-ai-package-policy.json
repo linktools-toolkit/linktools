@@ -17,157 +17,49 @@
   ],
   "dependencies": {
     "core": [],
-    "storage": [
-      "core"
-    ],
-    "asset": [
-      "core",
-      "storage"
-    ],
-    "spec": [
-      "core",
-      "asset"
-    ],
-    "model": [
-      "core"
-    ],
-    "observe": [
-      "core"
-    ],
-    "capability": [
-      "core",
-      "asset",
-      "spec"
-    ],
-    "task": [
-      "core",
-      "observe"
-    ],
-    "agent": [
-      "core",
-      "storage",
-      "asset",
-      "spec",
-      "model",
-      "capability"
-    ],
+    "storage": ["core"],
+    "asset": ["core", "storage"],
+    "spec": ["core"],
+    "model": ["core"],
+    "observe": ["core"],
+    "capability": ["core", "asset", "spec", "workspace"],
+    "task": ["core", "observe"],
+    "agent": ["core", "spec", "model", "capability"],
     "runtime": [
       "core",
       "storage",
       "asset",
       "spec",
-      "observe",
-      "capability",
-      "task",
-      "agent"
-    ],
-    "workspace": [
-      "core",
-      "storage",
-      "asset",
-      "spec",
-      "model",
-      "capability",
-      "agent",
-      "runtime",
-      "adapter",
-      "task",
-      "migrate"
-    ],
-    "adapter": [
-      "core",
-      "storage",
-      "spec",
-      "model",
-      "observe",
-      "capability",
-      "task",
-      "runtime"
-    ],
-    "temporal": [
-      "core",
-      "spec",
       "model",
       "observe",
       "capability",
       "task",
       "agent",
-      "runtime",
-      "storage"
+      "workspace"
     ],
-    "migrate": [
-      "core",
-      "storage",
-      "asset",
-      "adapter",
-      "runtime"
-    ]
+    "workspace": ["core"],
+    "adapter": ["core"],
+    "temporal": ["core", "storage", "task", "agent", "runtime"],
+    "migrate": ["asset", "storage", "runtime"]
   },
   "module_dependencies": {
-    "adapter._nats": [
-      "core",
-      "observe"
-    ],
-    "adapter._provider": [
-      "core",
-      "model"
-    ],
-    "adapter._identity": [
-      "core"
-    ],
-    "agent._compiler": [
-      "core",
-      "asset",
-      "spec",
-      "model",
-      "capability"
-    ],
-    "capability._mcp": [
-      "core",
-      "asset",
-      "spec"
-    ],
-    "capability._skill": [
-      "core",
-      "asset",
-      "spec"
-    ],
-    "runtime._runtime_service": [
-      "core",
-      "asset",
-      "spec",
-      "capability",
-      "agent",
-      "task"
-    ],
-    "runtime._local": [
-      "agent",
-      "capability",
-      "core",
-      "storage",
-      "task"
-    ],
-    "workspace._factory": [
-      "core",
-      "storage",
-      "asset",
-      "spec",
-      "model",
-      "capability",
-      "agent",
-      "runtime",
-      "adapter",
-      "task",
-      "migrate"
-    ],
-    "temporal._context": [
-      "core"
-    ],
-    "runtime._execution": [
-      "agent",
-      "core",
-      "storage"
-    ]
+    "adapter._nats": ["core", "observe"],
+    "adapter._provider": ["core", "model"],
+    "adapter._identity": ["core"],
+    "agent._compiler": ["core", "spec", "model", "capability"],
+    "capability._context": ["core", "workspace"],
+    "capability._group": ["core", "asset", "spec"],
+    "capability._mcp": ["core", "spec"],
+    "capability._skill": ["spec"],
+    "capability._workspace": ["workspace"],
+    "runtime._agent_executor": ["core", "capability", "agent"],
+    "runtime._capabilities": ["core", "capability"],
+    "runtime._factory": ["core", "storage", "asset", "spec", "model", "capability", "task", "agent", "workspace"],
+    "runtime._runtime_service": ["core", "model", "capability", "task", "agent", "workspace"],
+    "runtime._local": ["core", "storage", "capability", "agent", "workspace"],
+    "runtime._execution": ["core", "storage", "agent"],
+    "runtime._history": ["core"],
+    "temporal._context": ["core"]
   },
   "public_modules": [
     "errors",
@@ -197,9 +89,6 @@
   ],
   "asset_invariants": [
     "immutable-root",
-    "typed-codec-freeze",
-    "immutable-registry-snapshot",
-    "builtin-binding-manifest",
     "etag-validation",
     "entry-cas",
     "store-cas",

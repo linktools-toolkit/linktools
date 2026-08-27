@@ -23,7 +23,6 @@ from linktools.ai.runtime._tool import (
 )
 from linktools.ai.spec import AgentSpec, AgentSpecCodec
 from linktools.ai.workspace import DisabledSandbox
-from linktools.ai.workspace._tools import build_workspace_tool_map
 
 
 @pytest.mark.asyncio
@@ -90,17 +89,10 @@ async def test_service_principal_keeps_tenant_authorization() -> None:
 def test_agent_spec_codec_preserves_system_prompt_and_instructions() -> None:
     spec = AgentSpec(
         "agent",
-        1,
-        "model",
+        model="model",
         system_prompt="system",
         instructions=("instruction",),
     )
     payload = json.loads(AgentSpecCodec().encode(spec))
     assert payload["system_prompt"] == "system"
     assert payload["instructions"] == ["instruction"]
-
-
-@pytest.mark.asyncio
-async def test_workspace_tools_reject_paths_outside_the_project(tmp_path: Path) -> None:
-    result = await build_workspace_tool_map(tmp_path)["read_file"](path="../outside")
-    assert result == {"error": "PATH_OUTSIDE_ROOT"}

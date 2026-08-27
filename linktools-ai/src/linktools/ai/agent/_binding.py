@@ -1,170 +1,197 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Runtime and durable contracts for one exact Agent execution binding."""
+"""Durable exact Agent execution binding contract."""
 
 from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, Literal, cast
 
+from ..capability import capability_fingerprint
 from ..core import ImmutableJsonMapping, JsonValue
 from ..errors import AIError, ErrorCode
 from ..spec import AgentSpec, AgentSpecCodec
-from ._output import OutputBinding
+from ._output import OutputBinding, OutputMode
 
 if TYPE_CHECKING:
     from ._definition import AgentDefinition
 
+_PIN_KINDS = frozenset({"tool", "skill", "mcp", "capability"})
+_PIN_FIELDS = frozenset({"kind", "id", "contract_version", "contract"})
 _REQUIRED_FIELDS = frozenset(
     {
         "version",
         "agent_spec",
-        "agent_digest",
-        "output_schema_id",
-        "output_schema_revision",
-        "output_schema_fingerprint",
-        "local_runtime_capability_descriptors",
+        "model",
+        "selected",
+        "subagents",
+        "output_mode",
+        "output_schema",
         "binding_digest",
-        "global_runtime_capability_descriptors",
     }
 )
 
 
 @dataclass(frozen=True, slots=True)
-class AgentBindingSnapshot:
-    """Persist the inputs required to reconstruct one exact Agent binding."""
-
-    version: int
-    agent_spec: AgentSpec
-    agent_digest: str
-    output_schema_id: str
-    output_schema_revision: int
-    output_schema_fingerprint: str
-    local_runtime_capability_descriptors: "tuple[Mapping[str, JsonValue], ...]"
-    binding_digest: str
-    global_runtime_capability_descriptors: "tuple[Mapping[str, JsonValue], ...]"
-    output_schema_definition: "Mapping[str, JsonValue] | None" = None
+class SemanticPin:
+    kind: Literal["tool", "skill", "mcp", "capability"]
+    id: str
+    contract_version: int
+    contract: Mapping[str, JsonValue]
 
     def __post_init__(self) -> None:
-        if self.version != 1 or isinstance(self.version, bool):
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        if not isinstance(self.agent_spec, AgentSpec):
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        if not isinstance(self.output_schema_id, str) or not self.output_schema_id.strip():
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         if (
-            not _is_digest(self.agent_digest)
-            or not isinstance(self.output_schema_revision, int)
-            or isinstance(self.output_schema_revision, bool)
-            or self.output_schema_revision < 1
-            or not _is_digest(self.output_schema_fingerprint)
-            or not _is_digest(self.binding_digest)
+            self.kind not in _PIN_KINDS
+            or not isinstance(self.id, str)
+            or not self.id.strip()
+            or self.contract_version != 1
+            or isinstance(self.contract_version, bool)
         ):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         try:
-            local_descriptors = tuple(
-                ImmutableJsonMapping(value)
-                for value in self.local_runtime_capability_descriptors
-            )
-            global_descriptors = tuple(
-                ImmutableJsonMapping(value)
-                for value in self.global_runtime_capability_descriptors
-            )
-        except (AttributeError, TypeError, ValueError) as error:
+            contract = ImmutableJsonMapping(self.contract)
+        except (TypeError, ValueError) as error:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
-        if self.output_schema_definition is not None:
-            try:
-                output_schema_definition = ImmutableJsonMapping(
-                    self.output_schema_definition
-                )
-            except (AttributeError, TypeError, ValueError) as error:
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
-            object.__setattr__(
-                self,
-                "output_schema_definition",
-                output_schema_definition,
-            )
-        object.__setattr__(
-            self,
-            "local_runtime_capability_descriptors",
-            local_descriptors,
-        )
-        object.__setattr__(
-            self,
-            "global_runtime_capability_descriptors",
-            global_descriptors,
-        )
+        object.__setattr__(self, "contract", contract)
+
+    @property
+    def fingerprint(self) -> str:
+        return capability_fingerprint(self.kind, self.id, self.contract)
 
     def to_payload(self) -> "dict[str, JsonValue]":
-        payload: dict[str, JsonValue] = {
+        return {
+            "kind": self.kind,
+            "id": self.id,
+            "contract_version": self.contract_version,
+            "contract": dict(self.contract),
+        }
+
+    @classmethod
+    def from_payload(cls, value: object) -> "SemanticPin":
+        if not isinstance(value, Mapping) or set(value) != _PIN_FIELDS:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        kind = value["kind"]
+        identity = value["id"]
+        version = value["contract_version"]
+        contract = value["contract"]
+        if (
+            kind not in _PIN_KINDS
+            or not isinstance(identity, str)
+            or not isinstance(version, int)
+            or isinstance(version, bool)
+            or not isinstance(contract, Mapping)
+        ):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        return cls(
+            cast(Literal["tool", "skill", "mcp", "capability"], kind),
+            identity,
+            version,
+            _normalize_mapping(contract),
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class SubagentRef:
+    kind: Literal["agent"]
+    id: str
+
+    def __post_init__(self) -> None:
+        if self.kind != "agent" or not isinstance(self.id, str) or not self.id.strip():
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+
+    def to_payload(self) -> "dict[str, JsonValue]":
+        return {"kind": "agent", "id": self.id}
+
+    @classmethod
+    def from_payload(cls, value: object) -> "SubagentRef":
+        if not isinstance(value, Mapping) or value.get("kind") != "agent":
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        identity = value.get("id")
+        if not isinstance(identity, str):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        return cls("agent", identity)
+
+
+@dataclass(frozen=True, slots=True)
+class AgentBindingSnapshot:
+    """Persist every semantic input needed to restore one exact v1 binding."""
+
+    version: int
+    agent_spec: AgentSpec
+    model: Mapping[str, JsonValue]
+    selected: "tuple[SemanticPin, ...]"
+    subagents: "tuple[SubagentRef, ...]"
+    output_mode: OutputMode
+    output_schema: Mapping[str, JsonValue]
+    binding_digest: str
+
+    def __post_init__(self) -> None:
+        if self.version != 1 or isinstance(self.version, bool) or not _is_digest(self.binding_digest):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        if not isinstance(self.agent_spec, AgentSpec) or self.output_mode not in {"text", "structured"}:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        try:
+            model = ImmutableJsonMapping(self.model)
+            output_schema = ImmutableJsonMapping(self.output_schema)
+        except (TypeError, ValueError) as error:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
+        object.__setattr__(self, "model", model)
+        object.__setattr__(self, "output_schema", output_schema)
+        selected = tuple(sorted(self.selected, key=lambda item: (item.kind, item.id)))
+        if selected != self.selected or len({(item.kind, item.id) for item in selected}) != len(selected):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        subagents = tuple(sorted(self.subagents, key=lambda item: item.id))
+        if subagents != self.subagents or len({item.id for item in subagents}) != len(subagents):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+
+    @property
+    def subagent_ids(self) -> "tuple[str, ...]":
+        return tuple(item.id for item in self.subagents)
+
+    def to_payload(self) -> "dict[str, JsonValue]":
+        return {
             "version": 1,
             "agent_spec": AgentSpecCodec().to_payload(self.agent_spec),
-            "agent_digest": self.agent_digest,
-            "output_schema_id": self.output_schema_id,
-            "output_schema_revision": self.output_schema_revision,
-            "output_schema_fingerprint": self.output_schema_fingerprint,
-            "local_runtime_capability_descriptors": [
-                dict(value) for value in self.local_runtime_capability_descriptors
-            ],
+            "model": dict(self.model),
+            "selected": [item.to_payload() for item in self.selected],
+            "subagents": [item.to_payload() for item in self.subagents],
+            "output_mode": self.output_mode,
+            "output_schema": dict(self.output_schema),
             "binding_digest": self.binding_digest,
-            "global_runtime_capability_descriptors": [
-                dict(value) for value in self.global_runtime_capability_descriptors
-            ],
         }
-        if self.output_schema_definition is not None:
-            payload["output_schema_definition"] = dict(self.output_schema_definition)
-        return payload
 
     @classmethod
     def from_payload(cls, value: object) -> "AgentBindingSnapshot":
         if not isinstance(value, Mapping) or not _REQUIRED_FIELDS.issubset(value):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         version = value["version"]
-        revision = value["output_schema_revision"]
-        local_descriptors = value["local_runtime_capability_descriptors"]
-        global_descriptors = value["global_runtime_capability_descriptors"]
-        if isinstance(version, bool) or not isinstance(version, int) or version < 1:
+        if not isinstance(version, int) or isinstance(version, bool) or version < 1:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         if version != 1:
             raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
-        if not isinstance(revision, int) or isinstance(revision, bool) or revision < 1:
+        selected = value["selected"]
+        subagents = value["subagents"]
+        mode = value["output_mode"]
+        if not isinstance(selected, list) or not isinstance(subagents, list) or mode not in {"text", "structured"}:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        if not isinstance(local_descriptors, list) or not isinstance(global_descriptors, list):
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        if "output_schema_definition" in value:
-            output_schema_definition = _normalize_mapping(value["output_schema_definition"])
-        else:
-            output_schema_definition = None
         try:
-            agent_spec_payload = _require_mapping(value["agent_spec"])
-            agent_spec = AgentSpecCodec().from_payload(agent_spec_payload)
-            normalized_local = tuple(
-                _normalize_mapping(item) for item in local_descriptors
+            return cls(
+                version=1,
+                agent_spec=AgentSpecCodec().from_payload(_require_mapping(value["agent_spec"])),
+                model=_normalize_mapping(value["model"]),
+                selected=tuple(SemanticPin.from_payload(item) for item in selected),
+                subagents=tuple(SubagentRef.from_payload(item) for item in subagents),
+                output_mode=cast(OutputMode, mode),
+                output_schema=_normalize_mapping(value["output_schema"]),
+                binding_digest=_require_digest(value["binding_digest"]),
             )
-            normalized_global = tuple(
-                _normalize_mapping(item) for item in global_descriptors
-            )
-        except AIError as error:
+        except AIError:
+            raise
+        except (TypeError, ValueError) as error:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
-        return cls(
-            version=1,
-            agent_spec=agent_spec,
-            agent_digest=_require_digest(value["agent_digest"]),
-            output_schema_id=_require_string(value["output_schema_id"]),
-            output_schema_revision=revision,
-            output_schema_fingerprint=_require_digest(
-                value["output_schema_fingerprint"]
-            ),
-            local_runtime_capability_descriptors=normalized_local,
-            binding_digest=_require_digest(value["binding_digest"]),
-            global_runtime_capability_descriptors=normalized_global,
-            output_schema_definition=output_schema_definition,
-        )
 
 
 @dataclass(frozen=True, slots=True)
 class AgentBinding:
-    """Bind an AgentDefinition to the exact output contract used by execution."""
-
     digest: str
     definition: "AgentDefinition"
     output_binding: OutputBinding
@@ -173,30 +200,16 @@ class AgentBinding:
     def __post_init__(self) -> None:
         from ._definition import AgentDefinition
 
-        if not isinstance(self.definition, AgentDefinition):
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        if not isinstance(self.output_binding, OutputBinding):
-            raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID)
-        if not isinstance(self.snapshot, AgentBindingSnapshot):
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         if (
-            self.digest != self.snapshot.binding_digest
-            or self.definition.digest != self.snapshot.agent_digest
+            not isinstance(self.definition, AgentDefinition)
+            or not isinstance(self.output_binding, OutputBinding)
+            or not isinstance(self.snapshot, AgentBindingSnapshot)
+            or self.digest != self.snapshot.binding_digest
             or self.definition.spec != self.snapshot.agent_spec
-            or self.definition.local_runtime_capability_descriptors
-            != self.snapshot.local_runtime_capability_descriptors
-            or self.output_binding.schema_id != self.snapshot.output_schema_id
-            or self.output_binding.schema_revision
-            != self.snapshot.output_schema_revision
-            or self.output_binding.schema_fingerprint
-            != self.snapshot.output_schema_fingerprint
-            or self.definition.global_runtime_capability_descriptors
-            != self.snapshot.global_runtime_capability_descriptors
-            or (
-                self.snapshot.output_schema_definition is not None
-                and dict(self.snapshot.output_schema_definition)
-                != self.output_binding.schema_definition
-            )
+            or dict(self.definition.model.semantic_payload) != dict(self.snapshot.model)
+            or self.definition.selected_subagents != self.snapshot.subagent_ids
+            or self.output_binding.mode != self.snapshot.output_mode
+            or self.output_binding.schema_definition != dict(self.snapshot.output_schema)
         ):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
 
@@ -205,8 +218,8 @@ class AgentBinding:
         return self.output_binding.runtime_output_type
 
     @property
-    def output_schema_fingerprint(self) -> str:
-        return self.output_binding.schema_fingerprint
+    def output_fingerprint(self) -> str:
+        return self.output_binding.fingerprint
 
 
 def _normalize_mapping(value: object) -> "dict[str, JsonValue]":
@@ -214,7 +227,7 @@ def _normalize_mapping(value: object) -> "dict[str, JsonValue]":
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     try:
         return dict(ImmutableJsonMapping(cast("Mapping[str, JsonValue]", value)))
-    except (AttributeError, TypeError, ValueError) as error:
+    except (TypeError, ValueError) as error:
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
 
 
@@ -224,16 +237,10 @@ def _require_mapping(value: object) -> "dict[str, object]":
     return dict(value)
 
 
-def _require_string(value: object) -> str:
-    if not isinstance(value, str) or not value.strip():
-        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-    return value
-
-
 def _require_digest(value: object) -> str:
-    if not isinstance(value, str) or not _is_digest(value):
+    if not _is_digest(value):
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-    return value
+    return cast(str, value)
 
 
 def _is_digest(value: object) -> bool:
@@ -242,4 +249,4 @@ def _is_digest(value: object) -> bool:
     )
 
 
-__all__ = ["AgentBinding", "AgentBindingSnapshot"]
+__all__ = ["AgentBinding", "AgentBindingSnapshot", "SemanticPin", "SubagentRef"]

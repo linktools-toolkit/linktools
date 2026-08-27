@@ -30,14 +30,13 @@ def _binding() -> AgentBindingSnapshot:
     output = bind_output()
     return AgentBindingSnapshot(
         version=1,
-        agent_spec=AgentSpec("default", 1, "default"),
-        agent_digest="b" * 64,
-        output_schema_id=output.schema_id,
-        output_schema_revision=output.schema_revision,
-        output_schema_fingerprint=output.schema_fingerprint,
-        local_runtime_capability_descriptors=(),
+        agent_spec=AgentSpec("default"),
+        model={"route_id": "default", "model_identity": "test:model"},
+        selected=(),
+        subagents=(),
+        output_mode=output.mode,
+        output_schema=output.schema_definition,
         binding_digest="a" * 64,
-        global_runtime_capability_descriptors=(),
     )
 
 
@@ -52,6 +51,7 @@ def _checkpoint(
         "tenant",
         RecoveryExecutionInput(
             user_prompt="prompt",
+            user_prompt_codec="text",
             principal_id="owner",
             principal_kind="user",
             session_id=None,
@@ -64,6 +64,7 @@ def _checkpoint(
             base_execution_id=None,
             conversation_step_run_id=None,
             idempotency=RecoveryIdempotencyInput("scope", "key", "digest"),
+            mode="run",
             planning=False,
             thinking=False,
             binding=_binding(),

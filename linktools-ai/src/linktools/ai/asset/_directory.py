@@ -186,6 +186,12 @@ class DirectoryAssetBackend:
             False,
         )
 
+    async def close(self) -> None:
+        async with self._lock:
+            self._entries.clear()
+            self._revision = _store_revision(())
+        _logger.debug("local directory asset backend closed: root=%s", self._directory)
+
     async def head_revision(self) -> StorageRevision:
         async with self._lock:
             entries = await asyncio.to_thread(self._scan)

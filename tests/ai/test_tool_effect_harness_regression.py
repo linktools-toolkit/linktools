@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from linktools.ai.agent._capabilities import (
+from linktools.ai.runtime._capabilities import (
     ToolOperationDecision,
     _RuntimeStepPersistence,
 )

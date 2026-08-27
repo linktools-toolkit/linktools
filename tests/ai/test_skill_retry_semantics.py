@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Skill tool regression for model-correctable catalog misses."""
+"""Skill tool regression for model-correctable selection misses."""
 
 import pytest
-from linktools.ai.capability._skill import SkillCapability, SkillCatalogSnapshot, SkillDescriptor
+from linktools.ai.capability import SkillCapability
 from linktools.ai.spec import SkillSpec
 from pydantic_ai.exceptions import ModelRetry
 from pydantic_ai.models.test import TestModel
@@ -23,11 +23,9 @@ def _context() -> RunContext[None]:
 
 
 async def test_missing_skill_id_is_model_retry() -> None:
-    catalog = SkillCatalogSnapshot(
-        (SkillDescriptor("known", 1, "Known skill"),),
-        (SkillSpec("known", 1, content="instructions"),),
+    capability = SkillCapability(
+        (SkillSpec("known", content="instructions"),),
     )
-    capability = SkillCapability(catalog, id="linktools-skill")
     toolset = capability.get_toolset()
     context = _context()
     tools = await toolset.get_tools(context)

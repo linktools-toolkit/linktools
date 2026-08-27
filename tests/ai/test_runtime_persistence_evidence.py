@@ -9,12 +9,12 @@ from pathlib import Path
 
 import pytest
 from linktools.ai.agent import AgentBindingSnapshot
-from linktools.ai.agent._output import bind_output
 from linktools.ai.core import (
     ExecutionEventType,
     ExecutionLineageKind,
     ExecutionStatus,
     HmacCursorSigner,
+    JsonValue,
     Principal,
     SessionStatus,
     StopReason,
@@ -23,7 +23,7 @@ from linktools.ai.core import (
 )
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.migrate import provision_runtime_database
-from linktools.ai.runtime import DefaultSessionService, RuntimeState
+from linktools.ai.runtime import DefaultSessionService, Runtime, RuntimeState
 from linktools.ai.runtime._session import _session_agent_id
 from linktools.ai.runtime.state._codec import (
     _decode_enveloped_domain,
@@ -39,7 +39,7 @@ from linktools.ai.runtime.state._contracts import (
 )
 from linktools.ai.spec import AgentSpec, AgentSpecCodec
 from linktools.ai.storage import ObjectRef, StoredPayload
-from linktools.ai.workspace import Workspace, open_workspace_runtime
+from linktools.ai.workspace import Workspace
 from pydantic import BaseModel
 from pydantic_ai.models.test import TestModel
 from sqlalchemy.ext.asyncio import create_async_engine
@@ -66,17 +66,15 @@ def _session() -> SessionRecord:
 
 
 def _binding_snapshot() -> AgentBindingSnapshot:
-    output = bind_output()
     return AgentBindingSnapshot(
         version=1,
-        agent_spec=AgentSpec("agent", 1, "default"),
-        agent_digest="b" * 64,
-        output_schema_id=output.schema_id,
-        output_schema_revision=output.schema_revision,
-        output_schema_fingerprint=output.schema_fingerprint,
-        local_runtime_capability_descriptors=(),
+        agent_spec=AgentSpec("agent", model="default"),
+        model={"provider": "test", "model": "fixture"},
+        selected=(),
+        subagents=(),
+        output_mode="text",
+        output_schema={"type": "string"},
         binding_digest="a" * 64,
-        global_runtime_capability_descriptors=(),
     )
 
 
@@ -100,6 +98,7 @@ def _execution() -> ExecutionRecord:
         safe_error_details={},
         created_at=now,
         updated_at=now,
+        mode="run",
         planning=False,
         thinking=False,
         binding=_binding_snapshot(),
@@ -110,16 +109,11 @@ def _result(execution_id: str, payload_kind: str, now: datetime) -> ResultRecord
     output = (
         StoredPayload.inline_json({"text": "result"})
         if payload_kind == "inline"
-        else StoredPayload.object(
-            ObjectRef("runtime", "result", "c" * 64, 7)
-        )
+        else StoredPayload.object(ObjectRef("runtime", "result", "c" * 64, 7))
     )
     return ResultRecord(
         execution_id=execution_id,
         tenant_id="tenant",
-        output_schema_id="schema",
-        output_schema_revision=1,
-        output_schema_fingerprint="fingerprint",
         output=output,
         stop_reason=StopReason.END_TURN,
         usage=UsageMetrics(),
@@ -132,9 +126,6 @@ def test_execution_record_writer_accepts_nested_json_result() -> None:
     result = ResultRecord(
         execution_id=execution.execution_id,
         tenant_id=execution.tenant_id,
-        output_schema_id="schema",
-        output_schema_revision=1,
-        output_schema_fingerprint="fingerprint",
         output=StoredPayload.inline_json(
             {
                 "findings": [
@@ -177,8 +168,11 @@ class _PersistenceTestModelBinding:
     route_id = "default"
     provider = "test"
     model_identity = "test:test"
-    connection_identity = "test"
     fingerprint = "a" * 64
+    semantic_payload: dict[str, JsonValue] = {
+        "provider": "test",
+        "model": "test",
+    }
 
     def materialize(self) -> TestModel:
         return TestModel(
@@ -202,6 +196,18 @@ class _PersistenceTestModels:
     def resolve(self, route_id: str) -> _PersistenceTestModelBinding:
         if route_id != "default":
             raise AssertionError(f"unexpected model route: {route_id}")
+        return _PersistenceTestModelBinding()
+
+    def restore(
+        self,
+        payload: dict[str, JsonValue],
+        *,
+        route_id: "str | None" = None,
+    ) -> _PersistenceTestModelBinding:
+        if route_id not in {None, "default"}:
+            raise AssertionError(f"unexpected model route: {route_id}")
+        if dict(payload) != _PersistenceTestModelBinding.semantic_payload:
+            raise AIError(ErrorCode.MODEL_CONNECTION_NOT_FOUND)
         return _PersistenceTestModelBinding()
 
 
@@ -229,13 +235,14 @@ async def test_terminal_stream_allows_immediate_runtime_close(
         state = RuntimeState.sqlite(database)
 
     try:
-        async with open_workspace_runtime(
+        async with Runtime.open(
             Workspace.load(workspace_root),
-            models=_PersistenceTestModels(),
+            models=_PersistenceTestModels(),  # type: ignore[arg-type]
             state=state,
         ) as runtime:
+            execution = await runtime.agent("default").start("hello")
             terminal_events = []
-            async for event in runtime.agent("default").stream("hello"):
+            async for event in execution.stream():
                 if event.event_type in {
                     ExecutionEventType.EXECUTION_SUCCEEDED,
                     ExecutionEventType.EXECUTION_FAILED,
@@ -266,9 +273,9 @@ async def test_session_runtime_persists_and_reads_terminal_result(
     state = RuntimeState.sqlite(database)
 
     try:
-        async with open_workspace_runtime(
+        async with Runtime.open(
             Workspace.load(workspace_root),
-            models=_PersistenceTestModels(),
+            models=_PersistenceTestModels(),  # type: ignore[arg-type]
             state=state,
         ) as runtime:
             created = await runtime.agent("default").create_session("session")
@@ -285,6 +292,7 @@ async def test_session_runtime_persists_and_reads_terminal_result(
                 timeout_seconds=10,
             )
             assert result.status is ExecutionStatus.SUCCEEDED
+            assert result.output_fingerprint is not None
 
             session_record = await state.conversation.sessions.get(
                 created.session_id,
@@ -317,10 +325,7 @@ async def test_session_runtime_persists_and_reads_terminal_result(
             }
 
             terminal_execution = replace(execution, result=None)
-            next_execution = replace(
-                terminal_execution,
-                result=persisted_result,
-            )
+            next_execution = replace(terminal_execution, result=persisted_result)
             _encode_persisted_domain(persisted_result)
             _encode_persisted_domain(next_execution)
 
@@ -335,6 +340,7 @@ async def test_session_runtime_persists_and_reads_terminal_result(
             assert inspected.status is ExecutionStatus.SUCCEEDED
             assert waited.status is ExecutionStatus.SUCCEEDED
             assert waited.output == persisted_result.output.value
+            assert waited.output_fingerprint == result.output_fingerprint
     finally:
         await state.close()
 
@@ -476,12 +482,7 @@ async def test_filesystem_compatible_read_is_pure_and_survives_reopen(
     reopened = RuntimeState.filesystem(root)
     await reopened.initialize(namespace=namespace, tenant_id=session.tenant_id)
     try:
-        await _assert_read_preserves_raw_record(
-            reopened,
-            session,
-            key,
-            raw_before,
-        )
+        await _assert_read_preserves_raw_record(reopened, session, key, raw_before)
     finally:
         await reopened.close()
 
@@ -505,12 +506,7 @@ async def test_sqlite_compatible_read_is_pure_and_survives_reopen(
     reopened = RuntimeState.sqlite(path)
     await reopened.initialize(namespace=namespace, tenant_id=session.tenant_id)
     try:
-        await _assert_read_preserves_raw_record(
-            reopened,
-            session,
-            key,
-            raw_before,
-        )
+        await _assert_read_preserves_raw_record(reopened, session, key, raw_before)
     finally:
         await reopened.close()
 

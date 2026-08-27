@@ -1,10 +1,13 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Model binding and resolution contracts."""
+"""Logical model binding and resolution contracts."""
 
+from collections.abc import Mapping
 from typing import Protocol
 
 from pydantic_ai.models import Model
+
+from ..core import JsonValue
 
 
 class ModelBinding(Protocol):
@@ -18,7 +21,7 @@ class ModelBinding(Protocol):
     def model_identity(self) -> str: ...
 
     @property
-    def connection_identity(self) -> str: ...
+    def semantic_payload(self) -> Mapping[str, JsonValue]: ...
 
     @property
     def fingerprint(self) -> str: ...
@@ -28,6 +31,13 @@ class ModelBinding(Protocol):
 
 class ModelResolver(Protocol):
     def resolve(self, route_id: str) -> ModelBinding: ...
+
+    def restore(
+        self,
+        payload: Mapping[str, JsonValue],
+        *,
+        route_id: "str | None" = None,
+    ) -> ModelBinding: ...
 
 
 __all__ = ["ModelBinding", "ModelResolver"]

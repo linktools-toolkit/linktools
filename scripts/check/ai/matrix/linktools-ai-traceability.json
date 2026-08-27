@@ -1,197 +1,111 @@
 {
-  "status": "COMPLETE",
-  "validated_source_commit": "ed02e1331484691a03d46bf1f20d59e28393ea5f",
+  "status": "VERIFIED",
+  "validated_source_commit": "054d2cb265e96dfb1d50070e4e5d68fcb6853161",
   "open_findings": [],
   "entries": [
     {
-      "owner": "runtime",
-      "requirements": "R-01,R-02,R-09",
-      "implementation": [
-        "runtime/_persistence.py",
-        "runtime/_execution.py",
-        "runtime/_session.py",
-        "runtime/_services.py",
-        "runtime/_runtime_service.py"
-      ],
-      "tests": [
-        "tests/ai/test_v5_conformance.py",
-        "tests/ai/persistence/test_runtime_resources.py"
-      ]
-    },
-    {
-      "owner": "workbench",
-      "requirements": "R-01,R-03,R-11,T-01,T-03,T-05,T-06,T-07,T-18,T-19,T-20",
-      "implementation": [
-        "workspace/_factory.py",
-        "storage/_lock.py"
-      ],
-      "tests": [
-        "tests/ai/test_v5_conformance.py"
-      ]
-    },
-    {
-      "owner": "adapter",
-      "requirements": "R-01,R-04,R-06,R-10,T-15,T-21",
-      "implementation": [
-        "adapter/_history.py",
-        "runtime/state/_memory.py",
-        "runtime/state/_sql.py",
-        "runtime/state/_schema.py"
-      ],
-      "tests": [
-        "tests/ai/test_v5_conformance.py",
-        "tests/ai/persistence/test_runtime_resources.py",
-        "tests/ai/test_v5_conformance.py::test_memory_and_sqlite_request_cancel_operation_preconditions_match"
-      ]
-    },
-    {
-      "owner": "composition",
-      "requirements": "R-02,R-09",
-      "implementation": [
-        "workspace/_factory.py",
-        "runtime/_runtime_service.py"
-      ],
-      "tests": [
-        "tests/ai/test_v5_conformance.py::test_runtime_access_exposes_task_api_and_query_wrappers"
-      ]
-    },
-    {
       "owner": "architecture",
-      "requirements": "R-07,R-08,T-08,T-10,T-11",
+      "requirements": "final package ownership and public surface",
       "implementation": [
-        "scripts/check/ai/names.py",
         "scripts/check/ai/architecture.py",
-        "scripts/check/ai/matrix/linktools-ai-package-policy.json"
+        "scripts/check/ai/matrix/linktools-ai-package-policy.json",
+        "scripts/check/ai/matrix/linktools-ai-contract-map.json"
       ],
       "tests": [
         "tests/ai/test_architecture.py"
       ]
     },
     {
-      "owner": "temporal",
-      "requirements": "T-12",
+      "owner": "capability",
+      "requirements": "CapabilityGroup is the single registration and frozen discovery unit",
       "implementation": [
-        "temporal/_activity.py",
-        "temporal/_worker.py",
-        "temporal/workflow"
+        "linktools-ai/src/linktools/ai/capability/_group.py",
+        "linktools-ai/src/linktools/ai/capability/_skill.py",
+        "linktools-ai/src/linktools/ai/capability/_workspace.py"
       ],
       "tests": [
-        "tests/ai/test_contracts.py::test_temporal_registration_has_one_explicit_worker_surface"
+        "tests/ai/test_asset_repository.py",
+        "tests/ai/test_runtime_capability_identity.py",
+        "tests/ai/test_spec_capability_refactor.py"
       ]
     },
     {
-      "owner": "profile-removal",
-      "requirements": "R-09,R-10,T-13,T-14,T-15,T-16,T-17",
+      "owner": "agent",
+      "requirements": "AgentCompiler owns selection and AgentBinding pins exact execution semantics",
       "implementation": [
-        "core/_value.py",
-        "errors.py",
-        "runtime",
-        "adapter",
-        "workspace/_factory.py",
-        "workspace"
+        "linktools-ai/src/linktools/ai/agent/_compiler.py",
+        "linktools-ai/src/linktools/ai/agent/_binding.py",
+        "linktools-ai/src/linktools/ai/agent/_output.py"
       ],
       "tests": [
-        "tests/ai/test_v5_conformance.py::test_public_runtime_contract_has_no_profile_or_replacement_category",
-        "tests/ai/test_v5_conformance.py::test_runtime_composition_is_driven_by_injected_dependencies",
-        "tests/ai/test_v5_conformance.py::test_file_decoder_ignores_legacy_profile_fields",
-        "tests/ai/test_v5_conformance.py::test_sql_legacy_profile_tombstone_is_not_domain_semantic",
-        "tests/ai/test_v5_conformance.py::test_profile_removal_preserves_idempotency_conflicts_and_digest_scope"
+        "tests/ai/test_agent_composition.py",
+        "tests/ai/test_runtime_binding_contract.py"
       ]
     },
     {
-      "owner": "evidence",
-      "requirements": "R-05",
+      "owner": "runtime",
+      "requirements": "Runtime.open is the composition root and Agent, Session, and Execution are runtime-bound facades",
       "implementation": [
-        "scripts/check/ai/matrix/requirement-matrix.json",
-        "scripts/check/ai/matrix/runtime-step-requirements.json",
-        "scripts/check/ai/matrix/linktools-ai-evidence.json",
-        "scripts/check/ai/matrix/linktools-ai-review-coverage.json"
+        "linktools-ai/src/linktools/ai/runtime/_runtime_service.py",
+        "linktools-ai/src/linktools/ai/runtime/_factory.py",
+        "linktools-ai/src/linktools/ai/runtime/_agent.py",
+        "linktools-ai/src/linktools/ai/runtime/_agent_executor.py",
+        "linktools-ai/src/linktools/ai/runtime/_capabilities.py"
       ],
       "tests": [
-        "scripts/check/ai/matrix/requirement-matrix.json",
-        "scripts/check/ai/matrix/runtime-step-requirements.json",
-        "scripts/check/ai/matrix/linktools-ai-evidence.json",
-        "scripts/check/ai/matrix/linktools-ai-review-coverage.json"
+        "tests/ai/test_runtime_composition_regressions.py",
+        "tests/ai/test_agent_composition.py",
+        "tests/ai/test_runtime_stream_order.py"
       ]
     },
     {
-      "owner": "cancellation",
-      "requirements": "R-01,T-19,T-20,T-21",
+      "owner": "durability",
+      "requirements": "v1 binding, output, prompt, execution mode, and recovery semantics are explicit and restorable",
       "implementation": [
-        "runtime/_execution.py",
-        "workspace/_factory.py",
-        "runtime/state/_sql.py"
+        "linktools-ai/src/linktools/ai/agent/_binding.py",
+        "linktools-ai/src/linktools/ai/runtime/state/_contracts.py",
+        "scripts/check/ai/persistence.py",
+        "scripts/check/ai/matrix/runtime_agent_binding_snapshot_v1.json",
+        "scripts/check/ai/matrix/runtime_custom_wire_v1.json",
+        "scripts/check/ai/matrix/runtime_model_messages_v1.json"
       ],
       "tests": [
-        "tests/ai/test_v5_conformance.py::test_cancel_natural_terminal_wins_without_effect_unknown_or_storage_failure",
-        "tests/ai/test_v5_conformance.py::test_confirmed_cancel_requires_task_cancelled_and_closes_operation",
-        "tests/ai/test_v5_conformance.py::test_concurrent_cancel_request_ids_share_terminal_but_keep_ledgers",
-        "tests/ai/test_v5_conformance.py::test_cancel_terminal_wins_before_request_cancel_cas",
-        "tests/ai/test_v5_conformance.py::test_cancel_backend_failure_keeps_stable_error_in_operation_ledger"
+        "tests/ai/test_runtime_persistence_compatibility.py",
+        "tests/ai/test_runtime_persistence_evidence.py",
+        "tests/ai/test_user_content_durable_boundaries.py",
+        "tests/ai/test_local_execution_recovery.py"
       ]
     },
     {
-      "owner": "naming",
-      "requirements": "R-07,T-32",
+      "owner": "effects",
+      "requirements": "tool effects, cancellation, and commit-unknown paths preserve durable truth",
       "implementation": [
-        "scripts/check/ai/names.py"
+        "linktools-ai/src/linktools/ai/runtime/_capabilities.py",
+        "linktools-ai/src/linktools/ai/runtime/_tool.py",
+        "linktools-ai/src/linktools/ai/runtime/_local.py"
       ],
       "tests": [
-        "tests/ai/test_architecture.py::test_name_gate_allows_parallel_names_and_rejects_namespace_collisions",
-        "tests/ai/test_architecture.py::test_name_gate_includes_modules_and_packages_in_namespace_model",
-        "tests/ai/test_architecture.py::test_name_gate_treats_private_marker_as_semantic_only",
-        "tests/ai/test_architecture.py::test_name_gate_includes_modules_and_packages_in_namespace_model"
+        "tests/ai/test_tool_effect_semantics.py",
+        "tests/ai/test_closure_fix.py",
+        "tests/ai/test_runtime_stream_order.py"
       ]
     },
     {
-      "owner": "task-concurrency",
-      "requirements": "F-13,R-01,R-02,R-03,T-23,T-24,T-25,DOD-082",
+      "owner": "storage",
+      "requirements": "memory, filesystem, SQLite, MySQL, and PostgreSQL implementation contracts remain explicit without pessimistic database locking",
       "implementation": [
-        "runtime/_planner.py"
+        "linktools-ai/src/linktools/ai/runtime/state",
+        "linktools-ai/src/linktools/ai/storage",
+        "linktools-ai/src/linktools/ai/migrate"
       ],
       "tests": [
-        "tests/ai/test_v5_conformance.py::test_task_run_same_key_has_single_effect_owner",
-        "tests/ai/test_v5_conformance.py::test_task_failed_operation_replays_stable_error",
-        "tests/ai/test_v5_conformance.py::test_task_cancel_same_key_has_single_effect_owner"
-      ]
-    },
-    {
-      "owner": "execution-cancellation-convergence",
-      "requirements": "F-13,R-04,T-26,T-27,DOD-083",
-      "implementation": [
-        "runtime/_execution.py"
-      ],
-      "tests": [
-        "tests/ai/test_v5_conformance.py::test_execution_cancel_same_id_unknown_then_confirmed_converges",
-        "tests/ai/test_v5_conformance.py::test_execution_cancel_effect_unknown_resolves_actual_terminal"
-      ]
-    },
-    {
-      "owner": "profile-removal-completeness",
-      "requirements": "F-12,T-28",
-      "implementation": [
-        "runtime/_execution.py",
-        "runtime/_session.py",
-        "runtime/_planner.py"
-      ],
-      "tests": [
-        "tests/ai/test_v5_conformance.py::test_profile_removal_preserves_idempotency_conflicts_and_digest_scope"
-      ]
-    },
-    {
-      "owner": "contract-provenance",
-      "requirements": "F-05,T-29,DOD-023,DOD-024",
-      "implementation": [
-        "scripts/check/ai/matrix/runtime-step-requirements.json",
-        "scripts/check/ai/matrix/requirement-matrix.json"
-      ],
-      "tests": [
-        "tests/ai/test_architecture.py::test_runtime_step_contract_matrix_is_current"
+        "tests/ai/test_runtime_storage_io_convergence.py",
+        "tests/ai/test_filesystem_mutation_invariants.py"
       ]
     }
   ],
   "scope_exclusions": [
-    "Downstream migration and compatibility work are explicitly excluded by the user."
+    "Downstream migration and compatibility work are excluded from this refactor."
   ],
   "spec_revision": "linktools-ai-spec-capability-agent-runtime-refactor",
   "review_scope": "linktools-ai-spec-capability-agent-runtime-refactor"

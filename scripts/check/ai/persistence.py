@@ -10,7 +10,6 @@ from pathlib import Path
 from typing import cast
 
 from linktools.ai.agent import AgentBindingSnapshot, bind_output, restore_output
-from linktools.ai.capability import RuntimeCapability
 from linktools.ai.core import (
     IdempotencyStatus,
     JsonValue,
@@ -31,23 +30,11 @@ from linktools.ai.runtime.state._contracts import (
 from linktools.ai.spec import AgentSpec
 from linktools.ai.task import TaskNode
 from pydantic_ai.messages import ModelRequest, UserPromptPart
-from pydantic_ai.capabilities import AbstractCapability
 
 _BINDING_FIXTURE = "runtime_agent_binding_snapshot_v1.json"
 _CUSTOM_WIRE_FIXTURE = "runtime_custom_wire_v1.json"
 _MODEL_MESSAGE_FIXTURE = "runtime_model_messages_v1.json"
 _MATRIX_DIR = Path(__file__).with_name("matrix")
-
-
-class _PersistenceCapability(AbstractCapability[None]):
-    @classmethod
-    def get_serialization_name(cls) -> "str | None":
-        return "runtime-persistence-fixture"
-
-    @classmethod
-    def from_spec(cls, **kwargs: object) -> "_PersistenceCapability":
-        del kwargs
-        return cls()
 
 
 def _load_json(path: Path) -> object:
@@ -78,14 +65,12 @@ def _binding_fixture_value() -> AgentBindingSnapshot:
     return AgentBindingSnapshot(
         version=1,
         agent_spec=AgentSpec("runtime-persistence-v1"),
-        agent_digest="a" * 64,
-        output_schema_id=output.schema_id,
-        output_schema_revision=output.schema_revision,
-        output_schema_fingerprint=output.schema_fingerprint,
-        local_runtime_capability_descriptors=(),
+        model={"route_id": "default", "model_identity": "fixture:model"},
+        selected=(),
+        subagents=(),
+        output_mode=output.mode,
+        output_schema=output.schema_definition,
         binding_digest="c" * 64,
-        global_runtime_capability_descriptors=(),
-        output_schema_definition=output.schema_definition,
     )
 
 
@@ -117,41 +102,14 @@ def validate_agent_binding_fixture(matrix_dir: str | Path) -> tuple[str, ...]:
     return ()
 
 
-def _validate_output_descriptor() -> tuple[str, ...]:
+def _validate_output_contract() -> tuple[str, ...]:
     binding = bind_output()
-    descriptor = binding.descriptor
-    descriptor["future_metadata"] = {"$future_v2": ["must", "not", "decode"]}
     try:
-        restored = restore_output(descriptor)
+        restored = restore_output(binding.mode, binding.schema_definition)
     except (AIError, KeyError, TypeError, ValueError) as error:
-        return (f"Output descriptor additive field is not tolerated: {error}",)
-    if restored != binding:
-        return ("Output descriptor additive field changed semantics",)
-    return ()
-
-
-def _validate_runtime_capability_descriptor() -> tuple[str, ...]:
-    capability = RuntimeCapability.from_spec(
-        "runtime-persistence-fixture",
-        _PersistenceCapability,
-        config={},
-    )
-    descriptor = capability.descriptor
-    if descriptor is None:
-        return ("RuntimeCapability fixture did not produce a descriptor",)
-    additive = dict(descriptor)
-    additive["future_metadata"] = {"$future_v2": ["must", "not", "decode"]}
-    try:
-        restored = RuntimeCapability.restore(additive)
-    except (AIError, KeyError, TypeError, ValueError) as error:
-        return (
-            "RuntimeCapability descriptor additive field is not tolerated: "
-            f"{error}",
-        )
-    if restored.id != capability.id or restored.revision != capability.revision:
-        return ("RuntimeCapability additive field changed identity",)
-    if restored.fingerprint != capability.fingerprint:
-        return ("RuntimeCapability additive field changed fingerprint",)
+        return (f"Output contract is not restorable from durable semantics: {error}",)
+    if restored != binding or restored.fingerprint != binding.fingerprint:
+        return ("Output contract restore changed durable semantics",)
     return ()
 
 
@@ -348,8 +306,7 @@ def validate_exact_fixtures(matrix_dir: str | Path) -> tuple[str, ...]:
     root = Path(matrix_dir)
     return (
         *validate_agent_binding_fixture(root),
-        *_validate_output_descriptor(),
-        *_validate_runtime_capability_descriptor(),
+        *_validate_output_contract(),
         *validate_custom_wire_fixture(root),
         *validate_model_message_fixture(root),
         *_validate_generic_compatibility(),

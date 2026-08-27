@@ -1,192 +1,134 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Regression coverage for durable RuntimeCapability type identity."""
+"""Regression coverage for opaque capability semantic identity."""
+
+from dataclasses import dataclass, fields
 
 import pytest
-from linktools.ai.capability import RuntimeCapability
+from linktools.ai.capability import CapabilityContribution, CapabilityGroup, RunContext
 from linktools.ai.errors import AIError, ErrorCode
+from linktools.ai.spec import AgentSpec
 from pydantic_ai.capabilities import AbstractCapability
 
 
-class _OtherCapability(AbstractCapability[None]):
-    @classmethod
-    def get_serialization_name(cls) -> "str | None":
-        return "other-capability"
-
-    @classmethod
-    def from_spec(cls, **kwargs: object) -> "_OtherCapability":
-        del kwargs
-        return cls()
-
-
-class _WrongFactoryCapability(AbstractCapability[None]):
-    @classmethod
-    def get_serialization_name(cls) -> "str | None":
-        return "wrong-factory-capability"
-
-    @classmethod
-    def from_spec(cls, **kwargs: object) -> "_OtherCapability":
-        del kwargs
-        return _OtherCapability()
-
-
-class _RestorableCapability(AbstractCapability[None]):
-    raise_serialization_error = False
-    factory_calls = 0
+@dataclass
+class _Capability(AbstractCapability[RunContext[None]]):
+    id: str = "test-capability"
 
     @classmethod
     def get_serialization_name(cls) -> "str | None":
-        if cls.raise_serialization_error:
-            raise RuntimeError("serialization failure")
-        return "restorable-capability"
-
-    @classmethod
-    def from_spec(cls, **kwargs: object) -> "_RestorableCapability":
-        del kwargs
-        cls.factory_calls += 1
-        return cls()
+        return None
 
 
-def test_from_spec_rejects_factory_returning_a_different_type() -> None:
+@pytest.mark.asyncio
+async def test_capability_revision_is_fingerprint_input_only() -> None:
+    first = CapabilityGroup[None]("first")
+    first.capability(_Capability(), revision=1)
+    second = CapabilityGroup[None]("second")
+    second.capability(_Capability(), revision=2)
+
+    first_candidate = (await first.freeze())[0]
+    second_candidate = (await second.freeze())[0]
+
+    assert tuple(item.name for item in fields(CapabilityContribution)) == (
+        "kind",
+        "id",
+        "fingerprint",
+        "value",
+    )
+    assert first_candidate.kind == "capability"
+    assert first_candidate.id == "test-capability"
+    assert not hasattr(first_candidate, "semantic_revision")
+    assert first_candidate.semantic_contract["semantic_revision"] == 1
+    assert second_candidate.semantic_contract["semantic_revision"] == 2
+    assert first_candidate.fingerprint != second_candidate.fingerprint
+    assert "restore_locator" not in first_candidate.semantic_contract
+
+
+@pytest.mark.asyncio
+async def test_identical_capability_semantics_have_stable_fingerprint() -> None:
+    left = CapabilityGroup[None]("left")
+    left.capability(_Capability(), revision=7, semantic_config={"mode": "strict"})
+    right = CapabilityGroup[None]("right")
+    right.capability(_Capability(), revision=7, semantic_config={"mode": "strict"})
+
+    left_candidate = (await left.freeze())[0]
+    right_candidate = (await right.freeze())[0]
+
+    assert left_candidate.fingerprint == right_candidate.fingerprint
+    assert left_candidate.semantic_contract == right_candidate.semantic_contract
+    assert left_candidate.semantic_contract["config"] == {"mode": "strict"}
+
+
+@pytest.mark.asyncio
+async def test_public_semantic_config_changes_capability_fingerprint() -> None:
+    strict = CapabilityGroup[None]("strict")
+    strict.capability(_Capability(), revision=1, semantic_config={"mode": "strict"})
+    relaxed = CapabilityGroup[None]("relaxed")
+    relaxed.capability(_Capability(), revision=1, semantic_config={"mode": "relaxed"})
+
+    strict_candidate = (await strict.freeze())[0]
+    relaxed_candidate = (await relaxed.freeze())[0]
+
+    assert strict_candidate.fingerprint != relaxed_candidate.fingerprint
+
+
+def test_opaque_contribution_factory_rejects_canonical_declarations() -> None:
     with pytest.raises(AIError) as error:
-        RuntimeCapability.from_spec(
-            "capability",
-            _WrongFactoryCapability,
-            config={},
+        CapabilityContribution.from_opaque(
+            "agent",  # type: ignore[arg-type]
+            "agent",
+            AgentSpec("agent"),  # type: ignore[arg-type]
         )
     assert error.value.code is ErrorCode.CAPABILITY_RESOLUTION_INVALID
-
-
-def test_restore_rejects_factory_returning_a_different_type(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    value = RuntimeCapability.from_spec(
-        "capability",
-        _RestorableCapability,
-        config={},
-    )
-    descriptor = value.descriptor
-    assert descriptor is not None
-
-    monkeypatch.setattr(
-        _RestorableCapability,
-        "from_spec",
-        classmethod(lambda cls, **kwargs: _OtherCapability()),
-    )
-
-    with pytest.raises(AIError) as error:
-        RuntimeCapability.restore(descriptor)
-    assert error.value.code is ErrorCode.AGENT_DEFINITION_UNAVAILABLE
-
-
-def test_invalid_identity_is_rejected_before_factory_execution() -> None:
-    before = _RestorableCapability.factory_calls
-
-    with pytest.raises(AIError) as error:
-        RuntimeCapability.from_spec(
-            "",
-            _RestorableCapability,
-            config={},
-        )
-
-    assert error.value.code is ErrorCode.CAPABILITY_RESOLUTION_INVALID
-    assert _RestorableCapability.factory_calls == before
-
-
-def test_process_entrypoint_locator_is_rejected_before_factory_execution(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    before = _RestorableCapability.factory_calls
-    for module_name in ("__main__", "__mp_main__"):
-        with monkeypatch.context() as patch:
-            patch.setattr(_RestorableCapability, "__module__", module_name)
-            with pytest.raises(AIError) as error:
-                RuntimeCapability.from_spec(
-                    "capability",
-                    _RestorableCapability,
-                    config={},
-                )
-            assert error.value.code is ErrorCode.CAPABILITY_RESOLUTION_INVALID
-    assert _RestorableCapability.factory_calls == before
-
-
-def test_restore_ignores_unknown_descriptor_field() -> None:
-    value = RuntimeCapability.from_spec(
-        "capability",
-        _RestorableCapability,
-        config={},
-    )
-    descriptor = value.descriptor
-    assert descriptor is not None
-    descriptor["future_metadata"] = {"$future_v2": ["must", "not", "decode"]}
-
-    restored = RuntimeCapability.restore(descriptor)
-
-    assert restored.id == value.id
-    assert restored.revision == value.revision
-    assert restored.fingerprint == value.fingerprint
-
-
-def test_restore_rejects_missing_descriptor_field() -> None:
-    value = RuntimeCapability.from_spec(
-        "capability",
-        _RestorableCapability,
-        config={},
-    )
-    descriptor = value.descriptor
-    assert descriptor is not None
-    descriptor.pop("serialization_name")
-
-    with pytest.raises(AIError) as error:
-        RuntimeCapability.restore(descriptor)
-    assert error.value.code is ErrorCode.AGENT_DEFINITION_UNAVAILABLE
 
 
 @pytest.mark.parametrize("revision", [0, -1, True])
-def test_invalid_revision_is_rejected_before_factory_execution(revision: object) -> None:
-    before = _RestorableCapability.factory_calls
+def test_invalid_capability_revision_is_rejected(revision: object) -> None:
+    group = CapabilityGroup[None]("group")
+    with pytest.raises(AIError) as error:
+        group.capability(_Capability(), revision=revision)  # type: ignore[arg-type]
+    assert error.value.code is ErrorCode.CAPABILITY_RESOLUTION_INVALID
+
+
+def test_deferred_generic_capability_is_rejected_by_v1_always_on_contract() -> None:
+    capability = _Capability()
+    capability.defer_loading = True
+    group = CapabilityGroup[None]("group")
 
     with pytest.raises(AIError) as error:
-        RuntimeCapability.from_spec(
-            "capability",
-            _RestorableCapability,
-            config={},
-            revision=revision,  # type: ignore[arg-type]
-        )
+        group.capability(capability)
 
     assert error.value.code is ErrorCode.CAPABILITY_RESOLUTION_INVALID
-    assert _RestorableCapability.factory_calls == before
+    assert error.value.safe_details["reason"] == "deferred_loading_not_supported"
 
 
-def test_from_spec_maps_serialization_extension_failure() -> None:
-    _RestorableCapability.raise_serialization_error = True
-    try:
-        with pytest.raises(AIError) as error:
-            RuntimeCapability.from_spec(
-                "capability",
-                _RestorableCapability,
-                config={},
-            )
-    finally:
-        _RestorableCapability.raise_serialization_error = False
-
+@pytest.mark.parametrize(
+    "capability_id",
+    [
+        "workspace-filesystem",
+        "workspace-shell",
+        "linktools-skill",
+        "linktools-memory",
+        "linktools-planning",
+        "linktools-subagent",
+        "mcp__server",
+    ],
+)
+def test_custom_capability_cannot_claim_runtime_or_mcp_namespace(capability_id: str) -> None:
+    group = CapabilityGroup[None]("group")
+    with pytest.raises(AIError) as error:
+        group.capability(_Capability(capability_id))
     assert error.value.code is ErrorCode.CAPABILITY_RESOLUTION_INVALID
 
 
-def test_restore_maps_serialization_extension_failure() -> None:
-    value = RuntimeCapability.from_spec(
-        "capability",
-        _RestorableCapability,
-        config={},
-    )
-    descriptor = value.descriptor
-    assert descriptor is not None
+@pytest.mark.asyncio
+async def test_duplicate_capability_identity_is_rejected_when_group_freezes() -> None:
+    group = CapabilityGroup[None]("group")
+    group.capability(_Capability(), revision=1)
+    group.capability(_Capability(), revision=1)
 
-    _RestorableCapability.raise_serialization_error = True
-    try:
-        with pytest.raises(AIError) as error:
-            RuntimeCapability.restore(descriptor)
-    finally:
-        _RestorableCapability.raise_serialization_error = False
+    with pytest.raises(AIError) as error:
+        await group.freeze()
 
-    assert error.value.code is ErrorCode.AGENT_DEFINITION_UNAVAILABLE
+    assert error.value.code is ErrorCode.CAPABILITY_CONFLICT

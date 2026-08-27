@@ -4206,7 +4206,7 @@ class ToolRepositoryImpl(_RepositoryBase):
                     idempotency_key_digest=request.idempotency_key_digest,
                     tool_name=request.tool_name,
                     arguments_digest=request.arguments_digest,
-                    binding_fingerprint=request.binding_fingerprint,
+                    binding_digest=request.binding_digest,
                     replay_safe=request.replay_safe,
                     status=ToolOperationStatus.CLAIMED,
                     owner=request.owner,
@@ -5039,7 +5039,7 @@ def _tool_replay_matches(left: ToolOperationRecord, right: ToolOperationRecord) 
         and left.idempotency_key_digest == right.idempotency_key_digest
         and left.tool_name == right.tool_name
         and left.arguments_digest == right.arguments_digest
-        and left.binding_fingerprint == right.binding_fingerprint
+        and left.binding_digest == right.binding_digest
         and left.replay_safe == right.replay_safe
     )
 
@@ -5052,7 +5052,7 @@ def _tool_admission_matches(left: ToolOperationRecord, right: ToolOperationAdmis
         and left.idempotency_key_digest == right.idempotency_key_digest
         and left.tool_name == right.tool_name
         and left.arguments_digest == right.arguments_digest
-        and left.binding_fingerprint == right.binding_fingerprint
+        and left.binding_digest == right.binding_digest
         and left.replay_safe is right.replay_safe
         and left.step_run_id in {right.step_run_id, right.recovery_step_run_id}
     )

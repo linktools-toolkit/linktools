@@ -8,9 +8,10 @@ from typing import cast
 from linktools.core import environ
 from pydantic_ai.exceptions import ModelRetry
 
-from ..agent import AgentCatalog, AgentCompiler, SubagentDelegate
-from ..core import ExecutionStatus, JsonValue, Principal, canonical_sha256
+from ..agent import AgentCatalog, AgentCompiler
+from ..core import ExecutionMode, ExecutionStatus, JsonValue, Principal, ThinkingValue, canonical_sha256
 from ..errors import AIError, ErrorCode
+from ._capabilities import SubagentDelegate
 from ._execution import DefaultExecutionService
 from .service_api import CancelExecutionRequest, ExecutionRequest, ExecutionResult
 
@@ -43,8 +44,9 @@ class SubagentDispatcher:
         memory_scope: "str | None",
         principal: Principal,
         allowed_agent_ids: "tuple[str, ...]",
+        mode: ExecutionMode,
         planning: bool,
-        thinking: bool,
+        thinking: ThinkingValue,
     ) -> SubagentDelegate:
         allowed = frozenset(allowed_agent_ids)
         if len(allowed) != len(allowed_agent_ids):
@@ -62,6 +64,7 @@ class SubagentDispatcher:
                 memory_scope=memory_scope,
                 principal=principal,
                 allowed_agent_ids=allowed,
+                mode=mode,
                 planning=planning,
                 thinking=thinking,
                 agent_id=agent_id,
@@ -79,8 +82,9 @@ class SubagentDispatcher:
         memory_scope: "str | None",
         principal: Principal,
         allowed_agent_ids: "frozenset[str]",
+        mode: ExecutionMode,
         planning: bool,
-        thinking: bool,
+        thinking: ThinkingValue,
         agent_id: str,
         user_prompt: str,
         tool_call_id: str,
@@ -106,15 +110,18 @@ class SubagentDispatcher:
                 "parent_execution_id": parent_execution_id,
                 "tool_call_id": tool_call_id,
                 "agent_id": agent_id,
+                "mode": mode,
                 "planning": planning,
                 "thinking": thinking,
             }
         )
         request = ExecutionRequest(
             user_prompt=user_prompt,
+            user_prompt_codec="text",
             principal=principal,
             idempotency_key=idempotency_key,
             memory_scope=memory_scope,
+            mode=mode,
             planning=planning,
             thinking=thinking,
         )

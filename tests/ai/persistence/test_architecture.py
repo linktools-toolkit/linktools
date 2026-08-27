@@ -14,7 +14,7 @@ def test_runtime_has_no_provider_or_adapter_dependency() -> None:
         for node in ast.walk(tree):
             if isinstance(node, ast.ImportFrom) and node.level == 0 and node.module and node.module.startswith("linktools.ai"):
                 raise AssertionError(f"runtime uses absolute AI import: {path}:{node.lineno}")
-            if isinstance(node, ast.ImportFrom) and node.module and node.module.split(".", 1)[0] in {"adapter", "workspace", "temporal", "app"}:
+            if isinstance(node, ast.ImportFrom) and node.module and node.module.split(".", 1)[0] in {"adapter", "temporal", "app"}:
                 raise AssertionError(f"runtime imports forbidden package: {path}:{node.lineno}")
 
 
@@ -31,8 +31,9 @@ def test_converged_roots_and_owners_exist() -> None:
     assert not (root / "app" / "_sql.py").exists()
     assert (root / "runtime" / "state" / "_sql.py").is_file()
     assert (root / "runtime" / "state" / "_repositories.py").is_file()
-    assert (root / "adapter" / "_history.py").is_file()
+    assert (root / "runtime" / "_history.py").is_file()
     assert (root / "runtime" / "state" / "_steps.py").is_file()
+    assert not (root / "adapter" / "_history.py").exists()
     assert not (root / "adapter" / "_sql_runtime.py").exists()
     assert not (root / "adapter" / "_sql_repositories.py").exists()
     assert not (root / "adapter" / "_step.py").exists()

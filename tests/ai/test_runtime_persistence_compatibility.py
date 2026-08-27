@@ -71,14 +71,13 @@ def _binding_snapshot_payload() -> dict[str, object]:
     output = bind_output()
     snapshot = AgentBindingSnapshot(
         version=1,
-        agent_spec=AgentSpec("agent", 1, "default"),
-        agent_digest="b" * 64,
-        output_schema_id=output.schema_id,
-        output_schema_revision=output.schema_revision,
-        output_schema_fingerprint=output.schema_fingerprint,
-        local_runtime_capability_descriptors=(),
+        agent_spec=AgentSpec("agent"),
+        model={"route_id": "default", "model_identity": "test:model"},
+        selected=(),
+        subagents=(),
+        output_mode=output.mode,
+        output_schema=output.schema_definition,
         binding_digest="a" * 64,
-        global_runtime_capability_descriptors=(),
     )
     return snapshot.to_payload()
 
@@ -280,13 +279,12 @@ def test_agent_binding_snapshot_ignores_unknown_ordinary_field() -> None:
     (
         "version",
         "agent_spec",
-        "agent_digest",
-        "output_schema_id",
-        "output_schema_revision",
-        "output_schema_fingerprint",
-        "local_runtime_capability_descriptors",
+        "model",
+        "selected",
+        "subagents",
+        "output_mode",
+        "output_schema",
         "binding_digest",
-        "global_runtime_capability_descriptors",
     ),
 )
 def test_agent_binding_snapshot_requires_current_fields(missing: str) -> None:

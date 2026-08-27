@@ -3,15 +3,18 @@
 """Regression tests for workspace RuntimeState composition."""
 
 import pytest
-from linktools.ai.adapter import RuntimeMemoryStore
-from linktools.ai.model import ModelRegistry
-from linktools.ai.runtime import RuntimeDomain, RuntimeState
-from linktools.ai.spec import AgentSpec, AgentSpecCodec
-from linktools.ai.workspace import (
-    Workspace,
-    build_workspace_assets,
-    open_workspace_runtime,
+from linktools.ai.asset import (
+    AssetStore,
+    DirectoryAssetBackend,
+    PrefixAssetPathAdapter,
 )
+from linktools.ai.capability import CapabilityGroup
+from linktools.ai.model import ModelRegistry
+from linktools.ai.runtime import Runtime, RuntimeDomain, RuntimeState
+from linktools.ai.runtime._memory import RuntimeMemoryStore
+from linktools.ai.spec import AgentSpec, AgentSpecCodec, MCPServerSpec, MCPServerSpecCodec
+from linktools.ai.storage import StorageOverlay
+from linktools.ai.workspace import Workspace
 
 
 @pytest.mark.asyncio
@@ -21,7 +24,7 @@ async def test_runtime_memory_store_accepts_harness_scoped_paths() -> None:
     try:
         store = RuntimeMemoryStore(
             state.memory,
-            object_store=state._object_store(RuntimeDomain.MEMORY),
+            object_store=state.object_store(RuntimeDomain.MEMORY),
             namespace="memory-regression",
             tenant_id="tenant",
             execution_id="execution",
@@ -51,7 +54,7 @@ async def test_runtime_memory_store_accepts_harness_scoped_paths() -> None:
 
 
 @pytest.mark.asyncio
-async def test_workspace_assets_use_kind_scoped_paths(tmp_path) -> None:
+async def test_workspace_store_loads_kind_scoped_declarations(tmp_path) -> None:
     assets_root = tmp_path / ".linktools"
     agent_path = assets_root / "agents" / "default"
     skill_path = assets_root / "skills" / "review" / "SKILL.md"
@@ -59,31 +62,37 @@ async def test_workspace_assets_use_kind_scoped_paths(tmp_path) -> None:
     agent_path.parent.mkdir(parents=True)
     skill_path.parent.mkdir(parents=True)
     mcp_path.parent.mkdir(parents=True)
-    agent_path.write_bytes(AgentSpecCodec().encode(AgentSpec("default", 1, "gpt-test")))
+    agent_path.write_bytes(AgentSpecCodec().encode(AgentSpec("default", model="gpt-test")))
     skill_path.write_text(
         "---\nname: review\ndescription: Review changes.\n---\n\nReview changes.\n",
         encoding="utf-8",
     )
-    mcp_path.write_text(
-        '{"id":"local","revision":1,"command":"echo"}',
-        encoding="utf-8",
+    mcp_path.write_bytes(MCPServerSpecCodec().encode(MCPServerSpec("local", "echo")))
+
+    source = DirectoryAssetBackend(
+        str(assets_root),
+        path_adapter=PrefixAssetPathAdapter(
+            {"agent": "agents", "skill": "skills", "mcp": "mcp"}
+        ),
+        kinds=("agent", "skill", "mcp"),
     )
+    store = AssetStore(StorageOverlay(source))
+    await store.initialize()
 
-    assets = await build_workspace_assets(Workspace.load(tmp_path))
+    frozen = await CapabilityGroup.from_store("workspace", store).freeze()
 
-    agents = await assets.list(kind="agent")
-    skills = await assets.list(kind="skill")
-    mcp_servers = await assets.list(kind="mcp")
-    assert [item.ref.id for item in agents.items] == ["default"]
-    assert [item.ref.id for item in skills.items] == ["review"]
-    assert [item.ref.id for item in mcp_servers.items] == ["local"]
+    assert [(item.kind, item.id) for item in frozen] == [
+        ("agent", "default"),
+        ("mcp", "local"),
+        ("skill", "review"),
+    ]
 
 
 @pytest.mark.asyncio
 async def test_workspace_session_survives_cold_restart(tmp_path) -> None:
     workspace = Workspace.load(tmp_path)
     models = ModelRegistry.openai(model="gpt-test")
-    async with open_workspace_runtime(workspace, models=models) as runtime:
+    async with Runtime.open(workspace, models=models) as runtime:
         assert runtime.tenant_id == "default"
         assert runtime.default_principal.tenant_id == "default"
         created = await runtime.agent("default").create_session("remember")
@@ -95,7 +104,7 @@ async def test_workspace_session_survives_cold_restart(tmp_path) -> None:
             )
         ).items == ()
 
-    async with open_workspace_runtime(
+    async with Runtime.open(
         workspace,
         tenant_id="tenant-a",
         models=models,
@@ -104,7 +113,7 @@ async def test_workspace_session_survives_cold_restart(tmp_path) -> None:
         assert runtime.default_principal.tenant_id == "tenant-a"
         await runtime.agent("default").create_session("custom-tenant")
 
-    async with open_workspace_runtime(workspace, models=models) as runtime:
+    async with Runtime.open(workspace, models=models) as runtime:
         loaded = await runtime.session.get(
             created.session_id,
             principal=runtime.default_principal,
@@ -118,8 +127,6 @@ async def test_workspace_session_survives_cold_restart(tmp_path) -> None:
             principal=runtime.default_principal,
         )
 
-    assert loaded is not None
     assert loaded.session_id == created.session_id
-    assert agent_loaded is not None
     assert agent_loaded.session_id == agent_created.session_id
     assert history.items == ()

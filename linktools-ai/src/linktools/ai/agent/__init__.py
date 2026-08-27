@@ -1,69 +1,24 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Agent definition compilation and execution."""
+"""Static Agent definition, compilation, binding, and output contracts."""
 
-from ._binding import AgentBinding, AgentBindingSnapshot
-from ._builder import build_pydantic_agent
-from ._capabilities import (
-    MEMORY_TOOL_NAMES,
-    PLANNING_TOOL_NAMES,
-    SUBAGENT_TOOL_NAMES,
-    WORKSPACE_FILESYSTEM_READ_TOOL_NAMES,
-    WORKSPACE_FILESYSTEM_TOOL_NAMES,
-    WORKSPACE_SHELL_TOOL_NAMES,
-    SubagentDelegate,
-    ToolOperationDecision,
-    select_platform_tool_names,
-    tool_name_allowed,
-)
+from ._binding import AgentBinding, AgentBindingSnapshot, SemanticPin, SubagentRef
 from ._catalog import AgentCatalog
 from ._compiler import AgentCompiler
 from ._definition import AgentDefinition
-from ._executor import (
-    AgentExecutionResult,
-    AgentExecutor,
-    DurableBoundary,
-    EventSink,
-    LiveDelta,
-    UsageSink,
-)
-from ._input import UserPromptTransport, prepare_user_prompt, user_prompt_transport
-from ._output import (
-    ASSISTANT_TEXT_OUTPUT_SCHEMA_ID,
-    ASSISTANT_TEXT_OUTPUT_SCHEMA_REVISION,
-    AssistantTextOutput,
-    OutputBinding,
-    bind_output,
-    restore_output,
-)
+from ._output import AssistantTextOutput, OutputBinding, OutputMode, bind_output, restore_output
 
 __all__ = [
-    "ASSISTANT_TEXT_OUTPUT_SCHEMA_ID",
-    "ASSISTANT_TEXT_OUTPUT_SCHEMA_REVISION",
-    "MEMORY_TOOL_NAMES",
-    "PLANNING_TOOL_NAMES",
-    "SUBAGENT_TOOL_NAMES",
-    "WORKSPACE_FILESYSTEM_READ_TOOL_NAMES",
-    "WORKSPACE_FILESYSTEM_TOOL_NAMES",
-    "WORKSPACE_SHELL_TOOL_NAMES",
     "AgentBinding",
     "AgentBindingSnapshot",
     "AgentCatalog",
     "AgentCompiler",
     "AgentDefinition",
-    "AgentExecutionResult",
-    "AgentExecutor",
     "AssistantTextOutput",
-    "DurableBoundary",
-    "EventSink",
-    "LiveDelta",
     "OutputBinding",
-    "SubagentDelegate",
-    "ToolOperationDecision",
-    "UsageSink",
+    "OutputMode",
+    "SemanticPin",
+    "SubagentRef",
     "bind_output",
-    "build_pydantic_agent",
     "restore_output",
-    "select_platform_tool_names",
-    "tool_name_allowed",
 ]

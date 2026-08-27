@@ -11,6 +11,7 @@ from types import SimpleNamespace
 import linktools.ai.temporal._activity as temporal_activity
 import pytest
 from linktools.ai.agent import AgentBindingSnapshot
+from linktools.ai.agent._output import bind_output
 from linktools.ai.core import (
     ExecutionStatus,
     Principal,
@@ -49,16 +50,16 @@ from linktools.ai.temporal.workflow import (
 
 
 def _binding() -> AgentBindingSnapshot:
+    output = bind_output()
     return AgentBindingSnapshot(
         version=1,
-        agent_spec=AgentSpec("agent", 1, "model"),
-        agent_digest="c" * 64,
-        output_schema_id="test-output",
-        output_schema_revision=1,
-        output_schema_fingerprint="b" * 64,
-        local_runtime_capability_descriptors=(),
+        agent_spec=AgentSpec("agent", model="model"),
+        model={"route_id": "model", "model_identity": "test:model"},
+        selected=(),
+        subagents=(),
+        output_mode=output.mode,
+        output_schema=output.schema_definition,
         binding_digest="a" * 64,
-        global_runtime_capability_descriptors=(),
     )
 
 
@@ -81,7 +82,7 @@ def temporal_activity_context(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 class _ReplayRunner:
-    def __init__(self, failure: AIError | None = None) -> None:
+    def __init__(self, failure: "AIError | None" = None) -> None:
         self.failure = failure
         self.result_digest = canonical_sha256({"output": "value"})
         self.result_calls = 0
@@ -99,9 +100,14 @@ class _ReplayRunner:
         if self.failure is not None:
             raise self.failure
         return _binding().binding_digest, ExecutionRequest(
-            "prompt",
-            principal,
-            "key",
+            user_prompt="prompt",
+            user_prompt_codec="text",
+            principal=principal,
+            idempotency_key="key",
+            memory_scope=None,
+            mode="run",
+            planning=False,
+            thinking=False,
         )
 
     async def terminal_result(
@@ -117,14 +123,12 @@ class _ReplayRunner:
             else ErrorCode.EXECUTION_FAILED
         )
         return ExecutionResult(
-            execution_id,
-            self.terminal_status,
-            None,
-            None,
-            None,
-            None,
-            UsageMetrics(),
-            error_code.value,
+            execution_id=execution_id,
+            status=self.terminal_status,
+            output=None,
+            output_fingerprint=None,
+            usage=UsageMetrics(),
+            error_code=error_code.value,
         )
 
     async def result(
@@ -722,7 +726,7 @@ def _workflow_request(
 
 
 class _GraphActivity:
-    def __init__(self, *, failing_node: str | None = None) -> None:
+    def __init__(self, *, failing_node: "str | None" = None) -> None:
         self.failing_node = failing_node
         self.settled: list[ExecutionWorkflowResult] = []
         self.renew_gate = asyncio.Event()
@@ -801,8 +805,8 @@ class _GraphActivity:
 class _Child:
     def __init__(
         self,
-        result: ExecutionWorkflowResult | None = None,
-        error: BaseException | None = None,
+        result: "ExecutionWorkflowResult | None" = None,
+        error: "BaseException | None" = None,
         *,
         wait_for_cancel: bool = False,
     ) -> None:

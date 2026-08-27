@@ -1,5 +1,0 @@
-{
-  "runtime_access": ["execution", "session", "task", "evaluation", "approval", "event", "artifact"],
-  "query_rules": ["query APIs require Principal where data is tenant scoped", "query APIs do not expose mutation methods", "RuntimeAccess is built from the same RuntimeServices instance"],
-  "verification": "tests/ai/test_contracts.py"
-}

@@ -7,11 +7,13 @@ from datetime import datetime, timezone
 from typing import Any
 
 import pytest
-from linktools.ai.agent._capabilities import ToolOperationDecision, _RuntimeStepPersistence
 from linktools.ai.core import ToolOperationStatus
 from linktools.ai.errors import AIError, ErrorCode
+from linktools.ai.runtime._agent_executor import _RuntimePersistenceBoundary
+from linktools.ai.runtime._capabilities import ToolOperationDecision, _RuntimeStepPersistence
 from linktools.ai.runtime._tool import RuntimeToolOperationBridge, ToolOperationRecord
 from linktools.ai.storage import PayloadPolicy
+from pydantic_ai.capabilities import AbstractCapability, CombinedCapability
 from pydantic_ai.exceptions import CallDeferred, ModelRetry, SkipToolExecution, ToolFailedError, ToolRetryError
 from pydantic_ai.messages import RetryPromptPart, ToolCallPart, ToolReturnPart
 from pydantic_ai.models.test import TestModel
@@ -110,6 +112,122 @@ async def _capability(
     definition = ToolDefinition(name="tool", metadata={"linktools.ai.replay_safe": replay_safe})
     await capability.before_tool_execute(context, call=call, tool_def=definition, args={})
     return capability, bridge, store, context, call, definition
+
+
+async def test_custom_before_hook_rejection_does_not_start_durable_effect() -> None:
+    capability, bridge, store, context, call, definition = await _capability(True)
+
+    class RejectBefore(AbstractCapability[None]):
+        async def before_tool_execute(
+            self,
+            ctx: RunContext[None],
+            *,
+            call: ToolCallPart,
+            tool_def: ToolDefinition,
+            args: dict[str, Any],
+        ) -> dict[str, Any]:
+            del self, ctx, call, tool_def, args
+            raise ModelRetry("reject before execution")
+
+    combined = CombinedCapability((_RuntimePersistenceBoundary(capability), RejectBefore()))
+
+    with pytest.raises(ModelRetry):
+        await combined.before_tool_execute(
+            context,
+            call=call,
+            tool_def=definition,
+            args={},
+        )
+
+    assert bridge.calls == []
+    assert store.effects == []
+    assert not capability._calls
+
+
+async def test_plan_admission_precedes_custom_before_hook() -> None:
+    bridge = _Bridge(True)
+    store = _StepStore()
+    capability = _RuntimeStepPersistence(
+        tool_operations=bridge,
+        store=store,
+        agent_name="agent",
+        run_id="run",
+        plan_mode=True,
+    )
+    context = _context()
+    call = ToolCallPart("tool", {}, tool_call_id="call")
+    definition = ToolDefinition(name="tool", metadata={"linktools.ai.replay_safe": True})
+    entered: list[str] = []
+
+    class SideEffectBefore(AbstractCapability[None]):
+        async def before_tool_execute(
+            self,
+            ctx: RunContext[None],
+            *,
+            call: ToolCallPart,
+            tool_def: ToolDefinition,
+            args: dict[str, Any],
+        ) -> dict[str, Any]:
+            del self, ctx, call, tool_def
+            entered.append("custom")
+            return args
+
+    combined = CombinedCapability((_RuntimePersistenceBoundary(capability), SideEffectBefore()))
+
+    with pytest.raises(AIError) as raised:
+        await combined.before_tool_execute(
+            context,
+            call=call,
+            tool_def=definition,
+            args={},
+        )
+
+    assert raised.value.code is ErrorCode.CAPABILITY_POLICY_CONFLICT
+    assert entered == []
+    assert bridge.calls == []
+    assert store.effects == []
+    assert not capability._calls
+
+
+async def test_custom_wrap_failure_is_inside_durable_effect_boundary() -> None:
+    capability, bridge, store, context, call, definition = await _capability(False)
+
+    class FailingWrap(AbstractCapability[None]):
+        async def wrap_tool_execute(
+            self,
+            ctx: RunContext[None],
+            *,
+            call: ToolCallPart,
+            tool_def: ToolDefinition,
+            args: dict[str, Any],
+            handler: Any,
+        ) -> Any:
+            del self, ctx, call, tool_def, args, handler
+            raise RuntimeError("custom middleware failed before inner handler")
+
+    combined = CombinedCapability((_RuntimePersistenceBoundary(capability), FailingWrap()))
+    await combined.before_tool_execute(
+        context,
+        call=call,
+        tool_def=definition,
+        args={},
+    )
+
+    async def raw_handler(_args: dict[str, Any]) -> None:
+        raise AssertionError("custom wrapper must fail before the raw tool")
+
+    with pytest.raises(AIError) as raised:
+        await combined.wrap_tool_execute(
+            context,
+            call=call,
+            tool_def=definition,
+            args={},
+            handler=raw_handler,
+        )
+
+    assert raised.value.code is ErrorCode.TOOL_EFFECT_UNKNOWN
+    assert bridge.calls == ["begin", "unknown"]
+    assert [effect.status for effect in store.effects] == ["started"]
 
 
 async def test_skip_tool_execution_terminalizes_as_success() -> None:
@@ -237,7 +355,7 @@ def _runtime_bridge() -> RuntimeToolOperationBridge:
         tenant_id="tenant",
         execution_id="execution",
         step_run_id="run",
-        binding_fingerprint="binding",
+        binding_digest="binding",
         owner="owner",
         background_tasks=set(),
         payload_policy=PayloadPolicy(),
@@ -264,7 +382,7 @@ async def test_tool_failed_error_payload_round_trips_structured_content() -> Non
         idempotency_key_digest="idempotency",
         tool_name="tool",
         arguments_digest="arguments",
-        binding_fingerprint="binding",
+        binding_digest="binding",
         replay_safe=True,
         status=ToolOperationStatus.FAILED,
         owner=None,
@@ -300,7 +418,7 @@ async def test_tool_retry_error_payload_round_trips_retry_part() -> None:
         idempotency_key_digest="idempotency",
         tool_name="read_file",
         arguments_digest="arguments",
-        binding_fingerprint="binding",
+        binding_digest="binding",
         replay_safe=True,
         status=ToolOperationStatus.FAILED,
         owner=None,

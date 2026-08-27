@@ -13,7 +13,6 @@ from linktools.ai.runtime.state import (
     RuntimeStatePlan,
     RuntimeStateRoute,
 )
-from linktools.ai.workspace import open_workspace_runtime
 
 
 def test_runtime_state_plan_routes_each_domain_explicitly(tmp_path) -> None:
@@ -47,7 +46,7 @@ async def test_filesystem_state_writes_domain_manifest(tmp_path) -> None:
 
 
 def test_public_runtime_surface_is_not_storage_composition() -> None:
-    assert Runtime is not None
-    parameters = inspect.signature(open_workspace_runtime).parameters
+    parameters = inspect.signature(Runtime.open).parameters
+    assert "state" in parameters
     assert "runtime_storage" not in parameters
     assert "storage_root" not in parameters

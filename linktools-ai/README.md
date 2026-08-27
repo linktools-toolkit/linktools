@@ -1,27 +1,32 @@
 # linktools-ai
 
-`linktools-ai` is the Agent runtime layer for LinkTools. It keeps declaration, discovery, composition, identity, execution, and persistence responsibilities separate:
+`linktools-ai` provides the Agent runtime layer for LinkTools. The public composition model is intentionally small:
 
 ```text
-AssetStore
-    -> AssetRepository
-    -> AgentSpec
-    -> AgentCompiler.compile(...)
-    -> AgentDefinition
-    -> Runtime.agent(...)
-    -> AgentHandle
-    -> AgentCompiler.bind(..., output=...)
-    -> AgentBinding
-    -> Execution / Session turn / TaskGraph / Temporal / Recovery
+Workspace
+    + CapabilityGroup(s)
+    + ModelRegistry
+    + RuntimeState
+        -> Runtime.open(...)
+        -> frozen capability/declaration candidates
+        -> AgentCompiler
+        -> AgentDefinition
+        -> Runtime.agent(id)
+        -> per-execution AgentBinding
+        -> Agent / Session / Execution / Task / Evaluation / Recovery
 ```
 
-- **Asset** owns declaration origin, storage, discovery, and decoding.
-- **AgentSpec** declares one Agent.
-- **Capability** supplies executable behavior.
-- **AgentDefinition** is the compiled output-independent definition inside one Runtime.
-- **AgentBinding** is the exact executable identity for one output contract.
-- **Session** is bound to the stable `AgentSpec.id`.
-- **Execution**, recovery, evaluation, TaskGraph, and Temporal pin the exact Agent binding.
+The main ownership rules are:
+
+- `Workspace` owns workspace identity, paths, policy, and sandbox configuration.
+- `AssetStore` stores raw asset bytes. It does not interpret declarations.
+- `CapabilityGroup` is the only public registration/discovery composition unit. A group freezes direct registrations and, when store-backed, one immutable `AssetStore` snapshot.
+- `AgentSpec` is a runtime-independent Agent declaration.
+- `AgentCompiler` is the sole Agent-level selector. It resolves model, tool, Skill, MCP, capability, and Subagent candidates from the frozen Runtime candidate set.
+- `Runtime` is the composition root and owns the service graph.
+- `Runtime.agent(id)` returns a Runtime-bound `Agent`; it does not compile or register new definitions.
+- `AgentBinding` is created per execution and pins the exact durable semantics, including the output contract.
+- `Session` is bound to `AgentSpec.id`; retry/recovery remain pinned to the exact historical execution binding.
 
 ## 1. Run a workspace
 
@@ -36,153 +41,124 @@ Useful options:
 
 - `--base-url`, `--api-key`, and `--model` also read `OPENAI_BASE_URL`, `OPENAI_API_KEY`, and `OPENAI_MODEL`.
 - `--storage filesystem|sqlite` selects Runtime state storage.
-- `--planning` enables planning for this execution.
-- `--thinking` requests model thinking for this execution when supported.
+- `--planning` enables planning for the execution.
+- `--thinking` requests model thinking when supported.
 - `--json` emits one terminal JSON result.
 
 ### Python
 
 ```python
+from linktools.ai import Runtime, Workspace
 from linktools.ai.model import ModelRegistry
-from linktools.ai.workspace import Workspace, open_workspace_runtime
 
 workspace = Workspace.discover("/workspace/project")
 models = ModelRegistry.openai(model="gpt-4o-mini")
 
-async with open_workspace_runtime(workspace, models=models) as runtime:
-    agent = runtime.agent()
-    result = await agent.run(
+async with Runtime.open(workspace, models=models) as runtime:
+    result = await runtime.agent("default").run(
         "review this change",
         memory_scope=workspace.workspace_id,
         planning=True,
     )
 ```
 
-Select a named Agent or pass an inline `AgentSpec`:
+`Runtime.open()` is the public composition root. The Runtime is frozen for the lifetime of the context; registrations are completed before it opens.
+
+## 2. Define application capabilities and Agents
+
+Use `CapabilityGroup` for direct application registrations:
 
 ```python
-from linktools.ai.spec import AgentSpec
+from linktools.ai import CapabilityGroup, RunContext, Runtime
 
-named = runtime.agent("audit")
-inline = runtime.agent(
-    AgentSpec(
-        id="reviewer",
-        revision=1,
-        model="default",
-        system_prompt="Review changes carefully.",
-        allow_tools=("read_file",),
-    )
+application = CapabilityGroup[None]("application")
+
+@application.tool
+def lookup_ticket(ctx: RunContext[None], ticket_id: str) -> str:
+    return ticket_id
+
+application.agent(
+    "audit",
+    model="default",
+    system_prompt="Review the supplied evidence carefully.",
+    allow_tools=("lookup_ticket",),
+    allow_skills=("review",),
+    allow_subagents=(),
 )
+
+async with Runtime.open(
+    workspace,
+    models=models,
+    capabilities=(application,),
+) as runtime:
+    result = await runtime.agent("audit").run("inspect ticket SEC-123")
 ```
 
-`Runtime.agent()` selects Agent identity and optionally adds durable Agent-local Runtime capabilities. Output, planning, and thinking belong to each execution:
+`CapabilityGroup.tool()` and `CapabilityGroup.capability()` accept a positive semantic `revision`. The revision is an explicit fingerprint input for Python behavior whose semantics cannot be reconstructed from a declaration payload. It is not a project-wide version layer.
 
-```python
-from pydantic import BaseModel
-from linktools.ai.capability import RuntimeCapability
+`CapabilityGroup.agent()` creates an `AgentSpec`; declarations themselves use the single v1 wire contract and do not expose a per-declaration revision field.
 
-class ReviewResult(BaseModel):
-    summary: str
+## 3. Workspace declarations
 
-local_capability = RuntimeCapability.from_spec(
-    "review-context",
-    MyCapability,
-    config={"mode": "strict"},
-    revision=1,
-)
-
-agent = runtime.agent("audit", capabilities=(local_capability,))
-result = await agent.run(
-    "inspect the patch",
-    output=ReviewResult,
-    planning=True,
-    thinking=False,
-)
-```
-
-Agent-local `RuntimeCapability` values must be durable and exactly restorable. Direct Python-only capabilities are suitable for Runtime-global composition because the application recreates them when the Runtime is rebuilt.
-
-## 2. Identity model
-
-A Session is bound to `AgentSpec.id`, not a compiled Agent digest.
-Each new execution uses the current Agent binding.
-Retry and recovery remain pinned to the exact historical binding.
-
-History is content-owned: a projection digest identifies projected conversation
-content, not the Agent definition that consumed it.
-
-## 3. Agent controls
-
-`AgentSpec.allow_tools` is the static upper bound for business/external/model-visible tools. It does not own execution modes or independently disable platform control capabilities such as Skill loading, Subagent delegation, or planning support.
-
-Planning and thinking are execution modes. Planning applies the Runtime's model-visible presentation and admission rules before durable side effects begin.
-
-Subagents are selected from the frozen root Agent catalog. A root Agent may delegate to other root Agents, never itself. Child executions inherit the parent execution's planning/thinking modes and existing memory behavior, do not inherit the parent handle's local Runtime capabilities, use the default assistant-text output contract, and cannot create another subagent layer.
-
-## 4. Asset loading
-
-The default workspace source is the workspace storage root, normally backed by the `.linktools` workspace layout:
+When no group named `workspace` is supplied, `Runtime.open()` creates the standard workspace source from `.linktools` and loads these built-in declaration kinds:
 
 ```text
-agents/<id>
-skills/<id>/SKILL.md
-mcp/<id>
+.linktools/
+  agents/<id>
+  skills/<id>
+  skills/<id>/SKILL.md
+  mcp/<id>
 ```
 
-`AssetRepository` is the complete typed Asset composition passed to Runtime. It is constructed directly from an `AssetStore` and `AssetTypeBinding` sequence; callers do not need a public registry or registry snapshot.
-
-For the standard workspace layout, use `build_workspace_assets()`:
+The default workspace source is a raw `AssetStore`. `CapabilityGroup.from_store()` performs declaration discovery over one immutable store snapshot:
 
 ```python
-from linktools.ai.workspace import build_workspace_assets, open_workspace_runtime
+from linktools.ai import CapabilityGroup, Runtime
+from linktools.ai.asset import AssetStore
 
-assets = await build_workspace_assets(
-    workspace,
-    bindings=(my_asset_binding,),
-)
+workspace_group = CapabilityGroup.from_store("workspace", my_asset_store)
 
-async with open_workspace_runtime(
+async with Runtime.open(
     workspace,
-    assets=assets,
     models=models,
-    capability_providers=(my_provider,),
+    capabilities=(workspace_group,),
 ) as runtime:
     ...
 ```
 
-The helper merges built-in bindings with downstream bindings. If a custom binding uses an existing built-in kind, its `value_type` must match that built-in kind. Duplicate or conflicting kinds fail closed.
+A store-backed group reads metadata, batch-loads the corresponding bytes, verifies content identity, runs its loaders, and verifies that the store revision did not change during the freeze. Conflicting identities or layouts fail closed.
 
-Applications that need another Asset storage backend can provide an `AssetStore` to the helper:
+For downstream declaration formats or custom kinds such as `worker` or `audit`, implement `CapabilityLoader` and register it with `group.loader(loader)`. The loader receives the frozen `AssetInfo` sequence and matching byte mapping and returns normal `CapabilityContribution` values. No additional Registry/Provider abstraction is required.
+
+## 4. Agent selection and capability policy
+
+`AgentSpec` contains declarative selection policy:
 
 ```python
-from linktools.ai.asset import AssetStore
-from linktools.ai.workspace import build_workspace_assets
+from linktools.ai.spec import AgentSpec
 
-store = AssetStore(my_storage)
-assets = await build_workspace_assets(
-    workspace,
-    store=store,
-    bindings=(my_asset_binding,),
+spec = AgentSpec(
+    id="audit",
+    model="default",
+    system_prompt="Audit the supplied change.",
+    instructions=("Cite concrete evidence.",),
+    allow_tools=("read_file", "mcp__security__*"),
+    allow_skills=("review",),
+    allow_subagents=("triage",),
+    planning=True,
+    thinking="high",
 )
 ```
 
-When a custom `store` is supplied, path adaptation belongs to that store/backend composition and `path_adapter` must not also be passed. When the helper creates the default directory store, a custom `AssetPathAdapter` may be supplied there.
+The compiler resolves these selectors once from the frozen candidate universe. Missing or conflicting required candidates fail closed.
 
-A `CapabilityProvider` declares one public `value_type`. At workspace startup it is bound once to all matching discovered Assets. Every Asset binding whose `value_type is AgentSpec` is instead discovered directly into the root Agent catalog, regardless of the Asset kind name, so downstream kinds such as `worker` or `audit` can declare Agents without new Runtime concepts.
+`allow_tools` controls ordinary/external model-visible tools. Planning is an execution mode and is not enabled or disabled by pretending `write_plan` is an ordinary business tool. Runtime infrastructure capabilities such as planning, memory, Skill loading, and Subagent delegation are composed by Runtime according to the resolved execution contract.
 
-## 5. Capability scopes
+Subagents are root Agent definitions selected from the same frozen catalog. A root Agent cannot select itself as a Subagent, and the Runtime does not create a second registration system for child Agents.
 
-There are three capability scopes:
+## 5. Output contracts
 
-1. **Asset-backed Runtime-global capabilities**: `AssetRepository -> CapabilityProvider -> CapabilityBinding`.
-2. **Direct Runtime-global capabilities**: supplied through `open_workspace_runtime(..., capabilities=...)` and recreated by Runtime composition.
-3. **Agent-local capabilities**: supplied through `runtime.agent(..., capabilities=...)`; they must be durable and exactly restorable.
-
-There is no arbitrary `agent.run(..., capabilities=...)` scope. Runtime-global capability fingerprints and Agent-local capability descriptors participate in the exact executable binding, not Session identity.
-
-## 6. Output
-
-Output is an execution binding, not part of `AgentSpec`, `Runtime.agent()`, or Session identity:
+Output belongs to an execution, not to `AgentSpec`, `Runtime.agent()`, or Session identity:
 
 ```python
 from pydantic import BaseModel
@@ -192,163 +168,80 @@ class Finding(BaseModel):
     severity: str
 
 agent = runtime.agent("audit")
-result = await agent.run("inspect the patch", output=Finding)
+result = await agent.run(
+    "inspect the patch",
+    output=Finding,
+)
 ```
 
-The binding persists the exact JSON Schema and its fingerprint, not a Python import path. Normal executions use the supplied `BaseModel` and keep Pydantic's validation, coercion, defaults, and validators. Recovery can reconstruct the durable schema contract from the persisted snapshot without registering or importing that Python output type.
+The exact durable binding stores:
 
-## 7. Sessions and history
+- the v1 `AgentSpec` semantic payload;
+- the resolved model semantic payload;
+- the selected semantic pins;
+- selected Subagent ids;
+- `output_mode`;
+- the canonical output JSON Schema;
+- one `binding_digest`.
+
+The snapshot does not persist Python output import paths, duplicate output schema ids/revisions/fingerprints, or a second binding fingerprint. `ExecutionResult` exposes the derived `output_fingerprint` together with the terminal output.
+
+## 6. Sessions and executions
 
 ```python
 agent = runtime.agent("audit")
 session = await agent.create_session("chat-1")
 
-text_result = await agent.run(
-    "hello",
-    session_id=session.session_id,
-)
-structured_result = await agent.run(
-    "summarize the same conversation",
-    session_id=session.session_id,
+first = await session.run("inspect the first change")
+second = await session.run(
+    "return a structured summary",
     output=Finding,
     planning=True,
 )
 
-page = await runtime.session.history(
-    session.session_id,
-    principal=runtime.default_principal,
-    cursor=None,
-    limit=100,
-)
+history = await session.history()
 ```
 
-A Session is bound to `AgentSpec.id`, not a compiled Agent digest. Each new execution uses the current Agent binding. Retry and recovery remain pinned to the exact historical binding.
+A Session owns conversation continuity and the stable Agent id. Every new execution binds the current frozen Agent definition to that execution's output contract. Retry, fork, durable recovery, evaluation, Task execution, and Temporal execution use the exact binding snapshot/digest required by their contract rather than re-running current selector discovery.
 
-Session history is the committed conversation projection. Execution trace/transcript remain separate audit views.
+User prompt transport is also durable: plain text uses the `text` codec, while supported native Pydantic user content uses the v1 durable user-content codec. Unsupported external file lifecycle objects fail closed instead of being guessed or silently converted.
 
-## 8. Runtime persistence
+## 7. Runtime state
 
-`RuntimeStatePlan` selects persistence per Runtime domain. The workspace default stores filesystem Runtime state below the workspace storage root.
-
-Filesystem RuntimeState is an embedded single-writer backend. Domains with the same canonical `transaction_root` share one filesystem storage group and can publish a cross-domain checkpoint atomically.
-
-SQL RuntimeState uses optimistic conditional DML. Runtime correctness does not require or use pessimistic row, table, or advisory database locks. SQL routes sharing the same `AsyncEngine` participate in one physical SQL storage group; SQLite routes sharing one canonical database path use the same grouping rule.
-
-For externally managed SQL storage, provision the schema before Runtime startup:
+`Runtime.open()` accepts an explicit `RuntimeState` when the application owns storage selection:
 
 ```python
-from linktools.ai.migrate import provision_runtime_database
-from linktools.ai.runtime import RuntimeState, RuntimeStatePlan, RuntimeStateRoute
-from sqlalchemy.ext.asyncio import create_async_engine
+from linktools.ai import Runtime
+from linktools.ai.runtime import RuntimeState
 
-engine = create_async_engine("sqlite+aiosqlite:////var/lib/my-app/runtime.db")
-await provision_runtime_database(engine)
+state = RuntimeState.sqlite("/var/lib/linktools/runtime.db")
 
-state = RuntimeState.from_plan(
-    RuntimeStatePlan(
-        conversation=RuntimeStateRoute.sql(engine),
-        execution=RuntimeStateRoute.sql(engine),
-        recovery=RuntimeStateRoute.sql(engine),
-        memory=RuntimeStateRoute.sql(engine),
-    )
-)
-```
-
-MySQL, PostgreSQL, and SQLite use the same Runtime state contracts. The application owns an externally supplied engine and disposes it after Runtime shutdown.
-
-Runtime persistence uses a tolerant reader for ordinary internal dataclasses,
-while exact execution and storage contracts remain fail-closed.
-
-## 9. Durable execution binding
-
-Every current V1 execution and recovery input carries a mandatory `AgentBindingSnapshot` with:
-
-- canonical `AgentSpec`
-- `agent_digest`
-- ordered Agent-local Runtime capability descriptors
-- output schema definition, id, revision, and fingerprint
-- `binding_digest`
-
-Restore is exact for durable identity: the Runtime restores local capability descriptors, recompiles the Agent, verifies `agent_digest`, reconstructs the persisted output schema contract, rebuilds the binding, verifies `binding_digest`, and requires the reconstructed snapshot to equal the persisted snapshot. Python-only output validation behavior is intentionally process-local and is not persisted as durable identity. There is no root-definition fallback and no partial or null-binding V1 path.
-
-Planning and thinking are mandatory durable execution-mode fields. Retry and fork use the source exact binding and source modes.
-
-## 10. TaskGraph and Temporal
-
-`AgentHandle.task()` writes exactly one Agent TaskGraph V1 input:
-
-```text
-type = "linktools.ai.agent"
-version = 1
-binding = <AgentBindingSnapshot payload>
-user_prompt
-planning
-thinking
-```
-
-The binding snapshot is the sole durable Agent-binding authority in the node input; duplicate Agent id/digest/binding-digest fields are not stored alongside it. Unknown, legacy, partial, or corrupt V1 shapes are rejected.
-
-Temporal execution request transport also has one V1 shape:
-
-```text
-version = 1
-user_prompt
-principal
-idempotency_key
-memory_scope
-planning
-thinking
-binding = <AgentBindingSnapshot payload>
-```
-
-Workflow state may keep the compact `binding_digest`; loading the persisted request requires `binding.binding_digest` to match that state. Applications integrating Temporal should use the public `WorkflowGateway` and worker components rather than parsing transport objects directly.
-
-## 11. Public composition boundary
-
-`open_workspace_runtime()` accepts already-composed public dependencies:
-
-```python
-async with open_workspace_runtime(
+async with Runtime.open(
     workspace,
-    tenant_id="tenant",
-    assets=assets,
-    state=state,
     models=models,
-    capability_providers=(my_provider,),
-    capabilities=(my_runtime_capability,),
+    state=state,
 ) as runtime:
     ...
 ```
 
-Asset construction knobs do not belong on `open_workspace_runtime()`: construct an `AssetRepository` first, normally through `build_workspace_assets()`.
+Built-in Runtime state supports in-memory, filesystem, SQLite, and SQL composition used by the Runtime persistence layer. State domains keep their existing ownership, transaction, recovery, and retention rules; `Runtime.open()` consumes the state object instead of exposing duplicate storage-root arguments.
 
-`Runtime.agent()` accepts only an Agent id/spec plus Agent-local capabilities. Execution output/modes belong to `AgentHandle.start()`, `run()`, `stream()`, `task()`, and evaluation methods as appropriate.
+## 8. Public API boundary
 
-Top-level `linktools.ai` remains intentionally small. Sibling packages use the public `linktools.ai.agent` subsystem boundary rather than importing another package's private modules.
+The top-level composition API is intentionally small:
 
-## 12. Identity boundaries
-
-| Field | Meaning |
-|---|---|
-| Runtime `namespace` | Isolates one Runtime data set inside a storage target |
-| `tenant_id` | Authorization and resource ownership boundary |
-| `AgentSpec.id` | Stable logical Agent identity for a Session |
-| `agent_digest` | Exact output-independent Agent definition |
-| `binding_digest` | Exact executable Agent + output identity |
-| `memory_scope` | Selects a memory collection inside one tenant |
-| Asset `namespace` | Isolates raw Asset storage; unrelated to Runtime state |
-| Asset `kind` | Logical typed declaration kind |
-| Task/Tool `owner` | Current lease holder |
-
-`open_workspace_runtime()` uses `workspace.workspace_id` as the Runtime namespace. Its optional `tenant_id` defaults to `default`.
-
-## 13. Development checks
-
-Install the editable development environment once, then use the repository gate from the repository root:
-
-```bash
-python manage.py install --editable
-python manage.py check linktools-ai
+```python
+from linktools.ai import (
+    Agent,
+    CapabilityGroup,
+    Execution,
+    RunContext,
+    Runtime,
+    Session,
+    Workspace,
+)
 ```
 
-The repository gate owns the AI-specific release checks; package-local release scripts are not a supported development entry point.
+Package-specific public contracts remain available from their owning packages, for example `linktools.ai.asset`, `linktools.ai.model`, `linktools.ai.spec`, and `linktools.ai.runtime`.
+
+Private modules prefixed with `_` are implementation details. Downstream applications should not import Runtime execution infrastructure, state repository internals, or private compiler helpers directly.

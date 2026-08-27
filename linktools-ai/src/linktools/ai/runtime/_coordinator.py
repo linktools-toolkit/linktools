@@ -147,6 +147,12 @@ class _LocalRuntimeCoordinator:
                     tenant_id=principal.tenant_id,
                 )
 
+    def abandon_stream(self, execution_id: str) -> None:
+        """Release a prepared local stream when the caller never consumes it."""
+        lease = self._leases.pop(execution_id, None)
+        if lease is not None and lease.state == "PREPARED":
+            self._event.live_broker.abort_local_producer(lease)
+
     def _abort(self, lease: _PreparedStreamLease) -> None:
         self._leases.pop(lease.execution_id, None)
         self._event.live_broker.abort_local_producer(lease)

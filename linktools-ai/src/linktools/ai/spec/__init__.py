@@ -1,8 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Spec DTOs and codecs; no runtime composition owner."""
+"""Durable Agent, Skill, and MCP declaration contracts."""
 
-from ._assets import builtin_asset_bindings
 from ._codec import (
     AgentSpecCodec,
     MCPServerSpecCodec,
@@ -11,7 +10,16 @@ from ._codec import (
     SkillSpecCodec,
     SpecCodec,
 )
-from ._contract import AgentSpec, AgentUsageLimits, MCPServerSpec, SkillSpec
+from ._contract import (
+    AgentSpec,
+    AgentUsageLimits,
+    MCPServerSpec,
+    SkillSpec,
+    ThinkingEffort,
+    ThinkingValue,
+    canonical_selectors,
+    normalize_thinking,
+)
 
 __all__ = [
     "AgentSpec",
@@ -24,5 +32,8 @@ __all__ = [
     "SkillSpec",
     "SkillSpecCodec",
     "SpecCodec",
-    "builtin_asset_bindings",
+    "ThinkingEffort",
+    "ThinkingValue",
+    "canonical_selectors",
+    "normalize_thinking",
 ]

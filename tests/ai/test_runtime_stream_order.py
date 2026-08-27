@@ -45,14 +45,13 @@ def _binding_snapshot() -> AgentBindingSnapshot:
     output = bind_output()
     return AgentBindingSnapshot(
         version=1,
-        agent_spec=AgentSpec("default", 1, "default"),
-        agent_digest="b" * 64,
-        output_schema_id=output.schema_id,
-        output_schema_revision=output.schema_revision,
-        output_schema_fingerprint=output.schema_fingerprint,
-        local_runtime_capability_descriptors=(),
+        agent_spec=AgentSpec("default", model="default"),
+        model={"route_id": "default", "model_identity": "test:model"},
+        selected=(),
+        subagents=(),
+        output_mode=output.mode,
+        output_schema=output.schema_definition,
         binding_digest="a" * 64,
-        global_runtime_capability_descriptors=(),
     )
 
 
@@ -81,6 +80,7 @@ def _execution(
         safe_error_details={},
         created_at=now,
         updated_at=now,
+        mode="run",
         planning=False,
         thinking=False,
         binding=_binding_snapshot(),
@@ -395,15 +395,12 @@ async def test_terminal_local_bookkeeping_survives_caller_cancellation() -> None
     current = _execution()
     terminal = replace(current, status=ExecutionStatus.FAILED, revision=2, event_sequence=2)
     result = ResultRecord(
-        "execution",
-        "tenant",
-        None,
-        None,
-        None,
-        None,
-        StopReason.ERROR,
-        UsageMetrics(),
-        datetime.now(timezone.utc),
+        execution_id="execution",
+        tenant_id="tenant",
+        output=None,
+        stop_reason=StopReason.ERROR,
+        usage=UsageMetrics(),
+        created_at=datetime.now(timezone.utc),
     )
     commit = ExecutionTerminalCommit(
         0,

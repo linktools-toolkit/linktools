@@ -24,21 +24,16 @@ from pydantic_ai_harness.step_persistence import (
     fork_run,
 )
 
-from ..agent import (
-    MEMORY_TOOL_NAMES,
-    AgentBinding,
-    AgentCatalog,
-    AgentExecutor,
-    DurableBoundary,
-    LiveDelta,
-    SubagentDelegate,
-    UserPromptTransport,
-    select_platform_tool_names,
-    user_prompt_transport,
-)
-from ..capability import CapabilityMaterializationContext
+from ..agent import AgentBinding, AgentCatalog
+from ..capability import RunContext
+from ..workspace import Workspace
+from ._agent_executor import AgentExecutor, DurableBoundary, LiveDelta, _RunScope
+from ._capabilities import MEMORY_TOOL_NAMES, SubagentDelegate, select_runtime_tool_names
+from ._input import UserPromptTransport, user_prompt_transport
+from ._plan import RuntimePlanStore
 from ..core import (
     ExecutionEventType,
+    ExecutionMode,
     ExecutionLineageKind,
     ExecutionStatus,
     IdempotencyStatus,
@@ -48,6 +43,7 @@ from ..core import (
     ResourceRef,
     SessionStatus,
     StopReason,
+    ThinkingValue,
     ToolOperationStatus,
     UsageMetrics,
     canonical_json_bytes,
@@ -123,8 +119,9 @@ class _SubagentDispatcher(Protocol):
         memory_scope: "str | None",
         principal: Principal,
         allowed_agent_ids: "tuple[str, ...]",
+        mode: ExecutionMode,
         planning: bool,
-        thinking: bool,
+        thinking: ThinkingValue,
     ) -> SubagentDelegate: ...
 
 
@@ -200,8 +197,9 @@ class LocalExecutionBackend:
         executor: AgentExecutor,
         catalog: AgentCatalog,
         *,
+        workspace: Workspace,
+        app: object,
         tenant_id: str,
-        execution_root: Path,
         step_reads: Mapping[RuntimeDomain, StepStore],
         step_lifecycle: _StepLifecycle,
         memory_store_factory: "Callable[[str, str, str], SearchableMemoryStore] | None" = None,
@@ -224,8 +222,9 @@ class LocalExecutionBackend:
         self._steps = steps
         self._executor = executor
         self._catalog = catalog
+        self._workspace = workspace
+        self._app = app
         self._tenant_id = validate_tenant_id(tenant_id)
-        self._execution_root = execution_root
         self._memory_store_factory = memory_store_factory
         self._recovery_enabled = recovery_enabled
         self._conversation_durable = conversation_durable
@@ -256,6 +255,8 @@ class LocalExecutionBackend:
         conversation_steps = self._step_reads[RuntimeDomain.CONVERSATION]
         execution_repository = cast(ExecutionRepositoryImpl, self._execution.executions)
         session_repository = cast(SessionRepositoryImpl, self._conversation.sessions)
+        self._session_state_store = session_repository.state_store
+        self._execution_state_store = execution_repository.state_store
         self._conversation_commands = ConversationStateCommands(
             session_repository.state_store,
             session_repository,
@@ -299,8 +300,9 @@ class LocalExecutionBackend:
             raise AIError(ErrorCode.AUTHORIZATION_DENIED)
         binding = self._catalog.binding(execution.binding_digest)
         if (
-            request.planning is not execution.planning
-            or request.thinking is not execution.thinking
+            request.mode != execution.mode
+            or request.planning is not execution.planning
+            or request.thinking != execution.thinking
             or execution.binding != binding.snapshot
         ):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -495,6 +497,7 @@ class LocalExecutionBackend:
         now = datetime.now(timezone.utc)
         recovery_input = RecoveryExecutionInput(
             user_prompt=_recovery_prompt_payload(request.user_prompt),
+            user_prompt_codec=request.user_prompt_codec,
             principal_id=request.principal.principal_id,
             principal_kind=request.principal.kind,
             session_id=execution.session_id,
@@ -511,6 +514,7 @@ class LocalExecutionBackend:
                 idempotency_key_digest=identity.idempotency_key_digest,
                 request_digest=identity.request_digest,
             ),
+            mode=execution.mode,
             planning=execution.planning,
             thinking=execution.thinking,
             binding=execution.binding,
@@ -673,8 +677,9 @@ class LocalExecutionBackend:
         if (
             current.tenant_id != execution.tenant_id
             or current.binding_digest != execution.binding_digest
+            or current.mode != execution.mode
             or current.planning is not execution.planning
-            or current.thinking is not execution.thinking
+            or current.thinking != execution.thinking
             or current.binding != execution.binding
         ):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -736,8 +741,9 @@ class LocalExecutionBackend:
     ) -> None:
         if (
             execution.binding_digest != recovery_input.binding_digest
+            or execution.mode != recovery_input.mode
             or execution.planning is not recovery_input.planning
-            or execution.thinking is not recovery_input.thinking
+            or execution.thinking != recovery_input.thinking
             or execution.binding != recovery_input.binding
         ):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -928,7 +934,7 @@ class LocalExecutionBackend:
             or execution.conversation_step_run_id != recovery_input.conversation_step_run_id
             or execution.lineage_kind.value != recovery_input.lineage_kind
             or execution.planning is not recovery_input.planning
-            or execution.thinking is not recovery_input.thinking
+            or execution.thinking != recovery_input.thinking
             or execution.binding != recovery_input.binding
         ):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -1025,9 +1031,11 @@ class LocalExecutionBackend:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         request = ExecutionRequest(
             user_prompt=_recovery_prompt_text(recovery_input),
+            user_prompt_codec=recovery_input.user_prompt_codec,
             principal=principal,
             idempotency_key=f"recovery:{checkpoint.execution_id}",
             memory_scope=recovery_input.memory_scope,
+            mode=recovery_input.mode,
             planning=recovery_input.planning,
             thinking=recovery_input.thinking,
         )
@@ -1151,14 +1159,6 @@ class LocalExecutionBackend:
         if outcome.terminal_status in {ExecutionStatus.FAILED, ExecutionStatus.CANCELLED} and (
             handoff.conversation is not None
             or outcome.output is not None
-            or any(
-                value is not None
-                for value in (
-                    outcome.output_schema_id,
-                    outcome.output_schema_revision,
-                    outcome.output_schema_fingerprint,
-                )
-            )
         ):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         if (
@@ -1191,7 +1191,6 @@ class LocalExecutionBackend:
         if outcome.terminal_status in {ExecutionStatus.FAILED, ExecutionStatus.CANCELLED} and (
             handoff.conversation is not None
             or outcome.output is not None
-            or any(value is not None for value in (outcome.output_schema_id, outcome.output_schema_revision, outcome.output_schema_fingerprint))
         ):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         execution = await self._execution.executions.get(
@@ -1252,14 +1251,7 @@ class LocalExecutionBackend:
                 }
                 if execution.status not in allowed_statuses:
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            elif outcome.output is not None or any(
-                value is not None
-                for value in (
-                    outcome.output_schema_id,
-                    outcome.output_schema_revision,
-                    outcome.output_schema_fingerprint,
-                )
-            ):
+            elif outcome.output is not None:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             try:
                 await self._resolve_handoff_conversation(checkpoint, handoff)
@@ -1357,6 +1349,7 @@ class LocalExecutionBackend:
             updated_at=checkpoint.updated_at,
             memory_scope=recovery_input.memory_scope,
             conversation_step_run_id=recovery_input.conversation_step_run_id,
+            mode=recovery_input.mode,
             planning=recovery_input.planning,
             thinking=recovery_input.thinking,
             binding=recovery_input.binding,
@@ -1606,9 +1599,6 @@ class LocalExecutionBackend:
                 error_code=error_code,
                 safe_error_details={},
                 stop_reason=stop_reason,
-                output_schema_id=None,
-                output_schema_revision=None,
-                output_schema_fingerprint=None,
                 output=None,
                 object_source_domain=None,
                 usage=outcome.usage,
@@ -1736,9 +1726,6 @@ class LocalExecutionBackend:
         result = ResultRecord(
             current.execution_id,
             current.tenant_id,
-            outcome.output_schema_id,
-            outcome.output_schema_revision,
-            outcome.output_schema_fingerprint,
             execution_ref,
             outcome.stop_reason,
             outcome.usage,
@@ -1819,21 +1806,11 @@ class LocalExecutionBackend:
         if handoff.outcome.terminal_status is ExecutionStatus.SUCCEEDED:
             if (
                 result.output is None
-                or result.output_schema_id != handoff.outcome.output_schema_id
-                or result.output_schema_revision != handoff.outcome.output_schema_revision
-                or result.output_schema_fingerprint != handoff.outcome.output_schema_fingerprint
                 or handoff.outcome.output is None
                 or result.output.digest != handoff.outcome.output.digest
             ):
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        elif result.output is not None or any(
-            value is not None
-            for value in (
-                result.output_schema_id,
-                result.output_schema_revision,
-                result.output_schema_fingerprint,
-            )
-        ):
+        elif result.output is not None:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         records = await self._execution.idempotency.list_by_resource(
             ResourceKind.EXECUTION,
@@ -2154,7 +2131,7 @@ class LocalExecutionBackend:
                 tenant_id=current.tenant_id,
                 execution_id=execution_id,
                 step_run_id=run_id,
-                binding_fingerprint=current.binding_digest,
+                binding_digest=current.binding_digest,
                 owner=tool_owner,
                 background_tasks=execution_tasks,
                 payload_policy=self._payload_policy,
@@ -2208,24 +2185,20 @@ class LocalExecutionBackend:
                     return
                 await self._append_event(current, emission.kind, emission.payload)
 
-            allowed_subagent_ids = tuple(
-                agent_id
-                for agent_id in self._catalog.root_ids
-                if agent_id != definition.spec.id
-            )
+            allowed_subagent_ids = definition.selected_subagents
             subagent_available = (
                 current.parent_execution_id is None
                 and self._subagent_dispatcher is not None
                 and bool(allowed_subagent_ids)
             )
-            memory = None
-            platform_tool_names = select_platform_tool_names(
-                allow_tools=definition.spec.allow_tools,
+            runtime_tool_names = select_runtime_tool_names(
+                ordinary_tool_policy=definition.ordinary_tool_policy,
                 memory_scope=current.memory_scope,
                 planning=current.planning,
                 subagent_available=subagent_available,
             )
-            selected_memory = tuple(name for name in platform_tool_names if name in MEMORY_TOOL_NAMES)
+            memory = None
+            selected_memory = tuple(name for name in runtime_tool_names if name in MEMORY_TOOL_NAMES)
             if selected_memory:
                 if self._memory_store_factory is None:
                     raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
@@ -2234,47 +2207,72 @@ class LocalExecutionBackend:
                     current.execution_id,
                     current.memory_scope or "default",
                 )
+            session_metadata: Mapping[str, JsonValue] = {}
+            if current.session_id is not None:
+                session = await self._conversation.sessions.get(
+                    current.session_id,
+                    tenant_id=current.tenant_id,
+                )
+                if session is None:
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                session_metadata = session.metadata
+            public_context = RunContext(
+                app=self._app,
+                principal=request.principal,
+                workspace=self._workspace,
+                session_id=current.session_id,
+                execution_id=current.execution_id,
+                session_metadata=session_metadata,
+            )
+            plan_store = RuntimePlanStore(
+                self._session_state_store if current.session_id is not None else self._execution_state_store,
+                namespace=self._namespace,
+                tenant_id=current.tenant_id,
+                owner_kind="session" if current.session_id is not None else "execution",
+                owner_id=current.session_id or current.execution_id,
+            )
             try:
                 result = await self._executor.execute(
-                    binding,
-                    request.user_prompt,
-                    history,
-                    conversation_id,
-                    step_store=self._steps,
-                    step_run_id=run_id,
-                    segment_sequence=current.agent_run_sequence,
-                    history_id=history_id,
-                    capability_context=CapabilityMaterializationContext(
-                        request.principal,
-                        ResourceRef(ResourceKind.EXECUTION, execution_id, current.tenant_id),
-                        self._execution_root,
-                        definition.spec.allow_tools,
-                    ),
-                    memory_scope=current.memory_scope,
-                    memory_store=memory,
-                    platform_tool_names=platform_tool_names,
-                    planning=current.planning,
-                    thinking=current.thinking,
-                    subagent_delegate=(
-                        None
-                        if not subagent_available
-                        else self._subagent_dispatcher.delegate_for(
-                            parent_execution_id=current.execution_id,
-                            root_execution_id=current.root_execution_id,
-                            memory_scope=current.memory_scope,
-                            principal=request.principal,
-                            allowed_agent_ids=allowed_subagent_ids,
-                            planning=current.planning,
-                            thinking=current.thinking,
-                        )
-                    ),
-                    event_sink=sink,
-                    usage_sink=lambda usage: self._capture_usage(execution_id, usage),
-                    tool_operations=tool_operations,
-                    background_tasks=execution_tasks,
-                    replace_history_system_prompt=(
-                        session_history_start and not exact_recovery_context
-                    ),
+                    _RunScope(
+                        binding=binding,
+                        context=public_context,
+                        user_prompt=user_prompt_transport(request.user_prompt, request.user_prompt_codec),
+                        history=history,
+                        conversation_id=conversation_id,
+                        step_store=self._steps,
+                        step_run_id=run_id,
+                        segment_sequence=current.agent_run_sequence,
+                        history_id=history_id,
+                        memory_scope=current.memory_scope,
+                        memory_store=memory,
+                        plan_store_resolver=lambda _ctx: plan_store,
+                        mode=current.mode,
+                        planning=current.planning,
+                        thinking=current.thinking,
+                        parent_step_run_id=None,
+                        subagent_available=subagent_available,
+                        subagent_delegate=(
+                            None
+                            if not subagent_available
+                            else self._subagent_dispatcher.delegate_for(
+                                parent_execution_id=current.execution_id,
+                                root_execution_id=current.root_execution_id,
+                                memory_scope=current.memory_scope,
+                                principal=request.principal,
+                                allowed_agent_ids=allowed_subagent_ids,
+                                mode=current.mode,
+                                planning=current.planning,
+                                thinking=current.thinking,
+                            )
+                        ),
+                        event_sink=sink,
+                        usage_sink=lambda usage: self._capture_usage(execution_id, usage),
+                        tool_operations=tool_operations,
+                        background_tasks=execution_tasks,
+                        replace_history_system_prompt=(
+                            session_history_start and not exact_recovery_context
+                        ),
+                    )
                 )
             except Exception as error:
                 if _is_infrastructure_error(error):
@@ -2850,15 +2848,9 @@ class LocalExecutionBackend:
             return current
         now = datetime.now(timezone.utc)
         captured_usage = usage or self._captured_usage.get(execution.execution_id, UsageMetrics())
-        schema_id: str | None = None
-        schema_revision: int | None = None
-        schema_fingerprint: str | None = None
         if status is ExecutionStatus.SUCCEEDED:
             if binding is None or output is None:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            schema_id = binding.output_binding.schema_id
-            schema_revision = binding.output_binding.schema_revision
-            schema_fingerprint = binding.output_schema_fingerprint
         elif output is not None:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         if self._recovery_enabled:
@@ -2951,9 +2943,6 @@ class LocalExecutionBackend:
                         error_code=error_code,
                         safe_error_details=safe_error_details or {},
                         stop_reason=stop_reason,
-                        output_schema_id=schema_id if status is ExecutionStatus.SUCCEEDED else None,
-                        output_schema_revision=schema_revision if status is ExecutionStatus.SUCCEEDED else None,
-                        output_schema_fingerprint=schema_fingerprint if status is ExecutionStatus.SUCCEEDED else None,
                         output=handoff_output,
                         object_source_domain=source_domain,
                         usage=captured_usage,
@@ -3023,9 +3012,6 @@ class LocalExecutionBackend:
             ResultRecord(
                 current.execution_id,
                 current.tenant_id,
-                schema_id if status is ExecutionStatus.SUCCEEDED else None,
-                schema_revision if status is ExecutionStatus.SUCCEEDED else None,
-                schema_fingerprint if status is ExecutionStatus.SUCCEEDED else None,
                 output if status is ExecutionStatus.SUCCEEDED else None,
                 stop_reason,
                 captured_usage,
@@ -3133,15 +3119,9 @@ class LocalExecutionBackend:
             run_id if status is ExecutionStatus.SUCCEEDED else None,
         )
         now = datetime.now(timezone.utc)
-        schema_id: str | None = None
-        schema_revision: int | None = None
-        schema_fingerprint: str | None = None
         if status is ExecutionStatus.SUCCEEDED:
             if binding is None or output is None:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            schema_id = binding.output_binding.schema_id
-            schema_revision = binding.output_binding.schema_revision
-            schema_fingerprint = binding.output_schema_fingerprint
         elif output is not None:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         terminal = _terminal_record(
@@ -3158,9 +3138,6 @@ class LocalExecutionBackend:
             ResultRecord(
                 current.execution_id,
                 current.tenant_id,
-                schema_id if status is ExecutionStatus.SUCCEEDED else None,
-                schema_revision if status is ExecutionStatus.SUCCEEDED else None,
-                schema_fingerprint if status is ExecutionStatus.SUCCEEDED else None,
                 output if status is ExecutionStatus.SUCCEEDED else None,
                 stop_reason,
                 usage,

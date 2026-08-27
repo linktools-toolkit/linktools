@@ -13,12 +13,16 @@ from ..core import (
     EvaluationStatus,
     ExecutionDeltaType,
     ExecutionEventType,
+    ExecutionMode,
     ExecutionStatus,
     JsonValue,
     Page,
     Principal,
     SessionStatus,
+    ThinkingValue,
     UsageMetrics,
+    normalize_execution_mode,
+    normalize_thinking,
     validate_idempotency_key,
     validate_memory_scope,
     validate_resource_id,
@@ -39,42 +43,54 @@ from ..task import (
 @dataclass(frozen=True, slots=True)
 class ExecutionRequest:
     user_prompt: str
+    user_prompt_codec: str
     principal: Principal
-    idempotency_key: "str | None" = None
-    memory_scope: "str | None" = None
-    planning: bool = False
-    thinking: bool = False
+    idempotency_key: str
+    memory_scope: "str | None"
+    mode: ExecutionMode
+    planning: bool
+    thinking: ThinkingValue
 
     def __post_init__(self) -> None:
         validate_user_prompt(self.user_prompt)
-        if self.idempotency_key is None:
-            raise AIError(ErrorCode.IDEMPOTENCY_KEY_INVALID)
+        if self.user_prompt_codec not in {"text", "pydantic-user-content-v1"}:
+            raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
         validate_idempotency_key(self.idempotency_key)
         if self.memory_scope is not None:
             validate_memory_scope(self.memory_scope)
-        if not isinstance(self.planning, bool) or not isinstance(self.thinking, bool):
+        mode = normalize_execution_mode(self.mode)
+        thinking = normalize_thinking(self.thinking)
+        if not isinstance(self.planning, bool) or mode == "plan" and not self.planning:
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+        object.__setattr__(self, "mode", mode)
+        object.__setattr__(self, "thinking", thinking)
 
 
 @dataclass(frozen=True, slots=True)
 class RetryExecutionRequest:
     user_prompt: str
+    user_prompt_codec: str
     principal: Principal
     idempotency_key: str
 
     def __post_init__(self) -> None:
         validate_user_prompt(self.user_prompt)
+        if self.user_prompt_codec not in {"text", "pydantic-user-content-v1"}:
+            raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
         validate_idempotency_key(self.idempotency_key)
 
 
 @dataclass(frozen=True, slots=True)
 class ForkExecutionRequest:
     user_prompt: str
+    user_prompt_codec: str
     principal: Principal
     idempotency_key: str
 
     def __post_init__(self) -> None:
         validate_user_prompt(self.user_prompt)
+        if self.user_prompt_codec not in {"text", "pydantic-user-content-v1"}:
+            raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
         validate_idempotency_key(self.idempotency_key)
 
 
@@ -110,9 +126,7 @@ class ExecutionResult:
     execution_id: str
     status: ExecutionStatus
     output: JsonValue | None
-    output_schema_id: str | None
-    output_schema_revision: int | None
-    output_schema_fingerprint: str | None
+    output_fingerprint: "str | None"
     usage: UsageMetrics
     error_code: "str | None" = None
     safe_error_details: "Mapping[str, JsonValue]" = field(default_factory=dict)
@@ -123,6 +137,8 @@ class ExecutionResult:
         if self.status is ExecutionStatus.SUCCEEDED:
             if self.error_code is not None or details:
                 raise ValueError("successful execution result cannot carry an error")
+            if self.output is None or not _is_digest(self.output_fingerprint):
+                raise ValueError("successful execution result requires output contract")
             return
         if self.status is ExecutionStatus.CANCELLED:
             if self.error_code != ErrorCode.EXECUTION_CANCELLED.value:
@@ -146,11 +162,12 @@ class ExecutionResult:
 
 
 def _has_output_contract(result: ExecutionResult) -> bool:
-    return (
-        result.output is not None
-        or result.output_schema_id is not None
-        or result.output_schema_revision is not None
-        or result.output_schema_fingerprint is not None
+    return result.output is not None or result.output_fingerprint is not None
+
+
+def _is_digest(value: object) -> bool:
+    return isinstance(value, str) and len(value) == 64 and all(
+        character in "0123456789abcdef" for character in value
     )
 
 
@@ -161,10 +178,31 @@ class ExecutionTraceItem:
     payload: JsonValue
 
     def __post_init__(self) -> None:
-        if isinstance(self.payload, dict) and self.payload.get("kind") == "MODEL_RESPONSE" and "token_usage" not in self.payload:
-            payload = dict(self.payload)
-            payload["token_usage"] = None
-            object.__setattr__(self, "payload", payload)
+        if self.sequence < 0:
+            raise ValueError("execution trace sequence must be non-negative")
+        if not isinstance(self.payload, Mapping) or self.payload.get("kind") != "MODEL_RESPONSE":
+            return
+        if "token_usage" not in self.payload:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        status = self.payload.get("status")
+        usage = self.payload["token_usage"]
+        if status == "FAILED":
+            if usage is not None:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            return
+        if status != "SUCCEEDED" or not isinstance(usage, Mapping):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        required = {
+            "input_tokens",
+            "output_tokens",
+            "cache_read_tokens",
+            "cache_write_tokens",
+        }
+        if set(usage) != required or any(
+            not isinstance(value, int) or isinstance(value, bool) or value < 0
+            for value in usage.values()
+        ):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
 
 
 @dataclass(frozen=True, slots=True)
@@ -268,18 +306,26 @@ class ListSessionRequest:
 class ResumeSessionRequest:
     principal: Principal
     user_prompt: str
-    idempotency_key: str = ""
-    memory_scope: "str | None" = None
-    planning: bool = False
-    thinking: bool = False
+    user_prompt_codec: str
+    idempotency_key: str
+    memory_scope: "str | None"
+    mode: ExecutionMode
+    planning: bool
+    thinking: ThinkingValue
 
     def __post_init__(self) -> None:
         validate_user_prompt(self.user_prompt)
+        if self.user_prompt_codec not in {"text", "pydantic-user-content-v1"}:
+            raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
         validate_idempotency_key(self.idempotency_key)
         if self.memory_scope is not None:
             validate_memory_scope(self.memory_scope)
-        if not isinstance(self.planning, bool) or not isinstance(self.thinking, bool):
+        mode = normalize_execution_mode(self.mode)
+        thinking = normalize_thinking(self.thinking)
+        if not isinstance(self.planning, bool) or mode == "plan" and not self.planning:
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+        object.__setattr__(self, "mode", mode)
+        object.__setattr__(self, "thinking", thinking)
 
 
 @dataclass(frozen=True, slots=True)
@@ -362,7 +408,6 @@ class CompareEvaluationRequest:
     metric_contract_revision: "int | None" = None
     snapshot_digest: "str | None" = None
     artifact_digest: "str | None" = None
-    output_schema_fingerprint: "str | None" = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -587,7 +632,7 @@ class TaskService(Protocol):
 
 
 class EvaluationService(Protocol):
-    async def run(self, binding_digest: str, output_schema_fingerprint: str, request: RunEvaluationRequest) -> EvaluationHandle: ...
+    async def run(self, binding_digest: str, request: RunEvaluationRequest) -> EvaluationHandle: ...
     async def inspect(self, evaluation_id: str, *, principal: Principal) -> EvaluationView: ...
     async def compare(self, request: CompareEvaluationRequest) -> EvaluationComparison: ...
     async def snapshot(self, evaluation_id: str, *, principal: Principal) -> RunSnapshot: ...

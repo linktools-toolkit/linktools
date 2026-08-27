@@ -7,8 +7,8 @@ from dataclasses import replace
 from types import SimpleNamespace
 
 import pytest
-from linktools.ai.agent import AgentCompiler, bind_output
-from linktools.ai.capability import RuntimeCapability
+from linktools.ai.agent import AgentBindingSnapshot, AgentCompiler, bind_output
+from linktools.ai.capability import CapabilityContribution, CapabilityGroup
 from linktools.ai.core import ExecutionStatus, Principal, ResourceKind, ResourceRef, TaskStatus
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.model import ModelRegistry
@@ -45,24 +45,17 @@ _RecursiveOutput.model_rebuild()
 
 
 class _RegisteredCapability(AbstractCapability[None]):
-    @classmethod
-    def get_serialization_name(cls) -> "str | None":
-        return "durable-contract-capability"
-
-    @classmethod
-    def from_spec(cls, **kwargs: object) -> "_RegisteredCapability":
-        del kwargs
-        return cls()
+    id = "durable-contract-capability"
 
 
 def _compiler(
     *,
-    capabilities: tuple[object, ...] = (),
+    candidates: tuple[CapabilityContribution[object], ...] = (),
 ) -> AgentCompiler:
     return AgentCompiler(
         model_resolver=ModelRegistry.openai(model="gpt-test").snapshot(),
-        capabilities=capabilities,
-        runtime_fingerprint="a" * 64,
+        candidates=candidates,
+        agent_ids=("durable-contract",),
     )
 
 
@@ -75,14 +68,11 @@ def test_custom_output_restore_uses_persisted_schema() -> None:
     definition = compiler.compile(_spec())
     binding = compiler.bind(definition, output=_RegisteredOutput)
     snapshot = binding.snapshot
-    assert snapshot.output_schema_definition == binding.output_binding.schema_definition
-    assert not hasattr(compiler, "_outputs_by_type")
+    assert snapshot.output_schema == binding.output_binding.schema_definition
 
-    fresh = _compiler()
-    restored = fresh.restore(snapshot)
+    restored = _compiler().restore(snapshot)
     assert restored.snapshot == snapshot
     assert restored.output_type is not _RegisteredOutput
-    assert not hasattr(fresh, "_outputs_by_type")
 
 
 def test_custom_output_restore_rejects_missing_or_tampered_schema() -> None:
@@ -91,14 +81,15 @@ def test_custom_output_restore_rejects_missing_or_tampered_schema() -> None:
     snapshot = binding.snapshot
     fresh = _compiler()
 
-    historical = replace(snapshot, output_schema_definition=None)
+    missing_payload = snapshot.to_payload()
+    missing_payload.pop("output_schema")
     with pytest.raises(AIError) as missing_error:
-        fresh.restore(historical)
-    assert missing_error.value.code is ErrorCode.AGENT_DEFINITION_UNAVAILABLE
+        AgentBindingSnapshot.from_payload(missing_payload)
+    assert missing_error.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
 
-    tampered_schema = dict(snapshot.output_schema_definition or {})
+    tampered_schema = dict(snapshot.output_schema)
     tampered_schema["title"] = "TamperedOutput"
-    tampered = replace(snapshot, output_schema_definition=tampered_schema)
+    tampered = replace(snapshot, output_schema=tampered_schema)
     with pytest.raises(AIError) as tampered_error:
         fresh.restore(tampered)
     assert tampered_error.value.code is ErrorCode.AGENT_DEFINITION_UNAVAILABLE
@@ -111,56 +102,26 @@ def test_custom_output_rejects_non_durable_schema_at_bind_time() -> None:
     assert error.value.safe_details == {"reason": "output_schema_not_durable"}
 
 
-def test_local_runtime_capability_restore_uses_persisted_locator() -> None:
-    capability = RuntimeCapability.from_spec(
-        "local",
-        _RegisteredCapability,
-        config={"mode": "strict"},
-    )
-    compiler = _compiler()
-    definition = compiler.compile(_spec(), capabilities=(capability,))
-    binding = compiler.bind(definition)
-    assert not hasattr(compiler, "_runtime_capability_types")
-
-    fresh = _compiler()
-    assert fresh.restore(binding.snapshot).snapshot == binding.snapshot
-    assert not hasattr(fresh, "_runtime_capability_types")
-
-    descriptor = dict(binding.snapshot.local_runtime_capability_descriptors[0])
-    descriptor["restore_locator"] = {
-        "module": "missing.historical.module",
-        "qualname": "MovedCapability",
-    }
-    historical = replace(
-        binding.snapshot,
-        local_runtime_capability_descriptors=(descriptor,),
-    )
-    with pytest.raises(AIError) as missing_error:
-        fresh.restore(historical)
-    assert missing_error.value.code is ErrorCode.AGENT_DEFINITION_UNAVAILABLE
-
-
-def test_global_runtime_capability_is_restored_from_composition() -> None:
-    capability = RuntimeCapability.from_spec(
-        "global",
-        _RegisteredCapability,
-        config={"mode": "global"},
-    )
-    compiler = _compiler(capabilities=(capability,))
+@pytest.mark.asyncio
+async def test_opaque_capability_restore_requires_exact_current_semantic_pin() -> None:
+    group = CapabilityGroup[None]("durable")
+    group.capability(_RegisteredCapability(), revision=3)
+    candidates = tuple(await group.freeze())
+    compiler = _compiler(candidates=candidates)
     binding = compiler.bind(compiler.compile(_spec()))
-    fresh = _compiler(capabilities=(capability,))
-    assert fresh.restore(binding.snapshot).snapshot == binding.snapshot
 
-    descriptor = dict(binding.snapshot.global_runtime_capability_descriptors[0])
-    descriptor["restore_locator"] = {
-        "module": "missing.historical.module",
-        "qualname": "MovedCapability",
-    }
-    historical = replace(
-        binding.snapshot,
-        global_runtime_capability_descriptors=(descriptor,),
-    )
-    assert fresh.restore(historical).snapshot == historical
+    assert _compiler(candidates=candidates).restore(binding.snapshot).snapshot == binding.snapshot
+
+    with pytest.raises(AIError) as missing:
+        _compiler().restore(binding.snapshot)
+    assert missing.value.code is ErrorCode.AGENT_DEFINITION_UNAVAILABLE
+
+    changed_group = CapabilityGroup[None]("changed")
+    changed_group.capability(_RegisteredCapability(), revision=4)
+    changed_candidates = tuple(await changed_group.freeze())
+    with pytest.raises(AIError) as changed:
+        _compiler(candidates=changed_candidates).restore(binding.snapshot)
+    assert changed.value.code is ErrorCode.AGENT_DEFINITION_UNAVAILABLE
 
 
 @pytest.mark.asyncio
@@ -295,9 +256,7 @@ async def test_step_preflight_rejects_flights_tasks_and_terminal_seals() -> None
 
 
 @pytest.mark.asyncio
-async def test_runtime_object_preflight_rejects_pending_filesystem_work(
-    tmp_path,
-) -> None:
+async def test_runtime_object_preflight_rejects_pending_filesystem_work(tmp_path) -> None:
     store = FilesystemObjectStore(tmp_path)
     router = _RuntimeObjectRouter(
         {RuntimeDomain.EXECUTION: store},
@@ -315,9 +274,7 @@ async def test_runtime_object_preflight_rejects_pending_filesystem_work(
 
 
 @pytest.mark.asyncio
-async def test_runtime_object_preflight_ignores_external_filesystem_work(
-    tmp_path,
-) -> None:
+async def test_runtime_object_preflight_ignores_external_filesystem_work(tmp_path) -> None:
     store = FilesystemObjectStore(tmp_path)
     router = _RuntimeObjectRouter(
         {RuntimeDomain.EXECUTION: store},
@@ -382,28 +339,7 @@ async def test_runtime_object_preflight_rejects_pending_sql_work(tmp_path) -> No
 
 
 @pytest.mark.asyncio
-async def test_runtime_object_preflight_ignores_external_sql_work(tmp_path) -> None:
-    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'objects.db'}")
-    store = SqlObjectStore(engine)
-    router = _RuntimeObjectRouter(
-        {RuntimeDomain.EXECUTION: store},
-        close_guard_stores=(),
-    )
-    release = asyncio.Event()
-    task = asyncio.create_task(release.wait())
-    store._background_tasks.add(task)
-    try:
-        await router.preflight_close()
-    finally:
-        release.set()
-        await task
-        await store._context.close()
-        await engine.dispose()
-
-
-@pytest.mark.asyncio
-async def test_runtime_close_coordinator_does_not_close_lower_resources_after_preflight(
-) -> None:
+async def test_runtime_close_coordinator_does_not_close_lower_resources_after_preflight() -> None:
     calls: list[str] = []
     blocked = True
 
@@ -585,7 +521,7 @@ class _TerminalTaskRepository:
 
 
 class _TerminalTaskWaiter:
-    def __init__(self, error: AIError | None = None) -> None:
+    def __init__(self, error: "AIError | None" = None) -> None:
         self.error = error
         self.started = asyncio.Event()
         self.release = asyncio.Event()

@@ -26,7 +26,7 @@ from .core import (
 )
 from .errors import AIError
 from .runtime import CancelExecutionRequest, ListSessionRequest, Runtime
-from .workspace import Workspace, open_workspace_runtime
+from .workspace import Workspace
 
 _logger = environ.get_logger("ai.acp")
 
@@ -66,7 +66,11 @@ class ACPAgent:
     async def new_session(self, cwd: str, **kwargs: JsonValue) -> JsonValue:
         self._require_initialized()
         _, schema = _require_acp()
-        session = await self._runtime.create_session(uuid4().hex, principal=self._principal, cwd=cwd)
+        session = await self._runtime.agent().create_session(
+            uuid4().hex,
+            principal=self._principal,
+            cwd=cwd,
+        )
         return schema.NewSessionResponse(sessionId=session.session_id)
 
     async def load_session(self, cwd: str, session_id: str, **kwargs: JsonValue) -> JsonValue:
@@ -119,7 +123,14 @@ class ACPAgent:
         self._require_initialized()
         _, schema = _require_acp()
         text = "".join(item.text for item in prompt)
-        async for event in self._runtime.stream(text, principal=self._principal, session_id=session_id, memory_scope=self._memory_scope):
+        loaded = await self._runtime.session.get(session_id, principal=self._principal)
+        execution = await self._runtime.agent(loaded.agent_id).start(
+            text,
+            principal=self._principal,
+            session_id=session_id,
+            memory_scope=self._memory_scope,
+        )
+        async for event in execution.stream():
             if self._connection is not None:
                 update = _acp_update(schema, event.event_type, event.payload)
                 if update is not None:
@@ -153,7 +164,7 @@ class ACPApplication:
         return cls(workspace)
 
     async def serve(self, *, memory_scope: str) -> None:
-        async with open_workspace_runtime(self.workspace) as runtime:
+        async with Runtime.open(self.workspace) as runtime:
             await serve_stdio(
                 ACPAgent(
                     runtime,

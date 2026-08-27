@@ -1,16 +1,14 @@
 {
-  "baseline_commit": "9156a804dca0e9af3aa9028e401bca4ae5adda14",
-  "validated_source_commit": "21299844f1425d477f37cc09d8ae280ee6c6e112",
+  "baseline_commit": "77ce66cc3a68938181ec752cd30d9be5ab24d63b",
+  "validated_source_commit": "054d2cb265e96dfb1d50070e4e5d68fcb6853161",
   "status": "VERIFIED",
   "open_findings": [],
   "environment": {
-    "python": "3.11",
-    "debug": "false",
-    "pydantic_ai_harness": "0.24.0",
-    "pydantic_ai_slim": "2.33.0",
-    "ruff": "0.16.4",
-    "mysql_server": "not_run_no_environment_accepted",
-    "postgresql_server": "not_run_no_environment_accepted"
+    "github_actions_run_id": 33043243029,
+    "runner": "ubuntu-24.04",
+    "python": "3.10.21",
+    "pydantic_ai_slim": "2.35.1",
+    "pydantic_ai_harness": "0.26.0"
   },
   "runtime_backends": {
     "memory": "passed",

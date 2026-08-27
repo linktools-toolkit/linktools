@@ -89,7 +89,6 @@ def validate_compare_request(request: CompareEvaluationRequest) -> None:
         request.target_kind,
         request.snapshot_digest,
         request.artifact_digest,
-        request.output_schema_fingerprint,
     )
     revisions = (
         request.dataset_revision,
@@ -118,11 +117,11 @@ class DefaultEvaluationService:
         self._handoff_states: dict[tuple[str, str], _EvaluationHandoffState] = {}
         self._handoff_condition = asyncio.Condition()
 
-    async def run(self, binding_digest: str, output_schema_fingerprint: str, request: RunEvaluationRequest) -> EvaluationHandle:
+    async def run(self, binding_digest: str, request: RunEvaluationRequest) -> EvaluationHandle:
         evaluation_id = uuid.uuid4().hex
         idempotency_key_digest = compute_idempotency_key_digest(request.idempotency_key)
         await self._authorization.authorize(request.principal, AuthorizationAction.EVALUATION_RUN, ResourceRef(ResourceKind.EVALUATION, evaluation_id, request.principal.tenant_id))
-        request_digest = canonical_sha256({"action": "evaluation.run", "tenant_id": request.principal.tenant_id, "principal_id": request.principal.principal_id, "dataset_digest": request.dataset_digest, "binding": binding_digest, "output_schema_fingerprint": output_schema_fingerprint})
+        request_digest = canonical_sha256({"action": "evaluation.run", "tenant_id": request.principal.tenant_id, "principal_id": request.principal.principal_id, "dataset_digest": request.dataset_digest, "binding_digest": binding_digest})
         existing = await self._state.idempotency.get(
             "evaluation.run",
             idempotency_key_digest,
@@ -162,13 +161,17 @@ class DefaultEvaluationService:
                     binding_digest,
                     ExecutionRequest(
                         user_prompt=f"evaluation:{request.dataset_digest}",
+                        user_prompt_codec="text",
                         principal=request.principal,
                         idempotency_key=f"evaluation:{request.idempotency_key}",
                         memory_scope=request.memory_scope,
+                        mode="run",
+                        planning=False,
+                        thinking=False,
                     ),
                 )
                 await self._acquire_execution_hold(execution.execution_id, tenant_id=request.principal.tenant_id, hold_id=f"evaluation:{evaluation_id}")
-                record = EvaluationRecord(evaluation_id, request.principal.tenant_id, execution.execution_id, request.dataset_digest, 1, "default", 1, binding_digest, output_schema_fingerprint, None, EvaluationStatus.PENDING, 0, {}, now, now)
+                record = EvaluationRecord(evaluation_id, request.principal.tenant_id, execution.execution_id, request.dataset_digest, 1, "default", 1, binding_digest, None, EvaluationStatus.PENDING, 0, {}, now, now)
                 await self._state.records.create(record)
             elif record.status not in {EvaluationStatus.SUCCEEDED, EvaluationStatus.FAILED, EvaluationStatus.CANCELLED}:
                 execution = await self._execution_record(record)
@@ -241,7 +244,6 @@ class DefaultEvaluationService:
                 or baseline.evaluator_id != candidate.evaluator_id
                 or baseline.evaluator_revision != candidate.evaluator_revision
                 or baseline.binding_digest != candidate.binding_digest
-                or baseline.output_schema_fingerprint != candidate.output_schema_fingerprint
             ):
                 raise AIError(ErrorCode.EVALUATION_INCOMPATIBLE)
             comparison = EvaluationComparison(request.baseline_id, request.candidate_id, True)
@@ -270,9 +272,13 @@ class DefaultEvaluationService:
                 binding_digest,
                 ExecutionRequest(
                     user_prompt=f"replay:{record.evaluation_id}",
+                    user_prompt_codec="text",
                     principal=request.principal,
                     idempotency_key=request.idempotency_key,
                     memory_scope=request.memory_scope,
+                    mode="run",
+                    planning=False,
+                    thinking=False,
                 ),
             )
             if record.status in {EvaluationStatus.SUCCEEDED, EvaluationStatus.FAILED, EvaluationStatus.CANCELLED}:

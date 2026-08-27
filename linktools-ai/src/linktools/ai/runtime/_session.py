@@ -424,9 +424,11 @@ class DefaultSessionService:
                 raise AIError(ErrorCode.SESSION_BINDING_MISMATCH)
             execution_request = ExecutionRequest(
                 user_prompt=request.user_prompt,
+                user_prompt_codec=request.user_prompt_codec,
                 principal=request.principal,
                 idempotency_key=request.idempotency_key,
                 memory_scope=request.memory_scope,
+                mode=request.mode,
                 planning=request.planning,
                 thinking=request.thinking,
             )

@@ -65,6 +65,9 @@ class InMemoryAssetBackend:
     async def initialize(self) -> None:
         return None
 
+    async def close(self) -> None:
+        return None
+
     async def validate_integrity(self) -> None:
         async with self._lock:
             for key, history in self._versions.items():

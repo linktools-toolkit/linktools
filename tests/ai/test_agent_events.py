@@ -2,8 +2,8 @@
 # -*- coding: utf-8 -*-
 """Agent stream event mapping checks."""
 
-from linktools.ai.agent._executor import LiveDelta, _map_event
 from linktools.ai.core import ExecutionDeltaType
+from linktools.ai.runtime._agent_executor import LiveDelta, _map_event
 from pydantic_ai.messages import (
     PartDeltaEvent,
     PartStartEvent,

@@ -21,7 +21,6 @@ from ..agent import (
     AgentBindingSnapshot,
     AgentCatalog,
     AgentCompiler,
-    UserPromptTransport,
 )
 from ..core import (
     AuthorizationAction,
@@ -626,6 +625,7 @@ class DefaultExecutionService:
             agent_run_sequence=0,
             memory_scope=request.memory_scope,
             conversation_step_run_id=conversation_run_id,
+            mode=request.mode,
             planning=request.planning,
             thinking=request.thinking,
             binding=binding.snapshot,
@@ -817,9 +817,6 @@ class DefaultExecutionService:
                             current.execution_id,
                             current.tenant_id,
                             None,
-                            None,
-                            None,
-                            None,
                             StopReason.ERROR,
                             UsageMetrics(),
                             now,
@@ -972,23 +969,14 @@ class DefaultExecutionService:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         error_code, safe_details = _terminal_error(execution)
         if execution.status in {ExecutionStatus.FAILED, ExecutionStatus.CANCELLED}:
-            if result.output is not None or any(
-                value is not None
-                for value in (
-                    result.output_schema_id,
-                    result.output_schema_revision,
-                    result.output_schema_fingerprint,
-                )
-            ):
+            if result.output is not None:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             try:
                 return ExecutionResult(
                     execution.execution_id,
                     execution.status,
                     None,
-                    result.output_schema_id,
-                    result.output_schema_revision,
-                    result.output_schema_fingerprint,
+                    None,
                     result.usage,
                     error_code,
                     safe_details,
@@ -997,6 +985,7 @@ class DefaultExecutionService:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
         if result.output is None:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        binding = self._binding(execution.binding_digest, execution.binding)
         try:
             if result.output.kind == "inline":
                 decoded = result.output.decode()
@@ -1021,9 +1010,7 @@ class DefaultExecutionService:
                 execution.execution_id,
                 execution.status,
                 output,
-                result.output_schema_id,
-                result.output_schema_revision,
-                result.output_schema_fingerprint,
+                binding.output_fingerprint,
                 result.usage,
                 error_code,
                 safe_details,
@@ -1102,9 +1089,11 @@ class DefaultExecutionService:
             raise AIError(ErrorCode.RUNTIME_SERVICE_MISMATCH)
         retry_request = ExecutionRequest(
             user_prompt=request.user_prompt,
+            user_prompt_codec=request.user_prompt_codec,
             principal=request.principal,
             idempotency_key=request.idempotency_key,
             memory_scope=previous.memory_scope,
+            mode=previous.mode,
             planning=previous.planning,
             thinking=previous.thinking,
         )
@@ -1130,9 +1119,11 @@ class DefaultExecutionService:
             raise AIError(ErrorCode.RUNTIME_SERVICE_MISMATCH)
         fork_request = ExecutionRequest(
             user_prompt=request.user_prompt,
+            user_prompt_codec=request.user_prompt_codec,
             principal=request.principal,
             idempotency_key=request.idempotency_key,
             memory_scope=previous.memory_scope,
+            mode=previous.mode,
             planning=previous.planning,
             thinking=previous.thinking,
         )
@@ -1309,9 +1300,6 @@ class DefaultExecutionService:
             result = ResultRecord(
                 execution_id,
                 request.principal.tenant_id,
-                None,
-                None,
-                None,
                 None,
                 StopReason.CANCELLED,
                 UsageMetrics(),
@@ -1528,15 +1516,11 @@ def _request_digest(
     root_execution_id: str | None,
     lineage_kind: ExecutionLineageKind,
 ) -> str:
-    user_prompt_identity: JsonValue = str(request.user_prompt)
-    if (
-        isinstance(request.user_prompt, UserPromptTransport)
-        and request.user_prompt.codec != "text"
-    ):
-        user_prompt_identity = {
-            "codec": request.user_prompt.codec,
-            "value": str(request.user_prompt),
-        }
+    user_prompt_identity: JsonValue = (
+        request.user_prompt
+        if request.user_prompt_codec == "text"
+        else {"codec": request.user_prompt_codec, "value": request.user_prompt}
+    )
     return canonical_sha256(
         {
             "user_prompt": user_prompt_identity,
@@ -1550,6 +1534,7 @@ def _request_digest(
             "root_identity": root_execution_id or "$self",
             "lineage_kind": lineage_kind.value,
             "memory_scope_digest": None if request.memory_scope is None else canonical_sha256(request.memory_scope),
+            "mode": request.mode,
             "planning": request.planning,
             "thinking": request.thinking,
         }

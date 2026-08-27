@@ -29,13 +29,13 @@ from ..core import (
     validate_persistence_namespace,
 )
 from ..errors import AIError, ErrorCode
-from ..runtime.service_api import (
+from .service_api import (
     ExecutionHistoryItem,
     ExecutionTraceItem,
     SessionHistoryItem,
     TranscriptItem,
 )
-from ..runtime.state import (
+from .state import (
     SESSION_HISTORY_VIEW_V1,
     ExecutionReadModelBuild,
     ExecutionReadModelRepository,
@@ -48,7 +48,7 @@ from ..runtime.state import (
     project_session_history_message,
 )
 
-_logger = environ.get_logger("ai.adapter.history")
+_logger = environ.get_logger("ai.runtime.history")
 _MODEL_USAGE_INPUT_METADATA_KEY = "linktools.ai.model_usage.input_tokens"
 _MODEL_USAGE_OUTPUT_METADATA_KEY = "linktools.ai.model_usage.output_tokens"
 _MODEL_USAGE_CACHE_READ_METADATA_KEY = "linktools.ai.model_usage.cache_read_tokens"

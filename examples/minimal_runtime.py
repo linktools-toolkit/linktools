@@ -5,9 +5,10 @@
 import os
 from pathlib import Path
 
+from linktools.ai.capability import CapabilityGroup
 from linktools.ai.model import ModelRegistry
-from linktools.ai.spec import AgentSpec
-from linktools.ai.workspace import Workspace, open_workspace_runtime
+from linktools.ai.runtime import Runtime
+from linktools.ai.workspace import Workspace
 
 
 async def run(project: Path) -> object:
@@ -19,14 +20,18 @@ async def run(project: Path) -> object:
         api_key=os.environ.get("OPENAI_API_KEY") or None,
     )
     workspace = Workspace.load(project)
-    spec = AgentSpec(
+    application = CapabilityGroup[None]("application")
+    application.agent(
         "writer",
-        1,
-        "default",
+        model="default",
         system_prompt="You are a careful writer.",
     )
-    async with open_workspace_runtime(workspace, models=models) as runtime:
-        result = await runtime.agent(spec).run("Say hello.")
+    async with Runtime.open(
+        workspace,
+        models=models,
+        capabilities=(application,),
+    ) as runtime:
+        result = await runtime.agent("writer").run("Say hello.")
         return result.output
 
 
