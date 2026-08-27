@@ -143,7 +143,7 @@ def test_package_policy_matches_final_owner_graph() -> None:
         "model",
         "capability",
     }
-    assert {
+    assert set(policy["dependencies"]["runtime"]) == {
         "core",
         "storage",
         "asset",
@@ -154,7 +154,7 @@ def test_package_policy_matches_final_owner_graph() -> None:
         "task",
         "agent",
         "workspace",
-    } <= set(policy["dependencies"]["runtime"])
+    }
     removed_modules = {
         "workspace._factory",
         "workspace._tools",
@@ -177,6 +177,17 @@ def test_package_policy_matches_final_owner_graph() -> None:
         "core",
         "capability",
     ]
+    assert set(policy["module_dependencies"]["runtime._factory"]) == {
+        "core",
+        "storage",
+        "asset",
+        "spec",
+        "model",
+        "capability",
+        "task",
+        "agent",
+        "workspace",
+    }
 
 
 def test_contract_map_has_no_removed_composition_contracts() -> None:
