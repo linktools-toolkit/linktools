@@ -9,7 +9,7 @@ from pydantic_ai.messages import BinaryContent
 from linktools.ai.agent import AgentBindingSnapshot
 from linktools.ai.core import ExecutionLineageKind, Principal
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.runtime import ExecutionRequest, RuntimeObjectKeyFactory
+from linktools.ai.runtime import ExecutionRequest
 from linktools.ai.runtime._execution import _request_digest
 from linktools.ai.runtime._input import (
     UserPromptTransport,
@@ -19,12 +19,7 @@ from linktools.ai.runtime._input import (
 )
 from linktools.ai.runtime._local import _recovery_prompt_payload, _recovery_prompt_text
 from linktools.ai.spec import AgentSpec
-from linktools.ai.storage import InMemoryObjectStore, StoredPayload
-from linktools.ai.temporal._request import (
-    _execution_request_from_payload,
-    put_execution_request,
-    read_execution_request,
-)
+from linktools.ai.storage import StoredPayload
 
 
 def _binding() -> AgentBindingSnapshot:
@@ -53,25 +48,6 @@ def _rich_prompt() -> UserPromptTransport:
     )
 
 
-def _execution_payload(user_prompt: str, *, codec: str = "text") -> dict[str, object]:
-    return {
-        "version": 1,
-        "user_prompt": user_prompt,
-        "user_prompt_codec": codec,
-        "principal": {
-            "principal_id": "user",
-            "tenant_id": "tenant",
-            "kind": "service",
-        },
-        "idempotency_key": "temporal-prompt",
-        "memory_scope": None,
-        "mode": "run",
-        "planning": False,
-        "thinking": False,
-        "binding": _binding().to_payload(),
-    }
-
-
 def _request(prompt: str, *, codec: str) -> ExecutionRequest:
     return ExecutionRequest(
         user_prompt=prompt,
@@ -96,57 +72,6 @@ def _execution_request_digest(request: ExecutionRequest) -> str:
         root_execution_id=None,
         lineage_kind=ExecutionLineageKind.RUN,
     )
-
-
-@pytest.mark.asyncio
-async def test_temporal_execution_request_preserves_rich_prompt_codec() -> None:
-    store = InMemoryObjectStore("requests")
-    key_factory = RuntimeObjectKeyFactory("prompt-codec-test")
-    prompt = _rich_prompt()
-    request = _request(prompt, codec=prompt.codec)
-
-    request_ref = await put_execution_request(
-        store,
-        key_factory,
-        request,
-        binding=_binding(),
-    )
-    restored_request = await read_execution_request(
-        store,
-        key_factory,
-        tenant_id="tenant",
-        request_ref=request_ref,
-    )
-
-    assert restored_request.user_prompt == str(prompt)
-    assert restored_request.user_prompt_codec == "pydantic-user-content-v1"
-    restored = _restore_user_prompt(
-        user_prompt_transport(
-            restored_request.user_prompt,
-            restored_request.user_prompt_codec,
-        )
-    )
-    assert isinstance(restored, tuple)
-    assert restored[0] == "Inspect this attachment"
-    assert isinstance(restored[1], BinaryContent)
-    assert restored[1].identifier == "input.log"
-
-
-def test_temporal_v1_request_requires_explicit_prompt_codec() -> None:
-    payload = _execution_payload("payload")
-    del payload["user_prompt_codec"]
-
-    with pytest.raises(ValueError, match="request payload fields are invalid"):
-        _execution_request_from_payload(payload)
-
-
-def test_temporal_unknown_prompt_codec_is_unsupported() -> None:
-    payload = _execution_payload("payload", codec="future-user-content-v2")
-
-    with pytest.raises(AIError) as raised:
-        _execution_request_from_payload(payload)
-
-    assert raised.value.code is ErrorCode.STORAGE_VERSION_UNSUPPORTED
 
 
 def test_recovery_prompt_payload_preserves_rich_codec() -> None:

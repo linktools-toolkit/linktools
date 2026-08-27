@@ -15,31 +15,24 @@ from ..core import (
     Principal,
 )
 from ..errors import AIError, ErrorCode
-from .service_api import (
-    ApprovalDecisionRequest,
-    ApprovalDecisionResult,
-    ApprovalView,
-    WorkflowGateway,
-)
+from .service_api import ApprovalDecisionRequest, ApprovalDecisionResult, ApprovalView
 from .state._contracts import ApprovalRecord, ApprovalRepository, ExecutionRepository
 
 _logger = environ.get_logger("ai.runtime.approval")
 
 
 class DefaultApprovalService:
-    """Persist decisions before any optional workflow notification."""
+    """Persist and replay durable approval decisions."""
 
     def __init__(
         self,
         approvals: ApprovalRepository,
         executions: ExecutionRepository,
         authorization: AuthorizationPolicy,
-        workflow_gateway: "WorkflowGateway | None" = None,
     ) -> None:
         self._approvals = approvals
         self._executions = executions
         self._authorization = authorization
-        self._workflow_gateway = workflow_gateway
 
     async def list(
         self,
@@ -121,19 +114,6 @@ class DefaultApprovalService:
             or updated.decision_digest is None
         ):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        if self._workflow_gateway is not None:
-            await self._workflow_gateway.update_execution(
-                execution_id,
-                "approve",
-                {
-                    "operation_id": updated.operation_id,
-                    "approval_id": updated.approval_id,
-                    "idempotency_key": request.idempotency_key,
-                    "decision": updated.decision.value,
-                    "principal_id": updated.decided_by,
-                    "decision_digest": updated.decision_digest,
-                },
-            )
         _logger.info(
             "approval decided: execution=%s approval=%s",
             execution_id,

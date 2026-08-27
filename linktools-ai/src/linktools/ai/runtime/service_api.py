@@ -6,7 +6,6 @@ from collections.abc import AsyncIterator, Mapping
 from dataclasses import dataclass, field
 from typing import Protocol
 
-from ..agent import AgentBindingSnapshot
 from ..core import (
     ApprovalDecision,
     ApprovalStatus,
@@ -33,7 +32,6 @@ from ..observe import RunSnapshot
 from ..storage import ObjectRef
 from ..task import (
     CancelGraphRequest,
-    TaskGraphHandle,
     TaskGraphRequest,
     TaskGraphResult,
     TaskGraphView,
@@ -535,68 +533,6 @@ class ArtifactDownload:
     expires_at: str
 
 
-@dataclass(frozen=True, slots=True)
-class WorkflowUpdateResult:
-    workflow_id: str
-    status: str
-
-
-@dataclass(frozen=True, slots=True)
-class WorkflowQueryResult:
-    workflow_id: str
-    status: str
-    payload: "Mapping[str, JsonValue]"
-
-
-@dataclass(frozen=True, slots=True)
-class BudgetReservationRequest:
-    execution_id: str
-    idempotency_key: str
-    amount: int
-
-    def __post_init__(self) -> None:
-        if not self.execution_id.strip() or not self.idempotency_key.strip() or self.amount < 1:
-            raise ValueError("budget reservation is invalid")
-
-
-@dataclass(frozen=True, slots=True)
-class BudgetReservation:
-    reservation_id: str
-    amount: int
-
-
-@dataclass(frozen=True, slots=True)
-class BudgetSettlement:
-    reservation_id: str
-    amount: int
-
-
-@dataclass(frozen=True, slots=True)
-class BudgetSettlementRequest:
-    reservation_id: str
-    amount: int
-
-    def __post_init__(self) -> None:
-        if not self.reservation_id.strip() or self.amount < 0:
-            raise ValueError("budget settlement is invalid")
-
-
-class WorkflowGateway(Protocol):
-    async def start_execution(
-        self,
-        workflow_id: str,
-        request: ExecutionRequest,
-        *,
-        binding: AgentBindingSnapshot,
-    ) -> ExecutionHandle: ...
-
-    async def update_execution(self, workflow_id: str, operation: str, payload: 'Mapping[str, JsonValue]') -> WorkflowUpdateResult: ...
-    async def query_execution(self, workflow_id: str, query: str) -> WorkflowQueryResult: ...
-    async def cancel_execution(self, workflow_id: str) -> CancelExecutionResult: ...
-    async def start_task_graph(self, workflow_id: str, request: TaskGraphRequest) -> TaskGraphHandle: ...
-    async def cancel_task_graph(self, workflow_id: str, idempotency_key: str) -> TaskGraphView: ...
-
-
 class ExecutionService(Protocol):
     async def run(self, binding_digest: str, request: ExecutionRequest) -> ExecutionHandle: ...
     async def inspect(self, execution_id: str, *, principal: Principal) -> ExecutionView: ...
@@ -659,11 +595,6 @@ class ArtifactService(Protocol):
     async def get(self, artifact_id: str, *, principal: Principal) -> ArtifactDownload: ...
 
 
-class BudgetService(Protocol):
-    async def reserve(self, request: BudgetReservationRequest) -> BudgetReservation: ...
-    async def settle(self, request: BudgetSettlementRequest) -> BudgetSettlement: ...
-
-
 __all__ = [
     "ApprovalDecisionRequest",
     "ApprovalDecisionResult",
@@ -672,11 +603,6 @@ __all__ = [
     "ArtifactDownload",
     "ArtifactService",
     "ArtifactView",
-    "BudgetReservation",
-    "BudgetReservationRequest",
-    "BudgetService",
-    "BudgetSettlement",
-    "BudgetSettlementRequest",
     "CancelExecutionRequest",
     "CancelExecutionResult",
     "CancelGraphRequest",
@@ -717,7 +643,4 @@ __all__ = [
     "TaskService",
     "TranscriptItem",
     "UpdateSessionRequest",
-    "WorkflowGateway",
-    "WorkflowQueryResult",
-    "WorkflowUpdateResult",
 ]

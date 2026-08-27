@@ -202,7 +202,7 @@ second = await session.run(
 history = await session.history()
 ```
 
-A Session owns conversation continuity and the stable Agent id. Every new execution binds the current frozen Agent definition to that execution's output contract. Retry, fork, durable recovery, evaluation, Task execution, and Temporal execution use the exact binding snapshot/digest required by their contract rather than re-running current selector discovery.
+A Session owns conversation continuity and the stable Agent id. Every new execution binds the current frozen Agent definition to that execution's output contract. Retry, fork, durable recovery, evaluation, and Task execution use the exact binding snapshot/digest required by their contract rather than re-running current selector discovery.
 
 User prompt transport is also durable: plain text uses the `text` codec, while supported native Pydantic user content uses the v1 durable user-content codec. Unsupported external file lifecycle objects fail closed instead of being guessed or silently converted.
 
@@ -225,6 +225,8 @@ async with Runtime.open(
 ```
 
 Built-in Runtime state supports in-memory, filesystem, SQLite, and SQL composition used by the Runtime persistence layer. State domains keep their existing ownership, transaction, recovery, and retention rules; `Runtime.open()` consumes the state object instead of exposing duplicate storage-root arguments.
+
+Durable local execution and recovery are provided by Runtime state and recovery checkpoints and do not require an external workflow server.
 
 ## 8. Public API boundary
 

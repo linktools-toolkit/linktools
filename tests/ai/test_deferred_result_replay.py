@@ -1,9 +1,8 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Regression coverage for durable deferred-result notification replay."""
+"""Regression coverage for durable deferred-result replay."""
 
 import hashlib
-import json
 from dataclasses import replace
 from datetime import datetime, timezone
 from types import SimpleNamespace
@@ -20,52 +19,54 @@ from linktools.ai.core import (
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.runtime._approval import DefaultApprovalService
 from linktools.ai.runtime._external import DefaultExternalService
-from linktools.ai.runtime.service_api import (
-    ApprovalDecisionRequest,
-    ExternalSupplyRequest,
-)
+from linktools.ai.runtime.service_api import ApprovalDecisionRequest, ExternalSupplyRequest
 from linktools.ai.runtime.state._contracts import ApprovalRecord, ExternalCallRecord
 from linktools.ai.storage import ObjectRef
 from linktools.ai.workspace import trusted_workspace_principal
 
 
 class _AllowAuthorization:
-    async def authorize(self, principal: object, action: object, resource: object) -> None:
+    async def authorize(
+        self,
+        principal: object,
+        action: object,
+        resource: object,
+    ) -> None:
         del principal, action, resource
 
 
 class _Executions:
-    async def get_header(self, execution_id: str, *, tenant_id: str) -> ResourceRef | None:
+    async def get_header(
+        self,
+        execution_id: str,
+        *,
+        tenant_id: str,
+    ) -> ResourceRef | None:
         if execution_id == "execution" and tenant_id == "tenant":
             return ResourceRef(ResourceKind.EXECUTION, execution_id, tenant_id)
         return None
-
-
-class _FailOnceGateway:
-    def __init__(self) -> None:
-        self.calls: list[tuple[str, str, dict[str, object]]] = []
-
-    async def update_execution(
-        self,
-        workflow_id: str,
-        operation: str,
-        payload: dict[str, object],
-    ) -> None:
-        self.calls.append((workflow_id, operation, payload))
-        if len(self.calls) == 1:
-            raise RuntimeError("notification transport failed")
 
 
 class _ExternalCalls:
     def __init__(self, record: ExternalCallRecord) -> None:
         self.record = record
 
-    async def get(self, call_id: str, *, tenant_id: str) -> ExternalCallRecord | None:
+    async def get(
+        self,
+        call_id: str,
+        *,
+        tenant_id: str,
+    ) -> ExternalCallRecord | None:
         if call_id != self.record.call_id or tenant_id != self.record.tenant_id:
             return None
         return self.record
 
-    async def get_header(self, call_id: str, *, tenant_id: str) -> ResourceRef | None:
+    async def get_header(
+        self,
+        call_id: str,
+        *,
+        tenant_id: str,
+    ) -> ResourceRef | None:
         if call_id != self.record.call_id or tenant_id != self.record.tenant_id:
             return None
         return ResourceRef(ResourceKind.EXTERNAL_CALL, call_id, tenant_id)
@@ -102,17 +103,32 @@ class _Approvals:
     def __init__(self, record: ApprovalRecord) -> None:
         self.record = record
 
-    async def get(self, approval_id: str, *, tenant_id: str) -> ApprovalRecord | None:
+    async def get(
+        self,
+        approval_id: str,
+        *,
+        tenant_id: str,
+    ) -> ApprovalRecord | None:
         if approval_id != self.record.approval_id or tenant_id != self.record.tenant_id:
             return None
         return self.record
 
-    async def get_header(self, approval_id: str, *, tenant_id: str) -> ResourceRef | None:
+    async def get_header(
+        self,
+        approval_id: str,
+        *,
+        tenant_id: str,
+    ) -> ResourceRef | None:
         if approval_id != self.record.approval_id or tenant_id != self.record.tenant_id:
             return None
         return ResourceRef(ResourceKind.APPROVAL, approval_id, tenant_id)
 
-    async def list_pending(self, execution_id: str, *, tenant_id: str) -> tuple[ApprovalRecord, ...]:
+    async def list_pending(
+        self,
+        execution_id: str,
+        *,
+        tenant_id: str,
+    ) -> tuple[ApprovalRecord, ...]:
         if (
             execution_id == self.record.execution_id
             and tenant_id == self.record.tenant_id
@@ -156,7 +172,7 @@ class _Approvals:
 
 
 @pytest.mark.asyncio
-async def test_external_supply_replays_notification_after_durable_commit() -> None:
+async def test_external_supply_exact_replay_uses_durable_result() -> None:
     principal = trusted_workspace_principal("tenant")
     now = datetime.now(timezone.utc)
     calls = _ExternalCalls(
@@ -173,11 +189,9 @@ async def test_external_supply_replays_notification_after_durable_commit() -> No
             supplied_at=None,
         )
     )
-    gateway = _FailOnceGateway()
     service = DefaultExternalService(
         SimpleNamespace(external_calls=calls),
         _AllowAuthorization(),
-        gateway,
     )
     reference = ObjectRef("store", "objects/result", "a" * 64, 17)
     request = ExternalSupplyRequest(
@@ -188,27 +202,14 @@ async def test_external_supply_replays_notification_after_durable_commit() -> No
         "b" * 64,
     )
 
-    with pytest.raises(RuntimeError, match="transport failed"):
-        await service.supply("execution", request)
+    first = await service.supply("execution", request)
+    second = await service.supply("execution", request)
 
-    result = await service.supply("execution", request)
-
-    assert result.object_ref == reference
-    assert result.payload_digest == "b" * 64
-    assert len(gateway.calls) == 2
-    workflow_id, operation, payload = gateway.calls[-1]
-    assert workflow_id == "execution"
-    assert operation == "supply_external_result"
-    assert payload["operation_id"] == "operation"
-    assert payload["call_id"] == "external"
-    assert payload["idempotency_key"] == "supply-key"
-    assert payload["payload_digest"] == "b" * 64
-    assert json.loads(str(payload["object_ref"])) == {
-        "digest": "a" * 64,
-        "key": "objects/result",
-        "size": 17,
-        "store_id": "store",
-    }
+    assert first == second
+    assert second.object_ref == reference
+    assert second.payload_digest == "b" * 64
+    assert calls.record.object_ref == reference
+    assert calls.record.payload_digest == "b" * 64
 
     conflicting = ExternalSupplyRequest(
         principal,
@@ -223,7 +224,7 @@ async def test_external_supply_replays_notification_after_durable_commit() -> No
 
 
 @pytest.mark.asyncio
-async def test_approval_replays_persisted_actor_after_notification_failure() -> None:
+async def test_approval_exact_replay_preserves_original_actor() -> None:
     first_principal = Principal("approver-1", "tenant", "service")
     retry_principal = Principal("approver-2", "tenant", "service")
     now = datetime.now(timezone.utc)
@@ -242,28 +243,23 @@ async def test_approval_replays_persisted_actor_after_notification_failure() -> 
             decided_at=None,
         )
     )
-    gateway = _FailOnceGateway()
     service = DefaultApprovalService(
         approvals,
         _Executions(),
         _AllowAuthorization(),
-        gateway,
-    )
-    request = ApprovalDecisionRequest(
-        first_principal,
-        "approval",
-        "approval-key",
-        ApprovalDecision.APPROVE,
     )
 
-    with pytest.raises(RuntimeError, match="transport failed"):
-        await service.decide("execution", request)
-
+    first = await service.decide(
+        "execution",
+        ApprovalDecisionRequest(
+            first_principal,
+            "approval",
+            "approval-key",
+            ApprovalDecision.APPROVE,
+        ),
+    )
     persisted_digest = approvals.record.decision_digest
-    assert approvals.record.decided_by == first_principal.principal_id
-    assert persisted_digest is not None
-
-    result = await service.decide(
+    second = await service.decide(
         "execution",
         ApprovalDecisionRequest(
             retry_principal,
@@ -273,22 +269,12 @@ async def test_approval_replays_persisted_actor_after_notification_failure() -> 
         ),
     )
 
-    assert result.decision is ApprovalDecision.APPROVE
+    assert first == second
     assert approvals.record.idempotency_key_digest == hashlib.sha256(
         b"approval-key"
     ).hexdigest()
     assert approvals.record.decided_by == first_principal.principal_id
     assert approvals.record.decision_digest == persisted_digest
-    assert len(gateway.calls) == 2
-    workflow_id, operation, payload = gateway.calls[-1]
-    assert workflow_id == "execution"
-    assert operation == "approve"
-    assert payload["operation_id"] == "operation"
-    assert payload["approval_id"] == "approval"
-    assert payload["idempotency_key"] == "approval-key"
-    assert payload["decision"] == ApprovalDecision.APPROVE.value
-    assert payload["principal_id"] == first_principal.principal_id
-    assert payload["decision_digest"] == persisted_digest
 
     conflicting = ApprovalDecisionRequest(
         retry_principal,

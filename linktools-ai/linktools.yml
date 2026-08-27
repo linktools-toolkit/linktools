@@ -26,8 +26,6 @@ optional-dependencies:
     - aiosqlite>=0.22.1,<0.23.0
   evaluation:
     - pydantic-evals>=0.1.0
-  temporal:
-    - pydantic-ai-slim[temporal]>=2.27.0,<3.0.0
 
 scripts:
   capability: linktools.capabilities.ai:__cap_ai__

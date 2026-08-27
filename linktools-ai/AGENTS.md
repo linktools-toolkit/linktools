@@ -42,7 +42,7 @@ created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
 
 ### Durable external effects
 
-- Temporal workflow code must remain deterministic. Network access, processes, filesystem mutation, model calls, and other external effects belong in Activities or explicitly local adapters.
+- Durable recovery must not infer external-effect success from process lifetime or caller outcome. External effects that can be retried or recovered must have explicit ownership and idempotency/replay-safety semantics.
 - Define lifetime and recovery semantics before persisting external provider IDs, URLs, handles, tokens, or similar references.
 
 ## Guidance
@@ -65,7 +65,6 @@ These describe the current architecture and may evolve; they are not rules by th
 | `runtime` | Composition root, execution, persistence contracts, service APIs |
 | `workspace` | Workspace identity, paths, policy, configuration, sandbox contracts |
 | `adapter` | External provider, identity, transport adapters |
-| `temporal` | Durable workflows, activities, gateway, worker, launcher |
 | `migrate` | Explicit database schema provisioning |
 
 Repository-level checks under `scripts/check/ai` are release tooling, not another runtime architecture layer.

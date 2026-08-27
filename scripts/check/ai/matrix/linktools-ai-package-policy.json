@@ -12,7 +12,6 @@
     "runtime",
     "workspace",
     "adapter",
-    "temporal",
     "migrate"
   ],
   "dependencies": {
@@ -39,7 +38,6 @@
     ],
     "workspace": ["core"],
     "adapter": ["core"],
-    "temporal": ["core", "storage", "task", "agent", "runtime"],
     "migrate": ["asset", "storage", "runtime"]
   },
   "module_dependencies": {
@@ -58,8 +56,7 @@
     "runtime._runtime_service": ["core", "model", "capability", "task", "agent", "workspace"],
     "runtime._local": ["core", "storage", "capability", "agent", "workspace"],
     "runtime._execution": ["core", "storage", "agent"],
-    "runtime._history": ["core"],
-    "temporal._context": ["core"]
+    "runtime._history": ["core"]
   },
   "public_modules": [
     "errors",
