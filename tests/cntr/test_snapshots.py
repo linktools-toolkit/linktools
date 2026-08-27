@@ -28,7 +28,7 @@ def _check(snapshot_manager, name):
     expected = _snapshot_path(name).read_text(encoding="utf-8")
     assert actual == expected, (
         f"compose snapshot drift for builtin container `{name}`.\n"
-        f"Regenerate with: python scripts/cntr_generate_snapshots.py\n"
+        f"Regenerate with: python tests/cntr/update_snapshots.py\n"
         f"Only commit the change if the drift is intentional and explained."
     )
 
