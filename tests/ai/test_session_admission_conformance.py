@@ -9,6 +9,7 @@ from types import SimpleNamespace
 
 import pytest
 from linktools.ai.agent import AgentBindingSnapshot
+from linktools.ai.agent._output import bind_output
 from linktools.ai.core import (
     ExecutionStatus,
     Page,
@@ -198,16 +199,16 @@ async def test_closing_session_can_commit_owned_continuation_then_close() -> Non
 
 
 def _binding(digest: str) -> AgentBindingSnapshot:
+    output = bind_output()
     return AgentBindingSnapshot(
         version=1,
-        agent_spec=AgentSpec("agent", 1, "model"),
-        agent_digest="b" * 64,
-        output_schema_id="test-output",
-        output_schema_revision=1,
-        output_schema_fingerprint="c" * 64,
-        local_runtime_capability_descriptors=(),
+        agent_spec=AgentSpec("agent", model="model"),
+        model={"route_id": "model", "model_identity": "test:model"},
+        selected=(),
+        subagents=(),
+        output_mode=output.mode,
+        output_schema=output.schema_definition,
         binding_digest=digest,
-        global_runtime_capability_descriptors=(),
     )
 
 
@@ -220,13 +221,37 @@ class _DefinitionCatalog:
         )
 
 
-
 class _History:
-    async def trace(self, execution_id: str, *, tenant_id: str, cursor: str | None, limit: int) -> Page[object]:
+    async def history(
+        self,
+        execution_id: str,
+        *,
+        tenant_id: str,
+        cursor: str | None,
+        limit: int,
+    ) -> Page[object]:
         del execution_id, tenant_id, cursor, limit
         return Page((), None)
 
-    async def transcript(self, execution_id: str, *, tenant_id: str, cursor: str | None, limit: int) -> Page[object]:
+    async def trace(
+        self,
+        execution_id: str,
+        *,
+        tenant_id: str,
+        cursor: str | None,
+        limit: int,
+    ) -> Page[object]:
+        del execution_id, tenant_id, cursor, limit
+        return Page((), None)
+
+    async def transcript(
+        self,
+        execution_id: str,
+        *,
+        tenant_id: str,
+        cursor: str | None,
+        limit: int,
+    ) -> Page[object]:
         del execution_id, tenant_id, cursor, limit
         return Page((), None)
 
@@ -332,11 +357,16 @@ async def test_rejected_admission_terminalizes_pending_start() -> None:
                 "session",
                 ExecutionRequest(
                     user_prompt="hello",
+                    user_prompt_codec="text",
                     principal=Principal("owner", "tenant"),
                     idempotency_key="rejected-start",
+                    memory_scope=None,
+                    mode="run",
+                    planning=False,
+                    thinking=False,
                 ),
             )
-        assert error.value.code.value == "SESSION_BUSY"
+        assert error.value.code is ErrorCode.SESSION_BUSY
         executions = await state.execution.executions.list_by_session(
             "session",
             tenant_id="tenant",
@@ -344,7 +374,7 @@ async def test_rejected_admission_terminalizes_pending_start() -> None:
         assert len(executions) == 1
         execution = executions[0]
         assert execution.status is ExecutionStatus.FAILED
-        assert execution.error_code == "SESSION_BUSY"
+        assert execution.error_code == ErrorCode.SESSION_BUSY.value
         assert backend.aborted == [execution.execution_id]
         identities = await state.execution.idempotency.list_by_resource(
             ResourceKind.EXECUTION,
