@@ -38,9 +38,6 @@ class ModelRegistry:
         if not binding.route_id.strip():
             raise ValueError("model route_id is required")
         with self._lock:
-            current = self._bindings.get(binding.route_id)
-            if current is not None and current.fingerprint == binding.fingerprint:
-                return
             self._bindings[binding.route_id] = binding
             self._revision += 1
             _logger.info("model binding registered: route=%s revision=%s", binding.route_id, self._revision)
