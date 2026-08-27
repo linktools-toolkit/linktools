@@ -88,7 +88,7 @@ jobs:
     - name: Build package
       run: VERSION=${{ inputs.version }} RELEASE=true python manage.py build
     - name: Verify package
-      run: VERSION=${{ inputs.version }} python manage.py verify
+      run: VERSION=${{ inputs.version }} RELEASE=true python manage.py verify
 
     # publish python package
     - name: Publish package
@@ -105,7 +105,7 @@ jobs:
       run: |
         git config user.name github-actions[bot]
         git config user.email github-actions[bot]@users.noreply.github.com
-        git add linktools*/.version \
+        git add linktools*/linktools.yml \
                 linktools-mobile/src/linktools/assets/frida.js \
                 linktools-mobile/src/linktools/assets/frida-*.js \
                 linktools-mobile/src/linktools/assets/android-tools.*

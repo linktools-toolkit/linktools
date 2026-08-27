@@ -1,0 +1,45 @@
+name: mobile
+version: "0.10.0"
+
+dependencies: []
+
+dev-dependencies:
+  - linktools[cli]
+  - "pytest<7; python_version < '3.7'"
+  - "pytest; python_version >= '3.7'"
+
+release-dependencies:
+  - linktools[cli]>=0.10.0
+
+optional-dependencies:
+  frida:
+    - frida>=15.0.0
+    - objection
+  ssh:
+    - linktools[ssh]
+  ssl:
+    - pyOpenSSL
+
+scripts:
+  capability: linktools.capabilities.mobile:__cap_mobile__
+  console:
+    path: src/linktools/commands
+    module: linktools.commands
+
+convert:
+  - type: jinja2
+    source: capability.jinja2
+    dest: src/linktools/capabilities/mobile.py
+  - type: yml2json
+    source: src/linktools/assets/develop/tools/linktools-mobile.yml
+    dest: src/linktools/assets/tools/linktools-mobile.json
+
+checks:
+  ruff:
+    select:
+      - E9
+      - F63
+      - F7
+      - F82
+    paths:
+      - src

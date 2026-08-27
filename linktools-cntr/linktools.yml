@@ -1,0 +1,45 @@
+name: cntr
+version: "0.10.0"
+
+dependencies:
+  - jinja2
+  - pyyaml
+  - dotenv
+  - rsa
+  - dataclasses; python_version < '3.7'
+  - packaging<22; python_version < '3.8'
+  - packaging; python_version >= '3.8'
+
+dev-dependencies:
+  - linktools[cli,git]
+  - "pytest<7; python_version < '3.7'"
+  - "pytest; python_version >= '3.7'"
+
+release-dependencies:
+  - linktools[cli,git]>=0.10.0
+
+optional-dependencies: {}
+
+scripts:
+  capability: linktools.capabilities.cntr:__cap_cntr__
+  commands:
+    name: ct-cntr
+    module: linktools.cntr.__main__
+
+convert:
+  - type: jinja2
+    source: capability.jinja2
+    dest: src/linktools/capabilities/cntr.py
+
+checks:
+  ruff:
+    select:
+      - E9
+      - F63
+      - F7
+      - F82
+    paths:
+      - src
+  pytest:
+    paths:
+      - ../tests/cntr

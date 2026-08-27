@@ -1,5 +1,5 @@
 [build-system]
-requires = ["linktools-setup>=0.0.2"]
+requires = ["linktools-setup==0.0.3"]
 build-backend = "linktools_setup.build_meta"
 
 [project]
@@ -27,16 +27,3 @@ linktools = ["assets/**"]
 
 [tool.setuptools.exclude-package-data]
 linktools = ["assets/develop/**"]
-
-[tool.linktools]
-name = "common"
-version = {file = ".version"}
-dependencies = {file = "requirements.yml"}
-convert = [
-  {type = "jinja2", source = "capability.jinja2", dest = "src/linktools/capabilities/common.py"},
-  {type = "yml2json", source = "src/linktools/assets/develop/tools/linktools-common.yml", dest = "src/linktools/assets/tools/linktools-common.json"},
-]
-
-[tool.linktools.scripts]
-capability = "linktools.capabilities.common:__cap_common__"
-console = {path = "src/linktools/commands", module = "linktools.commands"}
