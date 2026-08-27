@@ -8,7 +8,6 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-from linktools.ai.adapter import StepExecutionHistoryReader
 from linktools.ai.agent import AgentBindingSnapshot
 from linktools.ai.agent._output import bind_output
 from linktools.ai.core import (
@@ -21,6 +20,7 @@ from linktools.ai.core import (
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.migrate import provision_database
 from linktools.ai.runtime import RuntimeState
+from linktools.ai.runtime._history import StepExecutionHistoryReader
 from linktools.ai.runtime._local import LocalExecutionBackend
 from linktools.ai.runtime.state import (
     ConversationHistoryRecord,
@@ -70,14 +70,13 @@ def _binding() -> AgentBindingSnapshot:
     output = bind_output()
     return AgentBindingSnapshot(
         version=1,
-        agent_spec=AgentSpec("default", 1, "default"),
-        agent_digest="b" * 64,
-        output_schema_id=output.schema_id,
-        output_schema_revision=output.schema_revision,
-        output_schema_fingerprint=output.schema_fingerprint,
-        local_runtime_capability_descriptors=(),
+        agent_spec=AgentSpec("default", model="default"),
+        model={"route_id": "default", "model_identity": "test:model"},
+        selected=(),
+        subagents=(),
+        output_mode=output.mode,
+        output_schema=output.schema_definition,
         binding_digest="a" * 64,
-        global_runtime_capability_descriptors=(),
     )
 
 
@@ -101,6 +100,7 @@ def _record(status: ExecutionStatus, sequence: int) -> ExecutionRecord:
         safe_error_details={},
         created_at=now,
         updated_at=now,
+        mode="run",
         planning=False,
         thinking=False,
         binding=_binding(),
