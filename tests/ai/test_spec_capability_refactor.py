@@ -123,21 +123,33 @@ def test_planning_gate_rejects_non_boolean_plan_safe_metadata() -> None:
 
 
 @pytest.mark.parametrize(
-    "payload",
+    ("payload", "expected_code"),
     (
-        {"version": 1, "id": 1, "model": "default"},
-        {"version": 1, "id": "agent", "model": 1},
-        {"version": True, "id": "agent", "model": "default"},
-        {"version": 2, "id": "agent", "model": "default"},
+        (
+            {"version": 1, "id": 1, "model": "default"},
+            ErrorCode.OUTPUT_CONTRACT_INVALID,
+        ),
+        (
+            {"version": 1, "id": "agent", "model": 1},
+            ErrorCode.OUTPUT_CONTRACT_INVALID,
+        ),
+        (
+            {"version": True, "id": "agent", "model": "default"},
+            ErrorCode.STORAGE_INTEGRITY_ERROR,
+        ),
+        (
+            {"version": 2, "id": "agent", "model": "default"},
+            ErrorCode.STORAGE_VERSION_UNSUPPORTED,
+        ),
     ),
 )
-def test_agent_spec_codec_rejects_invalid_v1_payload(payload: dict[str, object]) -> None:
+def test_agent_spec_codec_rejects_invalid_v1_payload(
+    payload: dict[str, object],
+    expected_code: ErrorCode,
+) -> None:
     with pytest.raises(AIError) as error:
         AgentSpecCodec().decode(json.dumps(payload).encode("utf-8"))
-    assert error.value.code in {
-        ErrorCode.OUTPUT_CONTRACT_INVALID,
-        ErrorCode.STORAGE_VERSION_UNSUPPORTED,
-    }
+    assert error.value.code is expected_code
 
 
 def test_declaration_codecs_preserve_unknown_additive_fields_without_affecting_semantics() -> None:
