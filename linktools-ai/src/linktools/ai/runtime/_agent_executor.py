@@ -12,7 +12,7 @@ from openai import APIError as OpenAIAPIError
 from pydantic import ValidationError
 from pydantic_ai import Agent as PydanticAgent
 from pydantic_ai import AgentRunResultEvent, ModelSettings, TextOutput, Tool
-from pydantic_ai.capabilities import AbstractCapability, ReinjectSystemPrompt
+from pydantic_ai.capabilities import AbstractCapability, CapabilityOrdering, ReinjectSystemPrompt
 from pydantic_ai.exceptions import (
     ConcurrencyLimitExceeded,
     ContentFilterError,
@@ -38,6 +38,7 @@ from pydantic_ai.messages import (
 )
 from pydantic_ai.models import Model
 from pydantic_ai.tools import RunContext as PydanticRunContext, ToolDefinition
+from pydantic_ai.toolsets import AbstractToolset, PreparedToolset
 from pydantic_ai.usage import RunUsage, UsageLimitExceeded, UsageLimits
 from pydantic_ai_harness.memory import SearchableMemoryStore
 from pydantic_ai_harness.planning import PlanStore
@@ -255,17 +256,15 @@ class AgentExecutor:
             scope,
             model=model,
         )
-        capabilities = (
-            *capabilities,
-            _ToolPresentation(
-                definition.ordinary_tool_policy,
-                static_tool_names=tuple(candidate.id for candidate in definition.selected_tools),
-                mcp_policy=definition.mcp_selector_policy,
-                plan_mode=scope.mode == "plan",
-                trusted_tool_classes=trusted_tool_classes,
-                trusted_mcp_selectors=trusted_mcp_selectors,
-            ),
+        presentation = _ToolPresentation(
+            definition.ordinary_tool_policy,
+            static_tool_names=tuple(candidate.id for candidate in definition.selected_tools),
+            mcp_policy=definition.mcp_selector_policy,
+            plan_mode=scope.mode == "plan",
+            trusted_tool_classes=trusted_tool_classes,
+            trusted_mcp_selectors=trusted_mcp_selectors,
         )
+        capabilities = (presentation, *capabilities)
         if scope.replace_history_system_prompt:
             capabilities = (*capabilities, ReinjectSystemPrompt(replace_existing=True))
         _logger.debug(
@@ -476,7 +475,16 @@ class _ToolPresentation(AbstractCapability[RunContext[object]]):
         self._trusted_tool_classes = trusted_tool_classes
         self._trusted_mcp_selectors = trusted_mcp_selectors
 
-    async def prepare_tools(
+    def get_ordering(self) -> CapabilityOrdering:
+        return CapabilityOrdering(position="outermost")
+
+    def get_wrapper_toolset(
+        self,
+        toolset: AbstractToolset[RunContext[object]],
+    ) -> AbstractToolset[RunContext[object]]:
+        return PreparedToolset(toolset, self._prepare_final_tools)
+
+    async def _prepare_final_tools(
         self,
         _ctx: PydanticRunContext[RunContext[object]],
         tool_defs: list[ToolDefinition],
