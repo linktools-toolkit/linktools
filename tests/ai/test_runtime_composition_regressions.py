@@ -3,11 +3,14 @@
 """Focused regressions for final Runtime composition invariants."""
 
 from datetime import datetime, timezone
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 from linktools.ai.agent import AgentBindingSnapshot
 from linktools.ai.agent._output import bind_output, restore_output
+from linktools.ai.asset import AssetStore, DirectoryAssetBackend, InMemoryAssetBackend
+from linktools.ai.capability import CapabilityGroup
 from linktools.ai.core import (
     ExecutionLineageKind,
     ExecutionStatus,
@@ -16,9 +19,12 @@ from linktools.ai.core import (
     ResourceRef,
 )
 from linktools.ai.errors import AIError, ErrorCode
+from linktools.ai.model import ModelRegistry
 from linktools.ai.runtime._approval import DefaultApprovalService
+from linktools.ai.runtime._factory import compose_runtime_components
 from linktools.ai.runtime._planner import _cancel_execution
 from linktools.ai.runtime._subagent import SubagentDispatcher
+from linktools.ai.runtime.state import RuntimeState
 from linktools.ai.runtime.state._codec import decode_domain, encode_domain
 from linktools.ai.runtime.state._contracts import (
     ExecutionRecord,
@@ -26,6 +32,8 @@ from linktools.ai.runtime.state._contracts import (
     RecoveryIdempotencyInput,
 )
 from linktools.ai.spec import AgentSpec
+from linktools.ai.storage import StorageOverlay
+from linktools.ai.workspace import Workspace
 from pydantic import BaseModel
 
 
@@ -142,6 +150,88 @@ def _recovery(
         thinking=False,
         binding=selected,
     )
+
+
+@pytest.mark.asyncio
+async def test_runtime_closes_owned_workspace_assets_once(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    closed: list[tuple[str, object]] = []
+    original_store_close = AssetStore.close
+    original_backend_close = DirectoryAssetBackend.close
+
+    async def close_store(store: AssetStore) -> None:
+        closed.append(("store", store))
+        await original_store_close(store)
+
+    async def close_backend(backend: DirectoryAssetBackend) -> None:
+        closed.append(("backend", backend))
+        await original_backend_close(backend)
+
+    monkeypatch.setattr(AssetStore, "close", close_store)
+    monkeypatch.setattr(DirectoryAssetBackend, "close", close_backend)
+    components = await compose_runtime_components(
+        Workspace.load(tmp_path),
+        models=ModelRegistry.openai(model="gpt-test"),
+        state=RuntimeState.in_memory(),
+    )
+
+    await components.close_callback()
+    await components.close_callback()
+
+    assert [kind for kind, _value in closed] == ["store", "backend"]
+    assert closed[0][1].ready is False
+
+
+@pytest.mark.asyncio
+async def test_runtime_open_failure_closes_owned_workspace_assets(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    closed: list[str] = []
+    original_store_close = AssetStore.close
+    original_backend_close = DirectoryAssetBackend.close
+
+    async def close_store(store: AssetStore) -> None:
+        closed.append("store")
+        await original_store_close(store)
+
+    async def close_backend(backend: DirectoryAssetBackend) -> None:
+        closed.append("backend")
+        await original_backend_close(backend)
+
+    monkeypatch.setattr(AssetStore, "close", close_store)
+    monkeypatch.setattr(DirectoryAssetBackend, "close", close_backend)
+    monkeypatch.delenv("OPENAI_MODEL", raising=False)
+    monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+
+    with pytest.raises(AIError) as error:
+        await compose_runtime_components(Workspace.load(tmp_path))
+
+    assert error.value.code is ErrorCode.RUNTIME_DEPENDENCY_NOT_READY
+    assert closed == ["store", "backend"]
+
+
+@pytest.mark.asyncio
+async def test_runtime_does_not_close_borrowed_workspace_store(tmp_path: Path) -> None:
+    backend = InMemoryAssetBackend()
+    store = AssetStore(StorageOverlay(backend))
+    await store.initialize()
+    group = CapabilityGroup.from_store("workspace", store)
+    components = await compose_runtime_components(
+        Workspace.load(tmp_path),
+        models=ModelRegistry.openai(model="gpt-test"),
+        state=RuntimeState.in_memory(),
+        capabilities=(group,),
+    )
+
+    await components.close_callback()
+
+    assert store.ready
+    await store.close()
+    await backend.close()
 
 
 @pytest.mark.asyncio
