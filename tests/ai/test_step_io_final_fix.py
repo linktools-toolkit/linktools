@@ -43,14 +43,13 @@ def _binding_snapshot() -> AgentBindingSnapshot:
     output = bind_output()
     return AgentBindingSnapshot(
         version=1,
-        agent_spec=AgentSpec("agent", 1, "default"),
-        agent_digest="b" * 64,
-        output_schema_id=output.schema_id,
-        output_schema_revision=output.schema_revision,
-        output_schema_fingerprint=output.schema_fingerprint,
-        local_runtime_capability_descriptors=(),
+        agent_spec=AgentSpec("agent"),
+        model={"route_id": "default", "model_identity": "test:model"},
+        selected=(),
+        subagents=(),
+        output_mode=output.mode,
+        output_schema=output.schema_definition,
         binding_digest="a" * 64,
-        global_runtime_capability_descriptors=(),
     )
 
 
@@ -74,6 +73,7 @@ def _execution() -> ExecutionRecord:
         safe_error_details={},
         created_at=now,
         updated_at=now,
+        mode="run",
         planning=False,
         thinking=False,
         binding=_binding_snapshot(),
