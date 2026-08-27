@@ -144,6 +144,92 @@ async def test_custom_before_hook_rejection_does_not_start_durable_effect() -> N
     assert not capability._calls
 
 
+async def test_plan_admission_precedes_custom_before_hook() -> None:
+    bridge = _Bridge(True)
+    store = _StepStore()
+    capability = _RuntimeStepPersistence(
+        tool_operations=bridge,
+        store=store,
+        agent_name="agent",
+        run_id="run",
+        plan_mode=True,
+    )
+    context = _context()
+    call = ToolCallPart("tool", {}, tool_call_id="call")
+    definition = ToolDefinition(name="tool", metadata={"linktools.ai.replay_safe": True})
+    entered: list[str] = []
+
+    class SideEffectBefore(AbstractCapability[None]):
+        async def before_tool_execute(
+            self,
+            ctx: RunContext[None],
+            *,
+            call: ToolCallPart,
+            tool_def: ToolDefinition,
+            args: dict[str, Any],
+        ) -> dict[str, Any]:
+            del self, ctx, call, tool_def
+            entered.append("custom")
+            return args
+
+    combined = CombinedCapability((_RuntimePersistenceBoundary(capability), SideEffectBefore()))
+
+    with pytest.raises(AIError) as raised:
+        await combined.before_tool_execute(
+            context,
+            call=call,
+            tool_def=definition,
+            args={},
+        )
+
+    assert raised.value.code is ErrorCode.CAPABILITY_POLICY_CONFLICT
+    assert entered == []
+    assert bridge.calls == []
+    assert store.effects == []
+    assert not capability._calls
+
+
+async def test_custom_wrap_failure_is_inside_durable_effect_boundary() -> None:
+    capability, bridge, store, context, call, definition = await _capability(False)
+
+    class FailingWrap(AbstractCapability[None]):
+        async def wrap_tool_execute(
+            self,
+            ctx: RunContext[None],
+            *,
+            call: ToolCallPart,
+            tool_def: ToolDefinition,
+            args: dict[str, Any],
+            handler: Any,
+        ) -> Any:
+            del self, ctx, call, tool_def, args, handler
+            raise RuntimeError("custom middleware failed before inner handler")
+
+    combined = CombinedCapability((_RuntimePersistenceBoundary(capability), FailingWrap()))
+    await combined.before_tool_execute(
+        context,
+        call=call,
+        tool_def=definition,
+        args={},
+    )
+
+    async def raw_handler(_args: dict[str, Any]) -> None:
+        raise AssertionError("custom wrapper must fail before the raw tool")
+
+    with pytest.raises(AIError) as raised:
+        await combined.wrap_tool_execute(
+            context,
+            call=call,
+            tool_def=definition,
+            args={},
+            handler=raw_handler,
+        )
+
+    assert raised.value.code is ErrorCode.TOOL_EFFECT_UNKNOWN
+    assert bridge.calls == ["begin", "unknown"]
+    assert [effect.status for effect in store.effects] == ["started"]
+
+
 async def test_skip_tool_execution_terminalizes_as_success() -> None:
     capability, bridge, store, context, call, definition = await _capability(True)
     result = {"skipped": True}
