@@ -97,20 +97,6 @@ _AGENT_TASK_V1_FIELDS = frozenset(
 
 
 class _LocalRuntimeCoordinatorPort(Protocol):
-    async def run(
-        self,
-        binding_digest: str,
-        request: ExecutionRequest,
-    ) -> ExecutionHandle: ...
-
-    async def resume(
-        self,
-        agent_id: str,
-        binding_digest: str,
-        session_id: str,
-        request: ResumeSessionRequest,
-    ) -> ExecutionHandle: ...
-
     def stream(
         self,
         execution_id: str,
@@ -118,8 +104,6 @@ class _LocalRuntimeCoordinatorPort(Protocol):
         principal: Principal,
         after_sequence: int = 0,
     ) -> AsyncIterator[ExecutionStreamEvent]: ...
-
-    def abandon_stream(self, execution_id: str) -> None: ...
 
 
 class Runtime(Generic[AppT]):
@@ -324,11 +308,7 @@ class Runtime(Generic[AppT]):
             thinking=resolved_thinking,
         )
         if session_id is None:
-            handle = (
-                await self._local_coordinator.run(binding.digest, request)
-                if self._local_coordinator is not None
-                else await self.execution.run(binding.digest, request)
-            )
+            handle = await self.execution.run(binding.digest, request)
         else:
             if not isinstance(session_id, str) or not session_id.strip():
                 raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
@@ -343,20 +323,11 @@ class Runtime(Generic[AppT]):
                 planning=request.planning,
                 thinking=request.thinking,
             )
-            handle = (
-                await self._local_coordinator.resume(
-                    definition.spec.id,
-                    binding.digest,
-                    session_id,
-                    resume_request,
-                )
-                if self._local_coordinator is not None
-                else await self.session.resume(
-                    definition.spec.id,
-                    binding.digest,
-                    session_id,
-                    resume_request,
-                )
+            handle = await self.session.resume(
+                definition.spec.id,
+                binding.digest,
+                session_id,
+                resume_request,
             )
         _logger.info(
             "runtime execution admitted: execution=%s agent=%s session=%s mode=%s planning=%s thinking=%s",
@@ -389,10 +360,6 @@ class Runtime(Generic[AppT]):
             principal=principal,
             after_sequence=after_sequence,
         )
-
-    def _abandon_execution_stream(self, execution_id: str) -> None:
-        if self._local_coordinator is not None:
-            self._local_coordinator.abandon_stream(execution_id)
 
     async def _retry_execution(
         self,

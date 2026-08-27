@@ -147,7 +147,7 @@ async def test_session_resume_preserves_mode_planning_and_thinking() -> None:
     service = object.__new__(DefaultSessionService)
     capture = _CaptureSessionExecution()
     service._authorization = _AllowAuthorization()
-    service._gated_execution = capture
+    service._execution = capture
 
     @asynccontextmanager
     async def _consumer(session_id: str, tenant_id: str):
@@ -156,7 +156,7 @@ async def test_session_resume_preserves_mode_planning_and_thinking() -> None:
 
     async def _authorized(session_id: str, principal: object, action: object) -> object:
         del session_id, principal, action
-        return SimpleNamespace(agent_id="agent", metadata={})
+        return SimpleNamespace(resolved_agent_id=lambda: "agent")
 
     async def _reconcile(record: object) -> object:
         return record

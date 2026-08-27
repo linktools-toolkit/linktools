@@ -24,7 +24,6 @@ from linktools.ai.core import (
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.migrate import provision_runtime_database
 from linktools.ai.runtime import DefaultSessionService, Runtime, RuntimeState
-from linktools.ai.runtime._session import _session_agent_id
 from linktools.ai.runtime.state._codec import (
     _decode_enveloped_domain,
     _encode_persisted_domain,
@@ -640,7 +639,7 @@ async def test_historical_session_business_write_persists_resolved_agent_id(
 def test_historical_session_identity_failures_are_scoped() -> None:
     session = replace(_session(), agent_id=None, metadata={})
     with pytest.raises(AIError) as raised:
-        _session_agent_id(session)
+        session.resolved_agent_id()
     assert raised.value.code is ErrorCode.STORAGE_VERSION_UNSUPPORTED
 
     conflicting = replace(
@@ -648,7 +647,7 @@ def test_historical_session_identity_failures_are_scoped() -> None:
         metadata={"linktools.ai.agent_id": "other"},
     )
     with pytest.raises(AIError) as raised:
-        _session_agent_id(conflicting)
+        conflicting.resolved_agent_id()
     assert raised.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
 
 

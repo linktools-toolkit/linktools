@@ -57,6 +57,7 @@ from .state._contracts import (
     ExecutionRepository,
     OperationLedgerInput,
     OperationLedgerRecord,
+    SESSION_AGENT_ID_METADATA_KEY,
     SessionRecord,
 )
 
@@ -67,26 +68,13 @@ class _SessionReleaseCallback(Protocol):
     async def __call__(self, session_id: str, *, tenant_id: str, continuation: ConversationCursor | None) -> None: ...
 
 
-class _LaunchGate(Protocol):
-    async def __call__(self, execution_id: str) -> None: ...
-
-
-class _GatedExecutionService(Protocol):
+class _SessionExecutionService(ExecutionService, Protocol):
     async def run_for_session(
         self,
         agent_id: str,
         binding_digest: str,
         session_id: str,
         request: ExecutionRequest,
-    ) -> ExecutionHandle: ...
-
-    async def _run_for_session_with_launch_gate(
-        self,
-        agent_id: str,
-        binding_digest: str,
-        session_id: str,
-        request: ExecutionRequest,
-        gate: _LaunchGate,
     ) -> ExecutionHandle: ...
 
 
@@ -124,29 +112,6 @@ async def _no_release_terminal(session_id: str, *, tenant_id: str, continuation:
     del session_id, tenant_id, continuation
 
 
-_AGENT_ID_METADATA_KEY = "linktools.ai.agent_id"
-
-
-def _session_agent_id(record: SessionRecord) -> str:
-    explicit = record.agent_id
-    historical = record.metadata.get(_AGENT_ID_METADATA_KEY)
-    historical_id: str | None = None
-    if isinstance(historical, str):
-        try:
-            historical_id = validate_agent_id(historical)
-        except AIError:
-            historical_id = None
-    if explicit is not None:
-        try:
-            resolved = validate_agent_id(explicit)
-        except (AIError, TypeError) as error:
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
-        if historical_id is not None and historical_id != resolved:
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        return resolved
-    if historical_id is not None:
-        return historical_id
-    raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
 
 
 @dataclass
@@ -165,13 +130,12 @@ class DefaultSessionService:
         conversation: ConversationState,
         executions: ExecutionRepository,
         authorization: AuthorizationPolicy,
-        execution: ExecutionService,
+        execution: _SessionExecutionService,
         cursor_signer: CursorSigner,
         *,
         history_reader: SessionHistoryReader,
         transcript_store: "_SessionTranscriptStore | None" = None,
         release_terminal: _SessionReleaseCallback | None = None,
-        gated_execution: "_GatedExecutionService | None" = None,
     ) -> None:
         self._conversation = conversation
         self._executions = executions
@@ -181,7 +145,6 @@ class DefaultSessionService:
         self._history_reader = history_reader
         self._transcript_store = transcript_store
         self._release_terminal = release_terminal or _no_release_terminal
-        self._gated_execution = gated_execution
         self._handoff_states: dict[tuple[str, str], _SessionHandoffState] = {}
         self._handoff_condition = asyncio.Condition()
 
@@ -373,29 +336,7 @@ class DefaultSessionService:
         session_id: str,
         request: ResumeSessionRequest,
     ) -> ExecutionHandle:
-        return await self._resume(
-            agent_id,
-            binding_digest,
-            session_id,
-            request,
-            launch_gate=None,
-        )
-
-    async def _resume_with_launch_gate(
-        self,
-        agent_id: str,
-        binding_digest: str,
-        session_id: str,
-        request: ResumeSessionRequest,
-        gate: _LaunchGate,
-    ) -> ExecutionHandle:
-        return await self._resume(
-            agent_id,
-            binding_digest,
-            session_id,
-            request,
-            launch_gate=gate,
-        )
+        return await self._resume(agent_id, binding_digest, session_id, request)
 
     async def _resume(
         self,
@@ -403,8 +344,6 @@ class DefaultSessionService:
         binding_digest: str,
         session_id: str,
         request: ResumeSessionRequest,
-        *,
-        launch_gate: _LaunchGate | None,
     ) -> ExecutionHandle:
         async with self._session_consumer(session_id, request.principal.tenant_id):
             record = await self._authorized(
@@ -420,7 +359,7 @@ class DefaultSessionService:
                     request.principal.tenant_id,
                 ),
             )
-            if _session_agent_id(record) != agent_id:
+            if record.resolved_agent_id() != agent_id:
                 raise AIError(ErrorCode.SESSION_BINDING_MISMATCH)
             execution_request = ExecutionRequest(
                 user_prompt=request.user_prompt,
@@ -432,25 +371,12 @@ class DefaultSessionService:
                 planning=request.planning,
                 thinking=request.thinking,
             )
-            if self._gated_execution is None:
-                raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
-            if launch_gate is None:
-                try:
-                    return await self._gated_execution.run_for_session(
-                        agent_id,
-                        binding_digest,
-                        session_id,
-                        execution_request,
-                    )
-                except AttributeError as error:
-                    raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY) from error
             try:
-                return await self._gated_execution._run_for_session_with_launch_gate(
+                return await self._execution.run_for_session(
                     agent_id,
                     binding_digest,
                     session_id,
                     execution_request,
-                    launch_gate,
                 )
             except AttributeError as error:
                 raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY) from error
@@ -468,7 +394,7 @@ class DefaultSessionService:
                     request.principal.principal_id,
                 ),
             )
-            resolved_agent_id = _session_agent_id(source)
+            resolved_agent_id = source.resolved_agent_id()
             if resolved_agent_id != agent_id:
                 raise AIError(ErrorCode.SESSION_BINDING_MISMATCH)
             digest = canonical_sha256(
@@ -484,7 +410,7 @@ class DefaultSessionService:
             )
             now = datetime.now(timezone.utc)
             target_metadata = dict(source.metadata)
-            target_metadata.pop(_AGENT_ID_METADATA_KEY, None)
+            target_metadata.pop(SESSION_AGENT_ID_METADATA_KEY, None)
             target = SessionRecord(
                 session_id=request.new_session_id,
                 tenant_id=source.tenant_id,
@@ -526,7 +452,7 @@ class DefaultSessionService:
 
     async def _update(self, agent_id: str, session_id: str, request: UpdateSessionRequest) -> SessionView:
         current = await self._authorized(session_id, request.principal, AuthorizationAction.SESSION_UPDATE)
-        resolved_agent_id = _session_agent_id(current)
+        resolved_agent_id = current.resolved_agent_id()
         if resolved_agent_id != agent_id:
             raise AIError(ErrorCode.SESSION_BINDING_MISMATCH)
         if any(
@@ -536,7 +462,7 @@ class DefaultSessionService:
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
         if any(
             key.startswith("linktools.ai.")
-            and key != _AGENT_ID_METADATA_KEY
+            and key != SESSION_AGENT_ID_METADATA_KEY
             and key not in request.metadata
             for key in current.metadata
         ):
@@ -927,7 +853,7 @@ class DefaultSessionService:
         active = () if active_execution is None else (active_execution.execution_id,)
         return SessionView(
             record.session_id,
-            _session_agent_id(record),
+            record.resolved_agent_id(),
             record.status,
             record.revision,
             record.resource_generation,

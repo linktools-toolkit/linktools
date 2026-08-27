@@ -40,7 +40,6 @@ class Execution(Generic[AppT]):
     _principal: Principal
 
     async def wait(self, *, timeout_seconds: "float | None" = None) -> ExecutionResult:
-        self._runtime._abandon_execution_stream(self.execution_id)
         return await self._runtime.execution.wait(
             self.execution_id,
             principal=self._principal,

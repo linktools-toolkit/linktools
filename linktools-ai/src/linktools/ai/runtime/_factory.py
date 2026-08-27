@@ -16,7 +16,11 @@ from pydantic_ai_harness.memory import SearchableMemoryStore
 
 from ..agent import AgentCatalog, AgentCompiler, AgentDefinition
 from ..asset import AssetStore, DirectoryAssetBackend, PrefixAssetPathAdapter
-from ..capability import CapabilityContribution, CapabilityGroup, workspace_tool_contributions
+from ..capability import (
+    CapabilityContribution,
+    CapabilityGroup,
+    workspace_tool_contributions,
+)
 from ..core import HmacCursorSigner, TenantAuthorizationPolicy, validate_tenant_id
 from ..errors import AIError, ErrorCode
 from ..model import ModelRegistry
@@ -404,7 +408,6 @@ async def _build_local_components(
             history_reader=session_history_reader,
             transcript_store=state.steps.read_store(RuntimeDomain.CONVERSATION),
             release_terminal=state.retention.release_session,
-            gated_execution=execution,
         )
         task_runner = RuntimeTaskNodeRunner(execution, catalog, compiler)
         task_launcher = LocalTaskGraphLauncher(
@@ -447,7 +450,11 @@ async def _build_local_components(
             grant_key=grant_key,
             cursor_signer=HmacCursorSigner("artifact", grant_key),
         )
-        local_coordinator = _LocalRuntimeCoordinator(execution, session, event, backend)
+        execution.bind_local_stream(
+            live_broker.prepare_local_producer,
+            live_broker.abandon_prepared_local_producer,
+        )
+        local_coordinator = _LocalRuntimeCoordinator(execution, event)
         close_actions: list[Callable[[], Awaitable[None]]] = [
             task.preflight_close,
             task_launcher.shutdown,

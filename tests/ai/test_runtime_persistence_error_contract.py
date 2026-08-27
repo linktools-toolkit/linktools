@@ -16,7 +16,6 @@ from linktools.ai.core import (
 )
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.runtime import RuntimeDomain, RuntimeState
-from linktools.ai.runtime._session import _session_agent_id
 from linktools.ai.runtime._tool import ToolOperationRecord
 from linktools.ai.runtime.state._codec import (
     _decode_enveloped_domain,
@@ -164,9 +163,9 @@ def _transcript_chunk_data() -> dict[str, object]:
 
 def test_generic_tolerance_does_not_guess_missing_agent_identity() -> None:
     with pytest.raises(AIError) as raised:
-        _session_agent_id(
-            _decode_enveloped_domain(_precomposition_session_data(), SessionRecord)
-        )
+        _decode_enveloped_domain(
+            _precomposition_session_data(), SessionRecord
+        ).resolved_agent_id()
 
     assert raised.value.code is ErrorCode.STORAGE_VERSION_UNSUPPORTED
 

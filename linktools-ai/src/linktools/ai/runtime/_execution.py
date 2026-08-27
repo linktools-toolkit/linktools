@@ -122,10 +122,6 @@ class _SubagentCancellation(Protocol):
     async def cancel_children(self, parent_execution_id: str, principal: Principal) -> None: ...
 
 
-class _LaunchGate(Protocol):
-    async def __call__(self, execution_id: str) -> None: ...
-
-
 class _LocalExecutionWaiter(Protocol):
     def owns_execution(self, execution_id: str, *, tenant_id: str) -> bool: ...
 
@@ -223,6 +219,8 @@ class DefaultExecutionService:
         self._terminal_verifier_is_default = terminal_verifier is None
         self._terminal_committer: _ExecutionTerminalCommitter | None = None
         self._local_waiter = local_waiter
+        self._local_stream_prepare: Callable[[str], None] | None = None
+        self._local_stream_abort: Callable[[str], None] | None = None
         self._subagent_cancellation: _SubagentCancellation | None = None
         self._session_locks: dict[tuple[str, str], _SessionLockEntry] = {}
         self._session_locks_guard = asyncio.Lock()
@@ -260,6 +258,18 @@ class DefaultExecutionService:
         if self._local_waiter is not None:
             raise RuntimeError("local execution waiter is already bound")
         self._local_waiter = waiter
+
+    def bind_local_stream(
+        self,
+        prepare: Callable[[str], None],
+        abort: Callable[[str], None],
+    ) -> None:
+        if not callable(prepare) or not callable(abort):
+            raise ValueError("local stream callbacks are required")
+        if self._local_stream_prepare is not None or self._local_stream_abort is not None:
+            raise RuntimeError("local stream lifecycle is already bound")
+        self._local_stream_prepare = prepare
+        self._local_stream_abort = abort
 
     def _binding(
         self,
@@ -387,7 +397,12 @@ class DefaultExecutionService:
                 await self._run_handoff_cleanup(execution_id, tenant_id, state)
 
     async def run(self, binding_digest: str, request: ExecutionRequest) -> ExecutionHandle:
-        return await self._start(binding_digest, request, scope="execution.run")
+        return await self._start(
+            binding_digest,
+            request,
+            scope="execution.run",
+            prepare_local_stream=True,
+        )
 
     async def run_for_session(
         self,
@@ -404,33 +419,7 @@ class DefaultExecutionService:
             session_id=session_id,
             session_agent_id=agent_id,
             scope="session.resume",
-        )
-
-    async def _run_with_launch_gate(
-        self,
-        binding_digest: str,
-        request: ExecutionRequest,
-        gate: _LaunchGate,
-    ) -> ExecutionHandle:
-        return await self._start(binding_digest, request, scope="execution.run", launch_gate=gate)
-
-    async def _run_for_session_with_launch_gate(
-        self,
-        agent_id: str,
-        binding_digest: str,
-        session_id: str,
-        request: ExecutionRequest,
-        gate: _LaunchGate,
-    ) -> ExecutionHandle:
-        if not session_id.strip():
-            raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
-        return await self._start(
-            binding_digest,
-            request,
-            session_id=session_id,
-            session_agent_id=agent_id,
-            scope="session.resume",
-            launch_gate=gate,
+            prepare_local_stream=True,
         )
 
     async def start_subagent(
@@ -473,7 +462,7 @@ class DefaultExecutionService:
         root_execution_id: "str | None" = None,
         lineage_kind: ExecutionLineageKind = ExecutionLineageKind.RUN,
         scope: str = "execution.run",
-        launch_gate: _LaunchGate | None = None,
+        prepare_local_stream: bool = False,
     ) -> ExecutionHandle:
         if session_id is None:
             return await self._start_unlocked(
@@ -488,7 +477,7 @@ class DefaultExecutionService:
                 root_execution_id=root_execution_id,
                 lineage_kind=lineage_kind,
                 scope=scope,
-                launch_gate=launch_gate,
+                prepare_local_stream=prepare_local_stream,
             )
         async with self._session_guard(request.principal.tenant_id, session_id):
             return await self._start_unlocked(
@@ -503,7 +492,7 @@ class DefaultExecutionService:
                 root_execution_id=root_execution_id,
                 lineage_kind=lineage_kind,
                 scope=scope,
-                launch_gate=launch_gate,
+                prepare_local_stream=prepare_local_stream,
             )
 
     async def _start_unlocked(
@@ -520,7 +509,7 @@ class DefaultExecutionService:
         root_execution_id: "str | None" = None,
         lineage_kind: ExecutionLineageKind = ExecutionLineageKind.RUN,
         scope: str = "execution.run",
-        launch_gate: _LaunchGate | None = None,
+        prepare_local_stream: bool = False,
     ) -> ExecutionHandle:
         if re.fullmatch(r"[0-9a-f]{64}", binding_digest) is None:
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
@@ -534,9 +523,8 @@ class DefaultExecutionService:
             session = await self._sessions.get(session_id, tenant_id=request.principal.tenant_id)
             if session is None:
                 raise AIError(ErrorCode.SESSION_NOT_FOUND)
-            from ._session import _session_agent_id
 
-            if _session_agent_id(session) != session_agent_id:
+            if session.resolved_agent_id() != session_agent_id:
                 raise AIError(ErrorCode.SESSION_BINDING_MISMATCH)
             conversation_run_id = None if session.continuation is None else session.continuation.step_run_id
             base_execution_id = None
@@ -566,7 +554,7 @@ class DefaultExecutionService:
                         pending,
                         scope=scope,
                         idempotency_key_digest=idempotency_key_digest,
-                        launch_gate=launch_gate,
+                        prepare_local_stream=prepare_local_stream,
                     )
                     return ExecutionHandle(existing.resource_id)
                 if pending is None or pending.status is not ExecutionStatus.PENDING_START:
@@ -577,7 +565,7 @@ class DefaultExecutionService:
                     scope=scope,
                     idempotency_key_digest=idempotency_key_digest,
                     request_digest=request_digest,
-                    launch_gate=launch_gate,
+                    prepare_local_stream=prepare_local_stream,
                 )
                 return ExecutionHandle(existing.resource_id)
             if existing.status is IdempotencyStatus.FAILED:
@@ -601,7 +589,7 @@ class DefaultExecutionService:
                 started,
                 scope=scope,
                 idempotency_key_digest=idempotency_key_digest,
-                launch_gate=launch_gate,
+                prepare_local_stream=prepare_local_stream,
             )
             return ExecutionHandle(existing.resource_id)
         now = datetime.now(timezone.utc)
@@ -660,7 +648,7 @@ class DefaultExecutionService:
                     scope=scope,
                     idempotency_key_digest=idempotency_key_digest,
                     request_digest=request_digest,
-                    launch_gate=launch_gate,
+                    prepare_local_stream=prepare_local_stream,
                 )
             elif reservation.idempotency.status is IdempotencyStatus.STARTED and reservation.execution.status in {
                 ExecutionStatus.STARTED,
@@ -674,7 +662,7 @@ class DefaultExecutionService:
                     reservation.execution,
                     scope=scope,
                     idempotency_key_digest=idempotency_key_digest,
-                    launch_gate=launch_gate,
+                    prepare_local_stream=prepare_local_stream,
                 )
             elif reservation.execution.status is ExecutionStatus.START_UNKNOWN or reservation.idempotency.status is IdempotencyStatus.START_UNKNOWN:
                 raise AIError(ErrorCode.EXECUTION_START_UNKNOWN)
@@ -688,7 +676,7 @@ class DefaultExecutionService:
             scope=scope,
             idempotency_key_digest=idempotency_key_digest,
             request_digest=request_digest,
-            launch_gate=launch_gate,
+            prepare_local_stream=prepare_local_stream,
         )
         _logger.info("execution started: execution=%s scope=%s", execution_id, scope)
         return ExecutionHandle(execution_id)
@@ -723,7 +711,7 @@ class DefaultExecutionService:
         scope: str,
         idempotency_key_digest: str,
         request_digest: str,
-        launch_gate: _LaunchGate | None = None,
+        prepare_local_stream: bool = False,
     ) -> None:
         if self._backend is None:
             raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
@@ -745,7 +733,7 @@ class DefaultExecutionService:
             started,
             scope=scope,
             idempotency_key_digest=idempotency_key_digest,
-            launch_gate=launch_gate,
+            prepare_local_stream=prepare_local_stream,
         )
 
     async def _reject_pending_start(
@@ -878,7 +866,7 @@ class DefaultExecutionService:
         *,
         scope: str,
         idempotency_key_digest: str,
-        launch_gate: _LaunchGate | None = None,
+        prepare_local_stream: bool = False,
     ) -> None:
         if self._backend is None:
             raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
@@ -900,11 +888,29 @@ class DefaultExecutionService:
             raise AIError(ErrorCode.EXECUTION_START_UNKNOWN)
         if launch_record.status is not ExecutionStatus.STARTED:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        prepared_local_stream = False
         try:
-            if launch_gate is not None:
-                await launch_gate(launch_record.execution_id)
+            if (
+                prepare_local_stream
+                and self._local_stream_prepare is not None
+                and not self._backend.worker_installed(launch_record.execution_id)
+            ):
+                prepared_local_stream = True
+                self._local_stream_prepare(launch_record.execution_id)
             await self._backend.launch(request, launch_record)
+            if (
+                prepared_local_stream
+                and self._local_stream_abort is not None
+                and not self._backend.worker_installed(launch_record.execution_id)
+            ):
+                self._local_stream_abort(launch_record.execution_id)
         except asyncio.CancelledError:
+            if (
+                prepared_local_stream
+                and self._local_stream_abort is not None
+                and not self._backend.worker_installed(launch_record.execution_id)
+            ):
+                self._local_stream_abort(launch_record.execution_id)
             raise
         except BaseException as error:
             worker_installed = False
@@ -919,6 +925,8 @@ class DefaultExecutionService:
                     exc_info=environ.debug,
                 )
                 return
+            if prepared_local_stream and self._local_stream_abort is not None:
+                self._local_stream_abort(launch_record.execution_id)
             current = await self._state.executions.get(execution.execution_id, tenant_id=execution.tenant_id)
             if current is not None and current.status is ExecutionStatus.STARTED:
                 identity = await self._state.idempotency.get(
@@ -1024,10 +1032,16 @@ class DefaultExecutionService:
     async def wait(self, execution_id: str, *, principal: Principal, timeout_seconds: "float | None" = None) -> ExecutionResult:
         if timeout_seconds is not None and timeout_seconds < 0:
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
-
         async def wait_once() -> ExecutionResult:
+            execution = await self._load_authorized(
+                execution_id,
+                principal,
+                AuthorizationAction.EXECUTION_READ,
+            )
+            if self._local_stream_abort is not None:
+                self._local_stream_abort(execution_id)
+            view = ExecutionView(execution.execution_id, execution.status)
             while True:
-                view = await self.inspect(execution_id, principal=principal)
                 waiter = self._local_waiter
                 owns_execution = waiter is not None and waiter.owns_execution(
                     execution_id,
@@ -1047,6 +1061,7 @@ class DefaultExecutionService:
                             execution_id,
                             tenant_id=principal.tenant_id,
                         )
+                        view = await self.inspect(execution_id, principal=principal)
                         continue
                     if self._backend is not None:
                         failure = self._backend.worker_failure(
@@ -1070,6 +1085,7 @@ class DefaultExecutionService:
                     )
                 else:
                     await asyncio.sleep(1.0)
+                view = await self.inspect(execution_id, principal=principal)
 
         try:
             return await asyncio.wait_for(wait_once(), timeout_seconds)
