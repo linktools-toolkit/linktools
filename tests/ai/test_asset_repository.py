@@ -4,6 +4,7 @@
 
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from typing import cast
 
 import pytest
 from linktools.ai.asset import AssetInfo, AssetKey, AssetStore, InMemoryAssetBackend
@@ -43,7 +44,7 @@ async def test_builtin_loader_freezes_agent_skill_and_mcp_declarations() -> None
         ("skill", "skill"),
     ]
     assert [item.value for item in frozen] == [agent, mcp, skill]
-    assert all(item.semantic_revision is None for item in frozen)
+    assert all("semantic_revision" not in item.semantic_contract for item in frozen)
 
 
 @pytest.mark.asyncio
@@ -108,6 +109,32 @@ async def test_custom_loader_receives_one_frozen_metadata_and_content_snapshot()
         AssetKey("custom", "a"): b"a",
         AssetKey("custom", "b"): b"b",
     }
+
+
+class _MutatingLoader:
+    @property
+    def id(self) -> str:
+        return "mutating"
+
+    async def load(
+        self,
+        entries: Sequence[AssetInfo],
+        contents: Mapping[AssetKey, bytes],
+    ) -> "Sequence[CapabilityContribution[object]]":
+        del entries
+        cast("dict[AssetKey, bytes]", contents)[AssetKey("custom", "a")] = b"changed"
+        return ()
+
+
+@pytest.mark.asyncio
+async def test_custom_loader_cannot_mutate_shared_content_snapshot() -> None:
+    store = await _store()
+    await store.put(AssetKey("custom", "a"), b"a")
+    group = CapabilityGroup.from_store("workspace", store)
+    group.loader(_MutatingLoader())
+
+    with pytest.raises(TypeError):
+        await group.freeze()
 
 
 @dataclass
