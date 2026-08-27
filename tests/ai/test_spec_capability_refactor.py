@@ -23,7 +23,9 @@ from linktools.ai.spec import (
     SkillSpec,
     SkillSpecCodec,
 )
+from pydantic_ai.capabilities import AbstractCapability, CombinedCapability
 from pydantic_ai.tools import ToolDefinition
+from pydantic_ai.toolsets import FunctionToolset, PreparedToolset, RenamedToolset
 
 
 def test_runtime_tool_selection_keeps_planning_outside_allow_tools() -> None:
@@ -122,10 +124,10 @@ async def test_exact_mcp_selector_requires_matching_trusted_runtime_tool() -> No
         name="mcp__trusted__read",
         capability_id="mcp__trusted",
     )
-    assert await presentation.prepare_tools(None, [trusted]) == [trusted]  # type: ignore[arg-type]
+    assert await presentation._prepare_final_tools(None, [trusted]) == [trusted]  # type: ignore[arg-type]
 
     with pytest.raises(AIError) as missing:
-        await presentation.prepare_tools(None, [])  # type: ignore[arg-type]
+        await presentation._prepare_final_tools(None, [])  # type: ignore[arg-type]
     assert missing.value.code is ErrorCode.CAPABILITY_RESOLUTION_INVALID
 
     spoofed = ToolDefinition(
@@ -133,7 +135,7 @@ async def test_exact_mcp_selector_requires_matching_trusted_runtime_tool() -> No
         capability_id="custom-mcp",
     )
     with pytest.raises(AIError) as wrong_provenance:
-        await presentation.prepare_tools(None, [spoofed])  # type: ignore[arg-type]
+        await presentation._prepare_final_tools(None, [spoofed])  # type: ignore[arg-type]
     assert wrong_provenance.value.code is ErrorCode.CAPABILITY_RESOLUTION_INVALID
 
 
@@ -151,14 +153,14 @@ async def test_mcp_server_wildcard_requires_trusted_runtime_provenance() -> None
         name="mcp__trusted__read",
         capability_id="mcp__trusted",
     )
-    assert await presentation.prepare_tools(None, [trusted]) == [trusted]  # type: ignore[arg-type]
+    assert await presentation._prepare_final_tools(None, [trusted]) == [trusted]  # type: ignore[arg-type]
 
     spoofed = ToolDefinition(
         name="mcp__trusted__read",
         capability_id="custom-mcp",
     )
     with pytest.raises(AIError) as error:
-        await presentation.prepare_tools(None, [spoofed])  # type: ignore[arg-type]
+        await presentation._prepare_final_tools(None, [spoofed])  # type: ignore[arg-type]
     assert error.value.code is ErrorCode.CAPABILITY_RESOLUTION_INVALID
 
 
@@ -172,7 +174,7 @@ async def test_mcp_server_wildcard_allows_empty_runtime_toolset() -> None:
         trusted_tool_classes=(),
         trusted_mcp_selectors=("mcp__trusted",),
     )
-    assert await presentation.prepare_tools(None, []) == []  # type: ignore[arg-type]
+    assert await presentation._prepare_final_tools(None, []) == []  # type: ignore[arg-type]
 
 
 @pytest.mark.asyncio
@@ -186,15 +188,15 @@ async def test_static_tool_surface_must_match_compiled_exact_set() -> None:
         trusted_mcp_selectors=(),
     )
     business = ToolDefinition(name="business")
-    assert await presentation.prepare_tools(None, [business]) == [business]  # type: ignore[arg-type]
+    assert await presentation._prepare_final_tools(None, [business]) == [business]  # type: ignore[arg-type]
 
     with pytest.raises(AIError) as missing:
-        await presentation.prepare_tools(None, [])  # type: ignore[arg-type]
+        await presentation._prepare_final_tools(None, [])  # type: ignore[arg-type]
     assert missing.value.code is ErrorCode.CAPABILITY_RESOLUTION_INVALID
 
     substituted = ToolDefinition(name="business", capability_id="custom")
     with pytest.raises(AIError) as wrong_owner:
-        await presentation.prepare_tools(None, [substituted])  # type: ignore[arg-type]
+        await presentation._prepare_final_tools(None, [substituted])  # type: ignore[arg-type]
     assert wrong_owner.value.code is ErrorCode.CAPABILITY_RESOLUTION_INVALID
 
     empty = _ToolPresentation(
@@ -206,7 +208,7 @@ async def test_static_tool_surface_must_match_compiled_exact_set() -> None:
         trusted_mcp_selectors=(),
     )
     with pytest.raises(AIError) as extra:
-        await empty.prepare_tools(None, [ToolDefinition(name="extra")])  # type: ignore[arg-type]
+        await empty._prepare_final_tools(None, [ToolDefinition(name="extra")])  # type: ignore[arg-type]
     assert extra.value.code is ErrorCode.CAPABILITY_RESOLUTION_INVALID
 
 
@@ -223,8 +225,30 @@ async def test_custom_capability_cannot_impersonate_reserved_control_tool() -> N
     spoofed = ToolDefinition(name="write_plan", capability_id="custom")
 
     with pytest.raises(AIError) as error:
-        await presentation.prepare_tools(None, [spoofed])  # type: ignore[arg-type]
+        await presentation._prepare_final_tools(None, [spoofed])  # type: ignore[arg-type]
     assert error.value.code is ErrorCode.CAPABILITY_POLICY_CONFLICT
+
+
+def test_tool_presentation_is_outermost_wrapper_after_custom_toolset_wrappers() -> None:
+    class RenameCapability(AbstractCapability[object]):
+        def get_wrapper_toolset(self, toolset: FunctionToolset[object]) -> RenamedToolset[object]:  # type: ignore[override]
+            return RenamedToolset(toolset, {"renamed": "original"})
+
+    presentation = _ToolPresentation(
+        ("*",),
+        static_tool_names=(),
+        mcp_policy=(),
+        plan_mode=False,
+        trusted_tool_classes=(),
+        trusted_mcp_selectors=(),
+    )
+    combined = CombinedCapability((presentation, RenameCapability()))
+    wrapped = combined.get_wrapper_toolset(FunctionToolset())
+
+    assert type(presentation).prepare_tools is AbstractCapability.prepare_tools
+    assert presentation.get_ordering().position == "outermost"
+    assert isinstance(wrapped, PreparedToolset)
+    assert isinstance(wrapped.wrapped, RenamedToolset)
 
 
 def test_planning_gate_rejects_non_boolean_plan_safe_metadata() -> None:
