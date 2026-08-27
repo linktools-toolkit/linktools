@@ -7,6 +7,7 @@ import hashlib
 import os
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
+from functools import partial
 from pathlib import Path
 from typing import TypeVar, cast
 
@@ -86,47 +87,55 @@ async def compose_runtime_components(
     if len(workspace_groups) > 1:
         raise AIError(ErrorCode.CAPABILITY_CONFLICT)
 
-    if workspace_groups:
-        effective_groups: tuple[CapabilityGroup[object], ...] = cast(
-            "tuple[CapabilityGroup[object], ...]", groups
-        )
-    else:
-        owned_store = _default_workspace_store(workspace)
-        await owned_store.initialize()
-        workspace_group: CapabilityGroup[object] = CapabilityGroup.from_store("workspace", owned_store)
-        effective_groups = (workspace_group, *cast("tuple[CapabilityGroup[object], ...]", groups))
-
-    group_ids = tuple(group.id for group in effective_groups)
-    if len(group_ids) != len(set(group_ids)):
-        raise AIError(ErrorCode.CAPABILITY_CONFLICT)
-
-    frozen: list[CapabilityContribution[object]] = list(workspace_tool_contributions(workspace))
-    for group in effective_groups:
-        frozen.extend(await group.freeze())
-    _validate_candidate_uniqueness(frozen)
-
-    agents = {
-        candidate.id: cast(AgentSpec, candidate.value)
-        for candidate in frozen
-        if candidate.kind == "agent"
-    }
-    if "default" not in agents:
-        agents["default"] = AgentSpec("default")
-    model_registry = models or _build_default_models(workspace)
-    resolver = model_registry.snapshot()
-    compiler = AgentCompiler(
-        model_resolver=resolver,
-        candidates=tuple(candidate for candidate in frozen if candidate.kind != "agent"),
-        agent_ids=tuple(agents),
-    )
-    catalog = AgentCatalog({agent_id: compiler.compile(agents[agent_id]) for agent_id in sorted(agents)})
-
-    effective_tenant_id = "default" if tenant_id is None else validate_tenant_id(tenant_id)
-    selected_state = state or _default_runtime_state(workspace)
+    owned_workspace_assets: tuple[AssetStore, DirectoryAssetBackend] | None = None
+    selected_state: RuntimeState | None = None
     initialized = False
     try:
+        if workspace_groups:
+            effective_groups: tuple[CapabilityGroup[object], ...] = cast(
+                "tuple[CapabilityGroup[object], ...]", groups
+            )
+        else:
+            owned_workspace_assets = _default_workspace_store(workspace)
+            owned_store, _owned_backend = owned_workspace_assets
+            await owned_store.initialize()
+            workspace_group: CapabilityGroup[object] = CapabilityGroup.from_store("workspace", owned_store)
+            effective_groups = (workspace_group, *cast("tuple[CapabilityGroup[object], ...]", groups))
+
+        group_ids = tuple(group.id for group in effective_groups)
+        if len(group_ids) != len(set(group_ids)):
+            raise AIError(ErrorCode.CAPABILITY_CONFLICT)
+
+        frozen: list[CapabilityContribution[object]] = list(workspace_tool_contributions(workspace))
+        for group in effective_groups:
+            frozen.extend(await group.freeze())
+        _validate_candidate_uniqueness(frozen)
+
+        agents = {
+            candidate.id: cast(AgentSpec, candidate.value)
+            for candidate in frozen
+            if candidate.kind == "agent"
+        }
+        if "default" not in agents:
+            agents["default"] = AgentSpec("default")
+        model_registry = models or _build_default_models(workspace)
+        resolver = model_registry.snapshot()
+        compiler = AgentCompiler(
+            model_resolver=resolver,
+            candidates=tuple(candidate for candidate in frozen if candidate.kind != "agent"),
+            agent_ids=tuple(agents),
+        )
+        catalog = AgentCatalog({agent_id: compiler.compile(agents[agent_id]) for agent_id in sorted(agents)})
+
+        effective_tenant_id = "default" if tenant_id is None else validate_tenant_id(tenant_id)
+        selected_state = state or _default_runtime_state(workspace)
         await selected_state.initialize(namespace=workspace.workspace_id, tenant_id=effective_tenant_id)
         initialized = True
+        owned_workspace_close = (
+            None
+            if owned_workspace_assets is None
+            else partial(_close_owned_workspace_assets, *owned_workspace_assets)
+        )
         return await _build_local_components(
             state=selected_state,
             catalog=catalog,
@@ -143,14 +152,21 @@ async def compose_runtime_components(
             ),
             memory_store_factory=_memory_store_factory(workspace, selected_state),
             grant_key=_grant_key(workspace),
+            owned_workspace_close=owned_workspace_close,
         )
     except BaseException:
-        if initialized:
-            await selected_state.close()
+        try:
+            if initialized and selected_state is not None:
+                await selected_state.close()
+        finally:
+            if owned_workspace_assets is not None:
+                await _close_owned_workspace_assets(*owned_workspace_assets)
         raise
 
 
-def _default_workspace_store(workspace: Workspace) -> AssetStore:
+def _default_workspace_store(
+    workspace: Workspace,
+) -> tuple[AssetStore, DirectoryAssetBackend]:
     adapter = PrefixAssetPathAdapter(
         {
             "agent": "agents",
@@ -163,7 +179,15 @@ def _default_workspace_store(workspace: Workspace) -> AssetStore:
         path_adapter=adapter,
         kinds=("agent", "skill", "mcp"),
     )
-    return AssetStore(StorageOverlay(source))
+    return AssetStore(StorageOverlay(source)), source
+
+
+async def _close_owned_workspace_assets(
+    store: AssetStore,
+    backend: DirectoryAssetBackend,
+) -> None:
+    await store.close()
+    await backend.close()
 
 
 def _validate_candidate_uniqueness(
@@ -280,6 +304,7 @@ async def _build_local_components(
     session_history_reader: SessionHistoryReader,
     memory_store_factory: "Callable[[str, str, str, ObjectStore, bool], SearchableMemoryStore] | None",
     grant_key: bytes,
+    owned_workspace_close: "Callable[[], Awaitable[None]] | None" = None,
 ) -> _RuntimeComponents:
     if not state.ready:
         raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
@@ -423,14 +448,15 @@ async def _build_local_components(
             cursor_signer=HmacCursorSigner("artifact", grant_key),
         )
         local_coordinator = _LocalRuntimeCoordinator(execution, session, event, backend)
-        coordinator = _RuntimeCloseCoordinator(
-            (
-                task.preflight_close,
-                task_launcher.shutdown,
-                backend.close,
-                state.close,
-            )
-        )
+        close_actions: list[Callable[[], Awaitable[None]]] = [
+            task.preflight_close,
+            task_launcher.shutdown,
+            backend.close,
+            state.close,
+        ]
+        if owned_workspace_close is not None:
+            close_actions.append(owned_workspace_close)
+        coordinator = _RuntimeCloseCoordinator(tuple(close_actions))
         await _restore_recovery_bindings(catalog, compiler, state, tenant_id=tenant_id)
         if RuntimeDomain.RECOVERY in state.plan.durable_domains:
             await backend.reconcile()
