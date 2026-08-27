@@ -6,10 +6,10 @@ from datetime import datetime, timezone
 
 import httpx
 import pytest
-from linktools.ai.agent._executor import _execution_error
 from linktools.ai.core import ExecutionStatus, ToolOperationStatus, UsageMetrics
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.runtime import ExecutionResult
+from linktools.ai.runtime._agent_executor import _execution_error
 from linktools.ai.runtime._evaluation import _stable_error
 from linktools.ai.runtime._execution import _terminal_error
 from linktools.ai.runtime._local import _secondary_execution_error
@@ -91,19 +91,16 @@ def test_execution_result_enforces_terminal_error_contract() -> None:
         "success",
         ExecutionStatus.SUCCEEDED,
         {"ok": True},
-        "schema",
-        1,
         "a" * 64,
         usage,
     )
+    assert succeeded.output_fingerprint == "a" * 64
     assert succeeded.error_code is None
     assert succeeded.safe_error_details == {}
 
     failed = ExecutionResult(
         "failed",
         ExecutionStatus.FAILED,
-        None,
-        None,
         None,
         None,
         usage,
@@ -118,8 +115,6 @@ def test_execution_result_enforces_terminal_error_contract() -> None:
         ExecutionStatus.CANCELLED,
         None,
         None,
-        None,
-        None,
         usage,
         ErrorCode.EXECUTION_CANCELLED.value,
     )
@@ -131,8 +126,6 @@ def test_execution_result_enforces_terminal_error_contract() -> None:
             ExecutionStatus.FAILED,
             None,
             None,
-            None,
-            None,
             usage,
             ErrorCode.EXECUTION_CANCELLED.value,
         )
@@ -140,8 +133,6 @@ def test_execution_result_enforces_terminal_error_contract() -> None:
         ExecutionResult(
             "unknown",
             ExecutionStatus.FAILED,
-            None,
-            None,
             None,
             None,
             usage,
@@ -152,20 +143,16 @@ def test_execution_result_enforces_terminal_error_contract() -> None:
             "failed-with-output",
             ExecutionStatus.FAILED,
             {"unexpected": True},
-            None,
-            None,
-            None,
+            "a" * 64,
             usage,
             ErrorCode.INTERNAL_ERROR.value,
         )
     with pytest.raises(ValueError):
         ExecutionResult(
-            "cancelled-with-schema",
+            "cancelled-with-output-contract",
             ExecutionStatus.CANCELLED,
             None,
-            "unexpected-schema",
-            None,
-            None,
+            "a" * 64,
             usage,
             ErrorCode.EXECUTION_CANCELLED.value,
         )
@@ -238,7 +225,7 @@ def _tool_bridge() -> RuntimeToolOperationBridge:
         tenant_id="tenant",
         execution_id="execution",
         step_run_id="run",
-        binding_fingerprint="a" * 64,
+        binding_digest="a" * 64,
         owner="worker",
         background_tasks=set(),
         payload_policy=PayloadPolicy(),
@@ -259,7 +246,7 @@ def _failed_tool_record(
         idempotency_key_digest="b" * 64,
         tool_name="tool",
         arguments_digest="c" * 64,
-        binding_fingerprint="a" * 64,
+        binding_digest="a" * 64,
         replay_safe=True,
         status=ToolOperationStatus.FAILED,
         owner=None,
