@@ -562,6 +562,12 @@ async def _materialize_attempt(state: RuntimeState, sequence: int, prompt: str) 
             timestamp=now,
             conversation_id=conversation_id,
             agent_name="default",
+            metadata={
+                "linktools.ai.model_usage.input_tokens": "0",
+                "linktools.ai.model_usage.output_tokens": "0",
+                "linktools.ai.model_usage.cache_read_tokens": "0",
+                "linktools.ai.model_usage.cache_write_tokens": "0",
+            },
         )
     )
     await state.steps.save_snapshot(
