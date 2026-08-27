@@ -49,6 +49,7 @@ from ..capability import (
     SKILL_TOOL_NAMES,
     SkillCapability,
     materialize_mcp_servers,
+    mcp_selector_server,
     mcp_server_selector,
     workspace_capabilities,
     workspace_tool_class,
@@ -475,6 +476,18 @@ class _ToolPresentation(AbstractCapability[RunContext[object]]):
         names = [tool.name for tool in tool_defs]
         if len(names) != len(set(names)):
             raise AIError(ErrorCode.CAPABILITY_CONFLICT)
+        mcp_names = {
+            tool.name
+            for tool in tool_defs
+            if tool.capability_id in self._trusted_mcp_selectors
+        }
+        for selector in self._mcp_policy:
+            parsed = mcp_selector_server(selector)
+            if parsed is None:
+                raise AIError(ErrorCode.CAPABILITY_POLICY_CONFLICT)
+            _namespace, exact_tool = parsed
+            if exact_tool is not None and selector not in mcp_names:
+                raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
         selected: list[ToolDefinition] = []
         for tool in tool_defs:
             if not tool_is_control(tool, trusted_tool_classes=self._trusted_tool_classes):
