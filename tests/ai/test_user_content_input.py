@@ -7,15 +7,15 @@ from pathlib import Path
 import pytest
 from pydantic_ai.messages import BinaryContent, UploadedFile
 
-from linktools.ai.agent._input import (
+from linktools.ai.core import Principal, canonical_json_bytes
+from linktools.ai.errors import AIError, ErrorCode
+from linktools.ai.runtime import ExecutionRequest
+from linktools.ai.runtime._input import (
     UserPromptTransport,
     _restore_user_prompt,
     prepare_user_prompt,
     user_prompt_transport,
 )
-from linktools.ai.core import Principal, canonical_json_bytes
-from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.runtime import ExecutionRequest
 
 _FIXTURE = Path(__file__).with_name("fixtures") / "user_prompt_transport_v1_golden.json"
 
@@ -130,15 +130,21 @@ def test_uploaded_file_is_rejected_until_durable_lifecycle_is_defined() -> None:
     }
 
 
-def test_execution_request_preserves_rich_prompt_transport() -> None:
+def test_execution_request_preserves_rich_prompt_transport_and_codec() -> None:
     transport = prepare_user_prompt(_attachment_prompt())
     request = ExecutionRequest(
         user_prompt=transport,
+        user_prompt_codec=transport.codec,
         principal=Principal("user", "tenant", "local_trusted"),
         idempotency_key="user-content-request",
+        memory_scope=None,
+        mode="run",
+        planning=False,
+        thinking=False,
     )
 
     assert request.user_prompt is transport
+    assert request.user_prompt_codec == "pydantic-user-content-v1"
     restored = _restore_user_prompt(request.user_prompt)
     assert isinstance(restored, tuple)
     assert isinstance(restored[1], BinaryContent)
