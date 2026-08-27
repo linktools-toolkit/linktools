@@ -552,7 +552,7 @@ class _ToolPresentation(AbstractCapability[RunContext[object]]):
                     or not tool.name.startswith(f"{tool.capability_id}__")
                 ):
                     raise AIError(
-                        ErrorCode.CAPABILITY_POLICY_CONFLICT,
+                        ErrorCode.CAPABILITY_RESOLUTION_INVALID,
                         safe_details={"tool_name": tool.name},
                     )
 
@@ -560,8 +560,8 @@ class _ToolPresentation(AbstractCapability[RunContext[object]]):
             raise AIError(
                 ErrorCode.CAPABILITY_RESOLUTION_INVALID,
                 safe_details={
-                    "expected_static_tools": tuple(sorted(expected_static)),
-                    "actual_static_tools": tuple(sorted(actual_static)),
+                    "expected_static_tools": sorted(expected_static),
+                    "actual_static_tools": sorted(actual_static),
                 },
             )
 
