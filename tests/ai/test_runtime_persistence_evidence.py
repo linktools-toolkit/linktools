@@ -240,8 +240,9 @@ async def test_terminal_stream_allows_immediate_runtime_close(
             models=_PersistenceTestModels(),  # type: ignore[arg-type]
             state=state,
         ) as runtime:
+            execution = await runtime.agent("default").start("hello")
             terminal_events = []
-            async for event in runtime.agent("default").stream("hello"):
+            async for event in execution.stream():
                 if event.event_type in {
                     ExecutionEventType.EXECUTION_SUCCEEDED,
                     ExecutionEventType.EXECUTION_FAILED,
