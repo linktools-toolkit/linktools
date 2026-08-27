@@ -180,6 +180,12 @@ class ExecutionTraceItem:
     def __post_init__(self) -> None:
         if self.sequence < 0:
             raise ValueError("execution trace sequence must be non-negative")
+        if (
+            isinstance(self.payload, Mapping)
+            and self.payload.get("kind") == "MODEL_RESPONSE"
+            and "token_usage" not in self.payload
+        ):
+            object.__setattr__(self, "payload", {**self.payload, "token_usage": None})
 
 
 @dataclass(frozen=True, slots=True)
