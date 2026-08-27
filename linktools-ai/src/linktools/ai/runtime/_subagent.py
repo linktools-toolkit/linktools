@@ -8,9 +8,10 @@ from typing import cast
 from linktools.core import environ
 from pydantic_ai.exceptions import ModelRetry
 
-from ..agent import AgentCatalog, AgentCompiler, SubagentDelegate
+from ..agent import AgentCatalog, AgentCompiler
 from ..core import ExecutionMode, ExecutionStatus, JsonValue, Principal, ThinkingValue, canonical_sha256
 from ..errors import AIError, ErrorCode
+from ._capabilities import SubagentDelegate
 from ._execution import DefaultExecutionService
 from .service_api import CancelExecutionRequest, ExecutionRequest, ExecutionResult
 
