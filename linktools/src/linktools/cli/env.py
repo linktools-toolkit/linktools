@@ -117,7 +117,6 @@ def get_commands(environ: "BaseEnviron") -> "Iterable[SubCommand]":
             alias_path = get_alias_path() / f"alias.{shell}"
             alias_path.parent.mkdir(parents=True, exist_ok=True)
             if not args.reload and os.path.exists(alias_path):
-                environ.logger.info(f"Found alias script: {alias_path}")
                 print(utils.read_file(alias_path, text=True), flush=True)
                 return 0
 
@@ -145,7 +144,6 @@ def get_commands(environ: "BaseEnviron") -> "Iterable[SubCommand]":
                     CommandStub(stub_path, executable, system=environ.system).write(
                         [get_interpreter(), "-m", command_info.module]
                     )
-                    environ.logger.info(f"Found alias: {executable} -> {command_info.module}")
                     executables.append(executable)
 
             script = ShellScript(shell)
@@ -153,7 +151,6 @@ def get_commands(environ: "BaseEnviron") -> "Iterable[SubCommand]":
 
             completion = ArgParseComplete.shellcode(executables, shell=shell)
             if completion:
-                environ.logger.info("Generate completion script ...")
                 script.add_raw(completion)
 
             result = script.render()
