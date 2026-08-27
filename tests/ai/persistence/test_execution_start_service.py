@@ -9,6 +9,7 @@ from types import SimpleNamespace
 
 import pytest
 from linktools.ai.agent import AgentBindingSnapshot
+from linktools.ai.agent._output import bind_output
 from linktools.ai.core import (
     ExecutionStatus,
     Page,
@@ -25,16 +26,16 @@ from sqlalchemy.ext.asyncio import create_async_engine
 
 
 def _binding(digest: str) -> AgentBindingSnapshot:
+    output = bind_output()
     return AgentBindingSnapshot(
         version=1,
-        agent_spec=AgentSpec("agent", 1, "model"),
-        agent_digest="d" * 64,
-        output_schema_id="test-output",
-        output_schema_revision=1,
-        output_schema_fingerprint="c" * 64,
-        local_runtime_capability_descriptors=(),
+        agent_spec=AgentSpec("agent", model="model"),
+        model={"route_id": "model", "model_identity": "test:model"},
+        selected=(),
+        subagents=(),
+        output_mode=output.mode,
+        output_schema=output.schema_definition,
         binding_digest=digest,
-        global_runtime_capability_descriptors=(),
     )
 
 
@@ -43,12 +44,38 @@ class _DefinitionCatalog:
         return SimpleNamespace(digest=digest, snapshot=_binding(digest))
 
 
-
 class _History:
-    async def trace(self, execution_id: str, *, tenant_id: str, cursor: str | None, limit: int) -> Page[object]:
+    async def history(
+        self,
+        execution_id: str,
+        *,
+        tenant_id: str,
+        cursor: str | None,
+        limit: int,
+    ) -> Page[object]:
+        del execution_id, tenant_id, cursor, limit
         return Page((), None)
 
-    async def transcript(self, execution_id: str, *, tenant_id: str, cursor: str | None, limit: int) -> Page[object]:
+    async def trace(
+        self,
+        execution_id: str,
+        *,
+        tenant_id: str,
+        cursor: str | None,
+        limit: int,
+    ) -> Page[object]:
+        del execution_id, tenant_id, cursor, limit
+        return Page((), None)
+
+    async def transcript(
+        self,
+        execution_id: str,
+        *,
+        tenant_id: str,
+        cursor: str | None,
+        limit: int,
+    ) -> Page[object]:
+        del execution_id, tenant_id, cursor, limit
         return Page((), None)
 
 
@@ -93,49 +120,89 @@ class _Launcher:
         return None
 
 
-@pytest.mark.asyncio
-async def test_execution_start_claim_has_one_launcher_winner() -> None:
-    state = RuntimeState.in_memory()
-    await state.initialize(namespace="service-start", tenant_id="tenant")
-    launcher = _Launcher(state.execution.executions)
-    service = DefaultExecutionService(
+def _request(
+    prompt: str,
+    principal: Principal,
+    idempotency_key: str,
+    *,
+    memory_scope: str | None = None,
+) -> ExecutionRequest:
+    return ExecutionRequest(
+        user_prompt=prompt,
+        user_prompt_codec="text",
+        principal=principal,
+        idempotency_key=idempotency_key,
+        memory_scope=memory_scope,
+        mode="run",
+        planning=False,
+        thinking=False,
+    )
+
+
+def _service(
+    state: RuntimeState,
+    *,
+    backend: _Launcher | None = None,
+    operation_ids: object | None = None,
+) -> DefaultExecutionService:
+    kwargs: dict[str, object] = {}
+    if operation_ids is not None:
+        kwargs["operation_ids"] = operation_ids
+    return DefaultExecutionService(
         state.execution,
-        state._object_store(RuntimeDomain.EXECUTION),
+        state.object_store(RuntimeDomain.EXECUTION),
         TenantAuthorizationPolicy(),
         sessions=state.conversation.sessions,
         catalog=_DefinitionCatalog(),
         compiler=object(),
-        backend=launcher,
-        operation_ids=iter(("execution-a", "execution-b")).__next__,
+        backend=backend,
         history_reader=_History(),
+        **kwargs,
     )
-    request = ExecutionRequest(
-        user_prompt="hello",
-        principal=Principal("owner", "tenant"),
-        idempotency_key="same",
-        memory_scope="test",
-    )
-    first, second = await asyncio.gather(service.run("a" * 64, request), service.run("a" * 64, request))
-    assert first.execution_id == second.execution_id
-    assert launcher.calls == 1
-    started = await state.execution.executions.get(first.execution_id, tenant_id="tenant")
-    assert started is not None
-    assert started.agent_run_sequence == 0
-    first_attempt = await state.execution.executions.claim_next_agent_run(
-        first.execution_id,
-        tenant_id="tenant",
-        expected_revision=started.revision,
-        expected_agent_run_sequence=0,
-    )
-    assert first_attempt.agent_run_sequence == 1
-    second_attempt = await state.execution.executions.claim_next_agent_run(
-        first.execution_id,
-        tenant_id="tenant",
-        expected_revision=first_attempt.revision,
-        expected_agent_run_sequence=1,
-    )
-    assert second_attempt.agent_run_sequence == 2
-    await state.close()
+
+
+@pytest.mark.asyncio
+async def test_execution_start_claim_has_one_launcher_winner() -> None:
+    state = RuntimeState.in_memory()
+    await state.initialize(namespace="service-start", tenant_id="tenant")
+    try:
+        launcher = _Launcher(state.execution.executions)
+        service = _service(
+            state,
+            backend=launcher,
+            operation_ids=iter(("execution-a", "execution-b")).__next__,
+        )
+        request = _request(
+            "hello",
+            Principal("owner", "tenant"),
+            "same",
+            memory_scope="test",
+        )
+        first, second = await asyncio.gather(
+            service.run("a" * 64, request),
+            service.run("a" * 64, request),
+        )
+        assert first.execution_id == second.execution_id
+        assert launcher.calls == 1
+        started = await state.execution.executions.get(first.execution_id, tenant_id="tenant")
+        assert started is not None
+        assert started.agent_run_sequence == 0
+        first_attempt = await state.execution.executions.claim_next_agent_run(
+            first.execution_id,
+            tenant_id="tenant",
+            expected_revision=started.revision,
+            expected_agent_run_sequence=0,
+        )
+        assert first_attempt.agent_run_sequence == 1
+        second_attempt = await state.execution.executions.claim_next_agent_run(
+            first.execution_id,
+            tenant_id="tenant",
+            expected_revision=first_attempt.revision,
+            expected_agent_run_sequence=1,
+        )
+        assert second_attempt.agent_run_sequence == 2
+    finally:
+        await state.close()
 
 
 @pytest.mark.asyncio
@@ -145,22 +212,11 @@ async def test_sql_execution_start_keeps_attempt_sequence_zero(tmp_path) -> None
     state = RuntimeState.sql(engine)
     await state.initialize(namespace="sql-start", tenant_id="tenant")
     try:
-        service = DefaultExecutionService(
-            state.execution,
-            state._object_store(RuntimeDomain.EXECUTION),
-            TenantAuthorizationPolicy(),
-            sessions=state.conversation.sessions,
-        catalog=_DefinitionCatalog(),
-        compiler=object(),
-            backend=_Launcher(state.execution.executions),
-            history_reader=_History(),
+        service = _service(state, backend=_Launcher(state.execution.executions))
+        handle = await service.run(
+            "b" * 64,
+            _request("hello", Principal("owner", "tenant"), "sql-start-key"),
         )
-        request = ExecutionRequest(
-            "hello",
-            Principal("owner", "tenant"),
-            "sql-start-key",
-        )
-        handle = await service.run("b" * 64, request)
         started = await state.execution.executions.get(handle.execution_id, tenant_id="tenant")
         assert started is not None
         assert started.agent_run_sequence == 0
@@ -174,19 +230,10 @@ async def test_filesystem_execution_start_keeps_attempt_sequence_zero(tmp_path) 
     state = RuntimeState.filesystem(tmp_path / "runtime")
     await state.initialize(namespace="filesystem-start", tenant_id="tenant")
     try:
-        service = DefaultExecutionService(
-            state.execution,
-            state._object_store(RuntimeDomain.EXECUTION),
-            TenantAuthorizationPolicy(),
-            sessions=state.conversation.sessions,
-        catalog=_DefinitionCatalog(),
-        compiler=object(),
-            backend=_Launcher(state.execution.executions),
-            history_reader=_History(),
-        )
+        service = _service(state, backend=_Launcher(state.execution.executions))
         handle = await service.run(
             "c" * 64,
-            ExecutionRequest(
+            _request(
                 "hello",
                 Principal("owner", "tenant"),
                 "filesystem-start-key",
@@ -207,15 +254,7 @@ async def test_terminal_verifier_can_be_bound_once() -> None:
     state = RuntimeState.in_memory()
     await state.initialize(namespace="terminal-verifier", tenant_id="tenant")
     try:
-        service = DefaultExecutionService(
-            state.execution,
-            state._object_store(RuntimeDomain.EXECUTION),
-            TenantAuthorizationPolicy(),
-            sessions=state.conversation.sessions,
-        catalog=_DefinitionCatalog(),
-        compiler=object(),
-            history_reader=_History(),
-        )
+        service = _service(state)
 
         with pytest.raises(ValueError):
             service.bind_terminal_verifier(None)
@@ -239,20 +278,11 @@ async def test_launch_missing_record_is_storage_integrity_failure() -> None:
     state = RuntimeState.in_memory()
     await state.initialize(namespace="launch-integrity", tenant_id="tenant")
     try:
-        service = DefaultExecutionService(
-            state.execution,
-            state._object_store(RuntimeDomain.EXECUTION),
-            TenantAuthorizationPolicy(),
-            sessions=state.conversation.sessions,
-        catalog=_DefinitionCatalog(),
-        compiler=object(),
-            backend=_Launcher(state.execution.executions),
-            history_reader=_History(),
-        )
+        service = _service(state, backend=_Launcher(state.execution.executions))
 
         with pytest.raises(AIError) as error:
             await service._launch_started(
-                ExecutionRequest("hello", Principal("owner", "tenant"), "launch-key"),
+                _request("hello", Principal("owner", "tenant"), "launch-key"),
                 SimpleNamespace(execution_id="missing", tenant_id="tenant"),
                 scope="scope",
                 idempotency_key_digest="digest",
@@ -268,22 +298,16 @@ async def test_execution_memory_scope_can_be_disabled_but_not_blank() -> None:
     state = RuntimeState.in_memory()
     await state.initialize(namespace="memory-namespace-validation", tenant_id="tenant")
     try:
-        service = DefaultExecutionService(
-            state.execution,
-            state._object_store(RuntimeDomain.EXECUTION),
-            TenantAuthorizationPolicy(),
-            sessions=state.conversation.sessions,
-        catalog=_DefinitionCatalog(),
-        compiler=object(),
-            backend=_Launcher(state.execution.executions),
-            history_reader=_History(),
-        )
+        service = _service(state, backend=_Launcher(state.execution.executions))
         principal = Principal("owner", "tenant")
         handle = await service.run(
             "a" * 64,
-            ExecutionRequest("without memory", principal, "without-memory", memory_scope=None),
+            _request("without memory", principal, "without-memory"),
         )
-        execution = await state.execution.executions.get(handle.execution_id, tenant_id=principal.tenant_id)
+        execution = await state.execution.executions.get(
+            handle.execution_id,
+            tenant_id=principal.tenant_id,
+        )
         assert execution is not None
         assert execution.memory_scope is None
 
@@ -291,7 +315,12 @@ async def test_execution_memory_scope_can_be_disabled_but_not_blank() -> None:
             with pytest.raises(AIError) as error:
                 await service.run(
                     "a" * 64,
-                    ExecutionRequest("invalid memory", principal, f"invalid-{len(value)}", memory_scope=value),
+                    _request(
+                        "invalid memory",
+                        principal,
+                        f"invalid-{len(value)}",
+                        memory_scope=value,
+                    ),
                 )
             assert error.value.code is ErrorCode.REQUEST_FIELD_INVALID
     finally:
