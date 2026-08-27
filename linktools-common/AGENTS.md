@@ -1,20 +1,17 @@
 # AGENTS.md (linktools-common)
 
-Architecture guidance for the common-tools sub-package. Shared concerns (monorepo
-structure, `manage.py`, config system, code style) live in the
-[repo-root AGENTS.md](../AGENTS.md).
+Package instructions for `linktools-common`. Repository-wide rules in [../AGENTS.md](../AGENTS.md) also apply.
 
-## Commands (`linktools-common/src/linktools/commands/common/`)
+## Required Rules
 
-General-purpose CLI tools (prefix `ct-`), all built on the core CLI framework
-(`BaseCommand` / `BaseCommandGroup`):
+- Common commands delegate shared configuration, platform, logging, CLI, and tool-management behavior to the core framework instead of duplicating it locally.
 
-- **`ct-env`** (`env.py`) — print/inspect the linktools environment (data/temp
-  directories, config paths, platform info).
-- **`ct-grep`** (`grep.py`) — recursive grep utility (wraps system `grep`/`ripgrep`
-  with linktools-aware defaults).
-- **`ct-tools`** (`tools.py`) — declarative tool manager: install / list / run the
-  external tools declared in `assets/tools.json` (e.g. `ct-tools apktool ...`).
+## Guidance
 
-These are thin, self-contained commands; the heavy lifting (config, tool download/
-extraction, platform detection) is delegated to the core framework.
+`linktools-common/src/linktools/commands/common/` currently contains:
+
+- `ct-env`: environment/config/platform inspection.
+- `ct-grep`: grep/ripgrep wrapper with linktools defaults.
+- `ct-tools`: install/list/run tools declared in `assets/tools.json`.
+
+New commands normally use the core `BaseCommand` / `BaseCommandGroup` framework and existing command discovery.
