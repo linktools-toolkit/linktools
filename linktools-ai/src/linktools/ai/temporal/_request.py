@@ -8,11 +8,7 @@ from collections.abc import Mapping
 
 from linktools.core import environ
 
-from ..agent import (
-    AgentBindingSnapshot,
-    UserPromptTransport,
-    user_prompt_transport,
-)
+from ..agent import AgentBindingSnapshot
 from ..core import (
     JsonValue,
     Principal,
@@ -26,6 +22,7 @@ from ..runtime import (
     RuntimeObjectKeyFactory,
     put_runtime_object,
     read_runtime_object,
+    user_prompt_transport,
 )
 from ..runtime.state import RuntimeDomain
 from ..storage import ObjectRef, ObjectStore
