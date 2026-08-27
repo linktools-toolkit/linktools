@@ -35,6 +35,7 @@ class _Effect:
     tool_call_id: str
     status: str
     effect_summary: str | None = None
+    idempotency_key: str | None = None
     started_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
 
 
@@ -43,7 +44,15 @@ class _StepStore:
         self.effects: list[_Effect] = []
 
     async def record_tool_effect(self, effect: Any) -> None:
-        self.effects.append(_Effect(effect.run_id, effect.tool_call_id, effect.status, effect.effect_summary))
+        self.effects.append(
+            _Effect(
+                effect.run_id,
+                effect.tool_call_id,
+                effect.status,
+                effect.effect_summary,
+                effect.idempotency_key,
+            )
+        )
 
     async def append_event(self, event: Any) -> None:
         del event
