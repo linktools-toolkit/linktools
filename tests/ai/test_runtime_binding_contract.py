@@ -6,8 +6,7 @@ from datetime import datetime, timezone
 from typing import Annotated
 
 import pytest
-from linktools.ai.agent import AgentBindingSnapshot, AgentCompiler
-from linktools.ai.agent._catalog import AgentCatalog
+from linktools.ai.agent import AgentBindingSnapshot, AgentCatalog, AgentCompiler
 from linktools.ai.agent._output import bind_output
 from linktools.ai.core import ExecutionLineageKind, ExecutionStatus
 from linktools.ai.errors import AIError, ErrorCode
@@ -72,14 +71,13 @@ def _snapshot(*, binding_digest: str = "a" * 64) -> AgentBindingSnapshot:
     output = bind_output()
     return AgentBindingSnapshot(
         version=1,
-        agent_spec=AgentSpec("agent", 1, "default"),
-        agent_digest="b" * 64,
-        output_schema_id=output.schema_id,
-        output_schema_revision=output.schema_revision,
-        output_schema_fingerprint=output.schema_fingerprint,
-        local_runtime_capability_descriptors=(),
+        agent_spec=AgentSpec("agent"),
+        model={"route_id": "default", "model_identity": "test:model"},
+        selected=(),
+        subagents=(),
+        output_mode=output.mode,
+        output_schema=output.schema_definition,
         binding_digest=binding_digest,
-        global_runtime_capability_descriptors=(),
     )
 
 
@@ -109,6 +107,7 @@ def _execution(
         safe_error_details={},
         created_at=now,
         updated_at=now,
+        mode="run",
         planning=planning,
         thinking=thinking,
         binding=_snapshot(binding_digest=binding_digest) if binding is None else binding,
@@ -124,6 +123,7 @@ def _recovery(
 ) -> RecoveryExecutionInput:
     return RecoveryExecutionInput(
         user_prompt="prompt",
+        user_prompt_codec="text",
         principal_id="principal",
         principal_kind="service",
         session_id=None,
@@ -136,6 +136,7 @@ def _recovery(
         base_execution_id=None,
         conversation_step_run_id=None,
         idempotency=RecoveryIdempotencyInput("scope", "key", "request"),
+        mode="run",
         planning=planning,
         thinking=thinking,
         binding=_snapshot(binding_digest=binding_digest) if binding is None else binding,
@@ -145,80 +146,87 @@ def _recovery(
 def _compiler() -> AgentCompiler:
     return AgentCompiler(
         model_resolver=ModelRegistry.openai(model="gpt-test").snapshot(),
-        runtime_fingerprint="a" * 64,
+        candidates=(),
+        agent_ids=("agent",),
     )
 
 
-def test_current_binding_snapshot_persists_schema_without_python_path() -> None:
+def test_current_binding_snapshot_persists_only_v1_semantic_inputs() -> None:
     output = bind_output()
     snapshot = AgentBindingSnapshot(
         version=1,
-        agent_spec=AgentSpec("agent", 1, "default"),
-        agent_digest="b" * 64,
-        output_schema_id=output.schema_id,
-        output_schema_revision=output.schema_revision,
-        output_schema_fingerprint=output.schema_fingerprint,
-        local_runtime_capability_descriptors=(),
+        agent_spec=AgentSpec("agent"),
+        model={"route_id": "default", "model_identity": "test:model"},
+        selected=(),
+        subagents=(),
+        output_mode=output.mode,
+        output_schema=output.schema_definition,
         binding_digest="a" * 64,
-        global_runtime_capability_descriptors=(),
-        output_schema_definition=output.schema_definition,
     )
-    payload = snapshot.to_payload()
-    assert set(payload) == {
+
+    assert set(snapshot.to_payload()) == {
         "version",
         "agent_spec",
-        "agent_digest",
-        "output_schema_id",
-        "output_schema_revision",
-        "output_schema_fingerprint",
-        "local_runtime_capability_descriptors",
+        "model",
+        "selected",
+        "subagents",
+        "output_mode",
+        "output_schema",
         "binding_digest",
-        "global_runtime_capability_descriptors",
-        "output_schema_definition",
     }
 
 
-def test_custom_output_keeps_pydantic_runtime_semantics() -> None:
+def test_custom_output_materializes_from_durable_json_schema() -> None:
     binding = bind_output(_PydanticOutput)
-    assert binding.runtime_output_type is _PydanticOutput
-    parsed = TypeAdapter(binding.runtime_output_type).validate_python({"value": "50"})
-    assert isinstance(parsed, _PydanticOutput)
-    assert parsed.value == 50
-    assert parsed.evidence == []
+    assert binding.mode == "structured"
+    assert binding.runtime_output_type is not _PydanticOutput
 
+    parsed = TypeAdapter(binding.runtime_output_type).validate_python(
+        {"value": 50, "evidence": []}
+    )
+    assert parsed == {"value": 50, "evidence": []}
 
-def test_custom_output_keeps_python_validator_semantics() -> None:
-    binding = bind_output(_PythonValidatedOutput)
     with pytest.raises(ValidationError):
-        TypeAdapter(binding.runtime_output_type).validate_python({"value": 7})
+        TypeAdapter(binding.runtime_output_type).validate_python(
+            {"value": "50", "evidence": []}
+        )
 
 
-def test_catalog_rejects_same_durable_schema_with_different_python_semantics() -> None:
+def test_python_only_output_validator_is_not_part_of_durable_contract() -> None:
+    binding = bind_output(_PythonValidatedOutput)
+
+    parsed = TypeAdapter(binding.runtime_output_type).validate_python({"value": 7})
+
+    assert parsed == {"value": 7}
+
+
+def test_same_json_schema_produces_same_binding_identity() -> None:
     compiler = _compiler()
-    definition = compiler.compile(AgentSpec("agent", model="default"))
+    definition = compiler.compile(AgentSpec("agent"))
     first = compiler.bind(definition, output=_SchemaTwinA)
     second = compiler.bind(definition, output=_SchemaTwinB)
+
     assert first.digest == second.digest
+    assert first.snapshot == second.snapshot
     assert first.output_binding.schema_definition == second.output_binding.schema_definition
 
-    catalog = AgentCatalog({})
+    catalog = AgentCatalog({"agent": definition})
     assert catalog.register_binding(first) is first
-    with pytest.raises(AIError) as error:
-        catalog.register_binding(second)
-    assert error.value.code is ErrorCode.BINDING_CONFLICT
+    assert catalog.register_binding(second) is first
+    assert catalog.binding(first.digest) is first
 
 
-def test_catalog_upgrades_restored_schema_binding_to_current_python_type() -> None:
+def test_restored_binding_uses_only_snapshot_semantics() -> None:
     compiler = _compiler()
-    definition = compiler.compile(AgentSpec("agent", model="default"))
+    definition = compiler.compile(AgentSpec("agent"))
     current = compiler.bind(definition, output=_SchemaTwinA)
-    restored = compiler.restore(current.snapshot)
-    assert restored.output_type is not _SchemaTwinA
 
-    catalog = AgentCatalog({})
-    assert catalog.register_binding(restored) is restored
-    assert catalog.register_binding(current) is current
-    assert catalog.binding(current.digest).output_type is _SchemaTwinA
+    restored = compiler.restore(current.snapshot)
+
+    assert restored.digest == current.digest
+    assert restored.snapshot == current.snapshot
+    assert restored.output_binding.schema_definition == current.output_binding.schema_definition
+    assert restored.output_type is not _SchemaTwinA
 
 
 def test_execution_requires_exact_binding_snapshot() -> None:
