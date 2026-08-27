@@ -145,7 +145,7 @@ class _SemanticContribution(CapabilityContribution[AppT]):
         except (TypeError, ValueError) as error:
             raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID) from error
         object.__setattr__(self, "_contract", contract)
-        super().__post_init__()
+        CapabilityContribution.__post_init__(self)
 
     @property
     def semantic_contract(self) -> "dict[str, JsonValue]":
