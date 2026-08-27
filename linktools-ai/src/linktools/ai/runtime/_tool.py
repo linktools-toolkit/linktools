@@ -47,7 +47,7 @@ from .state._durability import (
 from .state._plan import RuntimeDomain
 
 if TYPE_CHECKING:
-    from ..agent import ToolOperationDecision
+    from ._capabilities import ToolOperationDecision
 
 _logger = environ.get_logger("ai.runtime.tool")
 
@@ -306,7 +306,7 @@ class RuntimeToolOperationBridge:
         existing: ToolOperationRecord,
         replay_safe: bool,
     ) -> "ToolOperationDecision":
-        from ..agent import ToolOperationDecision
+        from ._capabilities import ToolOperationDecision
 
         if existing.replay_safe is not replay_safe:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -713,7 +713,7 @@ def _decision_type(
     *,
     fence: int,
 ) -> "ToolOperationDecision":
-    from ..agent import ToolOperationDecision
+    from ._capabilities import ToolOperationDecision
 
     return ToolOperationDecision(
         decision.operation_id,
