@@ -1,25 +1,34 @@
 {
-  "agent_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "version": 1,
   "agent_spec": {
+    "version": 1,
+    "id": "runtime-persistence-v1",
+    "model": "default",
+    "system_prompt": "",
+    "instructions": [],
     "allow_tools": [
       "*"
     ],
-    "id": "runtime-persistence-v1",
-    "instructions": [],
-    "model": "default",
-    "revision": 1,
-    "system_prompt": "",
-    "usage_limits": null
+    "allow_skills": [
+      "*"
+    ],
+    "allow_subagents": [
+      "*"
+    ],
+    "usage_limits": null,
+    "planning": false,
+    "thinking": false
   },
-  "binding_digest": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
-  "local_runtime_capability_descriptors": [],
-  "output_schema_fingerprint": "d5e196516d7067c7ffbb0847d2f57bf3382199aea943681a5e5e1a0ead279e7f",
-  "output_schema_id": "assistant-text",
-  "output_schema_revision": 1,
-  "global_runtime_capability_descriptors": [],
-  "output_schema_definition": {
+  "model": {
+    "route_id": "default",
+    "model_identity": "fixture:model"
+  },
+  "selected": [],
+  "subagents": [],
+  "output_mode": "text",
+  "output_schema": {
     "additionalProperties": false,
-    "description": "Canonical default output containing assistant response text.",
+    "description": "Canonical Runtime representation of plain assistant text.",
     "properties": {
       "text": {
         "title": "Text",
@@ -32,5 +41,5 @@
     "title": "AssistantTextOutput",
     "type": "object"
   },
-  "version": 1
+  "binding_digest": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
 }
