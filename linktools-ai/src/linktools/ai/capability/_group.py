@@ -7,7 +7,8 @@ import hashlib
 import inspect
 import re
 from collections.abc import Awaitable, Callable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from types import MappingProxyType
 from typing import Generic, Literal, Protocol, TypeAlias, TypeVar, cast, overload
 
 from pydantic_ai import Tool
@@ -15,7 +16,7 @@ from pydantic_ai.capabilities import AbstractCapability
 from pydantic_ai.tools import RunContext as PydanticRunContext
 
 from ..asset import AssetInfo, AssetKey, AssetStore
-from ..core import JsonValue, canonical_sha256
+from ..core import ImmutableJsonMapping, JsonValue, canonical_sha256
 from ..errors import AIError, ErrorCode
 from ..spec import (
     AgentSpec,
@@ -48,6 +49,16 @@ _RESERVED_TOOL_NAMES = frozenset(
         "write_memory",
     }
 )
+_RESERVED_CAPABILITY_IDS = frozenset(
+    {
+        "workspace-filesystem",
+        "workspace-shell",
+        "linktools-skill",
+        "linktools-memory",
+        "linktools-planning",
+        "linktools-subagent",
+    }
+)
 _TOOL_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_.-]{0,127}$")
 
 
@@ -57,7 +68,6 @@ class CapabilityContribution(Generic[AppT]):
     id: str
     fingerprint: str
     value: "Tool[RunContext[AppT]] | AgentSpec | SkillSpec | MCPServerSpec | AbstractCapability[RunContext[AppT]]"
-    _semantic_revision: "int | None" = None
 
     def __post_init__(self) -> None:
         if self.kind not in {"tool", "agent", "skill", "mcp", "capability"}:
@@ -75,12 +85,6 @@ class CapabilityContribution(Generic[AppT]):
             raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
         if self.kind == "capability" and not isinstance(self.value, AbstractCapability):
             raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
-        if self._semantic_revision is not None and (
-            not isinstance(self._semantic_revision, int)
-            or isinstance(self._semantic_revision, bool)
-            or self._semantic_revision < 1
-        ):
-            raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
         if self.kind == "tool" and cast(Tool, self.value).name != self.id:
             raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
         if self.kind == "agent" and cast(AgentSpec, self.value).id != self.id:
@@ -93,6 +97,7 @@ class CapabilityContribution(Generic[AppT]):
             capability_id = cast(AbstractCapability, self.value).id  # type: ignore[attr-defined]
             if not isinstance(capability_id, str) or capability_id != self.id:
                 raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
+            _validate_external_capability_id(capability_id)
         if self.fingerprint != capability_fingerprint(
             self.kind,
             self.id,
@@ -100,9 +105,26 @@ class CapabilityContribution(Generic[AppT]):
         ):
             raise AIError(ErrorCode.CAPABILITY_FINGERPRINT_INVALID)
 
-    @property
-    def semantic_revision(self) -> "int | None":
-        return self._semantic_revision
+    @classmethod
+    def from_semantic_contract(
+        cls,
+        kind: ContributionKind,
+        identity: str,
+        value: "Tool[RunContext[AppT]] | AgentSpec | SkillSpec | MCPServerSpec | AbstractCapability[RunContext[AppT]]",
+        semantic_contract: Mapping[str, JsonValue],
+    ) -> "CapabilityContribution[AppT]":
+        """Create a contribution from an explicit canonical semantic source."""
+        try:
+            contract = ImmutableJsonMapping(semantic_contract)
+        except (TypeError, ValueError) as error:
+            raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID) from error
+        return _SemanticContribution(
+            kind,
+            identity,
+            capability_fingerprint(kind, identity, contract),
+            value,
+            contract,
+        )
 
     @property
     def semantic_contract(self) -> "dict[str, JsonValue]":
@@ -110,8 +132,24 @@ class CapabilityContribution(Generic[AppT]):
             self.kind,
             self.id,
             self.value,
-            semantic_revision=self._semantic_revision,
         )
+
+
+@dataclass(frozen=True, slots=True)
+class _SemanticContribution(CapabilityContribution[AppT]):
+    _contract: Mapping[str, JsonValue] = field(repr=False, compare=False)
+
+    def __post_init__(self) -> None:
+        try:
+            contract = ImmutableJsonMapping(self._contract)
+        except (TypeError, ValueError) as error:
+            raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID) from error
+        object.__setattr__(self, "_contract", contract)
+        super().__post_init__()
+
+    @property
+    def semantic_contract(self) -> "dict[str, JsonValue]":
+        return dict(self._contract)
 
 
 class CapabilityLoader(Protocol[AppT]):
@@ -161,14 +199,18 @@ class CapabilityGroup(Generic[AppT]):
         tool_name = name or function.__name__
         _validate_business_tool_name(tool_name)
         adapted = _adapt_tool(function, name=tool_name)
-        fingerprint = _tool_fingerprint(adapted, revision=revision)
+        contract = contribution_semantic_contract(
+            "tool",
+            tool_name,
+            adapted,
+            semantic_revision=revision,
+        )
         self._contributions.append(
-            CapabilityContribution(
+            CapabilityContribution.from_semantic_contract(
                 "tool",
                 tool_name,
-                fingerprint,
                 adapted,
-                revision,
+                contract,
             )
         )
         return adapted
@@ -178,6 +220,7 @@ class CapabilityGroup(Generic[AppT]):
         capability: "AbstractCapability[RunContext[AppT]]",
         *,
         revision: int = 1,
+        semantic_config: "Mapping[str, JsonValue] | None" = None,
     ) -> "AbstractCapability[RunContext[AppT]]":
         """Register one always-selected Pydantic runtime behavior capability."""
         _validate_revision(revision)
@@ -187,20 +230,20 @@ class CapabilityGroup(Generic[AppT]):
             raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID) from error
         if not isinstance(capability_id, str) or not capability_id.strip():
             raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
+        _validate_external_capability_id(capability_id)
         contract = contribution_semantic_contract(
             "capability",
             capability_id,
             capability,
             semantic_revision=revision,
+            semantic_config=semantic_config,
         )
-        fingerprint = capability_fingerprint("capability", capability_id, contract)
         self._contributions.append(
-            CapabilityContribution(
+            CapabilityContribution.from_semantic_contract(
                 "capability",
                 capability_id,
-                fingerprint,
                 capability,
-                revision,
+                contract,
             )
         )
         return capability
@@ -248,14 +291,16 @@ class CapabilityGroup(Generic[AppT]):
 
     async def freeze(self) -> "tuple[CapabilityContribution[AppT], ...]":
         """Freeze this group's direct registrations and one immutable Store snapshot."""
-        contributions = list(self._contributions)
-        if self._store is not None:
-            if not self._store.ready:
+        contributions = list(tuple(self._contributions))
+        loaders = tuple(self._loaders)
+        store = self._store
+        if store is not None:
+            if not store.ready:
                 raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
-            before = await self._store.current_revision()
-            entries = await _list_all(self._store)
+            before = await store.current_revision()
+            entries = await _list_all(store)
             keys = tuple(entry.key for entry in entries)
-            values = await self._store.get_many(keys)
+            values = await store.get_many(keys)
             contents: dict[AssetKey, bytes] = {}
             for entry, value in zip(entries, values):
                 if value is None:
@@ -264,11 +309,13 @@ class CapabilityGroup(Generic[AppT]):
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                 contents[entry.key] = bytes(value)
             immutable_entries = tuple(entries)
-            immutable_contents = dict(contents)
-            for loader in self._loaders:
+            immutable_contents = MappingProxyType(dict(contents))
+            for loader in loaders:
                 loaded = await loader.load(immutable_entries, immutable_contents)
+                if any(not isinstance(item, CapabilityContribution) for item in loaded):
+                    raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
                 contributions.extend(loaded)
-            after = await self._store.current_revision()
+            after = await store.current_revision()
             if before != after:
                 raise AIError(ErrorCode.STORAGE_CONFLICT)
         _validate_unique(contributions)
@@ -395,7 +442,10 @@ def contribution_semantic_contract(
     value: ContributionSemanticValue,
     *,
     semantic_revision: "int | None" = None,
+    semantic_config: "Mapping[str, JsonValue] | None" = None,
 ) -> "dict[str, JsonValue]":
+    if semantic_config is not None and kind != "capability":
+        raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
     if kind == "tool" and isinstance(value, Tool):
         definition = value.tool_def
         contract: dict[str, JsonValue] = {
@@ -419,6 +469,11 @@ def contribution_semantic_contract(
         contract = {"version": 1}
         if semantic_revision is not None:
             contract["semantic_revision"] = semantic_revision
+        if semantic_config is not None:
+            try:
+                contract["config"] = dict(ImmutableJsonMapping(semantic_config))
+            except (TypeError, ValueError) as error:
+                raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID) from error
         return contract
     raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
 
@@ -438,16 +493,6 @@ def capability_fingerprint(
     )
 
 
-def _tool_fingerprint(tool: Tool, *, revision: int) -> str:
-    contract = contribution_semantic_contract(
-        "tool",
-        tool.name,
-        tool,
-        semantic_revision=revision,
-    )
-    return capability_fingerprint("tool", tool.name, contract)
-
-
 def _validate_business_tool_name(value: str) -> None:
     if (
         not isinstance(value, str)
@@ -455,6 +500,11 @@ def _validate_business_tool_name(value: str) -> None:
         or value.startswith("mcp__")
         or value in _RESERVED_TOOL_NAMES
     ):
+        raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
+
+
+def _validate_external_capability_id(value: str) -> None:
+    if value.startswith("mcp__") or value in _RESERVED_CAPABILITY_IDS:
         raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
 
 
