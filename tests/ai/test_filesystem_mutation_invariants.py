@@ -28,22 +28,35 @@ def _binding() -> AgentBindingSnapshot:
     output = bind_output()
     return AgentBindingSnapshot(
         version=1,
-        agent_spec=AgentSpec("agent", 1, "default"),
-        agent_digest="b" * 64,
-        output_schema_id=output.schema_id,
-        output_schema_revision=output.schema_revision,
-        output_schema_fingerprint=output.schema_fingerprint,
-        local_runtime_capability_descriptors=(),
+        agent_spec=AgentSpec("agent", model="default"),
+        model={"route_id": "default", "model_identity": "test:model"},
+        selected=(),
+        subagents=(),
+        output_mode=output.mode,
+        output_schema=output.schema_definition,
         binding_digest="a" * 64,
-        global_runtime_capability_descriptors=(),
     )
 
 
 def _tool_record() -> ToolOperationRecord:
     now = datetime.now(timezone.utc)
     return ToolOperationRecord(
-        "operation", "tenant", "run", "call", "a" * 64, "tool", "arguments", "binding", False,
-        ToolOperationStatus.PENDING, None, 0, None, None, now, now,
+        tool_operation_id="operation",
+        tenant_id="tenant",
+        step_run_id="run",
+        tool_call_id="call",
+        idempotency_key_digest="a" * 64,
+        tool_name="tool",
+        arguments_digest="b" * 64,
+        binding_digest="c" * 64,
+        replay_safe=False,
+        status=ToolOperationStatus.PENDING,
+        owner=None,
+        fence=0,
+        lease_expires_at=None,
+        error_code=None,
+        created_at=now,
+        updated_at=now,
     )
 
 
@@ -65,10 +78,20 @@ async def test_effect_unknown_commits_before_error_and_survives_reopen(tmp_path:
     await state.initialize(namespace="effect-unknown", tenant_id="tenant")
     try:
         await state.recovery.tools.reserve(_tool_record())
-        await state.recovery.tools.claim("operation", tenant_id="tenant", owner="worker", lease_seconds=1)
+        await state.recovery.tools.claim(
+            "operation",
+            tenant_id="tenant",
+            owner="worker",
+            lease_seconds=1,
+        )
         await asyncio.sleep(1.05)
         with pytest.raises(AIError) as error:
-            await state.recovery.tools.claim("operation", tenant_id="tenant", owner="worker-2", lease_seconds=1)
+            await state.recovery.tools.claim(
+                "operation",
+                tenant_id="tenant",
+                owner="worker-2",
+                lease_seconds=1,
+            )
         assert error.value.code is ErrorCode.TOOL_EFFECT_UNKNOWN
     finally:
         await state.close()
@@ -76,7 +99,10 @@ async def test_effect_unknown_commits_before_error_and_survives_reopen(tmp_path:
     reopened = RuntimeState.filesystem(root)
     await reopened.initialize(namespace="effect-unknown", tenant_id="tenant")
     try:
-        record = await reopened.recovery.tools.get_operation("operation", tenant_id="tenant")
+        record = await reopened.recovery.tools.get_operation(
+            "operation",
+            tenant_id="tenant",
+        )
         assert record is not None and record.status is ToolOperationStatus.EFFECT_UNKNOWN
     finally:
         await reopened.close()
@@ -89,15 +115,36 @@ async def test_nested_event_mutation_persists_after_restart(tmp_path: Path) -> N
     await state.initialize(namespace="nested-event", tenant_id="tenant")
     now = datetime.now(timezone.utc)
     execution = ExecutionRecord(
-        "execution", "tenant", None, "a" * 64, None, "execution", None, None,
-        ExecutionLineageKind.RUN, ExecutionStatus.STARTED, 0, 0, 0, None, {}, now, now,
-        False, False, _binding(),
+        execution_id="execution",
+        tenant_id="tenant",
+        session_id=None,
+        binding_digest="a" * 64,
+        parent_execution_id=None,
+        root_execution_id="execution",
+        source_execution_id=None,
+        base_execution_id=None,
+        lineage_kind=ExecutionLineageKind.RUN,
+        status=ExecutionStatus.STARTED,
+        revision=0,
+        event_sequence=0,
+        agent_run_sequence=0,
+        error_code=None,
+        safe_error_details={},
+        created_at=now,
+        updated_at=now,
+        mode="run",
+        planning=False,
+        thinking=False,
+        binding=_binding(),
     )
     try:
         await state.execution.executions.create(execution)
         event = await state.execution.events.append(
-            "execution", tenant_id="tenant", expected_sequence=0,
-            event_type=ExecutionEventType.EXECUTION_STARTED, payload={},
+            "execution",
+            tenant_id="tenant",
+            expected_sequence=0,
+            event_type=ExecutionEventType.EXECUTION_STARTED,
+            payload={},
         )
         assert event.sequence == 1
     finally:
@@ -106,8 +153,15 @@ async def test_nested_event_mutation_persists_after_restart(tmp_path: Path) -> N
     reopened = RuntimeState.filesystem(root)
     await reopened.initialize(namespace="nested-event", tenant_id="tenant")
     try:
-        events = await reopened.execution.events.list("execution", tenant_id="tenant", after_sequence=0, limit=10)
-        assert tuple(item.event_type for item in events.items) == (ExecutionEventType.EXECUTION_STARTED,)
+        events = await reopened.execution.events.list(
+            "execution",
+            tenant_id="tenant",
+            after_sequence=0,
+            limit=10,
+        )
+        assert tuple(item.event_type for item in events.items) == (
+            ExecutionEventType.EXECUTION_STARTED,
+        )
     finally:
         await reopened.close()
 
@@ -120,7 +174,7 @@ async def test_blob_stream_consumption_does_not_hold_runtime_transaction_lock() 
     release = asyncio.Event()
     data = b"stream"
     digest = hashlib.sha256(data).hexdigest()
-    store = state._object_store(RuntimeDomain.EXECUTION)
+    store = state.object_store(RuntimeDomain.EXECUTION)
 
     async def chunks() -> AsyncIterator[bytes]:
         started.set()
@@ -131,11 +185,20 @@ async def test_blob_stream_consumption_does_not_hold_runtime_transaction_lock() 
         yield b"inline"
 
     try:
-        stream = asyncio.create_task(store.put("v1/stream", chunks(), expected_size=len(data), expected_digest=digest))
+        stream = asyncio.create_task(
+            store.put(
+                "v1/stream",
+                chunks(),
+                expected_size=len(data),
+                expected_digest=digest,
+            )
+        )
         await started.wait()
         inline = asyncio.create_task(
             store.put(
-                "v1/inline", inline_chunks(), expected_size=6,
+                "v1/inline",
+                inline_chunks(),
+                expected_size=6,
                 expected_digest=hashlib.sha256(b"inline").hexdigest(),
             )
         )
