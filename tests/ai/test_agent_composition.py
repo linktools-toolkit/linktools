@@ -7,7 +7,7 @@ from types import SimpleNamespace
 
 import pytest
 from linktools import ai
-from linktools.ai.agent import AgentBindingSnapshot
+from linktools.ai.agent import AgentBindingSnapshot, SemanticPin
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.runtime import (
     Agent,
@@ -70,6 +70,31 @@ def test_agent_binding_snapshot_persists_only_final_v1_identity_contract() -> No
     assert "output_schema_fingerprint" not in payload
     assert "binding_fingerprint" not in payload
     assert "runtime_capabilities" not in payload
+
+
+def test_semantic_pin_persists_historical_source_without_fingerprint() -> None:
+    pin = SemanticPin(
+        "capability",
+        "guardrail",
+        1,
+        {"version": 1, "semantic_revision": 3},
+    )
+    payload = pin.to_payload()
+
+    assert payload == {
+        "kind": "capability",
+        "id": "guardrail",
+        "contract_version": 1,
+        "contract": {"version": 1, "semantic_revision": 3},
+    }
+    assert SemanticPin.from_payload(payload) == pin
+    assert len(pin.fingerprint) == 64
+
+    legacy = dict(payload)
+    legacy["fingerprint"] = pin.fingerprint
+    with pytest.raises(AIError) as error:
+        SemanticPin.from_payload(legacy)
+    assert error.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
 
 
 def test_agent_binding_snapshot_rejects_unknown_version() -> None:
