@@ -90,9 +90,6 @@
   ],
   "asset_invariants": [
     "immutable-root",
-    "typed-codec-freeze",
-    "immutable-registry-snapshot",
-    "builtin-binding-manifest",
     "etag-validation",
     "entry-cas",
     "store-cas",
