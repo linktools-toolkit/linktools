@@ -2,7 +2,7 @@
 
 Package instructions for `linktools-ai`. Repository-wide rules in [../AGENTS.md](../AGENTS.md) also apply.
 
-`Required Rules` should contain only long-lived constraints. Current package layout, class names, construction paths, and other implementation details belong in `Guidance` or the code itself.
+`Required Rules` contain only long-lived constraints. Current package layout, class names, construction paths, and other implementation details belong in `Guidance` or the code itself.
 
 ## Required Rules
 
@@ -41,7 +41,6 @@ created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
 
 - Temporal workflow code must remain deterministic. Network access, processes, filesystem mutation, model calls, and other external effects belong in Activities or explicitly local adapters.
 - Define lifetime and recovery semantics before persisting external provider IDs, URLs, handles, tokens, or similar references.
-- Durable codecs keep frozen old-version/golden fixtures and cover every public ingress path, not only same-version encode/decode.
 
 ## Guidance
 
@@ -75,4 +74,4 @@ python manage.py install --editable
 python manage.py check linktools-ai
 ```
 
-Run the project gate after changing architecture boundaries, public exports, persistence contracts, schema definitions, or release evidence.
+Run the project gate after changing architecture boundaries, public exports, persistence contracts, schema definitions, or release evidence. Durable-codec verification currently uses frozen old-version/golden fixtures and should cover public ingress paths, not only same-version encode/decode.

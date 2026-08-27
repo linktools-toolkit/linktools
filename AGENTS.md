@@ -9,7 +9,7 @@ Repository-wide instructions for coding agents.
 ### Repository workflow
 
 - Use `manage.py` as the repository entry point for install, check, build, verify, clean, and release gates. Do not add another task runner for the same responsibilities.
-- Repository build/release helpers live under root `scripts/`; package directories must not add their own release-script trees. Project-specific gates belong under `scripts/check/<project>/` only when genuinely project-specific.
+- Repository build/release helpers live under root `scripts/`; package directories must not add their own release-script trees.
 - `check` is read-only; `verify` validates built artifacts. Do not publish or tag after either gate fails.
 
 ### Python
@@ -49,7 +49,7 @@ Repository-wide instructions for coding agents.
 | `linktools-cntr/` | Docker / Docker Compose management | `ct-cntr` |
 | `linktools-ai/` | AI agent runtime | - |
 
-Each package lives under `{name}/src/linktools/`. Package entry points and capabilities are declared under `scripts:` in its `linktools.yml`.
+Each package lives under `{name}/src/linktools/`. Package entry points and capabilities are declared under `scripts:` in its `linktools.yml`. Project-specific repository gates currently live under `scripts/check/<project>/` when needed.
 
 ### Common commands
 
