@@ -14,15 +14,6 @@ from linktools.ai.core import JsonValue
 from .cohesion import check_files
 from .names import check_names
 
-_DURABLE_REFLECTION_FUNCTIONS = {
-    "linktools.ai.agent._output": frozenset(
-        {
-            "restore_output",
-            "_validate_importable_type",
-        }
-    ),
-}
-
 
 def module_name(path: Path, source_root: Path) -> str:
     """Return the import name represented by a source file."""
@@ -149,38 +140,6 @@ def _is_dynamic_import_call(
     )
 
 
-def _is_durable_reflection_shape(node: ast.Call) -> bool:
-    if (
-        isinstance(node.func, ast.Attribute)
-        and node.func.attr == "import_module"
-        and isinstance(node.func.value, ast.Name)
-        and node.func.value.id == "importlib"
-    ):
-        return len(node.args) == 1 and not node.keywords
-    return (
-        isinstance(node.func, ast.Name)
-        and node.func.id == "getattr"
-        and len(node.args) == 2
-        and not node.keywords
-    )
-
-
-def _durable_reflection_calls(module: str, tree: ast.Module) -> set[int]:
-    allowed_functions = _DURABLE_REFLECTION_FUNCTIONS.get(module)
-    if not allowed_functions:
-        return set()
-    calls: set[int] = set()
-    for statement in tree.body:
-        if not isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef)):
-            continue
-        if statement.name not in allowed_functions:
-            continue
-        for node in ast.walk(statement):
-            if isinstance(node, ast.Call) and _is_durable_reflection_shape(node):
-                calls.add(id(node))
-    return calls
-
-
 def _is_type_checking_import(node: ast.AST, checking_lines: "set[int]") -> bool:
     return node.lineno in checking_lines
 
@@ -202,7 +161,6 @@ def build_report(source_root: "str | Path") -> "dict[str, JsonValue]":
     for name, path in modules.items():
         tree = ast.parse(path.read_text(encoding="utf-8"), str(path))
         importlib_module_aliases, import_module_aliases = _dynamic_import_aliases(tree)
-        durable_reflection_calls = _durable_reflection_calls(name, tree)
         if path.name == "__init__.py":
             reexports[name] = sorted(
                 target
@@ -261,18 +219,16 @@ def build_report(source_root: "str | Path") -> "dict[str, JsonValue]":
                 importlib_module_aliases,
                 import_module_aliases,
             ):
-                if id(node) not in durable_reflection_calls:
-                    function_name = (
-                        node.func.id
-                        if isinstance(node.func, ast.Name)
-                        else f"{ast.unparse(node.func.value)}.{node.func.attr}"
-                    )
-                    dynamic_imports.append(f"{path}:{node.lineno}:{function_name}")
+                function_name = (
+                    node.func.id
+                    if isinstance(node.func, ast.Name)
+                    else f"{ast.unparse(node.func.value)}.{node.func.attr}"
+                )
+                dynamic_imports.append(f"{path}:{node.lineno}:{function_name}")
             elif (
                 isinstance(node, ast.Call)
                 and isinstance(node.func, ast.Name)
                 and node.func.id in forbidden_calls
-                and id(node) not in durable_reflection_calls
             ):
                 dynamic_imports.append(f"{path}:{node.lineno}:{node.func.id}")
             if isinstance(node, ast.Attribute) and node.attr in {
