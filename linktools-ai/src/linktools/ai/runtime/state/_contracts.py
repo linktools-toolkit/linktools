@@ -46,6 +46,8 @@ from ...errors import AIError, ErrorCode
 from ...storage import ObjectRef, StoredPayload
 from ...task import (
     TaskGraph,
+    TaskGraphAdmission,
+    TaskGraphLaunch,
     TaskGraphView,
     TaskLease,
     TaskNodeView,
@@ -1395,6 +1397,13 @@ class TaskRepository(RuntimeRepository, Protocol):
     async def get_graph(self, graph_id: str, *, tenant_id: str) -> TaskGraphView | None: ...
     async def reconcile_graph(self, graph_id: str, *, tenant_id: str) -> TaskGraphView: ...
     async def cancel_graph(self, graph_id: str, *, tenant_id: str) -> TaskGraphView: ...
+
+
+class TaskAdmissionRepository(RuntimeRepository, Protocol):
+    async def admit(self, admission: TaskGraphAdmission, graph: TaskGraph) -> TaskGraphView: ...
+    async def list_recoverable_page(
+        self, *, cursor: str | None, limit: int
+    ) -> Page[TaskGraphLaunch]: ...
     async def claim(
         self, graph_id: str, node_id: str, *, tenant_id: str, owner: str, lease_seconds: int
     ) -> TaskLease: ...
@@ -1479,6 +1488,7 @@ class ArtifactState:
 class TaskState:
     tasks: TaskRepository
     operations: OperationLedgerRepository
+    admissions: TaskAdmissionRepository
 
 
 @dataclass(frozen=True, slots=True)
@@ -1560,6 +1570,7 @@ __all__ = [
     "SessionRecord",
     "SessionRepository",
     "StoredStepSnapshot",
+    "TaskAdmissionRepository",
     "TaskRepository",
     "TaskState",
     "ToolOperationAdmission",

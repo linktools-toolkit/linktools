@@ -377,7 +377,11 @@ def _states(bundles: Mapping[RuntimeDomain, Mapping[str, object]]) -> object:
                 "artifact": ArtifactState(
                     bundles[RuntimeDomain.ARTIFACT]["records"], bundles[RuntimeDomain.ARTIFACT]["operations"]
                 ),
-                "task": TaskState(bundles[RuntimeDomain.TASK]["tasks"], bundles[RuntimeDomain.TASK]["operations"]),
+                "task": TaskState(
+                    bundles[RuntimeDomain.TASK]["tasks"],
+                    bundles[RuntimeDomain.TASK]["operations"],
+                    bundles[RuntimeDomain.TASK]["admissions"],
+                ),
                 "evaluation": EvaluationState(
                     bundles[RuntimeDomain.EVALUATION]["records"],
                     bundles[RuntimeDomain.EVALUATION]["idempotency"],

@@ -408,6 +408,11 @@ def _validate_state_configuration(
             is not RuntimeRetentionMode.DURABLE
         ):
             raise ValueError("durable conversation requires durable recovery")
+    if plan.route(RuntimeDomain.TASK).retention is RuntimeRetentionMode.DURABLE:
+        if plan.route(RuntimeDomain.EXECUTION).retention is not RuntimeRetentionMode.DURABLE:
+            raise ValueError("durable task requires durable execution")
+        if plan.route(RuntimeDomain.RECOVERY).retention is not RuntimeRetentionMode.DURABLE:
+            raise ValueError("durable task requires durable recovery")
 
 
 def _normalize_path(value: "str | Path") -> Path:

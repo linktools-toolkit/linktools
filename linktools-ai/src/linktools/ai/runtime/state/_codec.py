@@ -62,6 +62,7 @@ from ...errors import AIError, ErrorCode
 from ...storage import ObjectRef, StoredPayload
 from ...task import (
     TaskGraph,
+    TaskGraphAdmission,
     TaskGraphLimits,
     TaskGraphView,
     TaskLease,
@@ -207,6 +208,7 @@ _V1_WIRE_TYPES: tuple[tuple[str, type[object]], ...] = (
     ("tool_operation_admission", ToolOperationAdmission),
     ("runtime_domain", RuntimeDomain),
     ("task_graph", TaskGraph),
+    ("task_graph_admission", TaskGraphAdmission),
     ("task_graph_limits", TaskGraphLimits),
     ("task_graph_view", TaskGraphView),
     ("task_lease", TaskLease),

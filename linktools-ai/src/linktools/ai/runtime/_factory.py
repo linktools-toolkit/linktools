@@ -5,6 +5,7 @@
 import asyncio
 import hashlib
 import os
+import uuid
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
 from functools import partial
@@ -234,6 +235,10 @@ def _default_runtime_state(workspace: Workspace) -> RuntimeState:
                 runtime_root / "recovery",
                 transaction_root=runtime_root,
             ),
+            task=RuntimeStateRoute.filesystem(
+                runtime_root / "task",
+                transaction_root=runtime_root,
+            ),
         )
     )
 
@@ -413,7 +418,7 @@ async def _build_local_components(
         task_launcher = LocalTaskGraphLauncher(
             state.task.tasks,
             task_runner,
-            owner=f"runtime:{tenant_id}",
+            owner=f"runtime:{tenant_id}:{uuid.uuid4().hex}",
         )
         task = DefaultTaskService(
             state.task,
@@ -467,6 +472,7 @@ async def _build_local_components(
         await _restore_recovery_bindings(catalog, compiler, state, tenant_id=tenant_id)
         if RuntimeDomain.RECOVERY in state.plan.durable_domains:
             await backend.reconcile()
+        await task.recover_pending()
     except BaseException:
         if task_launcher is not None:
             await task_launcher.shutdown()

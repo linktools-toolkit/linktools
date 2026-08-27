@@ -14,6 +14,9 @@ from ..core import (
     Principal,
     TaskStatus,
     canonical_json_bytes,
+    canonical_sha256,
+    idempotency_key_digest,
+    principal_identity_payload,
     validate_idempotency_key,
     validate_lease_owner,
     validate_tenant_id,
@@ -283,6 +286,87 @@ class TaskGraphRequest:
         self.graph.validate_limits(self.limits)
 
 
+def _task_graph_request_digest(
+    graph: TaskGraph,
+    principal: Principal,
+    limits: TaskGraphLimits,
+) -> str:
+    return canonical_sha256(
+        {
+            "principal": principal_identity_payload(principal),
+            "graph_id": graph.graph_id,
+            "nodes": [
+                {
+                    "node_id": node.node_id,
+                    "dependencies": sorted(node.dependencies),
+                    "input": node.input,
+                    "budget_cost": node.budget_cost,
+                }
+                for node in sorted(graph.nodes, key=lambda item: item.node_id)
+            ],
+            "limits": {
+                "max_nodes": limits.max_nodes,
+                "max_depth": limits.max_depth,
+                "max_budget": limits.max_budget,
+                "max_concurrency": limits.max_concurrency,
+            },
+        }
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class TaskGraphLaunch:
+    graph: TaskGraph
+    principal: Principal
+    limits: TaskGraphLimits
+
+
+@dataclass(frozen=True, slots=True)
+class TaskGraphAdmission:
+    version: int
+    graph_id: str
+    principal: Principal
+    limits: TaskGraphLimits
+    operation_id: str
+    request_digest: str
+
+    def __post_init__(self) -> None:
+        if (
+            not isinstance(self.version, int)
+            or isinstance(self.version, bool)
+            or self.version < 1
+            or not isinstance(self.graph_id, str)
+            or not self.graph_id.strip()
+            or re.fullmatch(r"[0-9a-f]{64}", self.operation_id) is None
+            or re.fullmatch(r"[0-9a-f]{64}", self.request_digest) is None
+        ):
+            raise ValueError("task graph admission is invalid")
+
+    @classmethod
+    def from_request(cls, request: TaskGraphRequest) -> "TaskGraphAdmission":
+        return cls(
+            1,
+            request.graph.graph_id,
+            request.principal,
+            request.limits,
+            idempotency_key_digest(request.idempotency_key),
+            _task_graph_request_digest(request.graph, request.principal, request.limits),
+        )
+
+    def bind(self, graph: TaskGraph) -> TaskGraphLaunch:
+        if self.version != 1:
+            raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
+        try:
+            if graph.graph_id != self.graph_id:
+                raise ValueError("task graph admission graph mismatch")
+            graph.validate_limits(self.limits)
+            if _task_graph_request_digest(graph, self.principal, self.limits) != self.request_digest:
+                raise ValueError("task graph admission digest mismatch")
+        except (AIError, TypeError, ValueError) as error:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
+        return TaskGraphLaunch(graph, self.principal, self.limits)
+
+
 @dataclass(frozen=True, slots=True)
 class TaskGraphResult:
     graph_id: str
@@ -345,6 +429,8 @@ __all__ = [
     "TaskCompletionLedger",
     "TaskDependencyResult",
     "TaskGraph",
+    "TaskGraphAdmission",
+    "TaskGraphLaunch",
     "TaskGraphHandle",
     "TaskGraphLimits",
     "TaskGraphRequest",

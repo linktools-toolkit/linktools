@@ -23,6 +23,7 @@ async def open_local_task_api(
     launcher = LocalTaskGraphLauncher(persistence.tasks, runner, owner=owner)
     service = DefaultTaskService(persistence, authorization, launcher)
     try:
+        await service.recover_pending()
         yield service
     finally:
         await service.preflight_close()
