@@ -151,6 +151,45 @@ def _compiler() -> AgentCompiler:
     )
 
 
+def test_model_semantic_identity_ignores_openai_prefix_and_connection_config() -> None:
+    plain = ModelRegistry.openai(
+        model="gpt-test",
+        base_url="https://first.example/v1",
+        api_key="first-key",
+    ).snapshot().resolve("default")
+    prefixed = ModelRegistry.openai(
+        model="openai:gpt-test",
+        base_url="https://second.example/v1",
+        api_key="second-key",
+    ).snapshot().resolve("default")
+
+    assert dict(plain.semantic_payload) == dict(prefixed.semantic_payload)
+    assert plain.fingerprint == prefixed.fingerprint
+    assert plain.model_identity == "openai:gpt-test"
+
+
+def test_model_registry_replaces_connection_binding_with_same_semantic_identity() -> None:
+    registry = ModelRegistry.openai(
+        model="gpt-test",
+        base_url="https://first.example/v1",
+        api_key="first-key",
+    )
+    first_snapshot = registry.snapshot()
+    first = first_snapshot.resolve("default")
+
+    registry.register_openai(
+        "default",
+        model="gpt-test",
+        base_url="https://second.example/v1",
+        api_key="second-key",
+    )
+    second = registry.snapshot().resolve("default")
+
+    assert second is not first
+    assert second.fingerprint == first.fingerprint
+    assert first_snapshot.resolve("default") is first
+
+
 def test_current_binding_snapshot_persists_only_v1_semantic_inputs() -> None:
     output = bind_output()
     snapshot = AgentBindingSnapshot(
