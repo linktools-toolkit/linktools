@@ -66,7 +66,6 @@ from ..core import (
     normalize_json_value,
 )
 from ..errors import AIError, ErrorCode
-from ..spec import AgentUsageLimits
 from ._capabilities import (
     MEMORY_READ_TOOL_NAMES,
     MEMORY_TOOL_NAMES,
@@ -165,7 +164,15 @@ class AgentExecutor:
         binding = scope.binding
         definition = binding.definition
         run_usage = RunUsage()
-        usage_limits = _to_usage_limits(definition.spec.usage_limits)
+        configured_limits = definition.spec.usage_limits
+        usage_limits = UsageLimits(
+            cost_limit=None,
+            request_limit=None if configured_limits is None else configured_limits.model_requests,
+            tool_calls_limit=None if configured_limits is None else configured_limits.tool_calls,
+            input_tokens_limit=None if configured_limits is None else configured_limits.input_tokens,
+            output_tokens_limit=None if configured_limits is None else configured_limits.output_tokens,
+            total_tokens_limit=None if configured_limits is None else configured_limits.total_tokens,
+        )
         result: AgentExecutionResult | None = None
         primary_error: BaseException | None = None
         try:
@@ -626,26 +633,6 @@ def _execution_error(
         ErrorCode.INTERNAL_ERROR,
         retryable=False,
         safe_details={"phase": "agent_execution"},
-    )
-
-
-def _to_usage_limits(value: AgentUsageLimits | None) -> UsageLimits:
-    if value is None:
-        return UsageLimits(
-            cost_limit=None,
-            request_limit=None,
-            tool_calls_limit=None,
-            input_tokens_limit=None,
-            output_tokens_limit=None,
-            total_tokens_limit=None,
-        )
-    return UsageLimits(
-        cost_limit=None,
-        request_limit=value.model_requests,
-        tool_calls_limit=value.tool_calls,
-        input_tokens_limit=value.input_tokens,
-        output_tokens_limit=value.output_tokens,
-        total_tokens_limit=value.total_tokens,
     )
 
 
