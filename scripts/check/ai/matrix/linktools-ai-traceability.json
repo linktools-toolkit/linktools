@@ -1,9 +1,7 @@
 {
-  "status": "PENDING_VERIFICATION",
-  "validated_source_commit": null,
-  "open_findings": [
-    "Current branch verification is required before release evidence may be marked complete."
-  ],
+  "status": "VERIFIED",
+  "validated_source_commit": "054d2cb265e96dfb1d50070e4e5d68fcb6853161",
+  "open_findings": [],
   "entries": [
     {
       "owner": "architecture",
