@@ -5,6 +5,7 @@
 import inspect
 
 from linktools.ai.model import ModelRegistry
+from linktools.ai.runtime import Runtime
 from linktools.ai.runtime.state import (
     RuntimeDomain,
     RuntimeState,
@@ -28,9 +29,8 @@ def test_runtime_state_sqlite_route_normalizes_paths(tmp_path) -> None:
 
 
 def test_public_opener_does_not_expose_removed_storage_argument() -> None:
-    from linktools.ai.workspace import open_workspace_runtime
-
-    parameters = inspect.signature(open_workspace_runtime).parameters
+    parameters = inspect.signature(Runtime.open).parameters
+    assert "state" in parameters
     assert "storage_root" not in parameters
     assert "runtime_storage" not in parameters
 
