@@ -3,7 +3,6 @@
 """Execution capability for one compiler-selected immutable Skill set."""
 
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass
 
 from pydantic_ai.capabilities import AbstractCapability
 from pydantic_ai.exceptions import ModelRetry
@@ -16,17 +15,19 @@ from ._context import RunContext
 from ._names import SKILL_TOOL_NAMES
 
 
-@dataclass
 class SkillCapability(AbstractCapability[RunContext[object]]):
-    skills: "tuple[SkillSpec, ...]"
-    id: str = "linktools-skill"
-
-    def __post_init__(self) -> None:
-        ordered = tuple(sorted(self.skills, key=lambda item: item.id))
+    def __init__(
+        self,
+        skills: "tuple[SkillSpec, ...]",
+        *,
+        id: str = "linktools-skill",
+    ) -> None:
+        ordered = tuple(sorted(skills, key=lambda item: item.id))
         ids = tuple(item.id for item in ordered)
         if len(ids) != len(set(ids)):
             raise AIError(ErrorCode.CAPABILITY_CONFLICT)
         self.skills = ordered
+        self.id = id
 
     def get_instructions(
         self,
