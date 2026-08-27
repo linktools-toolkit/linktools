@@ -9,9 +9,11 @@ from typing import Any
 import pytest
 from linktools.ai.core import ToolOperationStatus
 from linktools.ai.errors import AIError, ErrorCode
+from linktools.ai.runtime._agent_executor import _RuntimePersistenceBoundary
 from linktools.ai.runtime._capabilities import ToolOperationDecision, _RuntimeStepPersistence
 from linktools.ai.runtime._tool import RuntimeToolOperationBridge, ToolOperationRecord
 from linktools.ai.storage import PayloadPolicy
+from pydantic_ai.capabilities import AbstractCapability, CombinedCapability
 from pydantic_ai.exceptions import CallDeferred, ModelRetry, SkipToolExecution, ToolFailedError, ToolRetryError
 from pydantic_ai.messages import RetryPromptPart, ToolCallPart, ToolReturnPart
 from pydantic_ai.models.test import TestModel
@@ -110,6 +112,36 @@ async def _capability(
     definition = ToolDefinition(name="tool", metadata={"linktools.ai.replay_safe": replay_safe})
     await capability.before_tool_execute(context, call=call, tool_def=definition, args={})
     return capability, bridge, store, context, call, definition
+
+
+async def test_custom_before_hook_rejection_does_not_start_durable_effect() -> None:
+    capability, bridge, store, context, call, definition = await _capability(True)
+
+    class RejectBefore(AbstractCapability[None]):
+        async def before_tool_execute(
+            self,
+            ctx: RunContext[None],
+            *,
+            call: ToolCallPart,
+            tool_def: ToolDefinition,
+            args: dict[str, Any],
+        ) -> dict[str, Any]:
+            del self, ctx, call, tool_def, args
+            raise ModelRetry("reject before execution")
+
+    combined = CombinedCapability((_RuntimePersistenceBoundary(capability), RejectBefore()))
+
+    with pytest.raises(ModelRetry):
+        await combined.before_tool_execute(
+            context,
+            call=call,
+            tool_def=definition,
+            args={},
+        )
+
+    assert bridge.calls == []
+    assert store.effects == []
+    assert not capability._calls
 
 
 async def test_skip_tool_execution_terminalizes_as_success() -> None:
