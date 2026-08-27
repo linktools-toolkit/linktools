@@ -81,6 +81,13 @@ class AssetStore:
         self._ready = True
         _logger.debug("asset store initialized")
 
+    async def close(self) -> None:
+        """Mark this store unavailable after its owner closes configured backends."""
+        if not self._ready:
+            return
+        self._ready = False
+        _logger.debug("asset store closed")
+
     async def stat(self, key: AssetKey) -> "AssetInfo | None":
         """Return current effective file metadata and status."""
         self._ensure_ready()
