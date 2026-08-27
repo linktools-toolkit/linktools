@@ -80,6 +80,18 @@ def test_invalid_capability_revision_is_rejected(revision: object) -> None:
     assert error.value.code is ErrorCode.CAPABILITY_RESOLUTION_INVALID
 
 
+def test_deferred_generic_capability_is_rejected_by_v1_always_on_contract() -> None:
+    capability = _Capability()
+    capability.defer_loading = True
+    group = CapabilityGroup[None]("group")
+
+    with pytest.raises(AIError) as error:
+        group.capability(capability)
+
+    assert error.value.code is ErrorCode.CAPABILITY_RESOLUTION_INVALID
+    assert error.value.safe_details["reason"] == "deferred_loading_not_supported"
+
+
 @pytest.mark.parametrize(
     "capability_id",
     [
