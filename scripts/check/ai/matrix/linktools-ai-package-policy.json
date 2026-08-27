@@ -35,8 +35,7 @@
       "capability",
       "task",
       "agent",
-      "workspace",
-      "adapter"
+      "workspace"
     ],
     "workspace": ["core"],
     "adapter": ["core"],
@@ -55,7 +54,7 @@
     "capability._workspace": ["workspace"],
     "runtime._agent_executor": ["core", "capability", "agent"],
     "runtime._capabilities": ["core", "capability"],
-    "runtime._factory": ["core", "storage", "asset", "spec", "model", "capability", "task", "agent", "workspace", "adapter"],
+    "runtime._factory": ["core", "storage", "asset", "spec", "model", "capability", "task", "agent", "workspace"],
     "runtime._runtime_service": ["core", "model", "capability", "task", "agent", "workspace"],
     "runtime._local": ["core", "storage", "capability", "agent", "workspace"],
     "runtime._execution": ["core", "storage", "agent"],
