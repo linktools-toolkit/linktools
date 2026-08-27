@@ -74,6 +74,7 @@ from ._capabilities import (
     SUBAGENT_TOOL_NAMES,
     SubagentDelegate,
     ToolOperationBridge,
+    _tool_effect_policy,
     compose_platform_capabilities,
     select_runtime_tool_names,
     tool_allowed_in_planning,
@@ -83,6 +84,10 @@ from ._capabilities import (
 from ._input import _RuntimeUserPrompt, _restore_user_prompt
 
 _logger = environ.get_logger("ai.runtime.agent_executor")
+_RUNTIME_RESERVED_TOOL_NAMES = frozenset(
+    (*SKILL_TOOL_NAMES, *MEMORY_TOOL_NAMES, *PLANNING_TOOL_NAMES, *SUBAGENT_TOOL_NAMES)
+)
+_WORKSPACE_CAPABILITY_IDS = frozenset({"workspace-filesystem", "workspace-shell"})
 
 
 @dataclass(frozen=True, slots=True)
@@ -254,6 +259,7 @@ class AgentExecutor:
             *capabilities,
             _ToolPresentation(
                 definition.ordinary_tool_policy,
+                static_tool_names=tuple(candidate.id for candidate in definition.selected_tools),
                 mcp_policy=definition.mcp_selector_policy,
                 plan_mode=scope.mode == "plan",
                 trusted_tool_classes=trusted_tool_classes,
@@ -457,12 +463,14 @@ class _ToolPresentation(AbstractCapability[RunContext[object]]):
         self,
         ordinary_policy: tuple[str, ...],
         *,
+        static_tool_names: tuple[str, ...],
         mcp_policy: tuple[str, ...],
         plan_mode: bool,
         trusted_tool_classes: tuple[tuple[str, str], ...],
         trusted_mcp_selectors: tuple[str, ...],
     ) -> None:
         self._ordinary_policy = ordinary_policy
+        self._static_tool_names = static_tool_names
         self._mcp_policy = mcp_policy
         self._plan_mode = plan_mode
         self._trusted_tool_classes = trusted_tool_classes
@@ -476,6 +484,7 @@ class _ToolPresentation(AbstractCapability[RunContext[object]]):
         names = [tool.name for tool in tool_defs]
         if len(names) != len(set(names)):
             raise AIError(ErrorCode.CAPABILITY_CONFLICT)
+        self._validate_provenance_and_static_surface(tool_defs)
         mcp_names = {
             tool.name
             for tool in tool_defs
@@ -504,6 +513,57 @@ class _ToolPresentation(AbstractCapability[RunContext[object]]):
                 continue
             selected.append(tool)
         return selected
+
+    def _validate_provenance_and_static_surface(
+        self,
+        tool_defs: list[ToolDefinition],
+    ) -> None:
+        trusted_classes = dict(self._trusted_tool_classes)
+        expected_static = frozenset(self._static_tool_names)
+        actual_static: set[str] = set()
+        for tool in tool_defs:
+            tool_class = trusted_classes.get(tool.name)
+            if tool_class is not None:
+                _tool_effect_policy(
+                    tool,
+                    trusted_tool_classes=self._trusted_tool_classes,
+                )
+                if tool_class in {"filesystem.read", "filesystem.write", "shell"}:
+                    actual_static.add(tool.name)
+            elif tool.name in _RUNTIME_RESERVED_TOOL_NAMES:
+                raise AIError(
+                    ErrorCode.CAPABILITY_POLICY_CONFLICT,
+                    safe_details={"tool_name": tool.name},
+                )
+
+            if tool.capability_id is None:
+                actual_static.add(tool.name)
+            elif tool.capability_id in _WORKSPACE_CAPABILITY_IDS:
+                actual_static.add(tool.name)
+                if tool.name not in trusted_classes:
+                    raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
+
+            is_mcp_name = tool.name.startswith("mcp__")
+            is_mcp_owner = tool.capability_id in self._trusted_mcp_selectors
+            if is_mcp_name or is_mcp_owner:
+                if (
+                    not is_mcp_owner
+                    or tool.capability_id is None
+                    or not tool.name.startswith(f"{tool.capability_id}__")
+                ):
+                    raise AIError(
+                        ErrorCode.CAPABILITY_POLICY_CONFLICT,
+                        safe_details={"tool_name": tool.name},
+                    )
+
+        if actual_static != expected_static:
+            raise AIError(
+                ErrorCode.CAPABILITY_RESOLUTION_INVALID,
+                safe_details={
+                    "expected_static_tools": tuple(sorted(expected_static)),
+                    "actual_static_tools": tuple(sorted(actual_static)),
+                },
+            )
 
     @classmethod
     def get_serialization_name(cls) -> str | None:
