@@ -12,7 +12,12 @@ from openai import APIError as OpenAIAPIError
 from pydantic import ValidationError
 from pydantic_ai import Agent as PydanticAgent
 from pydantic_ai import AgentRunResultEvent, ModelSettings, TextOutput, Tool
-from pydantic_ai.capabilities import AbstractCapability, CapabilityOrdering, ReinjectSystemPrompt
+from pydantic_ai.capabilities import (
+    AbstractCapability,
+    CapabilityOrdering,
+    ReinjectSystemPrompt,
+    WrapperCapability,
+)
 from pydantic_ai.exceptions import (
     ConcurrencyLimitExceeded,
     ContentFilterError,
@@ -42,7 +47,7 @@ from pydantic_ai.toolsets import AbstractToolset, PreparedToolset
 from pydantic_ai.usage import RunUsage, UsageLimitExceeded, UsageLimits
 from pydantic_ai_harness.memory import SearchableMemoryStore
 from pydantic_ai_harness.planning import PlanStore
-from pydantic_ai_harness.step_persistence import StepStore
+from pydantic_ai_harness.step_persistence import StepPersistence, StepStore
 
 from ..agent import AgentBinding, AgentDefinition, AssistantTextOutput
 from ..capability import (
@@ -412,6 +417,12 @@ async def _materialize_agent(
         background_tasks=scope.background_tasks,
         plan_store_resolver=scope.plan_store_resolver,
     )
+    platform = tuple(
+        _RuntimePersistenceBoundary(capability)
+        if isinstance(capability, StepPersistence)
+        else capability
+        for capability in platform
+    )
     capabilities.extend(cast("tuple[AbstractCapability[RunContext[object]], ...]", platform))
 
     output_type: object
@@ -455,6 +466,14 @@ def _thinking_settings(model: Model, thinking: ThinkingValue) -> ModelSettings:
             safe_details={"field": "thinking", "reason": "model_not_supported"},
         )
     return ModelSettings(thinking=thinking)
+
+
+class _RuntimePersistenceBoundary(WrapperCapability[RunContext[object]]):
+    def get_ordering(self) -> CapabilityOrdering:
+        return CapabilityOrdering(
+            position="outermost",
+            wraps=(AbstractCapability,),
+        )
 
 
 class _ToolPresentation(AbstractCapability[RunContext[object]]):
