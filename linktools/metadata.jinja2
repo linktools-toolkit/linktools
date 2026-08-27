@@ -1,16 +1,16 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-__name__ = "{{ metadata.name }}"
+__name__ = "{{ project.name }}"
 __version__ = "{{ version }}"
 __release__ = {{ "True" if release else "False" }}
 __develop__ = {{ "True" if develop else "False" }}
-__capability_group__ = "{{ const.capability_entrypoint }}"
-__scripts_group__ = "{{ const.scripts_entrypoint }}"
+__capability_group__ = "{{ groups.capability }}"
+__scripts_group__ = "{{ groups.scripts }}"
 __description__ = f"""\
     ___       __   __              __
    / (_)___  / /__/ /_____  ____  / /____
-  / / / __ \\/ //_/ __/ __ \\/ __ \\/ / ___/  {{ metadata.name }} toolkit (v{{ version }})
- / / / / / / ,< / /_/ /_/ / /_/ / (__  )   by: {{ metadata.author }} <{{ metadata.author_email }}>
+  / / / __ \\/ //_/ __/ __ \\/ __ \\/ / ___/  {{ project.name }} toolkit (v{{ version }})
+ / / / / / / ,< / /_/ /_/ / /_/ / (__  )   by: {{ project.authors[0].name }} <{{ project.authors[0].email }}>
 /_/_/_/ /_/_/|_|\\__/\\____/\\____/_/____/
 """
