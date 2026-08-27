@@ -13,7 +13,6 @@
     "runtime_session": {"owner": "runtime", "replacement": "Runtime.session"},
     "runtime_task": {"owner": "task", "replacement": "Runtime.task"},
     "runtime_evaluation": {"owner": "runtime", "replacement": "Runtime.evaluation"},
-    "runtime_access": {"owner": "runtime", "replacement": "RuntimeAccess"},
     "principal": {"owner": "core", "replacement": "linktools.ai.core.Principal"}
   }
 }
