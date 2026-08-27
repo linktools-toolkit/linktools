@@ -94,9 +94,15 @@ class CapabilityContribution(Generic[AppT]):
         if self.kind == "mcp" and cast(MCPServerSpec, self.value).id != self.id:
             raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
         if self.kind == "capability":
-            capability_id = cast(AbstractCapability, self.value).id  # type: ignore[attr-defined]
+            capability = cast(AbstractCapability, self.value)
+            capability_id = capability.id  # type: ignore[attr-defined]
             if not isinstance(capability_id, str) or capability_id != self.id:
                 raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
+            if capability.defer_loading:
+                raise AIError(
+                    ErrorCode.CAPABILITY_RESOLUTION_INVALID,
+                    safe_details={"capability_id": capability_id, "reason": "deferred_loading_not_supported"},
+                )
             _validate_external_capability_id(capability_id)
         if self.fingerprint != capability_fingerprint(
             self.kind,
