@@ -7,6 +7,7 @@ import json
 import pytest
 from linktools.ai.capability import SkillCapability
 from linktools.ai.errors import AIError, ErrorCode
+from linktools.ai.runtime._agent_executor import _ToolPresentation
 from linktools.ai.runtime._capabilities import (
     PLAN_SAFE_METADATA_KEY,
     select_runtime_tool_names,
@@ -105,6 +106,46 @@ def test_planning_gate_uses_trusted_mcp_provenance_not_name_prefix() -> None:
         trusted_tool_classes=(),
         trusted_mcp_selectors=("mcp__trusted",),
     )
+
+
+@pytest.mark.asyncio
+async def test_exact_mcp_selector_requires_matching_trusted_runtime_tool() -> None:
+    presentation = _ToolPresentation(
+        (),
+        mcp_policy=("mcp__trusted__read",),
+        plan_mode=False,
+        trusted_tool_classes=(),
+        trusted_mcp_selectors=("mcp__trusted",),
+    )
+    trusted = ToolDefinition(
+        name="mcp__trusted__read",
+        capability_id="mcp__trusted",
+    )
+    assert await presentation.prepare_tools(None, [trusted]) == [trusted]  # type: ignore[arg-type]
+
+    with pytest.raises(AIError) as missing:
+        await presentation.prepare_tools(None, [])  # type: ignore[arg-type]
+    assert missing.value.code is ErrorCode.CAPABILITY_RESOLUTION_INVALID
+
+    spoofed = ToolDefinition(
+        name="mcp__trusted__read",
+        capability_id="custom-mcp",
+    )
+    with pytest.raises(AIError) as wrong_provenance:
+        await presentation.prepare_tools(None, [spoofed])  # type: ignore[arg-type]
+    assert wrong_provenance.value.code is ErrorCode.CAPABILITY_RESOLUTION_INVALID
+
+
+@pytest.mark.asyncio
+async def test_mcp_server_wildcard_allows_empty_runtime_toolset() -> None:
+    presentation = _ToolPresentation(
+        (),
+        mcp_policy=("mcp__trusted__*",),
+        plan_mode=False,
+        trusted_tool_classes=(),
+        trusted_mcp_selectors=("mcp__trusted",),
+    )
+    assert await presentation.prepare_tools(None, []) == []  # type: ignore[arg-type]
 
 
 def test_planning_gate_rejects_non_boolean_plan_safe_metadata() -> None:
