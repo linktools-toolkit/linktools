@@ -10,15 +10,14 @@ from pydantic import BaseModel
 from ..capability import (
     CapabilityContribution,
     capability_fingerprint,
-    contribution_semantic_contract,
     mcp_selector_server,
     mcp_server_namespace,
     mcp_server_selector,
 )
-from ..core import JsonValue, canonical_sha256
+from ..core import canonical_sha256
 from ..errors import AIError, ErrorCode
 from ..model import ModelBinding, ModelResolver
-from ..spec import AgentSpec, AgentSpecCodec, MCPServerSpec, MCPServerSpecCodec, SkillSpec, SkillSpecCodec
+from ..spec import AgentSpec, AgentSpecCodec, MCPServerSpecCodec, SkillSpecCodec
 from ._binding import AgentBinding, AgentBindingSnapshot, SemanticPin, SubagentRef
 from ._definition import AgentDefinition
 from ._output import bind_output, restore_output
@@ -148,8 +147,6 @@ class AgentCompiler:
             "capability": [],
         }
         for pin in pins:
-            if capability_fingerprint(pin.kind, pin.id, pin.contract) != pin.fingerprint:
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             if pin.kind == "skill":
                 value = SkillSpecCodec().from_payload(cast("Mapping[str, object]", pin.contract))
                 candidate = CapabilityContribution("skill", pin.id, pin.fingerprint, value)
@@ -341,7 +338,6 @@ def _pin(candidate: CapabilityContribution[object]) -> SemanticPin:
         cast(Literal["tool", "skill", "mcp", "capability"], candidate.kind),
         candidate.id,
         1,
-        candidate.fingerprint,
         contract,
     )
 
