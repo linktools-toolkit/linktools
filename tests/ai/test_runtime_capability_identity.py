@@ -7,6 +7,7 @@ from dataclasses import dataclass, fields
 import pytest
 from linktools.ai.capability import CapabilityContribution, CapabilityGroup, RunContext
 from linktools.ai.errors import AIError, ErrorCode
+from linktools.ai.spec import AgentSpec
 from pydantic_ai.capabilities import AbstractCapability
 
 
@@ -70,6 +71,16 @@ async def test_public_semantic_config_changes_capability_fingerprint() -> None:
     relaxed_candidate = (await relaxed.freeze())[0]
 
     assert strict_candidate.fingerprint != relaxed_candidate.fingerprint
+
+
+def test_opaque_contribution_factory_rejects_canonical_declarations() -> None:
+    with pytest.raises(AIError) as error:
+        CapabilityContribution.from_opaque(
+            "agent",  # type: ignore[arg-type]
+            "agent",
+            AgentSpec("agent"),  # type: ignore[arg-type]
+        )
+    assert error.value.code is ErrorCode.CAPABILITY_RESOLUTION_INVALID
 
 
 @pytest.mark.parametrize("revision", [0, -1, True])
