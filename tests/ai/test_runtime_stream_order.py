@@ -144,9 +144,10 @@ def _service(
 @pytest.mark.asyncio
 async def test_live_semantic_events_keep_agent_source_order() -> None:
     broker = LiveExecutionEventBroker()
-    lease = broker.prepare_local_producer("execution")
+    broker.prepare_local_producer("execution")
     broker.register_local_producer("execution", 1)
-    live = broker.claim_local_producer(lease)
+    live = broker.claim_local_producer("execution")
+    assert live is not None
     broker.publish(ExecutionDelta("execution", ExecutionDeltaType.ASSISTANT_TEXT_DELTA, "before"))
     broker.publish_event(
         "execution",
@@ -177,9 +178,10 @@ async def test_live_semantic_events_keep_agent_source_order() -> None:
 @pytest.mark.asyncio
 async def test_live_durable_terminal_publication_is_idempotent() -> None:
     broker = LiveExecutionEventBroker()
-    lease = broker.prepare_local_producer("execution")
+    broker.prepare_local_producer("execution")
     broker.register_local_producer("execution", 0)
-    live = broker.claim_local_producer(lease)
+    live = broker.claim_local_producer("execution")
+    assert live is not None
     payload = {"run_id": "run"}
 
     broker.publish_event(
@@ -544,9 +546,8 @@ async def test_durable_stream_stops_when_terminal_cursor_already_seen() -> None:
 @pytest.mark.asyncio
 async def test_local_stream_skips_already_seen_terminal_and_stops() -> None:
     broker = LiveExecutionEventBroker()
-    lease = broker.prepare_local_producer("execution")
+    broker.prepare_local_producer("execution")
     broker.register_local_producer("execution", 0)
-    live = broker.claim_local_producer(lease)
     broker.publish_event(
         "execution",
         ExecutionEventType.EXECUTION_SUCCEEDED,
@@ -562,27 +563,27 @@ async def test_local_stream_skips_already_seen_terminal_and_stops() -> None:
     principal = Principal("user", "tenant", "user")
     streamed = [
         item
-        async for item in service._stream_claimed(
-            lease,
+        async for item in service.stream(
+            "execution",
             principal=principal,
             after_sequence=1,
         )
     ]
     assert streamed == []
-    assert live is lease.subscription
+    assert not broker.is_local_producer("execution")
 
 
 @pytest.mark.asyncio
 async def test_fast_completed_prepared_abort_releases_live_state() -> None:
     broker = LiveExecutionEventBroker()
-    lease = broker.prepare_local_producer("execution")
+    broker.prepare_local_producer("execution")
     broker.register_local_producer("execution", 0)
     broker.publish(
         ExecutionDelta("execution", ExecutionDeltaType.ASSISTANT_TEXT_DELTA, "buffered")
     )
     broker.complete("execution")
     assert broker.is_local_producer("execution")
-    broker.abort_local_producer(lease)
+    broker.abandon_prepared_local_producer("execution")
     assert not broker.is_local_producer("execution")
     assert "execution" not in broker._buffers
     assert "execution" not in broker._completed
@@ -592,9 +593,8 @@ async def test_fast_completed_prepared_abort_releases_live_state() -> None:
 @pytest.mark.asyncio
 async def test_reconnect_aligns_to_confirmed_cursor_before_replaying_deltas() -> None:
     broker = LiveExecutionEventBroker()
-    lease = broker.prepare_local_producer("execution")
+    broker.prepare_local_producer("execution")
     broker.register_local_producer("execution", 1)
-    broker.claim_local_producer(lease)
     broker.publish(
         ExecutionDelta("execution", ExecutionDeltaType.ASSISTANT_TEXT_DELTA, "before")
     )
@@ -609,8 +609,8 @@ async def test_reconnect_aligns_to_confirmed_cursor_before_replaying_deltas() ->
     )
     service = _service(_execution(revision=1, event_sequence=1), _EventReader({}), broker)
     principal = Principal("user", "tenant", "user")
-    iterator = service._stream_claimed(
-        lease,
+    iterator = service.stream(
+        "execution",
         principal=principal,
         after_sequence=2,
     ).__aiter__()
@@ -641,9 +641,8 @@ async def test_reconnect_aligns_to_confirmed_cursor_before_replaying_deltas() ->
 @pytest.mark.asyncio
 async def test_reconnect_after_terminal_cursor_does_not_replay_deltas() -> None:
     broker = LiveExecutionEventBroker()
-    lease = broker.prepare_local_producer("execution")
+    broker.prepare_local_producer("execution")
     broker.register_local_producer("execution", 1)
-    broker.claim_local_producer(lease)
     broker.publish(
         ExecutionDelta("execution", ExecutionDeltaType.ASSISTANT_TEXT_DELTA, "before")
     )
@@ -671,8 +670,8 @@ async def test_reconnect_after_terminal_cursor_does_not_replay_deltas() -> None:
     principal = Principal("user", "tenant", "user")
     streamed = [
         item
-        async for item in service._stream_claimed(
-            lease,
+        async for item in service.stream(
+            "execution",
             principal=principal,
             after_sequence=3,
         )

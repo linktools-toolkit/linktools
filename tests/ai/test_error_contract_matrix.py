@@ -190,8 +190,15 @@ async def test_execution_wait_timeout_has_stable_code() -> None:
         return SimpleNamespace(status=ExecutionStatus.STARTED)
 
     service.inspect = inspect  # type: ignore[method-assign]
+
+    async def load_authorized(execution_id: str, principal: Principal, action: object) -> object:
+        del principal, action
+        return SimpleNamespace(execution_id=execution_id, status=ExecutionStatus.STARTED)
+
+    service._load_authorized = load_authorized  # type: ignore[method-assign]
     service._backend = None
     service._local_waiter = None
+    service._local_stream_abort = None
     principal = Principal("principal", "tenant", "service")
     with pytest.raises(AIError) as error:
         await DefaultExecutionService.wait.__wrapped__(

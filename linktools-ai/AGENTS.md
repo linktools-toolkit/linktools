@@ -19,6 +19,8 @@ Package instructions for `linktools-ai`. Repository-wide rules in [../AGENTS.md]
 - Persisted or replayed data is a versioned contract. Compatibility must be based on explicit semantics, not accidental byte-for-byte output of dependencies.
 - Persistence protocols must remain evolvable and backward-compatible. Additive or non-semantic changes must not invalidate previously persisted data or make the storage system unreadable; incompatible changes require an explicit version boundary and a defined compatibility or migration path.
 - Stable hashes and idempotency identities must remain stable when non-semantic optional/default fields change; include codec/version/provenance when they change semantics.
+- Durable contracts must stay minimal. Persist stable references for dependencies intentionally resolved at use time; persist dependency semantics only when exact replay of an already-established durable fact requires them. Do not copy, embed, or recursively snapshot referenced configuration for convenience or speculative future recovery.
+- A semantic fact must have one durable owner. Any persisted duplicate used as an index, projection, or cache must be explicitly derived and must not become an independent source of truth or define conflicting recovery semantics.
 - Caller cancellation does not determine durable truth. Resolve commit/readback state before reporting an unknown outcome.
 - Filesystem coordination uses `filelock`. Database concurrency must avoid pessimistic locking.
 

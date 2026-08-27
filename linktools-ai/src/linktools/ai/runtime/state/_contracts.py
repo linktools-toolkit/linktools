@@ -40,7 +40,9 @@ from ...core import (
     UsageMetrics,
     normalize_execution_mode,
     normalize_thinking,
+    validate_agent_id,
 )
+from ...errors import AIError, ErrorCode
 from ...storage import ObjectRef, StoredPayload
 from ...task import (
     TaskGraph,
@@ -323,6 +325,9 @@ class ConversationHistoryRecord:
             raise ValueError("forked history with content requires a prefix head")
 
 
+SESSION_AGENT_ID_METADATA_KEY = "linktools.ai.agent_id"
+
+
 @dataclass(frozen=True, slots=True)
 class SessionRecord:
     session_id: str
@@ -349,6 +354,26 @@ class SessionRecord:
             raise ValueError("closed session cannot have an active execution")
         if self.history_quality not in {"complete", "conservative"}:
             raise ValueError("session history quality summary is invalid")
+
+    def resolved_agent_id(self) -> str:
+        historical = self.metadata.get(SESSION_AGENT_ID_METADATA_KEY)
+        historical_id: str | None = None
+        if isinstance(historical, str):
+            try:
+                historical_id = validate_agent_id(historical)
+            except AIError:
+                historical_id = None
+        if self.agent_id is not None:
+            try:
+                resolved = validate_agent_id(self.agent_id)
+            except (AIError, TypeError) as error:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
+            if historical_id is not None and historical_id != resolved:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            return resolved
+        if historical_id is not None:
+            return historical_id
+        raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
 
 
 @dataclass(frozen=True, slots=True)

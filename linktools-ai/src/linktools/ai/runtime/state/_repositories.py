@@ -4904,13 +4904,11 @@ def _projected_record(
 ) -> StoredRecord:
     _require_tenant(value, repository._tenant_id)
     if isinstance(value, SessionRecord):
-        from .._session import _session_agent_id
-
         if value.agent_id is None:
             current_value = _decode_enveloped_domain(current.data, SessionRecord)
-            value = replace(value, agent_id=_session_agent_id(current_value))
+            value = replace(value, agent_id=current_value.resolved_agent_id())
         else:
-            _session_agent_id(value)
+            value.resolved_agent_id()
     identity = _canonical_record_identity(current.kind, value)
     projected = repository._stored(current.kind, identity, value, state=_record_state(value))
     return replace(projected, storage_version=current.storage_version + 1)

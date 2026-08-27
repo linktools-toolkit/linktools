@@ -438,6 +438,14 @@ async def test_execution_wait_rechecks_after_local_worker_quiescence() -> None:
     service = object.__new__(DefaultExecutionService)
     service._local_waiter = Waiter()
     service._backend = None
+    abandoned: list[str] = []
+    service._local_stream_abort = abandoned.append
+
+    async def load_authorized(execution_id: str, principal: Principal, action: object) -> object:
+        del principal, action
+        return SimpleNamespace(execution_id=execution_id, status=ExecutionStatus.SUCCEEDED)
+
+    service._load_authorized = load_authorized  # type: ignore[method-assign]
 
     async def inspect(execution_id: str, *, principal: Principal) -> object:
         del execution_id, principal
@@ -459,6 +467,7 @@ async def test_execution_wait_rechecks_after_local_worker_quiescence() -> None:
         )
     )
     await started.wait()
+    assert abandoned == ["execution"]
     assert not task.done()
     release.set()
     assert await task == "terminal"
