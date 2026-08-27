@@ -7,13 +7,11 @@ from types import SimpleNamespace
 from typing import get_args, get_origin, get_type_hints
 
 import pytest
-from linktools.ai.agent import SubagentDelegate
-from linktools.ai.asset import AssetRef
 from linktools.ai.asset._sql import SqlAssetBackend
-from linktools.ai.capability import CapabilityMaterializationContext
-from linktools.ai.capability._mcp import bind_mcp_capability
-from linktools.ai.core import ExecutionStatus, ResourceKind, ResourceRef
+from linktools.ai.capability import materialize_mcp_servers
+from linktools.ai.core import ExecutionStatus, Principal, ResourceKind, ResourceRef
 from linktools.ai.errors import AIError, ErrorCode
+from linktools.ai.runtime._capabilities import SubagentDelegate
 from linktools.ai.runtime._evaluation import DefaultEvaluationService
 from linktools.ai.runtime._execution import DefaultExecutionService
 from linktools.ai.runtime._planner import RuntimeTaskNodeRunner
@@ -33,29 +31,18 @@ def test_subagent_delegate_contract_requires_mapping_result() -> None:
 
 
 @pytest.mark.asyncio
-async def test_mcp_runtime_shape_violation_is_capability_error(tmp_path) -> None:
-    class MalformedRuntime:
-        @property
-        def fingerprint(self) -> str:
-            return "a" * 64
-
-        async def toolsets(self, servers, **kwargs):
-            del servers, kwargs
-            return ()
-
-    binding = bind_mcp_capability(
-        (AssetRef("mcp", "server"),),
-        (MCPServerSpec("server", 1, "echo"),),
-        MalformedRuntime(),
-    )
-    context = CapabilityMaterializationContext(
-        trusted_workspace_principal("tenant"),
-        ResourceRef(ResourceKind.EXECUTION, "execution", "tenant"),
-        tmp_path,
-    )
+async def test_mcp_materialization_rejects_unselected_server(tmp_path) -> None:
+    principal = Principal("principal", "tenant")
+    execution = ResourceRef(ResourceKind.EXECUTION, "execution", "tenant")
 
     with pytest.raises(AIError) as error:
-        await binding.materialize(context)
+        await materialize_mcp_servers(
+            (MCPServerSpec("server", "echo"),),
+            (),
+            principal=principal,
+            execution=execution,
+            execution_root=str(tmp_path),
+        )
 
     assert error.value.code is ErrorCode.CAPABILITY_RESOLUTION_INVALID
 
