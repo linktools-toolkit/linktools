@@ -180,12 +180,29 @@ class ExecutionTraceItem:
     def __post_init__(self) -> None:
         if self.sequence < 0:
             raise ValueError("execution trace sequence must be non-negative")
-        if (
-            isinstance(self.payload, Mapping)
-            and self.payload.get("kind") == "MODEL_RESPONSE"
-            and "token_usage" not in self.payload
+        if not isinstance(self.payload, Mapping) or self.payload.get("kind") != "MODEL_RESPONSE":
+            return
+        if "token_usage" not in self.payload:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        status = self.payload.get("status")
+        usage = self.payload["token_usage"]
+        if status == "FAILED":
+            if usage is not None:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            return
+        if status != "SUCCEEDED" or not isinstance(usage, Mapping):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        required = {
+            "input_tokens",
+            "output_tokens",
+            "cache_read_tokens",
+            "cache_write_tokens",
+        }
+        if set(usage) != required or any(
+            not isinstance(value, int) or isinstance(value, bool) or value < 0
+            for value in usage.values()
         ):
-            object.__setattr__(self, "payload", {**self.payload, "token_usage": None})
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
 
 
 @dataclass(frozen=True, slots=True)
