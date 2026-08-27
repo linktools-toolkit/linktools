@@ -395,15 +395,12 @@ async def test_terminal_local_bookkeeping_survives_caller_cancellation() -> None
     current = _execution()
     terminal = replace(current, status=ExecutionStatus.FAILED, revision=2, event_sequence=2)
     result = ResultRecord(
-        "execution",
-        "tenant",
-        None,
-        None,
-        None,
-        None,
-        StopReason.ERROR,
-        UsageMetrics(),
-        datetime.now(timezone.utc),
+        execution_id="execution",
+        tenant_id="tenant",
+        output=None,
+        stop_reason=StopReason.ERROR,
+        usage=UsageMetrics(),
+        created_at=datetime.now(timezone.utc),
     )
     commit = ExecutionTerminalCommit(
         0,
