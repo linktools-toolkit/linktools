@@ -7,7 +7,7 @@ from dataclasses import replace
 from types import SimpleNamespace
 
 import pytest
-from linktools.ai.agent import AgentCompiler, bind_output
+from linktools.ai.agent import AgentBindingSnapshot, AgentCompiler, bind_output
 from linktools.ai.capability import CapabilityContribution, CapabilityGroup
 from linktools.ai.core import ExecutionStatus, Principal, ResourceKind, ResourceRef, TaskStatus
 from linktools.ai.errors import AIError, ErrorCode
@@ -81,10 +81,11 @@ def test_custom_output_restore_rejects_missing_or_tampered_schema() -> None:
     snapshot = binding.snapshot
     fresh = _compiler()
 
-    historical = replace(snapshot, output_schema=None)  # type: ignore[arg-type]
+    missing_payload = snapshot.to_payload()
+    missing_payload.pop("output_schema")
     with pytest.raises(AIError) as missing_error:
-        fresh.restore(historical)
-    assert missing_error.value.code is ErrorCode.AGENT_DEFINITION_UNAVAILABLE
+        AgentBindingSnapshot.from_payload(missing_payload)
+    assert missing_error.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
 
     tampered_schema = dict(snapshot.output_schema)
     tampered_schema["title"] = "TamperedOutput"
