@@ -18,7 +18,13 @@ from ._repositories import (
     _stored_operation_error,
     _task_graph_record,
 )
-from ._store import RecordQuery, RecordReplacement, StateTransaction, operation_key
+from ._store import (
+    RecordQuery,
+    StateTransaction,
+    StoredOperation,
+    StoredRecord,
+    operation_key,
+)
 
 
 class DurableTaskRepositoryImpl(TaskRepositoryImpl):
@@ -269,30 +275,26 @@ class DurableTaskAdmissionRepositoryImpl(TaskAdmissionRepositoryImpl):
     async def _require_committed_admission(
         self,
         transaction: StateTransaction,
-        graph_record: object,
-        admission_record: object,
-        node_records: tuple[object, ...],
+        graph_record: StoredRecord,
+        admission_record: StoredRecord,
+        node_records: tuple[StoredRecord, ...],
         *,
-        stored_operation: object | None = None,
+        stored_operation: StoredOperation | None = None,
     ) -> tuple[TaskGraphAdmission, TaskGraphView]:
-        if not hasattr(graph_record, "key_digest") or not hasattr(admission_record, "key_digest"):
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        graph_stored = graph_record
-        admission_stored = admission_record
-        existing = await self._decode(admission_stored, TaskGraphAdmission)
-        graph_view = await self._decode(graph_stored, TaskGraphView)
+        existing = await self._decode(admission_record, TaskGraphAdmission)
+        graph_view = await self._decode(graph_record, TaskGraphView)
         nodes = await self._decode_task_nodes(node_records)
         persisted_graph = TaskGraph(graph_view.graph_id, graph_view.nodes)
         existing.bind(persisted_graph)
         self._validate_graph(graph_view, persisted_graph, nodes)
         status = _graph_status(nodes)
         if (
-            graph_stored.key_digest != self._graph_key(graph_view.graph_id)
+            graph_record.key_digest != self._graph_key(graph_view.graph_id)
             or graph_view.status is not status
-            or graph_stored.state != status.value
-            or admission_stored.key_digest != self._admission_key(graph_view.graph_id)
-            or admission_stored.scope_digest != self._recovery_scope()
-            or admission_stored.state != status.value
+            or graph_record.state != status.value
+            or admission_record.key_digest != self._admission_key(graph_view.graph_id)
+            or admission_record.scope_digest != self._recovery_scope()
+            or admission_record.state != status.value
         ):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         if stored_operation is None:
