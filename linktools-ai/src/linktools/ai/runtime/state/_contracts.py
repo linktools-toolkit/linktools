@@ -46,6 +46,8 @@ from ...errors import AIError, ErrorCode
 from ...storage import ObjectRef, StoredPayload
 from ...task import (
     TaskGraph,
+    TaskGraphAdmission,
+    TaskGraphLaunch,
     TaskGraphView,
     TaskLease,
     TaskNodeView,
@@ -1304,6 +1306,12 @@ class ExecutionEventRecord:
 class ApprovalRepository(RuntimeRepository, Protocol):
     async def get_header(self, approval_id: str, *, tenant_id: str) -> ResourceRef | None: ...
     async def create(self, record: ApprovalRecord) -> ApprovalRecord: ...
+    async def create_with_operation(
+        self,
+        record: ApprovalRecord,
+        *,
+        operation: OperationLedgerInput,
+    ) -> tuple[ApprovalRecord, bool]: ...
     async def get(self, approval_id: str, *, tenant_id: str) -> ApprovalRecord | None: ...
     async def decide(
         self,
@@ -1408,6 +1416,13 @@ class TaskRepository(RuntimeRepository, Protocol):
     async def list_nodes(self, graph_id: str, *, tenant_id: str) -> tuple[TaskNodeView, ...]: ...
 
 
+class TaskAdmissionRepository(RuntimeRepository, Protocol):
+    async def admit(self, admission: TaskGraphAdmission, graph: TaskGraph) -> TaskGraphView: ...
+    async def list_recoverable_page(
+        self, *, cursor: str | None, limit: int
+    ) -> Page[TaskGraphLaunch]: ...
+
+
 class EvaluationRepository(RuntimeRepository, Protocol):
     async def get_header(self, evaluation_id: str, *, tenant_id: str) -> ResourceRef | None: ...
     async def create(self, record: EvaluationRecord) -> EvaluationRecord: ...
@@ -1479,6 +1494,7 @@ class ArtifactState:
 class TaskState:
     tasks: TaskRepository
     operations: OperationLedgerRepository
+    admissions: TaskAdmissionRepository
 
 
 @dataclass(frozen=True, slots=True)
@@ -1560,6 +1576,7 @@ __all__ = [
     "SessionRecord",
     "SessionRepository",
     "StoredStepSnapshot",
+    "TaskAdmissionRepository",
     "TaskRepository",
     "TaskState",
     "ToolOperationAdmission",

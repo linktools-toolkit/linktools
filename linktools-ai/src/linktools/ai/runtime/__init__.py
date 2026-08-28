@@ -8,13 +8,16 @@ from ._artifact import DefaultArtifactService
 from ._evaluation import DefaultEvaluationService
 from ._event import DefaultEventService, ExecutionDelta, LiveExecutionEventBroker
 from ._execution import DefaultExecutionService
+from ._history_service import DefaultExecutionHistoryService
 from ._input import user_prompt_transport
 from ._local import LocalExecutionBackend
 from ._object import RuntimeObjectKeyFactory, put_runtime_object, read_runtime_object
 from ._planner import DefaultTaskService, RuntimeTaskNodeRunner
+from ._runtime_history import RuntimeHistory
 from ._runtime_service import Runtime
 from ._session import DefaultSessionService
 from .service_api import (
+    ApprovalCreateRequest,
     ApprovalDecisionRequest,
     ApprovalDecisionResult,
     ApprovalService,
@@ -37,6 +40,7 @@ from .service_api import (
     ExecutionHandle,
     ExecutionHistoryItem,
     ExecutionHistoryReader,
+    ExecutionHistoryService,
     ExecutionRequest,
     ExecutionResult,
     ExecutionService,
@@ -75,6 +79,7 @@ __all__ = [
     "Agent",
     "Execution",
     "Session",
+    "ApprovalCreateRequest",
     "ApprovalDecisionRequest",
     "ApprovalDecisionResult",
     "ApprovalService",
@@ -92,6 +97,7 @@ __all__ = [
     "DefaultArtifactService",
     "DefaultEvaluationService",
     "DefaultEventService",
+    "DefaultExecutionHistoryService",
     "DefaultExecutionService",
     "DefaultSessionService",
     "DefaultTaskService",
@@ -105,6 +111,7 @@ __all__ = [
     "ExecutionHandle",
     "ExecutionHistoryItem",
     "ExecutionHistoryReader",
+    "ExecutionHistoryService",
     "ExecutionRequest",
     "ExecutionResult",
     "ExecutionService",
@@ -127,6 +134,7 @@ __all__ = [
     "RunEvaluationRequest",
     "Runtime",
     "RuntimeDomain",
+    "RuntimeHistory",
     "RuntimeObjectKeyFactory",
     "RuntimeRetentionMode",
     "RuntimeState",

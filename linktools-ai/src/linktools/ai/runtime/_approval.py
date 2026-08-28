@@ -1,8 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Approval decision API and durable default implementation."""
+"""Approval service and durable default implementation."""
 
-import hashlib
 from datetime import datetime, timezone
 
 from linktools.core import environ
@@ -12,17 +11,29 @@ from ..core import (
     ApprovalStatus,
     AuthorizationAction,
     AuthorizationPolicy,
+    OperationKind,
+    OperationLedgerInput,
+    OperationStatus,
     Principal,
+    ResourceKind,
+    canonical_sha256,
+    idempotency_key_digest,
+    principal_identity_payload,
 )
 from ..errors import AIError, ErrorCode
-from .service_api import ApprovalDecisionRequest, ApprovalDecisionResult, ApprovalView
+from .service_api import (
+    ApprovalCreateRequest,
+    ApprovalDecisionRequest,
+    ApprovalDecisionResult,
+    ApprovalView,
+)
 from .state._contracts import ApprovalRecord, ApprovalRepository, ExecutionRepository
 
 _logger = environ.get_logger("ai.runtime.approval")
 
 
 class DefaultApprovalService:
-    """Persist and replay durable approval decisions."""
+    """Own Approval creation, observation, and decision semantics."""
 
     def __init__(
         self,
@@ -33,6 +44,91 @@ class DefaultApprovalService:
         self._approvals = approvals
         self._executions = executions
         self._authorization = authorization
+
+    async def create(
+        self,
+        execution_id: str,
+        request: ApprovalCreateRequest,
+    ) -> ApprovalView:
+        tenant_id = request.principal.tenant_id
+        header = await self._executions.get_header(
+            execution_id,
+            tenant_id=tenant_id,
+        )
+        if header is None:
+            raise AIError(ErrorCode.AUTHORIZATION_DENIED)
+        await self._authorization.authorize(
+            request.principal,
+            AuthorizationAction.APPROVAL_CREATE,
+            header,
+        )
+
+        key_digest = idempotency_key_digest(request.idempotency_key)
+        request_digest = canonical_sha256(
+            {
+                "action": "approval.create",
+                "principal": principal_identity_payload(request.principal),
+                "execution_id": execution_id,
+                "approval_id": request.approval_id,
+                "operation_id": request.operation_id,
+            }
+        )
+        admission_operation_id = canonical_sha256(
+            {
+                "action": "approval.create.operation",
+                "tenant_id": tenant_id,
+                "execution_id": execution_id,
+                "idempotency_key_digest": key_digest,
+            }
+        )
+        result_digest = canonical_sha256(
+            {
+                "approval_id": request.approval_id,
+                "execution_id": execution_id,
+                "operation_id": request.operation_id,
+            }
+        )
+        now = datetime.now(timezone.utc)
+        record = ApprovalRecord(
+            approval_id=request.approval_id,
+            execution_id=execution_id,
+            tenant_id=tenant_id,
+            operation_id=request.operation_id,
+            status=ApprovalStatus.PENDING,
+            idempotency_key_digest=None,
+            decision=None,
+            decided_by=None,
+            decision_digest=None,
+            created_at=now,
+            decided_at=None,
+        )
+        operation = OperationLedgerInput(
+            operation_id=admission_operation_id,
+            tenant_id=tenant_id,
+            resource_kind=ResourceKind.APPROVAL,
+            resource_id=request.approval_id,
+            execution_id=execution_id,
+            operation_kind=OperationKind.APPROVAL,
+            status=OperationStatus.SUCCEEDED,
+            request_digest=request_digest,
+            result_ref=request.approval_id,
+            result_digest=result_digest,
+            error_code=None,
+            compactable=True,
+            created_at=now,
+            updated_at=now,
+        )
+        created, replayed = await self._approvals.create_with_operation(
+            record,
+            operation=operation,
+        )
+        _logger.info(
+            "approval create admitted: execution=%s approval=%s replayed=%s",
+            execution_id,
+            created.approval_id,
+            replayed,
+        )
+        return ApprovalView(created.approval_id, created.status)
 
     async def list(
         self,
@@ -80,9 +176,7 @@ class DefaultApprovalService:
             header,
         )
         decision_digest = _decision_digest(request)
-        idempotency_digest = hashlib.sha256(
-            request.idempotency_key.encode("utf-8")
-        ).hexdigest()
+        idempotency_digest = idempotency_key_digest(request.idempotency_key)
         try:
             updated = await self._approvals.decide(
                 request.approval_id,
@@ -148,8 +242,6 @@ def _is_exact_replay(
 
 
 def _decision_digest(request: ApprovalDecisionRequest) -> str:
-    from ..core import canonical_sha256
-
     return canonical_sha256(
         {
             "approval_id": request.approval_id,

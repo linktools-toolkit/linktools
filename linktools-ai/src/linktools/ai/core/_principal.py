@@ -27,6 +27,7 @@ class AuthorizationAction(str, Enum):
     EVALUATION_RUN = "evaluation.run"
     EVALUATION_READ = "evaluation.read"
     EVALUATION_COMPARE = "evaluation.compare"
+    APPROVAL_CREATE = "approval.create"
     APPROVAL_READ = "approval.read"
     APPROVAL_DECIDE = "approval.decide"
     EXTERNAL_READ = "external.read"
@@ -104,6 +105,7 @@ class TenantAuthorizationPolicy:
             AuthorizationAction.TASK_RUN,
             AuthorizationAction.TASK_READ,
             AuthorizationAction.TASK_CANCEL,
+            AuthorizationAction.APPROVAL_CREATE,
             AuthorizationAction.TOOL_EXECUTE,
         }:
             raise AIError(ErrorCode.AUTHORIZATION_DENIED)

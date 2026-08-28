@@ -25,6 +25,7 @@ from ...storage import (
     create_sql_storage_context,
     namespace_digest,
 )
+from ._approval_repository import ApprovalAdmissionRepositoryImpl
 from ._contracts import (
     ArtifactState,
     ConversationState,
@@ -52,6 +53,10 @@ from ._steps import (
     RuntimeStepStore,
     StagingStepStore,
     StateStepArchive,
+)
+from ._task_recovery_repository import (
+    DurableTaskAdmissionRepositoryImpl,
+    DurableTaskRepositoryImpl,
 )
 
 _logger = environ.get_logger("ai.runtime.state.materializer")
@@ -278,6 +283,21 @@ async def materialize_runtime_state(
             domain: build_repository_bundle(stores[domain], namespace=namespace, tenant_id=tenant_id, domain=domain)
             for domain in RuntimeDomain
         }
+        bundles[RuntimeDomain.RECOVERY]["approvals"] = ApprovalAdmissionRepositoryImpl(
+            stores[RuntimeDomain.RECOVERY],
+            namespace=namespace,
+            tenant_id=tenant_id,
+        )
+        bundles[RuntimeDomain.TASK]["tasks"] = DurableTaskRepositoryImpl(
+            stores[RuntimeDomain.TASK],
+            namespace=namespace,
+            tenant_id=tenant_id,
+        )
+        bundles[RuntimeDomain.TASK]["admissions"] = DurableTaskAdmissionRepositoryImpl(
+            stores[RuntimeDomain.TASK],
+            namespace=namespace,
+            tenant_id=tenant_id,
+        )
         components = tuple(
             value
             for bundle in bundles.values()
@@ -377,7 +397,11 @@ def _states(bundles: Mapping[RuntimeDomain, Mapping[str, object]]) -> object:
                 "artifact": ArtifactState(
                     bundles[RuntimeDomain.ARTIFACT]["records"], bundles[RuntimeDomain.ARTIFACT]["operations"]
                 ),
-                "task": TaskState(bundles[RuntimeDomain.TASK]["tasks"], bundles[RuntimeDomain.TASK]["operations"]),
+                "task": TaskState(
+                    bundles[RuntimeDomain.TASK]["tasks"],
+                    bundles[RuntimeDomain.TASK]["operations"],
+                    bundles[RuntimeDomain.TASK]["admissions"],
+                ),
                 "evaluation": EvaluationState(
                     bundles[RuntimeDomain.EVALUATION]["records"],
                     bundles[RuntimeDomain.EVALUATION]["idempotency"],

@@ -8,6 +8,7 @@ from ..core import Principal
 from ._graph import (
     CancelGraphRequest,
     TaskGraphHandle,
+    TaskGraphLaunch,
     TaskGraphRequest,
     TaskGraphResult,
     TaskGraphView,
@@ -27,7 +28,7 @@ class TaskApi(TaskQueryApi, Protocol):
 
 
 class TaskGraphLauncher(Protocol):
-    async def start(self, request: TaskGraphRequest) -> TaskGraphHandle: ...
+    async def start(self, launch: TaskGraphLaunch) -> TaskGraphHandle: ...
     async def cancel(self, graph_id: str, request: CancelGraphRequest) -> TaskGraphView: ...
 
 

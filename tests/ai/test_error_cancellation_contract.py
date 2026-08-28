@@ -114,12 +114,11 @@ async def test_transient_handoff_cleanup_preserves_cancellation(
 
 
 @pytest.mark.asyncio
-async def test_task_runner_preserves_cancellation_when_child_cleanup_fails() -> None:
+async def test_task_runner_cancellation_hands_off_without_business_cancel() -> None:
     class Execution:
         def __init__(self) -> None:
             self.wait_started = asyncio.Event()
-            self.cancel_started = asyncio.Event()
-            self.finish_cancel = asyncio.Event()
+            self.cancel_called = False
 
         async def run(self, *args, **kwargs):
             del args, kwargs
@@ -132,14 +131,15 @@ async def test_task_runner_preserves_cancellation_when_child_cleanup_fails() -> 
 
         async def cancel(self, *args, **kwargs):
             del args, kwargs
-            self.cancel_started.set()
-            await self.finish_cancel.wait()
-            raise RuntimeError("cleanup failed")
+            self.cancel_called = True
+            raise AssertionError("runner handoff must not business-cancel execution")
 
     execution = Execution()
     runner = object.__new__(RuntimeTaskNodeRunner)
     runner._execution = execution
     runner._detached_tasks = set()
+    runner._active_execution_ids = {}
+    runner._active_launch_tasks = {}
 
     async def prepare(*args, **kwargs):
         del args, kwargs
@@ -160,11 +160,11 @@ async def test_task_runner_preserves_cancellation_when_child_cleanup_fails() -> 
     with pytest.raises(asyncio.CancelledError):
         await task
 
-    await execution.cancel_started.wait()
+    await asyncio.sleep(0)
+    assert execution.cancel_called is False
     pending = runner.pending_background_tasks
-    assert pending
-    execution.finish_cancel.set()
-    await asyncio.gather(*pending, return_exceptions=True)
+    if pending:
+        await asyncio.gather(*pending, return_exceptions=True)
     assert runner.pending_background_tasks == ()
 
 

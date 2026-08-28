@@ -19,7 +19,7 @@ from ._graph import (
     CancelGraphRequest,
     TaskDependencyResult,
     TaskGraphHandle,
-    TaskGraphRequest,
+    TaskGraphLaunch,
     TaskGraphView,
     TaskNode,
 )
@@ -47,6 +47,15 @@ class TaskNodeRunner(Protocol):
         principal: Principal,
         dependency_results: "Mapping[str, TaskDependencyResult]",
     ) -> TaskNodeRunResult: ...
+
+    async def cancel(
+        self,
+        node: TaskNode,
+        *,
+        graph_id: str,
+        principal: Principal,
+        dependency_results: "Mapping[str, TaskDependencyResult]",
+    ) -> None: ...
 
 
 @runtime_checkable
@@ -175,7 +184,7 @@ class LocalTaskGraphLauncher:
         self._detached_tasks: set[asyncio.Task[object]] = set()
         self._accepting = True
 
-    async def start(self, request: TaskGraphRequest) -> TaskGraphHandle:
+    async def start(self, request: TaskGraphLaunch) -> TaskGraphHandle:
         if not self._accepting:
             raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
         key = request.principal.tenant_id, request.graph.graph_id
@@ -218,24 +227,51 @@ class LocalTaskGraphLauncher:
     ) -> TaskGraphView:
         key = request.principal.tenant_id, graph_id
         run = self._graphs.get(key)
+        view = await self._repository.get_graph(graph_id, tenant_id=request.principal.tenant_id)
+        if view is None:
+            raise AIError(ErrorCode.STORAGE_NOT_FOUND)
+        nodes = await self._repository.list_nodes(graph_id, tenant_id=request.principal.tenant_id)
+        cleanup_error: BaseException | None = None
+        static_nodes = {node.node_id: node for node in view.nodes}
+        for state in nodes:
+            if state.status is not TaskStatus.CANCELLED or state.fence < 1:
+                continue
+            node = static_nodes.get(state.node_id)
+            if node is None:
+                cleanup_error = AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                break
+            try:
+                await self._runner.cancel(
+                    node,
+                    graph_id=graph_id,
+                    principal=request.principal,
+                    dependency_results=await self._dependency_results(
+                        graph_id, request.principal.tenant_id, node
+                    ),
+                )
+            except BaseException as error:  # noqa: BLE001
+                cleanup_error = error
+                break
         if run is not None:
             self._close_run(run)
             if run.task is not None and not run.task.done():
                 run.task.cancel()
-                self._detach(run.task, "task graph cancellation")
-        view = await self._repository.get_graph(
-            graph_id,
-            tenant_id=request.principal.tenant_id,
-        )
-        if view is None:
-            raise AIError(ErrorCode.STORAGE_NOT_FOUND)
-        if run is not None:
+                await asyncio.gather(run.task, return_exceptions=True)
+            elif run.task is not None:
+                self._consume_done(run.task, "task graph cancellation")
             self._remove_run(key, run)
-        _logger.info(
-            "task graph scheduler disarmed: tenant=%s graph=%s",
-            key[0],
-            graph_id,
-        )
+        if self._detached_tasks:
+            await asyncio.gather(*tuple(self._detached_tasks), return_exceptions=True)
+        if cleanup_error is not None:
+            if isinstance(cleanup_error, asyncio.CancelledError):
+                raise cleanup_error
+            if isinstance(cleanup_error, AIError):
+                raise cleanup_error
+            raise AIError(
+                ErrorCode.STORAGE_RECOVERY_REQUIRED,
+                safe_details={"phase": "task_graph_cancel_cleanup", "graph_id": graph_id},
+            ) from cleanup_error
+        _logger.info("task graph explicit cancellation confirmed: tenant=%s graph=%s", key[0], graph_id)
         return view
 
     async def shutdown(self) -> None:
@@ -247,7 +283,13 @@ class LocalTaskGraphLauncher:
                 run.task.cancel()
             elif run.task is not None:
                 self._consume_done(run.task, "task graph shutdown")
-        await asyncio.sleep(0)
+        local_tasks = tuple(
+            run.task for run in runs if run.task is not None and not run.task.done()
+        )
+        if local_tasks:
+            await asyncio.gather(*local_tasks, return_exceptions=True)
+        if self._detached_tasks:
+            await asyncio.gather(*tuple(self._detached_tasks), return_exceptions=True)
         runner_pending = (
             self._runner.pending_background_tasks
             if isinstance(self._runner, _BackgroundTaskOwner)
@@ -344,7 +386,7 @@ class LocalTaskGraphLauncher:
 
     async def _run_graph(
         self,
-        request: TaskGraphRequest,
+        request: TaskGraphLaunch,
         run: _GraphRun,
     ) -> None:
         key = request.principal.tenant_id, request.graph.graph_id
@@ -356,18 +398,20 @@ class LocalTaskGraphLauncher:
                     request.graph.graph_id,
                     tenant_id=request.principal.tenant_id,
                 )
+                nodes = await self._repository.list_nodes(
+                    request.graph.graph_id,
+                    tenant_id=request.principal.tenant_id,
+                )
                 if view.status in {
                     TaskStatus.SUCCEEDED,
                     TaskStatus.FAILED,
                     TaskStatus.CANCELLED,
                     TaskStatus.BLOCKED,
                 }:
-                    self._cancel_inflight(inflight)
+                    if view.status in {TaskStatus.FAILED, TaskStatus.BLOCKED}:
+                        await self._cancel_terminal_effects(request, nodes)
+                    await self._cancel_inflight(inflight)
                     return
-                nodes = await self._repository.list_nodes(
-                    request.graph.graph_id,
-                    tenant_id=request.principal.tenant_id,
-                )
                 now = datetime.now(timezone.utc)
                 persisted = {
                     node.node_id
@@ -423,8 +467,31 @@ class LocalTaskGraphLauncher:
             )
         finally:
             self._close_run(run)
-            self._cancel_inflight(inflight)
+            await self._cancel_inflight(inflight)
             self._schedule_cleanup(run)
+
+    async def _cancel_terminal_effects(
+        self,
+        request: TaskGraphLaunch,
+        nodes: "tuple[_TaskNodeState, ...]",
+    ) -> None:
+        static_nodes = {node.node_id: node for node in request.graph.nodes}
+        for state in nodes:
+            if state.status is not TaskStatus.RUNNING or state.fence < 1:
+                continue
+            node = static_nodes.get(state.node_id)
+            if node is None:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            await self._runner.cancel(
+                node,
+                graph_id=request.graph.graph_id,
+                principal=request.principal,
+                dependency_results=await self._dependency_results(
+                    request.graph.graph_id,
+                    request.principal.tenant_id,
+                    node,
+                ),
+            )
 
     async def _wait_for_activity(
         self,
@@ -453,7 +520,7 @@ class LocalTaskGraphLauncher:
 
     async def _run_node(
         self,
-        request: TaskGraphRequest,
+        request: TaskGraphLaunch,
         node: TaskNode,
         inflight: dict[str, _InflightNode],
         run: _GraphRun,
@@ -476,7 +543,8 @@ class LocalTaskGraphLauncher:
                     graph_id=request.graph.graph_id,
                     principal=request.principal,
                     dependency_results=await self._dependency_results(
-                        request,
+                        request.graph.graph_id,
+                        request.principal.tenant_id,
                         node,
                     ),
                 )
@@ -495,7 +563,8 @@ class LocalTaskGraphLauncher:
             )
             if heartbeat_error is not None:
                 runner_task.cancel()
-                self._detach(
+                await asyncio.gather(runner_task, return_exceptions=True)
+                self._consume_done(
                     cast("asyncio.Task[object]", runner_task),
                     "task node runner after heartbeat loss",
                 )
@@ -565,32 +634,29 @@ class LocalTaskGraphLauncher:
                     code,
                 )
         finally:
-            for task in (runner_task, heartbeat_task):
-                if task is None:
-                    continue
+            cleanup_tasks = tuple(
+                task for task in (runner_task, heartbeat_task) if task is not None
+            )
+            for task in cleanup_tasks:
                 if not task.done():
                     task.cancel()
-                    self._detach(
-                        cast("asyncio.Task[object]", task),
-                        "task node cleanup",
-                    )
-                else:
-                    self._consume_done(
-                        cast("asyncio.Task[object]", task),
-                        "task node cleanup",
-                    )
+            if cleanup_tasks:
+                await asyncio.gather(*cleanup_tasks, return_exceptions=True)
+            for task in cleanup_tasks:
+                self._consume_done(
+                    cast("asyncio.Task[object]", task),
+                    "task node cleanup",
+                )
             if not run.closed:
                 self._signal(run)
 
     async def _dependency_results(
         self,
-        request: TaskGraphRequest,
+        graph_id: str,
+        tenant_id: str,
         node: TaskNode,
     ) -> "Mapping[str, TaskDependencyResult]":
-        nodes = await self._repository.list_nodes(
-            request.graph.graph_id,
-            tenant_id=request.principal.tenant_id,
-        )
+        nodes = await self._repository.list_nodes(graph_id, tenant_id=tenant_id)
         results: dict[str, TaskDependencyResult] = {}
         for dependency in node.dependencies:
             dependency_node = _node_by_id(nodes, dependency)
@@ -677,20 +743,21 @@ class LocalTaskGraphLauncher:
         if self._graphs.get(key) is run:
             self._graphs.pop(key, None)
 
-    def _cancel_inflight(self, inflight: dict[str, _InflightNode]) -> None:
-        for state in inflight.values():
-            task = state.task
+    async def _cancel_inflight(
+        self,
+        inflight: dict[str, _InflightNode],
+    ) -> None:
+        tasks = tuple(state.task for state in inflight.values())
+        for task in tasks:
             if not task.done():
                 task.cancel()
-                self._detach(
-                    cast("asyncio.Task[object]", task),
-                    "task graph inflight cleanup",
-                )
-            else:
-                self._consume_done(
-                    cast("asyncio.Task[object]", task),
-                    "task graph inflight cleanup",
-                )
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+        for task in tasks:
+            self._consume_done(
+                cast("asyncio.Task[object]", task),
+                "task graph inflight cleanup",
+            )
         inflight.clear()
 
     def _detach(

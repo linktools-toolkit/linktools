@@ -63,6 +63,7 @@
     "tool_operation_admission",
     "runtime_domain",
     "task_graph",
+    "task_graph_admission",
     "task_graph_limits",
     "task_graph_view",
     "task_lease",

@@ -404,6 +404,67 @@ class DefaultExecutionService:
             prepare_local_stream=True,
         )
 
+    async def resolve_existing(
+        self,
+        binding_digest: str,
+        request: ExecutionRequest,
+    ) -> "ExecutionHandle | None":
+        if re.fullmatch(r"[0-9a-f]{64}", binding_digest) is None:
+            raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+        binding = self._binding(binding_digest)
+        scope = "execution.run"
+        idempotency_key_digest = compute_idempotency_key_digest(request.idempotency_key)
+        request_digest = _request_digest(
+            request,
+            binding_digest,
+            session_id=None,
+            source_execution_id=None,
+            base_execution_id=None,
+            parent_execution_id=None,
+            root_execution_id=None,
+            lineage_kind=ExecutionLineageKind.RUN,
+        )
+        existing = await self._state.idempotency.get(
+            scope,
+            idempotency_key_digest,
+            tenant_id=request.principal.tenant_id,
+        )
+        if existing is None:
+            return None
+        if existing.request_digest != request_digest:
+            raise AIError(ErrorCode.IDEMPOTENCY_CONFLICT)
+        if (
+            existing.runtime_domain is not RuntimeDomain.EXECUTION
+            or existing.scope != scope
+            or existing.idempotency_key_digest != idempotency_key_digest
+            or existing.resource_kind is not ResourceKind.EXECUTION
+            or existing.tenant_id != request.principal.tenant_id
+        ):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        if existing.status is IdempotencyStatus.START_UNKNOWN:
+            raise AIError(ErrorCode.EXECUTION_START_UNKNOWN)
+        header = await self._state.executions.get_header(
+            existing.resource_id,
+            tenant_id=request.principal.tenant_id,
+        )
+        if header is None:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        await self._authorization.authorize(
+            request.principal,
+            AuthorizationAction.EXECUTION_RUN,
+            header,
+        )
+        execution = await self._state.executions.get(
+            existing.resource_id,
+            tenant_id=request.principal.tenant_id,
+        )
+        if execution is None:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        if execution.status is ExecutionStatus.START_UNKNOWN:
+            raise AIError(ErrorCode.EXECUTION_START_UNKNOWN)
+        self._validate_replayed_execution(execution, binding, request)
+        return ExecutionHandle(execution.execution_id)
+
     async def run_for_session(
         self,
         agent_id: str,
