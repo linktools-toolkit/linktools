@@ -2,12 +2,17 @@
 # -*- coding: utf-8 -*-
 """Durable Task admission and recovery contracts."""
 
+from datetime import datetime, timezone
+
 import pytest
 from linktools.ai.migrate import provision_database
 from sqlalchemy.ext.asyncio import create_async_engine
 from linktools.ai.core import (
+    OperationKind,
+    OperationLedgerInput,
     OperationStatus,
     Principal,
+    ResourceKind,
     TaskStatus,
     canonical_sha256,
     principal_identity_payload,
@@ -58,6 +63,36 @@ def _expected_request_digest(request: TaskGraphRequest) -> str:
                 "max_concurrency": request.limits.max_concurrency,
             },
         }
+    )
+
+
+def _submit_result_digest(graph: TaskGraph) -> str:
+    status = TaskStatus.SUCCEEDED if not graph.nodes else TaskStatus.PENDING
+    return canonical_sha256({"graph_id": graph.graph_id, "status": status.value})
+
+
+def _legacy_operation(
+    admission: TaskGraphAdmission,
+    graph: TaskGraph,
+    status: OperationStatus,
+) -> OperationLedgerInput:
+    now = datetime.now(timezone.utc)
+    terminal = status is OperationStatus.SUCCEEDED
+    return OperationLedgerInput(
+        admission.operation_id,
+        "tenant",
+        ResourceKind.TASK_GRAPH,
+        graph.graph_id,
+        None,
+        OperationKind.TASK_NODE,
+        status,
+        admission.request_digest,
+        graph.graph_id if terminal else None,
+        _submit_result_digest(graph) if terminal else None,
+        None,
+        True,
+        now,
+        now,
     )
 
 
@@ -125,6 +160,131 @@ async def test_memory_admission_is_atomic_replay_safe_and_recoverable() -> None:
                 changed.graph,
             )
         assert raised.value.code is ErrorCode.IDEMPOTENCY_CONFLICT
+    finally:
+        await state.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "legacy_status",
+    (OperationStatus.PENDING, OperationStatus.RUNNING, OperationStatus.EFFECT_UNKNOWN),
+)
+async def test_legacy_operation_without_graph_is_completed_by_exact_replay(
+    legacy_status: OperationStatus,
+) -> None:
+    state = RuntimeState.in_memory()
+    await state.initialize(namespace="task-test", tenant_id="tenant")
+    try:
+        request = _request(f"legacy-operation-{legacy_status.value.lower()}")
+        admission = TaskGraphAdmission.from_request(request)
+        await state.task.operations.append(
+            _legacy_operation(admission, request.graph, legacy_status)
+        )
+
+        view = await state.task.admissions.admit(admission, request.graph)
+        operation = await state.task.operations.get(
+            admission.operation_id,
+            tenant_id="tenant",
+        )
+        nodes = await state.task.tasks.list_nodes(
+            request.graph.graph_id,
+            tenant_id="tenant",
+        )
+        page = await state.task.admissions.list_recoverable_page(
+            cursor=None,
+            limit=128,
+        )
+
+        assert view.status is TaskStatus.PENDING
+        assert operation is not None
+        assert operation.status is OperationStatus.SUCCEEDED
+        assert operation.result_ref == request.graph.graph_id
+        assert operation.result_digest == _submit_result_digest(request.graph)
+        assert tuple(node.node_id for node in nodes) == ("root",)
+        assert page.items == (admission.bind(request.graph),)
+    finally:
+        await state.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "legacy_status",
+    (
+        OperationStatus.PENDING,
+        OperationStatus.RUNNING,
+        OperationStatus.EFFECT_UNKNOWN,
+        OperationStatus.SUCCEEDED,
+    ),
+)
+async def test_legacy_graph_without_admission_is_upgraded_by_exact_replay(
+    legacy_status: OperationStatus,
+) -> None:
+    state = RuntimeState.in_memory()
+    await state.initialize(namespace="task-test", tenant_id="tenant")
+    try:
+        request = _request(f"legacy-graph-{legacy_status.value.lower()}")
+        admission = TaskGraphAdmission.from_request(request)
+        await state.task.tasks.create_graph(request.graph, tenant_id="tenant")
+        await state.task.operations.append(
+            _legacy_operation(admission, request.graph, legacy_status)
+        )
+
+        view = await state.task.admissions.admit(admission, request.graph)
+        operation = await state.task.operations.get(
+            admission.operation_id,
+            tenant_id="tenant",
+        )
+        page = await state.task.admissions.list_recoverable_page(
+            cursor=None,
+            limit=128,
+        )
+
+        assert view.status is TaskStatus.PENDING
+        assert operation is not None
+        assert operation.status is OperationStatus.SUCCEEDED
+        assert operation.result_ref == request.graph.graph_id
+        assert operation.result_digest == _submit_result_digest(request.graph)
+        assert page.items == (admission.bind(request.graph),)
+    finally:
+        await state.close()
+
+
+@pytest.mark.asyncio
+async def test_succeeded_legacy_operation_without_graph_is_integrity_error() -> None:
+    state = RuntimeState.in_memory()
+    await state.initialize(namespace="task-test", tenant_id="tenant")
+    try:
+        request = _request("legacy-succeeded-without-graph")
+        admission = TaskGraphAdmission.from_request(request)
+        await state.task.operations.append(
+            _legacy_operation(admission, request.graph, OperationStatus.SUCCEEDED)
+        )
+
+        with pytest.raises(AIError) as raised:
+            await state.task.admissions.admit(admission, request.graph)
+        assert raised.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
+    finally:
+        await state.close()
+
+
+@pytest.mark.asyncio
+async def test_existing_admitted_graph_rejects_different_operation_as_storage_conflict() -> None:
+    state = RuntimeState.in_memory()
+    await state.initialize(namespace="task-test", tenant_id="tenant")
+    try:
+        first = _request("occupied", idempotency_key="submit:occupied:first")
+        second = _request("occupied", idempotency_key="submit:occupied:second")
+        await state.task.admissions.admit(
+            TaskGraphAdmission.from_request(first),
+            first.graph,
+        )
+
+        with pytest.raises(AIError) as raised:
+            await state.task.admissions.admit(
+                TaskGraphAdmission.from_request(second),
+                second.graph,
+            )
+        assert raised.value.code is ErrorCode.STORAGE_CONFLICT
     finally:
         await state.close()
 
