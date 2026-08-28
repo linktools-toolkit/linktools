@@ -25,6 +25,7 @@ from ...storage import (
     create_sql_storage_context,
     namespace_digest,
 )
+from ._approval_repository import ApprovalAdmissionRepositoryImpl
 from ._contracts import (
     ArtifactState,
     ConversationState,
@@ -278,6 +279,11 @@ async def materialize_runtime_state(
             domain: build_repository_bundle(stores[domain], namespace=namespace, tenant_id=tenant_id, domain=domain)
             for domain in RuntimeDomain
         }
+        bundles[RuntimeDomain.RECOVERY]["approvals"] = ApprovalAdmissionRepositoryImpl(
+            stores[RuntimeDomain.RECOVERY],
+            namespace=namespace,
+            tenant_id=tenant_id,
+        )
         components = tuple(
             value
             for bundle in bundles.values()
