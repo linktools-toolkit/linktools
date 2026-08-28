@@ -63,6 +63,7 @@ class RuntimeTaskNodeRunner:
         self._catalog = catalog
         self._compiler = compiler
         self._detached_tasks: set[asyncio.Task[object]] = set()
+        self._background_failures: dict[tuple[str, str, str], AIError] = {}
         self._active_execution_ids: dict[tuple[str, str, str], str] = {}
         self._active_launch_tasks: dict[
             tuple[str, str, str], asyncio.Task[ExecutionHandle]
@@ -71,6 +72,13 @@ class RuntimeTaskNodeRunner:
     @property
     def pending_background_tasks(self) -> tuple[asyncio.Task[object], ...]:
         return tuple(task for task in self._detached_tasks if not task.done())
+
+    @property
+    def background_failure(self) -> "AIError | None":
+        if not self._background_failures:
+            return None
+        failure = next(iter(self._background_failures.values()))
+        return AIError(failure.code, safe_details=dict(failure.safe_details))
 
     async def prepare(
         self,
@@ -237,12 +245,18 @@ class RuntimeTaskNodeRunner:
             handle = await asyncio.shield(launch_task)
         except asyncio.CancelledError:
             continuation = asyncio.create_task(
-                self._observe_after_launch(launch_task, key, graph_id, node.node_id),
-                name=f"task-execution-launch-handoff-{graph_id}-{node.node_id}",
+                self._cancel_after_launch(
+                    launch_task,
+                    key,
+                    principal,
+                    graph_id,
+                    node.node_id,
+                ),
+                name=f"task-execution-launch-cleanup-{graph_id}-{node.node_id}",
             )
             self._detach(
                 cast("asyncio.Task[object]", continuation),
-                "task execution launch handoff",
+                f"task execution launch cleanup graph={graph_id} task={node.node_id}",
             )
             raise
         except BaseException:
@@ -263,13 +277,27 @@ class RuntimeTaskNodeRunner:
                 wait_task.cancel()
                 self._detach(
                     cast("asyncio.Task[object]", wait_task),
-                    "task execution wait handoff",
+                    f"task execution wait cleanup graph={graph_id} task={node.node_id}",
                 )
             else:
                 self._consume_done(
                     cast("asyncio.Task[object]", wait_task),
-                    "task execution wait handoff",
+                    f"task execution wait cleanup graph={graph_id} task={node.node_id}",
                 )
+            cleanup = asyncio.create_task(
+                self._cancel_active_execution(
+                    key,
+                    handle.execution_id,
+                    principal,
+                    graph_id,
+                    node.node_id,
+                ),
+                name=f"task-execution-cancel-{graph_id}-{node.node_id}",
+            )
+            self._detach(
+                cast("asyncio.Task[object]", cleanup),
+                f"task execution cancellation graph={graph_id} task={node.node_id}",
+            )
             raise
         try:
             return await self.result(handle.execution_id, principal=principal)
@@ -320,34 +348,51 @@ class RuntimeTaskNodeRunner:
             except asyncio.CancelledError:
                 raise
             except AIError as error:
-                if error.code is ErrorCode.EXECUTION_START_UNKNOWN:
-                    raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED) from error
+                if error.code in {
+                    ErrorCode.EXECUTION_START_UNKNOWN,
+                    ErrorCode.STORAGE_RECOVERY_REQUIRED,
+                }:
+                    failure = self._record_background_failure(
+                        key,
+                        error,
+                        phase="task_execution_resolve_cancel",
+                    )
+                    raise failure from error
                 raise
             except BaseException as error:  # noqa: BLE001
-                raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED) from error
+                failure = self._record_background_failure(
+                    key,
+                    error,
+                    phase="task_execution_resolve_cancel",
+                )
+                raise failure from error
             if handle is None:
                 self._active_execution_ids.pop(key, None)
+                self._background_failures.pop(key, None)
                 return
             if not handle.execution_id:
-                raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
+                failure = self._record_background_failure(
+                    key,
+                    AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED),
+                    phase="task_execution_resolve_cancel",
+                )
+                raise failure
             execution_id = handle.execution_id
             self._active_execution_ids[key] = execution_id
 
-        try:
-            await _cancel_execution(
-                self._execution,
-                execution_id,
-                principal,
-                graph_id,
-                node.node_id,
-            )
-        finally:
-            self._active_execution_ids.pop(key, None)
+        await self._cancel_active_execution(
+            key,
+            execution_id,
+            principal,
+            graph_id,
+            node.node_id,
+        )
 
-    async def _observe_after_launch(
+    async def _cancel_after_launch(
         self,
         launch_task: "asyncio.Task[ExecutionHandle]",
         key: tuple[str, str, str],
+        principal: Principal,
         graph_id: str,
         node_id: str,
     ) -> None:
@@ -355,25 +400,97 @@ class RuntimeTaskNodeRunner:
             handle = await launch_task
         except asyncio.CancelledError:
             return
-        except BaseException as error:  # noqa: BLE001
+        except AIError as error:
+            if error.code in {
+                ErrorCode.EXECUTION_START_UNKNOWN,
+                ErrorCode.STORAGE_RECOVERY_REQUIRED,
+            }:
+                failure = self._record_background_failure(
+                    key,
+                    error,
+                    phase="task_execution_launch_cleanup",
+                )
+                raise failure from error
             _logger.warning(
-                "task execution launch failed during ownership handoff: graph=%s task=%s error=%s",
+                "task execution launch failed during cancellation: "
+                "graph=%s task=%s error=%s",
                 graph_id,
                 node_id,
                 type(error).__name__,
             )
             return
+        except BaseException as error:  # noqa: BLE001
+            failure = self._record_background_failure(
+                key,
+                error,
+                phase="task_execution_launch_cleanup",
+            )
+            raise failure from error
         finally:
             if self._active_launch_tasks.get(key) is launch_task:
                 self._active_launch_tasks.pop(key, None)
         if not handle.execution_id:
-            _logger.error(
-                "task execution launch returned invalid handle during ownership handoff: graph=%s task=%s",
+            failure = self._record_background_failure(
+                key,
+                AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED),
+                phase="task_execution_launch_cleanup",
+            )
+            raise failure
+        self._active_execution_ids[key] = handle.execution_id
+        await self._cancel_active_execution(
+            key,
+            handle.execution_id,
+            principal,
+            graph_id,
+            node_id,
+        )
+
+    async def _cancel_active_execution(
+        self,
+        key: tuple[str, str, str],
+        execution_id: str,
+        principal: Principal,
+        graph_id: str,
+        node_id: str,
+    ) -> None:
+        try:
+            await _cancel_execution(
+                self._execution,
+                execution_id,
+                principal,
                 graph_id,
                 node_id,
             )
-            return
-        self._active_execution_ids[key] = handle.execution_id
+        except asyncio.CancelledError:
+            raise
+        except BaseException as error:  # noqa: BLE001
+            failure = self._record_background_failure(
+                key,
+                error,
+                phase="task_execution_cancel_cleanup",
+            )
+            raise failure from error
+        self._background_failures.pop(key, None)
+        if self._active_execution_ids.get(key) == execution_id:
+            self._active_execution_ids.pop(key, None)
+
+    def _record_background_failure(
+        self,
+        key: tuple[str, str, str],
+        error: BaseException,
+        *,
+        phase: str,
+    ) -> AIError:
+        details = dict(error.safe_details) if isinstance(error, AIError) else {}
+        details.setdefault("phase", phase)
+        details.setdefault("graph_id", key[1])
+        details.setdefault("node_id", key[2])
+        failure = AIError(
+            ErrorCode.STORAGE_RECOVERY_REQUIRED,
+            safe_details=details,
+        )
+        self._background_failures[key] = failure
+        return failure
 
     def _detach(
         self,

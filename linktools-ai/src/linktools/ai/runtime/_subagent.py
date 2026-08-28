@@ -30,10 +30,18 @@ class SubagentDispatcher:
         self._compiler = compiler
         self._execution = execution
         self._detached_tasks: set[asyncio.Task[object]] = set()
+        self._background_failures: dict[str, AIError] = {}
 
     @property
     def pending_background_tasks(self) -> tuple[asyncio.Task[object], ...]:
         return tuple(task for task in self._detached_tasks if not task.done())
+
+    @property
+    def background_failure(self) -> "AIError | None":
+        if not self._background_failures:
+            return None
+        failure = next(iter(self._background_failures.values()))
+        return AIError(failure.code, safe_details=dict(failure.safe_details))
 
     def descriptions_for(
         self,
@@ -188,6 +196,7 @@ class SubagentDispatcher:
                 )
                 raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED) from primary
             raise
+        self._background_failures.pop(child.execution_id, None)
         return _subagent_result(result)
 
     async def cancel_children(
@@ -205,6 +214,7 @@ class SubagentDispatcher:
                 ExecutionStatus.FAILED,
                 ExecutionStatus.CANCELLED,
             }:
+                self._background_failures.pop(child.execution_id, None)
                 continue
             await self.cancel_child(
                 child.execution_id,
@@ -228,6 +238,7 @@ class SubagentDispatcher:
             ExecutionStatus.FAILED,
             ExecutionStatus.CANCELLED,
         }:
+            self._background_failures.pop(execution_id, None)
             return
         request = CancelExecutionRequest(
             principal=principal,
@@ -282,12 +293,25 @@ class SubagentDispatcher:
         principal: Principal,
     ) -> None:
         try:
-            result = await self._execution.cancel(execution_id, request)
-        except AIError:
-            raise
-        except BaseException as error:  # noqa: BLE001
-            raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED) from error
-        if not result.cancelled:
+            try:
+                result = await self._execution.cancel(execution_id, request)
+            except asyncio.CancelledError:
+                raise
+            except AIError:
+                raise
+            except BaseException as error:  # noqa: BLE001
+                raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED) from error
+            if not result.cancelled:
+                current = await self._execution.inspect(
+                    execution_id,
+                    principal=principal,
+                )
+                if current.status not in {
+                    ExecutionStatus.SUCCEEDED,
+                    ExecutionStatus.FAILED,
+                    ExecutionStatus.CANCELLED,
+                }:
+                    raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
             current = await self._execution.inspect(
                 execution_id,
                 principal=principal,
@@ -298,16 +322,33 @@ class SubagentDispatcher:
                 ExecutionStatus.CANCELLED,
             }:
                 raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
-        current = await self._execution.inspect(
-            execution_id,
-            principal=principal,
+        except asyncio.CancelledError:
+            raise
+        except BaseException as error:  # noqa: BLE001
+            failure = self._record_background_failure(
+                execution_id,
+                error,
+                phase="subagent_cancel_cleanup",
+            )
+            raise failure from error
+        self._background_failures.pop(execution_id, None)
+
+    def _record_background_failure(
+        self,
+        execution_id: str,
+        error: BaseException,
+        *,
+        phase: str,
+    ) -> AIError:
+        details = dict(error.safe_details) if isinstance(error, AIError) else {}
+        details.setdefault("phase", phase)
+        details.setdefault("execution_id", execution_id)
+        failure = AIError(
+            ErrorCode.STORAGE_RECOVERY_REQUIRED,
+            safe_details=details,
         )
-        if current.status not in {
-            ExecutionStatus.SUCCEEDED,
-            ExecutionStatus.FAILED,
-            ExecutionStatus.CANCELLED,
-        }:
-            raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
+        self._background_failures[execution_id] = failure
+        return failure
 
     def _detach(
         self,

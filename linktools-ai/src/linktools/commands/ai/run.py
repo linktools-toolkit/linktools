@@ -19,7 +19,7 @@ from ...ai.core import ExecutionDeltaType, ExecutionEventType, ExecutionStatus
 from ...ai.errors import AIError
 from ...ai.migrate import provision_runtime_database
 from ...ai.model import ModelRegistry
-from ...ai.runtime import ExecutionResult, Runtime, RuntimeState
+from ...ai.runtime import Execution, ExecutionResult, Runtime, RuntimeState
 from ...ai.workspace import Workspace
 
 if TYPE_CHECKING:
@@ -132,13 +132,18 @@ async def _emit_result(
 ) -> int:
     agent = runtime.agent()
     if as_json:
-        result = await agent.run(
+        execution = await agent.start(
             prompt,
             session_id=session_id,
             memory_scope=memory_scope,
             planning=planning,
             thinking=thinking,
         )
+        try:
+            result = await execution.wait()
+        except asyncio.CancelledError:
+            await _cancel_interrupted_execution(execution)
+            raise
         payload = _result_payload(result)
         print(json.dumps(payload, ensure_ascii=False, sort_keys=True))
         if result.status is not ExecutionStatus.SUCCEEDED:
@@ -162,30 +167,34 @@ async def _emit_result(
     terminal_status = "UNKNOWN"
     terminal_error_code: object = None
     terminal_safe_details: object = {}
-    async for event in execution.stream():
-        execution_id = event.execution_id
-        if event.event_type is ExecutionDeltaType.ASSISTANT_TEXT_DELTA:
-            text = event.payload.get("text") if isinstance(event.payload, dict) else None
-            if isinstance(text, str):
-                sys.stdout.write(text)
-                sys.stdout.flush()
-        elif event.event_type is ExecutionDeltaType.ASSISTANT_THINKING_DELTA:
-            _write_stderr("[thinking] " + _payload_text(event.payload))
-        elif event.event_type is ExecutionEventType.TOOL_CALL_STARTED:
-            _write_stderr("[tool] " + _payload_text(event.payload))
-        elif event.event_type is ExecutionEventType.TOOL_CALL_FINISHED:
-            _write_stderr("[tool] finished " + _payload_text(event.payload))
-        elif event.event_type is ExecutionEventType.EXECUTION_SUCCEEDED:
-            succeeded = True
-            terminal_status = ExecutionStatus.SUCCEEDED.value
-        elif event.event_type in {
-            ExecutionEventType.EXECUTION_FAILED,
-            ExecutionEventType.EXECUTION_CANCELLED,
-        }:
-            terminal_status = event.event_type.value.removeprefix("EXECUTION_")
-            if isinstance(event.payload, dict):
-                terminal_error_code = event.payload.get("error_code")
-                terminal_safe_details = event.payload.get("safe_error_details", {})
+    try:
+        async for event in execution.stream():
+            execution_id = event.execution_id
+            if event.event_type is ExecutionDeltaType.ASSISTANT_TEXT_DELTA:
+                text = event.payload.get("text") if isinstance(event.payload, dict) else None
+                if isinstance(text, str):
+                    sys.stdout.write(text)
+                    sys.stdout.flush()
+            elif event.event_type is ExecutionDeltaType.ASSISTANT_THINKING_DELTA:
+                _write_stderr("[thinking] " + _payload_text(event.payload))
+            elif event.event_type is ExecutionEventType.TOOL_CALL_STARTED:
+                _write_stderr("[tool] " + _payload_text(event.payload))
+            elif event.event_type is ExecutionEventType.TOOL_CALL_FINISHED:
+                _write_stderr("[tool] finished " + _payload_text(event.payload))
+            elif event.event_type is ExecutionEventType.EXECUTION_SUCCEEDED:
+                succeeded = True
+                terminal_status = ExecutionStatus.SUCCEEDED.value
+            elif event.event_type in {
+                ExecutionEventType.EXECUTION_FAILED,
+                ExecutionEventType.EXECUTION_CANCELLED,
+            }:
+                terminal_status = event.event_type.value.removeprefix("EXECUTION_")
+                if isinstance(event.payload, dict):
+                    terminal_error_code = event.payload.get("error_code")
+                    terminal_safe_details = event.payload.get("safe_error_details", {})
+    except asyncio.CancelledError:
+        await _cancel_interrupted_execution(execution)
+        raise
     sys.stdout.write("\n")
     sys.stdout.flush()
     if not succeeded:
@@ -195,6 +204,18 @@ async def _emit_result(
             f"error_code={terminal_error_code} safe_error_details={terminal_safe_details}"
         )
     return 0
+
+
+async def _cancel_interrupted_execution(execution: "Execution[object]") -> None:
+    result = await execution.cancel(
+        idempotency_key=f"ai-run-interrupt:{execution.execution_id}",
+    )
+    if not result.cancelled:
+        _logger.warning(
+            "ai run cancellation effect not yet confirmed: execution=%s",
+            execution.execution_id,
+        )
+    await execution.wait()
 
 
 def _result_payload(result: ExecutionResult) -> dict[str, object]:
