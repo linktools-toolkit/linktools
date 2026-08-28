@@ -54,6 +54,9 @@ from ..capability import (
     RunContext,
     SKILL_TOOL_NAMES,
     SkillCapability,
+    SkillSourceRegistry,
+    SubagentCapability,
+    SubagentDelegate,
     materialize_mcp_servers,
     mcp_selector_server,
     mcp_server_selector,
@@ -78,7 +81,6 @@ from ._capabilities import (
     MEMORY_TOOL_NAMES,
     PLANNING_TOOL_NAMES,
     SUBAGENT_TOOL_NAMES,
-    SubagentDelegate,
     ToolOperationBridge,
     _tool_effect_policy,
     compose_platform_capabilities,
@@ -88,6 +90,8 @@ from ._capabilities import (
     tool_name_allowed,
 )
 from ._input import _RuntimeUserPrompt, _restore_user_prompt
+from ._skill_adapter import _PydanticSkillCapability
+from ._subagent_adapter import _PydanticSubagentCapability
 
 _logger = environ.get_logger("ai.runtime.agent_executor")
 _RUNTIME_RESERVED_TOOL_NAMES = frozenset(
@@ -143,6 +147,7 @@ class _RunScope:
     thinking: ThinkingValue = False
     parent_step_run_id: str | None = None
     subagent_available: bool = False
+    subagent_descriptions: Mapping[str, str | None] = field(default_factory=dict)
     subagent_delegate: SubagentDelegate | None = None
     event_sink: EventSink | None = None
     usage_sink: UsageSink | None = None
@@ -165,7 +170,10 @@ class _RunScope:
 class AgentExecutor:
     """Execute one exact Agent binding inside a Runtime-owned execution scope."""
 
-    def __init__(self) -> None:
+    def __init__(self, skill_sources: SkillSourceRegistry) -> None:
+        if not isinstance(skill_sources, SkillSourceRegistry):
+            raise TypeError("skill_sources must be SkillSourceRegistry")
+        self._skill_sources = skill_sources
         self._detached_tasks: set[asyncio.Task[Any]] = set()
 
     @property
@@ -260,6 +268,7 @@ class AgentExecutor:
         agent, capabilities, runtime_tool_names, trusted_tool_classes, trusted_mcp_selectors = await _materialize_agent(
             scope,
             model=model,
+            skill_sources=self._skill_sources,
         )
         presentation = _ToolPresentation(
             definition.ordinary_tool_policy,
@@ -329,6 +338,7 @@ async def _materialize_agent(
     scope: _RunScope,
     *,
     model: Model,
+    skill_sources: SkillSourceRegistry,
 ) -> tuple[
     PydanticAgent[RunContext[object], object],
     tuple[AbstractCapability[RunContext[object]], ...],
@@ -355,7 +365,7 @@ async def _materialize_agent(
         ordinary_tool_policy=definition.ordinary_tool_policy,
         memory_scope=scope.memory_scope,
         planning=scope.planning,
-        subagent_available=scope.subagent_available and bool(definition.selected_subagents),
+        subagent_available=scope.subagent_available and bool(scope.binding.snapshot.subagents),
     )
     for name in runtime_tool_names:
         if name in MEMORY_TOOL_NAMES:
@@ -364,7 +374,7 @@ async def _materialize_agent(
             trusted[name] = "control"
         else:
             raise AIError(ErrorCode.CAPABILITY_POLICY_CONFLICT)
-    if definition.skill_specs:
+    if definition.skill_definitions:
         for name in SKILL_TOOL_NAMES:
             trusted[name] = "control"
     trusted_tool_classes = tuple(sorted(trusted.items()))
@@ -378,8 +388,24 @@ async def _materialize_agent(
         if not isinstance(candidate.value, AbstractCapability):
             raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
         capabilities.append(cast("AbstractCapability[RunContext[object]]", candidate.value))
-    if definition.skill_specs:
-        capabilities.append(SkillCapability(definition.skill_specs))
+    if definition.skill_definitions:
+        capabilities.append(
+            _PydanticSkillCapability(
+                SkillCapability(definition.skill_definitions, skill_sources)
+            )
+        )
+    if any(name in SUBAGENT_TOOL_NAMES for name in runtime_tool_names):
+        if scope.subagent_delegate is None:
+            raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+        capabilities.append(
+            _PydanticSubagentCapability(
+                SubagentCapability(
+                    scope.binding.snapshot.subagents,
+                    scope.subagent_delegate,
+                    scope.subagent_descriptions,
+                )
+            )
+        )
     if definition.mcp_servers:
         capabilities.extend(
             cast(
@@ -412,7 +438,6 @@ async def _materialize_agent(
         trusted_mcp_selectors=trusted_mcp_selectors,
         context_target_tokens=scope.context_target_tokens,
         parent_step_run_id=scope.parent_step_run_id,
-        subagent_delegate=scope.subagent_delegate,
         tool_operations=scope.tool_operations,
         background_tasks=scope.background_tasks,
         plan_store_resolver=scope.plan_store_resolver,

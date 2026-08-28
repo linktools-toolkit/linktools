@@ -24,7 +24,8 @@ from linktools.ai.core import (
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.model import ModelRegistry
 from linktools.ai.runtime import ExecutionRequest
-from linktools.ai.runtime._capabilities import _SubagentCapability
+from linktools.ai.capability import SubagentCapability
+from linktools.ai.runtime._subagent_adapter import _PydanticSubagentCapability
 from linktools.ai.runtime._tool import ToolOperationRecord
 from linktools.ai.runtime.state import RuntimeStatePlan
 from linktools.ai.runtime.state._codec import decode_domain, encode_domain
@@ -35,7 +36,7 @@ from linktools.ai.runtime.state._contracts import (
     RecoveryHandoffPhase,
     RecoveryIdempotencyInput,
 )
-from linktools.ai.spec import AgentSpec
+from linktools.ai.spec import AgentSpec, SubagentRef
 from linktools.ai.storage import StoredPayload
 from linktools.ai.task import TaskGraph, TaskLease, TaskNode
 from linktools.ai.workspace import trusted_workspace_principal
@@ -268,14 +269,22 @@ def test_domain_codec_preserves_mapping_payloads_in_nullable_json_values() -> No
 
 
 def test_subagent_tool_schema_accepts_json_payload() -> None:
-    async def delegate(**_kwargs: str) -> dict[str, object]:
+    async def delegate(
+        _ref: SubagentRef,
+        _task: str,
+        *,
+        invocation_id: str,
+    ) -> dict[str, JsonValue]:
+        assert invocation_id
         return {
             "execution_id": "child",
             "status": "SUCCEEDED",
             "output": {"value": True},
         }
 
-    capability = _SubagentCapability(delegate)  # type: ignore[arg-type]
+    capability = _PydanticSubagentCapability(
+        SubagentCapability((SubagentRef("agent", "child"),), delegate)
+    )
     assert capability.get_toolset() is not None
 
 

@@ -6,12 +6,11 @@ import asyncio
 from typing import cast
 
 from linktools.core import environ
-from pydantic_ai.exceptions import ModelRetry
-
 from ..agent import AgentCatalog, AgentCompiler
-from ..core import ExecutionMode, ExecutionStatus, JsonValue, Principal, ThinkingValue, canonical_sha256
+from ..core import ExecutionMode, ExecutionStatus, JsonValue, Principal, canonical_sha256
 from ..errors import AIError, ErrorCode
-from ._capabilities import SubagentDelegate
+from ..capability import SubagentDelegate
+from ..spec import SubagentRef
 from ._execution import DefaultExecutionService
 from .service_api import CancelExecutionRequest, ExecutionRequest, ExecutionResult
 
@@ -36,6 +35,16 @@ class SubagentDispatcher:
     def pending_background_tasks(self) -> tuple[asyncio.Task[object], ...]:
         return tuple(task for task in self._detached_tasks if not task.done())
 
+    def descriptions_for(
+        self,
+        refs: "tuple[SubagentRef, ...]",
+    ) -> "dict[str, str | None]":
+        descriptions: dict[str, str | None] = {}
+        for ref in refs:
+            if ref.description is not None:
+                descriptions[ref.id] = ref.description
+        return descriptions
+
     def delegate_for(
         self,
         *,
@@ -43,33 +52,31 @@ class SubagentDispatcher:
         root_execution_id: str,
         memory_scope: "str | None",
         principal: Principal,
-        allowed_agent_ids: "tuple[str, ...]",
+        refs: "tuple[SubagentRef, ...]",
         mode: ExecutionMode,
-        planning: bool,
-        thinking: ThinkingValue,
     ) -> SubagentDelegate:
-        allowed = frozenset(allowed_agent_ids)
-        if len(allowed) != len(allowed_agent_ids):
+        allowed = {ref.id: ref for ref in refs}
+        if len(allowed) != len(refs):
             raise AIError(ErrorCode.CAPABILITY_CONFLICT)
 
         async def dispatch(
-            agent_id: str,
-            user_prompt: str,
+            ref: SubagentRef,
+            task: str,
             *,
-            tool_call_id: str,
+            invocation_id: str,
         ) -> "dict[str, JsonValue]":
+            expected = allowed.get(ref.id)
+            if expected is None or expected != ref:
+                raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
             return await self.dispatch(
                 parent_execution_id=parent_execution_id,
                 root_execution_id=root_execution_id,
                 memory_scope=memory_scope,
                 principal=principal,
-                allowed_agent_ids=allowed,
+                ref=ref,
                 mode=mode,
-                planning=planning,
-                thinking=thinking,
-                agent_id=agent_id,
-                user_prompt=user_prompt,
-                tool_call_id=tool_call_id,
+                user_prompt=task,
+                invocation_id=invocation_id,
             )
 
         return dispatch
@@ -81,56 +88,71 @@ class SubagentDispatcher:
         root_execution_id: str,
         memory_scope: "str | None",
         principal: Principal,
-        allowed_agent_ids: "frozenset[str]",
+        ref: SubagentRef,
         mode: ExecutionMode,
-        planning: bool,
-        thinking: ThinkingValue,
-        agent_id: str,
         user_prompt: str,
-        tool_call_id: str,
+        invocation_id: str,
     ) -> "dict[str, JsonValue]":
-        if not isinstance(tool_call_id, str) or not tool_call_id.strip():
+        if not isinstance(ref, SubagentRef):
+            raise TypeError("ref must be SubagentRef")
+        if not isinstance(invocation_id, str) or not invocation_id.strip():
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
-        if agent_id not in allowed_agent_ids:
-            raise ModelRetry("requested subagent Agent is unavailable")
-        try:
-            definition = self._catalog.root_definition(agent_id)
-        except AIError as error:
-            if error.code is ErrorCode.AGENT_DEFINITION_UNAVAILABLE:
-                raise ModelRetry(
-                    "requested subagent Agent is unavailable"
-                ) from error
-            raise
-        binding = self._catalog.register_binding(
-            self._compiler.bind(definition)
-        )
+        child_mode: ExecutionMode = "plan" if mode == "plan" else "run"
         idempotency_key = "subagent:" + canonical_sha256(
             {
                 "version": 1,
                 "parent_execution_id": parent_execution_id,
-                "tool_call_id": tool_call_id,
-                "agent_id": agent_id,
-                "mode": mode,
-                "planning": planning,
-                "thinking": thinking,
+                "invocation_id": invocation_id,
             }
         )
-        request = ExecutionRequest(
+        child = await self._execution.replay_subagent(
+            agent_id=ref.id,
             user_prompt=user_prompt,
-            user_prompt_codec="text",
             principal=principal,
             idempotency_key=idempotency_key,
             memory_scope=memory_scope,
-            mode=mode,
-            planning=planning,
-            thinking=thinking,
-        )
-        child = await self._execution.start_subagent(
-            binding.digest,
-            request,
+            mode=child_mode,
             parent_execution_id=parent_execution_id,
             root_execution_id=root_execution_id,
         )
+        if child is None:
+            definition = self._catalog.root_definition(ref.id)
+            binding = self._catalog.register_binding(
+                self._compiler.bind_subagent(definition)
+            )
+            child_planning = True if child_mode == "plan" else definition.spec.planning
+            request = ExecutionRequest(
+                user_prompt=user_prompt,
+                user_prompt_codec="text",
+                principal=principal,
+                idempotency_key=idempotency_key,
+                memory_scope=memory_scope,
+                mode=child_mode,
+                planning=child_planning,
+                thinking=definition.spec.thinking,
+            )
+            try:
+                child = await self._execution.start_subagent(
+                    binding.digest,
+                    request,
+                    parent_execution_id=parent_execution_id,
+                    root_execution_id=root_execution_id,
+                )
+            except AIError as error:
+                if error.code is not ErrorCode.IDEMPOTENCY_CONFLICT:
+                    raise
+                child = await self._execution.replay_subagent(
+                    agent_id=ref.id,
+                    user_prompt=user_prompt,
+                    principal=principal,
+                    idempotency_key=idempotency_key,
+                    memory_scope=memory_scope,
+                    mode=child_mode,
+                    parent_execution_id=parent_execution_id,
+                    root_execution_id=root_execution_id,
+                )
+                if child is None:
+                    raise
         try:
             result = await self._execution.wait(
                 child.execution_id,

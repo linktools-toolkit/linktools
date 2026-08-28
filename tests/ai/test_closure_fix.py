@@ -167,6 +167,7 @@ async def test_tool_operation_admission_uses_runtime_step_and_binding_digest() -
         ("list_skills", "linktools-skill", "control", True, True),
         ("write_plan", "linktools-planning", "control", True, False),
         ("delegate_task", "linktools-subagent", "control", True, False),
+        ("list_subagents", "linktools-subagent", "control", True, True),
     ],
 )
 async def test_trusted_tool_effect_policy_matrix(

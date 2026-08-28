@@ -48,7 +48,7 @@
     "capability._context": ["core", "workspace"],
     "capability._group": ["core", "asset", "spec"],
     "capability._mcp": ["core", "spec"],
-    "capability._skill": ["spec"],
+    "capability._skill": ["core", "spec"],
     "capability._workspace": ["workspace"],
     "runtime._agent_executor": ["core", "capability", "agent"],
     "runtime._capabilities": ["core", "capability"],

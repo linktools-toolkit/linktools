@@ -11,7 +11,6 @@ from typing import Any, Protocol
 from linktools.core import environ
 from pydantic import ValidationError
 from pydantic_ai.capabilities import AbstractCapability, WrapToolExecuteHandler
-from pydantic_ai.capabilities import AgentCapability as PydanticAgentCapability
 from pydantic_ai.exceptions import (
     ApprovalRequired,
     CallDeferred,
@@ -24,7 +23,7 @@ from pydantic_ai.exceptions import (
 from pydantic_ai.messages import ModelResponse, RetryPromptPart, ToolCallPart, ToolReturnPart
 from pydantic_ai.models import Model, ModelRequestContext
 from pydantic_ai.tools import RunContext, ToolDefinition
-from pydantic_ai.toolsets import AbstractToolset, FunctionToolset
+from pydantic_ai.toolsets import AbstractToolset
 from pydantic_ai_harness.compaction import (
     ClearToolResults,
     DeduplicateFileReads,
@@ -37,6 +36,7 @@ from pydantic_ai_harness.step_persistence import StepEvent, StepPersistence, Ste
 
 from ..capability import (
     SKILL_TOOL_NAMES,
+    SUBAGENT_TOOL_NAMES,
     WORKSPACE_FILESYSTEM_READ_TOOL_NAMES,
     WORKSPACE_FILESYSTEM_TOOL_NAMES,
     WORKSPACE_SHELL_TOOL_NAMES,
@@ -49,7 +49,6 @@ _logger = environ.get_logger("ai.runtime.capabilities")
 MEMORY_TOOL_NAMES = ("delete_memory", "read_memory", "search_memory", "write_memory")
 MEMORY_READ_TOOL_NAMES = ("read_memory", "search_memory")
 PLANNING_TOOL_NAMES = ("write_plan",)
-SUBAGENT_TOOL_NAMES = ("delegate_task",)
 PLAN_SAFE_METADATA_KEY = "linktools.ai.plan_safe"
 _REPLAY_SAFE_METADATA_KEY = "linktools.ai.replay_safe"
 _MODEL_USAGE_INPUT_METADATA_KEY = "linktools.ai.model_usage.input_tokens"
@@ -664,16 +663,6 @@ class _RuntimeStepPersistence(StepPersistence[None]):
         return self._effective_run_id(ctx), call.tool_call_id
 
 
-class SubagentDelegate(Protocol):
-    async def __call__(
-        self,
-        agent_id: str,
-        user_prompt: str,
-        *,
-        tool_call_id: str,
-    ) -> "dict[str, JsonValue]": ...
-
-
 async def compose_platform_capabilities(
     *,
     agent_name: str,
@@ -690,15 +679,14 @@ async def compose_platform_capabilities(
     trusted_mcp_selectors: "tuple[str, ...]",
     context_target_tokens: "int | None",
     parent_step_run_id: "str | None",
-    subagent_delegate: "SubagentDelegate | None",
     tool_operations: "ToolOperationBridge | None",
     background_tasks: "set[asyncio.Task[object]]",
     plan_store_resolver: "Callable[[RunContext[None]], PlanStore] | None",
-) -> "tuple[PydanticAgentCapability[None], ...]":
+) -> "tuple[AbstractCapability[None], ...]":
     _validate_compaction_target(context_target_tokens)
     _validate_trusted_tool_classes(trusted_tool_classes)
     _validate_trusted_mcp_selectors(trusted_mcp_selectors)
-    capabilities: list[PydanticAgentCapability[None]] = []
+    capabilities: list[AbstractCapability[None]] = []
     capabilities.append(
         _RuntimeStepPersistence(
             store=step_store,
@@ -744,10 +732,6 @@ async def compose_platform_capabilities(
                 store_resolver=plan_store_resolver,
             )
         )
-    if "delegate_task" in selected:
-        if subagent_delegate is None:
-            raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
-        capabilities.append(_SubagentCapability(subagent_delegate))
     capabilities.append(
         _build_compaction(None)
         if context_target_tokens is None
@@ -807,29 +791,6 @@ class _CompactionCapability(AbstractCapability[None]):
         request_context: ModelRequestContext,
     ) -> ModelRequestContext:
         return await self._compaction.before_model_request(ctx, request_context)
-
-
-class _SubagentCapability(AbstractCapability[None]):
-    def __init__(self, delegate: SubagentDelegate) -> None:
-        self.id = _SUBAGENT_CAPABILITY_ID
-        self._delegate = delegate
-
-    def get_toolset(self) -> "FunctionToolset[None]":
-        toolset = FunctionToolset[None](id=_SUBAGENT_CAPABILITY_ID)
-
-        @toolset.tool
-        async def delegate_task(ctx: RunContext[None], agent_id: str, task: str) -> "dict[str, Any]":
-            values = (agent_id.strip(), task.strip())
-            if not all(values):
-                raise ModelRetry("agent_id and task are required")
-            if not ctx.tool_call_id:
-                raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
-            result = await self._delegate(values[0], values[1], tool_call_id=ctx.tool_call_id)
-            if not isinstance(result, dict):
-                raise AIError(ErrorCode.INTERNAL_ERROR)
-            return result
-
-        return toolset
 
 
 def _memory_guidance(selected_tools: "tuple[str, ...]") -> str:
@@ -971,8 +932,10 @@ def _tool_effect_policy(
         if tool_class == "control":
             if tool_def.name in SKILL_TOOL_NAMES:
                 return _ToolEffectPolicy(True, True)
-            if tool_def.name in PLANNING_TOOL_NAMES or tool_def.name in SUBAGENT_TOOL_NAMES:
+            if tool_def.name in PLANNING_TOOL_NAMES or tool_def.name == "delegate_task":
                 return _ToolEffectPolicy(True, False)
+            if tool_def.name == "list_subagents":
+                return _ToolEffectPolicy(True, True)
             raise AIError(ErrorCode.CAPABILITY_POLICY_CONFLICT)
         raise AIError(ErrorCode.CAPABILITY_POLICY_CONFLICT)
     metadata = (tool_def.metadata or {}).get(_REPLAY_SAFE_METADATA_KEY, False)
@@ -1088,7 +1051,6 @@ __all__ = [
     "WORKSPACE_FILESYSTEM_READ_TOOL_NAMES",
     "WORKSPACE_FILESYSTEM_TOOL_NAMES",
     "WORKSPACE_SHELL_TOOL_NAMES",
-    "SubagentDelegate",
     "ToolOperationBridge",
     "ToolOperationDecision",
     "compose_platform_capabilities",

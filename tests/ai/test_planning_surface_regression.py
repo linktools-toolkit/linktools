@@ -29,7 +29,6 @@ async def test_linktools_planning_registers_only_write_plan() -> None:
         trusted_mcp_selectors=(),
         context_target_tokens=None,
         parent_step_run_id=None,
-        subagent_delegate=None,
         tool_operations=None,
         background_tasks=set(),
         plan_store_resolver=lambda _ctx: None,  # type: ignore[return-value]

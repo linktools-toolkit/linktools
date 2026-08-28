@@ -3,22 +3,24 @@
 """Deterministic Agent selection, binding, and exact historical recovery."""
 
 from collections.abc import Mapping, Sequence
+from types import MappingProxyType
 from typing import Literal, cast
 
 from pydantic import BaseModel
 
 from ..capability import (
     CapabilityContribution,
+    SkillDefinition,
     capability_fingerprint,
     mcp_selector_server,
     mcp_server_namespace,
     mcp_server_selector,
 )
-from ..core import canonical_sha256
+from ..core import JsonValue, canonical_sha256
 from ..errors import AIError, ErrorCode
 from ..model import ModelBinding, ModelResolver
-from ..spec import AgentSpec, AgentSpecCodec, MCPServerSpecCodec, SkillSpecCodec
-from ._binding import AgentBinding, AgentBindingSnapshot, SemanticPin, SubagentRef
+from ..spec import AgentSpec, AgentSpecCodec, MCPServerSpecCodec, SubagentRef
+from ._binding import AgentBinding, AgentBindingSnapshot, SemanticPin
 from ._definition import AgentDefinition
 from ._output import bind_output, restore_output
 
@@ -31,19 +33,24 @@ class AgentCompiler:
         *,
         model_resolver: ModelResolver,
         candidates: Sequence[CapabilityContribution[object]],
-        agent_ids: Sequence[str],
+        agents: Mapping[str, AgentSpec],
     ) -> None:
         if model_resolver is None:
             raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
         ordered = tuple(sorted(candidates, key=lambda item: (item.kind, item.id)))
         if len({(item.kind, item.id) for item in ordered}) != len(ordered):
             raise AIError(ErrorCode.CAPABILITY_CONFLICT)
+        current_agents = dict(agents)
+        if not current_agents:
+            raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
+        for agent_id, specification in current_agents.items():
+            if not isinstance(agent_id, str) or not isinstance(specification, AgentSpec) or specification.id != agent_id:
+                raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
         self._models = model_resolver
         self._candidates = ordered
         self._by_identity = {(item.kind, item.id): item for item in ordered}
-        self._agent_ids = tuple(sorted(set(agent_ids)))
-        if not self._agent_ids:
-            raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
+        self._agents: Mapping[str, AgentSpec] = MappingProxyType(current_agents)
+        self._agent_ids = tuple(sorted(current_agents))
         self._mcp_by_namespace: dict[str, CapabilityContribution[object]] = {}
         for candidate in ordered:
             if candidate.kind != "mcp":
@@ -82,14 +89,50 @@ class AgentCompiler:
         *,
         output: "type[BaseModel] | None" = None,
     ) -> AgentBinding:
-        """Bind one current Definition to the exact durable output contract."""
+        """Bind one root Definition to the exact durable output and child targets."""
         if not isinstance(definition, AgentDefinition):
             raise TypeError("definition must be AgentDefinition")
+        subagents = tuple(
+            SubagentRef(
+                "agent",
+                agent_id,
+                self._agents[agent_id].description,
+            )
+            for agent_id in definition.selected_subagents
+        )
+        return self._bind(definition, output=output, subagents=subagents)
+
+    def bind_subagent(
+        self,
+        definition: AgentDefinition,
+        *,
+        output: "type[BaseModel] | None" = None,
+    ) -> AgentBinding:
+        """Bind one one-level child without materializing nested delegation targets."""
+        if not isinstance(definition, AgentDefinition):
+            raise TypeError("definition must be AgentDefinition")
+        return self._bind(definition, output=output, subagents=())
+
+    def _bind(
+        self,
+        definition: AgentDefinition,
+        *,
+        output: "type[BaseModel] | None",
+        subagents: Sequence[SubagentRef],
+    ) -> AgentBinding:
         output_binding = bind_output(output)
-        digest = _binding_digest(definition.digest, output_binding.fingerprint)
+        durable_subagents = tuple(subagents)
+        digest = _binding_digest(
+            definition.digest,
+            output_binding.fingerprint,
+            definition.selected_subagents,
+            durable_subagents,
+        )
         snapshot = AgentBindingSnapshot(
             version=1,
-            agent_spec=definition.spec,
+            agent_spec=AgentSpecCodec().from_payload(
+                AgentSpecCodec().to_payload(definition.spec)
+            ),
             model=dict(definition.model.semantic_payload),
             selected=tuple(
                 sorted(
@@ -97,7 +140,8 @@ class AgentCompiler:
                     key=lambda item: (item.kind, item.id),
                 )
             ),
-            subagents=tuple(SubagentRef("agent", agent_id) for agent_id in definition.selected_subagents),
+            selected_subagents=definition.selected_subagents,
+            subagents=durable_subagents,
             output_mode=output_binding.mode,
             output_schema=output_binding.schema_definition,
             binding_digest=digest,
@@ -122,16 +166,24 @@ class AgentCompiler:
                 selected_skills=selected["skill"],
                 selected_mcp=selected["mcp"],
                 selected_capabilities=selected["capability"],
-                selected_subagents=snapshot.subagent_ids,
+                selected_subagents=snapshot.selected_subagents,
                 ordinary_policy=ordinary_policy,
                 mcp_policy=mcp_policy,
             )
             output_binding = restore_output(snapshot.output_mode, snapshot.output_schema)
         except AIError as error:
-            if error.code is ErrorCode.STORAGE_INTEGRITY_ERROR:
+            if error.code in {
+                ErrorCode.STORAGE_INTEGRITY_ERROR,
+                ErrorCode.STORAGE_VERSION_UNSUPPORTED,
+            }:
                 raise
             raise AIError(ErrorCode.AGENT_DEFINITION_UNAVAILABLE) from error
-        digest = _binding_digest(definition.digest, output_binding.fingerprint)
+        digest = _binding_digest(
+            definition.digest,
+            output_binding.fingerprint,
+            cast("tuple[str, ...]", snapshot.selected_subagents),
+            snapshot.subagents,
+        )
         if digest != snapshot.binding_digest:
             raise AIError(ErrorCode.AGENT_DEFINITION_UNAVAILABLE)
         return AgentBinding(digest, definition, output_binding, snapshot)
@@ -148,7 +200,9 @@ class AgentCompiler:
         }
         for pin in pins:
             if pin.kind == "skill":
-                value = SkillSpecCodec().from_payload(cast("Mapping[str, object]", pin.contract))
+                value = SkillDefinition.from_semantic_contract(
+                    cast("Mapping[str, object]", pin.contract)
+                )
                 candidate = CapabilityContribution("skill", pin.id, pin.fingerprint, value)
             elif pin.kind == "mcp":
                 value = MCPServerSpecCodec().from_payload(cast("Mapping[str, object]", pin.contract))
@@ -334,22 +388,49 @@ def _pin(candidate: CapabilityContribution[object]) -> SemanticPin:
     contract = candidate.semantic_contract
     if capability_fingerprint(candidate.kind, candidate.id, contract) != candidate.fingerprint:
         raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
+    version = contract.get("version", 1) if candidate.kind == "skill" else 1
+    if not isinstance(version, int) or isinstance(version, bool):
+        raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
     return SemanticPin(
         cast(Literal["tool", "skill", "mcp", "capability"], candidate.kind),
         candidate.id,
-        1,
+        version,
         contract,
     )
 
 
-def _binding_digest(agent_definition_digest: str, output_fingerprint: str) -> str:
-    return canonical_sha256(
-        {
-            "contract": "agent-binding-v1",
-            "agent_definition_digest": agent_definition_digest,
-            "output_fingerprint": output_fingerprint,
+def _binding_digest(
+    agent_definition_digest: str,
+    output_fingerprint: str,
+    selected_subagents: Sequence[str],
+    subagents: Sequence[SubagentRef],
+) -> str:
+    effective_ids = tuple(ref.id for ref in subagents)
+    selected_ids = tuple(selected_subagents)
+    payload: dict[str, JsonValue] = {
+        "contract": "agent-binding-v1",
+        "agent_definition_digest": agent_definition_digest,
+        "output_fingerprint": output_fingerprint,
+    }
+    if selected_ids != effective_ids:
+        payload["delegation"] = {
+            "selected_subagents": list(selected_ids),
+            "effective_subagents": list(effective_ids),
         }
-    )
+    if any(ref.description is not None for ref in subagents):
+        payload["subagent_discovery"] = [
+            {
+                "kind": "agent",
+                "id": ref.id,
+                **(
+                    {"description": ref.description}
+                    if ref.description is not None
+                    else {}
+                ),
+            }
+            for ref in subagents
+        ]
+    return canonical_sha256(payload)
 
 
 __all__ = ["AgentCompiler"]

@@ -27,6 +27,7 @@ from ..core import (
     AuthorizationPolicy,
     ExecutionEventType,
     ExecutionLineageKind,
+    ExecutionMode,
     ExecutionStatus,
     IdempotencyStatus,
     JsonValue,
@@ -498,6 +499,59 @@ class DefaultExecutionService:
             root_execution_id=root_execution_id,
             lineage_kind=ExecutionLineageKind.SUBAGENT,
             scope="execution.subagent",
+        )
+
+    async def replay_subagent(
+        self,
+        *,
+        agent_id: str,
+        user_prompt: str,
+        principal: Principal,
+        idempotency_key: str,
+        memory_scope: "str | None",
+        mode: ExecutionMode,
+        parent_execution_id: str,
+        root_execution_id: str,
+    ) -> "ExecutionHandle | None":
+        """Replay an already-established child using its own durable binding."""
+        idempotency_key_digest = compute_idempotency_key_digest(idempotency_key)
+        existing = await self._state.idempotency.get(
+            "execution.subagent",
+            idempotency_key_digest,
+            tenant_id=principal.tenant_id,
+        )
+        if existing is None:
+            return None
+        execution = await self._state.executions.get(
+            existing.resource_id,
+            tenant_id=principal.tenant_id,
+        )
+        if execution is None:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        binding = self._binding(execution.binding_digest, execution.binding)
+        if binding.definition.spec.id != agent_id:
+            raise AIError(ErrorCode.IDEMPOTENCY_CONFLICT)
+        if (
+            execution.lineage_kind is not ExecutionLineageKind.SUBAGENT
+            or execution.parent_execution_id != parent_execution_id
+            or execution.root_execution_id != root_execution_id
+        ):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        request = ExecutionRequest(
+            user_prompt=user_prompt,
+            user_prompt_codec="text",
+            principal=principal,
+            idempotency_key=idempotency_key,
+            memory_scope=memory_scope,
+            mode=mode,
+            planning=execution.planning,
+            thinking=execution.thinking,
+        )
+        return await self.start_subagent(
+            execution.binding_digest,
+            request,
+            parent_execution_id=parent_execution_id,
+            root_execution_id=root_execution_id,
         )
 
     async def list_children(self, execution_id: str, *, principal: Principal) -> tuple[ExecutionView, ...]:

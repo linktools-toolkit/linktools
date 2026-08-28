@@ -9,6 +9,7 @@ from types import SimpleNamespace
 
 import pytest
 from linktools.ai.agent import AgentBindingSnapshot
+from linktools.ai.capability import SkillSourceRegistry
 from linktools.ai.core import ExecutionLineageKind, ExecutionStatus, OperationStatus
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.runtime._agent_executor import AgentExecutor
@@ -52,7 +53,6 @@ async def test_default_platform_composition_keeps_file_read_deduplication() -> N
         trusted_mcp_selectors=(),
         context_target_tokens=None,
         parent_step_run_id=None,
-        subagent_delegate=None,
         tool_operations=None,
         background_tasks=set(),
         plan_store_resolver=None,
@@ -62,7 +62,7 @@ async def test_default_platform_composition_keeps_file_read_deduplication() -> N
 
 @pytest.mark.asyncio
 async def test_agent_executor_cancellation_is_not_replaced_by_usage_sink_failure() -> None:
-    executor = AgentExecutor()
+    executor = AgentExecutor(SkillSourceRegistry())
 
     async def cancelled(*args: object, **kwargs: object) -> None:
         del args, kwargs

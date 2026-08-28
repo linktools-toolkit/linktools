@@ -7,6 +7,7 @@ from types import MappingProxyType
 
 from ..core import validate_agent_id
 from ..errors import AIError, ErrorCode
+from ..spec import AgentSpecCodec
 from ._binding import AgentBinding
 from ._definition import AgentDefinition
 
@@ -83,7 +84,7 @@ class AgentCatalog:
 def _same_definition(left: AgentDefinition, right: AgentDefinition) -> bool:
     return (
         left.digest == right.digest
-        and left.spec == right.spec
+        and AgentSpecCodec().to_payload(left.spec) == AgentSpecCodec().to_payload(right.spec)
         and left.model.fingerprint == right.model.fingerprint
         and tuple((item.kind, item.id, item.fingerprint) for item in left.selected_tools) == tuple((item.kind, item.id, item.fingerprint) for item in right.selected_tools)
         and tuple((item.kind, item.id, item.fingerprint) for item in left.selected_skills) == tuple((item.kind, item.id, item.fingerprint) for item in right.selected_skills)
