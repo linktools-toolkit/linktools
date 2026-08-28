@@ -26,9 +26,12 @@ from ._store import (
     operation_key,
 )
 
+_CURRENT_CURSOR_PREFIX = "a:"
+_LEGACY_CURSOR_PREFIX = "g:"
+
 
 class DurableTaskRepositoryImpl(TaskRepositoryImpl):
-    """Keep the Task admission recovery index aligned with graph aggregate state."""
+    """Keep the Task recovery projection aligned with graph aggregate state."""
 
     def _admission_key(self, graph_id: str) -> bytes:
         return self._key("task_admission", graph_id)
@@ -36,13 +39,16 @@ class DurableTaskRepositoryImpl(TaskRepositoryImpl):
     def _recovery_scope(self) -> bytes:
         return self._scope("task_admission", "recoverable", "graphs")
 
+    def _legacy_recovery_scope(self) -> bytes:
+        return self._scope("task_graph", "recoverable", "graphs")
+
     async def reconcile_graph(self, graph_id: str, *, tenant_id: str) -> TaskGraphView:
         async def mutate(transaction: StateTransaction) -> TaskGraphView:
             view = await super(DurableTaskRepositoryImpl, self).reconcile_graph(
                 graph_id,
                 tenant_id=tenant_id,
             )
-            await self._sync_admission_state(transaction, view)
+            await self._sync_recovery_projection(transaction, view)
             return view
 
         return await self.state_store.mutate(mutate)
@@ -53,38 +59,47 @@ class DurableTaskRepositoryImpl(TaskRepositoryImpl):
                 graph_id,
                 tenant_id=tenant_id,
             )
-            await self._sync_admission_state(transaction, view)
+            await self._sync_recovery_projection(transaction, view)
             return view
 
         return await self.state_store.mutate(mutate)
 
-    async def _sync_admission_state(
+    async def _sync_recovery_projection(
         self,
         transaction: StateTransaction,
         view: TaskGraphView,
     ) -> None:
-        key = self._admission_key(view.graph_id)
-        record = await transaction.get_record(key)
-        if record is None:
+        admission_key = self._admission_key(view.graph_id)
+        graph_key = self._graph_key(view.graph_id)
+        records = await transaction.get_records((admission_key, graph_key))
+        admission_record = records.get(admission_key)
+        if admission_record is None:
+            return
+        graph_record = records.get(graph_key)
+        if graph_record is None:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        if admission_record.key_digest != admission_key or admission_record.kind != "task_admission":
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        if admission_record.scope_digest == self._recovery_scope():
+            if admission_record.state == view.status.value:
+                return
+            candidate = replace(
+                admission_record,
+                state=view.status.value,
+                storage_version=admission_record.storage_version + 1,
+            )
+            if not await transaction.replace_record(
+                candidate,
+                expected_storage_version=admission_record.storage_version,
+            ):
+                raise AIError(ErrorCode.STORAGE_CONFLICT)
             return
         if (
-            record.key_digest != key
-            or record.kind != "task_admission"
-            or record.scope_digest != self._recovery_scope()
+            admission_record.scope_digest is None
+            and graph_record.scope_digest == self._legacy_recovery_scope()
         ):
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        if record.state == view.status.value:
             return
-        candidate = replace(
-            record,
-            state=view.status.value,
-            storage_version=record.storage_version + 1,
-        )
-        if not await transaction.replace_record(
-            candidate,
-            expected_storage_version=record.storage_version,
-        ):
-            raise AIError(ErrorCode.STORAGE_CONFLICT)
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
 
 
 class DurableTaskAdmissionRepositoryImpl(TaskAdmissionRepositoryImpl):
@@ -92,6 +107,9 @@ class DurableTaskAdmissionRepositoryImpl(TaskAdmissionRepositoryImpl):
 
     def _recovery_scope(self) -> bytes:
         return self._scope("task_admission", "recoverable", "graphs")
+
+    def _legacy_recovery_scope(self) -> bytes:
+        return self._scope("task_graph", "recoverable", "graphs")
 
     async def list_recoverable_page(
         self,
@@ -101,6 +119,41 @@ class DurableTaskAdmissionRepositoryImpl(TaskAdmissionRepositoryImpl):
     ) -> Page[TaskGraphLaunch]:
         if limit != 128:
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+        phase, inner_cursor = _decode_recovery_cursor(cursor)
+        if phase == "admission":
+            current = await self._list_current_recoverable_page(
+                cursor=inner_cursor,
+                limit=limit,
+            )
+            if current.items or current.next_cursor is not None:
+                return Page(
+                    current.items,
+                    (
+                        _CURRENT_CURSOR_PREFIX + current.next_cursor
+                        if current.next_cursor is not None
+                        else _LEGACY_CURSOR_PREFIX
+                    ),
+                )
+            inner_cursor = None
+        legacy = await self._list_legacy_recoverable_page(
+            cursor=inner_cursor,
+            limit=limit,
+        )
+        return Page(
+            legacy.items,
+            (
+                None
+                if legacy.next_cursor is None
+                else _LEGACY_CURSOR_PREFIX + legacy.next_cursor
+            ),
+        )
+
+    async def _list_current_recoverable_page(
+        self,
+        *,
+        cursor: str | None,
+        limit: int,
+    ) -> Page[TaskGraphLaunch]:
         after_sort_key, after_key_digest = _decode_record_cursor(cursor)
 
         async def read(transaction: StateTransaction) -> Page[TaskGraphLaunch]:
@@ -108,13 +161,7 @@ class DurableTaskAdmissionRepositoryImpl(TaskAdmissionRepositoryImpl):
                 RecordQuery(
                     scope_digest=self._recovery_scope(),
                     kind="task_admission",
-                    states=frozenset(
-                        {
-                            TaskStatus.PENDING.value,
-                            TaskStatus.READY.value,
-                            TaskStatus.RUNNING.value,
-                        }
-                    ),
+                    states=_RECOVERABLE_STATES,
                     after_sort_key=after_sort_key,
                     after_key_digest=after_key_digest,
                     limit=limit + 1,
@@ -140,6 +187,67 @@ class DurableTaskAdmissionRepositoryImpl(TaskAdmissionRepositoryImpl):
                     or graph_record.key_digest != self._graph_key(admission.graph_id)
                     or graph_record.state != graph_view.status.value
                     or graph_view.graph_id != admission.graph_id
+                ):
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                launches.append(
+                    admission.bind(TaskGraph(graph_view.graph_id, graph_view.nodes))
+                )
+            next_cursor = (
+                _record_cursor(selected[-1])
+                if len(records) > limit and selected
+                else None
+            )
+            return Page(tuple(launches), next_cursor)
+
+        return await self.state_store.read(read)
+
+    async def _list_legacy_recoverable_page(
+        self,
+        *,
+        cursor: str | None,
+        limit: int,
+    ) -> Page[TaskGraphLaunch]:
+        after_sort_key, after_key_digest = _decode_record_cursor(cursor)
+
+        async def read(transaction: StateTransaction) -> Page[TaskGraphLaunch]:
+            records = await transaction.list_records(
+                RecordQuery(
+                    scope_digest=self._legacy_recovery_scope(),
+                    kind="task_graph",
+                    states=_RECOVERABLE_STATES,
+                    after_sort_key=after_sort_key,
+                    after_key_digest=after_key_digest,
+                    limit=limit + 1,
+                )
+            )
+            selected = records[:limit]
+            graph_views = tuple(
+                [await self._decode(record, TaskGraphView) for record in selected]
+            )
+            admission_records = await transaction.get_records(
+                tuple(
+                    self._admission_key(graph_view.graph_id)
+                    for graph_view in graph_views
+                )
+            )
+            launches: list[TaskGraphLaunch] = []
+            for graph_record, graph_view in zip(selected, graph_views, strict=True):
+                admission_record = admission_records.get(
+                    self._admission_key(graph_view.graph_id)
+                )
+                if admission_record is None:
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                if admission_record.scope_digest == self._recovery_scope():
+                    continue
+                if admission_record.scope_digest is not None:
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                admission = await self._decode(admission_record, TaskGraphAdmission)
+                if (
+                    graph_record.key_digest != self._graph_key(graph_view.graph_id)
+                    or graph_record.scope_digest != self._legacy_recovery_scope()
+                    or graph_record.state != graph_view.status.value
+                    or admission.graph_id != graph_view.graph_id
+                    or admission_record.key_digest != self._admission_key(graph_view.graph_id)
                 ):
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                 launches.append(
@@ -306,11 +414,11 @@ class DurableTaskAdmissionRepositoryImpl(TaskAdmissionRepositoryImpl):
         existing.bind(persisted_graph)
         self._validate_graph(graph_view, persisted_graph, nodes)
         status = _graph_status(nodes)
-        if (
-            graph_record.key_digest != self._graph_key(graph_view.graph_id)
-            or admission_record.key_digest != self._admission_key(graph_view.graph_id)
-            or admission_record.scope_digest != self._recovery_scope()
-        ):
+        if graph_record.key_digest != self._graph_key(graph_view.graph_id):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        if admission_record.key_digest != self._admission_key(graph_view.graph_id):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        if not self._recognized_layout(graph_record, admission_record):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         if stored_operation is None:
             stored_operation = await transaction.get_operation(
@@ -337,22 +445,17 @@ class DurableTaskAdmissionRepositoryImpl(TaskAdmissionRepositoryImpl):
         admission_record: StoredRecord,
         view: TaskGraphView,
     ) -> None:
-        if graph_record.state != view.status.value:
-            graph_view = await self._decode(graph_record, TaskGraphView)
+        graph_view = await self._decode(graph_record, TaskGraphView)
+        if graph_view.status is not view.status or graph_record.state != view.status.value:
             await _replace_checked(
                 transaction,
                 _task_graph_record(self, graph_record, replace(graph_view, status=view.status)),
                 graph_record.storage_version,
             )
-        else:
-            graph_view = await self._decode(graph_record, TaskGraphView)
-            if graph_view.status is not view.status:
-                await _replace_checked(
-                    transaction,
-                    _task_graph_record(self, graph_record, replace(graph_view, status=view.status)),
-                    graph_record.storage_version,
-                )
-        if admission_record.state != view.status.value:
+        if (
+            admission_record.scope_digest == self._recovery_scope()
+            and admission_record.state != view.status.value
+        ):
             candidate = replace(
                 admission_record,
                 state=view.status.value,
@@ -363,6 +466,37 @@ class DurableTaskAdmissionRepositoryImpl(TaskAdmissionRepositoryImpl):
                 expected_storage_version=admission_record.storage_version,
             ):
                 raise AIError(ErrorCode.STORAGE_CONFLICT)
+
+    def _recognized_layout(
+        self,
+        graph_record: StoredRecord,
+        admission_record: StoredRecord,
+    ) -> bool:
+        return admission_record.scope_digest == self._recovery_scope() or (
+            admission_record.scope_digest is None
+            and graph_record.scope_digest == self._legacy_recovery_scope()
+        )
+
+
+_RECOVERABLE_STATES = frozenset(
+    {
+        TaskStatus.PENDING.value,
+        TaskStatus.READY.value,
+        TaskStatus.RUNNING.value,
+    }
+)
+
+
+def _decode_recovery_cursor(cursor: str | None) -> tuple[str, str | None]:
+    if cursor is None:
+        return "admission", None
+    if cursor.startswith(_CURRENT_CURSOR_PREFIX):
+        inner = cursor[len(_CURRENT_CURSOR_PREFIX) :]
+        return "admission", inner or None
+    if cursor.startswith(_LEGACY_CURSOR_PREFIX):
+        inner = cursor[len(_LEGACY_CURSOR_PREFIX) :]
+        return "graph", inner or None
+    return "graph", cursor
 
 
 __all__ = ["DurableTaskAdmissionRepositoryImpl", "DurableTaskRepositoryImpl"]
