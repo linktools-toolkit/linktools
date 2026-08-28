@@ -3,7 +3,7 @@
 """Public LinkTools AI composition and runtime API."""
 
 from .capability import CapabilityGroup, RunContext
-from .runtime import Agent, Execution, Runtime, Session
+from .runtime import Agent, Execution, Runtime, RuntimeHistory, Session
 from .workspace import Workspace
 
 __all__ = [
@@ -12,6 +12,7 @@ __all__ = [
     "Execution",
     "RunContext",
     "Runtime",
+    "RuntimeHistory",
     "Session",
     "Workspace",
 ]
