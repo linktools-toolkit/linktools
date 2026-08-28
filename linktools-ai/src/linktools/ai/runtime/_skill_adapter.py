@@ -3,6 +3,7 @@
 """Pydantic AI adapter for the vendor-neutral Skill capability."""
 
 from collections.abc import Awaitable, Callable
+from typing import cast
 
 from pydantic_ai.capabilities import AbstractCapability
 from pydantic_ai.exceptions import ModelRetry
@@ -10,7 +11,6 @@ from pydantic_ai.tools import RunContext as PydanticRunContext
 from pydantic_ai.toolsets import FunctionToolset
 
 from ..capability import RunContext, SkillCapability
-from ..core import JsonValue
 from ..errors import AIError, ErrorCode
 
 _SKILL_CAPABILITY_ID = "linktools-skill"
@@ -57,11 +57,14 @@ class _PydanticSkillCapability(AbstractCapability[RunContext[object]]):
             ctx: PydanticRunContext[RunContext[object]],
             skill_id: str,
             path: "str | None" = None,
-        ) -> "dict[str, JsonValue]":
+        ) -> "dict[str, str | list[str]]":
             """Load skill instructions or one relative text resource."""
             del ctx
             try:
-                return await self._capability.load_skill(skill_id, path)
+                return cast(
+                    dict[str, str | list[str]],
+                    await self._capability.load_skill(skill_id, path),
+                )
             except AIError as error:
                 if error.code not in _MODEL_CORRECTABLE_ERRORS:
                     raise

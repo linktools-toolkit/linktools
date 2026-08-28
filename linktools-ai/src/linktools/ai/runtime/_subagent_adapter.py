@@ -3,14 +3,15 @@
 """Pydantic AI adapter for the vendor-neutral Subagent capability."""
 
 from collections.abc import Awaitable, Callable
+from typing import cast
 
+from pydantic import JsonValue as PydanticJsonValue
 from pydantic_ai.capabilities import AbstractCapability
 from pydantic_ai.exceptions import ModelRetry
 from pydantic_ai.tools import RunContext as PydanticRunContext
 from pydantic_ai.toolsets import FunctionToolset
 
 from ..capability import RunContext, SubagentCapability
-from ..core import JsonValue
 from ..errors import AIError, ErrorCode
 
 _SUBAGENT_CAPABILITY_ID = "linktools-subagent"
@@ -54,15 +55,18 @@ class _PydanticSubagentCapability(AbstractCapability[RunContext[object]]):
             ctx: PydanticRunContext[RunContext[object]],
             subagent_id: str,
             task: str,
-        ) -> "dict[str, JsonValue]":
+        ) -> "dict[str, PydanticJsonValue]":
             """Delegate one task to a selected subagent."""
             if not ctx.tool_call_id:
                 raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
             try:
-                return await self._capability.delegate_task(
-                    subagent_id,
-                    task,
-                    invocation_id=ctx.tool_call_id,
+                return cast(
+                    dict[str, PydanticJsonValue],
+                    await self._capability.delegate_task(
+                        subagent_id,
+                        task,
+                        invocation_id=ctx.tool_call_id,
+                    ),
                 )
             except AIError as error:
                 if error.code not in _MODEL_CORRECTABLE_ERRORS:
