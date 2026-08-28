@@ -126,14 +126,19 @@ class DurableTaskAdmissionRepositoryImpl(TaskAdmissionRepositoryImpl):
                 limit=limit,
             )
             if current.items or current.next_cursor is not None:
-                return Page(
-                    current.items,
-                    (
-                        _CURRENT_CURSOR_PREFIX + current.next_cursor
-                        if current.next_cursor is not None
-                        else _LEGACY_CURSOR_PREFIX
-                    ),
-                )
+                if current.next_cursor is not None:
+                    next_cursor = _CURRENT_CURSOR_PREFIX + current.next_cursor
+                else:
+                    legacy_probe = await self._list_legacy_recoverable_page(
+                        cursor=None,
+                        limit=1,
+                    )
+                    next_cursor = (
+                        _LEGACY_CURSOR_PREFIX
+                        if legacy_probe.items or legacy_probe.next_cursor is not None
+                        else None
+                    )
+                return Page(current.items, next_cursor)
             inner_cursor = None
         legacy = await self._list_legacy_recoverable_page(
             cursor=inner_cursor,
