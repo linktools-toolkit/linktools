@@ -290,13 +290,30 @@ class DurableTaskAdmissionRepositoryImpl(TaskAdmissionRepositoryImpl):
         status = _graph_status(nodes)
         if (
             graph_record.key_digest != self._graph_key(graph_view.graph_id)
-            or graph_view.status is not status
-            or graph_record.state != status.value
             or admission_record.key_digest != self._admission_key(graph_view.graph_id)
             or admission_record.scope_digest != self._recovery_scope()
-            or admission_record.state != status.value
         ):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+
+        next_graph = TaskGraphView(graph_view.graph_id, status, graph_view.nodes)
+        if graph_view.status is not status or graph_record.state != status.value:
+            await _replace_checked(
+                transaction,
+                _task_graph_record(self, graph_record, next_graph),
+                graph_record.storage_version,
+            )
+        if admission_record.state != status.value:
+            candidate = replace(
+                admission_record,
+                state=status.value,
+                storage_version=admission_record.storage_version + 1,
+            )
+            if not await transaction.replace_record(
+                candidate,
+                expected_storage_version=admission_record.storage_version,
+            ):
+                raise AIError(ErrorCode.STORAGE_CONFLICT)
+
         if stored_operation is None:
             stored_operation = await transaction.get_operation(
                 operation_key(
@@ -313,7 +330,7 @@ class DurableTaskAdmissionRepositoryImpl(TaskAdmissionRepositoryImpl):
         if operation.request_digest != existing.request_digest:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         self._validate_succeeded_operation(operation, persisted_graph)
-        return existing, TaskGraphView(graph_view.graph_id, status, graph_view.nodes)
+        return existing, next_graph
 
 
 __all__ = ["DurableTaskAdmissionRepositoryImpl", "DurableTaskRepositoryImpl"]
