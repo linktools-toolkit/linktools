@@ -110,6 +110,9 @@ class _SubagentDispatcher(Protocol):
     @property
     def pending_background_tasks(self) -> tuple[asyncio.Task[object], ...]: ...
 
+    @property
+    def background_failure(self) -> "AIError | None": ...
+
     def delegate_for(
         self,
         *,
@@ -1884,7 +1887,12 @@ class LocalExecutionBackend:
             if isinstance(task, asyncio.Task) and not task.done()
         }
         pending_background = tuple(pending_background_by_identity.values())
-        if pending or pending_background:
+        dispatcher_failure = (
+            None
+            if self._subagent_dispatcher is None
+            else self._subagent_dispatcher.background_failure
+        )
+        if pending or pending_background or dispatcher_failure is not None:
             raise AIError(
                 ErrorCode.STORAGE_RECOVERY_REQUIRED,
                 safe_details={
@@ -1893,6 +1901,7 @@ class LocalExecutionBackend:
                     "pending_background_tasks": len(pending_background),
                     "pending_checkpoint_tasks": len(checkpoint_background),
                     "pending_execution_tasks": len(execution_background),
+                    "background_failures": int(dispatcher_failure is not None),
                 },
             )
         for execution_id, task in tasks:

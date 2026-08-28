@@ -209,15 +209,27 @@ class DefaultTaskService(TaskApi):
             self._launcher.start(launch),
             name=f"task-scheduler-arm-{launch.principal.tenant_id}-{launch.graph.graph_id}",
         )
-        cancelled = False
-        while True:
+        try:
+            await asyncio.shield(task)
+        except asyncio.CancelledError:
+            if not task.done():
+                self._detach_finalizer(
+                    cast("asyncio.Task[object]", task),
+                    launch.graph.graph_id,
+                    label="task scheduler arm",
+                )
+                raise
             try:
-                await asyncio.shield(task)
-                break
-            except asyncio.CancelledError:
-                if task.done():
-                    break
-                cancelled = True
+                task.result()
+            except asyncio.CancelledError as error:
+                raise AIError(
+                    ErrorCode.STORAGE_RECOVERY_REQUIRED,
+                    safe_details={
+                        "phase": "task_scheduler_arm",
+                        "graph_id": launch.graph.graph_id,
+                        "durable_admitted": True,
+                    },
+                ) from error
             except BaseException as error:  # noqa: BLE001
                 raise AIError(
                     ErrorCode.STORAGE_RECOVERY_REQUIRED,
@@ -227,17 +239,8 @@ class DefaultTaskService(TaskApi):
                         "durable_admitted": True,
                     },
                 ) from error
-        if task.cancelled():
-            raise AIError(
-                ErrorCode.STORAGE_RECOVERY_REQUIRED,
-                safe_details={
-                    "phase": "task_scheduler_arm",
-                    "graph_id": launch.graph.graph_id,
-                    "durable_admitted": True,
-                },
-            )
-        error = task.exception()
-        if error is not None:
+            raise
+        except BaseException as error:  # noqa: BLE001
             raise AIError(
                 ErrorCode.STORAGE_RECOVERY_REQUIRED,
                 safe_details={
@@ -246,8 +249,6 @@ class DefaultTaskService(TaskApi):
                     "durable_admitted": True,
                 },
             ) from error
-        if cancelled:
-            raise asyncio.CancelledError
 
     async def recover_pending(self) -> None:
         if self._launcher is None:
@@ -923,6 +924,8 @@ class DefaultTaskService(TaskApi):
         self,
         task: "asyncio.Task[object]",
         graph_id: str,
+        *,
+        label: str = "task graph cancel finalizer",
     ) -> None:
         if task in self._detached_finalizers:
             return
@@ -935,8 +938,8 @@ class DefaultTaskService(TaskApi):
                 pass
             except BaseException as error:  # noqa: BLE001
                 _logger.warning(
-                    "task graph cancel finalizer failed after caller cancellation: "
-                    "graph=%s error=%s",
+                    "%s failed after caller cancellation: graph=%s error=%s",
+                    label,
                     graph_id,
                     type(error).__name__,
                 )

@@ -238,11 +238,23 @@ async def test_task_wait_timeout_has_stable_code() -> None:
     assert error.value.code is ErrorCode.TASK_WAIT_TIMEOUT
 
 
+class _FailedExecution:
+    def __init__(self, result: ExecutionResult) -> None:
+        self._result = result
+
+    async def wait(self) -> ExecutionResult:
+        return self._result
+
+    def stream(self, *args: object, **kwargs: object) -> object:
+        del args, kwargs
+        raise AssertionError("JSON result path must not scan execution events")
+
+
 class _FailedAgent:
     def __init__(self, result: ExecutionResult) -> None:
         self._result = result
 
-    async def run(
+    async def start(
         self,
         prompt: str,
         *,
@@ -250,13 +262,9 @@ class _FailedAgent:
         memory_scope: str,
         planning: bool,
         thinking: bool,
-    ) -> ExecutionResult:
+    ) -> _FailedExecution:
         del prompt, session_id, memory_scope, planning, thinking
-        return self._result
-
-    def stream(self, *args: object, **kwargs: object) -> object:
-        del args, kwargs
-        raise AssertionError("JSON result path must not scan execution events")
+        return _FailedExecution(self._result)
 
 
 class _FailedRuntime:

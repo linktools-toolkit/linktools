@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 """End-to-end evidence for tolerant Runtime persistence reads."""
 
+import asyncio
 import copy
 from dataclasses import replace
 from datetime import datetime, timezone
@@ -24,6 +25,7 @@ from linktools.ai.core import (
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.migrate import provision_runtime_database
 from linktools.ai.runtime import DefaultSessionService, Runtime, RuntimeState
+from linktools.ai.runtime._agent_executor import AgentExecutor
 from linktools.ai.runtime.state._codec import (
     _decode_enveloped_domain,
     _encode_persisted_domain,
@@ -39,6 +41,7 @@ from linktools.ai.runtime.state._contracts import (
 from linktools.ai.spec import AgentSpec, AgentSpecCodec
 from linktools.ai.storage import ObjectRef, StoredPayload
 from linktools.ai.workspace import Workspace
+from linktools.commands.ai.run import _emit_result
 from pydantic import BaseModel
 from pydantic_ai.models.test import TestModel
 from sqlalchemy.ext.asyncio import create_async_engine
@@ -251,6 +254,71 @@ async def test_terminal_stream_allows_immediate_runtime_close(
             assert len(terminal_events) == 1
     finally:
         await state.close()
+
+
+@pytest.mark.asyncio
+async def test_ai_run_interrupt_closes_and_reopens_sqlite_runtime(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace_root = tmp_path / "workspace"
+    agent_path = workspace_root / ".linktools" / "agents" / "default"
+    agent_path.parent.mkdir(parents=True)
+    agent_path.write_bytes(
+        AgentSpecCodec().encode(
+            AgentSpec("default", model="default", allow_tools=())
+        )
+    )
+    database = tmp_path / "runtime.db"
+    engine = create_async_engine(f"sqlite+aiosqlite:///{database}")
+    await provision_runtime_database(engine)
+    await engine.dispose()
+
+    execution_started = asyncio.Event()
+
+    async def blocking_execute(self, scope):
+        del self, scope
+        execution_started.set()
+        await asyncio.Event().wait()
+        raise AssertionError("blocked execution unexpectedly completed")
+
+    monkeypatch.setattr(AgentExecutor, "execute", blocking_execute)
+    workspace = Workspace.load(workspace_root)
+    state = RuntimeState.sqlite(database)
+    try:
+        async with Runtime.open(
+            workspace,
+            models=_PersistenceTestModels(),  # type: ignore[arg-type]
+            state=state,
+        ) as runtime:
+            task = asyncio.create_task(
+                _emit_result(
+                    runtime,
+                    "hello",
+                    workspace.workspace_id,
+                    workspace.workspace_id,
+                    False,
+                    False,
+                    False,
+                )
+            )
+            await execution_started.wait()
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+    finally:
+        await state.close()
+
+    reopened = RuntimeState.sqlite(database)
+    try:
+        async with Runtime.open(
+            workspace,
+            models=_PersistenceTestModels(),  # type: ignore[arg-type]
+            state=reopened,
+        ):
+            pass
+    finally:
+        await reopened.close()
 
 
 @pytest.mark.asyncio

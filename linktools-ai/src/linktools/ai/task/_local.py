@@ -64,6 +64,12 @@ class _BackgroundTaskOwner(Protocol):
     def pending_background_tasks(self) -> tuple[asyncio.Task[object], ...]: ...
 
 
+@runtime_checkable
+class _BackgroundTaskFailureOwner(Protocol):
+    @property
+    def background_failure(self) -> "AIError | None": ...
+
+
 class _TaskNodeState(Protocol):
     node_id: str
     status: TaskStatus
@@ -256,12 +262,16 @@ class LocalTaskGraphLauncher:
             self._close_run(run)
             if run.task is not None and not run.task.done():
                 run.task.cancel()
-                await asyncio.gather(run.task, return_exceptions=True)
-            elif run.task is not None:
-                self._consume_done(run.task, "task graph cancellation")
+                await asyncio.sleep(0)
+            if run.task is not None:
+                if run.task.done():
+                    self._consume_done(run.task, "task graph cancellation")
+                else:
+                    self._detach(
+                        cast("asyncio.Task[object]", run.task),
+                        "task graph cancellation",
+                    )
             self._remove_run(key, run)
-        if self._detached_tasks:
-            await asyncio.gather(*tuple(self._detached_tasks), return_exceptions=True)
         if cleanup_error is not None:
             if isinstance(cleanup_error, asyncio.CancelledError):
                 raise cleanup_error
@@ -283,18 +293,22 @@ class LocalTaskGraphLauncher:
                 run.task.cancel()
             elif run.task is not None:
                 self._consume_done(run.task, "task graph shutdown")
-        local_tasks = tuple(
-            run.task for run in runs if run.task is not None and not run.task.done()
-        )
-        if local_tasks:
-            await asyncio.gather(*local_tasks, return_exceptions=True)
-        if self._detached_tasks:
-            await asyncio.gather(*tuple(self._detached_tasks), return_exceptions=True)
         runner_pending = (
             self._runner.pending_background_tasks
             if isinstance(self._runner, _BackgroundTaskOwner)
             else ()
         )
+        if (
+            any(run.task is not None and not run.task.done() for run in runs)
+            or any(not task.done() for task in self._detached_tasks)
+            or any(not task.done() for task in runner_pending)
+        ):
+            await asyncio.sleep(0)
+            runner_pending = (
+                self._runner.pending_background_tasks
+                if isinstance(self._runner, _BackgroundTaskOwner)
+                else ()
+            )
         pending = tuple(
             task
             for task in (
@@ -311,6 +325,16 @@ class LocalTaskGraphLauncher:
                     "phase": "task_graph_shutdown",
                     "pending_tasks": len(pending),
                 },
+            )
+        runner_failure = (
+            self._runner.background_failure
+            if isinstance(self._runner, _BackgroundTaskFailureOwner)
+            else None
+        )
+        if runner_failure is not None:
+            raise AIError(
+                runner_failure.code,
+                safe_details=dict(runner_failure.safe_details),
             )
         for run in runs:
             if run.task is not None:
@@ -562,12 +586,6 @@ class LocalTaskGraphLauncher:
                 else None
             )
             if heartbeat_error is not None:
-                runner_task.cancel()
-                await asyncio.gather(runner_task, return_exceptions=True)
-                self._consume_done(
-                    cast("asyncio.Task[object]", runner_task),
-                    "task node runner after heartbeat loss",
-                )
                 _logger.warning(
                     "task heartbeat lost ownership: graph=%s task=%s",
                     request.graph.graph_id,
@@ -638,15 +656,13 @@ class LocalTaskGraphLauncher:
                 task for task in (runner_task, heartbeat_task) if task is not None
             )
             for task in cleanup_tasks:
+                tracked = cast("asyncio.Task[object]", task)
                 if not task.done():
                     task.cancel()
-            if cleanup_tasks:
-                await asyncio.gather(*cleanup_tasks, return_exceptions=True)
-            for task in cleanup_tasks:
-                self._consume_done(
-                    cast("asyncio.Task[object]", task),
-                    "task node cleanup",
-                )
+                if task.done():
+                    self._consume_done(tracked, "task node cleanup")
+                else:
+                    self._detach(tracked, "task node cleanup")
             if not run.closed:
                 self._signal(run)
 
@@ -751,13 +767,18 @@ class LocalTaskGraphLauncher:
         for task in tasks:
             if not task.done():
                 task.cancel()
-        if tasks:
-            await asyncio.gather(*tasks, return_exceptions=True)
         for task in tasks:
-            self._consume_done(
-                cast("asyncio.Task[object]", task),
-                "task graph inflight cleanup",
-            )
+            tracked = cast("asyncio.Task[object]", task)
+            if task.done():
+                self._consume_done(
+                    tracked,
+                    "task graph inflight cleanup",
+                )
+            else:
+                self._detach(
+                    tracked,
+                    "task graph inflight cleanup",
+                )
         inflight.clear()
 
     def _detach(
