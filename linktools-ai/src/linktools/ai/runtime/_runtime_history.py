@@ -138,7 +138,11 @@ async def _open_runtime_history(
         )
         service = DefaultExecutionHistoryService(
             selected_state.execution.executions,
-            authorization or TenantAuthorizationPolicy(effective_tenant_id),
+            (
+                TenantAuthorizationPolicy(effective_tenant_id)
+                if authorization is None
+                else authorization
+            ),
             reader,
         )
         yield RuntimeHistory(service, tenant_id=effective_tenant_id)
