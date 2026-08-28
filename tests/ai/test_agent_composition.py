@@ -92,9 +92,10 @@ def test_semantic_pin_persists_historical_source_without_fingerprint() -> None:
 
     legacy = dict(payload)
     legacy["fingerprint"] = pin.fingerprint
-    with pytest.raises(AIError) as error:
-        SemanticPin.from_payload(legacy)
-    assert error.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
+    decoded = SemanticPin.from_payload(legacy)
+    assert decoded == pin
+    assert decoded.fingerprint == pin.fingerprint
+    assert decoded.to_payload() == legacy
 
 
 def test_agent_binding_snapshot_rejects_unknown_version() -> None:
@@ -108,7 +109,7 @@ def test_agent_binding_snapshot_rejects_unknown_version() -> None:
         output_schema={"type": "object"},
         binding_digest="a" * 64,
     ).to_payload()
-    snapshot["version"] = 2
+    snapshot["version"] = 3
 
     with pytest.raises(AIError) as error:
         AgentBindingSnapshot.from_payload(snapshot)

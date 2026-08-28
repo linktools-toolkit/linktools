@@ -2,7 +2,8 @@
 # -*- coding: utf-8 -*-
 """Static Agent definition, compilation, binding, and output contracts."""
 
-from ._binding import AgentBinding, AgentBindingSnapshot, SemanticPin, SubagentRef
+from ..spec import SubagentRef
+from ._binding import AgentBinding, AgentBindingSnapshot, SemanticPin
 from ._catalog import AgentCatalog
 from ._compiler import AgentCompiler
 from ._definition import AgentDefinition

@@ -8,10 +8,9 @@ from typing import get_args, get_origin, get_type_hints
 
 import pytest
 from linktools.ai.asset._sql import SqlAssetBackend
-from linktools.ai.capability import materialize_mcp_servers
+from linktools.ai.capability import SubagentDelegate, materialize_mcp_servers
 from linktools.ai.core import ExecutionStatus, Principal, ResourceKind, ResourceRef
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.runtime._capabilities import SubagentDelegate
 from linktools.ai.runtime._evaluation import DefaultEvaluationService
 from linktools.ai.runtime._execution import DefaultExecutionService
 from linktools.ai.runtime._planner import RuntimeTaskNodeRunner

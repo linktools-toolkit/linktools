@@ -16,10 +16,12 @@ from linktools.core import environ
 from pydantic_ai_harness.memory import SearchableMemoryStore
 
 from ..agent import AgentCatalog, AgentCompiler, AgentDefinition
-from ..asset import AssetStore, DirectoryAssetBackend, PrefixAssetPathAdapter
+from ..asset import AssetKey, AssetPathAdapter, AssetStore, DirectoryAssetBackend, PrefixAssetPathAdapter
 from ..capability import (
     CapabilityContribution,
     CapabilityGroup,
+    LocalSkillResourceSource,
+    SkillSourceRegistry,
     workspace_tool_contributions,
 )
 from ..core import HmacCursorSigner, TenantAuthorizationPolicy, validate_tenant_id
@@ -104,7 +106,14 @@ async def compose_runtime_components(
             owned_workspace_assets = _default_workspace_store(workspace)
             owned_store, _owned_backend = owned_workspace_assets
             await owned_store.initialize()
-            workspace_group: CapabilityGroup[object] = CapabilityGroup.from_store("workspace", owned_store)
+            workspace_group: CapabilityGroup[object] = CapabilityGroup.from_store(
+                "workspace",
+                owned_store,
+                skill_source=LocalSkillResourceSource(
+                    "workspace",
+                    workspace.storage_root / "skills",
+                ),
+            )
             effective_groups = (workspace_group, *cast("tuple[CapabilityGroup[object], ...]", groups))
 
         group_ids = tuple(group.id for group in effective_groups)
@@ -115,6 +124,13 @@ async def compose_runtime_components(
         for group in effective_groups:
             frozen.extend(await group.freeze())
         _validate_candidate_uniqueness(frozen)
+        skill_sources = SkillSourceRegistry(
+            tuple(
+                source
+                for group in effective_groups
+                if (source := group.skill_source) is not None
+            )
+        )
 
         agents = {
             candidate.id: cast(AgentSpec, candidate.value)
@@ -128,7 +144,7 @@ async def compose_runtime_components(
         compiler = AgentCompiler(
             model_resolver=resolver,
             candidates=tuple(candidate for candidate in frozen if candidate.kind != "agent"),
-            agent_ids=tuple(agents),
+            agents=agents,
         )
         catalog = AgentCatalog({agent_id: compiler.compile(agents[agent_id]) for agent_id in sorted(agents)})
 
@@ -156,6 +172,7 @@ async def compose_runtime_components(
                 cursor_signer=HmacCursorSigner("session-history", _grant_key(workspace)),
             ),
             memory_store_factory=_memory_store_factory(workspace, selected_state),
+            skill_sources=skill_sources,
             grant_key=_grant_key(workspace),
             owned_workspace_close=owned_workspace_close,
         )
@@ -169,16 +186,38 @@ async def compose_runtime_components(
         raise
 
 
+class _WorkspaceDeclarationPathAdapter:
+    def __init__(self) -> None:
+        self._delegate = PrefixAssetPathAdapter(
+            {
+                "agent": "agents",
+                "skill": "skills",
+                "mcp": "mcp",
+            }
+        )
+
+    def validate(self, kinds: Sequence[str]) -> None:
+        self._delegate.validate(kinds)
+
+    def root_path(self, kind: str) -> str:
+        return self._delegate.root_path(kind)
+
+    def to_path(self, key: AssetKey) -> str:
+        return self._delegate.to_path(key)
+
+    def from_path(self, path: str) -> "AssetKey | None":
+        key = self._delegate.from_path(path)
+        if key is None or key.kind != "skill":
+            return key
+        if "/" not in key.id or key.id.endswith("/SKILL.md"):
+            return key
+        return None
+
+
 def _default_workspace_store(
     workspace: Workspace,
 ) -> tuple[AssetStore, DirectoryAssetBackend]:
-    adapter = PrefixAssetPathAdapter(
-        {
-            "agent": "agents",
-            "skill": "skills",
-            "mcp": "mcp",
-        }
-    )
+    adapter: AssetPathAdapter = _WorkspaceDeclarationPathAdapter()
     source = DirectoryAssetBackend(
         str(workspace.storage_root),
         path_adapter=adapter,
@@ -312,6 +351,7 @@ async def _build_local_components(
     history_reader: ExecutionHistoryReader,
     session_history_reader: SessionHistoryReader,
     memory_store_factory: "Callable[[str, str, str, ObjectStore, bool], SearchableMemoryStore] | None",
+    skill_sources: SkillSourceRegistry,
     grant_key: bytes,
     owned_workspace_close: "Callable[[], Awaitable[None]] | None" = None,
 ) -> _RuntimeComponents:
@@ -329,7 +369,7 @@ async def _build_local_components(
         release_terminal=state.retention.release_execution_handoff,
     )
     dispatcher = SubagentDispatcher(catalog, compiler, execution)
-    executor = AgentExecutor()
+    executor = AgentExecutor(skill_sources)
 
     def build_memory_store(
         memory_tenant: str,

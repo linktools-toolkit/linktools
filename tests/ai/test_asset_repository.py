@@ -2,15 +2,16 @@
 # -*- coding: utf-8 -*-
 """Store-backed CapabilityGroup discovery and freeze contract checks."""
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import cast
 
 import pytest
 from linktools.ai.asset import AssetInfo, AssetKey, AssetStore, InMemoryAssetBackend
 from linktools.ai.capability import (
     CapabilityContribution,
     CapabilityGroup,
+    CapabilityLoadContext,
+    SkillDefinition,
     capability_fingerprint,
     contribution_semantic_contract,
 )
@@ -43,7 +44,7 @@ async def test_builtin_loader_freezes_agent_skill_and_mcp_declarations() -> None
         ("mcp", "server"),
         ("skill", "skill"),
     ]
-    assert [item.value for item in frozen] == [agent, mcp, skill]
+    assert [item.value for item in frozen] == [agent, mcp, SkillDefinition(skill)]
     assert all("semantic_revision" not in item.semantic_contract for item in frozen)
 
 
@@ -76,7 +77,7 @@ class _CapturingLoader:
     def __init__(self) -> None:
         self.calls = 0
         self.entries: tuple[AssetInfo, ...] = ()
-        self.contents: dict[AssetKey, bytes] = {}
+        self.read_value: bytes | None = None
 
     @property
     def id(self) -> str:
@@ -84,17 +85,16 @@ class _CapturingLoader:
 
     async def load(
         self,
-        entries: Sequence[AssetInfo],
-        contents: Mapping[AssetKey, bytes],
+        context: CapabilityLoadContext,
     ) -> "Sequence[CapabilityContribution[object]]":
         self.calls += 1
-        self.entries = tuple(entries)
-        self.contents = dict(contents)
+        self.entries = context.entries
+        self.read_value = await context.read(AssetKey("custom", "a"))
         return ()
 
 
 @pytest.mark.asyncio
-async def test_custom_loader_receives_one_frozen_metadata_and_content_snapshot() -> None:
+async def test_custom_loader_receives_frozen_metadata_and_reads_explicit_keys_only() -> None:
     store = await _store()
     await store.put(AssetKey("custom", "a"), b"a")
     await store.put(AssetKey("custom", "b"), b"b")
@@ -105,36 +105,32 @@ async def test_custom_loader_receives_one_frozen_metadata_and_content_snapshot()
     assert await group.freeze() == ()
     assert loader.calls == 1
     assert [entry.key for entry in loader.entries] == [AssetKey("custom", "a"), AssetKey("custom", "b")]
-    assert loader.contents == {
-        AssetKey("custom", "a"): b"a",
-        AssetKey("custom", "b"): b"b",
-    }
+    assert loader.read_value == b"a"
 
 
-class _MutatingLoader:
+class _OutsideSnapshotLoader:
     @property
     def id(self) -> str:
-        return "mutating"
+        return "outside-snapshot"
 
     async def load(
         self,
-        entries: Sequence[AssetInfo],
-        contents: Mapping[AssetKey, bytes],
+        context: CapabilityLoadContext,
     ) -> "Sequence[CapabilityContribution[object]]":
-        del entries
-        cast("dict[AssetKey, bytes]", contents)[AssetKey("custom", "a")] = b"changed"
+        await context.read(AssetKey("custom", "missing"))
         return ()
 
 
 @pytest.mark.asyncio
-async def test_custom_loader_cannot_mutate_shared_content_snapshot() -> None:
+async def test_custom_loader_cannot_read_key_outside_frozen_metadata() -> None:
     store = await _store()
     await store.put(AssetKey("custom", "a"), b"a")
     group = CapabilityGroup.from_store("workspace", store)
-    group.loader(_MutatingLoader())
+    group.loader(_OutsideSnapshotLoader())
 
-    with pytest.raises(TypeError):
+    with pytest.raises(AIError) as error:
         await group.freeze()
+    assert error.value.code is ErrorCode.STORAGE_CONFLICT
 
 
 @dataclass
@@ -145,10 +141,9 @@ class _DuplicateAgentLoader:
 
     async def load(
         self,
-        entries: Sequence[AssetInfo],
-        contents: Mapping[AssetKey, bytes],
+        context: CapabilityLoadContext,
     ) -> "Sequence[CapabilityContribution[object]]":
-        del entries, contents
+        del context
         spec = AgentSpec("agent", model="other-model")
         contract = contribution_semantic_contract("agent", spec.id, spec)
         return (
@@ -182,12 +177,12 @@ class _RaceStore(AssetStore):
         super().__init__(StorageOverlay(backend, writer=backend))
         self._raced = False
 
-    async def get_many(self, keys: Sequence[AssetKey]) -> "tuple[bytes | None, ...]":
-        values = await super().get_many(keys)
+    async def get(self, key: AssetKey) -> "bytes | None":
+        value = await super().get(key)
         if not self._raced:
             self._raced = True
             await self.put(AssetKey("skill", "late"), SkillSpecCodec().encode(SkillSpec("late", "late")))
-        return values
+        return value
 
 
 @pytest.mark.asyncio

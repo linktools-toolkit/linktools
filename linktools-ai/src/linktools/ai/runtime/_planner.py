@@ -116,7 +116,10 @@ class RuntimeTaskNodeRunner:
             snapshot = AgentBindingSnapshot.from_payload(payload["binding"])
             binding = self._catalog.register_binding(self._compiler.restore(snapshot))
         except AIError as error:
-            if error.code is ErrorCode.STORAGE_INTEGRITY_ERROR:
+            if error.code in {
+                ErrorCode.STORAGE_INTEGRITY_ERROR,
+                ErrorCode.STORAGE_VERSION_UNSUPPORTED,
+            }:
                 raise
             raise AIError(
                 ErrorCode.AGENT_DEFINITION_UNAVAILABLE,

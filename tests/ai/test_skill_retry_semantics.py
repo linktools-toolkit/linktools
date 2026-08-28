@@ -3,7 +3,8 @@
 """Skill tool regression for model-correctable selection misses."""
 
 import pytest
-from linktools.ai.capability import SkillCapability
+from linktools.ai.capability import SkillCapability, SkillDefinition, SkillSourceRegistry
+from linktools.ai.runtime._skill_adapter import _PydanticSkillCapability
 from linktools.ai.spec import SkillSpec
 from pydantic_ai.exceptions import ModelRetry
 from pydantic_ai.models.test import TestModel
@@ -23,8 +24,11 @@ def _context() -> RunContext[None]:
 
 
 async def test_missing_skill_id_is_model_retry() -> None:
-    capability = SkillCapability(
-        (SkillSpec("known", content="instructions"),),
+    capability = _PydanticSkillCapability(
+        SkillCapability(
+            (SkillDefinition(SkillSpec("known", content="instructions")),),
+            SkillSourceRegistry(),
+        )
     )
     toolset = capability.get_toolset()
     context = _context()

@@ -267,11 +267,12 @@ def test_explicit_custom_task_node_tolerates_additive_field() -> None:
     assert decode_domain(payload, TaskNode) == node
 
 
-def test_agent_binding_snapshot_ignores_unknown_ordinary_field() -> None:
+def test_agent_binding_snapshot_preserves_unknown_ordinary_field() -> None:
     payload = _binding_snapshot_payload()
     payload["future_metadata"] = {"$future_v2": ["must", "not", "be", "interpreted"]}
     decoded = AgentBindingSnapshot.from_payload(payload)
-    assert decoded.to_payload() == _binding_snapshot_payload()
+    assert decoded.to_payload() == payload
+    assert decoded.binding_digest == "a" * 64
 
 
 @pytest.mark.parametrize(

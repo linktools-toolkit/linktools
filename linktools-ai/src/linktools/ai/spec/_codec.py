@@ -28,9 +28,10 @@ _AGENT_FIELDS = frozenset(
         "usage_limits",
         "planning",
         "thinking",
+        "description",
     }
 )
-_SKILL_FIELDS = frozenset({"version", "id", "content"})
+_SKILL_FIELDS = frozenset({"version", "id", "description", "content"})
 _MCP_FIELDS = frozenset({"version", "id", "command", "args"})
 _USAGE_LIMIT_FIELDS = (
     "model_requests",
@@ -76,6 +77,8 @@ class AgentSpecCodec:
     def to_wire_payload(self, value: AgentSpec) -> "dict[str, JsonValue]":
         payload = dict(value._extensions)
         payload.update(self.to_payload(value))
+        if value.description is not None:
+            payload["description"] = value.description
         return payload
 
     def from_payload(self, raw: Mapping[str, object]) -> AgentSpec:
@@ -89,6 +92,7 @@ class AgentSpecCodec:
         allow_subagents = raw.get("allow_subagents", ["*"])
         planning = raw.get("planning", False)
         thinking = raw.get("thinking", False)
+        description = raw.get("description")
         if not isinstance(identity, str) or not identity.strip():
             raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID, "agent id must be a non-empty string")
         if not isinstance(model, str) or not model.strip():
@@ -106,6 +110,10 @@ class AgentSpecCodec:
                 raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID, f"{name} must be a string array")
         if not isinstance(planning, bool):
             raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID, "planning must be bool")
+        if description is not None and (
+            not isinstance(description, str) or not 1 <= len(description) <= 1024
+        ):
+            raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID, "description must contain 1..1024 characters")
         try:
             normalized_thinking = normalize_thinking(thinking)
             return AgentSpec(
@@ -119,6 +127,7 @@ class AgentSpecCodec:
                 usage_limits=_decode_usage_limits(raw.get("usage_limits")),
                 planning=planning,
                 thinking=normalized_thinking,
+                description=cast("str | None", description),
                 _extensions=_extensions(raw, _AGENT_FIELDS),
             )
         except AIError as error:
@@ -137,9 +146,17 @@ class AgentSpecCodec:
 
 class SkillSpecCodec:
     def to_payload(self, value: SkillSpec) -> "dict[str, JsonValue]":
+        """Return the canonical semantic v1 payload used by durable identity."""
         if not isinstance(value, SkillSpec):
             raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID, "skill spec is invalid")
-        return {"version": _VERSION, "id": value.id, "content": value.content}
+        payload: dict[str, JsonValue] = {
+            "version": 1,
+            "id": value.id,
+            "content": value.content,
+        }
+        if value.description is not None:
+            payload["description"] = value.description
+        return payload
 
     def to_wire_payload(self, value: SkillSpec) -> "dict[str, JsonValue]":
         payload = dict(value._extensions)
@@ -152,8 +169,18 @@ class SkillSpecCodec:
         content = raw.get("content")
         if not isinstance(identity, str) or not identity.strip() or not isinstance(content, str):
             raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID, "skill spec is invalid")
+        description = raw.get("description")
+        if description is not None and (
+            not isinstance(description, str) or not 1 <= len(description) <= 1024
+        ):
+            raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID, "skill description must contain 1..1024 characters")
         try:
-            return SkillSpec(identity, content, _extensions(raw, _SKILL_FIELDS))
+            return SkillSpec(
+                identity,
+                content,
+                cast("str | None", description),
+                _extensions(raw, _SKILL_FIELDS),
+            )
         except (TypeError, ValueError) as error:
             raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID, "skill spec is invalid") from error
 
@@ -174,7 +201,7 @@ class SkillMarkdownSpecCodec:
             if isinstance(error, AIError):
                 raise
             raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID) from error
-        if frontmatter["name"] != value.id:
+        if frontmatter["name"] != value.id or frontmatter["description"] != value.description:
             raise AIError(ErrorCode.ASSET_CONTENT_MISMATCH)
         try:
             return value.content.encode("utf-8")
@@ -185,7 +212,11 @@ class SkillMarkdownSpecCodec:
         try:
             content = data.decode("utf-8")
             frontmatter = _parse_skill_markdown(content)
-            return SkillSpec(cast(str, frontmatter["name"]), content)
+            return SkillSpec(
+                cast(str, frontmatter["name"]),
+                content,
+                cast(str, frontmatter["description"]),
+            )
         except AIError:
             raise
         except Exception as error:
@@ -199,12 +230,22 @@ class SkillMarkdownSpecAdapter:
         local_name = logical_id.rsplit("/", 1)[-1]
         if value.id != local_name:
             raise AIError(ErrorCode.ASSET_CONTENT_MISMATCH)
-        return SkillSpec(logical_id, value.content, value._extensions)
+        return SkillSpec(
+            logical_id,
+            value.content,
+            value.description,
+            _extensions=value._extensions,
+        )
 
     def to_storage(self, logical_id: str, value: SkillSpec) -> SkillSpec:
         if value.id != logical_id:
             raise AIError(ErrorCode.ASSET_CONTENT_MISMATCH)
-        return SkillSpec(logical_id.rsplit("/", 1)[-1], value.content, value._extensions)
+        return SkillSpec(
+            logical_id.rsplit("/", 1)[-1],
+            value.content,
+            value.description,
+            _extensions=value._extensions,
+        )
 
 
 def retarget_skill_markdown(content: str, local_name: str) -> str:
@@ -267,14 +308,19 @@ def _decode(data: bytes) -> "dict[str, object]":
     return value
 
 
-def _require_v1(raw: Mapping[str, object]) -> None:
+def _require_version(raw: Mapping[str, object], supported: set[int]) -> int:
     version = raw.get("version")
     if version is None:
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     if not isinstance(version, int) or isinstance(version, bool) or version < 1:
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-    if version != 1:
+    if version not in supported:
         raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
+    return version
+
+
+def _require_v1(raw: Mapping[str, object]) -> None:
+    _require_version(raw, {1})
 
 
 def _extensions(raw: Mapping[str, object], known: frozenset[str]) -> "dict[str, JsonValue]":

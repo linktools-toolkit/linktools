@@ -24,11 +24,11 @@ from pydantic_ai_harness.step_persistence import (
     fork_run,
 )
 
-from ..agent import AgentBinding, AgentCatalog
-from ..capability import RunContext
+from ..agent import AgentBinding, AgentCatalog, SubagentRef
+from ..capability import RunContext, SubagentDelegate
 from ..workspace import Workspace
 from ._agent_executor import AgentExecutor, DurableBoundary, LiveDelta, _RunScope
-from ._capabilities import MEMORY_TOOL_NAMES, SubagentDelegate, select_runtime_tool_names
+from ._capabilities import MEMORY_TOOL_NAMES, select_runtime_tool_names
 from ._input import UserPromptTransport, user_prompt_transport
 from ._plan import RuntimePlanStore
 from ..core import (
@@ -43,7 +43,6 @@ from ..core import (
     ResourceRef,
     SessionStatus,
     StopReason,
-    ThinkingValue,
     ToolOperationStatus,
     UsageMetrics,
     canonical_json_bytes,
@@ -118,11 +117,14 @@ class _SubagentDispatcher(Protocol):
         root_execution_id: str,
         memory_scope: "str | None",
         principal: Principal,
-        allowed_agent_ids: "tuple[str, ...]",
+        refs: "tuple[SubagentRef, ...]",
         mode: ExecutionMode,
-        planning: bool,
-        thinking: ThinkingValue,
     ) -> SubagentDelegate: ...
+
+    def descriptions_for(
+        self,
+        refs: "tuple[SubagentRef, ...]",
+    ) -> "dict[str, str | None]": ...
 
 
 _logger = environ.get_logger("ai.runtime.local")
@@ -2185,11 +2187,11 @@ class LocalExecutionBackend:
                     return
                 await self._append_event(current, emission.kind, emission.payload)
 
-            allowed_subagent_ids = definition.selected_subagents
+            subagent_refs = binding.snapshot.subagents
             subagent_available = (
                 current.parent_execution_id is None
                 and self._subagent_dispatcher is not None
-                and bool(allowed_subagent_ids)
+                and bool(subagent_refs)
             )
             runtime_tool_names = select_runtime_tool_names(
                 ordinary_tool_policy=definition.ordinary_tool_policy,
@@ -2251,6 +2253,11 @@ class LocalExecutionBackend:
                         thinking=current.thinking,
                         parent_step_run_id=None,
                         subagent_available=subagent_available,
+                        subagent_descriptions=(
+                            {}
+                            if self._subagent_dispatcher is None
+                            else self._subagent_dispatcher.descriptions_for(subagent_refs)
+                        ),
                         subagent_delegate=(
                             None
                             if not subagent_available
@@ -2259,10 +2266,8 @@ class LocalExecutionBackend:
                                 root_execution_id=current.root_execution_id,
                                 memory_scope=current.memory_scope,
                                 principal=request.principal,
-                                allowed_agent_ids=allowed_subagent_ids,
+                                refs=subagent_refs,
                                 mode=current.mode,
-                                planning=current.planning,
-                                thinking=current.thinking,
                             )
                         ),
                         event_sink=sink,

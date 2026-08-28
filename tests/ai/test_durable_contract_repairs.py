@@ -55,7 +55,7 @@ def _compiler(
     return AgentCompiler(
         model_resolver=ModelRegistry.openai(model="gpt-test").snapshot(),
         candidates=candidates,
-        agent_ids=("durable-contract",),
+        agents={"durable-contract": _spec()},
     )
 
 

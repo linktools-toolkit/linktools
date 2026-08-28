@@ -4,10 +4,10 @@
 
 from dataclasses import dataclass
 
-from ..capability import CapabilityContribution
+from ..capability import CapabilityContribution, SkillDefinition
 from ..errors import AIError, ErrorCode
 from ..model import ModelBinding
-from ..spec import AgentSpec, MCPServerSpec, SkillSpec
+from ..spec import AgentSpec, MCPServerSpec
 
 
 def _is_digest(value: object) -> bool:
@@ -53,8 +53,12 @@ class AgentDefinition:
             raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
 
     @property
-    def skill_specs(self) -> "tuple[SkillSpec, ...]":
-        return tuple(value.value for value in self.selected_skills if isinstance(value.value, SkillSpec))
+    def skill_definitions(self) -> "tuple[SkillDefinition, ...]":
+        return tuple(
+            value.value
+            for value in self.selected_skills
+            if isinstance(value.value, SkillDefinition)
+        )
 
     @property
     def mcp_servers(self) -> "tuple[MCPServerSpec, ...]":

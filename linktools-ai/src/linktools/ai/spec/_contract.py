@@ -4,7 +4,7 @@
 
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
-from typing import TypeAlias, cast
+from typing import Literal, TypeAlias, cast
 
 from ..core import (
     ImmutableJsonMapping,
@@ -100,6 +100,7 @@ class AgentSpec:
     usage_limits: "AgentUsageLimits | None" = None
     planning: bool = False
     thinking: ThinkingValue = False
+    description: "str | None" = None
     _extensions: Mapping[str, JsonValue] = field(default_factory=dict, repr=False, compare=False, hash=False)
 
     def __post_init__(self) -> None:
@@ -120,6 +121,10 @@ class AgentSpec:
             raise TypeError("agent usage_limits must be AgentUsageLimits or None")
         if not isinstance(self.planning, bool):
             raise TypeError("agent planning must be bool")
+        if self.description is not None and (
+            not isinstance(self.description, str) or not 1 <= len(self.description) <= 1024
+        ):
+            raise ValueError("agent description must contain 1..1024 characters")
         thinking = normalize_thinking(self.thinking)
         try:
             extensions = ImmutableJsonMapping(self._extensions)
@@ -137,6 +142,7 @@ class AgentSpec:
 class SkillSpec:
     id: str
     content: str
+    description: "str | None" = None
     _extensions: Mapping[str, JsonValue] = field(default_factory=dict, repr=False, compare=False, hash=False)
 
     def __post_init__(self) -> None:
@@ -144,7 +150,69 @@ class SkillSpec:
             raise ValueError("skill id must be non-empty")
         if not isinstance(self.content, str):
             raise TypeError("skill content must be a string")
+        if self.description is not None and (
+            not isinstance(self.description, str) or not 1 <= len(self.description) <= 1024
+        ):
+            raise ValueError("skill description must contain 1..1024 characters")
         object.__setattr__(self, "_extensions", ImmutableJsonMapping(self._extensions))
+
+
+@dataclass(frozen=True, slots=True)
+class SubagentRef:
+    """Durable logical reference to one allowed child Agent."""
+
+    kind: Literal["agent"]
+    id: str
+    description: "str | None" = None
+    _extensions: Mapping[str, JsonValue] = field(
+        default_factory=dict,
+        repr=False,
+        compare=False,
+        hash=False,
+    )
+
+    def __post_init__(self) -> None:
+        if self.kind != "agent" or not isinstance(self.id, str) or not self.id.strip():
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        if self.description is not None and (
+            not isinstance(self.description, str) or not 1 <= len(self.description) <= 1024
+        ):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        try:
+            extensions = ImmutableJsonMapping(self._extensions)
+        except (TypeError, ValueError) as error:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
+        object.__setattr__(self, "_extensions", extensions)
+
+    def to_payload(self) -> "dict[str, JsonValue]":
+        payload = dict(self._extensions)
+        payload.update({"kind": "agent", "id": self.id})
+        if self.description is not None:
+            payload["description"] = self.description
+        return payload
+
+    @classmethod
+    def from_payload(cls, value: object) -> "SubagentRef":
+        if not isinstance(value, Mapping) or value.get("kind") != "agent":
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        identity = value.get("id")
+        description = value.get("description")
+        if not isinstance(identity, str) or not identity.strip():
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        if description is not None and not isinstance(description, str):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        extensions: dict[str, JsonValue] = {}
+        for key, raw in value.items():
+            if key in {"kind", "id", "description"}:
+                continue
+            if not isinstance(key, str):
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            try:
+                extensions[key] = cast(JsonValue, raw)
+                ImmutableJsonMapping(extensions)
+            except (TypeError, ValueError) as error:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
+        return cls("agent", identity, description, extensions)
 
 
 @dataclass(frozen=True, slots=True)
@@ -173,6 +241,7 @@ __all__ = [
     "AgentUsageLimits",
     "MCPServerSpec",
     "SkillSpec",
+    "SubagentRef",
     "ThinkingEffort",
     "ThinkingValue",
     "canonical_selectors",

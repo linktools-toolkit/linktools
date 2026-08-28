@@ -5,7 +5,7 @@
 import json
 
 import pytest
-from linktools.ai.capability import SkillCapability
+from linktools.ai.capability import SkillCapability, SkillDefinition, SkillSourceRegistry
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.runtime._agent_executor import _RuntimePersistenceBoundary, _ToolPresentation
 from linktools.ai.runtime._capabilities import (
@@ -43,7 +43,7 @@ def test_runtime_tool_selection_keeps_planning_outside_allow_tools() -> None:
         ordinary_tool_policy=(),
         memory_scope=None,
         subagent_available=True,
-    ) == ("delegate_task",)
+    ) == ("delegate_task", "list_subagents")
 
 
 def test_runtime_tool_selection_honors_wildcard_for_ordinary_memory_tools() -> None:
@@ -392,10 +392,23 @@ def test_spec_constructors_reject_invalid_values() -> None:
         MCPServerSpec("", "echo")
 
 
-def test_skill_capability_sorts_selected_skills_and_rejects_duplicates() -> None:
-    capability = SkillCapability((SkillSpec("z", "z skill"), SkillSpec("a", "a skill")))
-    assert tuple(item.id for item in capability.skills) == ("a", "z")
+@pytest.mark.asyncio
+async def test_skill_capability_sorts_selected_skills_and_rejects_duplicates() -> None:
+    capability = SkillCapability(
+        (
+            SkillDefinition(SkillSpec("z", "z skill")),
+            SkillDefinition(SkillSpec("a", "a skill")),
+        ),
+        SkillSourceRegistry(),
+    )
+    assert [item["id"] for item in await capability.list_skills()] == ["a", "z"]
 
     with pytest.raises(AIError) as error:
-        SkillCapability((SkillSpec("same", "one"), SkillSpec("same", "two")))
+        SkillCapability(
+            (
+                SkillDefinition(SkillSpec("same", "one")),
+                SkillDefinition(SkillSpec("same", "two")),
+            ),
+            SkillSourceRegistry(),
+        )
     assert error.value.code is ErrorCode.CAPABILITY_CONFLICT

@@ -1,0 +1,13 @@
+{
+  "fingerprint": "196cf2d371404d382c721161b7e11aeb3475467409a746aa202f785c567972f4",
+  "pin": {
+    "kind": "skill",
+    "id": "legacy",
+    "contract_version": 1,
+    "contract": {
+      "version": 1,
+      "id": "legacy",
+      "content": "legacy instructions"
+    }
+  }
+}
