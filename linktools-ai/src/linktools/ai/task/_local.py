@@ -398,18 +398,20 @@ class LocalTaskGraphLauncher:
                     request.graph.graph_id,
                     tenant_id=request.principal.tenant_id,
                 )
+                nodes = await self._repository.list_nodes(
+                    request.graph.graph_id,
+                    tenant_id=request.principal.tenant_id,
+                )
                 if view.status in {
                     TaskStatus.SUCCEEDED,
                     TaskStatus.FAILED,
                     TaskStatus.CANCELLED,
                     TaskStatus.BLOCKED,
                 }:
-                    self._cancel_inflight(inflight)
+                    if view.status in {TaskStatus.FAILED, TaskStatus.BLOCKED}:
+                        await self._cancel_terminal_effects(request, nodes)
+                    await self._cancel_inflight(inflight)
                     return
-                nodes = await self._repository.list_nodes(
-                    request.graph.graph_id,
-                    tenant_id=request.principal.tenant_id,
-                )
                 now = datetime.now(timezone.utc)
                 persisted = {
                     node.node_id
@@ -465,8 +467,31 @@ class LocalTaskGraphLauncher:
             )
         finally:
             self._close_run(run)
-            self._cancel_inflight(inflight)
+            await self._cancel_inflight(inflight)
             self._schedule_cleanup(run)
+
+    async def _cancel_terminal_effects(
+        self,
+        request: TaskGraphLaunch,
+        nodes: "tuple[_TaskNodeState, ...]",
+    ) -> None:
+        static_nodes = {node.node_id: node for node in request.graph.nodes}
+        for state in nodes:
+            if state.status is not TaskStatus.RUNNING or state.fence < 1:
+                continue
+            node = static_nodes.get(state.node_id)
+            if node is None:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            await self._runner.cancel(
+                node,
+                graph_id=request.graph.graph_id,
+                principal=request.principal,
+                dependency_results=await self._dependency_results(
+                    request.graph.graph_id,
+                    request.principal.tenant_id,
+                    node,
+                ),
+            )
 
     async def _wait_for_activity(
         self,
@@ -538,7 +563,8 @@ class LocalTaskGraphLauncher:
             )
             if heartbeat_error is not None:
                 runner_task.cancel()
-                self._detach(
+                await asyncio.gather(runner_task, return_exceptions=True)
+                self._consume_done(
                     cast("asyncio.Task[object]", runner_task),
                     "task node runner after heartbeat loss",
                 )
@@ -608,20 +634,19 @@ class LocalTaskGraphLauncher:
                     code,
                 )
         finally:
-            for task in (runner_task, heartbeat_task):
-                if task is None:
-                    continue
+            cleanup_tasks = tuple(
+                task for task in (runner_task, heartbeat_task) if task is not None
+            )
+            for task in cleanup_tasks:
                 if not task.done():
                     task.cancel()
-                    self._detach(
-                        cast("asyncio.Task[object]", task),
-                        "task node cleanup",
-                    )
-                else:
-                    self._consume_done(
-                        cast("asyncio.Task[object]", task),
-                        "task node cleanup",
-                    )
+            if cleanup_tasks:
+                await asyncio.gather(*cleanup_tasks, return_exceptions=True)
+            for task in cleanup_tasks:
+                self._consume_done(
+                    cast("asyncio.Task[object]", task),
+                    "task node cleanup",
+                )
             if not run.closed:
                 self._signal(run)
 
@@ -718,20 +743,21 @@ class LocalTaskGraphLauncher:
         if self._graphs.get(key) is run:
             self._graphs.pop(key, None)
 
-    def _cancel_inflight(self, inflight: dict[str, _InflightNode]) -> None:
-        for state in inflight.values():
-            task = state.task
+    async def _cancel_inflight(
+        self,
+        inflight: dict[str, _InflightNode],
+    ) -> None:
+        tasks = tuple(state.task for state in inflight.values())
+        for task in tasks:
             if not task.done():
                 task.cancel()
-                self._detach(
-                    cast("asyncio.Task[object]", task),
-                    "task graph inflight cleanup",
-                )
-            else:
-                self._consume_done(
-                    cast("asyncio.Task[object]", task),
-                    "task graph inflight cleanup",
-                )
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+        for task in tasks:
+            self._consume_done(
+                cast("asyncio.Task[object]", task),
+                "task graph inflight cleanup",
+            )
         inflight.clear()
 
     def _detach(
