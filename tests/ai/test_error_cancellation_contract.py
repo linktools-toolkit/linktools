@@ -139,6 +139,7 @@ async def test_task_runner_cancellation_hands_off_without_business_cancel() -> N
     runner._execution = execution
     runner._detached_tasks = set()
     runner._active_execution_ids = {}
+    runner._active_launch_tasks = {}
 
     async def prepare(*args, **kwargs):
         del args, kwargs
