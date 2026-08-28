@@ -4286,6 +4286,15 @@ class TaskAdmissionRepositoryImpl(_RepositoryBase):
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             return await self._create_admission(transaction, admission, graph)
         if stored_operation is None:
+            if graph_record is not None and admission_record is not None:
+                existing, _ = await self._require_committed_admission(
+                    transaction,
+                    graph_record,
+                    admission_record,
+                    node_records,
+                )
+                if existing.operation_id != admission.operation_id:
+                    raise AIError(ErrorCode.STORAGE_CONFLICT)
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         operation = _decode_operation(stored_operation)
         if operation.request_digest != admission.request_digest:
@@ -4294,20 +4303,45 @@ class TaskAdmissionRepositoryImpl(_RepositoryBase):
         if operation.status in {OperationStatus.FAILED, OperationStatus.CANCELLED}:
             raise _stored_operation_error(operation)
         if graph_record is None:
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            if admission_record is not None or node_records:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            if operation.status not in {
+                OperationStatus.PENDING,
+                OperationStatus.RUNNING,
+                OperationStatus.EFFECT_UNKNOWN,
+            }:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            view = await self._insert_admission_records(transaction, admission, graph)
+            await self._settle_operation(transaction, stored_operation, operation, graph)
+            _logger.info(
+                "legacy task admission completed from operation: tenant=%s graph=%s",
+                self._tenant_id,
+                graph.graph_id,
+            )
+            return view
         graph_view = await self._decode(graph_record, TaskGraphView)
         nodes = await self._decode_task_nodes(node_records)
         self._validate_graph(graph_view, graph, nodes)
         if admission_record is not None:
-            existing = await self._decode(admission_record, TaskGraphAdmission)
-            if existing != admission or operation.status is not OperationStatus.SUCCEEDED:
+            existing, view = await self._require_committed_admission(
+                transaction,
+                graph_record,
+                admission_record,
+                node_records,
+                stored_operation=stored_operation,
+            )
+            if existing != admission:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            return TaskGraphView(graph.graph_id, _graph_status(nodes), graph.nodes)
+            return view
         if operation.status not in {
-            OperationStatus.PENDING, OperationStatus.RUNNING,
-            OperationStatus.EFFECT_UNKNOWN, OperationStatus.SUCCEEDED,
+            OperationStatus.PENDING,
+            OperationStatus.RUNNING,
+            OperationStatus.EFFECT_UNKNOWN,
+            OperationStatus.SUCCEEDED,
         }:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        if operation.status is OperationStatus.SUCCEEDED:
+            self._validate_succeeded_operation(operation, graph)
         status = _graph_status(nodes)
         next_graph = TaskGraphView(graph.graph_id, status, graph.nodes)
         await _replace_checked(
@@ -4322,12 +4356,30 @@ class TaskAdmissionRepositoryImpl(_RepositoryBase):
             graph_record.storage_version,
         )
         await transaction.insert_record(self._stored("task_admission", graph.graph_id, admission))
-        await self._settle_operation(transaction, stored_operation, operation, graph)
+        if operation.status is not OperationStatus.SUCCEEDED:
+            await self._settle_operation(transaction, stored_operation, operation, graph)
         _logger.info("legacy task graph admission upgraded: tenant=%s graph=%s", self._tenant_id, graph.graph_id)
         return next_graph
 
     async def _create_admission(
         self, transaction: StateTransaction, admission: TaskGraphAdmission, graph: TaskGraph
+    ) -> TaskGraphView:
+        view = await self._insert_admission_records(transaction, admission, graph)
+        now = await transaction.now()
+        operation_input = OperationLedgerInput(
+            admission.operation_id, self._tenant_id, ResourceKind.TASK_GRAPH, graph.graph_id, None,
+            OperationKind.TASK_NODE, OperationStatus.SUCCEEDED, admission.request_digest,
+            graph.graph_id, _task_submit_result_digest(graph), None, True, now, now,
+        )
+        await _append_operation(transaction, self, operation_input)
+        _logger.info("task graph durably admitted: tenant=%s graph=%s", self._tenant_id, graph.graph_id)
+        return view
+
+    async def _insert_admission_records(
+        self,
+        transaction: StateTransaction,
+        admission: TaskGraphAdmission,
+        graph: TaskGraph,
     ) -> TaskGraphView:
         status = TaskStatus.SUCCEEDED if not graph.nodes else TaskStatus.PENDING
         view = TaskGraphView(graph.graph_id, status, graph.nodes)
@@ -4350,15 +4402,7 @@ class TaskAdmissionRepositoryImpl(_RepositoryBase):
                     state=node_status.value,
                 )
             )
-        now = await transaction.now()
-        operation_input = OperationLedgerInput(
-            admission.operation_id, self._tenant_id, ResourceKind.TASK_GRAPH, graph.graph_id, None,
-            OperationKind.TASK_NODE, OperationStatus.SUCCEEDED, admission.request_digest,
-            graph.graph_id, _task_submit_result_digest(graph), None, True, now, now,
-        )
         await transaction.insert_records(records)
-        await _append_operation(transaction, self, operation_input)
-        _logger.info("task graph durably admitted: tenant=%s graph=%s", self._tenant_id, graph.graph_id)
         return view
 
     async def _settle_operation(
@@ -4394,50 +4438,69 @@ class TaskAdmissionRepositoryImpl(_RepositoryBase):
         )
         if graph_record is None and admission_record is None and stored_operation is None and not node_records:
             return CommitObservation(DurableCommitState.NOT_COMMITTED)
-        if stored_operation is not None:
-            operation = _decode_operation(stored_operation)
-            if operation.request_digest != admission.request_digest:
-                return CommitObservation(
-                    DurableCommitState.NOT_COMMITTED,
-                    error=AIError(ErrorCode.IDEMPOTENCY_CONFLICT),
-                )
-            try:
-                self._validate_operation_identity(operation, admission)
-            except AIError as error:
-                return CommitObservation(
-                    DurableCommitState.PARTIAL_INTEGRITY_ERROR,
-                    error=error,
-                )
-            if operation.status in {OperationStatus.FAILED, OperationStatus.CANCELLED}:
-                return CommitObservation(
-                    DurableCommitState.NOT_COMMITTED,
-                    error=_stored_operation_error(operation),
-                )
-        if graph_record is None or admission_record is None or stored_operation is None:
-            return CommitObservation(
-                DurableCommitState.PARTIAL_INTEGRITY_ERROR, error=AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            )
         try:
-            operation = _decode_operation(stored_operation)
-            existing = await self._decode(admission_record, TaskGraphAdmission)
+            operation = None if stored_operation is None else _decode_operation(stored_operation)
+            if operation is not None:
+                if operation.request_digest != admission.request_digest:
+                    return CommitObservation(
+                        DurableCommitState.NOT_COMMITTED,
+                        error=AIError(ErrorCode.IDEMPOTENCY_CONFLICT),
+                    )
+                self._validate_operation_identity(operation, admission)
+                if operation.status in {OperationStatus.FAILED, OperationStatus.CANCELLED}:
+                    return CommitObservation(
+                        DurableCommitState.NOT_COMMITTED,
+                        error=_stored_operation_error(operation),
+                    )
+            if stored_operation is None:
+                if graph_record is not None and admission_record is not None:
+                    existing, _ = await self._require_committed_admission(
+                        transaction,
+                        graph_record,
+                        admission_record,
+                        node_records,
+                    )
+                    if existing.operation_id != admission.operation_id:
+                        return CommitObservation(
+                            DurableCommitState.NOT_COMMITTED,
+                            error=AIError(ErrorCode.STORAGE_CONFLICT),
+                        )
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            assert operation is not None
+            if graph_record is None:
+                if admission_record is not None or node_records:
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                if operation.status in {
+                    OperationStatus.PENDING,
+                    OperationStatus.RUNNING,
+                    OperationStatus.EFFECT_UNKNOWN,
+                }:
+                    return CommitObservation(DurableCommitState.NOT_COMMITTED)
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             graph_view = await self._decode(graph_record, TaskGraphView)
             nodes = await self._decode_task_nodes(node_records)
-            self._validate_operation_identity(operation, admission)
             self._validate_graph(graph_view, graph, nodes)
-            if (
-                operation.status is not OperationStatus.SUCCEEDED
-                or operation.request_digest != admission.request_digest
-                or operation.result_ref != graph.graph_id
-                or operation.result_digest != _task_submit_result_digest(graph)
-                or existing != admission
-                or graph_record.scope_digest != self._recovery_scope()
-                or graph_record.state != graph_view.status.value
-            ):
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            return CommitObservation(
-                DurableCommitState.COMMITTED,
-                TaskGraphView(graph.graph_id, _graph_status(nodes), graph.nodes),
+            if admission_record is None:
+                if operation.status not in {
+                    OperationStatus.PENDING,
+                    OperationStatus.RUNNING,
+                    OperationStatus.EFFECT_UNKNOWN,
+                    OperationStatus.SUCCEEDED,
+                }:
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                if operation.status is OperationStatus.SUCCEEDED:
+                    self._validate_succeeded_operation(operation, graph)
+                return CommitObservation(DurableCommitState.NOT_COMMITTED)
+            existing, view = await self._require_committed_admission(
+                transaction,
+                graph_record,
+                admission_record,
+                node_records,
+                stored_operation=stored_operation,
             )
+            if existing != admission:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            return CommitObservation(DurableCommitState.COMMITTED, view)
         except (KeyError, TypeError, ValueError) as error:
             return CommitObservation(
                 DurableCommitState.PARTIAL_INTEGRITY_ERROR,
@@ -4445,6 +4508,59 @@ class TaskAdmissionRepositoryImpl(_RepositoryBase):
             )
         except AIError as error:
             return CommitObservation(DurableCommitState.PARTIAL_INTEGRITY_ERROR, error=error)
+
+    async def _require_committed_admission(
+        self,
+        transaction: StateTransaction,
+        graph_record: StoredRecord,
+        admission_record: StoredRecord,
+        node_records: tuple[StoredRecord, ...],
+        *,
+        stored_operation: StoredOperation | None = None,
+    ) -> tuple[TaskGraphAdmission, TaskGraphView]:
+        existing = await self._decode(admission_record, TaskGraphAdmission)
+        graph_view = await self._decode(graph_record, TaskGraphView)
+        nodes = await self._decode_task_nodes(node_records)
+        persisted_graph = TaskGraph(graph_view.graph_id, graph_view.nodes)
+        existing.bind(persisted_graph)
+        self._validate_graph(graph_view, persisted_graph, nodes)
+        status = _graph_status(nodes)
+        if (
+            graph_view.status is not status
+            or graph_record.scope_digest != self._recovery_scope()
+            or graph_record.state != status.value
+        ):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        if stored_operation is None:
+            stored_operation = await transaction.get_operation(
+                operation_key(
+                    self._namespace,
+                    self._tenant_id,
+                    self._domain.value,
+                    existing.operation_id,
+                )
+            )
+        if stored_operation is None:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        operation = _decode_operation(stored_operation)
+        self._validate_operation_identity(operation, existing)
+        if operation.request_digest != existing.request_digest:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        self._validate_succeeded_operation(operation, persisted_graph)
+        return existing, TaskGraphView(graph_view.graph_id, status, graph_view.nodes)
+
+    def _validate_succeeded_operation(
+        self,
+        operation: OperationLedgerRecord,
+        graph: TaskGraph,
+    ) -> None:
+        if (
+            operation.status is not OperationStatus.SUCCEEDED
+            or operation.result_ref != graph.graph_id
+            or operation.result_digest != _task_submit_result_digest(graph)
+            or operation.error_code is not None
+        ):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
 
     def _validate_operation_identity(
         self, operation: OperationLedgerRecord, admission: TaskGraphAdmission
