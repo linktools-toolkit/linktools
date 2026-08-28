@@ -9,16 +9,20 @@ from linktools.ai.runtime.state import RuntimeState
 from linktools.ai.task import TaskGraph, TaskGraphAdmission, TaskGraphRequest, TaskNode
 
 
+def _request(graph_id: str) -> TaskGraphRequest:
+    return TaskGraphRequest(
+        TaskGraph(graph_id, (TaskNode("root"),)),
+        Principal("tester", "tenant"),
+        f"submit:{graph_id}",
+    )
+
+
 @pytest.mark.asyncio
 async def test_terminal_graph_is_removed_from_recovery_index_after_reconcile() -> None:
     state = RuntimeState.in_memory()
     await state.initialize(namespace="task-recovery-index", tenant_id="tenant")
     try:
-        request = TaskGraphRequest(
-            TaskGraph("terminal-index", (TaskNode("root"),)),
-            Principal("tester", "tenant"),
-            "submit:terminal-index",
-        )
+        request = _request("terminal-index")
         admission = TaskGraphAdmission.from_request(request)
         await state.task.admissions.admit(admission, request.graph)
 
@@ -46,6 +50,43 @@ async def test_terminal_graph_is_removed_from_recovery_index_after_reconcile() -
         )
 
         assert view.status is TaskStatus.SUCCEEDED
+        assert recoverable.items == ()
+    finally:
+        await state.close()
+
+
+@pytest.mark.asyncio
+async def test_exact_submit_replay_repairs_running_and_terminal_projections() -> None:
+    state = RuntimeState.in_memory()
+    await state.initialize(namespace="task-replay-projection", tenant_id="tenant")
+    try:
+        request = _request("replay-projection")
+        admission = TaskGraphAdmission.from_request(request)
+        await state.task.admissions.admit(admission, request.graph)
+
+        lease = await state.task.tasks.claim(
+            request.graph.graph_id,
+            "root",
+            tenant_id="tenant",
+            owner="worker",
+            lease_seconds=60,
+        )
+        running = await state.task.admissions.admit(admission, request.graph)
+        assert running.status is TaskStatus.RUNNING
+
+        await state.task.tasks.complete(
+            lease,
+            tenant_id="tenant",
+            execution_id=None,
+            result_digest="0" * 64,
+        )
+        terminal = await state.task.admissions.admit(admission, request.graph)
+        recoverable = await state.task.admissions.list_recoverable_page(
+            cursor=None,
+            limit=128,
+        )
+
+        assert terminal.status is TaskStatus.SUCCEEDED
         assert recoverable.items == ()
     finally:
         await state.close()
