@@ -462,6 +462,19 @@ class ApprovalView:
 
 
 @dataclass(frozen=True, slots=True)
+class ApprovalCreateRequest:
+    principal: Principal
+    approval_id: str
+    operation_id: str
+    idempotency_key: str
+
+    def __post_init__(self) -> None:
+        validate_resource_id(self.approval_id)
+        validate_resource_id(self.operation_id)
+        validate_idempotency_key(self.idempotency_key)
+
+
+@dataclass(frozen=True, slots=True)
 class ApprovalDecisionRequest:
     principal: Principal
     approval_id: str
@@ -533,6 +546,35 @@ class ArtifactDownload:
     expires_at: str
 
 
+class ExecutionHistoryService(Protocol):
+    async def trace(
+        self,
+        execution_id: str,
+        *,
+        principal: Principal,
+        cursor: "str | None" = None,
+        limit: int = 100,
+    ) -> "Page[ExecutionTraceItem]": ...
+
+    async def transcript(
+        self,
+        execution_id: str,
+        *,
+        principal: Principal,
+        cursor: "str | None" = None,
+        limit: int = 100,
+    ) -> Page[TranscriptItem]: ...
+
+    async def history(
+        self,
+        execution_id: str,
+        *,
+        principal: Principal,
+        cursor: "str | None" = None,
+        limit: int = 100,
+    ) -> "Page[ExecutionHistoryItem]": ...
+
+
 class ExecutionService(Protocol):
     async def run(self, binding_digest: str, request: ExecutionRequest) -> ExecutionHandle: ...
     async def resolve_existing(
@@ -581,6 +623,7 @@ class EvaluationService(Protocol):
 
 
 class ApprovalService(Protocol):
+    async def create(self, execution_id: str, request: ApprovalCreateRequest) -> ApprovalView: ...
     async def list(self, execution_id: str, *, principal: Principal) -> 'tuple[ApprovalView, ...]': ...
     async def decide(self, execution_id: str, request: ApprovalDecisionRequest) -> ApprovalDecisionResult: ...
 
@@ -601,6 +644,7 @@ class ArtifactService(Protocol):
 
 
 __all__ = [
+    "ApprovalCreateRequest",
     "ApprovalDecisionRequest",
     "ApprovalDecisionResult",
     "ApprovalService",
@@ -623,6 +667,7 @@ __all__ = [
     "ExecutionHandle",
     "ExecutionHistoryItem",
     "ExecutionHistoryReader",
+    "ExecutionHistoryService",
     "ExecutionRequest",
     "ExecutionResult",
     "ExecutionService",
