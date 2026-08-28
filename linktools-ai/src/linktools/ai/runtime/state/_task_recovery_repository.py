@@ -173,15 +173,9 @@ class DurableTaskAdmissionRepositoryImpl(TaskAdmissionRepositoryImpl):
                 admission.operation_id,
             )
         )
-        if graph_record is None or admission_record is not None or stored_operation is None:
+        if graph_record is None or stored_operation is None:
             return await super()._admit_in_transaction(transaction, admission, graph)
 
-        node_records = await transaction.list_records(
-            RecordQuery(
-                parent_digest=self._parent("task_node", "graph", graph.graph_id),
-                kind="task_node",
-            )
-        )
         operation = _decode_operation(stored_operation)
         if operation.request_digest != admission.request_digest:
             raise AIError(ErrorCode.IDEMPOTENCY_CONFLICT)
@@ -195,6 +189,30 @@ class DurableTaskAdmissionRepositoryImpl(TaskAdmissionRepositoryImpl):
             OperationStatus.SUCCEEDED,
         }:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+
+        node_records = await transaction.list_records(
+            RecordQuery(
+                parent_digest=self._parent("task_node", "graph", graph.graph_id),
+                kind="task_node",
+            )
+        )
+        if admission_record is not None:
+            existing, view = await self._require_committed_admission(
+                transaction,
+                graph_record,
+                admission_record,
+                node_records,
+                stored_operation=stored_operation,
+            )
+            if existing != admission:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            await self._repair_aggregate_projection(
+                transaction,
+                graph_record,
+                admission_record,
+                view,
+            )
+            return view
 
         graph_view = await self._decode(graph_record, TaskGraphView)
         nodes = await self._decode_task_nodes(node_records)
@@ -294,26 +312,6 @@ class DurableTaskAdmissionRepositoryImpl(TaskAdmissionRepositoryImpl):
             or admission_record.scope_digest != self._recovery_scope()
         ):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-
-        next_graph = TaskGraphView(graph_view.graph_id, status, graph_view.nodes)
-        if graph_view.status is not status or graph_record.state != status.value:
-            await _replace_checked(
-                transaction,
-                _task_graph_record(self, graph_record, next_graph),
-                graph_record.storage_version,
-            )
-        if admission_record.state != status.value:
-            candidate = replace(
-                admission_record,
-                state=status.value,
-                storage_version=admission_record.storage_version + 1,
-            )
-            if not await transaction.replace_record(
-                candidate,
-                expected_storage_version=admission_record.storage_version,
-            ):
-                raise AIError(ErrorCode.STORAGE_CONFLICT)
-
         if stored_operation is None:
             stored_operation = await transaction.get_operation(
                 operation_key(
@@ -330,7 +328,41 @@ class DurableTaskAdmissionRepositoryImpl(TaskAdmissionRepositoryImpl):
         if operation.request_digest != existing.request_digest:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         self._validate_succeeded_operation(operation, persisted_graph)
-        return existing, next_graph
+        return existing, TaskGraphView(graph_view.graph_id, status, graph_view.nodes)
+
+    async def _repair_aggregate_projection(
+        self,
+        transaction: StateTransaction,
+        graph_record: StoredRecord,
+        admission_record: StoredRecord,
+        view: TaskGraphView,
+    ) -> None:
+        if graph_record.state != view.status.value:
+            graph_view = await self._decode(graph_record, TaskGraphView)
+            await _replace_checked(
+                transaction,
+                _task_graph_record(self, graph_record, replace(graph_view, status=view.status)),
+                graph_record.storage_version,
+            )
+        else:
+            graph_view = await self._decode(graph_record, TaskGraphView)
+            if graph_view.status is not view.status:
+                await _replace_checked(
+                    transaction,
+                    _task_graph_record(self, graph_record, replace(graph_view, status=view.status)),
+                    graph_record.storage_version,
+                )
+        if admission_record.state != view.status.value:
+            candidate = replace(
+                admission_record,
+                state=view.status.value,
+                storage_version=admission_record.storage_version + 1,
+            )
+            if not await transaction.replace_record(
+                candidate,
+                expected_storage_version=admission_record.storage_version,
+            ):
+                raise AIError(ErrorCode.STORAGE_CONFLICT)
 
 
 __all__ = ["DurableTaskAdmissionRepositoryImpl", "DurableTaskRepositoryImpl"]
