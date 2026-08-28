@@ -54,6 +54,10 @@ from ._steps import (
     StagingStepStore,
     StateStepArchive,
 )
+from ._task_recovery_repository import (
+    DurableTaskAdmissionRepositoryImpl,
+    DurableTaskRepositoryImpl,
+)
 
 _logger = environ.get_logger("ai.runtime.state.materializer")
 _OBJECT_DOMAINS = frozenset(
@@ -281,6 +285,16 @@ async def materialize_runtime_state(
         }
         bundles[RuntimeDomain.RECOVERY]["approvals"] = ApprovalAdmissionRepositoryImpl(
             stores[RuntimeDomain.RECOVERY],
+            namespace=namespace,
+            tenant_id=tenant_id,
+        )
+        bundles[RuntimeDomain.TASK]["tasks"] = DurableTaskRepositoryImpl(
+            stores[RuntimeDomain.TASK],
+            namespace=namespace,
+            tenant_id=tenant_id,
+        )
+        bundles[RuntimeDomain.TASK]["admissions"] = DurableTaskAdmissionRepositoryImpl(
+            stores[RuntimeDomain.TASK],
             namespace=namespace,
             tenant_id=tenant_id,
         )
