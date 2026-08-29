@@ -333,6 +333,9 @@ class AgentCompiler:
         ordinary_policy: Sequence[str],
         mcp_policy: Sequence[str],
     ) -> AgentDefinition:
+        selected_skill_ids = {candidate.id for candidate in selected_skills}
+        if any(skill_id not in selected_skill_ids for skill_id in spec.preload_skills):
+            raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
         semantic = tuple(
             sorted(
                 (*selected_tools, *selected_skills, *selected_mcp, *selected_capabilities),
