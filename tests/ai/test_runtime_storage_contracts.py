@@ -15,9 +15,13 @@ from linktools.ai.runtime import RuntimeDomain, RuntimeState
 from linktools.ai.runtime._capabilities import _RuntimeStepPersistence
 from linktools.ai.runtime._tool import RuntimeToolOperationBridge
 from linktools.ai.runtime.state import (
+    FactQuery,
     FilesystemStateStore,
     RuntimeStateCommands,
+    SqlStateStore,
     StateTransaction,
+    StoredFact,
+    StoredRecord,
 )
 from linktools.ai.spec import AgentSpec
 from linktools.ai.storage import PayloadPolicy
@@ -26,6 +30,7 @@ from pydantic_ai.models.test import TestModel
 from pydantic_ai.tools import RunContext, ToolDefinition
 from pydantic_ai.usage import RunUsage
 from pydantic_ai_harness.step_persistence import RunRecord
+from sqlalchemy import event
 from sqlalchemy.dialects import mysql
 from sqlalchemy.ext.asyncio import create_async_engine
 from sqlalchemy.schema import CreateTable
@@ -76,6 +81,85 @@ async def test_sql_state_group_maps_programming_failure_to_internal(tmp_path: Pa
         assert raised.value.safe_details == {"phase": "runtime_state_sql_mutation"}
     finally:
         await state.close()
+        await engine.dispose()
+
+
+async def test_sql_latest_per_subject_uses_portable_aggregate_query(tmp_path: Path) -> None:
+    path = tmp_path / "runtime.db"
+    engine = create_async_engine(f"sqlite+aiosqlite:///{path}")
+    await provision_database(engine)
+    store = SqlStateStore(engine)
+    await store.initialize()
+    statements: list[str] = []
+
+    def capture_sql(
+        _connection: object,
+        _cursor: object,
+        statement: str,
+        _parameters: object,
+        _context: object,
+        _executemany: bool,
+    ) -> None:
+        statements.append(statement)
+
+    event.listen(engine.sync_engine, "before_cursor_execute", capture_sql)
+    owner = b"o" * 32
+    stream = b"s" * 32
+    subject_a = b"a" * 32
+    subject_b = b"b" * 32
+    record = StoredRecord(
+        owner,
+        b"p" * 32,
+        None,
+        None,
+        "test",
+        "owner",
+        None,
+        0,
+        None,
+        0,
+        None,
+        {},
+    )
+    facts = (
+        StoredFact(stream, 1, owner, "test", subject_a, None, {"value": 1}),
+        StoredFact(stream, 2, owner, "test", subject_b, None, {"value": 2}),
+        StoredFact(stream, 3, owner, "test", subject_a, None, {"value": 3}),
+        StoredFact(stream, 4, owner, "test", None, None, {"value": 4}),
+        StoredFact(stream, 5, owner, "test", None, None, {"value": 5}),
+    )
+
+    async def seed(transaction: StateTransaction) -> None:
+        await transaction.insert_record(record)
+        await transaction.insert_facts(facts)
+
+    try:
+        await store.mutate(seed)
+        statements.clear()
+        values = await store.read(
+            lambda transaction: transaction.list_facts(
+                FactQuery(stream, latest_per_subject=True)
+            )
+        )
+        assert tuple(value.sequence for value in values) == (2, 3, 5)
+        filtered = await store.read(
+            lambda transaction: transaction.list_facts(
+                FactQuery(
+                    stream,
+                    after_sequence=2,
+                    limit=1,
+                    latest_per_subject=True,
+                )
+            )
+        )
+        assert tuple(value.sequence for value in filtered) == (3,)
+        sql = "\n".join(statements).upper()
+        assert "ROW_NUMBER" not in sql
+        assert " OVER " not in sql
+        assert "GROUP BY" in sql
+    finally:
+        event.remove(engine.sync_engine, "before_cursor_execute", capture_sql)
+        await store.close()
         await engine.dispose()
 
 
