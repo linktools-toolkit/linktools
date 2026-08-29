@@ -1,14 +1,36 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Workspace identity, discovery, policy, and sandbox contracts."""
+"""Workspace identity, discovery, policy, instructions, and sandbox contracts."""
 
-from ._root import Workspace, WorkspacePolicy, trusted_workspace_principal
+from ._instructions import (
+    LocalRepositoryInstructionResolver,
+    LocalRuleCatalog,
+    RepositoryInstructionDocument,
+    RepositoryInstructionResolver,
+    RepositoryInstructions,
+)
+from ._root import (
+    PermissionDecision,
+    ToolPermissionRule,
+    Workspace,
+    WorkspacePolicy,
+    WorkspaceToolPermissionPolicy,
+    trusted_workspace_principal,
+)
 from ._sandbox import DisabledSandbox, Sandbox
 
 __all__ = [
     "DisabledSandbox",
+    "LocalRepositoryInstructionResolver",
+    "LocalRuleCatalog",
+    "PermissionDecision",
+    "RepositoryInstructionDocument",
+    "RepositoryInstructionResolver",
+    "RepositoryInstructions",
     "Sandbox",
+    "ToolPermissionRule",
     "Workspace",
     "WorkspacePolicy",
+    "WorkspaceToolPermissionPolicy",
     "trusted_workspace_principal",
 ]
