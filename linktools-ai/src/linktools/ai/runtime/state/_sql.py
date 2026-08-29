@@ -970,23 +970,18 @@ class _SqlTransaction:
         if query.subject_digest is not None:
             conditions.append(table.c.subject_digest == _hex(query.subject_digest))
         if query.latest_per_subject:
-            ranked = (
-                select(
-                    table,
-                    func.row_number()
-                    .over(
-                        partition_by=table.c.subject_digest,
-                        order_by=table.c.sequence.desc(),
-                    )
-                    .label("_subject_rank"),
-                )
+            latest_sequences = (
+                select(func.max(table.c.sequence))
                 .where(*conditions)
-                .subquery()
+                .group_by(table.c.subject_digest)
             )
             statement = (
-                select(ranked)
-                .where(ranked.c._subject_rank == 1)
-                .order_by(ranked.c.sequence)
+                select(table)
+                .where(
+                    table.c.stream_digest == _hex(query.stream_digest),
+                    table.c.sequence.in_(latest_sequences),
+                )
+                .order_by(table.c.sequence)
             )
         else:
             if query.latest:
