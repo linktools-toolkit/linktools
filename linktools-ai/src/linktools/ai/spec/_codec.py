@@ -15,7 +15,7 @@ from ._contract import AgentSpec, AgentUsageLimits, MCPServerSpec, SkillSpec, no
 
 SpecT = TypeVar("SpecT")
 _VERSION = 1
-_AGENT_FIELDS = frozenset(
+_AGENT_V1_FIELDS = frozenset(
     {
         "version",
         "id",
@@ -31,6 +31,7 @@ _AGENT_FIELDS = frozenset(
         "description",
     }
 )
+_AGENT_V2_FIELDS = _AGENT_V1_FIELDS | {"preload_skills"}
 _SKILL_FIELDS = frozenset({"version", "id", "description", "content"})
 _MCP_FIELDS = frozenset({"version", "id", "command", "args"})
 _USAGE_LIMIT_FIELDS = (
@@ -49,11 +50,11 @@ class SpecCodec(Protocol[SpecT]):
 
 class AgentSpecCodec:
     def to_payload(self, value: AgentSpec) -> "dict[str, JsonValue]":
-        """Return the canonical semantic v1 payload used by durable identity."""
+        """Return the canonical semantic payload used by durable identity."""
         if not isinstance(value, AgentSpec):
             raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID, "agent spec is invalid")
-        return {
-            "version": _VERSION,
+        payload: dict[str, JsonValue] = {
+            "version": 1 if not value.preload_skills else 2,
             "id": value.id,
             "model": value.model,
             "system_prompt": value.system_prompt,
@@ -73,6 +74,9 @@ class AgentSpecCodec:
             "planning": value.planning,
             "thinking": value.thinking,
         }
+        if value.preload_skills:
+            payload["preload_skills"] = list(value.preload_skills)
+        return payload
 
     def to_wire_payload(self, value: AgentSpec) -> "dict[str, JsonValue]":
         payload = dict(value._extensions)
@@ -82,7 +86,7 @@ class AgentSpecCodec:
         return payload
 
     def from_payload(self, raw: Mapping[str, object]) -> AgentSpec:
-        _require_v1(raw)
+        version = _require_version(raw, {1, 2})
         identity = raw.get("id")
         model = raw.get("model", "default")
         system_prompt = raw.get("system_prompt", "")
@@ -93,6 +97,20 @@ class AgentSpecCodec:
         planning = raw.get("planning", False)
         thinking = raw.get("thinking", False)
         description = raw.get("description")
+        if version == 1:
+            if "preload_skills" in raw:
+                raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID, "preload_skills requires AgentSpec v2")
+            preload_skills: object = []
+            known_fields = _AGENT_V1_FIELDS
+        else:
+            preload_skills = raw.get("preload_skills")
+            if (
+                not isinstance(preload_skills, list)
+                or not preload_skills
+                or any(not isinstance(item, str) for item in preload_skills)
+            ):
+                raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID, "preload_skills must be a non-empty string array")
+            known_fields = _AGENT_V2_FIELDS
         if not isinstance(identity, str) or not identity.strip():
             raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID, "agent id must be a non-empty string")
         if not isinstance(model, str) or not model.strip():
@@ -128,7 +146,8 @@ class AgentSpecCodec:
                 planning=planning,
                 thinking=normalized_thinking,
                 description=cast("str | None", description),
-                _extensions=_extensions(raw, _AGENT_FIELDS),
+                preload_skills=tuple(cast("list[str]", preload_skills)),
+                _extensions=_extensions(raw, known_fields),
             )
         except AIError as error:
             if error.code in {ErrorCode.STORAGE_INTEGRITY_ERROR, ErrorCode.STORAGE_VERSION_UNSUPPORTED}:
