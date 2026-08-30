@@ -379,6 +379,14 @@ class LocalExecutionBackend:
             self._execution_durable_tasks = task_map
             return task_map
 
+    def _worker_cancel_request_set(self) -> set[str]:
+        try:
+            return self._worker_cancel_requests
+        except AttributeError:
+            requests: set[str] = set()
+            self._worker_cancel_requests = requests
+            return requests
+
     def _execution_task_set(
         self,
         execution_id: str,
@@ -430,29 +438,18 @@ class LocalExecutionBackend:
             label,
             execution_id,
         )
-        cancellation: asyncio.CancelledError | None = None
-        while True:
+        try:
+            return await asyncio.shield(task), None
+        except asyncio.CancelledError as cancellation:
+            if not task.done():
+                raise AIError(
+                    ErrorCode.STORAGE_COMMIT_UNKNOWN,
+                    safe_details={"phase": "local_checkpoint", "operation": label},
+                ) from cancellation
             try:
-                value = await asyncio.shield(task)
-            except asyncio.CancelledError as error:
-                if task.done():
-                    if task.cancelled():
-                        raise AIError(
-                            ErrorCode.STORAGE_COMMIT_UNKNOWN,
-                            safe_details={
-                                "phase": "local_checkpoint",
-                                "operation": label,
-                            },
-                        ) from error
-                    try:
-                        value = task.result()
-                    except BaseException as task_error:  # noqa: BLE001
-                        raise task_error from error
-                    return value, cancellation or error
-                if cancellation is None:
-                    cancellation = error
-                continue
-            return value, cancellation
+                return task.result(), cancellation
+            except BaseException as error:  # noqa: BLE001
+                raise error from cancellation
 
     async def _commit_terminal_checkpoint_owned(
         self,
@@ -968,7 +965,7 @@ class LocalExecutionBackend:
         if self._tasks.get(execution_id) is not task:
             return
         self._tasks.pop(execution_id, None)
-        self._worker_cancel_requests.discard(execution_id)
+        self._worker_cancel_request_set().discard(execution_id)
         self._captured_usage.pop(execution_id, None)
         if self._approval_pause_segments.get(execution_id) is task:
             self._approval_pause_segments.pop(execution_id, None)
@@ -1012,9 +1009,10 @@ class LocalExecutionBackend:
         execution_id: str,
         task: asyncio.Task[None],
     ) -> None:
-        if task.done() or execution_id in self._worker_cancel_requests:
+        requests = self._worker_cancel_request_set()
+        if task.done() or execution_id in requests:
             return
-        self._worker_cancel_requests.add(execution_id)
+        requests.add(execution_id)
         task.cancel()
 
     async def _drain_worker_task(
@@ -3189,8 +3187,15 @@ class LocalExecutionBackend:
             )
         if dispatcher_failure is not None:
             raise AIError(
-                dispatcher_failure.code,
-                safe_details=dict(dispatcher_failure.safe_details),
+                ErrorCode.STORAGE_RECOVERY_REQUIRED,
+                safe_details={
+                    "phase": "local_execution_close",
+                    "pending_workers": 0,
+                    "pending_background_tasks": 0,
+                    "pending_checkpoint_tasks": 0,
+                    "pending_execution_tasks": 0,
+                    "background_failures": 1,
+                },
             )
         self._tasks.clear()
         self._captured_usage.clear()
@@ -3202,7 +3207,7 @@ class LocalExecutionBackend:
         self._segment_only_worker_exits.clear()
         self._repository_instruction_provenance.clear()
         self._checkpoint_tasks.clear()
-        self._worker_cancel_requests.clear()
+        self._worker_cancel_request_set().clear()
         self._execution_task_map().clear()
 
     async def release_runtime_execution(
@@ -3231,7 +3236,7 @@ class LocalExecutionBackend:
             raise AIError(ErrorCode.STORAGE_CONFLICT)
         if task is not None:
             self._tasks.pop(execution_id, None)
-        self._worker_cancel_requests.discard(execution_id)
+        self._worker_cancel_request_set().discard(execution_id)
         self._terminal_events.pop(execution_id, None)
         self._worker_failures.pop(execution_id, None)
         self._captured_usage.pop(execution_id, None)
