@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 """Regressions for TaskGraph and ToolOperation optimistic CAS convergence."""
 
+from collections.abc import Mapping
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
@@ -21,8 +22,9 @@ from linktools.ai.runtime._tool import RuntimeToolOperationBridge, ToolOperation
 from linktools.ai.runtime.state import RuntimeState
 from linktools.ai.runtime.state._repositories import ToolRepositoryImpl
 from linktools.ai.runtime.state._tool_repository import DurableToolRepositoryImpl
-from linktools.ai.storage import InMemoryObjectStore, StoredPayload
+from linktools.ai.storage import InMemoryObjectStore, PayloadPolicy, StoredPayload
 from linktools.ai.task import (
+    TaskDependencyResult,
     TaskGraph,
     TaskGraphLimits,
     TaskGraphRequest,
@@ -42,7 +44,7 @@ class _DigestRunner:
         *,
         graph_id: str,
         principal: Principal,
-        dependency_results: object,
+        dependency_results: Mapping[str, TaskDependencyResult],
     ) -> TaskNodeRunResult:
         del principal, dependency_results
         return TaskNodeRunResult(
@@ -55,7 +57,7 @@ class _DigestRunner:
         *,
         graph_id: str,
         principal: Principal,
-        dependency_results: object,
+        dependency_results: Mapping[str, TaskDependencyResult],
     ) -> None:
         del node, graph_id, principal, dependency_results
 
@@ -92,7 +94,10 @@ async def test_sqlite_task_graph_dependency_and_parallel_runs_are_stable(tmp_pat
                     timeout_seconds=10,
                 )
                 assert result.status is TaskStatus.SUCCEEDED
-                assert all(node.status is TaskStatus.SUCCEEDED for node in result.nodes)
+                assert all(
+                    node.status is TaskStatus.SUCCEEDED
+                    for node in result.node_results
+                )
 
             for index in range(20):
                 graph = TaskGraph(
@@ -114,7 +119,10 @@ async def test_sqlite_task_graph_dependency_and_parallel_runs_are_stable(tmp_pat
                     timeout_seconds=10,
                 )
                 assert result.status is TaskStatus.SUCCEEDED
-                assert all(node.status is TaskStatus.SUCCEEDED for node in result.nodes)
+                assert all(
+                    node.status is TaskStatus.SUCCEEDED
+                    for node in result.node_results
+                )
     finally:
         await state.close()
         await engine.dispose()
@@ -318,7 +326,7 @@ async def test_tool_terminal_readback_preserves_result_conflict() -> None:
         binding_digest=canonical_sha256({"binding": True}),
         owner="tool-owner",
         background_tasks=set(),
-        payload_policy=SimpleNamespace(),
+        payload_policy=PayloadPolicy(),
     )
     decision = SimpleNamespace(operation_id="tool-op", owner="tool-owner", fence=1)
 
@@ -356,7 +364,7 @@ async def test_tool_terminal_readback_requires_exact_owner_and_fence() -> None:
         binding_digest=canonical_sha256({"binding": True}),
         owner="tool-owner",
         background_tasks=set(),
-        payload_policy=SimpleNamespace(),
+        payload_policy=PayloadPolicy(),
     )
     decision = SimpleNamespace(operation_id="tool-op", owner="tool-owner", fence=1)
 
