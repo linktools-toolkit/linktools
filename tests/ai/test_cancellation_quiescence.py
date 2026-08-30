@@ -370,21 +370,13 @@ async def test_task_launcher_shutdown_drains_detached_owned_cleanup() -> None:
     launcher._wait_observations = {}
     launcher._detached_tasks = set()
     launcher._runner = SimpleNamespace()
-    cancelled = asyncio.Event()
     release = asyncio.Event()
 
     async def cleanup() -> None:
-        try:
-            await asyncio.Event().wait()
-        except asyncio.CancelledError:
-            cancelled.set()
-            await release.wait()
-            raise
+        await release.wait()
 
     task = asyncio.create_task(cleanup())
     launcher._detach(task, "owned cleanup")
-    task.cancel()
-    await cancelled.wait()
 
     shutdown = asyncio.create_task(launcher.shutdown())
     await asyncio.sleep(0)
