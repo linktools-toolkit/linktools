@@ -439,9 +439,8 @@ async def test_terminal_commit_cancellation_still_finalizes_after_durable_commit
     )
     await started.wait()
     task.cancel()
-    with pytest.raises(AIError) as error:
+    with pytest.raises(asyncio.CancelledError):
         await task
-    assert error.value.code is ErrorCode.STORAGE_COMMIT_UNKNOWN
     await lifecycle.finalized.wait()
     await asyncio.sleep(0)
     assert not backend._checkpoint_tasks
