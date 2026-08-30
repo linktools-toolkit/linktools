@@ -265,6 +265,10 @@ class DefaultExecutionService:
         self._session_locks_guard = asyncio.Lock()
         self._handoff_states: dict[tuple[str, str], _ExecutionHandoffState] = {}
         self._handoff_condition = asyncio.Condition()
+        self._detached_cancel_finalizers: set[
+            asyncio.Task[CancelExecutionResult]
+        ] = set()
+        self._detached_cancel_failure: AIError | None = None
 
     async def _materialize_repository_instructions(
         self,
@@ -1418,9 +1422,89 @@ class DefaultExecutionService:
 
     async def cancel(self, execution_id: str, request: CancelExecutionRequest) -> CancelExecutionResult:
         async with self._execution_consumer(execution_id, request.principal.tenant_id):
+            finalizer = asyncio.create_task(
+                self._cancel_finalizer_with_handoff(execution_id, request),
+                name=f"execution-cancel-finalizer-{request.principal.tenant_id}-{execution_id}",
+            )
+            try:
+                return await asyncio.shield(finalizer)
+            except asyncio.CancelledError:
+                if finalizer.done():
+                    return finalizer.result()
+                self._detach_cancel_finalizer(finalizer, execution_id)
+                raise
+
+    async def _cancel_finalizer_with_handoff(
+        self,
+        execution_id: str,
+        request: CancelExecutionRequest,
+    ) -> CancelExecutionResult:
+        async with self._execution_consumer(
+            execution_id,
+            request.principal.tenant_id,
+        ):
             result = await self._cancel(execution_id, request)
-            await self._request_handoff_if_terminal(execution_id, request.principal.tenant_id)
+            await self._request_handoff_if_terminal(
+                execution_id,
+                request.principal.tenant_id,
+            )
             return result
+
+    def _detach_cancel_finalizer(
+        self,
+        task: asyncio.Task[CancelExecutionResult],
+        execution_id: str,
+    ) -> None:
+        if task in self._detached_cancel_finalizers:
+            return
+        self._detached_cancel_finalizers.add(task)
+
+        def consume(done: asyncio.Task[CancelExecutionResult]) -> None:
+            try:
+                done.result()
+            except BaseException as error:  # noqa: BLE001
+                _logger.warning(
+                    "execution cancel finalizer failed after caller cancellation: "
+                    "execution=%s error=%s",
+                    execution_id,
+                    type(error).__name__,
+                )
+                if self._detached_cancel_failure is None:
+                    details = (
+                        dict(error.safe_details)
+                        if isinstance(error, AIError)
+                        else {}
+                    )
+                    details.setdefault("phase", "execution_cancel_finalizer")
+                    details.setdefault("execution_id", execution_id)
+                    self._detached_cancel_failure = AIError(
+                        ErrorCode.STORAGE_RECOVERY_REQUIRED,
+                        safe_details=details,
+                    )
+            finally:
+                self._detached_cancel_finalizers.discard(done)
+
+        task.add_done_callback(consume)
+
+    async def preflight_close(self) -> None:
+        while True:
+            pending = tuple(
+                task
+                for task in self._detached_cancel_finalizers
+                if not task.done()
+            )
+            if not pending:
+                break
+            await asyncio.gather(
+                *(asyncio.shield(task) for task in pending),
+                return_exceptions=True,
+            )
+        failure = self._detached_cancel_failure
+        if failure is not None:
+            raise AIError(
+                failure.code,
+                safe_details=dict(failure.safe_details),
+            )
 
     async def _cancel(self, execution_id: str, request: CancelExecutionRequest) -> CancelExecutionResult:
         execution = await self._load_authorized(execution_id, request.principal, AuthorizationAction.EXECUTION_CANCEL)
