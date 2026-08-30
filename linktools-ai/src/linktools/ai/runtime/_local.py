@@ -1553,20 +1553,29 @@ class LocalExecutionBackend:
     ) -> Mapping[str, ToolApprovalContext]:
         if tenant_id != self._tenant_id:
             raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
+        ordered = tuple(approval_ids)
+        if len(set(ordered)) != len(ordered):
+            raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
         execution = await self._execution.executions.get(
             execution_id,
             tenant_id=tenant_id,
         )
+        if execution is None or execution.status is not ExecutionStatus.WAITING_APPROVAL:
+            return {}
         checkpoint = await self._recovery.checkpoints.get(
             execution_id,
             tenant_id=tenant_id,
         )
-        if execution is None or checkpoint is None or checkpoint.pending_approval is None:
-            return {}
+        if (
+            checkpoint is None
+            or checkpoint.state is not RecoveryCheckpointState.WAITING
+            or checkpoint.pending_approval is None
+        ):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         _, batch = await self._approval_batch(execution, checkpoint)
         by_id = {item.approval_id: item for item in batch}
         result: dict[str, ToolApprovalContext] = {}
-        for approval_id in dict.fromkeys(approval_ids):
+        for approval_id in ordered:
             item = by_id.get(approval_id)
             if item is None:
                 continue
