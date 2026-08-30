@@ -290,7 +290,7 @@ async def test_execution_service_preflight_surfaces_detached_cancel_failure() ->
 
 
 @pytest.mark.asyncio
-async def test_task_service_preflight_drains_owned_finalizers() -> None:
+async def test_task_service_drains_owned_finalizers_before_preflight() -> None:
     service = object.__new__(DefaultTaskService)
     release = asyncio.Event()
 
@@ -301,12 +301,13 @@ async def test_task_service_preflight_drains_owned_finalizers() -> None:
     service._detached_finalizers = {task}
     service._detached_finalizer_failure = None
 
-    preflight = asyncio.create_task(service.preflight_close())
+    drain = asyncio.create_task(service.drain_owned_finalizers())
     await asyncio.sleep(0)
-    assert not preflight.done()
+    assert not drain.done()
 
     release.set()
-    await preflight
+    await drain
+    await service.preflight_close()
 
 
 @pytest.mark.asyncio
@@ -363,24 +364,47 @@ async def test_task_launcher_shutdown_drains_runner_owned_cancellation_cleanup()
 
 
 @pytest.mark.asyncio
-async def test_task_launcher_shutdown_drains_detached_owned_cleanup() -> None:
+async def test_task_launcher_shutdown_rejects_runner_cancelled_leftover() -> None:
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def cleanup() -> None:
+        started.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            await release.wait()
+
+    task = asyncio.create_task(cleanup())
+    await started.wait()
+    task.cancel()
+    await asyncio.sleep(0)
+
+    class Runner:
+        @property
+        def pending_background_tasks(self) -> tuple[asyncio.Task[object], ...]:
+            return ()
+
+        @property
+        def pending_cancelled_tasks(self) -> tuple[asyncio.Task[object], ...]:
+            return () if task.done() else (task,)
+
+        @property
+        def background_failure(self) -> None:
+            return None
+
     launcher = object.__new__(LocalTaskGraphLauncher)
     launcher._accepting = True
     launcher._graphs = {}
     launcher._wait_observations = {}
     launcher._detached_tasks = set()
-    launcher._runner = SimpleNamespace()
-    release = asyncio.Event()
+    launcher._runner = Runner()
 
-    async def cleanup() -> None:
-        await release.wait()
-
-    task = asyncio.create_task(cleanup())
-    launcher._detach(task, "owned cleanup")
-
-    shutdown = asyncio.create_task(launcher.shutdown())
-    await asyncio.sleep(0)
-    assert not shutdown.done()
-
-    release.set()
-    await shutdown
+    try:
+        with pytest.raises(AIError) as error:
+            await launcher.shutdown()
+        assert error.value.code is ErrorCode.STORAGE_RECOVERY_REQUIRED
+        assert error.value.safe_details["phase"] == "task_graph_shutdown"
+    finally:
+        release.set()
+        await task
