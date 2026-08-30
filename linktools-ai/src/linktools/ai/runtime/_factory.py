@@ -24,7 +24,7 @@ from ..capability import (
     SkillSourceRegistry,
     workspace_tool_contributions,
 )
-from ..core import HmacCursorSigner, TenantAuthorizationPolicy, validate_tenant_id
+from ..core import DEFAULT_DISCOVERY_POLICY, HmacCursorSigner, TenantAuthorizationPolicy, validate_tenant_id
 from ..errors import AIError, ErrorCode
 from ..model import ModelRegistry
 from ..observe import MiddlewarePipeline
@@ -285,6 +285,8 @@ def _default_workspace_store(
         str(workspace.storage_root),
         path_adapter=adapter,
         kinds=("agent", "skill", "mcp"),
+        follow_external_symlinks=True,
+        ignore_paths=DEFAULT_DISCOVERY_POLICY.ignores,
     )
     return AssetStore(StorageOverlay(source)), source
 

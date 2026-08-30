@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 """Pure core values and errors."""
 
+from ._discovery import DEFAULT_DISCOVERY_POLICY
 from ._ids import (
     canonical_identity_digest,
     canonical_sha256,
@@ -95,6 +96,7 @@ __all__ = [
     "AuthorizationPolicy",
     "CursorPayload",
     "CursorSigner",
+    "DEFAULT_DISCOVERY_POLICY",
     "EvaluationStatus",
     "ExecutionDeltaType",
     "ExecutionEventType",

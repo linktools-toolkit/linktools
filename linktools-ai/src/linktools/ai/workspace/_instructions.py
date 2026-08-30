@@ -15,7 +15,7 @@ from typing import TYPE_CHECKING, Protocol
 
 import yaml
 
-from ..core import JsonValue, canonical_sha256
+from ..core import DEFAULT_DISCOVERY_POLICY, JsonValue, canonical_sha256
 from ..errors import AIError, ErrorCode
 
 if TYPE_CHECKING:
@@ -246,6 +246,8 @@ class LocalRuleCatalog:
         child_directories: list[tuple[Path, os.stat_result]] = []
         rule_files: list[Path] = []
         for entry in entries:
+            if DEFAULT_DISCOVERY_POLICY.ignores(entry.name):
+                continue
             try:
                 entry_stat = entry.stat(follow_symlinks=False)
             except OSError as error:
