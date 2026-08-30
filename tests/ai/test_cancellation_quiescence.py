@@ -9,7 +9,10 @@ import pytest
 
 from linktools.ai.core import ExecutionStatus
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.runtime._execution import CancelEffectOutcome
+from linktools.ai.runtime._execution import (
+    CancelEffectOutcome,
+    DefaultExecutionService,
+)
 from linktools.ai.runtime._local import LocalExecutionBackend
 from linktools.ai.task._local import LocalTaskGraphLauncher
 from linktools.ai.task._service_impl import DefaultTaskService
@@ -56,6 +59,15 @@ def _local_backend(current: object) -> LocalExecutionBackend:
     backend._subagent_dispatcher = None
     backend._accepting = True
     return backend
+
+
+def _execution_service() -> DefaultExecutionService:
+    service = object.__new__(DefaultExecutionService)
+    service._handoff_states = {}
+    service._handoff_condition = asyncio.Condition()
+    service._detached_cancel_finalizers = set()
+    service._detached_cancel_failure = None
+    return service
 
 
 @pytest.mark.asyncio
@@ -227,6 +239,54 @@ async def test_local_close_drains_owned_worker_and_finalizer_before_guarding_bac
     release_finalizer.set()
     await close_task
     assert backend._tasks == {}
+
+
+@pytest.mark.asyncio
+async def test_execution_service_caller_cancel_detaches_owned_finalizer_until_preflight() -> None:
+    service = _execution_service()
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def finalizer(execution_id: str, request: object) -> object:
+        del execution_id, request
+        started.set()
+        await release.wait()
+        return SimpleNamespace(cancelled=True)
+
+    service._cancel_finalizer_with_handoff = finalizer
+    request = SimpleNamespace(principal=SimpleNamespace(tenant_id="tenant"))
+    caller = asyncio.create_task(service.cancel("execution", request))
+    await started.wait()
+    caller.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await caller
+
+    preflight = asyncio.create_task(service.preflight_close())
+    await asyncio.sleep(0)
+    assert not preflight.done()
+
+    release.set()
+    await preflight
+    assert service._detached_cancel_finalizers == set()
+
+
+@pytest.mark.asyncio
+async def test_execution_service_preflight_surfaces_detached_cancel_failure() -> None:
+    service = _execution_service()
+
+    async def fail() -> object:
+        raise RuntimeError("cancel finalizer failed")
+
+    task = asyncio.create_task(fail())
+    service._detach_cancel_finalizer(task, "execution")
+    await asyncio.gather(task, return_exceptions=True)
+    await asyncio.sleep(0)
+
+    with pytest.raises(AIError) as error:
+        await service.preflight_close()
+    assert error.value.code is ErrorCode.STORAGE_RECOVERY_REQUIRED
+    assert error.value.safe_details["phase"] == "execution_cancel_finalizer"
 
 
 @pytest.mark.asyncio
