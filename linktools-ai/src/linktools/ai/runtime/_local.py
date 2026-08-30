@@ -310,6 +310,7 @@ class LocalExecutionBackend:
             str,
             set[asyncio.Task[object]],
         ] = {}
+        self._worker_cancel_requests: set[str] = set()
         self._accepting = True
         execution_steps = self._step_reads[RuntimeDomain.EXECUTION]
         conversation_steps = self._step_reads[RuntimeDomain.CONVERSATION]
@@ -429,18 +430,29 @@ class LocalExecutionBackend:
             label,
             execution_id,
         )
-        try:
-            return await asyncio.shield(task), None
-        except asyncio.CancelledError as cancellation:
-            if not task.done():
-                raise AIError(
-                    ErrorCode.STORAGE_COMMIT_UNKNOWN,
-                    safe_details={"phase": "local_checkpoint", "operation": label},
-                ) from cancellation
+        cancellation: asyncio.CancelledError | None = None
+        while True:
             try:
-                return task.result(), cancellation
-            except BaseException as error:  # noqa: BLE001
-                raise error from cancellation
+                value = await asyncio.shield(task)
+            except asyncio.CancelledError as error:
+                if task.done():
+                    if task.cancelled():
+                        raise AIError(
+                            ErrorCode.STORAGE_COMMIT_UNKNOWN,
+                            safe_details={
+                                "phase": "local_checkpoint",
+                                "operation": label,
+                            },
+                        ) from error
+                    try:
+                        value = task.result()
+                    except BaseException as task_error:  # noqa: BLE001
+                        raise task_error from error
+                    return value, cancellation or error
+                if cancellation is None:
+                    cancellation = error
+                continue
+            return value, cancellation
 
     async def _commit_terminal_checkpoint_owned(
         self,
@@ -956,6 +968,7 @@ class LocalExecutionBackend:
         if self._tasks.get(execution_id) is not task:
             return
         self._tasks.pop(execution_id, None)
+        self._worker_cancel_requests.discard(execution_id)
         self._captured_usage.pop(execution_id, None)
         if self._approval_pause_segments.get(execution_id) is task:
             self._approval_pause_segments.pop(execution_id, None)
@@ -993,6 +1006,31 @@ class LocalExecutionBackend:
         )
         if live_broker is not None:
             live_broker.complete(execution_id)
+
+    def _request_worker_cancel(
+        self,
+        execution_id: str,
+        task: asyncio.Task[None],
+    ) -> None:
+        if task.done() or execution_id in self._worker_cancel_requests:
+            return
+        self._worker_cancel_requests.add(execution_id)
+        task.cancel()
+
+    async def _drain_worker_task(
+        self,
+        execution_id: str,
+        task: asyncio.Task[None],
+    ) -> None:
+        try:
+            await asyncio.shield(task)
+        except asyncio.CancelledError:
+            if not task.done():
+                raise
+        except BaseException:  # noqa: BLE001
+            pass
+        if self._tasks.get(execution_id) is task:
+            self._task_done(execution_id, task)
 
     def worker_failure(self, execution_id: str, *, tenant_id: str) -> AIError | None:
         if tenant_id != self._tenant_id:
@@ -1064,11 +1102,8 @@ class LocalExecutionBackend:
             }:
                 return CancelEffectOutcome.CONFIRMED
             return CancelEffectOutcome.UNKNOWN
-        task.cancel()
-        await asyncio.sleep(0)
-        if not task.done():
-            return CancelEffectOutcome.UNKNOWN
-        self._task_done(execution.execution_id, task)
+        self._request_worker_cancel(execution.execution_id, task)
+        await self._drain_worker_task(execution.execution_id, task)
         current = await self._execution.executions.get(
             execution.execution_id,
             tenant_id=execution.tenant_id,
@@ -3057,7 +3092,6 @@ class LocalExecutionBackend:
     async def close(self) -> None:
         self._accepting = False
         tasks = tuple(self._tasks.items())
-        cancel_tasks: list[asyncio.Task[None]] = []
         for execution_id, task in tasks:
             current = await self._execution.executions.get(
                 execution_id,
@@ -3069,63 +3103,62 @@ class LocalExecutionBackend:
                 ExecutionStatus.FAILED,
                 ExecutionStatus.CANCELLED,
             }:
-                task.cancel()
+                self._request_worker_cancel(execution_id, task)
             else:
                 _logger.info(
                     "close draining terminal execution worker: execution=%s status=%s",
                     execution_id,
                     current.status.value,
                 )
-            cancel_tasks.append(task)
-        if cancel_tasks:
-            await asyncio.sleep(0)
-        pending = tuple(task for task in cancel_tasks if not task.done())
-        background = self._executor.pending_background_tasks
-        dispatcher_background = (
-            ()
-            if self._subagent_dispatcher is None
-            else self._subagent_dispatcher.pending_background_tasks
-        )
-        checkpoint_background = tuple(
-            task for task in self._checkpoint_tasks if not task.done()
-        )
-        execution_task_map = self._execution_task_map()
-        execution_background = tuple(
-            task
-            for tasks_for_execution in execution_task_map.values()
-            for task in tasks_for_execution
-            if isinstance(task, asyncio.Task) and not task.done()
-        )
-        pending_background_by_identity = {
-            id(task): task
-            for task in (
-                *background,
-                *dispatcher_background,
-                *checkpoint_background,
-                *execution_background,
+
+        for execution_id, task in tasks:
+            await self._drain_worker_task(execution_id, task)
+
+        while True:
+            background = self._executor.pending_background_tasks
+            dispatcher_background = (
+                ()
+                if self._subagent_dispatcher is None
+                else self._subagent_dispatcher.pending_background_tasks
             )
-            if isinstance(task, asyncio.Task) and not task.done()
-        }
-        pending_background = tuple(pending_background_by_identity.values())
+            checkpoint_background = tuple(
+                task for task in self._checkpoint_tasks if not task.done()
+            )
+            execution_task_map = self._execution_task_map()
+            execution_background = tuple(
+                task
+                for tasks_for_execution in execution_task_map.values()
+                for task in tasks_for_execution
+                if isinstance(task, asyncio.Task) and not task.done()
+            )
+            pending_background_by_identity = {
+                id(task): task
+                for task in (
+                    *background,
+                    *dispatcher_background,
+                    *checkpoint_background,
+                    *execution_background,
+                )
+                if isinstance(task, asyncio.Task) and not task.done()
+            }
+            pending_background = tuple(pending_background_by_identity.values())
+            if not pending_background:
+                break
+            await asyncio.gather(
+                *(asyncio.shield(task) for task in pending_background),
+                return_exceptions=True,
+            )
+
         dispatcher_failure = (
             None
             if self._subagent_dispatcher is None
             else self._subagent_dispatcher.background_failure
         )
-        if pending or pending_background or dispatcher_failure is not None:
+        if dispatcher_failure is not None:
             raise AIError(
-                ErrorCode.STORAGE_RECOVERY_REQUIRED,
-                safe_details={
-                    "phase": "local_execution_close",
-                    "pending_workers": len(pending),
-                    "pending_background_tasks": len(pending_background),
-                    "pending_checkpoint_tasks": len(checkpoint_background),
-                    "pending_execution_tasks": len(execution_background),
-                    "background_failures": int(dispatcher_failure is not None),
-                },
+                dispatcher_failure.code,
+                safe_details=dict(dispatcher_failure.safe_details),
             )
-        for execution_id, task in tasks:
-            self._task_done(execution_id, task)
         self._tasks.clear()
         self._captured_usage.clear()
         self._terminal_events.clear()
@@ -3136,7 +3169,8 @@ class LocalExecutionBackend:
         self._segment_only_worker_exits.clear()
         self._repository_instruction_provenance.clear()
         self._checkpoint_tasks.clear()
-        execution_task_map.clear()
+        self._worker_cancel_requests.clear()
+        self._execution_task_map().clear()
 
     async def release_runtime_execution(
         self,
@@ -3164,6 +3198,7 @@ class LocalExecutionBackend:
             raise AIError(ErrorCode.STORAGE_CONFLICT)
         if task is not None:
             self._tasks.pop(execution_id, None)
+        self._worker_cancel_requests.discard(execution_id)
         self._terminal_events.pop(execution_id, None)
         self._worker_failures.pop(execution_id, None)
         self._captured_usage.pop(execution_id, None)
