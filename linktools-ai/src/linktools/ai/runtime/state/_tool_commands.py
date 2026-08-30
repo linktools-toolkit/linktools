@@ -45,11 +45,13 @@ class RuntimeStateCommands(_RuntimeStateCommands):
                 if observed.status is ToolOperationStatus.CANCELLED:
                     raise AIError(ErrorCode.TOOL_OPERATION_CONFLICT) from error
                 if observed.status in {
-                    ToolOperationStatus.CLAIMED,
                     ToolOperationStatus.COMPLETED,
                     ToolOperationStatus.FAILED,
                 }:
                     return observed
+                # CLAIMED/PENDING must be classified by a fresh repository
+                # transaction so lease expiry and owner takeover semantics are
+                # never guessed from an out-of-transaction readback.
                 await asyncio.sleep(0)
 
     async def commit_tool_terminal(
