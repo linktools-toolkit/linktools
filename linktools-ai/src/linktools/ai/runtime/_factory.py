@@ -27,8 +27,9 @@ from ..capability import (
 from ..core import HmacCursorSigner, TenantAuthorizationPolicy, validate_tenant_id
 from ..errors import AIError, ErrorCode
 from ..model import ModelRegistry
+from ..observe import MiddlewarePipeline
 if TYPE_CHECKING:
-    from ..observe import Middleware, MiddlewarePipeline
+    from ..observe import Middleware
 from ..spec import AgentSpec, AgentSpecCodec
 from ..storage import ObjectStore, PayloadPolicy, StorageOverlay
 from ..task import LocalTaskGraphLauncher
@@ -48,7 +49,6 @@ from ._history import StepExecutionHistoryReader, StepSessionHistoryReader
 from ._memory import RuntimeMemoryStore
 from ._object import RuntimeObjectKeyFactory
 from ._local import LocalExecutionBackend
-from ._observation import _build_middleware_pipeline
 from ._planner import DefaultTaskService, RuntimeTaskNodeRunner
 from ._session import DefaultSessionService
 from ._subagent import SubagentDispatcher
@@ -210,7 +210,6 @@ async def compose_runtime_components(
             or selected_state.plan.route(RuntimeDomain.CONVERSATION).retention
             is RuntimeRetentionMode.DURABLE
         )
-        middleware_pipeline = _build_middleware_pipeline(middleware_values)
         owned_workspace_close = (
             None
             if owned_workspace_assets is None
@@ -237,7 +236,7 @@ async def compose_runtime_components(
             object_key_factory=object_key_factory,
             payload_policy=payload_policy,
             session_execution_ready=session_execution_ready,
-            middleware=middleware_pipeline,
+            middleware=middleware_values,
             owned_workspace_close=owned_workspace_close,
         )
     except BaseException:
@@ -421,7 +420,7 @@ async def _build_local_components(
     object_key_factory: RuntimeObjectKeyFactory,
     payload_policy: PayloadPolicy,
     session_execution_ready: bool,
-    middleware: "MiddlewarePipeline",
+    middleware: "Sequence[Middleware]",
     owned_workspace_close: "Callable[[], Awaitable[None]] | None" = None,
 ) -> _RuntimeComponents:
     if not state.ready:
@@ -442,10 +441,11 @@ async def _build_local_components(
         session_execution_ready=session_execution_ready,
     )
     dispatcher = SubagentDispatcher(catalog, compiler, execution)
+    middleware_pipeline = MiddlewarePipeline(middleware)
     executor = AgentExecutor(
         skill_sources,
         instruction_resolver=instruction_resolver,
-        middleware=middleware,
+        middleware=middleware_pipeline,
     )
 
     def build_memory_store(
