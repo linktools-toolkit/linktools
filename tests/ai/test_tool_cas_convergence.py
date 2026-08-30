@@ -10,11 +10,13 @@ from types import SimpleNamespace
 import pytest
 from linktools.ai.core import ToolOperationStatus, canonical_sha256
 from linktools.ai.errors import AIError, ErrorCode
+from linktools.ai.migrate import provision_runtime_database
 from linktools.ai.runtime._tool import RuntimeToolOperationBridge, ToolOperationRecord
 from linktools.ai.runtime.state import RuntimeState, RuntimeStateCommands, ToolOperationAdmission
 from linktools.ai.runtime.state._repositories import ToolRepositoryImpl
 from linktools.ai.runtime.state._tool_repository import DurableToolRepositoryImpl
 from linktools.ai.storage import StoredPayload
+from sqlalchemy.ext.asyncio import create_async_engine
 
 
 def _record(
@@ -72,7 +74,12 @@ def _admission(*, owner: str = "tool-owner") -> ToolOperationAdmission:
 
 @pytest.mark.asyncio
 async def test_sqlite_materializes_convergent_tool_repository(tmp_path) -> None:
-    state = RuntimeState.sqlite(tmp_path / "state.sqlite")
+    database = tmp_path / "state.sqlite"
+    engine = create_async_engine(f"sqlite+aiosqlite:///{database}")
+    await provision_runtime_database(engine)
+    await engine.dispose()
+
+    state = RuntimeState.sqlite(database)
     await state.initialize(namespace="tool-cas", tenant_id="tenant")
     try:
         repository = state.recovery.tools
