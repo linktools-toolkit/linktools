@@ -291,41 +291,30 @@ class LocalTaskGraphLauncher:
             self._close_run(run)
             if run.task is not None and not run.task.done():
                 run.task.cancel()
-            elif run.task is not None:
-                self._consume_done(run.task, "task graph shutdown")
-        runner_pending = (
-            self._runner.pending_background_tasks
-            if isinstance(self._runner, _BackgroundTaskOwner)
-            else ()
-        )
-        if (
-            any(run.task is not None and not run.task.done() for run in runs)
-            or any(not task.done() for task in self._detached_tasks)
-            or any(not task.done() for task in runner_pending)
-        ):
-            await asyncio.sleep(0)
+
+        while True:
             runner_pending = (
                 self._runner.pending_background_tasks
                 if isinstance(self._runner, _BackgroundTaskOwner)
                 else ()
             )
-        pending = tuple(
-            task
-            for task in (
-                *(run.task for run in runs if run.task is not None),
-                *self._detached_tasks,
-                *runner_pending,
+            pending_by_identity = {
+                id(task): task
+                for task in (
+                    *(run.task for run in runs if run.task is not None),
+                    *self._detached_tasks,
+                    *runner_pending,
+                )
+                if isinstance(task, asyncio.Task) and not task.done()
+            }
+            pending = tuple(pending_by_identity.values())
+            if not pending:
+                break
+            await asyncio.gather(
+                *(asyncio.shield(task) for task in pending),
+                return_exceptions=True,
             )
-            if isinstance(task, asyncio.Task) and not task.done()
-        )
-        if pending:
-            raise AIError(
-                ErrorCode.STORAGE_RECOVERY_REQUIRED,
-                safe_details={
-                    "phase": "task_graph_shutdown",
-                    "pending_tasks": len(pending),
-                },
-            )
+
         runner_failure = (
             self._runner.background_failure
             if isinstance(self._runner, _BackgroundTaskFailureOwner)
