@@ -20,16 +20,20 @@ from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.migrate import provision_database
 from linktools.ai.runtime._tool import RuntimeToolOperationBridge, ToolOperationRecord
 from linktools.ai.runtime.state import RuntimeState
-from linktools.ai.runtime.state._repositories import ToolRepositoryImpl
+from linktools.ai.runtime.state._repositories import TaskRepositoryImpl, ToolRepositoryImpl
+from linktools.ai.runtime.state._task_recovery_repository import DurableTaskRepositoryImpl
 from linktools.ai.runtime.state._tool_repository import DurableToolRepositoryImpl
 from linktools.ai.storage import InMemoryObjectStore, PayloadPolicy, StoredPayload
 from linktools.ai.task import (
     TaskDependencyResult,
     TaskGraph,
+    TaskGraphAdmission,
     TaskGraphLimits,
     TaskGraphRequest,
     TaskGraphView,
+    TaskLease,
     TaskNode,
+    TaskTerminalRecord,
 )
 from linktools.ai.task._api import open_local_task_api
 from linktools.ai.task._local import TaskNodeRunResult
@@ -128,6 +132,60 @@ async def test_sqlite_task_graph_dependency_and_parallel_runs_are_stable(tmp_pat
         await engine.dispose()
 
 
+@pytest.mark.asyncio
+async def test_sqlite_terminal_node_reconciles_recovery_projection_after_reopen(tmp_path) -> None:
+    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'recovery.sqlite'}")
+    await provision_database(engine)
+    request = TaskGraphRequest(
+        TaskGraph("recovery-projection", (TaskNode("root"),)),
+        Principal("tester", "tenant"),
+        "submit:recovery-projection",
+        TaskGraphLimits(max_concurrency=1),
+    )
+    admission = TaskGraphAdmission.from_request(request)
+    state = RuntimeState.sql(engine)
+    await state.initialize(namespace="task-cas-recovery", tenant_id="tenant")
+    try:
+        await state.task.admissions.admit(admission, request.graph)
+        lease = await state.task.tasks.claim(
+            request.graph.graph_id,
+            "root",
+            tenant_id="tenant",
+            owner="recovery-runner",
+            lease_seconds=60,
+        )
+        await state.task.tasks.complete(
+            lease,
+            tenant_id="tenant",
+            execution_id=None,
+            result_digest=canonical_sha256({"result": "done"}),
+        )
+        page = await state.task.admissions.list_recoverable_page(
+            cursor=None,
+            limit=128,
+        )
+        assert page.items == (admission.bind(request.graph),)
+    finally:
+        await state.close()
+
+    reopened = RuntimeState.sql(engine)
+    await reopened.initialize(namespace="task-cas-recovery", tenant_id="tenant")
+    try:
+        view = await reopened.task.tasks.reconcile_graph(
+            request.graph.graph_id,
+            tenant_id="tenant",
+        )
+        assert view.status is TaskStatus.SUCCEEDED
+        page = await reopened.task.admissions.list_recoverable_page(
+            cursor=None,
+            limit=128,
+        )
+        assert page.items == ()
+    finally:
+        await reopened.close()
+        await engine.dispose()
+
+
 class _ReadOnlyTaskRepository:
     def __init__(self, view: TaskGraphView) -> None:
         self.view = view
@@ -182,6 +240,98 @@ async def test_task_inspect_and_wait_are_read_only() -> None:
     assert inspected.status is TaskStatus.SUCCEEDED
     assert waited.status is TaskStatus.SUCCEEDED
     assert tasks.reconcile_calls == 0
+
+
+@pytest.mark.asyncio
+async def test_durable_task_terminal_retries_only_storage_conflict(monkeypatch) -> None:
+    lease = TaskLease(
+        "graph",
+        "node",
+        "tenant",
+        "task-owner",
+        1,
+        datetime.now(timezone.utc) + timedelta(seconds=60),
+    )
+    terminal = TaskTerminalRecord(
+        "node",
+        "task-owner",
+        1,
+        TaskStatus.SUCCEEDED,
+        canonical_sha256({"result": True}),
+        None,
+        None,
+    )
+    attempts = 0
+
+    async def complete(
+        self: TaskRepositoryImpl,
+        lease: TaskLease,
+        *,
+        tenant_id: str,
+        execution_id: str | None,
+        result_digest: str,
+    ) -> TaskTerminalRecord:
+        nonlocal attempts
+        del self, lease, tenant_id, execution_id, result_digest
+        attempts += 1
+        if attempts == 1:
+            raise AIError(ErrorCode.STORAGE_CONFLICT)
+        return terminal
+
+    monkeypatch.setattr(TaskRepositoryImpl, "complete", complete)
+    repository = object.__new__(DurableTaskRepositoryImpl)
+
+    result = await repository.complete(
+        lease,
+        tenant_id="tenant",
+        execution_id=None,
+        result_digest=terminal.result_digest or "",
+    )
+
+    assert result == terminal
+    assert attempts == 2
+
+
+@pytest.mark.asyncio
+async def test_durable_task_terminal_preserves_stale_fence(monkeypatch) -> None:
+    lease = TaskLease(
+        "graph",
+        "node",
+        "tenant",
+        "task-owner",
+        1,
+        datetime.now(timezone.utc) + timedelta(seconds=60),
+    )
+    attempts = 0
+
+    async def complete(
+        self: TaskRepositoryImpl,
+        lease: TaskLease,
+        *,
+        tenant_id: str,
+        execution_id: str | None,
+        result_digest: str,
+    ) -> TaskTerminalRecord:
+        nonlocal attempts
+        del self, lease, tenant_id, execution_id, result_digest
+        attempts += 1
+        if attempts == 1:
+            raise AIError(ErrorCode.STORAGE_CONFLICT)
+        raise AIError(ErrorCode.TASK_FENCE_STALE)
+
+    monkeypatch.setattr(TaskRepositoryImpl, "complete", complete)
+    repository = object.__new__(DurableTaskRepositoryImpl)
+
+    with pytest.raises(AIError) as raised:
+        await repository.complete(
+            lease,
+            tenant_id="tenant",
+            execution_id=None,
+            result_digest=canonical_sha256({"result": True}),
+        )
+
+    assert raised.value.code is ErrorCode.TASK_FENCE_STALE
+    assert attempts == 2
 
 
 def _tool_record(
