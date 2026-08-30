@@ -944,7 +944,7 @@ class DefaultTaskService(TaskApi):
                     graph_id,
                     type(error).__name__,
                 )
-                if getattr(self, "_detached_finalizer_failure", None) is None:
+                if self._detached_finalizer_failure is None:
                     details = dict(error.safe_details) if isinstance(error, AIError) else {}
                     details.setdefault("phase", "task_service_finalizer")
                     details.setdefault("graph_id", graph_id)
@@ -968,7 +968,7 @@ class DefaultTaskService(TaskApi):
                 *(asyncio.shield(task) for task in pending),
                 return_exceptions=True,
             )
-        failure = getattr(self, "_detached_finalizer_failure", None)
+        failure = self._detached_finalizer_failure
         if failure is not None:
             raise AIError(
                 failure.code,
