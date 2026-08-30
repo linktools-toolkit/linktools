@@ -86,8 +86,8 @@ from ..core import (
     normalize_json_value,
 )
 from ..errors import AIError, ErrorCode
+from ..observe import MiddlewarePipeline, context_for
 if TYPE_CHECKING:
-    from ..observe import MiddlewarePipeline
     from ..workspace import RepositoryInstructionResolver, RepositoryInstructions
 from ._capabilities import (
     MEMORY_READ_TOOL_NAMES,
@@ -95,6 +95,8 @@ from ._capabilities import (
     PLANNING_TOOL_NAMES,
     SUBAGENT_TOOL_NAMES,
     ToolOperationBridge,
+    _ObservationalMiddlewareCapability,
+    _WorkspaceToolGate,
     _tool_effect_policy,
     compose_platform_capabilities,
     select_runtime_tool_names,
@@ -103,11 +105,6 @@ from ._capabilities import (
     tool_name_allowed,
 )
 from ._input import _RuntimeUserPrompt, _restore_user_prompt
-from ._observation import (
-    _observational_middleware_capability,
-    _require_middleware_pipeline,
-)
-from ._repository_instructions import _WorkspaceToolGate
 from ._skill_adapter import _PydanticSkillCapability
 from ._subagent_adapter import _PydanticSubagentCapability
 
@@ -222,9 +219,11 @@ class AgentExecutor:
     ) -> None:
         if not isinstance(skill_sources, SkillSourceRegistry):
             raise TypeError("skill_sources must be SkillSourceRegistry")
+        if not isinstance(middleware, MiddlewarePipeline):
+            raise TypeError("middleware must be MiddlewarePipeline")
         self._skill_sources = skill_sources
         self._instruction_resolver = instruction_resolver
-        self._middleware = _require_middleware_pipeline(middleware)
+        self._middleware = middleware
         self._detached_tasks: set[asyncio.Task[Any]] = set()
 
     @classmethod
@@ -406,13 +405,15 @@ class AgentExecutor:
             policy=scope.context.workspace.policy,
             trusted_tool_classes=trusted_tool_classes,
         )
-        middleware = _observational_middleware_capability(
+        middleware = _ObservationalMiddlewareCapability(
             self._middleware,
-            principal=scope.context.principal,
-            execution_id=scope.context.execution_id,
-            session_id=scope.context.session_id,
-            run_id=scope.step_run_id,
-            agent_id=definition.spec.id,
+            context_for(
+                scope.context.principal,
+                scope.context.execution_id,
+                scope.context.session_id,
+                scope.step_run_id,
+                definition.spec.id,
+            ),
         )
         capabilities = (presentation, gate, middleware, *capabilities)
         if scope.replace_history_system_prompt:
