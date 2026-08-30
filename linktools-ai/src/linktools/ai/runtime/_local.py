@@ -438,18 +438,29 @@ class LocalExecutionBackend:
             label,
             execution_id,
         )
-        try:
-            return await asyncio.shield(task), None
-        except asyncio.CancelledError as cancellation:
-            if not task.done():
-                raise AIError(
-                    ErrorCode.STORAGE_COMMIT_UNKNOWN,
-                    safe_details={"phase": "local_checkpoint", "operation": label},
-                ) from cancellation
+        cancellation: asyncio.CancelledError | None = None
+        while True:
             try:
-                return task.result(), cancellation
-            except BaseException as error:  # noqa: BLE001
-                raise error from cancellation
+                value = await asyncio.shield(task)
+            except asyncio.CancelledError as error:
+                if task.done():
+                    if task.cancelled():
+                        raise AIError(
+                            ErrorCode.STORAGE_COMMIT_UNKNOWN,
+                            safe_details={
+                                "phase": "local_checkpoint",
+                                "operation": label,
+                            },
+                        ) from error
+                    try:
+                        value = task.result()
+                    except BaseException as task_error:  # noqa: BLE001
+                        raise task_error from error
+                    return value, cancellation or error
+                if cancellation is None:
+                    cancellation = error
+                continue
+            return value, cancellation
 
     async def _commit_terminal_checkpoint_owned(
         self,
