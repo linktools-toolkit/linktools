@@ -12,7 +12,7 @@ from pydantic_ai.tools import ToolDefinition
 
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.runtime._agent_executor import _ToolPresentation
-from linktools.ai.runtime._repository_instructions import (
+from linktools.ai.runtime._capabilities import (
     _WorkspaceToolGate,
     _repository_instruction_marker,
 )
