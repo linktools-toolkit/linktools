@@ -422,6 +422,7 @@ async def test_tool_unknown_resolves_durable_truth_before_propagating_cancellati
     bridge._repository = repository
     bridge._tenant_id = "tenant"
     bridge._execution_id = "execution"
+    bridge._owner = "tool-owner"
     bridge._background_tasks = set()
     decision = SimpleNamespace(
         operation_id="tool-operation",
