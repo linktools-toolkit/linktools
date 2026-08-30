@@ -10,7 +10,7 @@ from linktools.ai.core import JsonValue
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.observe import MiddlewarePipeline, RunContext
 from linktools.ai.runtime import Runtime
-from linktools.ai.runtime._observation import _ObservationalMiddlewareCapability
+from linktools.ai.runtime._capabilities import _ObservationalMiddlewareCapability
 from linktools.ai.spec import AgentSpec, AgentSpecCodec
 from linktools.ai.workspace import Workspace
 from pydantic_ai.models.test import TestModel
