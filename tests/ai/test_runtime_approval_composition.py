@@ -7,7 +7,7 @@ from collections.abc import Mapping
 from pathlib import Path
 
 import pytest
-from linktools.ai.core import ExecutionStatus, JsonValue
+from linktools.ai.core import ApprovalStatus, ExecutionStatus, JsonValue
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.runtime import Runtime, RuntimeState
 from linktools.ai.runtime.state import RecoveryCheckpointState
@@ -99,3 +99,4 @@ async def test_composed_runtime_ask_enters_durable_approval_wait(tmp_path: Path)
         )
         assert len(approvals) == 1
         assert approvals[0].execution_id == execution.execution_id
+        assert approvals[0].status is ApprovalStatus.PENDING
