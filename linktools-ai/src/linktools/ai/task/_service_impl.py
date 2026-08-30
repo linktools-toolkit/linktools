@@ -957,16 +957,34 @@ class DefaultTaskService(TaskApi):
 
         task.add_done_callback(consume)
 
-    async def preflight_close(self) -> None:
+    async def drain_owned_finalizers(self) -> None:
         while True:
             pending = tuple(
                 task for task in self._detached_finalizers if not task.done()
             )
             if not pending:
-                break
+                await asyncio.sleep(0)
+                return
             await asyncio.gather(
                 *(asyncio.shield(task) for task in pending),
                 return_exceptions=True,
+            )
+
+    async def preflight_close(self) -> None:
+        pending = tuple(
+            task for task in self._detached_finalizers if not task.done()
+        )
+        if pending:
+            _logger.warning(
+                "task service close blocked by detached finalizers: tasks=%s",
+                len(pending),
+            )
+            raise AIError(
+                ErrorCode.STORAGE_RECOVERY_REQUIRED,
+                safe_details={
+                    "phase": "task_service_preflight_close",
+                    "pending_finalizers": len(pending),
+                },
             )
         failure = self._detached_finalizer_failure
         if failure is not None:
