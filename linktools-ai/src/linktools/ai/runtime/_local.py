@@ -85,11 +85,13 @@ from .state import (
     ExecutionRepositoryImpl,
     ExecutionState,
     ExecutionTerminalSealPlan,
+    PendingApprovalContinuation,
     RecoveryState,
     RuntimeStateCommands,
     RuntimeStepStore,
     SessionRepositoryImpl,
     StateStepArchive,
+    ToolApprovalAdmission,
 )
 from .state._contracts import (
     AgentAttemptClaim,
@@ -103,7 +105,6 @@ from .state._contracts import (
     ExecutionTerminalCommitResult,
     IdempotencyRecord,
     LoadedModelContext,
-    PendingApprovalContinuation,
     RecoveryCheckpoint,
     RecoveryCheckpointState,
     RecoveryConversationIntent,
@@ -114,7 +115,6 @@ from .state._contracts import (
     RecoveryTerminalOutcome,
     ResultRecord,
     RuntimePayloadRef,
-    ToolApprovalAdmission,
 )
 from .state._plan import RuntimeDomain
 from .state._repositories import (
@@ -328,6 +328,7 @@ class LocalExecutionBackend:
             namespace=self._namespace,
             events=cast(EventRepositoryImpl, self._execution.events),
             operations=cast(OperationLedgerRepository, self._execution.operations),
+            approvals=self._recovery.approvals,
             conversation=session_repository,
             recovery=cast(RecoveryCheckpointRepositoryImpl, self._recovery.checkpoints),
             conversation_history=cast(
