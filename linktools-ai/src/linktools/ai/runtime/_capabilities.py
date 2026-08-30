@@ -302,6 +302,7 @@ class _RuntimeStepPersistence(StepPersistence[None]):
                 ErrorCode.CAPABILITY_POLICY_CONFLICT,
                 safe_details={"tool_name": tool_def.name, "mode": "plan"},
             )
+        # Effect admission starts only after every before-hook has settled.
         return args
 
     async def wrap_tool_execute(
@@ -649,7 +650,7 @@ class _RuntimeStepPersistence(StepPersistence[None]):
             task.result()
         except asyncio.CancelledError:
             pass
-        except BaseException:
+        except BaseException:  # noqa: BLE001
             _logger.exception("detached %s failed", label)
 
     async def _fail_known_effect(
