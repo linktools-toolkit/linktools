@@ -4,7 +4,8 @@
 
 import asyncio
 import hashlib
-from collections.abc import Mapping, Sequence
+import os
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
@@ -151,14 +152,22 @@ class DirectoryAssetBackend:
         *,
         path_adapter: "AssetPathAdapter | None" = None,
         kinds: "Sequence[str] | None" = None,
+        follow_external_symlinks: bool = False,
+        ignore_paths: "Callable[[str], bool] | None" = None,
     ) -> None:
         resolved = directory_root(root) if isinstance(root, str) else root
         if resolved.scheme != "file":
             raise ValueError("DirectoryAssetBackend requires a filesystem root")
+        if not isinstance(follow_external_symlinks, bool):
+            raise TypeError("follow_external_symlinks must be bool")
+        if ignore_paths is not None and not callable(ignore_paths):
+            raise TypeError("ignore_paths must be callable")
         self._root = resolved
         self._directory = Path(resolved.locator)
         self._path_adapter = path_adapter or PrefixAssetPathAdapter()
         self._kinds = None if kinds is None else frozenset(kinds)
+        self._follow_external_symlinks = follow_external_symlinks
+        self._ignore_paths = ignore_paths
         if kinds is not None:
             self._path_adapter.validate(tuple(kinds))
             for kind in self._kinds:
@@ -258,9 +267,11 @@ class DirectoryAssetBackend:
             scan_root = self._directory / Path(*PurePosixPath(relative_root).parts)
             if not scan_root.is_dir():
                 continue
-            for path in scan_root.rglob("*"):
-                if not path.is_file() or path.is_symlink():
-                    continue
+            for path in _iter_files(
+                scan_root,
+                follow_external_symlinks=self._follow_external_symlinks,
+                ignore_paths=self._ignore_paths,
+            ):
                 relative = path.relative_to(self._directory).as_posix()
                 key = self._path_adapter.from_path(relative)
                 if key is None or self._kinds is not None and key.kind not in self._kinds:
@@ -269,13 +280,18 @@ class DirectoryAssetBackend:
                     continue
                 if key in values:
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR, "asset path adapter produced duplicate keys")
-                stat = path.stat()
+                content_path = (
+                    _resolve_path(path, strict=True)
+                    if self._follow_external_symlinks
+                    else path
+                )
+                stat = content_path.stat()
                 signature = _directory_signature(stat)
                 cached = self._entries.get(key)
                 if cached is not None and cached[0] == signature:
                     entry = cached[1]
                 else:
-                    content = read_bytes(path)
+                    content = read_bytes(content_path)
                     entry = _DirectoryEntry(
                         key,
                         _etag(content),
@@ -309,7 +325,9 @@ class DirectoryAssetBackend:
         root_parts = _safe_asset_parts(self._path_adapter.root_path(key.kind))
         if pure.parts[: len(root_parts)] != root_parts or len(pure.parts) <= len(root_parts):
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID, "asset path is outside its kind root")
-        path = (self._directory / Path(*pure.parts)).resolve()
+        path = _resolve_path(self._directory / Path(*pure.parts), strict=False)
+        if self._follow_external_symlinks:
+            return path
         try:
             path.relative_to(self._directory.resolve())
         except ValueError as error:
@@ -351,7 +369,10 @@ class DirectoryAssetBackend:
 
 
 def directory_root(locator: str) -> AssetRoot:
-    path = Path(locator).expanduser().resolve()
+    try:
+        path = Path(locator).expanduser().resolve()
+    except (OSError, RuntimeError) as error:
+        raise AIError(ErrorCode.STORAGE_UNAVAILABLE) from error
     digest = hashlib.sha256(str(path).encode("utf-8")).hexdigest()
     return AssetRoot(f"file:{digest[:16]}", "file", str(path), digest)
 
@@ -391,6 +412,74 @@ def _safe_asset_parts(value: str) -> tuple[str, ...]:
     ):
         raise AIError(ErrorCode.ASSET_LAYOUT_CONFLICT)
     return pure.parts
+
+
+def _iter_files(
+    root: Path,
+    *,
+    follow_external_symlinks: bool,
+    ignore_paths: "Callable[[str], bool] | None",
+) -> Iterator[Path]:
+    for directory, directory_names, file_names in os.walk(
+        root,
+        followlinks=follow_external_symlinks,
+    ):
+        base = Path(directory)
+        directory_names[:] = [
+            name
+            for name in directory_names
+            if not _path_is_ignored(root, base / name, ignore_paths)
+            and (
+                not follow_external_symlinks
+                or not _would_cycle(root, base, name)
+            )
+        ]
+        for name in file_names:
+            path = base / name
+            if _path_is_ignored(root, path, ignore_paths):
+                continue
+            if not follow_external_symlinks:
+                if not path.is_symlink() and path.is_file():
+                    yield path
+                continue
+            try:
+                target = path.resolve(strict=True)
+            except (OSError, RuntimeError):
+                continue
+            if target.is_file():
+                yield path
+
+
+def _path_is_ignored(
+    root: Path,
+    path: Path,
+    ignore_paths: "Callable[[str], bool] | None",
+) -> bool:
+    return (
+        ignore_paths is not None
+        and ignore_paths(path.relative_to(root).as_posix())
+    )
+
+
+def _would_cycle(root: Path, directory: Path, name: str) -> bool:
+    try:
+        target = (directory / name).resolve(strict=True)
+        current = directory
+        while True:
+            if current.resolve(strict=True) == target:
+                return True
+            if current == root:
+                return False
+            current = current.parent
+    except (OSError, RuntimeError):
+        return True
+
+
+def _resolve_path(path: Path, *, strict: bool) -> Path:
+    try:
+        return path.resolve(strict=strict)
+    except (OSError, RuntimeError) as error:
+        raise AIError(ErrorCode.STORAGE_UNAVAILABLE) from error
 
 
 def _read_many_sync(paths: Mapping[AssetKey, Path]) -> dict[AssetKey, bytes]:

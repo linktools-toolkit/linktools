@@ -11,6 +11,7 @@ from types import MappingProxyType
 from typing import Literal, Protocol, runtime_checkable
 
 from ..asset import AssetKey, AssetStore
+from ..core import DEFAULT_DISCOVERY_POLICY
 from ..errors import AIError, ErrorCode
 
 
@@ -88,18 +89,27 @@ class LocalSkillResourceSource:
     def _inspect_sync(self, root: str) -> SkillResourceView:
         package = self._package_path(root)
         resources: list[str] = []
-        for directory, directory_names, file_names in os.walk(package, followlinks=False):
+        for directory, directory_names, file_names in os.walk(package, followlinks=True):
             base = Path(directory)
             directory_names[:] = [
-                name for name in directory_names if not (base / name).is_symlink()
+                name
+                for name in directory_names
+                if _skill_directory_is_discoverable(package, base, name)
             ]
             for name in file_names:
                 path = base / name
-                if path.is_symlink() or not path.is_file():
-                    continue
                 relative = path.relative_to(package).as_posix()
-                if relative == "SKILL.md":
+                if relative == "SKILL.md" or DEFAULT_DISCOVERY_POLICY.ignores(relative):
                     continue
+                try:
+                    _resolve_contained_file(package, path)
+                except AIError as error:
+                    if error.code in {
+                        ErrorCode.ASSET_NOT_FOUND,
+                        ErrorCode.ASSET_PATH_OUTSIDE_ROOT,
+                    }:
+                        continue
+                    raise
                 resources.append(_normalize_resource_path(relative))
         return SkillResourceView(
             SkillLocation("local", str(package)),
@@ -109,25 +119,15 @@ class LocalSkillResourceSource:
     def _read_sync(self, root: str, path: str) -> bytes:
         package = self._package_path(root)
         candidate = package.joinpath(*PurePosixPath(path).parts)
-        _reject_symlink_path(package, candidate)
-        resolved = candidate.resolve()
-        try:
-            resolved.relative_to(package)
-        except ValueError as error:
-            raise AIError(ErrorCode.ASSET_PATH_OUTSIDE_ROOT) from error
-        if not candidate.is_file() or candidate.is_symlink():
-            raise AIError(ErrorCode.ASSET_NOT_FOUND)
-        return candidate.read_bytes()
+        return _resolve_contained_file(package, candidate).read_bytes()
 
     def _package_path(self, root: str) -> Path:
         candidate = self._root.joinpath(*PurePosixPath(root).parts)
-        _reject_symlink_path(self._root, candidate)
-        resolved = candidate.resolve()
         try:
-            resolved.relative_to(self._root)
-        except ValueError as error:
-            raise AIError(ErrorCode.ASSET_PATH_OUTSIDE_ROOT) from error
-        if not candidate.is_dir() or candidate.is_symlink():
+            resolved = candidate.resolve(strict=True)
+        except (OSError, RuntimeError) as error:
+            raise AIError(ErrorCode.ASSET_NOT_FOUND) from error
+        if not resolved.is_dir():
             raise AIError(ErrorCode.ASSET_NOT_FOUND)
         return resolved
 
@@ -159,7 +159,7 @@ class AssetSkillResourceSource:
             )
             for info in page.items:
                 relative = info.key.id[len(prefix) :]
-                if relative == "SKILL.md":
+                if relative == "SKILL.md" or DEFAULT_DISCOVERY_POLICY.ignores(relative):
                     continue
                 try:
                     resources.append(_normalize_resource_path(relative))
@@ -230,16 +230,42 @@ def _normalize_relative_path(path: str, *, field_name: str) -> str:
     return normalized
 
 
-def _reject_symlink_path(root: Path, candidate: Path) -> None:
+def _skill_directory_is_discoverable(package: Path, base: Path, name: str) -> bool:
+    path = base / name
+    relative = path.relative_to(package).as_posix()
+    if DEFAULT_DISCOVERY_POLICY.ignores(relative):
+        return False
     try:
-        relative = candidate.relative_to(root)
+        target = path.resolve(strict=True)
+        target.relative_to(package)
+    except (OSError, RuntimeError, ValueError):
+        return False
+    if not target.is_dir():
+        return False
+    current = base
+    while True:
+        try:
+            if current.resolve(strict=True) == target:
+                return False
+        except (OSError, RuntimeError):
+            return False
+        if current == package:
+            return True
+        current = current.parent
+
+
+def _resolve_contained_file(root: Path, candidate: Path) -> Path:
+    try:
+        resolved = candidate.resolve(strict=True)
+    except (OSError, RuntimeError) as error:
+        raise AIError(ErrorCode.ASSET_NOT_FOUND) from error
+    try:
+        resolved.relative_to(root)
     except ValueError as error:
         raise AIError(ErrorCode.ASSET_PATH_OUTSIDE_ROOT) from error
-    current = root
-    for part in relative.parts:
-        current = current / part
-        if current.is_symlink():
-            raise AIError(ErrorCode.ASSET_PATH_OUTSIDE_ROOT)
+    if not resolved.is_file():
+        raise AIError(ErrorCode.ASSET_NOT_FOUND)
+    return resolved
 
 
 __all__ = [
