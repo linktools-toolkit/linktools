@@ -17,8 +17,11 @@ from pydantic_ai_harness.step_persistence import StepPersistence
 
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.runtime._agent_executor import AgentExecutor, _RuntimePersistenceBoundary
-from linktools.ai.runtime._capabilities import ToolOperationDecision, _RuntimeStepPersistence
-from linktools.ai.runtime._repository_instructions import _WorkspaceToolGate
+from linktools.ai.runtime._capabilities import (
+    ToolOperationDecision,
+    _RuntimeStepPersistence,
+    _WorkspaceToolGate,
+)
 from linktools.ai.workspace import (
     RepositoryInstructions,
     ToolPermissionRule,
