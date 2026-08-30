@@ -5,7 +5,7 @@
 import asyncio
 import hashlib
 import json
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from enum import Enum
@@ -89,10 +89,21 @@ class ToolStateRepository(Protocol):
     async def claim(self, tool_operation_id: str, *, tenant_id: str, owner: str, lease_seconds: int) -> ToolOperationRecord: ...
     async def renew(self, tool_operation_id: str, *, tenant_id: str, owner: str, fence: int, lease_seconds: int) -> ToolOperationRecord: ...
     async def fail(self, tool_operation_id: str, *, tenant_id: str, owner: str, fence: int, error_code: str) -> ToolOperationRecord: ...
+    async def has_by_step_run(self, step_run_id: str, *, tenant_id: str) -> bool: ...
 
 
 class _ToolOperationRuntimeRepository(Protocol):
     async def admit(self, request: ToolOperationAdmission) -> ToolOperationRecord: ...
+
+    async def has_by_step_run(self, step_run_id: str, *, tenant_id: str) -> bool: ...
+
+    async def existing_call_ids(
+        self,
+        step_run_id: str,
+        tool_call_ids: Sequence[str],
+        *,
+        tenant_id: str,
+    ) -> frozenset[str]: ...
 
     async def get_by_call(
         self,
@@ -300,6 +311,16 @@ class RuntimeToolOperationBridge:
             "cached" if decision.has_cached_result or decision.cached_error is not None else "claimed",
         )
         return decision
+
+
+    async def existing_call_ids(
+        self, tool_call_ids: Sequence[str]
+    ) -> frozenset[str]:
+        return await self._repository.existing_call_ids(
+            self._step_run_id,
+            tool_call_ids,
+            tenant_id=self._tenant_id,
+        )
 
     async def _decision_from_record(
         self,

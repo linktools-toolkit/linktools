@@ -12,7 +12,7 @@ from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from enum import Enum
 from functools import wraps
-from typing import Protocol
+from typing import TYPE_CHECKING, Protocol
 
 from linktools.core import environ
 
@@ -39,6 +39,7 @@ from ..core import (
     ResourceRef,
     StopReason,
     UsageMetrics,
+    canonical_json_bytes,
     canonical_sha256,
     principal_identity_payload,
 )
@@ -46,7 +47,14 @@ from ..core import (
     idempotency_key_digest as compute_idempotency_key_digest,
 )
 from ..errors import AIError, ErrorCode
-from ..storage import ObjectStore, read_object
+from ..storage import (
+    ObjectStore,
+    PayloadPolicy,
+    StoredPayload,
+    payload_fits_inline,
+    read_object,
+)
+from ._object import RuntimeObjectKeyFactory, put_runtime_object
 from .service_api import (
     CancelExecutionRequest,
     CancelExecutionResult,
@@ -78,6 +86,9 @@ from .state._contracts import (
     SessionRepository,
 )
 from .state._plan import RuntimeDomain
+
+if TYPE_CHECKING:
+    from .state import RuntimePayloadRef
 
 _logger = environ.get_logger("ai.runtime.execution")
 
@@ -127,6 +138,17 @@ class _LocalExecutionWaiter(Protocol):
     def owns_execution(self, execution_id: str, *, tenant_id: str) -> bool: ...
 
     async def wait_terminal(self, execution_id: str, *, tenant_id: str) -> None: ...
+
+
+class _RepositoryInstructionBundle(Protocol):
+    @property
+    def digest(self) -> str: ...
+
+    def to_payload(self) -> JsonValue: ...
+
+
+class _RepositoryInstructionResolver(Protocol):
+    async def resolve(self, path: str) -> _RepositoryInstructionBundle: ...
 
 
 async def _no_release_terminal(execution_id: str, *, tenant_id: str) -> None:
@@ -205,6 +227,10 @@ class DefaultExecutionService:
         release_terminal: _ExecutionReleaseCallback | None = None,
         terminal_verifier: "_ExecutionTerminalVerifier | None" = None,
         local_waiter: "_LocalExecutionWaiter | None" = None,
+        instruction_resolver: "_RepositoryInstructionResolver | None" = None,
+        object_key_factory: "RuntimeObjectKeyFactory | None" = None,
+        payload_policy: "PayloadPolicy | None" = None,
+        session_execution_ready: bool = True,
     ) -> None:
         self._state = state
         self._object_store = object_store
@@ -220,6 +246,18 @@ class DefaultExecutionService:
         self._terminal_verifier_is_default = terminal_verifier is None
         self._terminal_committer: _ExecutionTerminalCommitter | None = None
         self._local_waiter = local_waiter
+        if not isinstance(session_execution_ready, bool):
+            raise TypeError("session_execution_ready must be bool")
+        if instruction_resolver is not None and (
+            object_key_factory is None or payload_policy is None
+        ):
+            raise ValueError(
+                "repository instruction resolver requires object key factory and payload policy"
+            )
+        self._instruction_resolver = instruction_resolver
+        self._object_key_factory = object_key_factory
+        self._payload_policy = payload_policy
+        self._session_execution_ready = session_execution_ready
         self._local_stream_prepare: Callable[[str], None] | None = None
         self._local_stream_abort: Callable[[str], None] | None = None
         self._subagent_cancellation: _SubagentCancellation | None = None
@@ -227,6 +265,35 @@ class DefaultExecutionService:
         self._session_locks_guard = asyncio.Lock()
         self._handoff_states: dict[tuple[str, str], _ExecutionHandoffState] = {}
         self._handoff_condition = asyncio.Condition()
+
+    async def _materialize_repository_instructions(
+        self,
+        instructions: _RepositoryInstructionBundle,
+        *,
+        tenant_id: str,
+    ) -> "RuntimePayloadRef":
+        from .state import RuntimePayloadRef
+
+        if self._object_key_factory is None or self._payload_policy is None:
+            raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+        payload = instructions.to_payload()
+        if canonical_sha256(payload) != instructions.digest:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        inline = StoredPayload.inline_json(payload)
+        if payload_fits_inline(inline, self._payload_policy):
+            stored = inline
+        else:
+            reference = await put_runtime_object(
+                self._object_store,
+                self._object_key_factory,
+                RuntimeDomain.EXECUTION,
+                tenant_id,
+                canonical_json_bytes(payload),
+            )
+            stored = StoredPayload.object(reference)
+        if stored.digest != instructions.digest:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        return RuntimePayloadRef(stored, RuntimeDomain.EXECUTION)
 
     def bind_backend(self, backend: ExecutionBackend) -> None:
         if backend is None:
@@ -464,7 +531,31 @@ class DefaultExecutionService:
         if execution.status is ExecutionStatus.START_UNKNOWN:
             raise AIError(ErrorCode.EXECUTION_START_UNKNOWN)
         self._validate_replayed_execution(execution, binding, request)
-        return ExecutionHandle(execution.execution_id)
+        if existing.status is IdempotencyStatus.COMPLETED:
+            if execution.status not in {
+                ExecutionStatus.SUCCEEDED,
+                ExecutionStatus.FAILED,
+                ExecutionStatus.CANCELLED,
+            }:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            return ExecutionHandle(execution.execution_id)
+        if (
+            existing.status is IdempotencyStatus.STARTED
+            and execution.status is ExecutionStatus.WAITING_APPROVAL
+        ):
+            return ExecutionHandle(execution.execution_id)
+        if existing.status is IdempotencyStatus.STARTED and execution.status is ExecutionStatus.FINALIZING:
+            return ExecutionHandle(execution.execution_id)
+        if existing.status is IdempotencyStatus.STARTED and execution.status is ExecutionStatus.STARTED:
+            await self._launch_started(
+                request,
+                execution,
+                scope=scope,
+                idempotency_key_digest=idempotency_key_digest,
+                prepare_local_stream=True,
+            )
+            return ExecutionHandle(execution.execution_id)
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
 
     async def run_for_session(
         self,
@@ -634,6 +725,7 @@ class DefaultExecutionService:
             raise AIError(ErrorCode.IDEMPOTENCY_KEY_INVALID)
         binding = self._binding(binding_digest)
         conversation_run_id = conversation_step_run_id
+        session = None
         if session_id is not None and source_execution_id is None:
             session = await self._sessions.get(session_id, tenant_id=request.principal.tenant_id)
             if session is None:
@@ -695,7 +787,10 @@ class DefaultExecutionService:
                 if started.status not in {ExecutionStatus.SUCCEEDED, ExecutionStatus.FAILED, ExecutionStatus.CANCELLED}:
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                 return ExecutionHandle(existing.resource_id)
-            if existing.status is IdempotencyStatus.STARTED and started.status is ExecutionStatus.FINALIZING:
+            if existing.status is IdempotencyStatus.STARTED and started.status in {
+                ExecutionStatus.WAITING_APPROVAL,
+                ExecutionStatus.FINALIZING,
+            }:
                 return ExecutionHandle(existing.resource_id)
             if started.status is not ExecutionStatus.STARTED:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -707,6 +802,50 @@ class DefaultExecutionService:
                 prepare_local_stream=prepare_local_stream,
             )
             return ExecutionHandle(existing.resource_id)
+
+        if session_id is not None and not self._session_execution_ready:
+            raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+
+        repository_instructions = None
+        if self._instruction_resolver is not None:
+            if lineage_kind is ExecutionLineageKind.SUBAGENT:
+                if parent_execution_id is None:
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                parent = await self._state.executions.get(
+                    parent_execution_id,
+                    tenant_id=request.principal.tenant_id,
+                )
+                if (
+                    parent is None
+                    or parent.root_execution_id != (root_execution_id or parent.root_execution_id)
+                ):
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                repository_instructions = parent.repository_instructions
+                if repository_instructions is None:
+                    resolved_instructions = await self._instruction_resolver.resolve(".")
+                    repository_instructions = await self._materialize_repository_instructions(
+                        resolved_instructions,
+                        tenant_id=request.principal.tenant_id,
+                    )
+            else:
+                instruction_path: str = "."
+                if session_id is not None:
+                    if session is None:
+                        session = await self._sessions.get(
+                            session_id,
+                            tenant_id=request.principal.tenant_id,
+                        )
+                        if session is None:
+                            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                    instruction_path = "." if session.cwd is None else session.cwd
+                resolved_instructions = await self._instruction_resolver.resolve(
+                    instruction_path
+                )
+                repository_instructions = await self._materialize_repository_instructions(
+                    resolved_instructions,
+                    tenant_id=request.principal.tenant_id,
+                )
+
         now = datetime.now(timezone.utc)
         execution = ExecutionRecord(
             execution_id=execution_id,
@@ -732,6 +871,7 @@ class DefaultExecutionService:
             planning=request.planning,
             thinking=request.thinking,
             binding=binding.snapshot,
+            repository_instructions=repository_instructions,
         )
         reservation = await self._state.executions.reserve_start(
             ExecutionStartReservation(
@@ -765,6 +905,11 @@ class DefaultExecutionService:
                     request_digest=request_digest,
                     prepare_local_stream=prepare_local_stream,
                 )
+            elif (
+                reservation.idempotency.status is IdempotencyStatus.STARTED
+                and reservation.execution.status is ExecutionStatus.WAITING_APPROVAL
+            ):
+                return ExecutionHandle(reservation.execution.execution_id)
             elif reservation.idempotency.status is IdempotencyStatus.STARTED and reservation.execution.status in {
                 ExecutionStatus.STARTED,
                 ExecutionStatus.FINALIZING,
@@ -997,6 +1142,7 @@ class DefaultExecutionService:
             ExecutionStatus.CANCELLED,
             ExecutionStatus.CANCELLING,
             ExecutionStatus.FINALIZING,
+            ExecutionStatus.WAITING_APPROVAL,
         }:
             return
         if launch_record.status is ExecutionStatus.START_UNKNOWN:

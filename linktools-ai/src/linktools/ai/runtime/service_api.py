@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """Runtime service protocols and transport-neutral request values."""
 
-from collections.abc import AsyncIterator, Mapping
+from collections.abc import AsyncIterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Protocol
 
@@ -459,6 +459,36 @@ class EvaluationComparison:
 class ApprovalView:
     approval_id: str
     status: ApprovalStatus
+    kind: str | None = None
+    tool_name: str | None = None
+    arguments: JsonValue = None
+
+
+@dataclass(frozen=True, slots=True)
+class ToolApprovalContext:
+    tool_name: str
+    arguments: JsonValue
+    args_digest: str
+    batch_id: str
+
+
+class ApprovalContextReader(Protocol):
+    async def tool_approvals(
+        self,
+        approval_ids: Sequence[str],
+        *,
+        execution_id: str,
+        tenant_id: str,
+    ) -> Mapping[str, ToolApprovalContext]: ...
+
+
+class ApprovalContinuation(Protocol):
+    async def reconcile_approval(
+        self,
+        execution_id: str,
+        *,
+        tenant_id: str,
+    ) -> None: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -644,11 +674,14 @@ class ArtifactService(Protocol):
 
 
 __all__ = [
+    "ApprovalContextReader",
+    "ApprovalContinuation",
     "ApprovalCreateRequest",
     "ApprovalDecisionRequest",
     "ApprovalDecisionResult",
     "ApprovalService",
     "ApprovalView",
+    "ToolApprovalContext",
     "ArtifactDownload",
     "ArtifactService",
     "ArtifactView",

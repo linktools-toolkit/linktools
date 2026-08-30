@@ -101,6 +101,7 @@ class AgentSpec:
     planning: bool = False
     thinking: ThinkingValue = False
     description: "str | None" = None
+    preload_skills: "tuple[str, ...]" = ()
     _extensions: Mapping[str, JsonValue] = field(default_factory=dict, repr=False, compare=False, hash=False)
 
     def __post_init__(self) -> None:
@@ -126,15 +127,32 @@ class AgentSpec:
         ):
             raise ValueError("agent description must contain 1..1024 characters")
         thinking = normalize_thinking(self.thinking)
+        allow_skills = canonical_selectors(self.allow_skills, field_name="allow_skills")
+        preload_skills = canonical_selectors(self.preload_skills, field_name="preload_skills")
+        if "*" in preload_skills:
+            raise AIError(
+                ErrorCode.CAPABILITY_RESOLUTION_INVALID,
+                "preload_skills requires exact skill ids",
+            )
+        if allow_skills != ("*",) and any(
+            skill_id not in allow_skills for skill_id in preload_skills
+        ):
+            raise AIError(
+                ErrorCode.CAPABILITY_RESOLUTION_INVALID,
+                "preload_skills must be selected by allow_skills",
+            )
         try:
             extensions = ImmutableJsonMapping(self._extensions)
         except (TypeError, ValueError) as error:
             raise TypeError("agent extensions must be JSON values") from error
+        if "preload_skills" in extensions:
+            raise ValueError("preload_skills is a reserved agent field")
         object.__setattr__(self, "instructions", instructions)
         object.__setattr__(self, "allow_tools", canonical_selectors(self.allow_tools, field_name="allow_tools", mcp=True))
-        object.__setattr__(self, "allow_skills", canonical_selectors(self.allow_skills, field_name="allow_skills"))
+        object.__setattr__(self, "allow_skills", allow_skills)
         object.__setattr__(self, "allow_subagents", canonical_selectors(self.allow_subagents, field_name="allow_subagents"))
         object.__setattr__(self, "thinking", thinking)
+        object.__setattr__(self, "preload_skills", preload_skills)
         object.__setattr__(self, "_extensions", extensions)
 
 

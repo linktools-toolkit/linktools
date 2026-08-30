@@ -61,6 +61,14 @@ class AgentDefinition:
         )
 
     @property
+    def preloaded_skill_definitions(self) -> "tuple[SkillDefinition, ...]":
+        by_id = {definition.spec.id: definition for definition in self.skill_definitions}
+        try:
+            return tuple(by_id[skill_id] for skill_id in self.spec.preload_skills)
+        except KeyError as error:
+            raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID) from error
+
+    @property
     def mcp_servers(self) -> "tuple[MCPServerSpec, ...]":
         return tuple(value.value for value in self.selected_mcp if isinstance(value.value, MCPServerSpec))
 

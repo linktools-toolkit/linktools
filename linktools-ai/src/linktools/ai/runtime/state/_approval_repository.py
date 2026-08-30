@@ -3,6 +3,9 @@
 """Durable Approval admission repository."""
 
 import asyncio
+from collections.abc import Sequence
+from dataclasses import replace
+from datetime import datetime
 
 from ...core import (
     ApprovalStatus,
@@ -51,10 +54,10 @@ class ApprovalAdmissionRepositoryImpl(
 
         async def commit() -> tuple[ApprovalRecord, bool]:
             return await self._store.mutate(
-                lambda transaction: self._create_in_transaction(
+                lambda transaction: self.create_with_operation_in_transaction(
                     transaction,
                     record,
-                    operation,
+                    operation=operation,
                 )
             )
 
@@ -88,12 +91,14 @@ class ApprovalAdmissionRepositoryImpl(
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from result.error
         raise AIError(ErrorCode.STORAGE_COMMIT_UNKNOWN) from result.error
 
-    async def _create_in_transaction(
+    async def create_with_operation_in_transaction(
         self,
         transaction: StateTransaction,
         record: ApprovalRecord,
+        *,
         operation: OperationLedgerInput,
     ) -> tuple[ApprovalRecord, bool]:
+        self._validate_create(record, operation)
         operation_record = await OperationLedgerRepository.get_in_transaction(
             self,
             transaction,
@@ -136,6 +141,64 @@ class ApprovalAdmissionRepositoryImpl(
             )
         )
         return record, False
+
+    async def get_approval_in_transaction(
+        self,
+        transaction: StateTransaction,
+        approval_id: str,
+        *,
+        tenant_id: str,
+    ) -> ApprovalRecord | None:
+        if tenant_id != self._tenant_id:
+            return None
+        stored = await transaction.get_record(self._key("approval", approval_id))
+        return None if stored is None else await self._decode(stored, ApprovalRecord)
+
+    async def cancel_pending_in_transaction(
+        self,
+        transaction: StateTransaction,
+        approval_ids: Sequence[str],
+        *,
+        execution_id: str,
+        tenant_id: str,
+        decided_at: datetime,
+    ) -> tuple[ApprovalRecord, ...]:
+        if tenant_id != self._tenant_id:
+            raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
+        if not isinstance(approval_ids, Sequence) or isinstance(approval_ids, (str, bytes)):
+            raise TypeError("approval_ids must be a sequence")
+        ordered = tuple(dict.fromkeys(approval_ids))
+        if not ordered or any(not isinstance(value, str) or not value for value in ordered):
+            raise ValueError("approval_ids must contain non-empty strings")
+        if not isinstance(decided_at, datetime) or decided_at.tzinfo is None:
+            raise ValueError("decided_at must be timezone-aware")
+        result: list[ApprovalRecord] = []
+        for approval_id in ordered:
+            stored = await transaction.get_record(self._key("approval", approval_id))
+            if stored is None:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            current = await self._decode(stored, ApprovalRecord)
+            if current.tenant_id != tenant_id or current.execution_id != execution_id:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            if current.status is ApprovalStatus.PENDING:
+                value = replace(current, status=ApprovalStatus.CANCELLED, decided_at=decided_at)
+                if not await transaction.replace_record(
+                    replace(
+                        self._stored(
+                            "approval",
+                            value.approval_id,
+                            value,
+                            state=value.status.value,
+                        ),
+                        storage_version=stored.storage_version + 1,
+                    ),
+                    expected_storage_version=stored.storage_version,
+                ):
+                    raise AIError(ErrorCode.STORAGE_CONFLICT)
+                result.append(value)
+            else:
+                result.append(current)
+        return tuple(result)
 
     async def _read_create(
         self,

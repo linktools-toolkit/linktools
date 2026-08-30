@@ -29,6 +29,7 @@ _AGENT_FIELDS = frozenset(
         "planning",
         "thinking",
         "description",
+        "preload_skills",
     }
 )
 _SKILL_FIELDS = frozenset({"version", "id", "description", "content"})
@@ -49,11 +50,11 @@ class SpecCodec(Protocol[SpecT]):
 
 class AgentSpecCodec:
     def to_payload(self, value: AgentSpec) -> "dict[str, JsonValue]":
-        """Return the canonical semantic v1 payload used by durable identity."""
+        """Return the canonical semantic payload used by durable identity."""
         if not isinstance(value, AgentSpec):
             raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID, "agent spec is invalid")
-        return {
-            "version": _VERSION,
+        payload: dict[str, JsonValue] = {
+            "version": 1,
             "id": value.id,
             "model": value.model,
             "system_prompt": value.system_prompt,
@@ -73,6 +74,9 @@ class AgentSpecCodec:
             "planning": value.planning,
             "thinking": value.thinking,
         }
+        if value.preload_skills:
+            payload["preload_skills"] = list(value.preload_skills)
+        return payload
 
     def to_wire_payload(self, value: AgentSpec) -> "dict[str, JsonValue]":
         payload = dict(value._extensions)
@@ -93,6 +97,11 @@ class AgentSpecCodec:
         planning = raw.get("planning", False)
         thinking = raw.get("thinking", False)
         description = raw.get("description")
+        preload_skills: object = raw.get("preload_skills", [])
+        if not isinstance(preload_skills, list) or any(
+            not isinstance(item, str) for item in preload_skills
+        ):
+            raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID, "preload_skills must be a string array")
         if not isinstance(identity, str) or not identity.strip():
             raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID, "agent id must be a non-empty string")
         if not isinstance(model, str) or not model.strip():
@@ -128,6 +137,7 @@ class AgentSpecCodec:
                 planning=planning,
                 thinking=normalized_thinking,
                 description=cast("str | None", description),
+                preload_skills=tuple(cast("list[str]", preload_skills)),
                 _extensions=_extensions(raw, _AGENT_FIELDS),
             )
         except AIError as error:

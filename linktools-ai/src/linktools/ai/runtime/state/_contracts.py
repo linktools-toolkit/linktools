@@ -60,6 +60,12 @@ if TYPE_CHECKING:
     from ._store import StateStore, StateTransaction, StoredRecord
 
 
+def _is_sha256(value: object) -> bool:
+    return isinstance(value, str) and len(value) == 64 and all(
+        character in "0123456789abcdef" for character in value
+    )
+
+
 @dataclass(frozen=True, slots=True)
 class ConversationCursor:
     step_run_id: str
@@ -450,6 +456,7 @@ class ExecutionRecord:
     memory_scope: str | None = None
     conversation_step_run_id: str | None = None
     result: ResultRecord | None = None
+    repository_instructions: RuntimePayloadRef | None = None
 
     def __post_init__(self) -> None:
         mode = normalize_execution_mode(self.mode)
@@ -743,6 +750,32 @@ class ApprovalRecord:
 
 
 @dataclass(frozen=True, slots=True)
+class PendingApprovalContinuation:
+    batch_id: str
+    source_step_run_id: str
+
+    def __post_init__(self) -> None:
+        if not _is_sha256(self.batch_id):
+            raise ValueError("approval continuation batch id must be lowercase SHA-256")
+        if not isinstance(self.source_step_run_id, str) or not self.source_step_run_id:
+            raise ValueError("approval continuation source step run id is required")
+
+
+@dataclass(frozen=True, slots=True)
+class ToolApprovalAdmission:
+    record: ApprovalRecord
+    operation: OperationLedgerInput
+    tool_name: str
+    args_digest: str
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.tool_name, str) or not self.tool_name:
+            raise ValueError("tool approval name is required")
+        if not _is_sha256(self.args_digest):
+            raise ValueError("tool approval arguments digest must be lowercase SHA-256")
+
+
+@dataclass(frozen=True, slots=True)
 class ExternalCallRecord:
     call_id: str
     execution_id: str
@@ -771,18 +804,35 @@ class RecoveryCheckpoint:
     revision: int
     created_at: datetime
     updated_at: datetime
+    pending_approval: PendingApprovalContinuation | None = None
 
     def __post_init__(self) -> None:
         if self.agent_run_sequence < 0:
             raise ValueError("recovery checkpoint sequence must be non-negative")
         if self.state is RecoveryCheckpointState.ADMITTED and (
-            self.agent_run_sequence != 0 or self.step_run_id is not None or self.pending_operation_id is not None
+            self.agent_run_sequence != 0
+            or self.step_run_id is not None
+            or self.pending_operation_id is not None
+            or self.pending_approval is not None
         ):
             raise ValueError("admitted recovery checkpoint cannot have an attempt")
         if self.state in {RecoveryCheckpointState.ACTIVE, RecoveryCheckpointState.WAITING} and (
             self.agent_run_sequence < 1 or self.step_run_id is None
         ):
             raise ValueError("active recovery checkpoint requires an attempt")
+        if self.state is RecoveryCheckpointState.WAITING and self.pending_approval is not None:
+            if (
+                self.step_run_id != self.pending_approval.source_step_run_id
+                or self.pending_operation_id is not None
+                or self.handoff_phase is not RecoveryHandoffPhase.NONE
+                or self.terminal_handoff is not None
+            ):
+                raise ValueError("approval waiting checkpoint is inconsistent")
+        if self.state is RecoveryCheckpointState.ACTIVE and self.pending_approval is not None:
+            if self.step_run_id is None or self.step_run_id == self.pending_approval.source_step_run_id:
+                raise ValueError("approval continuation active checkpoint is inconsistent")
+        if self.state in {RecoveryCheckpointState.HANDOFF, RecoveryCheckpointState.COMPLETED} and self.pending_approval is not None:
+            raise ValueError("terminal recovery checkpoint cannot retain approval continuation")
         if self.handoff_phase is RecoveryHandoffPhase.NONE:
             if self.terminal_handoff is not None or self.handoff_contract_digest is not None:
                 raise ValueError("unprepared recovery checkpoint cannot contain a handoff")
@@ -837,6 +887,7 @@ class RecoveryStateRecord:
     pending_operation_id: str | None
     revision: int
     updated_at: datetime
+    pending_approval: PendingApprovalContinuation | None = None
 
 
 class RecoveryCheckpointState(str, Enum):
@@ -879,6 +930,7 @@ class RecoveryExecutionInput:
     planning: bool
     thinking: ThinkingValue
     binding: AgentBindingSnapshot
+    repository_instructions: RuntimePayloadRef | None = None
 
     def __post_init__(self) -> None:
         prompt = self.user_prompt
@@ -1157,12 +1209,42 @@ class ExecutionRepository(RuntimeRepository, Protocol):
         expected_revision: int,
         expected_agent_run_sequence: int,
     ) -> ExecutionRecord: ...
+    async def enter_approval_wait_in_transaction(
+        self,
+        transaction: StateTransaction,
+        execution_id: str,
+        *,
+        tenant_id: str,
+        expected_revision: int,
+        expected_event_sequence: int,
+        expected_agent_run_sequence: int,
+        audit_events: Sequence[ExecutionEventAppend] = (),
+        approval_events: Sequence[ExecutionEventAppend],
+        occurred_at: datetime,
+    ) -> ExecutionRecord: ...
+    async def claim_approval_resume_in_transaction(
+        self,
+        transaction: StateTransaction,
+        execution_id: str,
+        *,
+        tenant_id: str,
+        expected_revision: int,
+        expected_event_sequence: int,
+        expected_agent_run_sequence: int,
+    ) -> ExecutionRecord: ...
     async def mark_start_unknown(self, commit: ExecutionStartUnknownCommit) -> ExecutionRecord: ...
-
     async def request_cancel(
         self,
         commit: ExecutionCancelRequestCommit,
         *,
+        pending_events: Sequence[ExecutionEventAppend] = (),
+    ) -> ExecutionRecord: ...
+    async def request_cancel_in_transaction(
+        self,
+        transaction: StateTransaction,
+        commit: ExecutionCancelRequestCommit,
+        *,
+        expected_status: ExecutionStatus | None = None,
         pending_events: Sequence[ExecutionEventAppend] = (),
     ) -> ExecutionRecord: ...
     async def advance_event_sequence(
@@ -1312,7 +1394,21 @@ class ApprovalRepository(RuntimeRepository, Protocol):
         *,
         operation: OperationLedgerInput,
     ) -> tuple[ApprovalRecord, bool]: ...
+    async def create_with_operation_in_transaction(
+        self,
+        transaction: StateTransaction,
+        record: ApprovalRecord,
+        *,
+        operation: OperationLedgerInput,
+    ) -> tuple[ApprovalRecord, bool]: ...
     async def get(self, approval_id: str, *, tenant_id: str) -> ApprovalRecord | None: ...
+    async def get_approval_in_transaction(
+        self,
+        transaction: StateTransaction,
+        approval_id: str,
+        *,
+        tenant_id: str,
+    ) -> ApprovalRecord | None: ...
     async def decide(
         self,
         approval_id: str,
@@ -1325,6 +1421,15 @@ class ApprovalRepository(RuntimeRepository, Protocol):
         decision_digest: str,
         decided_at: datetime,
     ) -> ApprovalRecord: ...
+    async def cancel_pending_in_transaction(
+        self,
+        transaction: StateTransaction,
+        approval_ids: Sequence[str],
+        *,
+        execution_id: str,
+        tenant_id: str,
+        decided_at: datetime,
+    ) -> tuple[ApprovalRecord, ...]: ...
     async def list_pending(self, execution_id: str, *, tenant_id: str) -> tuple[ApprovalRecord, ...]: ...
 
 
@@ -1557,6 +1662,7 @@ __all__ = [
     "MemoryState",
     "OperationLedgerRepository",
     "OperationTerminalUpdate",
+    "PendingApprovalContinuation",
     "RecoveryActiveRecord",
     "RecoveryAdmissionRecord",
     "RecoveryCheckpoint",
@@ -1579,6 +1685,7 @@ __all__ = [
     "TaskAdmissionRepository",
     "TaskRepository",
     "TaskState",
+    "ToolApprovalAdmission",
     "ToolOperationAdmission",
     "TranscriptChunk",
     "TranscriptHeadRecord",

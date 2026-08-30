@@ -30,6 +30,7 @@
     "operation_ledger_input",
     "operation_ledger_record",
     "principal",
+    "pending_approval_continuation",
     "recovery_checkpoint",
     "recovery_admission",
     "recovery_active",
