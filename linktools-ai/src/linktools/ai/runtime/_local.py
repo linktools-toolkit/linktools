@@ -3121,39 +3121,72 @@ class LocalExecutionBackend:
                 if self._subagent_dispatcher is None
                 else self._subagent_dispatcher.pending_background_tasks
             )
-            checkpoint_background = tuple(
-                task for task in self._checkpoint_tasks if not task.done()
-            )
-            execution_task_map = self._execution_task_map()
-            execution_background = tuple(
-                task
-                for tasks_for_execution in execution_task_map.values()
-                for task in tasks_for_execution
-                if isinstance(task, asyncio.Task) and not task.done()
-            )
-            pending_background_by_identity = {
+            owned_background_by_identity = {
                 id(task): task
-                for task in (
-                    *background,
-                    *dispatcher_background,
-                    *checkpoint_background,
-                    *execution_background,
-                )
+                for task in (*background, *dispatcher_background)
                 if isinstance(task, asyncio.Task) and not task.done()
             }
-            pending_background = tuple(pending_background_by_identity.values())
-            if not pending_background:
+            owned_background = tuple(owned_background_by_identity.values())
+            if not owned_background:
                 break
             await asyncio.gather(
-                *(asyncio.shield(task) for task in pending_background),
+                *(asyncio.shield(task) for task in owned_background),
                 return_exceptions=True,
             )
 
+        pending_workers = tuple(
+            task for task in self._tasks.values() if not task.done()
+        )
+        background = self._executor.pending_background_tasks
+        dispatcher_background = (
+            ()
+            if self._subagent_dispatcher is None
+            else self._subagent_dispatcher.pending_background_tasks
+        )
+        checkpoint_background = tuple(
+            task for task in self._checkpoint_tasks if not task.done()
+        )
+        execution_task_map = self._execution_task_map()
+        execution_background = tuple(
+            task
+            for tasks_for_execution in execution_task_map.values()
+            for task in tasks_for_execution
+            if isinstance(task, asyncio.Task) and not task.done()
+        )
+        pending_background_by_identity = {
+            id(task): task
+            for task in (
+                *background,
+                *dispatcher_background,
+                *checkpoint_background,
+                *execution_background,
+            )
+            if isinstance(task, asyncio.Task) and not task.done()
+        }
+        pending_background = tuple(pending_background_by_identity.values())
         dispatcher_failure = (
             None
             if self._subagent_dispatcher is None
             else self._subagent_dispatcher.background_failure
         )
+        if pending_workers or pending_background:
+            raise AIError(
+                ErrorCode.STORAGE_RECOVERY_REQUIRED,
+                safe_details={
+                    "phase": "local_execution_close",
+                    "pending_workers": len(pending_workers),
+                    "pending_background_tasks": len(pending_background),
+                    "pending_checkpoint_tasks": len(checkpoint_background),
+                    "pending_execution_tasks": len(execution_background),
+                    "background_failures": int(dispatcher_failure is not None),
+                },
+            )
+        if self._worker_failures:
+            worker_failure = self._worker_failures[sorted(self._worker_failures)[0]]
+            raise AIError(
+                worker_failure.code,
+                safe_details=dict(worker_failure.safe_details),
+            )
         if dispatcher_failure is not None:
             raise AIError(
                 dispatcher_failure.code,
