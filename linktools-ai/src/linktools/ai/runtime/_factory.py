@@ -585,6 +585,7 @@ async def _build_local_components(
         close_actions: list[Callable[[], Awaitable[None]]] = [
             task.preflight_close,
             task_launcher.shutdown,
+            execution.preflight_close,
             backend.close,
             state.close,
         ]
