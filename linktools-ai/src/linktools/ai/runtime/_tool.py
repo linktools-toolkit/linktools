@@ -312,7 +312,6 @@ class RuntimeToolOperationBridge:
         )
         return decision
 
-
     async def existing_call_ids(
         self, tool_call_ids: Sequence[str]
     ) -> frozenset[str]:
@@ -634,6 +633,11 @@ class RuntimeToolOperationBridge:
             if observed is None:
                 return CommitObservation(DurableCommitState.NOT_COMMITTED)
             if observed.status is expected_status:
+                if observed.owner != decision.owner or observed.fence != decision.fence:
+                    return CommitObservation(
+                        DurableCommitState.NOT_COMMITTED,
+                        error=AIError(ErrorCode.TOOL_OPERATION_CONFLICT),
+                    )
                 try:
                     self._verify_terminal_payload(
                         observed,
@@ -643,20 +647,29 @@ class RuntimeToolOperationBridge:
                     )
                 except AIError as error:
                     return CommitObservation(
-                        DurableCommitState.PARTIAL_INTEGRITY_ERROR,
+                        DurableCommitState.NOT_COMMITTED,
                         error=error,
                     )
                 return CommitObservation(
                     DurableCommitState.COMMITTED,
                     value=observed,
                 )
-            if (
-                observed.status is ToolOperationStatus.CLAIMED
-                and observed.owner == decision.owner
-                and observed.fence == decision.fence
-            ):
-                return CommitObservation(DurableCommitState.NOT_COMMITTED)
-            return CommitObservation(DurableCommitState.UNRESOLVED)
+            if observed.status is ToolOperationStatus.CLAIMED:
+                if observed.owner == decision.owner and observed.fence == decision.fence:
+                    return CommitObservation(DurableCommitState.NOT_COMMITTED)
+                return CommitObservation(
+                    DurableCommitState.NOT_COMMITTED,
+                    error=AIError(ErrorCode.TOOL_OPERATION_CONFLICT),
+                )
+            if observed.status is ToolOperationStatus.EFFECT_UNKNOWN:
+                return CommitObservation(
+                    DurableCommitState.NOT_COMMITTED,
+                    error=AIError(ErrorCode.TOOL_EFFECT_UNKNOWN),
+                )
+            return CommitObservation(
+                DurableCommitState.NOT_COMMITTED,
+                error=AIError(ErrorCode.TOOL_OPERATION_CONFLICT),
+            )
 
         result = await run_durable_commit(
             operation,
@@ -674,6 +687,12 @@ class RuntimeToolOperationBridge:
                 ErrorCode.STORAGE_INTEGRITY_ERROR,
                 "tool terminal commit left partial durable state",
             ) from result.error
+        if isinstance(result.error, AIError) and result.error.code in {
+            ErrorCode.TOOL_OPERATION_CONFLICT,
+            ErrorCode.TOOL_RESULT_CONFLICT,
+            ErrorCode.TOOL_EFFECT_UNKNOWN,
+        }:
+            raise result.error
         raise AIError(ErrorCode.STORAGE_COMMIT_UNKNOWN) from result.error
 
     @staticmethod
