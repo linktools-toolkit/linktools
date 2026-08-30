@@ -50,6 +50,7 @@ def _local_backend(current: object) -> LocalExecutionBackend:
     backend._repository_instruction_provenance = {}
     backend._checkpoint_tasks = set()
     backend._execution_durable_tasks = {}
+    backend._worker_cancel_requests = set()
     backend._live_broker = _LiveBroker()
     backend._executor = _Executor()
     backend._subagent_dispatcher = None
@@ -161,17 +162,19 @@ async def test_local_cancel_does_not_repeat_cancel_during_owned_cleanup() -> Non
             raise
 
     worker_task = asyncio.create_task(worker())
-    worker_task.cancel()
     backend._tasks["execution"] = worker_task
+    first = asyncio.create_task(backend.cancel(current))
     await first_cancel.wait()
 
-    cancel_task = asyncio.create_task(backend.cancel(current))
+    second = asyncio.create_task(backend.cancel(current))
     await asyncio.sleep(0)
-    assert not cancel_task.done()
+    assert not first.done()
+    assert not second.done()
     assert cancellation_count == 1
 
     release.set()
-    assert await cancel_task is CancelEffectOutcome.CONFIRMED
+    assert await first is CancelEffectOutcome.CONFIRMED
+    assert await second is CancelEffectOutcome.CONFIRMED
     assert cancellation_count == 1
 
 
@@ -300,31 +303,32 @@ async def test_task_launcher_shutdown_drains_runner_owned_cancellation_cleanup()
 
 
 @pytest.mark.asyncio
-async def test_task_launcher_shutdown_still_rejects_unowned_stuck_cleanup() -> None:
+async def test_task_launcher_shutdown_drains_detached_owned_cleanup() -> None:
     launcher = object.__new__(LocalTaskGraphLauncher)
     launcher._accepting = True
     launcher._graphs = {}
     launcher._wait_observations = {}
     launcher._detached_tasks = set()
     launcher._runner = SimpleNamespace()
+    cancelled = asyncio.Event()
     release = asyncio.Event()
 
     async def cleanup() -> None:
         try:
             await asyncio.Event().wait()
         except asyncio.CancelledError:
+            cancelled.set()
             await release.wait()
+            raise
 
     task = asyncio.create_task(cleanup())
-    await asyncio.sleep(0)
+    launcher._detach(task, "owned cleanup")
     task.cancel()
-    launcher._detach(task, "unowned cleanup")
+    await cancelled.wait()
 
-    try:
-        with pytest.raises(AIError) as error:
-            await launcher.shutdown()
-        assert error.value.code is ErrorCode.STORAGE_RECOVERY_REQUIRED
-        assert error.value.safe_details["phase"] == "task_graph_shutdown"
-    finally:
-        release.set()
-        await task
+    shutdown = asyncio.create_task(launcher.shutdown())
+    await asyncio.sleep(0)
+    assert not shutdown.done()
+
+    release.set()
+    await shutdown
