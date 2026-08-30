@@ -219,7 +219,7 @@ class _RunningTasks:
     async def get_header(self, graph_id: str, *, tenant_id: str) -> ResourceRef:
         return ResourceRef(ResourceKind.TASK_GRAPH, graph_id, tenant_id)
 
-    async def reconcile_graph(self, graph_id: str, *, tenant_id: str) -> object:
+    async def get_graph(self, graph_id: str, *, tenant_id: str) -> object:
         del graph_id, tenant_id
         return SimpleNamespace(status=TaskStatus.RUNNING)
 
