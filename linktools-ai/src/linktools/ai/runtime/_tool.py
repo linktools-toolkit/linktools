@@ -446,23 +446,67 @@ class RuntimeToolOperationBridge:
         error: BaseException,
     ) -> None:
         code = ErrorCode.TOOL_EFFECT_UNKNOWN.value
-        try:
-            await self._repository.mark_effect_unknown(
+
+        async def finish() -> ToolOperationRecord:
+            return await self._repository.mark_effect_unknown(
                 decision.operation_id,
                 tenant_id=self._tenant_id,
                 owner=self._owner,
                 fence=decision.fence,
                 error_code=code,
             )
-        except AIError as current_error:
-            if current_error.code is not ErrorCode.STORAGE_COMMIT_UNKNOWN:
-                raise
+
+        async def readback() -> CommitObservation[ToolOperationRecord]:
             observed = await self._repository.get_operation(
                 decision.operation_id,
                 tenant_id=self._tenant_id,
             )
-            if observed is None or observed.status is not ToolOperationStatus.EFFECT_UNKNOWN:
-                raise
+            if observed is None:
+                return CommitObservation(DurableCommitState.NOT_COMMITTED)
+            if observed.status is ToolOperationStatus.EFFECT_UNKNOWN:
+                if (
+                    observed.owner != decision.owner
+                    or observed.fence != decision.fence
+                    or observed.error_code != code
+                ):
+                    return CommitObservation(
+                        DurableCommitState.NOT_COMMITTED,
+                        error=AIError(ErrorCode.TOOL_OPERATION_CONFLICT),
+                    )
+                return CommitObservation(
+                    DurableCommitState.COMMITTED,
+                    value=observed,
+                )
+            if observed.status is ToolOperationStatus.CLAIMED:
+                if observed.owner == decision.owner and observed.fence == decision.fence:
+                    return CommitObservation(DurableCommitState.NOT_COMMITTED)
+                return CommitObservation(
+                    DurableCommitState.NOT_COMMITTED,
+                    error=AIError(ErrorCode.TOOL_OPERATION_CONFLICT),
+                )
+            return CommitObservation(
+                DurableCommitState.NOT_COMMITTED,
+                error=AIError(ErrorCode.TOOL_OPERATION_CONFLICT),
+            )
+
+        result = await run_durable_commit(
+            finish,
+            readback,
+            background_tasks=self._background_tasks,
+        )
+        if result.state is DurableCommitState.COMMITTED:
+            if result.cancelled:
+                raise asyncio.CancelledError
+        elif result.state is DurableCommitState.NOT_COMMITTED:
+            if result.error is not None:
+                raise result.error
+            raise AIError(ErrorCode.STORAGE_CONFLICT)
+        elif result.state is DurableCommitState.PARTIAL_INTEGRITY_ERROR:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from result.error
+        elif isinstance(result.error, AIError) and result.error.code is ErrorCode.TOOL_OPERATION_CONFLICT:
+            raise result.error
+        else:
+            raise AIError(ErrorCode.STORAGE_COMMIT_UNKNOWN) from result.error
         _logger.error(
             "tool operation effect became unknown: execution=%s operation=%s error=%s",
             self._execution_id,
