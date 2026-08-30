@@ -302,10 +302,13 @@ class DefaultTaskService(TaskApi):
                 AuthorizationAction.TASK_READ,
                 header,
             )
-            return await self._persistence.tasks.reconcile_graph(
+            view = await self._persistence.tasks.get_graph(
                 graph_id,
                 tenant_id=principal.tenant_id,
             )
+            if view is None:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            return view
 
     async def wait_graph(
         self,
@@ -331,10 +334,12 @@ class DefaultTaskService(TaskApi):
 
             async def poll() -> TaskGraphResult:
                 while True:
-                    view = await self._persistence.tasks.reconcile_graph(
+                    view = await self._persistence.tasks.get_graph(
                         graph_id,
                         tenant_id=principal.tenant_id,
                     )
+                    if view is None:
+                        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                     waiter = self._local_waiter
                     owns_graph = waiter is not None and waiter.owns_graph(
                         graph_id,
@@ -348,10 +353,12 @@ class DefaultTaskService(TaskApi):
                                     tenant_id=principal.tenant_id,
                                 )
                             except Exception as error:
-                                latest = await self._persistence.tasks.reconcile_graph(
+                                latest = await self._persistence.tasks.get_graph(
                                     graph_id,
                                     tenant_id=principal.tenant_id,
                                 )
+                                if latest is None:
+                                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
                                 if _terminal(latest.status):
                                     result = await self._result(
                                         latest,

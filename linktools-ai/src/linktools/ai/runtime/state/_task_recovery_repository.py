@@ -2,11 +2,20 @@
 # -*- coding: utf-8 -*-
 """Task repositories with durable recovery indexing and legacy admission repair."""
 
+import asyncio
 from dataclasses import replace
 
 from ...core import OperationStatus, Page, TaskStatus
 from ...errors import AIError, ErrorCode
-from ...task import TaskGraph, TaskGraphAdmission, TaskGraphLaunch, TaskGraphView, TaskNodeView
+from ...task import (
+    TaskGraph,
+    TaskGraphAdmission,
+    TaskGraphLaunch,
+    TaskGraphView,
+    TaskLease,
+    TaskNodeView,
+    TaskTerminalRecord,
+)
 from ._repositories import (
     TaskAdmissionRepositoryImpl,
     TaskRepositoryImpl,
@@ -31,7 +40,7 @@ _LEGACY_CURSOR_PREFIX = "g:"
 
 
 class DurableTaskRepositoryImpl(TaskRepositoryImpl):
-    """Keep the Task recovery projection aligned with graph aggregate state."""
+    """Keep Task authority and recovery projections convergent under CAS races."""
 
     def _admission_key(self, graph_id: str) -> bytes:
         return self._key("task_admission", graph_id)
@@ -43,26 +52,103 @@ class DurableTaskRepositoryImpl(TaskRepositoryImpl):
         return self._scope("task_graph", "recoverable", "graphs")
 
     async def reconcile_graph(self, graph_id: str, *, tenant_id: str) -> TaskGraphView:
-        async def mutate(transaction: StateTransaction) -> TaskGraphView:
-            view = await super(DurableTaskRepositoryImpl, self).reconcile_graph(
-                graph_id,
-                tenant_id=tenant_id,
-            )
-            await self._sync_recovery_projection(transaction, view)
-            return view
+        while True:
+            async def mutate(transaction: StateTransaction) -> TaskGraphView:
+                view = await super(DurableTaskRepositoryImpl, self).reconcile_graph(
+                    graph_id,
+                    tenant_id=tenant_id,
+                )
+                await self._sync_recovery_projection(transaction, view)
+                return view
 
-        return await self.state_store.mutate(mutate)
+            try:
+                return await self.state_store.mutate(mutate)
+            except AIError as error:
+                if error.code is not ErrorCode.STORAGE_CONFLICT:
+                    raise
+                await asyncio.sleep(0)
 
     async def cancel_graph(self, graph_id: str, *, tenant_id: str) -> TaskGraphView:
-        async def mutate(transaction: StateTransaction) -> TaskGraphView:
-            view = await super(DurableTaskRepositoryImpl, self).cancel_graph(
-                graph_id,
-                tenant_id=tenant_id,
-            )
-            await self._sync_recovery_projection(transaction, view)
-            return view
+        while True:
+            async def mutate(transaction: StateTransaction) -> TaskGraphView:
+                view = await super(DurableTaskRepositoryImpl, self).cancel_graph(
+                    graph_id,
+                    tenant_id=tenant_id,
+                )
+                await self._sync_recovery_projection(transaction, view)
+                return view
 
-        return await self.state_store.mutate(mutate)
+            try:
+                return await self.state_store.mutate(mutate)
+            except AIError as error:
+                if error.code is not ErrorCode.STORAGE_CONFLICT:
+                    raise
+                await asyncio.sleep(0)
+
+    async def claim(
+        self,
+        graph_id: str,
+        node_id: str,
+        *,
+        tenant_id: str,
+        owner: str,
+        lease_seconds: int,
+    ) -> TaskLease:
+        while True:
+            try:
+                return await super().claim(
+                    graph_id,
+                    node_id,
+                    tenant_id=tenant_id,
+                    owner=owner,
+                    lease_seconds=lease_seconds,
+                )
+            except AIError as error:
+                if error.code is not ErrorCode.STORAGE_CONFLICT:
+                    raise
+                await asyncio.sleep(0)
+
+    async def complete(
+        self,
+        lease: TaskLease,
+        *,
+        tenant_id: str,
+        execution_id: str | None,
+        result_digest: str,
+    ) -> TaskTerminalRecord:
+        while True:
+            try:
+                return await super().complete(
+                    lease,
+                    tenant_id=tenant_id,
+                    execution_id=execution_id,
+                    result_digest=result_digest,
+                )
+            except AIError as error:
+                if error.code is not ErrorCode.STORAGE_CONFLICT:
+                    raise
+                await asyncio.sleep(0)
+
+    async def fail(
+        self,
+        lease: TaskLease,
+        *,
+        tenant_id: str,
+        error_code: str,
+        error_digest: str,
+    ) -> TaskTerminalRecord:
+        while True:
+            try:
+                return await super().fail(
+                    lease,
+                    tenant_id=tenant_id,
+                    error_code=error_code,
+                    error_digest=error_digest,
+                )
+            except AIError as error:
+                if error.code is not ErrorCode.STORAGE_CONFLICT:
+                    raise
+                await asyncio.sleep(0)
 
     async def _sync_recovery_projection(
         self,

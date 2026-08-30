@@ -58,6 +58,7 @@ from ._task_recovery_repository import (
     DurableTaskAdmissionRepositoryImpl,
     DurableTaskRepositoryImpl,
 )
+from ._tool_repository import DurableToolRepositoryImpl
 
 _logger = environ.get_logger("ai.runtime.state.materializer")
 _OBJECT_DOMAINS = frozenset(
@@ -284,6 +285,11 @@ async def materialize_runtime_state(
             for domain in RuntimeDomain
         }
         bundles[RuntimeDomain.RECOVERY]["approvals"] = ApprovalAdmissionRepositoryImpl(
+            stores[RuntimeDomain.RECOVERY],
+            namespace=namespace,
+            tenant_id=tenant_id,
+        )
+        bundles[RuntimeDomain.RECOVERY]["tools"] = DurableToolRepositoryImpl(
             stores[RuntimeDomain.RECOVERY],
             namespace=namespace,
             tenant_id=tenant_id,
