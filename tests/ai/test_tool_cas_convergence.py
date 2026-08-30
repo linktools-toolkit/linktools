@@ -384,6 +384,66 @@ class _ReadbackRepository:
         return self.record
 
 
+class _BlockingUnknownRepository(_ReadbackRepository):
+    def __init__(self) -> None:
+        super().__init__(_record())
+        self.started = asyncio.Event()
+        self.release = asyncio.Event()
+        self.calls = 0
+
+    async def mark_effect_unknown(
+        self,
+        tool_operation_id: str,
+        *,
+        tenant_id: str,
+        owner: str,
+        fence: int,
+        error_code: str | None,
+    ) -> ToolOperationRecord:
+        del tool_operation_id, tenant_id
+        self.calls += 1
+        self.started.set()
+        await self.release.wait()
+        self.record = replace(
+            self.record,
+            status=ToolOperationStatus.EFFECT_UNKNOWN,
+            owner=owner,
+            fence=fence,
+            lease_expires_at=None,
+            error_code=error_code,
+        )
+        return self.record
+
+
+@pytest.mark.asyncio
+async def test_tool_unknown_resolves_durable_truth_before_propagating_cancellation() -> None:
+    repository = _BlockingUnknownRepository()
+    bridge = object.__new__(RuntimeToolOperationBridge)
+    bridge._repository = repository
+    bridge._tenant_id = "tenant"
+    bridge._execution_id = "execution"
+    bridge._background_tasks = set()
+    decision = SimpleNamespace(
+        operation_id="tool-operation",
+        owner="tool-owner",
+        fence=1,
+    )
+
+    task = asyncio.create_task(bridge.unknown(decision, RuntimeError("boom")))
+    await repository.started.wait()
+    task.cancel()
+    repository.release.set()
+
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert repository.calls == 1
+    assert repository.record.status is ToolOperationStatus.EFFECT_UNKNOWN
+    assert repository.record.owner == decision.owner
+    assert repository.record.fence == decision.fence
+    assert repository.record.error_code == ErrorCode.TOOL_EFFECT_UNKNOWN.value
+
+
 @pytest.mark.asyncio
 async def test_tool_bridge_preserves_result_conflict_instead_of_integrity_error() -> None:
     expected = StoredPayload.inline_bytes(b"expected")
