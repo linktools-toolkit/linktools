@@ -490,7 +490,7 @@ class _RunningTaskRepository:
     ) -> ResourceRef:
         return ResourceRef(ResourceKind.TASK_GRAPH, graph_id, tenant_id)
 
-    async def reconcile_graph(
+    async def get_graph(
         self,
         graph_id: str,
         *,
@@ -524,7 +524,7 @@ class _TerminalTaskRepository:
     ) -> ResourceRef:
         return ResourceRef(ResourceKind.TASK_GRAPH, graph_id, tenant_id)
 
-    async def reconcile_graph(
+    async def get_graph(
         self,
         graph_id: str,
         *,
