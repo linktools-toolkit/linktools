@@ -226,6 +226,8 @@ async with Runtime.open(
 
 Built-in Runtime state supports in-memory, filesystem, SQLite, and SQL composition used by the Runtime persistence layer. State domains keep their existing ownership, transaction, recovery, and retention rules; `Runtime.open()` consumes the state object instead of exposing duplicate storage-root arguments.
 
+SQLite-backed Runtime state supports the built-in durable TaskGraph scheduler without a SQLite-specific launcher or an external lock. Task state advancement uses optimistic concurrency: normal internal Task CAS races are reread and converged by the Task domain, while genuine ownership, fence, idempotency, integrity, and storage errors remain observable. Runtime startup still does not provision or migrate database schemas; schema provisioning remains an explicit deployment step.
+
 Durable local execution and recovery are provided by Runtime state and recovery checkpoints and do not require an external workflow server.
 
 ## 8. Public API boundary
