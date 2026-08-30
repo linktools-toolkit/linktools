@@ -62,7 +62,9 @@ async def test_sqlite_runtime_open_recovers_expired_task_lease(
     finally:
         await engine.dispose()
 
-    workspace = Workspace.load(tmp_path / "workspace")
+    workspace_root = tmp_path / "workspace"
+    workspace_root.mkdir()
+    workspace = Workspace.load(workspace_root)
     graph = TaskGraph("reopen-expired", (TaskNode("root"),))
     request = TaskGraphRequest(
         graph,
