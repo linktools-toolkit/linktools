@@ -224,9 +224,9 @@ async def test_external_supply_exact_replay_uses_durable_result() -> None:
 
 
 @pytest.mark.asyncio
-async def test_approval_exact_replay_preserves_original_actor() -> None:
+async def test_approval_exact_replay_requires_same_actor() -> None:
     first_principal = Principal("approver-1", "tenant", "service")
-    retry_principal = Principal("approver-2", "tenant", "service")
+    other_principal = Principal("approver-2", "tenant", "service")
     now = datetime.now(timezone.utc)
     approvals = _Approvals(
         ApprovalRecord(
@@ -262,7 +262,7 @@ async def test_approval_exact_replay_preserves_original_actor() -> None:
     second = await service.decide(
         "execution",
         ApprovalDecisionRequest(
-            retry_principal,
+            first_principal,
             "approval",
             "approval-key",
             ApprovalDecision.APPROVE,
@@ -276,8 +276,22 @@ async def test_approval_exact_replay_preserves_original_actor() -> None:
     assert approvals.record.decided_by == first_principal.principal_id
     assert approvals.record.decision_digest == persisted_digest
 
+    with pytest.raises(AIError) as actor_error:
+        await service.decide(
+            "execution",
+            ApprovalDecisionRequest(
+                other_principal,
+                "approval",
+                "approval-key",
+                ApprovalDecision.APPROVE,
+            ),
+        )
+    assert actor_error.value.code is ErrorCode.APPROVAL_CONFLICT
+    assert approvals.record.decided_by == first_principal.principal_id
+    assert approvals.record.decision_digest == persisted_digest
+
     conflicting = ApprovalDecisionRequest(
-        retry_principal,
+        first_principal,
         "approval",
         "approval-key",
         ApprovalDecision.DENY,

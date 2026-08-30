@@ -6,7 +6,7 @@ import asyncio
 import secrets
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
-from typing import Generic, Protocol, TypeVar, overload
+from typing import TYPE_CHECKING, Generic, Protocol, TypeVar, overload
 
 from linktools.core import environ
 from pydantic import BaseModel
@@ -38,6 +38,8 @@ from ..core import (
 )
 from ..errors import AIError, ErrorCode
 from ..model import ModelRegistry
+if TYPE_CHECKING:
+    from ..observe import Middleware
 from ..task import (
     TaskGraph,
     TaskGraphLimits,
@@ -178,6 +180,7 @@ class Runtime(Generic[AppT]):
         models: "ModelRegistry | None" = None,
         state: "RuntimeState | None" = None,
         capabilities: "Sequence[CapabilityGroup[None]]" = (),
+        middleware: "Sequence[Middleware]" = (),
     ) -> "AbstractAsyncContextManager[Runtime[None]]": ...
 
     @classmethod
@@ -191,6 +194,7 @@ class Runtime(Generic[AppT]):
         models: "ModelRegistry | None" = None,
         state: "RuntimeState | None" = None,
         capabilities: "Sequence[CapabilityGroup[AppT]]" = (),
+        middleware: "Sequence[Middleware]" = (),
     ) -> "AbstractAsyncContextManager[Runtime[AppT]]": ...
 
     @classmethod
@@ -203,6 +207,7 @@ class Runtime(Generic[AppT]):
         models: "ModelRegistry | None" = None,
         state: "RuntimeState | None" = None,
         capabilities: "Sequence[CapabilityGroup[object]]" = (),
+        middleware: "Sequence[Middleware]" = (),
     ) -> "AbstractAsyncContextManager[Runtime[object]]":
         return _open_runtime(
             workspace,
@@ -211,6 +216,7 @@ class Runtime(Generic[AppT]):
             models=models,
             state=state,
             capabilities=capabilities,
+            middleware=middleware,
         )
 
     @property
@@ -826,6 +832,7 @@ async def _open_runtime(
     models: "ModelRegistry | None",
     state: "RuntimeState | None",
     capabilities: "Sequence[CapabilityGroup[object]]",
+    middleware: "Sequence[Middleware]",
 ):
     from ._factory import compose_runtime_components
 
@@ -836,6 +843,7 @@ async def _open_runtime(
         models=models,
         state=state,
         capabilities=capabilities,
+        middleware=middleware,
     )
     try:
         runtime = Runtime(

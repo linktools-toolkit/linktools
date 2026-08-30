@@ -120,6 +120,7 @@ async def test_exact_mcp_selector_requires_matching_trusted_runtime_tool() -> No
         plan_mode=False,
         trusted_tool_classes=(),
         trusted_mcp_selectors=("mcp__trusted",),
+        instruction_aware=False,
     )
     trusted = ToolDefinition(
         name="mcp__trusted__read",
@@ -149,6 +150,7 @@ async def test_mcp_server_wildcard_requires_trusted_runtime_provenance() -> None
         plan_mode=False,
         trusted_tool_classes=(),
         trusted_mcp_selectors=("mcp__trusted",),
+        instruction_aware=False,
     )
     trusted = ToolDefinition(
         name="mcp__trusted__read",
@@ -174,6 +176,7 @@ async def test_mcp_server_wildcard_allows_empty_runtime_toolset() -> None:
         plan_mode=False,
         trusted_tool_classes=(),
         trusted_mcp_selectors=("mcp__trusted",),
+        instruction_aware=False,
     )
     assert await presentation._prepare_final_tools(None, []) == []  # type: ignore[arg-type]
 
@@ -187,6 +190,7 @@ async def test_static_tool_surface_must_match_compiled_exact_set() -> None:
         plan_mode=False,
         trusted_tool_classes=(),
         trusted_mcp_selectors=(),
+        instruction_aware=False,
     )
     business = ToolDefinition(name="business")
     assert await presentation._prepare_final_tools(None, [business]) == [business]  # type: ignore[arg-type]
@@ -207,6 +211,7 @@ async def test_static_tool_surface_must_match_compiled_exact_set() -> None:
         plan_mode=False,
         trusted_tool_classes=(),
         trusted_mcp_selectors=(),
+        instruction_aware=False,
     )
     with pytest.raises(AIError) as extra:
         await empty._prepare_final_tools(None, [ToolDefinition(name="extra")])  # type: ignore[arg-type]
@@ -222,6 +227,7 @@ async def test_custom_capability_cannot_impersonate_reserved_control_tool() -> N
         plan_mode=False,
         trusted_tool_classes=(),
         trusted_mcp_selectors=(),
+        instruction_aware=False,
     )
     spoofed = ToolDefinition(name="write_plan", capability_id="custom")
 
@@ -242,6 +248,7 @@ def test_tool_presentation_is_outermost_wrapper_after_custom_toolset_wrappers() 
         plan_mode=False,
         trusted_tool_classes=(),
         trusted_mcp_selectors=(),
+        instruction_aware=False,
     )
     combined = CombinedCapability((presentation, RenameCapability()))
     wrapped = combined.get_wrapper_toolset(FunctionToolset())
@@ -264,6 +271,7 @@ def test_runtime_persistence_boundary_is_outside_custom_execution_middleware() -
         plan_mode=False,
         trusted_tool_classes=(),
         trusted_mcp_selectors=(),
+        instruction_aware=False,
     )
     custom = CustomOutermost()
     boundary = _RuntimePersistenceBoundary(StepPersistence())

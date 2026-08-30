@@ -10,7 +10,7 @@ from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
 from functools import partial
 from pathlib import Path
-from typing import TypeVar, cast
+from typing import TYPE_CHECKING, TypeVar, cast
 
 from linktools.core import environ
 from pydantic_ai_harness.memory import SearchableMemoryStore
@@ -27,10 +27,16 @@ from ..capability import (
 from ..core import HmacCursorSigner, TenantAuthorizationPolicy, validate_tenant_id
 from ..errors import AIError, ErrorCode
 from ..model import ModelRegistry
+if TYPE_CHECKING:
+    from ..observe import Middleware, MiddlewarePipeline
 from ..spec import AgentSpec, AgentSpecCodec
-from ..storage import ObjectStore, StorageOverlay
+from ..storage import ObjectStore, PayloadPolicy, StorageOverlay
 from ..task import LocalTaskGraphLauncher
-from ..workspace import Workspace
+from ..workspace import (
+    LocalRepositoryInstructionResolver,
+    LocalRuleCatalog,
+    Workspace,
+)
 from ._agent_executor import AgentExecutor
 from ._approval import DefaultApprovalService
 from ._artifact import DefaultArtifactService
@@ -40,7 +46,9 @@ from ._event import DefaultEventService, LiveExecutionEventBroker
 from ._execution import DefaultExecutionService
 from ._history import StepExecutionHistoryReader, StepSessionHistoryReader
 from ._memory import RuntimeMemoryStore
+from ._object import RuntimeObjectKeyFactory
 from ._local import LocalExecutionBackend
+from ._observation import _build_middleware_pipeline
 from ._planner import DefaultTaskService, RuntimeTaskNodeRunner
 from ._session import DefaultSessionService
 from ._subagent import SubagentDispatcher
@@ -53,6 +61,7 @@ from .state import (
     RuntimeState,
     RuntimeStatePlan,
     RuntimeStateRoute,
+    StateStepArchive,
 )
 
 AppT = TypeVar("AppT")
@@ -83,10 +92,26 @@ async def compose_runtime_components(
     models: "ModelRegistry | None" = None,
     state: "RuntimeState | None" = None,
     capabilities: "Sequence[CapabilityGroup[AppT]]" = (),
+    middleware: "Sequence[Middleware]" = (),
 ) -> _RuntimeComponents:
     """Freeze declarations and build Runtime-private services without constructing Runtime."""
     if not isinstance(workspace, Workspace):
         raise TypeError("workspace must be Workspace")
+    workspace.policy.validate()
+    if isinstance(middleware, (str, bytes, bytearray)) or not isinstance(
+        middleware, Sequence
+    ):
+        raise TypeError("middleware must be a sequence")
+    middleware_values = tuple(middleware)
+    for item in middleware_values:
+        try:
+            mutating = item.mutating
+        except AttributeError as error:
+            raise TypeError("middleware must define a bool mutating attribute") from error
+        if not isinstance(mutating, bool):
+            raise TypeError("middleware mutating attribute must be bool")
+        if mutating:
+            raise AIError(ErrorCode.CAPABILITY_POLICY_CONFLICT)
     groups = tuple(capabilities)
     if any(not isinstance(group, CapabilityGroup) for group in groups):
         raise TypeError("capabilities must contain CapabilityGroup values")
@@ -152,6 +177,40 @@ async def compose_runtime_components(
         selected_state = state or _default_runtime_state(workspace)
         await selected_state.initialize(namespace=workspace.workspace_id, tenant_id=effective_tenant_id)
         initialized = True
+        if workspace.policy.tool_permissions.requires_approval:
+            if (
+                selected_state.plan.route(RuntimeDomain.EXECUTION).retention
+                is not RuntimeRetentionMode.DURABLE
+                or selected_state.plan.route(RuntimeDomain.RECOVERY).retention
+                is not RuntimeRetentionMode.DURABLE
+            ):
+                raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+            recovery_steps = selected_state.steps.read_store(RuntimeDomain.RECOVERY)
+            if not isinstance(recovery_steps, StateStepArchive):
+                raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+            approval_group = (
+                selected_state.execution.executions.state_store.storage_group
+            )
+            if (
+                selected_state.recovery.checkpoints.state_store.storage_group
+                is not approval_group
+                or selected_state.recovery.approvals.state_store.storage_group
+                is not approval_group
+                or recovery_steps.state_store.storage_group is not approval_group
+            ):
+                raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+        rules = await LocalRuleCatalog.load(workspace.root, workspace.policy)
+        instruction_resolver = LocalRepositoryInstructionResolver(
+            workspace.root, workspace.policy, rules
+        )
+        object_key_factory = RuntimeObjectKeyFactory(workspace.workspace_id)
+        payload_policy = PayloadPolicy()
+        session_execution_ready = (
+            not workspace.policy.tool_permissions.requires_approval
+            or selected_state.plan.route(RuntimeDomain.CONVERSATION).retention
+            is RuntimeRetentionMode.DURABLE
+        )
+        middleware_pipeline = _build_middleware_pipeline(middleware_values)
         owned_workspace_close = (
             None
             if owned_workspace_assets is None
@@ -174,6 +233,11 @@ async def compose_runtime_components(
             memory_store_factory=_memory_store_factory(workspace, selected_state),
             skill_sources=skill_sources,
             grant_key=_grant_key(workspace),
+            instruction_resolver=instruction_resolver,
+            object_key_factory=object_key_factory,
+            payload_policy=payload_policy,
+            session_execution_ready=session_execution_ready,
+            middleware=middleware_pipeline,
             owned_workspace_close=owned_workspace_close,
         )
     except BaseException:
@@ -353,6 +417,11 @@ async def _build_local_components(
     memory_store_factory: "Callable[[str, str, str, ObjectStore, bool], SearchableMemoryStore] | None",
     skill_sources: SkillSourceRegistry,
     grant_key: bytes,
+    instruction_resolver: LocalRepositoryInstructionResolver,
+    object_key_factory: RuntimeObjectKeyFactory,
+    payload_policy: PayloadPolicy,
+    session_execution_ready: bool,
+    middleware: "MiddlewarePipeline",
     owned_workspace_close: "Callable[[], Awaitable[None]] | None" = None,
 ) -> _RuntimeComponents:
     if not state.ready:
@@ -367,9 +436,17 @@ async def _build_local_components(
         compiler=compiler,
         history_reader=history_reader,
         release_terminal=state.retention.release_execution_handoff,
+        instruction_resolver=instruction_resolver,
+        object_key_factory=object_key_factory,
+        payload_policy=payload_policy,
+        session_execution_ready=session_execution_ready,
     )
     dispatcher = SubagentDispatcher(catalog, compiler, execution)
-    executor = AgentExecutor(skill_sources)
+    executor = AgentExecutor(
+        skill_sources,
+        instruction_resolver=instruction_resolver,
+        middleware=middleware,
+    )
 
     def build_memory_store(
         memory_tenant: str,
@@ -432,6 +509,7 @@ async def _build_local_components(
             handoff_contract_digest=state.handoff_contract_digest,
             subagent_dispatcher=dispatcher,
             live_broker=live_broker,
+            payload_policy=payload_policy,
             execution_objects_durable=(
                 state.plan.route(RuntimeDomain.EXECUTION).retention
                 is RuntimeRetentionMode.DURABLE
@@ -481,6 +559,8 @@ async def _build_local_components(
             state.recovery.approvals,
             state.execution.executions,
             authorization,
+            context_reader=backend,
+            continuation=backend,
         )
         event = DefaultEventService(
             state.execution.executions,

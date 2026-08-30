@@ -2064,6 +2064,93 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
         )
         return next_value
 
+    async def enter_approval_wait_in_transaction(
+        self,
+        transaction: StateTransaction,
+        execution_id: str,
+        *,
+        tenant_id: str,
+        expected_revision: int,
+        expected_event_sequence: int,
+        expected_agent_run_sequence: int,
+        audit_events: Sequence[ExecutionEventAppend] = (),
+        approval_events: Sequence[ExecutionEventAppend],
+        occurred_at: datetime,
+    ) -> ExecutionRecord:
+        if not approval_events or any(
+            event.event_type is not ExecutionEventType.APPROVAL_REQUESTED
+            for event in approval_events
+        ):
+            raise ValueError("approval wait requires approval-requested events")
+        if occurred_at.tzinfo is None:
+            raise ValueError("approval wait timestamp must be timezone-aware")
+        current = await self.get_in_transaction(
+            transaction,
+            execution_id,
+            tenant_id=tenant_id,
+        )
+        if (
+            current is None
+            or current.status is not ExecutionStatus.STARTED
+            or current.revision != expected_revision
+            or current.event_sequence != expected_event_sequence
+            or current.agent_run_sequence != expected_agent_run_sequence
+        ):
+            raise AIError(ErrorCode.STORAGE_CONFLICT)
+        last = approval_events[-1]
+        updated = await self._transition_execution(
+            execution_id,
+            tenant_id=tenant_id,
+            expected_revision=expected_revision,
+            expected_event_sequence=expected_event_sequence,
+            expected_status=ExecutionStatus.STARTED,
+            next_status=ExecutionStatus.WAITING_APPROVAL,
+            pending_events=(*audit_events, *approval_events[:-1]),
+            event_type=last.event_type,
+            payload=last.payload,
+            updated_at=occurred_at,
+            transaction=transaction,
+        )
+        if updated.agent_run_sequence != expected_agent_run_sequence:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        return updated
+
+    async def claim_approval_resume_in_transaction(
+        self,
+        transaction: StateTransaction,
+        execution_id: str,
+        *,
+        tenant_id: str,
+        expected_revision: int,
+        expected_event_sequence: int,
+        expected_agent_run_sequence: int,
+    ) -> ExecutionRecord:
+        _require_repository_tenant(tenant_id, self._tenant_id)
+        record = await transaction.get_record(self._key("execution", execution_id))
+        if record is None:
+            raise AIError(ErrorCode.STORAGE_NOT_FOUND)
+        current = await self._decode(record, ExecutionRecord)
+        if (
+            current.status is not ExecutionStatus.WAITING_APPROVAL
+            or current.revision != expected_revision
+            or current.event_sequence != expected_event_sequence
+            or current.agent_run_sequence != expected_agent_run_sequence
+        ):
+            raise AIError(ErrorCode.STORAGE_CONFLICT)
+        next_value = replace(
+            current,
+            status=ExecutionStatus.STARTED,
+            agent_run_sequence=current.agent_run_sequence + 1,
+            revision=current.revision + 1,
+            updated_at=await transaction.now(),
+        )
+        await _replace_checked(
+            transaction,
+            _projected_record(self, record, next_value),
+            record.storage_version,
+        )
+        return next_value
+
     async def mark_start_unknown(self, commit: ExecutionStartUnknownCommit) -> ExecutionRecord:
         return await self._transition_execution(
             commit.execution_id,
@@ -2083,16 +2170,35 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
         *,
         pending_events: Sequence[ExecutionEventAppend] = (),
     ) -> ExecutionRecord:
+        return await self._store.mutate(
+            lambda transaction: self.request_cancel_in_transaction(
+                transaction,
+                commit,
+                expected_status=None,
+                pending_events=pending_events,
+            )
+        )
+
+    async def request_cancel_in_transaction(
+        self,
+        transaction: StateTransaction,
+        commit: ExecutionCancelRequestCommit,
+        *,
+        expected_status: ExecutionStatus | None = None,
+        pending_events: Sequence[ExecutionEventAppend] = (),
+    ) -> ExecutionRecord:
         return await self._transition_execution(
             commit.execution_id,
             tenant_id=commit.tenant_id,
             expected_revision=commit.expected_revision,
             expected_event_sequence=commit.expected_event_sequence,
+            expected_status=expected_status,
             next_status=ExecutionStatus.CANCELLING,
             event_type=ExecutionEventType.CANCEL_REQUESTED,
             payload={"operation_id": commit.operation_id},
             updated_at=commit.requested_at,
             pending_events=pending_events,
+            transaction=transaction,
         )
 
     async def advance_event_sequence(
@@ -3556,6 +3662,7 @@ class RecoveryCheckpointRepositoryImpl(_ResourceRepository[RecoveryCheckpoint]):
             state.revision,
             admission.created_at,
             state.updated_at,
+            state.pending_approval,
         )
 
 
@@ -4790,6 +4897,76 @@ class ToolRepositoryImpl(_RepositoryBase):
         record = await self._record(self._tool_key(tool_operation_id))
         return None if record is None else await self._decode(record, ToolOperationRecord)
 
+    async def has_by_step_run(
+        self,
+        step_run_id: str,
+        *,
+        tenant_id: str,
+    ) -> bool:
+        if tenant_id != self._tenant_id:
+            return False
+        records = await self._records(
+            "tool_operation",
+            scope=self._scope("tool_operation", "step_run", step_run_id),
+            limit=1,
+        )
+        return bool(records)
+
+    async def existing_call_ids(
+        self,
+        step_run_id: str,
+        tool_call_ids: Sequence[str],
+        *,
+        tenant_id: str,
+    ) -> frozenset[str]:
+        if tenant_id != self._tenant_id:
+            return frozenset()
+        if not isinstance(step_run_id, str) or not step_run_id:
+            raise ValueError("step_run_id must be a non-empty string")
+        if not isinstance(tool_call_ids, Sequence) or isinstance(tool_call_ids, (str, bytes)):
+            raise TypeError("tool_call_ids must be a sequence")
+        ordered = tuple(dict.fromkeys(tool_call_ids))
+        if any(not isinstance(value, str) or not value for value in ordered):
+            raise ValueError("tool_call_ids must contain non-empty strings")
+        if not ordered:
+            return frozenset()
+        aliases = tuple(
+            alias_digest(
+                self._namespace,
+                self._tenant_id,
+                self._domain.value,
+                "tool_call",
+                [step_run_id, tool_call_id],
+            )
+            for tool_call_id in ordered
+        )
+
+        async def read(transaction: StateTransaction) -> frozenset[str]:
+            resolved = await transaction.resolve_aliases(aliases)
+            record_keys = tuple(dict.fromkeys(
+                key for key in resolved.values() if key is not None
+            ))
+            records = await transaction.get_records(record_keys) if record_keys else {}
+            decoded: dict[bytes, ToolOperationRecord] = {}
+            present: set[str] = set()
+            for tool_call_id, alias in zip(ordered, aliases, strict=True):
+                key = resolved.get(alias)
+                if key is None:
+                    continue
+                stored = records.get(key)
+                if stored is None or stored.kind != "tool_operation":
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                value = decoded.get(key)
+                if value is None:
+                    value = await self._decode(stored, ToolOperationRecord)
+                    decoded[key] = value
+                if value.tenant_id != self._tenant_id or value.tool_call_id != tool_call_id:
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                present.add(tool_call_id)
+            return frozenset(present)
+
+        return await self._store.read(read)
+
     async def get_by_call(
         self,
         step_run_id: str,
@@ -5520,6 +5697,7 @@ def _execution_replay_matches(left: ExecutionRecord, right: ExecutionRecord) -> 
         and left.source_execution_id == right.source_execution_id
         and left.base_execution_id == right.base_execution_id
         and left.lineage_kind is right.lineage_kind
+        and left.repository_instructions == right.repository_instructions
     )
 
 
@@ -5548,6 +5726,7 @@ def _recovery_state_record(value: RecoveryCheckpoint) -> RecoveryStateRecord:
         value.pending_operation_id,
         value.revision,
         value.updated_at,
+        value.pending_approval,
     )
 
 

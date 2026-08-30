@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 """Approval service and durable default implementation."""
 
+import asyncio
 from datetime import datetime, timezone
 
 from linktools.core import environ
@@ -24,10 +25,13 @@ from ..errors import AIError, ErrorCode
 from .service_api import (
     ApprovalCreateRequest,
     ApprovalDecisionRequest,
+    ApprovalContextReader,
+    ApprovalContinuation,
     ApprovalDecisionResult,
     ApprovalView,
 )
-from .state._contracts import ApprovalRecord, ApprovalRepository, ExecutionRepository
+from .state import ApprovalRepository, ExecutionRepository
+from .state._contracts import ApprovalRecord
 
 _logger = environ.get_logger("ai.runtime.approval")
 
@@ -40,10 +44,15 @@ class DefaultApprovalService:
         approvals: ApprovalRepository,
         executions: ExecutionRepository,
         authorization: AuthorizationPolicy,
+        *,
+        context_reader: ApprovalContextReader | None = None,
+        continuation: ApprovalContinuation | None = None,
     ) -> None:
         self._approvals = approvals
         self._executions = executions
         self._authorization = authorization
+        self._context_reader = context_reader
+        self._continuation = continuation
 
     async def create(
         self,
@@ -151,7 +160,35 @@ class DefaultApprovalService:
             execution_id,
             tenant_id=principal.tenant_id,
         )
-        return tuple(ApprovalView(record.approval_id, record.status) for record in records)
+        if self._context_reader is None:
+            return tuple(ApprovalView(record.approval_id, record.status) for record in records)
+        approval_ids = tuple(record.approval_id for record in records)
+        contexts = await self._context_reader.tool_approvals(
+            approval_ids,
+            execution_id=execution_id,
+            tenant_id=principal.tenant_id,
+        )
+        unexpected = set(contexts) - set(approval_ids)
+        if unexpected:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        views: list[ApprovalView] = []
+        for record in records:
+            context = contexts.get(record.approval_id)
+            if context is None:
+                views.append(ApprovalView(record.approval_id, record.status))
+                continue
+            if canonical_sha256(context.arguments) != context.args_digest:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            views.append(
+                ApprovalView(
+                    record.approval_id,
+                    record.status,
+                    kind="tool",
+                    tool_name=context.tool_name,
+                    arguments=context.arguments,
+                )
+            )
+        return tuple(views)
 
     async def decide(
         self,
@@ -200,6 +237,9 @@ class DefaultApprovalService:
                 execution_id=execution_id,
                 idempotency_key_digest=idempotency_digest,
                 decision=request.decision,
+                principal_id=request.principal.principal_id,
+                decision_digest=decision_digest,
+                tenant_id=request.principal.tenant_id,
             ):
                 raise
         if (
@@ -213,6 +253,28 @@ class DefaultApprovalService:
             execution_id,
             updated.approval_id,
         )
+        if self._continuation is not None:
+            try:
+                await self._continuation.reconcile_approval(
+                    execution_id,
+                    tenant_id=request.principal.tenant_id,
+                )
+            except asyncio.CancelledError:
+                raise
+            except AIError:
+                raise
+            except Exception as error:
+                _logger.warning(
+                    "approval continuation reconciliation failed: execution=%s approval=%s",
+                    execution_id,
+                    request.approval_id,
+                    exc_info=environ.debug,
+                )
+                raise AIError(
+                    ErrorCode.STORAGE_RECOVERY_REQUIRED,
+                    retryable=True,
+                    safe_details={"phase": "approval_continuation"},
+                ) from error
         return ApprovalDecisionResult(
             updated.approval_id,
             request.idempotency_key,
@@ -226,6 +288,9 @@ def _is_exact_replay(
     execution_id: str,
     idempotency_key_digest: str,
     decision: ApprovalDecision,
+    principal_id: str,
+    decision_digest: str,
+    tenant_id: str,
 ) -> bool:
     expected_status = (
         ApprovalStatus.APPROVED
@@ -238,6 +303,10 @@ def _is_exact_replay(
         and record.status is expected_status
         and record.idempotency_key_digest == idempotency_key_digest
         and record.decision is decision
+        and record.decided_by == principal_id
+        and record.decision_digest == decision_digest
+        and record.decided_at is not None
+        and record.tenant_id == tenant_id
     )
 
 
@@ -247,7 +316,7 @@ def _decision_digest(request: ApprovalDecisionRequest) -> str:
             "approval_id": request.approval_id,
             "idempotency_key": request.idempotency_key,
             "decision": request.decision.value,
-            "principal_id": request.principal.principal_id,
+            "principal": principal_identity_payload(request.principal),
         }
     )
 

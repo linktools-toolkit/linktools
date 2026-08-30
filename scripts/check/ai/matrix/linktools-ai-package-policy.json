@@ -55,6 +55,8 @@
     "runtime._factory": ["core", "storage", "asset", "spec", "model", "capability", "task", "agent", "workspace"],
     "runtime._runtime_service": ["core", "model", "capability", "task", "agent", "workspace"],
     "runtime._local": ["core", "storage", "capability", "agent", "workspace"],
+    "runtime._observation": ["core", "observe"],
+    "runtime._repository_instructions": ["core", "workspace"],
     "runtime._execution": ["core", "storage", "agent"],
     "runtime._history": ["core"]
   },

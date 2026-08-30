@@ -43,16 +43,26 @@ class ToolPermissionRule:
     tool_class: "str | None" = None
 
     def __post_init__(self) -> None:
+        if not isinstance(self.decision, str):
+            raise TypeError("tool permission decision must be a string")
         if self.decision not in _PERMISSION_DECISION_RANK:
             raise ValueError("tool permission decision is invalid")
         if (self.tool_name is None) == (self.tool_class is None):
             raise ValueError("tool permission rule requires exactly one selector")
-        if self.tool_name is not None and (
-            not self.tool_name or self.tool_name != self.tool_name.strip()
-        ):
-            raise ValueError("tool permission tool name is invalid")
-        if self.tool_class is not None and self.tool_class not in _TOOL_PERMISSION_CLASSES:
-            raise ValueError("tool permission class is invalid")
+        if self.tool_name is not None:
+            if not isinstance(self.tool_name, str):
+                raise TypeError("tool permission tool name must be a string")
+            if (
+                not self.tool_name
+                or self.tool_name != self.tool_name.strip()
+                or "*" in self.tool_name
+            ):
+                raise ValueError("tool permission tool name is invalid")
+        if self.tool_class is not None:
+            if not isinstance(self.tool_class, str):
+                raise TypeError("tool permission class must be a string")
+            if self.tool_class not in _TOOL_PERMISSION_CLASSES:
+                raise ValueError("tool permission class is invalid")
 
 
 @dataclass(frozen=True, slots=True)
@@ -61,6 +71,8 @@ class WorkspaceToolPermissionPolicy:
     default: PermissionDecision = "allow"
 
     def __post_init__(self) -> None:
+        if not isinstance(self.default, str):
+            raise TypeError("default tool permission decision must be a string")
         if self.default not in _PERMISSION_DECISION_RANK:
             raise ValueError("default tool permission decision is invalid")
         if not isinstance(self.rules, tuple) or any(
@@ -78,6 +90,15 @@ class WorkspaceToolPermissionPolicy:
         tool_name: str,
         tool_class: "str | None",
     ) -> PermissionDecision:
+        if not isinstance(tool_name, str):
+            raise TypeError("tool permission tool name must be a string")
+        if not tool_name or tool_name != tool_name.strip() or "*" in tool_name:
+            raise ValueError("tool permission tool name is invalid")
+        if tool_class is not None:
+            if not isinstance(tool_class, str):
+                raise TypeError("tool permission class must be a string or None")
+            if tool_class not in _TOOL_PERMISSION_CLASSES:
+                raise ValueError("tool permission class is invalid")
         matched = tuple(
             rule
             for rule in self.rules
@@ -121,12 +142,16 @@ class WorkspacePolicy:
             raise ValueError("workspace policy limits must be positive")
         if not isinstance(self.tool_permissions, WorkspaceToolPermissionPolicy):
             raise TypeError("workspace tool_permissions must be WorkspaceToolPermissionPolicy")
-        if (
-            self.max_repository_instruction_documents < 1
-            or self.max_repository_instruction_bytes < 1
-            or self.max_preloaded_skill_bytes < 1
+        limits = (
+            self.max_repository_instruction_documents,
+            self.max_repository_instruction_bytes,
+            self.max_preloaded_skill_bytes,
+        )
+        if any(
+            not isinstance(value, int) or isinstance(value, bool) or value < 1
+            for value in limits
         ):
-            raise ValueError("workspace instruction limits must be positive")
+            raise ValueError("workspace instruction limits must be positive integers")
 
 
 @dataclass(frozen=True, slots=True)
@@ -218,7 +243,7 @@ def load_config(path: Path) -> "dict[str, JsonValue]":
 def _select_policy(policy: "WorkspacePolicy | None") -> WorkspacePolicy:
     selected = WorkspacePolicy() if policy is None else policy
     if not isinstance(selected, WorkspacePolicy):
-        raise TypeError("policy must be WorkspacePolicy")
+        raise TypeError("policy must be WorkspacePolicy or None")
     selected.validate()
     return selected
 

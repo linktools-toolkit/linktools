@@ -348,6 +348,8 @@ async def test_cancel_local_bookkeeping_survives_caller_cancellation() -> None:
     backend._pending_audit_events = {"execution": [pending]}
     backend._pending_audit_locks = {}
     backend._checkpoint_tasks = set()
+    backend._execution_durable_tasks = {}
+    backend._execution = SimpleNamespace(executions=_ExecutionReader(_execution()))
     backend._live_broker = broker
     backend._runtime_commands = commands
     commit = ExecutionCancelRequestCommit(
@@ -442,6 +444,7 @@ async def test_terminal_local_bookkeeping_survives_caller_cancellation() -> None
     backend._live_broker = broker
     backend._runtime_commands = commands
     backend._terminal_events = {}
+    live = broker.subscribe("execution")
     task = asyncio.create_task(backend.commit_terminal_checkpoint(commit, session_id=None))
     await commands.started.wait()
     task.cancel()
@@ -455,7 +458,6 @@ async def test_terminal_local_bookkeeping_survives_caller_cancellation() -> None
     await asyncio.gather(*owners)
     assert not backend._checkpoint_tasks
     assert "execution" not in backend._pending_audit_events
-    live = broker.subscribe("execution")
     first = await live.__anext__()
     second = await live.__anext__()
     await live.close()

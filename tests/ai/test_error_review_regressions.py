@@ -5,6 +5,7 @@
 import asyncio
 from dataclasses import replace
 from datetime import datetime, timezone
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -17,10 +18,22 @@ from linktools.ai.runtime._capabilities import compose_platform_capabilities
 from linktools.ai.runtime._execution import CancelEffectOutcome, DefaultExecutionService
 from linktools.ai.runtime.service_api import CancelExecutionRequest
 from linktools.ai.runtime.state import ExecutionRecord
+from linktools.ai.observe import MiddlewarePipeline
 from linktools.ai.spec import AgentSpec
-from linktools.ai.workspace import trusted_workspace_principal
+from linktools.ai.workspace import RepositoryInstructions, trusted_workspace_principal
 from pydantic_ai_harness.compaction import DeduplicateFileReads
 from pydantic_ai_harness.step_persistence import InMemoryStepStore
+
+
+class _EmptyRepositoryInstructionResolver:
+    async def resolve(
+        self,
+        path: str | Path = ".",
+        *,
+        exclude_sources: frozenset[str] = frozenset(),
+    ) -> RepositoryInstructions:
+        del path, exclude_sources
+        return RepositoryInstructions(())
 
 
 def _binding_snapshot() -> AgentBindingSnapshot:
@@ -62,7 +75,11 @@ async def test_default_platform_composition_keeps_file_read_deduplication() -> N
 
 @pytest.mark.asyncio
 async def test_agent_executor_cancellation_is_not_replaced_by_usage_sink_failure() -> None:
-    executor = AgentExecutor(SkillSourceRegistry())
+    executor = AgentExecutor(
+        SkillSourceRegistry(),
+        instruction_resolver=_EmptyRepositoryInstructionResolver(),
+        middleware=MiddlewarePipeline(()),
+    )
 
     async def cancelled(*args: object, **kwargs: object) -> None:
         del args, kwargs

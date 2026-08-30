@@ -374,6 +374,9 @@ async def test_local_execution_close_rejects_pending_command_owned_work() -> Non
     backend._worker_failures = {}
     backend._pending_audit_events = {}
     backend._pending_audit_locks = {}
+    backend._approval_pause_segments = {}
+    backend._segment_only_worker_exits = set()
+    backend._repository_instruction_provenance = {}
     release = asyncio.Event()
     task = asyncio.create_task(release.wait())
     backend._checkpoint_tasks = {task}
@@ -403,6 +406,9 @@ async def test_runtime_release_waits_for_execution_scoped_durable_task() -> None
     backend._captured_usage = {}
     backend._pending_audit_events = {}
     backend._pending_audit_locks = {}
+    backend._approval_pause_segments = {}
+    backend._segment_only_worker_exits = set()
+    backend._repository_instruction_provenance = {}
     release = asyncio.Event()
     task = asyncio.create_task(release.wait())
     backend._execution_durable_tasks = {"execution": {task}}

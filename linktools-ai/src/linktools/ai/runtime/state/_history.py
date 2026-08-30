@@ -830,6 +830,31 @@ class TranscriptRepository:
                 for message in messages:
                     yield message
 
+    async def iter_raw_messages(self, owner_id: str) -> AsyncIterator[ModelMessage]:
+        require_no_run_history_lock("TranscriptRepository.iter_raw_messages")
+        stream = self._transcript_stream(owner_id)
+        after_sequence: int | None = None
+        while True:
+            values = await self._store.read(
+                lambda transaction, sequence=after_sequence: transaction.list_facts(
+                    FactQuery(
+                        stream,
+                        after_sequence=sequence,
+                        limit=_TRANSCRIPT_PAGE_SIZE,
+                    )
+                )
+            )
+            if not values:
+                return
+            after_sequence = values[-1].sequence
+            for fact in values:
+                chunk = self.decode_chunk(fact)
+                if chunk.origin is not TranscriptOrigin.RAW:
+                    continue
+                messages = await self._decode_chunk_messages(chunk)
+                for message in messages:
+                    yield message
+
     async def _decode_chunk_messages(self, chunk: TranscriptChunk) -> tuple[ModelMessage, ...]:
         raw = await self._read_payload(chunk.content.payload)
         if chunk.codec == "zlib":

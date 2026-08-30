@@ -19,7 +19,7 @@ class RunContext:
     tenant_id: str
     principal_id: str
     execution_id: str
-    session_id: str
+    session_id: "str | None"
     run_id: str
     agent_id: str
     parent_execution_id: "str | None" = None
@@ -34,9 +34,12 @@ class RunContext:
             validate_resource_id(self.execution_id)
         except AIError as error:
             raise ValueError("run context identity is invalid") from error
+        if self.session_id is not None and (
+            not isinstance(self.session_id, str) or not self.session_id.strip()
+        ):
+            raise ValueError("run context is incomplete")
         if (
-            not self.session_id.strip()
-            or not self.run_id.strip()
+            not self.run_id.strip()
             or not self.agent_id.strip()
             or self.depth < 0
         ):
@@ -58,7 +61,13 @@ def current_context() -> 'RunContext | None':
     return _current.get()
 
 
-def context_for(principal: Principal, execution_id: str, session_id: str, run_id: str, agent_id: str) -> RunContext:
+def context_for(
+    principal: Principal,
+    execution_id: str,
+    session_id: "str | None",
+    run_id: str,
+    agent_id: str,
+) -> RunContext:
     return RunContext(principal.tenant_id, principal.principal_id, execution_id, session_id, run_id, agent_id)
 
 

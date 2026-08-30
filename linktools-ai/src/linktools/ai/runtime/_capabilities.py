@@ -2,15 +2,21 @@
 # -*- coding: utf-8 -*-
 """Execution-scoped Pydantic AI infrastructure capabilities."""
 
+from __future__ import annotations
+
 import asyncio
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
-from pathlib import Path
 from typing import Any, Protocol
 
 from linktools.core import environ
 from pydantic import ValidationError
-from pydantic_ai.capabilities import AbstractCapability, WrapToolExecuteHandler
+from pydantic_ai.capabilities import (
+    AbstractCapability,
+    AgentNode,
+    NodeResult,
+    WrapToolExecuteHandler,
+)
 from pydantic_ai.exceptions import (
     ApprovalRequired,
     CallDeferred,
@@ -20,9 +26,16 @@ from pydantic_ai.exceptions import (
     ToolFailedError,
     ToolRetryError,
 )
-from pydantic_ai.messages import ModelResponse, RetryPromptPart, ToolCallPart, ToolReturnPart
+from pydantic_ai.messages import (
+    ModelResponse,
+    RetryPromptPart,
+    ToolCallPart,
+    ToolReturnPart,
+)
 from pydantic_ai.models import Model, ModelRequestContext
+from pydantic_ai.run import AgentRunResult
 from pydantic_ai.tools import RunContext, ToolDefinition
+from pydantic_ai.tools import DeferredToolRequests
 from pydantic_ai.toolsets import AbstractToolset
 from pydantic_ai_harness.compaction import (
     ClearToolResults,
@@ -122,6 +135,10 @@ class ToolOperationBridge(Protocol):
 
     async def unknown(self, decision: ToolOperationDecision, error: BaseException) -> None: ...
 
+    async def existing_call_ids(
+        self, tool_call_ids: Sequence[str]
+    ) -> frozenset[str]: ...
+
 
 class _MissingToolOperationBridge:
     async def begin(
@@ -151,6 +168,12 @@ class _MissingToolOperationBridge:
         del decision, error
         raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
 
+    async def existing_call_ids(
+        self, tool_call_ids: Sequence[str]
+    ) -> frozenset[str]:
+        del tool_call_ids
+        raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+
 
 class _RuntimeStepPersistence(StepPersistence[None]):
     def __init__(
@@ -161,6 +184,7 @@ class _RuntimeStepPersistence(StepPersistence[None]):
         trusted_tool_classes: "tuple[tuple[str, str], ...]" = (),
         trusted_mcp_selectors: "tuple[str, ...]" = (),
         background_tasks: "set[asyncio.Task[Any]] | None" = None,
+        deferred_pause_sink: "Callable[[int], None] | None" = None,
         **kwargs: Any,
     ) -> None:
         if not isinstance(plan_mode, bool):
@@ -174,6 +198,36 @@ class _RuntimeStepPersistence(StepPersistence[None]):
         self._trusted_mcp_selectors = trusted_mcp_selectors
         self._calls: dict[tuple[str, str], _ToolCallState] = {}
         self._background_tasks = set() if background_tasks is None else background_tasks
+        self._deferred_pause_sink = deferred_pause_sink
+        self._last_observed_step_index: int | None = None
+
+    async def after_node_run(
+        self,
+        ctx: "RunContext[None]",
+        *,
+        node: AgentNode[None],
+        result: NodeResult[None],
+    ) -> NodeResult[None]:
+        observed = await super().after_node_run(ctx, node=node, result=result)
+        self._last_observed_step_index = ctx.run_step
+        return observed
+
+    async def after_run(
+        self,
+        ctx: "RunContext[None]",
+        *,
+        result: AgentRunResult[Any],
+    ) -> AgentRunResult[Any]:
+        output = result.output
+        if isinstance(output, DeferredToolRequests):
+            if not output.approvals or output.calls:
+                raise AIError(ErrorCode.CAPABILITY_POLICY_CONFLICT)
+            if self._last_observed_step_index is None:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            if self._deferred_pause_sink is None:
+                raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+            self._deferred_pause_sink(self._last_observed_step_index)
+        return await super().after_run(ctx, result=result)
 
     async def after_model_request(
         self,
@@ -682,6 +736,7 @@ async def compose_platform_capabilities(
     tool_operations: "ToolOperationBridge | None",
     background_tasks: "set[asyncio.Task[object]]",
     plan_store_resolver: "Callable[[RunContext[None]], PlanStore] | None",
+    deferred_pause_sink: "Callable[[int], None] | None" = None,
 ) -> "tuple[AbstractCapability[None], ...]":
     _validate_compaction_target(context_target_tokens)
     _validate_trusted_tool_classes(trusted_tool_classes)
@@ -704,6 +759,7 @@ async def compose_platform_capabilities(
             trusted_tool_classes=trusted_tool_classes,
             trusted_mcp_selectors=trusted_mcp_selectors,
             background_tasks=background_tasks,
+            deferred_pause_sink=deferred_pause_sink,
         )
     )
     selected = frozenset(runtime_tool_names)

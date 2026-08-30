@@ -1843,6 +1843,11 @@ class StateStepArchive(StepStore):
         async for message in self._history.iter_messages(run_id):
             yield message
 
+    async def iter_raw_messages(self, *, run_id: str) -> AsyncIterator[ModelMessage]:
+        require_no_run_history_lock("StateStepArchive.iter_raw_messages")
+        async for message in self._history.iter_raw_messages(run_id):
+            yield message
+
     async def load_model_context(
         self,
         *,
