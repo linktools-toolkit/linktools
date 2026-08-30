@@ -63,6 +63,7 @@ class RuntimeTaskNodeRunner:
         self._catalog = catalog
         self._compiler = compiler
         self._detached_tasks: set[asyncio.Task[object]] = set()
+        self._cancelled_tasks: set[asyncio.Task[object]] = set()
         self._background_failures: dict[tuple[str, str, str], AIError] = {}
         self._active_execution_ids: dict[tuple[str, str, str], str] = {}
         self._active_launch_tasks: dict[
@@ -72,6 +73,12 @@ class RuntimeTaskNodeRunner:
     @property
     def pending_background_tasks(self) -> tuple[asyncio.Task[object], ...]:
         return tuple(task for task in self._detached_tasks if not task.done())
+
+    @property
+    def pending_cancelled_tasks(self) -> tuple[asyncio.Task[object], ...]:
+        return tuple(
+            task for task in self._cancelled_task_set() if not task.done()
+        )
 
     @property
     def background_failure(self) -> "AIError | None":
@@ -275,7 +282,7 @@ class RuntimeTaskNodeRunner:
         except asyncio.CancelledError:
             if not wait_task.done():
                 wait_task.cancel()
-                self._detach(
+                self._detach_cancelled(
                     cast("asyncio.Task[object]", wait_task),
                     f"task execution wait cleanup graph={graph_id} task={node.node_id}",
                 )
@@ -492,6 +499,14 @@ class RuntimeTaskNodeRunner:
         self._background_failures[key] = failure
         return failure
 
+    def _cancelled_task_set(self) -> set[asyncio.Task[object]]:
+        try:
+            return self._cancelled_tasks
+        except AttributeError:
+            cancelled: set[asyncio.Task[object]] = set()
+            self._cancelled_tasks = cancelled
+            return cancelled
+
     def _detach(
         self,
         task: "asyncio.Task[object]",
@@ -509,6 +524,27 @@ class RuntimeTaskNodeRunner:
                 self._consume_done(done, label)
             finally:
                 self._detached_tasks.discard(done)
+
+        task.add_done_callback(consume)
+
+    def _detach_cancelled(
+        self,
+        task: "asyncio.Task[object]",
+        label: str,
+    ) -> None:
+        if task.done():
+            self._consume_done(task, label)
+            return
+        tasks = self._cancelled_task_set()
+        if task in tasks:
+            return
+        tasks.add(task)
+
+        def consume(done: "asyncio.Task[object]") -> None:
+            try:
+                self._consume_done(done, label)
+            finally:
+                tasks.discard(done)
 
         task.add_done_callback(consume)
 

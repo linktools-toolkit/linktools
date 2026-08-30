@@ -365,13 +365,14 @@ async def test_cancel_local_bookkeeping_survives_caller_cancellation() -> None:
     )
     await commands.started.wait()
     task.cancel()
-    with pytest.raises(AIError) as raised:
-        await task
-    assert raised.value.code is ErrorCode.STORAGE_COMMIT_UNKNOWN
+    await asyncio.sleep(0)
+    assert not task.done()
     owners = tuple(backend._checkpoint_tasks)
     assert len(owners) == 1
     assert "execution" in backend._pending_audit_events
     commands.release.set()
+    with pytest.raises(asyncio.CancelledError):
+        await task
     await asyncio.gather(*owners)
     assert not backend._checkpoint_tasks
     assert "execution" not in backend._pending_audit_events
@@ -448,13 +449,14 @@ async def test_terminal_local_bookkeeping_survives_caller_cancellation() -> None
     task = asyncio.create_task(backend.commit_terminal_checkpoint(commit, session_id=None))
     await commands.started.wait()
     task.cancel()
-    with pytest.raises(AIError) as raised:
-        await task
-    assert raised.value.code is ErrorCode.STORAGE_COMMIT_UNKNOWN
+    await asyncio.sleep(0)
+    assert not task.done()
     owners = tuple(backend._checkpoint_tasks)
     assert len(owners) == 1
     assert "execution" in backend._pending_audit_events
     commands.release.set()
+    with pytest.raises(asyncio.CancelledError):
+        await task
     await asyncio.gather(*owners)
     assert not backend._checkpoint_tasks
     assert "execution" not in backend._pending_audit_events

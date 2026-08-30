@@ -26,6 +26,7 @@ async def open_local_task_api(
         await service.recover_pending()
         yield service
     finally:
+        await service.drain_owned_finalizers()
         await service.preflight_close()
         await launcher.shutdown()
 

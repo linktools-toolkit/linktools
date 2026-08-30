@@ -65,6 +65,12 @@ class _BackgroundTaskOwner(Protocol):
 
 
 @runtime_checkable
+class _CancelledTaskOwner(Protocol):
+    @property
+    def pending_cancelled_tasks(self) -> tuple[asyncio.Task[object], ...]: ...
+
+
+@runtime_checkable
 class _BackgroundTaskFailureOwner(Protocol):
     @property
     def background_failure(self) -> "AIError | None": ...
@@ -271,6 +277,15 @@ class LocalTaskGraphLauncher:
                         cast("asyncio.Task[object]", run.task),
                         "task graph cancellation",
                     )
+                    if cleanup_error is None:
+                        cleanup_error = AIError(
+                            ErrorCode.STORAGE_RECOVERY_REQUIRED,
+                            safe_details={
+                                "phase": "task_graph_cancel_cleanup",
+                                "graph_id": graph_id,
+                                "pending_tasks": 1,
+                            },
+                        )
             self._remove_run(key, run)
         if cleanup_error is not None:
             if isinstance(cleanup_error, asyncio.CancelledError):
@@ -293,39 +308,93 @@ class LocalTaskGraphLauncher:
                 run.task.cancel()
             elif run.task is not None:
                 self._consume_done(run.task, "task graph shutdown")
-        runner_pending = (
-            self._runner.pending_background_tasks
-            if isinstance(self._runner, _BackgroundTaskOwner)
+
+        runner_cancelled = (
+            self._runner.pending_cancelled_tasks
+            if isinstance(self._runner, _CancelledTaskOwner)
             else ()
         )
         if (
             any(run.task is not None and not run.task.done() for run in runs)
             or any(not task.done() for task in self._detached_tasks)
-            or any(not task.done() for task in runner_pending)
+            or any(not task.done() for task in runner_cancelled)
         ):
             await asyncio.sleep(0)
+
+        runner_cancelled = (
+            self._runner.pending_cancelled_tasks
+            if isinstance(self._runner, _CancelledTaskOwner)
+            else ()
+        )
+        cancelled_by_identity = {
+            id(task): task
+            for task in (
+                *(run.task for run in runs if run.task is not None),
+                *self._detached_tasks,
+                *runner_cancelled,
+            )
+            if isinstance(task, asyncio.Task) and not task.done()
+        }
+        cancelled_pending = tuple(cancelled_by_identity.values())
+        if cancelled_pending:
+            raise AIError(
+                ErrorCode.STORAGE_RECOVERY_REQUIRED,
+                safe_details={
+                    "phase": "task_graph_shutdown",
+                    "pending_tasks": len(cancelled_pending),
+                },
+            )
+
+        while True:
             runner_pending = (
                 self._runner.pending_background_tasks
                 if isinstance(self._runner, _BackgroundTaskOwner)
                 else ()
             )
-        pending = tuple(
-            task
-            for task in (
-                *(run.task for run in runs if run.task is not None),
-                *self._detached_tasks,
-                *runner_pending,
+            pending_by_identity = {
+                id(task): task
+                for task in runner_pending
+                if isinstance(task, asyncio.Task) and not task.done()
+            }
+            pending = tuple(pending_by_identity.values())
+            if not pending:
+                break
+            await asyncio.gather(
+                *(asyncio.shield(task) for task in pending),
+                return_exceptions=True,
             )
+
+        runner_cancelled = (
+            self._runner.pending_cancelled_tasks
+            if isinstance(self._runner, _CancelledTaskOwner)
+            else ()
+        )
+        cancelled_pending = tuple(
+            task
+            for task in runner_cancelled
             if isinstance(task, asyncio.Task) and not task.done()
         )
-        if pending:
-            raise AIError(
-                ErrorCode.STORAGE_RECOVERY_REQUIRED,
-                safe_details={
-                    "phase": "task_graph_shutdown",
-                    "pending_tasks": len(pending),
-                },
+        if cancelled_pending:
+            await asyncio.sleep(0)
+            runner_cancelled = (
+                self._runner.pending_cancelled_tasks
+                if isinstance(self._runner, _CancelledTaskOwner)
+                else ()
             )
+            cancelled_pending = tuple(
+                task
+                for task in runner_cancelled
+                if isinstance(task, asyncio.Task) and not task.done()
+            )
+            if cancelled_pending:
+                raise AIError(
+                    ErrorCode.STORAGE_RECOVERY_REQUIRED,
+                    safe_details={
+                        "phase": "task_graph_shutdown",
+                        "pending_tasks": len(cancelled_pending),
+                    },
+                )
+
         runner_failure = (
             self._runner.background_failure
             if isinstance(self._runner, _BackgroundTaskFailureOwner)

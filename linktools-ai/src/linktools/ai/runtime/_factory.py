@@ -583,8 +583,10 @@ async def _build_local_components(
         )
         local_coordinator = _LocalRuntimeCoordinator(execution, event)
         close_actions: list[Callable[[], Awaitable[None]]] = [
+            task.drain_owned_finalizers,
             task.preflight_close,
             task_launcher.shutdown,
+            execution.preflight_close,
             backend.close,
             state.close,
         ]

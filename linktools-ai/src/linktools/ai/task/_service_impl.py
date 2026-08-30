@@ -173,6 +173,7 @@ class DefaultTaskService(TaskApi):
         self._handoff_states: dict[tuple[str, str], _TaskHandoffState] = {}
         self._handoff_condition = asyncio.Condition()
         self._detached_finalizers: set[asyncio.Task[object]] = set()
+        self._detached_finalizer_failure: AIError | None = None
 
     async def run_graph(self, request: TaskGraphRequest) -> TaskGraphResult:
         return await self._run_graph(request, release_terminal=True)
@@ -943,10 +944,31 @@ class DefaultTaskService(TaskApi):
                     graph_id,
                     type(error).__name__,
                 )
+                if self._detached_finalizer_failure is None:
+                    details = dict(error.safe_details) if isinstance(error, AIError) else {}
+                    details.setdefault("phase", "task_service_finalizer")
+                    details.setdefault("graph_id", graph_id)
+                    self._detached_finalizer_failure = AIError(
+                        ErrorCode.STORAGE_RECOVERY_REQUIRED,
+                        safe_details=details,
+                    )
             finally:
                 self._detached_finalizers.discard(done)
 
         task.add_done_callback(consume)
+
+    async def drain_owned_finalizers(self) -> None:
+        while True:
+            pending = tuple(
+                task for task in self._detached_finalizers if not task.done()
+            )
+            if not pending:
+                await asyncio.sleep(0)
+                return
+            await asyncio.gather(
+                *(asyncio.shield(task) for task in pending),
+                return_exceptions=True,
+            )
 
     async def preflight_close(self) -> None:
         pending = tuple(
@@ -963,6 +985,12 @@ class DefaultTaskService(TaskApi):
                     "phase": "task_service_preflight_close",
                     "pending_finalizers": len(pending),
                 },
+            )
+        failure = self._detached_finalizer_failure
+        if failure is not None:
+            raise AIError(
+                failure.code,
+                safe_details=dict(failure.safe_details),
             )
 
 

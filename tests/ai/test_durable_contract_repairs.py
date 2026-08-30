@@ -377,6 +377,7 @@ async def test_local_execution_close_rejects_pending_command_owned_work() -> Non
     backend._approval_pause_segments = {}
     backend._segment_only_worker_exits = set()
     backend._repository_instruction_provenance = {}
+    backend._worker_cancel_requests = set()
     release = asyncio.Event()
     task = asyncio.create_task(release.wait())
     backend._checkpoint_tasks = {task}
@@ -409,6 +410,7 @@ async def test_runtime_release_waits_for_execution_scoped_durable_task() -> None
     backend._approval_pause_segments = {}
     backend._segment_only_worker_exits = set()
     backend._repository_instruction_provenance = {}
+    backend._worker_cancel_requests = set()
     release = asyncio.Event()
     task = asyncio.create_task(release.wait())
     backend._execution_durable_tasks = {"execution": {task}}
@@ -653,6 +655,9 @@ async def test_standalone_task_api_preflights_before_launcher_shutdown(
         def __init__(self, persistence: object, authorization: object, launcher: object) -> None:
             del persistence, authorization
             self.launcher = launcher
+
+        async def drain_owned_finalizers(self) -> None:
+            return None
 
         async def preflight_close(self) -> None:
             raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
