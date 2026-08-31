@@ -29,6 +29,45 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install -U -r requirements.txt
           python manage.py install --editable
+      - name: Diagnose Task scheduler bootstrap
+        shell: bash
+        run: |
+          python - <<'PY'
+          import asyncio
+          from linktools.ai.runtime import RuntimeState
+          from linktools.ai.task import TaskGraph, TaskGraphAdmission, TaskGraphRequest, TaskNode
+          from linktools.ai.workspace import trusted_workspace_principal
+
+          async def main() -> None:
+              state = RuntimeState.in_memory()
+              await state.initialize(namespace="task-bootstrap-diagnostic", tenant_id="tenant")
+              try:
+                  graph = TaskGraph("diagnostic-graph", (TaskNode("node"),))
+                  principal = trusted_workspace_principal("tenant")
+                  request = TaskGraphRequest(
+                      graph,
+                      principal,
+                      idempotency_key="diagnostic-graph-run-0001",
+                  )
+                  admission = TaskGraphAdmission.from_request(request)
+                  print("admit", await state.task.admissions.admit(admission, graph))
+                  print("reconcile", await state.task.tasks.reconcile_graph("diagnostic-graph", tenant_id="tenant"))
+                  print("nodes", await state.task.tasks.list_nodes("diagnostic-graph", tenant_id="tenant"))
+                  print(
+                      "claim",
+                      await state.task.tasks.claim(
+                          "diagnostic-graph",
+                          "node",
+                          tenant_id="tenant",
+                          owner="worker",
+                          lease_seconds=90,
+                      ),
+                  )
+              finally:
+                  await state.close()
+
+          asyncio.run(main())
+          PY
       - name: Run new mixed-node reliability tests
         shell: bash
         run: timeout 180s python -m pytest -vv -q tests/ai/test_task_mixed_node_reliability.py
