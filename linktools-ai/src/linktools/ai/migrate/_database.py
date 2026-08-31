@@ -64,6 +64,7 @@ async def provision_runtime_database(
             RuntimeDomain.MEMORY,
             RuntimeDomain.ARTIFACT,
             RuntimeDomain.RECOVERY,
+            RuntimeDomain.TASK,
         }
     ):
         build_object_sql_metadata(metadata=metadata)
