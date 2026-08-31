@@ -34,6 +34,8 @@ jobs:
         run: |
           python - <<'PY'
           import asyncio
+          import traceback
+          import linktools.ai.task._local as task_local
           from linktools.ai.runtime import RuntimeState
           from linktools.ai.storage import StoredPayload
           from linktools.ai.task import (
@@ -47,6 +49,15 @@ jobs:
               TaskNodeRunResult,
           )
           from linktools.ai.workspace import trusted_workspace_principal
+
+          original_scheduler_failure = task_local._scheduler_failure
+
+          def diagnostic_scheduler_failure(error, graph_id):
+              print("scheduler-original-error", type(error).__name__, repr(error))
+              traceback.print_exception(type(error), error, error.__traceback__)
+              return original_scheduler_failure(error, graph_id)
+
+          task_local._scheduler_failure = diagnostic_scheduler_failure
 
           class Runner:
               def __init__(self) -> None:
@@ -68,27 +79,6 @@ jobs:
               launcher = None
               try:
                   principal = trusted_workspace_principal("tenant")
-                  graph = TaskGraph("diagnostic-graph", (TaskNode("node"),))
-                  request = TaskGraphRequest(
-                      graph,
-                      principal,
-                      idempotency_key="diagnostic-graph-run-0001",
-                  )
-                  admission = TaskGraphAdmission.from_request(request)
-                  print("admit", await state.task.admissions.admit(admission, graph))
-                  print("reconcile", await state.task.tasks.reconcile_graph("diagnostic-graph", tenant_id="tenant"))
-                  print("nodes", await state.task.tasks.list_nodes("diagnostic-graph", tenant_id="tenant"))
-                  print(
-                      "claim",
-                      await state.task.tasks.claim(
-                          "diagnostic-graph",
-                          "node",
-                          tenant_id="tenant",
-                          owner="worker",
-                          lease_seconds=90,
-                      ),
-                  )
-
                   launch_graph = TaskGraph("launcher-graph", (TaskNode("node"),))
                   launch_request = TaskGraphRequest(
                       launch_graph,
@@ -97,13 +87,14 @@ jobs:
                   )
                   launch_admission = TaskGraphAdmission.from_request(launch_request)
                   await state.task.admissions.admit(launch_admission, launch_graph)
+                  print("before-launch", await state.task.tasks.list_nodes("launcher-graph", tenant_id="tenant"))
                   runner = Runner()
                   launcher = LocalTaskGraphLauncher(state.task.tasks, runner, owner="worker")
                   await launcher.start(TaskGraphLaunch(launch_graph, principal, TaskGraphLimits()))
                   try:
                       await asyncio.wait_for(runner.entered.wait(), 1)
                   except asyncio.TimeoutError:
-                      print("launcher-nodes", await state.task.tasks.list_nodes("launcher-graph", tenant_id="tenant"))
+                      print("after-timeout", await state.task.tasks.list_nodes("launcher-graph", tenant_id="tenant"))
                       generation = launcher.graph_activity_generation("launcher-graph", tenant_id="tenant")
                       print("launcher-generation", generation)
                       if generation is not None:
@@ -119,8 +110,6 @@ jobs:
                           except BaseException as error:
                               print("launcher-wait-error", type(error).__name__, repr(error), getattr(error, "safe_details", None))
                       raise
-                  await asyncio.sleep(0)
-                  print("launcher-final", await state.task.tasks.list_nodes("launcher-graph", tenant_id="tenant"))
               finally:
                   if launcher is not None:
                       await launcher.shutdown()
