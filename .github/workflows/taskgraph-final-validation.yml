@@ -8,9 +8,14 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: taskgraph-final-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   validate:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
         with:
@@ -24,19 +29,24 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install -U -r requirements.txt
           python manage.py install --editable
-      - name: Run TaskGraph reliability tests
+      - name: Run new mixed-node reliability tests
         shell: bash
-        run: |
-          python -m pytest -q \
-            tests/ai/test_task_mixed_node_reliability.py \
-            tests/ai/test_task_durable_recovery.py \
-            tests/ai/test_task_runtime_recovery.py \
-            tests/ai/test_task_sqlite_cas_convergence.py \
-            tests/ai/test_cancellation_quiescence.py \
-            tests/ai/test_error_cancellation_contract.py
-      - name: Run linktools-ai release gates
+        run: timeout 180s python -m pytest -vv -q tests/ai/test_task_mixed_node_reliability.py
+      - name: Run durable Task recovery tests
         shell: bash
-        run: |
-          python manage.py check linktools-ai
-          python manage.py build linktools-ai
-          python manage.py verify linktools-ai
+        run: timeout 240s python -m pytest -vv -q tests/ai/test_task_durable_recovery.py tests/ai/test_task_runtime_recovery.py
+      - name: Run Task CAS convergence tests
+        shell: bash
+        run: timeout 240s python -m pytest -vv -q tests/ai/test_task_sqlite_cas_convergence.py
+      - name: Run cancellation regression tests
+        shell: bash
+        run: timeout 240s python -m pytest -vv -q tests/ai/test_cancellation_quiescence.py tests/ai/test_error_cancellation_contract.py
+      - name: Check linktools-ai
+        shell: bash
+        run: timeout 300s python manage.py check linktools-ai
+      - name: Build linktools-ai
+        shell: bash
+        run: timeout 300s python manage.py build linktools-ai
+      - name: Verify linktools-ai
+        shell: bash
+        run: timeout 300s python manage.py verify linktools-ai
