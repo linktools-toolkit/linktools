@@ -1,0 +1,42 @@
+name: TaskGraph callback binding fix
+
+on:
+  push:
+    branches:
+      - feat/ai-taskgraph-reliable-mixed-nodes
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feat/ai-taskgraph-reliable-mixed-nodes
+          fetch-depth: 2
+      - name: Restore static callback binding
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          path = Path("linktools-ai/src/linktools/ai/task/_local.py")
+          text = path.read_text()
+          old = '''    def _consume_run(run: _GraphRun, task: "asyncio.Task[None]") -> None:\n'''
+          new = '''    @staticmethod\n    def _consume_run(run: _GraphRun, task: "asyncio.Task[None]") -> None:\n'''
+          if text.count(old) != 1:
+              raise SystemExit(f"unexpected _consume_run anchor count: {text.count(old)}")
+          path.write_text(text.replace(old, new, 1))
+          Path(".github/workflows/taskgraph-staticmethod-fix.yml").unlink()
+          PY
+          python -m compileall -q linktools-ai/src
+          git diff --check
+      - name: Commit fix
+        run: |
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add -A
+          git commit -m "fix(ai-task): restore launcher callback binding"
+          git push origin HEAD:feat/ai-taskgraph-reliable-mixed-nodes
