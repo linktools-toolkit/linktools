@@ -35,15 +35,40 @@ jobs:
           python - <<'PY'
           import asyncio
           from linktools.ai.runtime import RuntimeState
-          from linktools.ai.task import TaskGraph, TaskGraphAdmission, TaskGraphRequest, TaskNode
+          from linktools.ai.storage import StoredPayload
+          from linktools.ai.task import (
+              LocalTaskGraphLauncher,
+              TaskGraph,
+              TaskGraphAdmission,
+              TaskGraphLaunch,
+              TaskGraphLimits,
+              TaskGraphRequest,
+              TaskNode,
+              TaskNodeRunResult,
+          )
           from linktools.ai.workspace import trusted_workspace_principal
+
+          class Runner:
+              def __init__(self) -> None:
+                  self.entered = asyncio.Event()
+
+              async def run(self, node, *, graph_id, principal, dependency_results, control):
+                  del node, graph_id, principal, dependency_results, control
+                  print("runner-entered")
+                  self.entered.set()
+                  payload = StoredPayload.inline_json({"ok": True})
+                  return TaskNodeRunResult(payload.digest, result_payload=payload)
+
+              async def cancel(self, node, *, graph_id, principal, dependency_results):
+                  del node, graph_id, principal, dependency_results
 
           async def main() -> None:
               state = RuntimeState.in_memory()
               await state.initialize(namespace="task-bootstrap-diagnostic", tenant_id="tenant")
+              launcher = None
               try:
-                  graph = TaskGraph("diagnostic-graph", (TaskNode("node"),))
                   principal = trusted_workspace_principal("tenant")
+                  graph = TaskGraph("diagnostic-graph", (TaskNode("node"),))
                   request = TaskGraphRequest(
                       graph,
                       principal,
@@ -63,7 +88,42 @@ jobs:
                           lease_seconds=90,
                       ),
                   )
+
+                  launch_graph = TaskGraph("launcher-graph", (TaskNode("node"),))
+                  launch_request = TaskGraphRequest(
+                      launch_graph,
+                      principal,
+                      idempotency_key="launcher-graph-run-0001",
+                  )
+                  launch_admission = TaskGraphAdmission.from_request(launch_request)
+                  await state.task.admissions.admit(launch_admission, launch_graph)
+                  runner = Runner()
+                  launcher = LocalTaskGraphLauncher(state.task.tasks, runner, owner="worker")
+                  await launcher.start(TaskGraphLaunch(launch_graph, principal, TaskGraphLimits()))
+                  try:
+                      await asyncio.wait_for(runner.entered.wait(), 1)
+                  except asyncio.TimeoutError:
+                      print("launcher-nodes", await state.task.tasks.list_nodes("launcher-graph", tenant_id="tenant"))
+                      generation = launcher.graph_activity_generation("launcher-graph", tenant_id="tenant")
+                      print("launcher-generation", generation)
+                      if generation is not None:
+                          try:
+                              await asyncio.wait_for(
+                                  launcher.wait_graph_activity(
+                                      "launcher-graph",
+                                      tenant_id="tenant",
+                                      after_generation=generation,
+                                  ),
+                                  0.1,
+                              )
+                          except BaseException as error:
+                              print("launcher-wait-error", type(error).__name__, repr(error), getattr(error, "safe_details", None))
+                      raise
+                  await asyncio.sleep(0)
+                  print("launcher-final", await state.task.tasks.list_nodes("launcher-graph", tenant_id="tenant"))
               finally:
+                  if launcher is not None:
+                      await launcher.shutdown()
                   await state.close()
 
           asyncio.run(main())
