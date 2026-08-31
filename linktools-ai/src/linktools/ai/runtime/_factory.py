@@ -78,6 +78,7 @@ class _RuntimeComponents:
     tenant_id: str
     close_callback: Callable[[], Awaitable[None]]
     local_coordinator: _LocalRuntimeCoordinator
+    task_node_runtime: RuntimeTaskNodeRunner[object]
 
 
 async def compose_runtime_components(
@@ -647,6 +648,7 @@ async def _build_local_components(
         tenant_id=tenant_id,
         close_callback=coordinator.close,
         local_coordinator=local_coordinator,
+        task_node_runtime=cast("RuntimeTaskNodeRunner[object]", task_runner),
     )
 
 
