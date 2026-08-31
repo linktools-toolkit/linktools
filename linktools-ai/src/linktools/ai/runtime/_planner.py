@@ -6,6 +6,7 @@ import asyncio
 import json
 import re
 from collections.abc import Mapping, Sequence
+from types import MappingProxyType
 from typing import Generic, Protocol, TypeVar, cast
 
 from linktools.core import environ
@@ -32,7 +33,6 @@ from ..task import (
     TaskDependencyResult,
     TaskGraph,
     TaskGraphSnapshot,
-    TaskHandlerResult,
     TaskNode,
     TaskNodeContext,
     TaskNodeHandler,
@@ -76,6 +76,14 @@ class _TaskStateReader(Protocol):
         *,
         tenant_id: str,
     ) -> TaskGraphSnapshot | None: ...
+
+    async def get_results(
+        self,
+        graph_id: str,
+        node_ids: tuple[str, ...],
+        *,
+        tenant_id: str,
+    ) -> Mapping[str, TaskResultRecord]: ...
 
 
 class _AgentTaskNodeHandler:
@@ -187,7 +195,7 @@ class _AgentTaskNodeHandler:
         principal: Principal,
         dependencies: Mapping[str, TaskDependency],
         control: TaskNodeRunControl,
-    ) -> TaskHandlerResult:
+    ) -> tuple[JsonValue, str]:
         binding_digest, request = self._prepare_request(
             node,
             graph_id=graph_id,
@@ -250,7 +258,20 @@ class _AgentTaskNodeHandler:
             raise _execution_failure(result)
         if result.output is None:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        return TaskHandlerResult(result.output, result.execution_id)
+        return result.output, result.execution_id
+
+    async def read_result(
+        self,
+        execution_id: str,
+        *,
+        principal: Principal,
+        expected_digest: str,
+    ) -> JsonValue:
+        result = await self._execution.result(execution_id, principal=principal)
+        _validate_dependency_result(result, expected_digest)
+        if result.output is None:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        return result.output
 
     async def cancel_node(
         self,
@@ -503,7 +524,7 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
             if key in values:
                 raise AIError(ErrorCode.CAPABILITY_CONFLICT)
             values[key] = handler
-        self._handlers = values
+        self._handlers = MappingProxyType(values)
         self._materialization_tasks: set[asyncio.Task[StoredPayload]] = set()
         self._background_failure: AIError | None = None
 
@@ -628,8 +649,9 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
             principal=principal,
             dependency_results=dependency_results,
         )
+        execution_id: str | None = None
         if handler is self._agent:
-            result = await self._agent.run_node(
+            output, execution_id = await self._agent.run_node(
                 node,
                 graph_id=graph_id,
                 principal=principal,
@@ -652,19 +674,24 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
                 dependencies,
                 idempotency_key,
             )
-            result = await handler.run(context)
-            if not isinstance(result, TaskHandlerResult):
-                raise AIError(ErrorCode.TASK_NODE_FAILED)
-        digest = canonical_sha256(result.output)
+            try:
+                output = normalize_json_value(await handler.run(context))
+            except asyncio.CancelledError:
+                raise
+            except AIError:
+                raise
+            except (TypeError, ValueError) as error:
+                raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID) from error
+        digest = canonical_sha256(output)
         payload = await self._materialize_result(
-            result.output,
+            output,
             tenant_id=principal.tenant_id,
             graph_id=graph_id,
             node_id=node.node_id,
         )
         if payload.digest != digest:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        return TaskNodeRunResult(digest, result.execution_id, payload)
+        return TaskNodeRunResult(digest, execution_id, payload)
 
     async def cancel(
         self,
@@ -713,6 +740,20 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
         )
         await handler.cancel(context)
 
+    async def get_result_record(
+        self,
+        graph_id: str,
+        node_id: str,
+        *,
+        tenant_id: str,
+    ) -> TaskResultRecord | None:
+        records = await self._task_state.get_results(
+            graph_id,
+            (node_id,),
+            tenant_id=tenant_id,
+        )
+        return records.get(node_id)
+
     async def read_result_record(self, record: TaskResultRecord) -> JsonValue:
         output = await self._read_payload(record.payload)
         if canonical_sha256(output) != record.result_digest:
@@ -726,11 +767,11 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
         principal: Principal,
         expected_digest: str,
     ) -> JsonValue:
-        result = await self._agent._execution.result(execution_id, principal=principal)
-        _validate_dependency_result(result, expected_digest)
-        if result.output is None:
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        return result.output
+        return await self._agent.read_result(
+            execution_id,
+            principal=principal,
+            expected_digest=expected_digest,
+        )
 
     async def _dependencies(
         self,
