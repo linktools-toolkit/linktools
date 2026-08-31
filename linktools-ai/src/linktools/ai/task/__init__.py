@@ -25,13 +25,7 @@ from ._graph import (
     TaskTerminalRecord,
     ready_nodes,
 )
-from ._handler import (
-    TaskDependency,
-    TaskFunction,
-    TaskHandlerResult,
-    TaskNodeContext,
-    TaskNodeHandler,
-)
+from ._handler import TaskDependency, TaskFunction, TaskNodeContext, TaskNodeHandler
 from ._local import (
     LocalTaskGraphLauncher,
     TaskNodeRunControl,
@@ -61,7 +55,6 @@ __all__ = [
     "TaskGraphResult",
     "TaskGraphSnapshot",
     "TaskGraphView",
-    "TaskHandlerResult",
     "TaskLease",
     "TaskNode",
     "TaskNodeContext",
