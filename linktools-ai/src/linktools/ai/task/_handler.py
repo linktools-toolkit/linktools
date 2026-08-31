@@ -91,7 +91,7 @@ class TaskNodeHandler(Protocol[AppT]):
     async def cancel(self, context: TaskNodeContext[AppT]) -> None: ...
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True)
 class TaskFunction(Generic[AppT]):
     type: str
     version: int
@@ -99,13 +99,6 @@ class TaskFunction(Generic[AppT]):
         repr=False,
         compare=False,
     )
-    __orig_class__: object = field(
-        init=False,
-        repr=False,
-        compare=False,
-        default=None,
-    )
-
     def __post_init__(self) -> None:
         if (
             not isinstance(self.type, str)

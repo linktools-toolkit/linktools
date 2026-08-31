@@ -7,13 +7,16 @@ import re
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
 from linktools.core import environ
 
 from ..core import JsonValue, Principal, TaskStatus, canonical_sha256, validate_lease_owner
 from ..errors import AIError, ErrorCode
-from ..storage import StoredPayload
+
+if TYPE_CHECKING:
+    from ..storage import StoredPayload
+
 from ._graph import (
     CancelGraphRequest,
     TaskDependencyResult,
@@ -28,7 +31,7 @@ from ._graph import (
 
 _logger = environ.get_logger("ai.task.local")
 _HEARTBEAT_SECONDS = 30.0
-_LEASE_SECONDS = 90
+_LEASE_SECONDS = 60
 _SCHEDULER_RECHECK_SECONDS = 1.0
 _RECOVERY_UNKNOWN_CODES = frozenset(
     {
@@ -62,9 +65,11 @@ class TaskNodeRunResult:
         ):
             raise ValueError("task node result execution id is invalid")
         if self.result_payload is not None:
-            if not isinstance(self.result_payload, StoredPayload):
-                raise TypeError("task node result payload is invalid")
-            if self.result_payload.digest != self.result_digest:
+            try:
+                payload_digest = self.result_payload.digest
+            except AttributeError as error:
+                raise TypeError("task node result payload is invalid") from error
+            if payload_digest != self.result_digest:
                 raise ValueError("task node result payload digest does not match result")
 
 
@@ -407,6 +412,8 @@ class LocalTaskGraphLauncher:
                 )
                 await self._notify(run)
                 if view.status in _TERMINAL:
+                    if view.status in {TaskStatus.FAILED, TaskStatus.BLOCKED}:
+                        await self._cancel_terminal_effects(run, states)
                     return
                 _reap_inflight(inflight)
                 now = datetime.now(timezone.utc)
@@ -466,6 +473,30 @@ class LocalTaskGraphLauncher:
                 )
             run.closed = True
             await self._notify(run)
+
+    async def _cancel_terminal_effects(
+        self,
+        run: _GraphRun,
+        states: "tuple[TaskNodeView, ...]",
+    ) -> None:
+        request = run.request
+        static = {node.node_id: node for node in request.graph.nodes}
+        for state in states:
+            if state.status is not TaskStatus.RUNNING or state.fence < 1:
+                continue
+            node = static.get(state.node_id)
+            if node is None:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            await self._runner.cancel(
+                node,
+                graph_id=request.graph.graph_id,
+                principal=request.principal,
+                dependency_results=await self._dependency_results(
+                    request.graph.graph_id,
+                    node,
+                    tenant_id=request.principal.tenant_id,
+                ),
+            )
 
     async def _wait_scheduler(
         self,

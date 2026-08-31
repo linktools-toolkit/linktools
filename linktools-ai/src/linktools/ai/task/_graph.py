@@ -8,6 +8,7 @@ import re
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from typing import TYPE_CHECKING
 
 from ..core import (
     JsonValue,
@@ -22,7 +23,19 @@ from ..core import (
     validate_tenant_id,
 )
 from ..errors import AIError, ErrorCode
-from ..storage import StoredPayload
+
+if TYPE_CHECKING:
+    from ..storage import StoredPayload
+
+
+def _payload_digest(value: object) -> str:
+    try:
+        digest = value.digest  # type: ignore[attr-defined]
+    except AttributeError as error:
+        raise TypeError("task result payload is invalid") from error
+    if not isinstance(digest, str) or re.fullmatch(r"[0-9a-f]{64}", digest) is None:
+        raise TypeError("task result payload digest is invalid")
+    return digest
 
 
 @dataclass(frozen=True, slots=True)
@@ -406,7 +419,7 @@ class TaskResultRecord:
     graph_id: str
     node_id: str
     result_digest: str
-    payload: StoredPayload
+    payload: "StoredPayload"
 
     def __post_init__(self) -> None:
         if not isinstance(self.graph_id, str) or not self.graph_id.strip():
@@ -415,9 +428,7 @@ class TaskResultRecord:
             raise ValueError("task result node id is required")
         if re.fullmatch(r"[0-9a-f]{64}", self.result_digest) is None:
             raise ValueError("task result digest is invalid")
-        if not isinstance(self.payload, StoredPayload):
-            raise TypeError("task result payload is invalid")
-        if self.payload.digest != self.result_digest:
+        if _payload_digest(self.payload) != self.result_digest:
             raise ValueError("task result payload digest does not match result")
 
 
@@ -431,9 +442,7 @@ class TaskDependencyResult:
         if re.fullmatch(r"[0-9a-f]{64}", self.result_digest) is None:
             raise ValueError("task dependency result digest is invalid")
         if self.result_payload is not None:
-            if not isinstance(self.result_payload, StoredPayload):
-                raise TypeError("task dependency result payload is invalid")
-            if self.result_payload.digest != self.result_digest:
+            if _payload_digest(self.result_payload) != self.result_digest:
                 raise ValueError("task dependency result payload digest does not match result")
 
 

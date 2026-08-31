@@ -345,11 +345,37 @@ def _decode_v1_task_node(
     )
 
 
+def _decode_v1_task_result(
+    raw_fields: Mapping[str, object],
+    codec: "_VersionCodec",
+    persisted: bool,
+) -> TaskResultRecord:
+    _require_fields(
+        raw_fields,
+        frozenset({"graph_id", "node_id", "result_digest", "payload"}),
+    )
+    return TaskResultRecord(
+        cast(str, _decode_domain(raw_fields["graph_id"], str, codec, persisted=persisted)),
+        cast(str, _decode_domain(raw_fields["node_id"], str, codec, persisted=persisted)),
+        cast(
+            str,
+            _decode_domain(raw_fields["result_digest"], str, codec, persisted=persisted),
+        ),
+        cast(
+            StoredPayload,
+            _decode_domain(raw_fields["payload"], StoredPayload, codec, persisted=persisted),
+        ),
+    )
+
+
 _V1_DATACLASS_ENCODERS: Mapping[str, DataclassEncoder] = MappingProxyType(
     {"task_node": _encode_v1_task_node}
 )
 _V1_DATACLASS_DECODERS: Mapping[str, DataclassDecoder] = MappingProxyType(
-    {"task_node": _decode_v1_task_node}
+    {
+        "task_node": _decode_v1_task_node,
+        "task_result": _decode_v1_task_result,
+    }
 )
 
 _V1_EXTERNAL_SCHEMA_TYPES: Mapping[type[object], JsonValue] = MappingProxyType(

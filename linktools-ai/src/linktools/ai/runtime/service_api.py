@@ -32,7 +32,6 @@ from ..observe import RunSnapshot
 from ..storage import ObjectRef
 from ..task import (
     CancelGraphRequest,
-    TaskCompletionLedger,
     TaskGraphRequest,
     TaskGraphResult,
     TaskGraphSnapshot,
@@ -653,8 +652,7 @@ class TaskService(Protocol):
         graph_id: str,
         *,
         principal: Principal,
-        after_version: int = 0,
-    ) -> "AsyncIterator[TaskCompletionLedger]": ...
+    ) -> "AsyncIterator[TaskGraphSnapshot]": ...
     async def wait_graph(self, graph_id: str, *, principal: Principal, timeout_seconds: "float | None" = None) -> TaskGraphResult: ...
     async def cancel_graph(self, graph_id: str, request: CancelGraphRequest) -> TaskGraphView: ...
 
