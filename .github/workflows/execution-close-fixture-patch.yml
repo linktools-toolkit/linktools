@@ -1,0 +1,45 @@
+name: Execution close fixture patch
+
+on:
+  push:
+    branches:
+      - feat/ai-taskgraph-reliable-mixed-nodes
+    paths:
+      - .github/workflows/execution-close-fixture-patch.yml
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feat/ai-taskgraph-reliable-mixed-nodes
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+      - name: Update close fixture
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          path = Path('tests/ai/test_cancellation_quiescence.py')
+          text = path.read_text()
+          old = '    backend._worker_shutdown_requests = set()\n    backend._live_broker = _LiveBroker()\n'
+          new = '    backend._worker_shutdown_requests = set()\n    backend._recovery_enabled = False\n    backend._live_broker = _LiveBroker()\n'
+          if text.count(old) != 1:
+              raise SystemExit(f'expected one close fixture block, found {text.count(old)}')
+          path.write_text(text.replace(old, new))
+          PY
+          python -m py_compile tests/ai/test_cancellation_quiescence.py
+          git diff --check
+      - name: Commit fixture and remove patch workflow
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git rm .github/workflows/execution-close-fixture-patch.yml
+          git add tests/ai/test_cancellation_quiescence.py
+          git commit -m 'test(ai): initialize execution recovery mode'
+          git push origin HEAD:feat/ai-taskgraph-reliable-mixed-nodes
