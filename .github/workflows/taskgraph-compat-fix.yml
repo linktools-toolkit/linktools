@@ -1,0 +1,106 @@
+name: TaskGraph compatibility convergence
+
+on:
+  push:
+    branches:
+      - feat/ai-taskgraph-reliable-mixed-nodes
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.ref_name }}
+      - name: Apply compatibility fixes
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          def replace_once(path: Path, old: str, new: str) -> None:
+              text = path.read_text(encoding="utf-8")
+              count = text.count(old)
+              if count != 1:
+                  raise SystemExit(f"{path}: expected one replacement, found {count}")
+              path.write_text(text.replace(old, new), encoding="utf-8")
+
+          task_local = Path("linktools-ai/src/linktools/ai/task/_local.py")
+          text = task_local.read_text(encoding="utf-8")
+          if "self._runs" not in text:
+              raise SystemExit("task launcher _runs anchor missing")
+          text = text.replace("self._runs", "self._graphs")
+          task_local.write_text(text, encoding="utf-8")
+
+          replace_once(
+              task_local,
+              '''        view = await self._repository.cancel_graph(graph_id, tenant_id=tenant_id)\n        states = await self._repository.list_nodes(graph_id, tenant_id=tenant_id)\n''',
+              '''        view = await self._repository.get_graph(graph_id, tenant_id=tenant_id)\n        if view is None:\n            raise AIError(ErrorCode.STORAGE_NOT_FOUND)\n        states = await self._repository.list_nodes(graph_id, tenant_id=tenant_id)\n''',
+          )
+          replace_once(
+              task_local,
+              '''        async with self._lock:\n            run = self._graphs.get(key)\n            if run is not None:\n                run.closed = True\n                task = run.task\n            else:\n                task = None\n''',
+              '''        async with self._lock:\n            run = self._graphs.pop(key, None)\n            if run is not None:\n                run.closed = True\n                task = run.task\n            else:\n                task = None\n''',
+          )
+          replace_once(
+              task_local,
+              '''        if view.status not in _TERMINAL:\n            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)\n        return view\n''',
+              '''        return view\n''',
+          )
+          old_wait = '''    async def wait_graph_activity(\n        self,\n        graph_id: str,\n        *,\n        tenant_id: str,\n        after_generation: int,\n    ) -> None:\n        if after_generation < 0:\n            raise ValueError("activity generation must be non-negative")\n        async with self._lock:\n            run = self._graphs.get((tenant_id, graph_id))\n        if run is None:\n            return\n        if run.failure is not None:\n            raise AIError(run.failure.code, safe_details=dict(run.failure.safe_details))\n        if run.closed:\n            return\n        async with run.condition:\n            await run.condition.wait_for(\n                lambda: run.generation != after_generation\n                or run.closed\n                or run.failure is not None\n            )\n        if run.failure is not None:\n            raise AIError(run.failure.code, safe_details=dict(run.failure.safe_details))\n'''
+          new_wait = '''    async def wait_graph_activity(\n        self,\n        graph_id: str,\n        *,\n        tenant_id: str,\n        after_generation: "int | None" = None,\n    ) -> None:\n        if after_generation is not None and after_generation < 0:\n            raise ValueError("activity generation must be non-negative")\n        key = (tenant_id, graph_id)\n        async with self._lock:\n            run = self._graphs.get(key)\n        if run is None:\n            return\n        if run.failure is not None:\n            raise AIError(run.failure.code, safe_details=dict(run.failure.safe_details))\n        if run.closed:\n            async with self._lock:\n                if self._graphs.get(key) is run:\n                    self._graphs.pop(key, None)\n            return\n        observed_generation = run.generation if after_generation is None else after_generation\n        async with run.condition:\n            await run.condition.wait_for(\n                lambda: run.generation != observed_generation\n                or run.closed\n                or run.failure is not None\n            )\n        if run.failure is not None:\n            raise AIError(run.failure.code, safe_details=dict(run.failure.safe_details))\n        if run.closed:\n            async with self._lock:\n                if self._graphs.get(key) is run:\n                    self._graphs.pop(key, None)\n'''
+          replace_once(task_local, old_wait, new_wait)
+
+          service = Path("linktools-ai/src/linktools/ai/task/_service_impl.py")
+          replace_once(
+              service,
+              '''    async def wait_graph_activity(\n        self,\n        graph_id: str,\n        *,\n        tenant_id: str,\n        after_generation: int,\n    ) -> None: ...\n''',
+              '''    async def wait_graph_activity(\n        self,\n        graph_id: str,\n        *,\n        tenant_id: str,\n        after_generation: "int | None" = None,\n    ) -> None: ...\n''',
+          )
+          replace_once(
+              service,
+              '''        if waiter is None or not waiter.owns_graph(graph_id, tenant_id=tenant_id):\n            return None\n        return waiter.graph_activity_generation(graph_id, tenant_id=tenant_id)\n''',
+              '''        if waiter is None or not waiter.owns_graph(graph_id, tenant_id=tenant_id):\n            return None\n        try:\n            return waiter.graph_activity_generation(graph_id, tenant_id=tenant_id)\n        except AttributeError:\n            return None\n''',
+          )
+          replace_once(
+              service,
+              '''        if after_generation is None:\n            return\n        timeout = _nearest_live_lease_delay(snapshot)\n''',
+              '''        if after_generation is None:\n            await waiter.wait_graph_activity(\n                snapshot.graph_id,\n                tenant_id=tenant_id,\n            )\n            return\n        timeout = _nearest_live_lease_delay(snapshot)\n''',
+          )
+
+          runtime_local = Path("linktools-ai/src/linktools/ai/runtime/_local.py")
+          replace_once(
+              runtime_local,
+              '''    def _request_worker_shutdown(\n        self,\n        execution_id: str,\n        task: asyncio.Task[None],\n    ) -> None:\n        if task.done() or execution_id in self._worker_cancel_requests:\n            return\n        self._worker_shutdown_requests.add(execution_id)\n        self._request_worker_cancel(execution_id, task)\n\n''',
+              '''    def _worker_shutdown_set(self) -> set[str]:\n        try:\n            return self._worker_shutdown_requests\n        except AttributeError:\n            requests: set[str] = set()\n            self._worker_shutdown_requests = requests\n            return requests\n\n    def _request_worker_shutdown(\n        self,\n        execution_id: str,\n        task: asyncio.Task[None],\n    ) -> None:\n        if task.done() or execution_id in self._worker_cancel_requests:\n            return\n        self._worker_shutdown_set().add(execution_id)\n        self._request_worker_cancel(execution_id, task)\n\n''',
+          )
+          text = runtime_local.read_text(encoding="utf-8")
+          replacements = {
+              "self._worker_shutdown_requests.discard(execution_id)": "self._worker_shutdown_set().discard(execution_id)",
+              "self._worker_shutdown_requests.clear()": "self._worker_shutdown_set().clear()",
+              "execution_id in self._worker_shutdown_requests": "execution_id in self._worker_shutdown_set()",
+          }
+          for old, new in replacements.items():
+              if old not in text:
+                  raise SystemExit(f"runtime launcher anchor missing: {old}")
+              text = text.replace(old, new)
+          runtime_local.write_text(text, encoding="utf-8")
+          PY
+          python -m compileall -q linktools-ai/src
+          git diff --check
+      - name: Commit compatibility fixes
+        shell: bash
+        run: |
+          rm .github/workflows/taskgraph-compat-fix.yml
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add linktools-ai/src/linktools/ai/task/_local.py \
+                  linktools-ai/src/linktools/ai/task/_service_impl.py \
+                  linktools-ai/src/linktools/ai/runtime/_local.py \
+                  .github/workflows/taskgraph-compat-fix.yml
+          git diff --cached --check
+          git commit -m "fix(ai-task): preserve launcher compatibility"
+          git push origin HEAD:${{ github.ref_name }}
