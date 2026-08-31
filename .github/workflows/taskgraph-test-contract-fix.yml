@@ -38,169 +38,168 @@ jobs:
               start,
           )
           replacement = '''@pytest.mark.asyncio
-          async def test_task_shutdown_waits_for_cancellation_resistant_graph_cleanup() -> None:
-              launcher = object.__new__(LocalTaskGraphLauncher)
-              launcher._accepting = True
-              launcher._lock = asyncio.Lock()
-              launcher._runner = SimpleNamespace()
-              cancelled = asyncio.Event()
-              release = asyncio.Event()
+async def test_task_shutdown_waits_for_cancellation_resistant_graph_cleanup() -> None:
+    launcher = object.__new__(LocalTaskGraphLauncher)
+    launcher._accepting = True
+    launcher._lock = asyncio.Lock()
+    launcher._runner = SimpleNamespace()
+    cancelled = asyncio.Event()
+    release = asyncio.Event()
 
-              async def graph_cleanup() -> None:
-                  try:
-                      await asyncio.Event().wait()
-                  except asyncio.CancelledError:
-                      cancelled.set()
-                      await release.wait()
-                      raise
+    async def graph_cleanup() -> None:
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            cancelled.set()
+            await release.wait()
+            raise
 
-              task = asyncio.create_task(graph_cleanup())
-              await asyncio.sleep(0)
-              launcher._graphs = {
-                  ("tenant", "graph"): SimpleNamespace(task=task, closed=False)
-              }
+    task = asyncio.create_task(graph_cleanup())
+    await asyncio.sleep(0)
+    launcher._graphs = {
+        ("tenant", "graph"): SimpleNamespace(task=task, closed=False)
+    }
 
-              shutdown = asyncio.create_task(launcher.shutdown())
-              await asyncio.wait_for(cancelled.wait(), 1)
-              assert not shutdown.done()
+    shutdown = asyncio.create_task(launcher.shutdown())
+    await asyncio.wait_for(cancelled.wait(), 1)
+    assert not shutdown.done()
 
-              release.set()
-              await asyncio.wait_for(shutdown, 1)
-              assert launcher._graphs == {}
-
-
-          @pytest.mark.asyncio
-          async def test_task_shutdown_drains_runner_owned_background_work() -> None:
-              release = asyncio.Event()
-
-              async def cleanup() -> None:
-                  await release.wait()
-
-              cleanup_task = asyncio.create_task(cleanup())
-
-              class Runner:
-                  @property
-                  def pending_background_tasks(self):
-                      return () if cleanup_task.done() else (cleanup_task,)
-
-                  @property
-                  def pending_cancelled_tasks(self):
-                      return ()
-
-                  @property
-                  def background_failure(self):
-                      return None
-
-              launcher = object.__new__(LocalTaskGraphLauncher)
-              launcher._accepting = True
-              launcher._graphs = {}
-              launcher._lock = asyncio.Lock()
-              launcher._runner = Runner()
-
-              shutdown = asyncio.create_task(launcher.shutdown())
-              await asyncio.sleep(0)
-              assert not shutdown.done()
-
-              release.set()
-              await asyncio.wait_for(shutdown, 1)
-              assert cleanup_task.done()
+    release.set()
+    await asyncio.wait_for(shutdown, 1)
+    assert launcher._graphs == {}
 
 
-          @pytest.mark.asyncio
-          async def test_task_shutdown_surfaces_runner_background_failure() -> None:
-              failure = AIError(
-                  ErrorCode.STORAGE_RECOVERY_REQUIRED,
-                  safe_details={"phase": "task_graph_shutdown_test"},
-              )
+@pytest.mark.asyncio
+async def test_task_shutdown_drains_runner_owned_background_work() -> None:
+    release = asyncio.Event()
 
-              class Runner:
-                  @property
-                  def pending_background_tasks(self):
-                      return ()
+    async def cleanup() -> None:
+        await release.wait()
 
-                  @property
-                  def pending_cancelled_tasks(self):
-                      return ()
+    cleanup_task = asyncio.create_task(cleanup())
 
-                  @property
-                  def background_failure(self):
-                      return failure
+    class Runner:
+        @property
+        def pending_background_tasks(self):
+            return () if cleanup_task.done() else (cleanup_task,)
 
-              launcher = object.__new__(LocalTaskGraphLauncher)
-              launcher._accepting = True
-              launcher._graphs = {}
-              launcher._lock = asyncio.Lock()
-              launcher._runner = Runner()
+        @property
+        def pending_cancelled_tasks(self):
+            return ()
 
-              with pytest.raises(AIError) as error:
-                  await launcher.shutdown()
-              assert error.value.code is ErrorCode.STORAGE_RECOVERY_REQUIRED
-              assert error.value.safe_details["phase"] == "task_graph_shutdown_test"
+        @property
+        def background_failure(self):
+            return None
 
+    launcher = object.__new__(LocalTaskGraphLauncher)
+    launcher._accepting = True
+    launcher._graphs = {}
+    launcher._lock = asyncio.Lock()
+    launcher._runner = Runner()
 
-          @pytest.mark.asyncio
-          async def test_task_heartbeat_loss_waits_for_cancellation_resistant_runner(
-              monkeypatch: pytest.MonkeyPatch,
-          ) -> None:
-              class Runner:
-                  def __init__(self) -> None:
-                      self.started = asyncio.Event()
-                      self.cancelled = asyncio.Event()
-                      self.release = asyncio.Event()
+    shutdown = asyncio.create_task(launcher.shutdown())
+    await asyncio.sleep(0)
+    assert not shutdown.done()
 
-                  async def run(self, *args, **kwargs):
-                      del args, kwargs
-                      self.started.set()
-                      try:
-                          await asyncio.Event().wait()
-                      except asyncio.CancelledError:
-                          self.cancelled.set()
-                          await self.release.wait()
-                          raise
-
-                  async def cancel(self, *args, **kwargs):
-                      del args, kwargs
-                      raise AssertionError("lease-loss cleanup must cancel the owned runner task")
-
-              runner = Runner()
-
-              async def lost_heartbeat(self, lease_state, *, tenant_id, stop):
-                  del self, lease_state, tenant_id, stop
-                  await runner.started.wait()
-                  raise AIError(ErrorCode.TASK_FENCE_STALE)
-
-              monkeypatch.setattr(LocalTaskGraphLauncher, "_heartbeat", lost_heartbeat)
-              launcher = object.__new__(LocalTaskGraphLauncher)
-              launcher._repository = SimpleNamespace()
-              launcher._runner = runner
-              run = SimpleNamespace(
-                  request=SimpleNamespace(
-                      principal=trusted_workspace_principal("tenant"),
-                      graph=SimpleNamespace(graph_id="graph"),
-                  ),
-                  condition=asyncio.Condition(),
-                  generation=0,
-                  failure=None,
-                  closed=False,
-              )
-              node = SimpleNamespace(node_id="node", dependencies=())
-              lease_state = SimpleNamespace(
-                  lease=SimpleNamespace(graph_id="graph", node_id="node", fence=1),
-                  lock=asyncio.Lock(),
-              )
-
-              task = asyncio.create_task(launcher._run_node(run, node, lease_state))
-              await asyncio.wait_for(runner.started.wait(), 1)
-              await asyncio.wait_for(runner.cancelled.wait(), 1)
-              assert not task.done()
-
-              runner.release.set()
-              await asyncio.wait_for(task, 1)
-              assert runner.cancelled.is_set()
+    release.set()
+    await asyncio.wait_for(shutdown, 1)
+    assert cleanup_task.done()
 
 
-          '''
-          replacement = "\n".join(line[10:] if line.startswith("          ") else line for line in replacement.splitlines()) + "\n"
+@pytest.mark.asyncio
+async def test_task_shutdown_surfaces_runner_background_failure() -> None:
+    failure = AIError(
+        ErrorCode.STORAGE_RECOVERY_REQUIRED,
+        safe_details={"phase": "task_graph_shutdown_test"},
+    )
+
+    class Runner:
+        @property
+        def pending_background_tasks(self):
+            return ()
+
+        @property
+        def pending_cancelled_tasks(self):
+            return ()
+
+        @property
+        def background_failure(self):
+            return failure
+
+    launcher = object.__new__(LocalTaskGraphLauncher)
+    launcher._accepting = True
+    launcher._graphs = {}
+    launcher._lock = asyncio.Lock()
+    launcher._runner = Runner()
+
+    with pytest.raises(AIError) as error:
+        await launcher.shutdown()
+    assert error.value.code is ErrorCode.STORAGE_RECOVERY_REQUIRED
+    assert error.value.safe_details["phase"] == "task_graph_shutdown_test"
+
+
+@pytest.mark.asyncio
+async def test_task_heartbeat_loss_waits_for_cancellation_resistant_runner(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class Runner:
+        def __init__(self) -> None:
+            self.started = asyncio.Event()
+            self.cancelled = asyncio.Event()
+            self.release = asyncio.Event()
+
+        async def run(self, *args, **kwargs):
+            del args, kwargs
+            self.started.set()
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                self.cancelled.set()
+                await self.release.wait()
+                raise
+
+        async def cancel(self, *args, **kwargs):
+            del args, kwargs
+            raise AssertionError("lease-loss cleanup must cancel the owned runner task")
+
+    runner = Runner()
+
+    async def lost_heartbeat(self, lease_state, *, tenant_id, stop):
+        del self, lease_state, tenant_id, stop
+        await runner.started.wait()
+        raise AIError(ErrorCode.TASK_FENCE_STALE)
+
+    monkeypatch.setattr(LocalTaskGraphLauncher, "_heartbeat", lost_heartbeat)
+    launcher = object.__new__(LocalTaskGraphLauncher)
+    launcher._repository = SimpleNamespace()
+    launcher._runner = runner
+    run = SimpleNamespace(
+        request=SimpleNamespace(
+            principal=trusted_workspace_principal("tenant"),
+            graph=SimpleNamespace(graph_id="graph"),
+        ),
+        condition=asyncio.Condition(),
+        generation=0,
+        failure=None,
+        closed=False,
+    )
+    node = SimpleNamespace(node_id="node", dependencies=())
+    lease_state = SimpleNamespace(
+        lease=SimpleNamespace(graph_id="graph", node_id="node", fence=1),
+        lock=asyncio.Lock(),
+    )
+
+    task = asyncio.create_task(launcher._run_node(run, node, lease_state))
+    await asyncio.wait_for(runner.started.wait(), 1)
+    await asyncio.wait_for(runner.cancelled.wait(), 1)
+    assert not task.done()
+
+    runner.release.set()
+    await asyncio.wait_for(task, 1)
+    assert runner.cancelled.is_set()
+
+
+'''
           text = text[:start] + replacement + text[end:]
           path.write_text(text)
           PY
