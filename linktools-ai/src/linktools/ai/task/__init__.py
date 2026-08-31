@@ -28,6 +28,7 @@ from ._graph import (
 from ._handler import TaskDependency, TaskFunction, TaskNodeContext, TaskNodeHandler
 from ._local import (
     LocalTaskGraphLauncher,
+    TaskNodeRunControl,
     TaskNodeRunError,
     TaskNodeRunner,
     TaskNodeRunResult,
@@ -59,6 +60,7 @@ __all__ = [
     "TaskNodeContext",
     "TaskNodeHandler",
     "TaskNodeResult",
+    "TaskNodeRunControl",
     "TaskNodeRunError",
     "TaskNodeRunResult",
     "TaskNodeRunner",
