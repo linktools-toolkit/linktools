@@ -1080,7 +1080,7 @@ class LocalExecutionBackend:
         return self._live_broker
 
     async def cancel(self, execution: ExecutionRecord) -> CancelEffectOutcome:
-        self._worker_shutdown_requests.discard(execution.execution_id)
+        self._worker_shutdown_set().discard(execution.execution_id)
         current = await self._execution.executions.get(
             execution.execution_id,
             tenant_id=execution.tenant_id,

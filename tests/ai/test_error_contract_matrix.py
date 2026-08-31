@@ -26,7 +26,12 @@ from linktools.ai.runtime._agent_executor import DurableBoundary, _execution_err
 from linktools.ai.runtime._planner import _execution_failure
 from linktools.ai.runtime._subagent import _subagent_result
 from linktools.ai.storage import StoragePath
-from linktools.ai.task import DefaultTaskService
+from linktools.ai.task import (
+    DefaultTaskService,
+    TaskGraphSnapshot,
+    TaskNode,
+    TaskNodeView,
+)
 from linktools.cli import CommandError
 from linktools.commands.ai.run import _emit_result
 from pydantic_ai.exceptions import (
@@ -222,6 +227,33 @@ class _RunningTasks:
     async def get_graph(self, graph_id: str, *, tenant_id: str) -> object:
         del graph_id, tenant_id
         return SimpleNamespace(status=TaskStatus.RUNNING)
+
+    async def snapshot_graph(
+        self,
+        graph_id: str,
+        *,
+        tenant_id: str,
+    ) -> TaskGraphSnapshot:
+        del tenant_id
+        node = TaskNode("node")
+        state = TaskNodeView(
+            graph_id,
+            node.node_id,
+            (),
+            TaskStatus.READY,
+            None,
+            0,
+            None,
+            None,
+            None,
+            None,
+        )
+        return TaskGraphSnapshot(
+            graph_id,
+            TaskStatus.PENDING,
+            (node,),
+            (state,),
+        )
 
 
 @pytest.mark.asyncio

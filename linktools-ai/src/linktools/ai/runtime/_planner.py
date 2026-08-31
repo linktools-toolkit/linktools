@@ -177,7 +177,10 @@ class _AgentTaskNodeHandler:
             return self.normalize(input)
         except AIError as error:
             cause = error.__cause__
-            if isinstance(cause, AIError) and cause.code is ErrorCode.AGENT_DEFINITION_UNAVAILABLE:
+            if isinstance(cause, AIError) and cause.code in {
+                ErrorCode.AGENT_DEFINITION_UNAVAILABLE,
+                ErrorCode.STORAGE_VERSION_UNSUPPORTED,
+            }:
                 raise cause
             raise AIError(
                 ErrorCode.STORAGE_INTEGRITY_ERROR,
