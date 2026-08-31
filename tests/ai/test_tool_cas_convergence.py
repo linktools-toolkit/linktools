@@ -14,7 +14,6 @@ from linktools.ai.migrate import provision_runtime_database
 from linktools.ai.runtime._tool import RuntimeToolOperationBridge, ToolOperationRecord
 from linktools.ai.runtime.state import RuntimeState, RuntimeStateCommands, ToolOperationAdmission
 from linktools.ai.runtime.state._repositories import ToolRepositoryImpl
-from linktools.ai.runtime.state._tool_repository import DurableToolRepositoryImpl
 from linktools.ai.storage import StoredPayload
 from sqlalchemy.ext.asyncio import create_async_engine
 
@@ -83,7 +82,7 @@ async def test_sqlite_materializes_convergent_tool_repository(tmp_path) -> None:
     await state.initialize(namespace="tool-cas", tenant_id="tenant")
     try:
         repository = state.recovery.tools
-        assert isinstance(repository, DurableToolRepositoryImpl)
+        assert type(repository) is ToolRepositoryImpl
 
         request = _admission()
         first, second = await asyncio.gather(
@@ -116,122 +115,41 @@ async def test_sqlite_materializes_convergent_tool_repository(tmp_path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_durable_tool_terminal_retries_raw_storage_conflict(monkeypatch) -> None:
-    payload = StoredPayload.inline_bytes(b"result")
-    committed = _record(
-        status=ToolOperationStatus.COMPLETED,
-        result_payload=payload,
-    )
+async def test_tool_repository_retries_raw_storage_conflict() -> None:
+    repository = object.__new__(ToolRepositoryImpl)
+    committed = _record(status=ToolOperationStatus.COMPLETED)
     attempts = 0
 
-    async def complete_payload(
-        self: ToolRepositoryImpl,
-        tool_operation_id: str,
-        *,
-        tenant_id: str,
-        owner: str,
-        fence: int,
-        result_payload: StoredPayload,
-    ) -> ToolOperationRecord:
+    async def operation() -> ToolOperationRecord:
         nonlocal attempts
-        del self, tool_operation_id, tenant_id, owner, fence, result_payload
         attempts += 1
         if attempts == 1:
             raise AIError(ErrorCode.STORAGE_CONFLICT)
         return committed
 
-    monkeypatch.setattr(ToolRepositoryImpl, "complete_payload", complete_payload)
-    repository = object.__new__(DurableToolRepositoryImpl)
-
-    result = await repository.complete_payload(
-        "tool-operation",
-        tenant_id="tenant",
-        owner="tool-owner",
-        fence=1,
-        result_payload=payload,
-    )
+    result = await repository._retry_storage_conflict(operation)
 
     assert result == committed
     assert attempts == 2
 
 
 @pytest.mark.asyncio
-async def test_durable_tool_terminal_does_not_retry_fence_conflict(monkeypatch) -> None:
+async def test_tool_repository_does_not_retry_semantic_conflict() -> None:
+    repository = object.__new__(ToolRepositoryImpl)
     attempts = 0
 
-    async def fail_payload(
-        self: ToolRepositoryImpl,
-        tool_operation_id: str,
-        *,
-        tenant_id: str,
-        owner: str,
-        fence: int,
-        error_code: str,
-        error_payload: StoredPayload | None,
-    ) -> ToolOperationRecord:
+    async def operation() -> ToolOperationRecord:
         nonlocal attempts
-        del self, tool_operation_id, tenant_id, owner, fence, error_code, error_payload
         attempts += 1
         raise AIError(ErrorCode.TOOL_OPERATION_CONFLICT)
 
-    monkeypatch.setattr(ToolRepositoryImpl, "fail_payload", fail_payload)
-    repository = object.__new__(DurableToolRepositoryImpl)
-
     with pytest.raises(AIError) as raised:
-        await repository.fail_payload(
-            "tool-operation",
-            tenant_id="tenant",
-            owner="tool-owner",
-            fence=1,
-            error_code=ErrorCode.TOOL_EXECUTION_FAILED.value,
-            error_payload=None,
-        )
+        await repository._retry_storage_conflict(operation)
 
     assert raised.value.code is ErrorCode.TOOL_OPERATION_CONFLICT
     assert attempts == 1
 
 
-@pytest.mark.asyncio
-async def test_durable_effect_unknown_retries_raw_storage_conflict(monkeypatch) -> None:
-    unknown = _record(
-        status=ToolOperationStatus.EFFECT_UNKNOWN,
-        error_code=ErrorCode.TOOL_EFFECT_UNKNOWN.value,
-    )
-    attempts = 0
-
-    async def mark_effect_unknown(
-        self: ToolRepositoryImpl,
-        tool_operation_id: str,
-        *,
-        tenant_id: str,
-        owner: str,
-        fence: int,
-        error_code: str | None,
-    ) -> ToolOperationRecord:
-        nonlocal attempts
-        del self, tool_operation_id, tenant_id, owner, fence, error_code
-        attempts += 1
-        if attempts == 1:
-            raise AIError(ErrorCode.STORAGE_CONFLICT)
-        return unknown
-
-    monkeypatch.setattr(
-        ToolRepositoryImpl,
-        "mark_effect_unknown",
-        mark_effect_unknown,
-    )
-    repository = object.__new__(DurableToolRepositoryImpl)
-
-    result = await repository.mark_effect_unknown(
-        "tool-operation",
-        tenant_id="tenant",
-        owner="tool-owner",
-        fence=1,
-        error_code=ErrorCode.TOOL_EFFECT_UNKNOWN.value,
-    )
-
-    assert result == unknown
-    assert attempts == 2
 
 
 class _GroupTransaction:

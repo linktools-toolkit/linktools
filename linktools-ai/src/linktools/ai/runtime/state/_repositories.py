@@ -6,7 +6,7 @@ import asyncio
 import base64
 import hashlib
 import json
-from collections.abc import Mapping, Sequence
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import replace
 from datetime import datetime, timedelta
 from typing import Generic, TypeVar
@@ -4706,17 +4706,32 @@ class ToolRepositoryImpl(_RepositoryBase):
     def _tool_key(self, identity: str) -> bytes:
         return self._key("tool_operation", identity)
 
+    async def _retry_storage_conflict(
+        self,
+        operation: Callable[[], Awaitable[ToolOperationRecord]],
+    ) -> ToolOperationRecord:
+        while True:
+            try:
+                return await operation()
+            except AIError as error:
+                if error.code is not ErrorCode.STORAGE_CONFLICT:
+                    raise
+                await asyncio.sleep(0)
+
     async def admit(self, request: ToolOperationAdmission) -> ToolOperationRecord:
-        result = await self._store.mutate(
-            lambda transaction: self.admit_in_transaction(transaction, request)
-        )
-        _logger.debug(
-            "tool operation admitted: operation=%s status=%s fence=%s",
-            result.tool_operation_id,
-            result.status.value,
-            result.fence,
-        )
-        return result
+        async def attempt() -> ToolOperationRecord:
+            result = await self._store.mutate(
+                lambda transaction: self.admit_in_transaction(transaction, request)
+            )
+            _logger.debug(
+                "tool operation admitted: operation=%s status=%s fence=%s",
+                result.tool_operation_id,
+                result.status.value,
+                result.fence,
+            )
+            return result
+
+        return await self._retry_storage_conflict(attempt)
 
     async def admit_in_transaction(
         self,
@@ -4849,47 +4864,50 @@ class ToolRepositoryImpl(_RepositoryBase):
         return await mutate(transaction)
 
     async def reserve(self, record: ToolOperationRecord) -> ToolOperationRecord:
-        _require_tenant(record, self._tenant_id)
-        key = self._tool_key(record.tool_operation_id)
-        replay_alias = alias_digest(
-            self._namespace,
-            self._tenant_id,
-            self._domain.value,
-            "tool_call",
-            [record.step_run_id, record.tool_call_id],
-        )
-
-        async def mutate(transaction: StateTransaction) -> ToolOperationRecord:
-            alias_key = await transaction.resolve_alias(replay_alias)
-            existing_key = alias_key or key
-            existing_record = await transaction.get_record(existing_key)
-            if alias_key is not None and existing_record is None:
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            if existing_record is not None:
-                existing = await self._decode(existing_record, ToolOperationRecord)
-                if not _tool_replay_matches(existing, record):
-                    raise AIError(ErrorCode.IDEMPOTENCY_CONFLICT)
-                if alias_key is None:
-                    guarded = await transaction.guard_record(
-                        existing_record.key_digest,
-                        expected_storage_version=existing_record.storage_version,
-                    )
-                    if guarded is None:
-                        raise AIError(ErrorCode.STORAGE_CONFLICT)
-                    await transaction.insert_aliases((StoredAlias(replay_alias, existing_key),))
-                return existing
-            stored = self._stored(
-                "tool_operation",
-                record.tool_operation_id,
-                record,
-                scope=self._scope("tool_operation", "step_run", record.step_run_id),
-                state=record.status.value,
+        async def attempt() -> ToolOperationRecord:
+            _require_tenant(record, self._tenant_id)
+            key = self._tool_key(record.tool_operation_id)
+            replay_alias = alias_digest(
+                self._namespace,
+                self._tenant_id,
+                self._domain.value,
+                "tool_call",
+                [record.step_run_id, record.tool_call_id],
             )
-            await transaction.insert_record(stored)
-            await transaction.insert_aliases((StoredAlias(replay_alias, key),))
-            return record
 
-        return await self._store.mutate(mutate)
+            async def mutate(transaction: StateTransaction) -> ToolOperationRecord:
+                alias_key = await transaction.resolve_alias(replay_alias)
+                existing_key = alias_key or key
+                existing_record = await transaction.get_record(existing_key)
+                if alias_key is not None and existing_record is None:
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                if existing_record is not None:
+                    existing = await self._decode(existing_record, ToolOperationRecord)
+                    if not _tool_replay_matches(existing, record):
+                        raise AIError(ErrorCode.IDEMPOTENCY_CONFLICT)
+                    if alias_key is None:
+                        guarded = await transaction.guard_record(
+                            existing_record.key_digest,
+                            expected_storage_version=existing_record.storage_version,
+                        )
+                        if guarded is None:
+                            raise AIError(ErrorCode.STORAGE_CONFLICT)
+                        await transaction.insert_aliases((StoredAlias(replay_alias, existing_key),))
+                    return existing
+                stored = self._stored(
+                    "tool_operation",
+                    record.tool_operation_id,
+                    record,
+                    scope=self._scope("tool_operation", "step_run", record.step_run_id),
+                    state=record.status.value,
+                )
+                await transaction.insert_record(stored)
+                await transaction.insert_aliases((StoredAlias(replay_alias, key),))
+                return record
+
+            return await self._store.mutate(mutate)
+
+        return await self._retry_storage_conflict(attempt)
 
     async def get_operation(self, tool_operation_id: str, *, tenant_id: str) -> ToolOperationRecord | None:
         if tenant_id != self._tenant_id:
@@ -4995,53 +5013,56 @@ class ToolRepositoryImpl(_RepositoryBase):
     async def claim(
         self, tool_operation_id: str, *, tenant_id: str, owner: str, lease_seconds: int
     ) -> ToolOperationRecord:
-        if tenant_id != self._tenant_id:
-            raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
-        validate_lease_owner(owner)
-        validate_lease_seconds(lease_seconds)
+        async def attempt() -> ToolOperationRecord:
+            if tenant_id != self._tenant_id:
+                raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
+            validate_lease_owner(owner)
+            validate_lease_seconds(lease_seconds)
 
-        async def mutate(transaction: StateTransaction) -> ToolOperationRecord:
-            record = await transaction.get_record(self._tool_key(tool_operation_id))
-            if record is None:
-                raise AIError(ErrorCode.STORAGE_NOT_FOUND)
-            current = await self._decode(record, ToolOperationRecord)
-            if current.status in {
-                ToolOperationStatus.COMPLETED,
-                ToolOperationStatus.FAILED,
-                ToolOperationStatus.EFFECT_UNKNOWN,
-                ToolOperationStatus.CANCELLED,
-            }:
-                raise AIError(ErrorCode.TOOL_OPERATION_CONFLICT)
-            now = await transaction.now()
-            expired = current.lease_expires_at is not None and current.lease_expires_at <= now
-            if current.status is ToolOperationStatus.CLAIMED and not expired:
-                raise AIError(ErrorCode.TOOL_OPERATION_CONFLICT)
-            if current.status is ToolOperationStatus.CLAIMED and not current.replay_safe:
-                unknown = replace(
+            async def mutate(transaction: StateTransaction) -> ToolOperationRecord:
+                record = await transaction.get_record(self._tool_key(tool_operation_id))
+                if record is None:
+                    raise AIError(ErrorCode.STORAGE_NOT_FOUND)
+                current = await self._decode(record, ToolOperationRecord)
+                if current.status in {
+                    ToolOperationStatus.COMPLETED,
+                    ToolOperationStatus.FAILED,
+                    ToolOperationStatus.EFFECT_UNKNOWN,
+                    ToolOperationStatus.CANCELLED,
+                }:
+                    raise AIError(ErrorCode.TOOL_OPERATION_CONFLICT)
+                now = await transaction.now()
+                expired = current.lease_expires_at is not None and current.lease_expires_at <= now
+                if current.status is ToolOperationStatus.CLAIMED and not expired:
+                    raise AIError(ErrorCode.TOOL_OPERATION_CONFLICT)
+                if current.status is ToolOperationStatus.CLAIMED and not current.replay_safe:
+                    unknown = replace(
+                        current,
+                        status=ToolOperationStatus.EFFECT_UNKNOWN,
+                        lease_expires_at=None,
+                        updated_at=now,
+                    )
+                    await self._replace_tool_in_transaction(transaction, record, unknown)
+                    return unknown
+                if current.status is not ToolOperationStatus.PENDING and current.status is not ToolOperationStatus.CLAIMED:
+                    raise AIError(ErrorCode.TOOL_OPERATION_CONFLICT)
+                value = replace(
                     current,
-                    status=ToolOperationStatus.EFFECT_UNKNOWN,
-                    lease_expires_at=None,
+                    status=ToolOperationStatus.CLAIMED,
+                    owner=owner,
+                    fence=current.fence + 1,
+                    lease_expires_at=now + timedelta(seconds=lease_seconds),
                     updated_at=now,
                 )
-                await self._replace_tool_in_transaction(transaction, record, unknown)
-                return unknown
-            if current.status is not ToolOperationStatus.PENDING and current.status is not ToolOperationStatus.CLAIMED:
-                raise AIError(ErrorCode.TOOL_OPERATION_CONFLICT)
-            value = replace(
-                current,
-                status=ToolOperationStatus.CLAIMED,
-                owner=owner,
-                fence=current.fence + 1,
-                lease_expires_at=now + timedelta(seconds=lease_seconds),
-                updated_at=now,
-            )
-            await self._replace_tool_in_transaction(transaction, record, value)
-            return value
+                await self._replace_tool_in_transaction(transaction, record, value)
+                return value
 
-        result = await self._store.mutate(mutate)
-        if result.status is ToolOperationStatus.EFFECT_UNKNOWN:
-            raise AIError(ErrorCode.TOOL_EFFECT_UNKNOWN)
-        return result
+            result = await self._store.mutate(mutate)
+            if result.status is ToolOperationStatus.EFFECT_UNKNOWN:
+                raise AIError(ErrorCode.TOOL_EFFECT_UNKNOWN)
+            return result
+
+        return await self._retry_storage_conflict(attempt)
 
     async def renew(
         self, tool_operation_id: str, *, tenant_id: str, owner: str, fence: int, lease_seconds: int
@@ -5081,43 +5102,49 @@ class ToolRepositoryImpl(_RepositoryBase):
         fence: int,
         result_payload: StoredPayload,
     ) -> ToolOperationRecord:
-        return await self._finish_tool(
-            tool_operation_id,
-            tenant_id=tenant_id,
-            owner=owner,
-            fence=fence,
-            terminal_status=ToolOperationStatus.COMPLETED,
-            requested_result_payload=result_payload,
-            value=lambda current, now: replace(
-                current,
-                status=ToolOperationStatus.COMPLETED,
-                result_payload=result_payload,
-                lease_expires_at=None,
-                updated_at=now,
-            ),
-        )
+        async def attempt() -> ToolOperationRecord:
+            return await self._finish_tool(
+                tool_operation_id,
+                tenant_id=tenant_id,
+                owner=owner,
+                fence=fence,
+                terminal_status=ToolOperationStatus.COMPLETED,
+                requested_result_payload=result_payload,
+                value=lambda current, now: replace(
+                    current,
+                    status=ToolOperationStatus.COMPLETED,
+                    result_payload=result_payload,
+                    lease_expires_at=None,
+                    updated_at=now,
+                ),
+            )
+
+        return await self._retry_storage_conflict(attempt)
 
     async def fail(
         self, tool_operation_id: str, *, tenant_id: str, owner: str, fence: int, error_code: str
     ) -> ToolOperationRecord:
-        def value(current: ToolOperationRecord, now: datetime) -> ToolOperationRecord:
-            return replace(
-                current,
-                status=ToolOperationStatus.FAILED,
-                error_code=error_code,
-                lease_expires_at=None,
-                updated_at=now,
+        async def attempt() -> ToolOperationRecord:
+            def value(current: ToolOperationRecord, now: datetime) -> ToolOperationRecord:
+                return replace(
+                    current,
+                    status=ToolOperationStatus.FAILED,
+                    error_code=error_code,
+                    lease_expires_at=None,
+                    updated_at=now,
+                )
+
+            return await self._finish_tool(
+                tool_operation_id,
+                tenant_id=tenant_id,
+                owner=owner,
+                fence=fence,
+                terminal_status=ToolOperationStatus.FAILED,
+                requested_error=error_code,
+                value=value,
             )
 
-        return await self._finish_tool(
-            tool_operation_id,
-            tenant_id=tenant_id,
-            owner=owner,
-            fence=fence,
-            terminal_status=ToolOperationStatus.FAILED,
-            requested_error=error_code,
-            value=value,
-        )
+        return await self._retry_storage_conflict(attempt)
 
     async def fail_payload(
         self,
@@ -5129,23 +5156,26 @@ class ToolRepositoryImpl(_RepositoryBase):
         error_code: str,
         error_payload: StoredPayload | None,
     ) -> ToolOperationRecord:
-        return await self._finish_tool(
-            tool_operation_id,
-            tenant_id=tenant_id,
-            owner=owner,
-            fence=fence,
-            terminal_status=ToolOperationStatus.FAILED,
-            requested_error=error_code,
-            requested_error_payload=error_payload,
-            value=lambda current, now: replace(
-                current,
-                status=ToolOperationStatus.FAILED,
-                error_code=error_code,
-                error_payload=error_payload,
-                lease_expires_at=None,
-                updated_at=now,
-            ),
-        )
+        async def attempt() -> ToolOperationRecord:
+            return await self._finish_tool(
+                tool_operation_id,
+                tenant_id=tenant_id,
+                owner=owner,
+                fence=fence,
+                terminal_status=ToolOperationStatus.FAILED,
+                requested_error=error_code,
+                requested_error_payload=error_payload,
+                value=lambda current, now: replace(
+                    current,
+                    status=ToolOperationStatus.FAILED,
+                    error_code=error_code,
+                    error_payload=error_payload,
+                    lease_expires_at=None,
+                    updated_at=now,
+                ),
+            )
+
+        return await self._retry_storage_conflict(attempt)
 
     async def mark_effect_unknown(
         self,
@@ -5156,32 +5186,35 @@ class ToolRepositoryImpl(_RepositoryBase):
         fence: int,
         error_code: str | None,
     ) -> ToolOperationRecord:
-        if tenant_id != self._tenant_id:
-            raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
-        validate_lease_owner(owner)
+        async def attempt() -> ToolOperationRecord:
+            if tenant_id != self._tenant_id:
+                raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
+            validate_lease_owner(owner)
 
-        async def mutate(transaction: StateTransaction) -> ToolOperationRecord:
-            record = await transaction.get_record(self._tool_key(tool_operation_id))
-            if record is None:
-                raise AIError(ErrorCode.STORAGE_NOT_FOUND)
-            current = await self._decode(record, ToolOperationRecord)
-            now = await transaction.now()
-            if current.status is ToolOperationStatus.EFFECT_UNKNOWN:
-                if current.owner == owner and current.fence == fence and current.error_code == error_code:
-                    return current
-                raise AIError(ErrorCode.TOOL_OPERATION_CONFLICT)
-            _require_live_tool_lease(current, owner=owner, fence=fence, now=now)
-            value = replace(
-                current,
-                status=ToolOperationStatus.EFFECT_UNKNOWN,
-                error_code=error_code,
-                lease_expires_at=None,
-                updated_at=now,
-            )
-            await self._replace_tool_in_transaction(transaction, record, value)
-            return value
+            async def mutate(transaction: StateTransaction) -> ToolOperationRecord:
+                record = await transaction.get_record(self._tool_key(tool_operation_id))
+                if record is None:
+                    raise AIError(ErrorCode.STORAGE_NOT_FOUND)
+                current = await self._decode(record, ToolOperationRecord)
+                now = await transaction.now()
+                if current.status is ToolOperationStatus.EFFECT_UNKNOWN:
+                    if current.owner == owner and current.fence == fence and current.error_code == error_code:
+                        return current
+                    raise AIError(ErrorCode.TOOL_OPERATION_CONFLICT)
+                _require_live_tool_lease(current, owner=owner, fence=fence, now=now)
+                value = replace(
+                    current,
+                    status=ToolOperationStatus.EFFECT_UNKNOWN,
+                    error_code=error_code,
+                    lease_expires_at=None,
+                    updated_at=now,
+                )
+                await self._replace_tool_in_transaction(transaction, record, value)
+                return value
 
-        return await self._store.mutate(mutate)
+            return await self._store.mutate(mutate)
+
+        return await self._retry_storage_conflict(attempt)
 
     async def _finish_tool(
         self,

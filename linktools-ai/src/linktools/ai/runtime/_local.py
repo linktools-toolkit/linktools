@@ -379,13 +379,6 @@ class LocalExecutionBackend:
             self._execution_durable_tasks = task_map
             return task_map
 
-    def _worker_cancel_request_set(self) -> set[str]:
-        try:
-            return self._worker_cancel_requests
-        except AttributeError:
-            requests: set[str] = set()
-            self._worker_cancel_requests = requests
-            return requests
 
     def _execution_task_set(
         self,
@@ -976,7 +969,7 @@ class LocalExecutionBackend:
         if self._tasks.get(execution_id) is not task:
             return
         self._tasks.pop(execution_id, None)
-        self._worker_cancel_request_set().discard(execution_id)
+        self._worker_cancel_requests.discard(execution_id)
         self._captured_usage.pop(execution_id, None)
         if self._approval_pause_segments.get(execution_id) is task:
             self._approval_pause_segments.pop(execution_id, None)
@@ -1020,7 +1013,7 @@ class LocalExecutionBackend:
         execution_id: str,
         task: asyncio.Task[None],
     ) -> None:
-        requests = self._worker_cancel_request_set()
+        requests = self._worker_cancel_requests
         if task.done() or execution_id in requests:
             return
         requests.add(execution_id)
@@ -3218,7 +3211,7 @@ class LocalExecutionBackend:
         self._segment_only_worker_exits.clear()
         self._repository_instruction_provenance.clear()
         self._checkpoint_tasks.clear()
-        self._worker_cancel_request_set().clear()
+        self._worker_cancel_requests.clear()
         self._execution_task_map().clear()
 
     async def release_runtime_execution(
@@ -3247,7 +3240,7 @@ class LocalExecutionBackend:
             raise AIError(ErrorCode.STORAGE_CONFLICT)
         if task is not None:
             self._tasks.pop(execution_id, None)
-        self._worker_cancel_request_set().discard(execution_id)
+        self._worker_cancel_requests.discard(execution_id)
         self._terminal_events.pop(execution_id, None)
         self._worker_failures.pop(execution_id, None)
         self._captured_usage.pop(execution_id, None)

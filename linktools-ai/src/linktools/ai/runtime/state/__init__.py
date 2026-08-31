@@ -19,7 +19,11 @@ from ._codec import (
     parse_envelope,
     wire_type_id,
 )
-from ._commands import ConversationStateCommands, ExecutionStateCommands
+from ._commands import (
+    ConversationStateCommands,
+    ExecutionStateCommands,
+    RuntimeStateCommands,
+)
 from ._contracts import (
     AgentAttemptClaim,
     ApprovalRepository,
@@ -147,7 +151,6 @@ from ._store import (
     stream_digest,
     subject_digest,
 )
-from ._tool_commands import RuntimeStateCommands
 from ._views import (
     EXECUTION_TRANSCRIPT_VIEW_V1,
     SESSION_HISTORY_VIEW_V1,
