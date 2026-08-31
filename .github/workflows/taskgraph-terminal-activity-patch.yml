@@ -1,0 +1,45 @@
+name: TaskGraph terminal activity patch
+
+on:
+  push:
+    branches:
+      - feat/ai-taskgraph-reliable-mixed-nodes
+    paths:
+      - .github/workflows/taskgraph-terminal-activity-patch.yml
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feat/ai-taskgraph-reliable-mixed-nodes
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+      - name: Apply terminal activity linearization fix
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          path = Path('linktools-ai/src/linktools/ai/task/_local.py')
+          text = path.read_text()
+          old = '''                if inflight:\n                    await asyncio.wait(\n                        tuple(value.task for value in inflight.values()),\n                        return_when=asyncio.FIRST_COMPLETED,\n                    )\n                    await self._notify(run)\n                    _reap_inflight(inflight)\n                    continue\n'''
+          new = '''                if inflight:\n                    await asyncio.wait(\n                        tuple(value.task for value in inflight.values()),\n                        return_when=asyncio.FIRST_COMPLETED,\n                    )\n                    _reap_inflight(inflight)\n                    continue\n'''
+          if text.count(old) != 1:
+              raise SystemExit(f'expected one terminal activity block, found {text.count(old)}')
+          path.write_text(text.replace(old, new))
+          PY
+          python -m py_compile linktools-ai/src/linktools/ai/task/_local.py
+          git diff --check
+      - name: Commit fix and remove patch workflow
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git rm .github/workflows/taskgraph-terminal-activity-patch.yml
+          git add linktools-ai/src/linktools/ai/task/_local.py
+          git commit -m 'fix(ai-task): publish terminal activity after reconcile'
+          git push origin HEAD:feat/ai-taskgraph-reliable-mixed-nodes
