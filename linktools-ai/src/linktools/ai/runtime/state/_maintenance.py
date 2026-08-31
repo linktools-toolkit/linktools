@@ -36,6 +36,7 @@ _OBJECT_DOMAINS = frozenset(
         RuntimeDomain.MEMORY,
         RuntimeDomain.ARTIFACT,
         RuntimeDomain.RECOVERY,
+        RuntimeDomain.TASK,
     }
 )
 _MAINTENANCE_PAGE_SIZE = 128
