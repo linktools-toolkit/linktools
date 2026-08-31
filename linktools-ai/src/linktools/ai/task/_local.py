@@ -447,7 +447,6 @@ class LocalTaskGraphLauncher:
                         tuple(value.task for value in inflight.values()),
                         return_when=asyncio.FIRST_COMPLETED,
                     )
-                    await self._notify(run)
                     _reap_inflight(inflight)
                     continue
                 await self._wait_scheduler(run, states)
