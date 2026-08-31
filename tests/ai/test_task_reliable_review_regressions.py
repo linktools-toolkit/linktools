@@ -4,6 +4,7 @@
 
 import asyncio
 from collections.abc import Mapping
+from types import SimpleNamespace
 
 import pytest
 import linktools.ai.task._local as task_local
@@ -21,6 +22,7 @@ from linktools.ai.task import (
     TaskNodeRunControl,
     TaskNodeRunResult,
 )
+from linktools.ai.task._service_impl import DefaultTaskService
 from linktools.ai.workspace import trusted_workspace_principal
 
 
@@ -84,6 +86,36 @@ class _BlockingRunner:
         dependency_results: Mapping[str, TaskDependencyResult],
     ) -> None:
         del node, graph_id, principal, dependency_results
+
+
+class _AllowAuthorization:
+    async def authorize(self, *args: object, **kwargs: object) -> None:
+        del args, kwargs
+
+
+class _FailingLocalWaiter:
+    def owns_graph(self, graph_id: str, *, tenant_id: str) -> bool:
+        del graph_id, tenant_id
+        return True
+
+    def graph_activity_generation(
+        self,
+        graph_id: str,
+        *,
+        tenant_id: str,
+    ) -> int:
+        del graph_id, tenant_id
+        return 0
+
+    async def wait_graph_activity(
+        self,
+        graph_id: str,
+        *,
+        tenant_id: str,
+        after_generation: "int | None" = None,
+    ) -> None:
+        del graph_id, tenant_id, after_generation
+        raise AIError(ErrorCode.INTERNAL_ERROR)
 
 
 @pytest.mark.asyncio
@@ -165,4 +197,41 @@ async def test_heartbeat_lease_loss_cancels_runner_without_terminal_write(
     finally:
         if launcher is not None:
             await launcher.shutdown()
+        await state.close()
+
+
+@pytest.mark.asyncio
+async def test_nonterminal_waiter_failure_propagates_after_fresh_snapshot() -> None:
+    state = RuntimeState.in_memory()
+    await state.initialize(namespace="task-waiter-failure", tenant_id="tenant")
+    try:
+        repository = state.task.tasks
+        graph = TaskGraph("waiter-failure-graph", (TaskNode("node"),))
+        await repository.create_graph(graph, tenant_id="tenant")
+        await repository.claim(
+            graph.graph_id,
+            "node",
+            tenant_id="tenant",
+            owner="local-worker",
+            lease_seconds=30,
+        )
+        principal = trusted_workspace_principal("tenant")
+        service = DefaultTaskService(
+            SimpleNamespace(tasks=repository),
+            _AllowAuthorization(),
+            local_waiter=_FailingLocalWaiter(),
+        )
+
+        with pytest.raises(AIError) as error:
+            await service.wait_graph(
+                graph.graph_id,
+                principal=principal,
+                timeout_seconds=1,
+            )
+
+        assert error.value.code is ErrorCode.INTERNAL_ERROR
+        snapshot = await repository.snapshot_graph(graph.graph_id, tenant_id="tenant")
+        assert snapshot is not None
+        assert snapshot.status is TaskStatus.RUNNING
+    finally:
         await state.close()
