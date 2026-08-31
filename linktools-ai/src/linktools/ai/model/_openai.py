@@ -6,11 +6,13 @@ from dataclasses import dataclass, field
 from urllib.parse import urlsplit, urlunsplit
 
 from linktools.core import environ
+from pydantic_ai.exceptions import UserError
 from pydantic_ai.models import Model
 from pydantic_ai.models.openai import OpenAIChatModel
 from pydantic_ai.providers.openai import OpenAIProvider
 
 from ..core import JsonValue, canonical_sha256
+from ..errors import AIError, ErrorCode
 
 _logger = environ.get_logger("ai.model.openai")
 
@@ -53,7 +55,17 @@ class _OpenAIModelBinding:
         return canonical_sha256({"contract": "model-v1", **self.semantic_payload})
 
     def materialize(self) -> Model:
-        model = OpenAIChatModel(self.model, provider=OpenAIProvider(base_url=self.base_url, api_key=self.api_key))
+        try:
+            model = OpenAIChatModel(self.model, provider=OpenAIProvider(base_url=self.base_url, api_key=self.api_key))
+        except UserError as error:
+            raise AIError(
+                ErrorCode.MODEL_CONFIG_INVALID,
+                retryable=False,
+                safe_details={
+                    "provider": "openai",
+                    "reason": "provider_configuration_invalid",
+                },
+            ) from error
         _logger.debug("OpenAI model materialized: route=%s model=%s credential=%s", self.route_id, self.model, self.api_key is not None)
         return model
 

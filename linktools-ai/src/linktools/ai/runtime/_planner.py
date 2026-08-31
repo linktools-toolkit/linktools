@@ -25,7 +25,13 @@ from ..core import (
     validate_user_prompt,
 )
 from ..errors import AIError, ErrorCode
-from ..task import DefaultTaskService, TaskDependencyResult, TaskNode, TaskNodeRunResult
+from ..task import (
+    DefaultTaskService,
+    TaskDependencyResult,
+    TaskNode,
+    TaskNodeRunError,
+    TaskNodeRunResult,
+)
 from ._input import user_prompt_transport
 from .service_api import (
     CancelExecutionRequest,
@@ -563,19 +569,23 @@ class RuntimeTaskNodeRunner:
             _logger.exception("detached %s failed", label)
 
 
-def _execution_failure(result: ExecutionResult) -> AIError:
+def _execution_failure(result: ExecutionResult) -> TaskNodeRunError:
     if result.status not in {
         ExecutionStatus.FAILED,
         ExecutionStatus.CANCELLED,
     }:
-        return AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     if result.error_code is None:
-        return AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     try:
         code = ErrorCode(result.error_code)
-    except ValueError:
-        return AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-    return AIError(code, safe_details=result.safe_error_details)
+    except ValueError as error:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
+    return TaskNodeRunError(
+        code,
+        result.execution_id,
+        safe_details=result.safe_error_details,
+    )
 
 
 def _validate_dependency_result(

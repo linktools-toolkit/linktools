@@ -25,6 +25,7 @@ from ._graph import (
 )
 from ._local import (
     LocalTaskGraphLauncher,
+    TaskNodeRunError,
     TaskNodeRunner,
     TaskNodeRunResult,
 )
@@ -50,6 +51,7 @@ __all__ = [
     "TaskLease",
     "TaskNode",
     "TaskNodeResult",
+    "TaskNodeRunError",
     "TaskNodeRunResult",
     "TaskNodeRunner",
     "TaskNodeView",

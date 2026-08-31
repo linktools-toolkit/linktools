@@ -13,7 +13,7 @@ from weakref import WeakKeyDictionary
 
 from linktools.core import environ
 
-from ..core import Principal, TaskStatus, canonical_sha256, validate_lease_owner
+from ..core import JsonValue, Principal, TaskStatus, canonical_sha256, validate_lease_owner
 from ..errors import AIError, ErrorCode
 from ._graph import (
     CancelGraphRequest,
@@ -36,6 +36,22 @@ class TaskNodeRunResult:
     def __post_init__(self) -> None:
         if re.fullmatch(r"[0-9a-f]{64}", self.result_digest) is None:
             raise ValueError("task node result identity is invalid")
+
+
+class TaskNodeRunError(AIError):
+    """A task-node failure tied to one concrete execution."""
+
+    def __init__(
+        self,
+        code: ErrorCode,
+        execution_id: str,
+        *,
+        safe_details: "Mapping[str, JsonValue] | None" = None,
+    ) -> None:
+        if not isinstance(execution_id, str) or not execution_id.strip():
+            raise ValueError("task node failure execution id is required")
+        super().__init__(code, safe_details=safe_details)
+        self.execution_id = execution_id
 
 
 class TaskNodeRunner(Protocol):
@@ -151,6 +167,7 @@ class _TaskRepository(Protocol):
         tenant_id: str,
         error_code: str,
         error_digest: str,
+        execution_id: "str | None" = None,
     ) -> _TaskTerminal: ...
 
 
@@ -697,6 +714,11 @@ class LocalTaskGraphLauncher:
                     if isinstance(error, AIError)
                     else ErrorCode.TASK_NODE_FAILED.value
                 )
+                execution_id = (
+                    error.execution_id
+                    if isinstance(error, TaskNodeRunError)
+                    else None
+                )
                 digest = canonical_sha256(
                     {
                         "graph_id": request.graph.graph_id,
@@ -710,6 +732,7 @@ class LocalTaskGraphLauncher:
                         tenant_id=request.principal.tenant_id,
                         error_code=code,
                         error_digest=digest,
+                        execution_id=execution_id,
                     )
                 except AIError as terminal_error:
                     if terminal_error.code is not ErrorCode.TASK_FENCE_STALE:
@@ -912,4 +935,9 @@ def _node_by_id(
     return next((node for node in nodes if node.node_id == node_id), None)
 
 
-__all__ = ["LocalTaskGraphLauncher", "TaskNodeRunResult", "TaskNodeRunner"]
+__all__ = [
+    "LocalTaskGraphLauncher",
+    "TaskNodeRunError",
+    "TaskNodeRunResult",
+    "TaskNodeRunner",
+]
