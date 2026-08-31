@@ -105,6 +105,7 @@ async def test_explicit_cancel_cleans_running_node_without_local_scheduler_owner
         runner = _RecordingRunner()
         launcher = LocalTaskGraphLauncher(repository, runner, owner="local-worker")
         principal = trusted_workspace_principal("tenant")
+        await repository.cancel_graph(graph.graph_id, tenant_id="tenant")
 
         view = await launcher.cancel(
             graph.graph_id,
