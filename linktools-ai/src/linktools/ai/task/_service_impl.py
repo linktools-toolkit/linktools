@@ -58,11 +58,19 @@ class _TaskReleaseCallback(Protocol):
 class _LocalTaskWaiter(Protocol):
     def owns_graph(self, graph_id: str, *, tenant_id: str) -> bool: ...
 
+    def graph_activity_generation(
+        self,
+        graph_id: str,
+        *,
+        tenant_id: str,
+    ) -> int | None: ...
+
     async def wait_graph_activity(
         self,
         graph_id: str,
         *,
         tenant_id: str,
+        after_generation: int,
     ) -> None: ...
 
 
@@ -394,6 +402,7 @@ class DefaultTaskService(TaskApi):
         principal: Principal,
     ) -> AsyncIterator[TaskGraphSnapshot]:
         tenant_id = principal.tenant_id
+        generation = self._local_activity_generation(graph_id, tenant_id=tenant_id)
         async with self._graph_consumer(graph_id, tenant_id):
             header = await self._persistence.tasks.get_header(
                 graph_id,
@@ -420,7 +429,11 @@ class DefaultTaskService(TaskApi):
             return
         while True:
             try:
-                await self._wait_observation_opportunity(snapshot, tenant_id=tenant_id)
+                await self._wait_observation_opportunity(
+                    snapshot,
+                    tenant_id=tenant_id,
+                    after_generation=generation,
+                )
             except AIError:
                 latest = await self._snapshot_with_terminal_release(
                     graph_id,
@@ -432,6 +445,10 @@ class DefaultTaskService(TaskApi):
                         yield latest
                     return
                 raise
+            generation = self._local_activity_generation(
+                graph_id,
+                tenant_id=tenant_id,
+            )
             latest = await self._snapshot_with_terminal_release(
                 graph_id,
                 tenant_id=tenant_id,
@@ -461,25 +478,47 @@ class DefaultTaskService(TaskApi):
                 await self._request_graph_release(graph_id, tenant_id)
             return snapshot
 
+    def _local_activity_generation(
+        self,
+        graph_id: str,
+        *,
+        tenant_id: str,
+    ) -> int | None:
+        waiter = self._local_waiter
+        if waiter is None or not waiter.owns_graph(graph_id, tenant_id=tenant_id):
+            return None
+        return waiter.graph_activity_generation(graph_id, tenant_id=tenant_id)
+
     async def _wait_observation_opportunity(
         self,
         snapshot: TaskGraphSnapshot,
         *,
         tenant_id: str,
+        after_generation: int | None,
     ) -> None:
         waiter = self._local_waiter
         if waiter is None or not waiter.owns_graph(snapshot.graph_id, tenant_id=tenant_id):
             await asyncio.sleep(_GRAPH_OBSERVATION_RECHECK_SECONDS)
             return
+        if after_generation is None:
+            return
         timeout = _nearest_live_lease_delay(snapshot)
         if timeout is None:
-            await waiter.wait_graph_activity(snapshot.graph_id, tenant_id=tenant_id)
+            await waiter.wait_graph_activity(
+                snapshot.graph_id,
+                tenant_id=tenant_id,
+                after_generation=after_generation,
+            )
             return
         if timeout <= 0:
             return
         try:
             await asyncio.wait_for(
-                waiter.wait_graph_activity(snapshot.graph_id, tenant_id=tenant_id),
+                waiter.wait_graph_activity(
+                    snapshot.graph_id,
+                    tenant_id=tenant_id,
+                    after_generation=after_generation,
+                ),
                 timeout=timeout,
             )
         except asyncio.TimeoutError:
@@ -1103,7 +1142,9 @@ def _nearest_live_lease_delay(snapshot: TaskGraphSnapshot) -> "float | None":
     expiries = tuple(
         state.lease_expires_at
         for state in snapshot.node_states
-        if state.lease_expires_at is not None and state.lease_expires_at > now
+        if state.status is TaskStatus.RUNNING
+        and state.lease_expires_at is not None
+        and state.lease_expires_at > now
     )
     if not expiries:
         return None

@@ -4,7 +4,7 @@
 
 import asyncio
 import re
-from collections.abc import Mapping
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Protocol, runtime_checkable
@@ -216,10 +216,12 @@ class _TaskNodeRunControlImpl:
         lease_state: _LeaseState,
         *,
         tenant_id: str,
+        on_activity: Callable[[], Awaitable[None]],
     ) -> None:
         self._repository = repository
         self._lease_state = lease_state
         self._tenant_id = tenant_id
+        self._on_activity = on_activity
 
     async def bind_execution(self, execution_id: str) -> None:
         if not isinstance(execution_id, str) or not execution_id.strip():
@@ -230,6 +232,7 @@ class _TaskNodeRunControlImpl:
                 tenant_id=self._tenant_id,
                 execution_id=execution_id,
             )
+        await self._on_activity()
 
 
 class LocalTaskGraphLauncher:
@@ -351,12 +354,26 @@ class LocalTaskGraphLauncher:
         run = self._runs.get((tenant_id, graph_id))
         return run is not None and (not run.closed or run.failure is not None)
 
+    def graph_activity_generation(
+        self,
+        graph_id: str,
+        *,
+        tenant_id: str,
+    ) -> int | None:
+        run = self._runs.get((tenant_id, graph_id))
+        if run is None or (run.closed and run.failure is None):
+            return None
+        return run.generation
+
     async def wait_graph_activity(
         self,
         graph_id: str,
         *,
         tenant_id: str,
+        after_generation: int,
     ) -> None:
+        if after_generation < 0:
+            raise ValueError("activity generation must be non-negative")
         async with self._lock:
             run = self._runs.get((tenant_id, graph_id))
         if run is None:
@@ -366,9 +383,8 @@ class LocalTaskGraphLauncher:
         if run.closed:
             return
         async with run.condition:
-            generation = run.generation
             await run.condition.wait_for(
-                lambda: run.generation != generation
+                lambda: run.generation != after_generation
                 or run.closed
                 or run.failure is not None
             )
@@ -425,6 +441,7 @@ class LocalTaskGraphLauncher:
                         name=f"task-node-{request.graph.graph_id}-{node.node_id}",
                     )
                     inflight[node.node_id] = _InflightNode(task, lease_state)
+                    await self._notify(run)
                 if inflight:
                     await asyncio.wait(
                         tuple(value.task for value in inflight.values()),
@@ -504,6 +521,7 @@ class LocalTaskGraphLauncher:
             self._repository,
             lease_state,
             tenant_id=tenant_id,
+            on_activity=lambda: self._notify(run),
         )
         heartbeat_stop = asyncio.Event()
         heartbeat = asyncio.create_task(
