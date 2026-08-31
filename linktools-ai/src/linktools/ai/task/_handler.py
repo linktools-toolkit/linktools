@@ -14,6 +14,7 @@ from ._graph import TaskNode
 AppT = TypeVar("AppT")
 _TASK_TYPE = re.compile(r"^[A-Za-z][A-Za-z0-9_.-]{0,127}$")
 _RESERVED_TASK_TYPE_PREFIX = "linktools.ai."
+_RESULT_DIGEST = re.compile(r"[0-9a-f]{64}")
 
 
 @dataclass(frozen=True, slots=True)
@@ -26,14 +27,16 @@ class TaskDependency:
     def __post_init__(self) -> None:
         if not isinstance(self.node_id, str) or not self.node_id.strip():
             raise ValueError("task dependency node id is required")
+        if not isinstance(self.result_digest, str) or _RESULT_DIGEST.fullmatch(self.result_digest) is None:
+            raise ValueError("task dependency result digest is invalid")
         output = normalize_json_value(self.output)
         if canonical_sha256(output) != self.result_digest:
             raise ValueError("task dependency result digest does not match output")
-        object.__setattr__(self, "output", output)
         if self.execution_id is not None and (
             not isinstance(self.execution_id, str) or not self.execution_id.strip()
         ):
             raise ValueError("task dependency execution id is invalid")
+        object.__setattr__(self, "output", output)
 
 
 @dataclass(frozen=True, slots=True)
@@ -70,6 +73,20 @@ class TaskNodeContext(Generic[AppT]):
         object.__setattr__(self, "dependencies", MappingProxyType(dependencies))
 
 
+@dataclass(frozen=True, slots=True)
+class TaskHandlerResult:
+    output: JsonValue
+    execution_id: "str | None" = None
+
+    def __post_init__(self) -> None:
+        output = normalize_json_value(self.output)
+        if self.execution_id is not None and (
+            not isinstance(self.execution_id, str) or not self.execution_id.strip()
+        ):
+            raise ValueError("task handler result execution id is invalid")
+        object.__setattr__(self, "output", output)
+
+
 @runtime_checkable
 class TaskNodeHandler(Protocol[AppT]):
     @property
@@ -83,7 +100,7 @@ class TaskNodeHandler(Protocol[AppT]):
         input: Mapping[str, JsonValue],
     ) -> Mapping[str, JsonValue]: ...
 
-    async def run(self, context: TaskNodeContext[AppT]) -> JsonValue: ...
+    async def run(self, context: TaskNodeContext[AppT]) -> TaskHandlerResult: ...
 
     async def cancel(self, context: TaskNodeContext[AppT]) -> None: ...
 
@@ -126,8 +143,8 @@ class TaskFunction(Generic[AppT]):
             raise ValueError("task handler input cannot contain reserved fields")
         return normalized
 
-    async def run(self, context: TaskNodeContext[AppT]) -> JsonValue:
-        return normalize_json_value(await self.function(context))
+    async def run(self, context: TaskNodeContext[AppT]) -> TaskHandlerResult:
+        return TaskHandlerResult(await self.function(context))
 
     async def cancel(self, context: TaskNodeContext[AppT]) -> None:
         return None
@@ -156,6 +173,7 @@ class TaskFunction(Generic[AppT]):
 __all__ = [
     "TaskDependency",
     "TaskFunction",
+    "TaskHandlerResult",
     "TaskNodeContext",
     "TaskNodeHandler",
 ]
