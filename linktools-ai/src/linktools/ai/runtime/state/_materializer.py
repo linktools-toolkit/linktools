@@ -67,6 +67,7 @@ _OBJECT_DOMAINS = frozenset(
         RuntimeDomain.MEMORY,
         RuntimeDomain.ARTIFACT,
         RuntimeDomain.RECOVERY,
+        RuntimeDomain.TASK,
     }
 )
 _STEP_DOMAINS = (RuntimeDomain.CONVERSATION, RuntimeDomain.EXECUTION, RuntimeDomain.RECOVERY)
