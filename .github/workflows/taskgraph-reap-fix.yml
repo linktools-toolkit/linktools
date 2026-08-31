@@ -1,0 +1,47 @@
+name: TaskGraph reap fix
+
+on:
+  push:
+    branches:
+      - feat/ai-taskgraph-reliable-mixed-nodes
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feat/ai-taskgraph-reliable-mixed-nodes
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+      - name: Apply exact inflight reap fix
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          path = Path('linktools-ai/src/linktools/ai/task/_local.py')
+          text = path.read_text()
+          old = 'self._reap_inflight(inflight)'
+          count = text.count(old)
+          if count != 2:
+              raise RuntimeError(f'expected two self reap calls, got {count}')
+          path.write_text(text.replace(old, '_reap_inflight(inflight)'))
+          PY
+          python -m py_compile linktools-ai/src/linktools/ai/task/_local.py
+          git diff --check
+      - name: Commit fix and remove patch workflow
+        shell: bash
+        run: |
+          rm .github/workflows/taskgraph-reap-fix.yml
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add linktools-ai/src/linktools/ai/task/_local.py .github/workflows/taskgraph-reap-fix.yml
+          git diff --cached --check
+          git commit -m 'fix(ai-task): reap completed node runs'
+          git push origin HEAD:feat/ai-taskgraph-reliable-mixed-nodes
