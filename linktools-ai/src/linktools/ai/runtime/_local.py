@@ -971,7 +971,7 @@ class LocalExecutionBackend:
             return
         self._tasks.pop(execution_id, None)
         self._worker_cancel_requests.discard(execution_id)
-        self._worker_shutdown_requests.discard(execution_id)
+        self._worker_shutdown_set().discard(execution_id)
         self._captured_usage.pop(execution_id, None)
         if self._approval_pause_segments.get(execution_id) is task:
             self._approval_pause_segments.pop(execution_id, None)
@@ -1010,6 +1010,14 @@ class LocalExecutionBackend:
         if live_broker is not None:
             live_broker.complete(execution_id)
 
+    def _worker_shutdown_set(self) -> set[str]:
+        try:
+            return self._worker_shutdown_requests
+        except AttributeError:
+            requests: set[str] = set()
+            self._worker_shutdown_requests = requests
+            return requests
+
     def _request_worker_shutdown(
         self,
         execution_id: str,
@@ -1017,7 +1025,7 @@ class LocalExecutionBackend:
     ) -> None:
         if task.done() or execution_id in self._worker_cancel_requests:
             return
-        self._worker_shutdown_requests.add(execution_id)
+        self._worker_shutdown_set().add(execution_id)
         self._request_worker_cancel(execution_id, task)
 
     def _request_worker_cancel(
@@ -3228,7 +3236,7 @@ class LocalExecutionBackend:
         self._repository_instruction_provenance.clear()
         self._checkpoint_tasks.clear()
         self._worker_cancel_requests.clear()
-        self._worker_shutdown_requests.clear()
+        self._worker_shutdown_set().clear()
         self._execution_task_map().clear()
 
     async def release_runtime_execution(
@@ -3258,7 +3266,7 @@ class LocalExecutionBackend:
         if task is not None:
             self._tasks.pop(execution_id, None)
         self._worker_cancel_requests.discard(execution_id)
-        self._worker_shutdown_requests.discard(execution_id)
+        self._worker_shutdown_set().discard(execution_id)
         self._terminal_events.pop(execution_id, None)
         self._worker_failures.pop(execution_id, None)
         self._captured_usage.pop(execution_id, None)
@@ -3778,7 +3786,7 @@ class LocalExecutionBackend:
             if current is not None and current.status is ExecutionStatus.FINALIZING:
                 raise
             if current is not None and current.status is ExecutionStatus.CANCELLING:
-                self._worker_shutdown_requests.discard(execution_id)
+                self._worker_shutdown_set().discard(execution_id)
                 current = await self._commit_terminal(
                     current,
                     ExecutionStatus.CANCELLED,
@@ -3811,7 +3819,7 @@ class LocalExecutionBackend:
                 ExecutionStatus.CANCELLING,
             }:
                 operation_result = _execution_operation_result(current.status)
-            if execution_id in self._worker_shutdown_requests:
+            if execution_id in self._worker_shutdown_set():
                 operation_result = "cancelled"
             raise
         except Exception:

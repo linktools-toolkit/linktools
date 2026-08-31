@@ -70,7 +70,7 @@ class _LocalTaskWaiter(Protocol):
         graph_id: str,
         *,
         tenant_id: str,
-        after_generation: int,
+        after_generation: "int | None" = None,
     ) -> None: ...
 
 
@@ -487,7 +487,10 @@ class DefaultTaskService(TaskApi):
         waiter = self._local_waiter
         if waiter is None or not waiter.owns_graph(graph_id, tenant_id=tenant_id):
             return None
-        return waiter.graph_activity_generation(graph_id, tenant_id=tenant_id)
+        try:
+            return waiter.graph_activity_generation(graph_id, tenant_id=tenant_id)
+        except AttributeError:
+            return None
 
     async def _wait_observation_opportunity(
         self,
@@ -501,6 +504,10 @@ class DefaultTaskService(TaskApi):
             await asyncio.sleep(_GRAPH_OBSERVATION_RECHECK_SECONDS)
             return
         if after_generation is None:
+            await waiter.wait_graph_activity(
+                snapshot.graph_id,
+                tenant_id=tenant_id,
+            )
             return
         timeout = _nearest_live_lease_delay(snapshot)
         if timeout is None:

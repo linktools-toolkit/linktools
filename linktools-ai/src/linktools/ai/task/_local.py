@@ -257,7 +257,7 @@ class LocalTaskGraphLauncher:
         self._repository = repository
         self._runner = runner
         self._owner = owner
-        self._runs: dict[tuple[str, str], _GraphRun] = {}
+        self._graphs: dict[tuple[str, str], _GraphRun] = {}
         self._lock = asyncio.Lock()
         self._accepting = True
 
@@ -266,7 +266,7 @@ class LocalTaskGraphLauncher:
             raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
         key = (request.principal.tenant_id, request.graph.graph_id)
         async with self._lock:
-            existing = self._runs.get(key)
+            existing = self._graphs.get(key)
             if existing is not None and not existing.closed:
                 if existing.failure is not None:
                     raise AIError(
@@ -278,7 +278,7 @@ class LocalTaskGraphLauncher:
                     f"local:{key[0]}:{key[1]}",
                 )
             run = _GraphRun(request, self._owner)
-            self._runs[key] = run
+            self._graphs[key] = run
             run.task = asyncio.create_task(
                 self._run_graph(run),
                 name=f"task-graph-{request.graph.graph_id}",
@@ -298,7 +298,9 @@ class LocalTaskGraphLauncher:
     ) -> TaskGraphView:
         tenant_id = request.principal.tenant_id
         key = (tenant_id, graph_id)
-        view = await self._repository.cancel_graph(graph_id, tenant_id=tenant_id)
+        view = await self._repository.get_graph(graph_id, tenant_id=tenant_id)
+        if view is None:
+            raise AIError(ErrorCode.STORAGE_NOT_FOUND)
         states = await self._repository.list_nodes(graph_id, tenant_id=tenant_id)
         static = {node.node_id: node for node in view.nodes}
         cleanup_error: BaseException | None = None
@@ -325,7 +327,7 @@ class LocalTaskGraphLauncher:
                 if cleanup_error is None:
                     cleanup_error = error
         async with self._lock:
-            run = self._runs.get(key)
+            run = self._graphs.pop(key, None)
             if run is not None:
                 run.closed = True
                 task = run.task
@@ -343,14 +345,12 @@ class LocalTaskGraphLauncher:
                 ErrorCode.STORAGE_RECOVERY_REQUIRED,
                 safe_details={"phase": "task_graph_cancel_cleanup", "graph_id": graph_id},
             ) from cleanup_error
-        if view.status not in _TERMINAL:
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         return view
 
     async def shutdown(self) -> None:
         self._accepting = False
         async with self._lock:
-            runs = tuple(self._runs.values())
+            runs = tuple(self._graphs.values())
             tasks = tuple(
                 run.task
                 for run in runs
@@ -364,10 +364,10 @@ class LocalTaskGraphLauncher:
             await asyncio.gather(*tasks, return_exceptions=True)
         await self._drain_runner_background()
         async with self._lock:
-            self._runs.clear()
+            self._graphs.clear()
 
     def owns_graph(self, graph_id: str, *, tenant_id: str) -> bool:
-        run = self._runs.get((tenant_id, graph_id))
+        run = self._graphs.get((tenant_id, graph_id))
         return run is not None and (not run.closed or run.failure is not None)
 
     def graph_activity_generation(
@@ -376,7 +376,7 @@ class LocalTaskGraphLauncher:
         *,
         tenant_id: str,
     ) -> int | None:
-        run = self._runs.get((tenant_id, graph_id))
+        run = self._graphs.get((tenant_id, graph_id))
         if run is None or (run.closed and run.failure is None):
             return None
         return run.generation
@@ -386,26 +386,35 @@ class LocalTaskGraphLauncher:
         graph_id: str,
         *,
         tenant_id: str,
-        after_generation: int,
+        after_generation: "int | None" = None,
     ) -> None:
-        if after_generation < 0:
+        if after_generation is not None and after_generation < 0:
             raise ValueError("activity generation must be non-negative")
+        key = (tenant_id, graph_id)
         async with self._lock:
-            run = self._runs.get((tenant_id, graph_id))
+            run = self._graphs.get(key)
         if run is None:
             return
         if run.failure is not None:
             raise AIError(run.failure.code, safe_details=dict(run.failure.safe_details))
         if run.closed:
+            async with self._lock:
+                if self._graphs.get(key) is run:
+                    self._graphs.pop(key, None)
             return
+        observed_generation = run.generation if after_generation is None else after_generation
         async with run.condition:
             await run.condition.wait_for(
-                lambda: run.generation != after_generation
+                lambda: run.generation != observed_generation
                 or run.closed
                 or run.failure is not None
             )
         if run.failure is not None:
             raise AIError(run.failure.code, safe_details=dict(run.failure.safe_details))
+        if run.closed:
+            async with self._lock:
+                if self._graphs.get(key) is run:
+                    self._graphs.pop(key, None)
 
     async def _run_graph(self, run: _GraphRun) -> None:
         request = run.request
@@ -721,7 +730,7 @@ class LocalTaskGraphLauncher:
             },
         )
         async with self._lock:
-            current = self._runs.get((run.request.principal.tenant_id, graph_id))
+            current = self._graphs.get((run.request.principal.tenant_id, graph_id))
             if current is run:
                 run.failure = failure
                 run.closed = True
