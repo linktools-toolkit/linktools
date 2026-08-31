@@ -809,6 +809,7 @@ class LocalTaskGraphLauncher:
         if failure is not None:
             raise AIError(failure.code, safe_details=dict(failure.safe_details))
 
+    @staticmethod
     def _consume_run(run: _GraphRun, task: "asyncio.Task[None]") -> None:
         if task.cancelled():
             return
