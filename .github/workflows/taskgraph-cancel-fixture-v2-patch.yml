@@ -1,0 +1,44 @@
+name: TaskGraph cancellation fixture v2 patch
+
+on:
+  push:
+    branches:
+      - feat/ai-taskgraph-reliable-mixed-nodes
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feat/ai-taskgraph-reliable-mixed-nodes
+      - name: Update launcher shutdown fixtures
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          path = Path("tests/ai/test_cancellation_quiescence.py")
+          text = path.read_text()
+          old = '''    class Runner:\n        @property\n        def pending_background_tasks(self) -> tuple[asyncio.Task[object], ...]:\n            return () if cleanup_task.done() else (cleanup_task,)\n\n        @property\n        def background_failure(self) -> None:\n            return None\n\n    launcher = object.__new__(LocalTaskGraphLauncher)\n    launcher._accepting = True\n    launcher._graphs = {}\n    launcher._wait_observations = {}\n    launcher._detached_tasks = set()\n    launcher._runner = Runner()\n'''
+          new = '''    class Runner:\n        @property\n        def pending_background_tasks(self) -> tuple[asyncio.Task[object], ...]:\n            return () if cleanup_task.done() else (cleanup_task,)\n\n        @property\n        def pending_cancelled_tasks(self) -> tuple[asyncio.Task[object], ...]:\n            return ()\n\n        @property\n        def background_failure(self) -> None:\n            return None\n\n    launcher = object.__new__(LocalTaskGraphLauncher)\n    launcher._accepting = True\n    launcher._runs = {}\n    launcher._lock = asyncio.Lock()\n    launcher._runner = Runner()\n'''
+          if old not in text:
+              raise SystemExit("first launcher fixture not found")
+          text = text.replace(old, new, 1)
+          old = '''    launcher = object.__new__(LocalTaskGraphLauncher)\n    launcher._accepting = True\n    launcher._graphs = {}\n    launcher._wait_observations = {}\n    launcher._detached_tasks = set()\n    launcher._runner = Runner()\n\n    try:\n        with pytest.raises(AIError) as error:\n            await launcher.shutdown()\n'''
+          new = '''    launcher = object.__new__(LocalTaskGraphLauncher)\n    launcher._accepting = True\n    launcher._runs = {}\n    launcher._lock = asyncio.Lock()\n    launcher._runner = Runner()\n\n    try:\n        with pytest.raises(AIError) as error:\n            await launcher.shutdown()\n'''
+          if old not in text:
+              raise SystemExit("second launcher fixture not found")
+          path.write_text(text.replace(old, new, 1))
+          PY
+      - name: Commit fixture and remove patch workflow
+        run: |
+          rm .github/workflows/taskgraph-cancel-fixture-v2-patch.yml
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add tests/ai/test_cancellation_quiescence.py .github/workflows/taskgraph-cancel-fixture-v2-patch.yml
+          git commit -m 'test(ai): align task launcher shutdown fixture'
+          git push origin HEAD:feat/ai-taskgraph-reliable-mixed-nodes
