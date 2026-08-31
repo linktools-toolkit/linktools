@@ -493,9 +493,10 @@ class LocalTaskGraphLauncher:
         lease_state: _LeaseState,
     ) -> None:
         request = run.request
+        graph_id = request.graph.graph_id
         tenant_id = request.principal.tenant_id
         dependency_results = await self._dependency_results(
-            request.graph.graph_id,
+            graph_id,
             node,
             tenant_id=tenant_id,
         )
@@ -507,12 +508,13 @@ class LocalTaskGraphLauncher:
         heartbeat_stop = asyncio.Event()
         heartbeat = asyncio.create_task(
             self._heartbeat(lease_state, tenant_id=tenant_id, stop=heartbeat_stop),
-            name=f"task-heartbeat-{request.graph.graph_id}-{node.node_id}",
+            name=f"task-heartbeat-{graph_id}-{node.node_id}",
         )
+        completion: TaskNodeRunResult | None = None
         try:
-            result = await self._runner.run(
+            completion = await self._runner.run(
                 node,
-                graph_id=request.graph.graph_id,
+                graph_id=graph_id,
                 principal=request.principal,
                 dependency_results=dependency_results,
                 control=control,
@@ -522,14 +524,8 @@ class LocalTaskGraphLauncher:
         except BaseException as error:  # noqa: BLE001
             await _stop_heartbeat(heartbeat_stop, heartbeat)
             if isinstance(error, AIError) and error.code in _RECOVERY_UNKNOWN_CODES:
-                raise AIError(
-                    ErrorCode.STORAGE_RECOVERY_REQUIRED,
-                    safe_details={
-                        **dict(error.safe_details),
-                        "graph_id": request.graph.graph_id,
-                        "node_id": node.node_id,
-                    },
-                ) from error
+                await self._defer_recovery(run, node, cause_code=error.code)
+                return
             code = (
                 error.code.value
                 if isinstance(error, AIError)
@@ -540,7 +536,7 @@ class LocalTaskGraphLauncher:
             )
             digest = canonical_sha256(
                 {
-                    "graph_id": request.graph.graph_id,
+                    "graph_id": graph_id,
                     "node_id": node.node_id,
                     "code": code,
                 }
@@ -564,22 +560,78 @@ class LocalTaskGraphLauncher:
                 await self._repository.complete(
                     lease_state.lease,
                     tenant_id=tenant_id,
-                    execution_id=result.execution_id,
-                    result_digest=result.result_digest,
-                    result_payload=result.result_payload,
+                    execution_id=completion.execution_id,
+                    result_digest=completion.result_digest,
+                    result_payload=completion.result_payload,
                 )
+                return
             except AIError as error:
                 if error.code not in _RECOVERY_UNKNOWN_CODES:
                     raise
-                raise AIError(
-                    ErrorCode.STORAGE_RECOVERY_REQUIRED,
-                    safe_details={
-                        **dict(error.safe_details),
-                        "graph_id": request.graph.graph_id,
-                        "node_id": node.node_id,
-                        "phase": "task_terminal_commit",
-                    },
-                ) from error
+                if await self._completion_committed(
+                    graph_id,
+                    node.node_id,
+                    completion,
+                    tenant_id=tenant_id,
+                ):
+                    return
+                await self._defer_recovery(run, node, cause_code=error.code)
+
+    async def _completion_committed(
+        self,
+        graph_id: str,
+        node_id: str,
+        completion: TaskNodeRunResult,
+        *,
+        tenant_id: str,
+    ) -> bool:
+        states = await self._repository.list_nodes(graph_id, tenant_id=tenant_id)
+        state = next((value for value in states if value.node_id == node_id), None)
+        if state is None:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        if state.status is TaskStatus.SUCCEEDED:
+            if (
+                state.result_digest != completion.result_digest
+                or state.execution_id != completion.execution_id
+            ):
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            if completion.result_payload is not None:
+                results = await self._repository.get_results(
+                    graph_id,
+                    (node_id,),
+                    tenant_id=tenant_id,
+                )
+                record = results.get(node_id)
+                if record is None or record.result_digest != completion.result_digest:
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            return True
+        if state.status in _TERMINAL:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        return False
+
+    async def _defer_recovery(
+        self,
+        run: _GraphRun,
+        node: TaskNode,
+        *,
+        cause_code: ErrorCode,
+    ) -> None:
+        graph_id = run.request.graph.graph_id
+        failure = AIError(
+            ErrorCode.STORAGE_RECOVERY_REQUIRED,
+            safe_details={
+                "phase": "task_node_recovery",
+                "graph_id": graph_id,
+                "node_id": node.node_id,
+                "cause_code": cause_code.value,
+            },
+        )
+        async with self._lock:
+            current = self._runs.get((run.request.principal.tenant_id, graph_id))
+            if current is run:
+                run.failure = failure
+                run.closed = True
+        await self._notify(run)
 
     async def _heartbeat(
         self,
