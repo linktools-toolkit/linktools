@@ -235,9 +235,20 @@ class _TaskNodeRunControlImpl:
 class LocalTaskGraphLauncher:
     """Run admitted TaskGraphs locally while durable state remains authoritative."""
 
-    def __init__(self, repository: _TaskRepository, runner: TaskNodeRunner) -> None:
+    def __init__(
+        self,
+        repository: _TaskRepository,
+        runner: TaskNodeRunner,
+        *,
+        owner: str,
+    ) -> None:
+        try:
+            validate_lease_owner(owner)
+        except AIError as error:
+            raise ValueError("task launcher lease owner is invalid") from error
         self._repository = repository
         self._runner = runner
+        self._owner = owner
         self._runs: dict[tuple[str, str], _GraphRun] = {}
         self._lock = asyncio.Lock()
         self._accepting = True
@@ -254,17 +265,11 @@ class LocalTaskGraphLauncher:
                         existing.failure.code,
                         safe_details=dict(existing.failure.safe_details),
                     )
-                return TaskGraphHandle(request.graph.graph_id, existing.owner)
-            owner = canonical_sha256(
-                {
-                    "tenant_id": request.principal.tenant_id,
-                    "graph_id": request.graph.graph_id,
-                    "process": id(self),
-                    "generation": len(self._runs) + 1,
-                }
-            )
-            validate_lease_owner(owner)
-            run = _GraphRun(request, owner)
+                return TaskGraphHandle(
+                    request.graph.graph_id,
+                    f"local:{key[0]}:{key[1]}",
+                )
+            run = _GraphRun(request, self._owner)
             self._runs[key] = run
             run.task = asyncio.create_task(
                 self._run_graph(run),
@@ -273,7 +278,10 @@ class LocalTaskGraphLauncher:
             run.task.add_done_callback(
                 lambda task, selected=run: self._consume_run(selected, task)
             )
-        return TaskGraphHandle(request.graph.graph_id, owner)
+        return TaskGraphHandle(
+            request.graph.graph_id,
+            f"local:{key[0]}:{key[1]}",
+        )
 
     async def cancel(
         self,
@@ -414,9 +422,7 @@ class LocalTaskGraphLauncher:
                     lease_state = _LeaseState(lease)
                     task = asyncio.create_task(
                         self._run_node(run, node, lease_state),
-                        name=(
-                            f"task-node-{request.graph.graph_id}-{node.node_id}"
-                        ),
+                        name=f"task-node-{request.graph.graph_id}-{node.node_id}",
                     )
                     inflight[node.node_id] = _InflightNode(task, lease_state)
                 if inflight:
