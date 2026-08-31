@@ -68,6 +68,7 @@ from ...task import (
     TaskLease,
     TaskNode,
     TaskNodeView,
+    TaskResultRecord,
     TaskTerminalRecord,
 )
 from .._message import decode_model_messages, encode_model_messages
@@ -216,6 +217,7 @@ _V1_WIRE_TYPES: tuple[tuple[str, type[object]], ...] = (
     ("task_lease", TaskLease),
     ("task_node", TaskNode),
     ("task_node_view", TaskNodeView),
+    ("task_result", TaskResultRecord),
     ("task_terminal", TaskTerminalRecord),
     ("tool_operation", ToolOperationRecord),
     ("usage_metrics", UsageMetrics),
