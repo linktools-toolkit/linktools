@@ -32,12 +32,8 @@ if TYPE_CHECKING:
     from ..observe import Middleware
 from ..spec import AgentSpec, AgentSpecCodec
 from ..storage import ObjectStore, PayloadPolicy, StorageOverlay
-from ..task import LocalTaskGraphLauncher
-from ..workspace import (
-    LocalRepositoryInstructionResolver,
-    LocalRuleCatalog,
-    Workspace,
-)
+from ..task import LocalTaskGraphLauncher, TaskNodeHandler
+from ..workspace import LocalRepositoryInstructionResolver, LocalRuleCatalog, Workspace
 from ._agent_executor import AgentExecutor
 from ._approval import DefaultApprovalService
 from ._artifact import DefaultArtifactService
@@ -46,9 +42,9 @@ from ._evaluation import DefaultEvaluationService
 from ._event import DefaultEventService, LiveExecutionEventBroker
 from ._execution import DefaultExecutionService
 from ._history import StepExecutionHistoryReader, StepSessionHistoryReader
+from ._local import LocalExecutionBackend
 from ._memory import RuntimeMemoryStore
 from ._object import RuntimeObjectKeyFactory
-from ._local import LocalExecutionBackend
 from ._planner import DefaultTaskService, RuntimeTaskNodeRunner
 from ._session import DefaultSessionService
 from ._subagent import SubagentDispatcher
@@ -98,9 +94,7 @@ async def compose_runtime_components(
     if not isinstance(workspace, Workspace):
         raise TypeError("workspace must be Workspace")
     workspace.policy.validate()
-    if isinstance(middleware, (str, bytes, bytearray)) or not isinstance(
-        middleware, Sequence
-    ):
+    if isinstance(middleware, (str, bytes, bytearray)) or not isinstance(middleware, Sequence):
         raise TypeError("middleware must be a sequence")
     middleware_values = tuple(middleware)
     for item in middleware_values:
@@ -139,13 +133,18 @@ async def compose_runtime_components(
                     workspace.storage_root / "skills",
                 ),
             )
-            effective_groups = (workspace_group, *cast("tuple[CapabilityGroup[object], ...]", groups))
+            effective_groups = (
+                workspace_group,
+                *cast("tuple[CapabilityGroup[object], ...]", groups),
+            )
 
         group_ids = tuple(group.id for group in effective_groups)
         if len(group_ids) != len(set(group_ids)):
             raise AIError(ErrorCode.CAPABILITY_CONFLICT)
 
-        frozen: list[CapabilityContribution[object]] = list(workspace_tool_contributions(workspace))
+        frozen: list[CapabilityContribution[object]] = list(
+            workspace_tool_contributions(workspace)
+        )
         for group in effective_groups:
             frozen.extend(await group.freeze())
         _validate_candidate_uniqueness(frozen)
@@ -155,6 +154,11 @@ async def compose_runtime_components(
                 for group in effective_groups
                 if (source := group.skill_source) is not None
             )
+        )
+        task_handlers = tuple(
+            cast("TaskNodeHandler[object]", candidate.value)
+            for candidate in frozen
+            if candidate.kind == "task"
         )
 
         agents = {
@@ -168,14 +172,28 @@ async def compose_runtime_components(
         resolver = model_registry.snapshot()
         compiler = AgentCompiler(
             model_resolver=resolver,
-            candidates=tuple(candidate for candidate in frozen if candidate.kind != "agent"),
+            candidates=tuple(
+                candidate
+                for candidate in frozen
+                if candidate.kind not in {"agent", "task"}
+            ),
             agents=agents,
         )
-        catalog = AgentCatalog({agent_id: compiler.compile(agents[agent_id]) for agent_id in sorted(agents)})
+        catalog = AgentCatalog(
+            {
+                agent_id: compiler.compile(agents[agent_id])
+                for agent_id in sorted(agents)
+            }
+        )
 
-        effective_tenant_id = "default" if tenant_id is None else validate_tenant_id(tenant_id)
+        effective_tenant_id = (
+            "default" if tenant_id is None else validate_tenant_id(tenant_id)
+        )
         selected_state = state or _default_runtime_state(workspace)
-        await selected_state.initialize(namespace=workspace.workspace_id, tenant_id=effective_tenant_id)
+        await selected_state.initialize(
+            namespace=workspace.workspace_id,
+            tenant_id=effective_tenant_id,
+        )
         initialized = True
         if workspace.policy.tool_permissions.requires_approval:
             if (
@@ -188,9 +206,7 @@ async def compose_runtime_components(
             recovery_steps = selected_state.steps.read_store(RuntimeDomain.RECOVERY)
             if not isinstance(recovery_steps, StateStepArchive):
                 raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
-            approval_group = (
-                selected_state.execution.executions.state_store.storage_group
-            )
+            approval_group = selected_state.execution.executions.state_store.storage_group
             if (
                 selected_state.recovery.checkpoints.state_store.storage_group
                 is not approval_group
@@ -201,7 +217,9 @@ async def compose_runtime_components(
                 raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
         rules = await LocalRuleCatalog.load(workspace.root, workspace.policy)
         instruction_resolver = LocalRepositoryInstructionResolver(
-            workspace.root, workspace.policy, rules
+            workspace.root,
+            workspace.policy,
+            rules,
         )
         object_key_factory = RuntimeObjectKeyFactory(workspace.workspace_id)
         payload_policy = PayloadPolicy()
@@ -224,7 +242,12 @@ async def compose_runtime_components(
             namespace=workspace.workspace_id,
             workspace=workspace,
             app=app,
-            history_reader=_execution_history_reader(workspace, selected_state, effective_tenant_id),
+            task_handlers=task_handlers,
+            history_reader=_execution_history_reader(
+                workspace,
+                selected_state,
+                effective_tenant_id,
+            ),
             session_history_reader=StepSessionHistoryReader(
                 store=selected_state.steps.read_store(RuntimeDomain.CONVERSATION),
                 cursor_signer=HmacCursorSigner("session-history", _grant_key(workspace)),
@@ -252,11 +275,7 @@ async def compose_runtime_components(
 class _WorkspaceDeclarationPathAdapter:
     def __init__(self) -> None:
         self._delegate = PrefixAssetPathAdapter(
-            {
-                "agent": "agents",
-                "skill": "skills",
-                "mcp": "mcp",
-            }
+            {"agent": "agents", "skill": "skills", "mcp": "mcp"}
         )
 
     def validate(self, kinds: Sequence[str]) -> None:
@@ -413,6 +432,7 @@ async def _build_local_components(
     namespace: str,
     workspace: Workspace,
     app: AppT,
+    task_handlers: Sequence[TaskNodeHandler[AppT]],
     history_reader: ExecutionHistoryReader,
     session_history_reader: SessionHistoryReader,
     memory_store_factory: "Callable[[str, str, str, ObjectStore, bool], SearchableMemoryStore] | None",
@@ -534,7 +554,17 @@ async def _build_local_components(
             transcript_store=state.steps.read_store(RuntimeDomain.CONVERSATION),
             release_terminal=state.retention.release_session,
         )
-        task_runner = RuntimeTaskNodeRunner(execution, catalog, compiler)
+        task_runner = RuntimeTaskNodeRunner(
+            execution,
+            catalog,
+            compiler,
+            app=app,
+            task_state=state.task.tasks,
+            task_objects=state.object_store(RuntimeDomain.TASK),
+            object_key_factory=object_key_factory,
+            payload_policy=payload_policy,
+            handlers=task_handlers,
+        )
         task_launcher = LocalTaskGraphLauncher(
             state.task.tasks,
             task_runner,
@@ -546,6 +576,7 @@ async def _build_local_components(
             task_launcher,
             release_terminal=state.retention.release_task_graph,
             local_waiter=task_launcher,
+            preflight=task_runner,
         )
         evaluation = DefaultEvaluationService(
             state.evaluation,
