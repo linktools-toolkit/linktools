@@ -408,7 +408,7 @@ class LocalTaskGraphLauncher:
                 await self._notify(run)
                 if view.status in _TERMINAL:
                     return
-                self._reap_inflight(inflight)
+                _reap_inflight(inflight)
                 now = datetime.now(timezone.utc)
                 static = {node.node_id: node for node in request.graph.nodes}
                 for state in states:
@@ -448,7 +448,7 @@ class LocalTaskGraphLauncher:
                         return_when=asyncio.FIRST_COMPLETED,
                     )
                     await self._notify(run)
-                    self._reap_inflight(inflight)
+                    _reap_inflight(inflight)
                     continue
                 await self._wait_scheduler(run, states)
         except asyncio.CancelledError:
