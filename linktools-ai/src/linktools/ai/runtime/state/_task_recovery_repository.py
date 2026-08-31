@@ -42,6 +42,9 @@ from ._store import (
 
 _CURRENT_CURSOR_PREFIX = "a:"
 _LEGACY_CURSOR_PREFIX = "g:"
+_COMMIT_READBACK_CODES = frozenset(
+    {ErrorCode.STORAGE_CONFLICT, ErrorCode.STORAGE_COMMIT_UNKNOWN}
+)
 
 
 class DurableTaskRepositoryImpl(TaskRepositoryImpl):
@@ -170,7 +173,7 @@ class DurableTaskRepositoryImpl(TaskRepositoryImpl):
             if node.execution_id == execution_id:
                 return node
             if node.execution_id is not None:
-                raise AIError(ErrorCode.TASK_RESULT_CONFLICT)
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             value = replace(node, execution_id=execution_id)
             await self._update_node_in_transaction(transaction, node, value)
             return value
@@ -178,7 +181,7 @@ class DurableTaskRepositoryImpl(TaskRepositoryImpl):
         try:
             return await self.state_store.mutate(mutate)
         except AIError as error:
-            if error.code is not ErrorCode.STORAGE_CONFLICT:
+            if error.code not in _COMMIT_READBACK_CODES:
                 raise
             current = await self._node(lease.graph_id, lease.node_id, tenant_id)
             if current.execution_id == execution_id:
@@ -186,7 +189,16 @@ class DurableTaskRepositoryImpl(TaskRepositoryImpl):
             if current.fence != lease.fence or current.owner != lease.owner:
                 raise AIError(ErrorCode.TASK_FENCE_STALE) from error
             if current.execution_id is not None:
-                raise AIError(ErrorCode.TASK_RESULT_CONFLICT) from error
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
+            if error.code is ErrorCode.STORAGE_COMMIT_UNKNOWN:
+                raise AIError(
+                    ErrorCode.STORAGE_RECOVERY_REQUIRED,
+                    safe_details={
+                        "phase": "task_execution_bind",
+                        "graph_id": lease.graph_id,
+                        "node_id": lease.node_id,
+                    },
+                ) from error
             raise
 
     async def reconcile_graph(self, graph_id: str, *, tenant_id: str) -> TaskGraphView:
@@ -330,6 +342,7 @@ class DurableTaskRepositoryImpl(TaskRepositoryImpl):
                         current_result.graph_id != lease.graph_id
                         or current_result.node_id != lease.node_id
                         or current_result.result_digest != result_digest
+                        or current_result.payload != result_payload
                     ):
                         raise AIError(ErrorCode.TASK_RESULT_CONFLICT)
             value = replace(
@@ -357,7 +370,7 @@ class DurableTaskRepositoryImpl(TaskRepositoryImpl):
         try:
             return await self.state_store.mutate(mutate)
         except AIError as error:
-            if error.code is not ErrorCode.STORAGE_CONFLICT:
+            if error.code not in _COMMIT_READBACK_CODES:
                 raise
             return await self._classify_terminal_readback(
                 lease,
@@ -398,7 +411,7 @@ class DurableTaskRepositoryImpl(TaskRepositoryImpl):
                 error_digest=error_digest,
             )
         except AIError as error:
-            if error.code is not ErrorCode.STORAGE_CONFLICT:
+            if error.code not in _COMMIT_READBACK_CODES:
                 raise
             return await self._classify_terminal_readback(
                 lease,
@@ -443,7 +456,11 @@ class DurableTaskRepositoryImpl(TaskRepositoryImpl):
                     tenant_id=tenant_id,
                 )
                 result = results.get(lease.node_id)
-                if result is None or result.result_digest != result_digest:
+                if (
+                    result is None
+                    or result.result_digest != result_digest
+                    or result.payload != result_payload
+                ):
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from conflict
             return TaskTerminalRecord(
                 lease.node_id,
@@ -464,6 +481,15 @@ class DurableTaskRepositoryImpl(TaskRepositoryImpl):
             raise AIError(ErrorCode.TASK_TERMINAL_CONFLICT) from conflict
         if current.owner != lease.owner:
             raise AIError(ErrorCode.TASK_FENCE_STALE) from conflict
+        if conflict.code is ErrorCode.STORAGE_COMMIT_UNKNOWN:
+            raise AIError(
+                ErrorCode.STORAGE_RECOVERY_REQUIRED,
+                safe_details={
+                    "phase": "task_terminal_commit",
+                    "graph_id": lease.graph_id,
+                    "node_id": lease.node_id,
+                },
+            ) from conflict
         raise conflict
 
     async def _sync_recovery_projection(
