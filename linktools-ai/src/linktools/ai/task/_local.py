@@ -237,6 +237,14 @@ class _TaskNodeRunControlImpl:
                 tenant_id=self._tenant_id,
                 execution_id=execution_id,
             )
+            lease = self._lease_state.lease
+        _logger.info(
+            "task execution bound: graph=%s node=%s execution=%s fence=%s",
+            lease.graph_id,
+            lease.node_id,
+            execution_id,
+            lease.fence,
+        )
         await self._on_activity()
 
 

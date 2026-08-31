@@ -14,7 +14,7 @@ from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.runtime._evaluation import DefaultEvaluationService
 from linktools.ai.runtime._execution import DefaultExecutionService
 from linktools.ai.runtime._local import LocalExecutionBackend
-from linktools.ai.runtime._planner import RuntimeTaskNodeRunner
+from linktools.ai.runtime._planner import _AgentTaskNodeHandler
 from linktools.ai.runtime._session import DefaultSessionService
 from linktools.ai.runtime._subagent import SubagentDispatcher
 from linktools.ai.spec import MCPServerSpec
@@ -115,12 +115,12 @@ async def test_transient_handoff_cleanup_preserves_cancellation(
 
 
 @pytest.mark.asyncio
-async def test_task_runner_preserves_cancellation_when_child_cleanup_fails() -> None:
+async def test_task_runner_cancellation_does_not_business_cancel_running_execution() -> None:
     class Execution:
         def __init__(self) -> None:
             self.wait_started = asyncio.Event()
-            self.cancel_started = asyncio.Event()
-            self.finish_cancel = asyncio.Event()
+            self.wait_cancelled = asyncio.Event()
+            self.cancel_called = asyncio.Event()
 
         async def run(self, *args, **kwargs):
             del args, kwargs
@@ -129,65 +129,52 @@ async def test_task_runner_preserves_cancellation_when_child_cleanup_fails() -> 
         async def wait(self, *args, **kwargs):
             del args, kwargs
             self.wait_started.set()
-            await asyncio.Event().wait()
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                self.wait_cancelled.set()
+                raise
 
         async def cancel(self, *args, **kwargs):
             del args, kwargs
-            self.cancel_started.set()
-            await self.finish_cancel.wait()
-            raise RuntimeError("cleanup failed")
+            self.cancel_called.set()
+            return SimpleNamespace(cancelled=True)
+
+    class Control:
+        def __init__(self) -> None:
+            self.bound: list[str] = []
+
+        async def bind_execution(self, execution_id: str) -> None:
+            self.bound.append(execution_id)
 
     execution = Execution()
-    runner = object.__new__(RuntimeTaskNodeRunner)
-    runner._execution = execution
-    runner._detached_tasks = set()
-    runner._background_failures = {}
-    runner._active_execution_ids = {}
-    runner._active_launch_tasks = {}
-
-    async def prepare(*args, **kwargs):
-        del args, kwargs
-        return "binding", object()
-
-    runner.prepare = prepare
+    handler = _AgentTaskNodeHandler(execution, object(), object())
+    handler._prepare_request = lambda *args, **kwargs: ("binding", object())
+    control = Control()
     task = asyncio.create_task(
-        runner.run(
+        handler.run_node(
             SimpleNamespace(node_id="node"),
             graph_id="graph",
             principal=trusted_workspace_principal("tenant"),
-            dependency_results={},
+            dependencies={},
+            control=control,
         )
     )
     await execution.wait_started.wait()
+    assert control.bound == ["execution"]
     task.cancel()
 
     with pytest.raises(asyncio.CancelledError):
         await task
 
-    await execution.cancel_started.wait()
-    pending = runner.pending_background_tasks
-    assert pending
-    execution.finish_cancel.set()
-    await asyncio.gather(*pending, return_exceptions=True)
+    await asyncio.wait_for(execution.wait_cancelled.wait(), 1)
     await asyncio.sleep(0)
-    assert runner.pending_background_tasks == ()
-    failure = runner.background_failure
-    assert failure is not None
-    assert failure.code is ErrorCode.STORAGE_RECOVERY_REQUIRED
-
-    launcher = object.__new__(LocalTaskGraphLauncher)
-    launcher._accepting = True
-    launcher._graphs = {}
-    launcher._wait_observations = {}
-    launcher._detached_tasks = set()
-    launcher._runner = runner
-    with pytest.raises(AIError) as shutdown_error:
-        await launcher.shutdown()
-    assert shutdown_error.value.code is ErrorCode.STORAGE_RECOVERY_REQUIRED
+    assert not execution.cancel_called.is_set()
+    assert handler.background_failure is None
 
 
 @pytest.mark.asyncio
-async def test_task_runner_cancels_execution_that_finishes_launch_after_caller_cancel() -> None:
+async def test_task_runner_binds_execution_that_finishes_launch_after_caller_cancel() -> None:
     class Execution:
         def __init__(self) -> None:
             self.launch_started = asyncio.Event()
@@ -209,25 +196,26 @@ async def test_task_runner_cancels_execution_that_finishes_launch_after_caller_c
             self.cancel_called.set()
             return SimpleNamespace(cancelled=True)
 
+    class Control:
+        def __init__(self) -> None:
+            self.bound = asyncio.Event()
+            self.execution_id: str | None = None
+
+        async def bind_execution(self, execution_id: str) -> None:
+            self.execution_id = execution_id
+            self.bound.set()
+
     execution = Execution()
-    runner = object.__new__(RuntimeTaskNodeRunner)
-    runner._execution = execution
-    runner._detached_tasks = set()
-    runner._background_failures = {}
-    runner._active_execution_ids = {}
-    runner._active_launch_tasks = {}
-
-    async def prepare(*args, **kwargs):
-        del args, kwargs
-        return "binding", object()
-
-    runner.prepare = prepare
+    handler = _AgentTaskNodeHandler(execution, object(), object())
+    handler._prepare_request = lambda *args, **kwargs: ("binding", object())
+    control = Control()
     task = asyncio.create_task(
-        runner.run(
+        handler.run_node(
             SimpleNamespace(node_id="node"),
             graph_id="graph",
             principal=trusted_workspace_principal("tenant"),
-            dependency_results={},
+            dependencies={},
+            control=control,
         )
     )
     await execution.launch_started.wait()
@@ -236,13 +224,17 @@ async def test_task_runner_cancels_execution_that_finishes_launch_after_caller_c
     with pytest.raises(asyncio.CancelledError):
         await task
 
-    pending = runner.pending_background_tasks
-    assert pending
+    assert handler.pending_background_tasks
     execution.release_launch.set()
-    await asyncio.gather(*pending, return_exceptions=True)
-    assert execution.cancel_called.is_set()
-    assert runner.pending_background_tasks == ()
-    assert runner._active_execution_ids == {}
+    await asyncio.wait_for(control.bound.wait(), 1)
+    pending = handler.pending_background_tasks
+    if pending:
+        await asyncio.gather(*pending, return_exceptions=True)
+    await asyncio.sleep(0)
+    assert control.execution_id == "execution"
+    assert not execution.cancel_called.is_set()
+    assert handler.pending_background_tasks == ()
+    assert handler.background_failure is None
 
 
 @pytest.mark.asyncio
@@ -262,25 +254,21 @@ async def test_task_runner_start_unknown_after_caller_cancel_blocks_shutdown() -
             del args, kwargs
             raise AssertionError("wait must not start after unknown launch")
 
+    class Control:
+        async def bind_execution(self, execution_id: str) -> None:
+            del execution_id
+            raise AssertionError("unknown launch must not bind execution")
+
     execution = Execution()
-    runner = object.__new__(RuntimeTaskNodeRunner)
-    runner._execution = execution
-    runner._detached_tasks = set()
-    runner._background_failures = {}
-    runner._active_execution_ids = {}
-    runner._active_launch_tasks = {}
-
-    async def prepare(*args, **kwargs):
-        del args, kwargs
-        return "binding", object()
-
-    runner.prepare = prepare
+    handler = _AgentTaskNodeHandler(execution, object(), object())
+    handler._prepare_request = lambda *args, **kwargs: ("binding", object())
     task = asyncio.create_task(
-        runner.run(
+        handler.run_node(
             SimpleNamespace(node_id="node"),
             graph_id="graph",
             principal=trusted_workspace_principal("tenant"),
-            dependency_results={},
+            dependencies={},
+            control=Control(),
         )
     )
     await execution.launch_started.wait()
@@ -289,21 +277,20 @@ async def test_task_runner_start_unknown_after_caller_cancel_blocks_shutdown() -
         await task
 
     execution.release_launch.set()
-    pending = runner.pending_background_tasks
+    pending = handler.pending_background_tasks
     assert pending
     await asyncio.gather(*pending, return_exceptions=True)
     await asyncio.sleep(0)
-    assert runner.pending_background_tasks == ()
-    failure = runner.background_failure
+    assert handler.pending_background_tasks == ()
+    failure = handler.background_failure
     assert failure is not None
     assert failure.code is ErrorCode.STORAGE_RECOVERY_REQUIRED
 
     launcher = object.__new__(LocalTaskGraphLauncher)
     launcher._accepting = True
     launcher._graphs = {}
-    launcher._wait_observations = {}
-    launcher._detached_tasks = set()
-    launcher._runner = runner
+    launcher._lock = asyncio.Lock()
+    launcher._runner = handler
     with pytest.raises(AIError) as shutdown_error:
         await launcher.shutdown()
     assert shutdown_error.value.code is ErrorCode.STORAGE_RECOVERY_REQUIRED
@@ -359,7 +346,7 @@ async def test_task_inflight_cleanup_detaches_cancellation_resistant_node() -> N
 
     task = asyncio.create_task(node())
     await asyncio.sleep(0)
-    inflight = {"node": _InflightNode(task)}
+    inflight = {"node": _InflightNode(task, SimpleNamespace())}
 
     await launcher._cancel_inflight(inflight)
     await cancelled.wait()
