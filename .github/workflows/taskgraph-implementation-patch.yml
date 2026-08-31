@@ -1,0 +1,1180 @@
+name: TaskGraph implementation patch
+
+on:
+  push:
+    branches:
+      - feat/ai-taskgraph-reliable-mixed-nodes
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feat/ai-taskgraph-reliable-mixed-nodes
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+      - name: Apply exact Task repository patches
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          repo_path = Path("linktools-ai/src/linktools/ai/runtime/state/_repositories.py")
+          text = repo_path.read_text()
+          old_import = '''from ...task import (
+              TaskGraph,
+              TaskGraphAdmission,
+              TaskGraphLaunch,
+              TaskGraphView,
+              TaskLease,
+              TaskNodeView,
+              TaskTerminalRecord,
+          )'''
+          new_import = '''from ...task import (
+              TaskGraph,
+              TaskGraphAdmission,
+              TaskGraphLaunch,
+              TaskGraphSnapshot,
+              TaskGraphView,
+              TaskLease,
+              TaskNodeView,
+              TaskResultRecord,
+              TaskTerminalRecord,
+          )'''
+          assert text.count(old_import) == 1
+          text = text.replace(old_import, new_import)
+
+          start = text.index("class TaskRepositoryImpl(_RepositoryBase):")
+          end = text.index("\n\nclass TaskAdmissionRepositoryImpl(_RepositoryBase):", start)
+          old_block = text[start:end]
+          assert "async def snapshot_graph(" not in old_block
+          assert "result_payload" not in old_block
+          assert old_block.count("async def complete(") == 1
+          assert old_block.count("async def fail(") == 1
+
+          new_block = '''def _resolve_task_execution_id(
+              current: str | None,
+              supplied: str | None,
+          ) -> str | None:
+              if current is None:
+                  return supplied
+              if supplied is None or supplied == current:
+                  return current
+              raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+
+
+          class TaskRepositoryImpl(_RepositoryBase):
+              def __init__(self, store: StateStore, *, namespace: str, tenant_id: str) -> None:
+                  super().__init__(store, namespace=namespace, tenant_id=tenant_id, domain=RuntimeDomain.TASK)
+
+              def _graph_key(self, graph_id: str) -> bytes:
+                  return self._key("task_graph", graph_id)
+
+              def _node_key(self, graph_id: str, node_id: str) -> bytes:
+                  return self._key("task_node", [graph_id, node_id])
+
+              def _result_key(self, graph_id: str, node_id: str) -> bytes:
+                  return self._key("task_result", [graph_id, node_id])
+
+              def _result_scope(self, graph_id: str) -> bytes:
+                  return self._scope("task_result", "graph", graph_id)
+
+              def _result_parent(self, graph_id: str) -> bytes:
+                  return self._parent("task_result", "graph", graph_id)
+
+              async def get_header(self, graph_id: str, *, tenant_id: str) -> ResourceRef | None:
+                  return (
+                      None
+                      if await self.get_graph(graph_id, tenant_id=tenant_id) is None
+                      else ResourceRef(ResourceKind.TASK_GRAPH, graph_id, tenant_id)
+                  )
+
+              async def create_graph(self, graph: TaskGraph, *, tenant_id: str) -> TaskGraphView:
+                  if tenant_id != self._tenant_id:
+                      raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
+                  view = TaskGraphView(graph.graph_id, TaskStatus.PENDING, graph.nodes)
+
+                  async def mutate(transaction: StateTransaction) -> TaskGraphView:
+                      records = [self._stored("task_graph", graph.graph_id, view, state=view.status.value)]
+                      for node in graph.nodes:
+                          status = TaskStatus.READY if not node.dependencies else TaskStatus.PENDING
+                          node_view = TaskNodeView(
+                              graph.graph_id, node.node_id, node.dependencies, status, None, 0, None, None, None, None
+                          )
+                          records.append(
+                              self._stored(
+                                  "task_node",
+                                  [graph.graph_id, node.node_id],
+                                  node_view,
+                                  parent=self._parent("task_node", "graph", graph.graph_id),
+                                  state=status.value,
+                              )
+                          )
+                      await transaction.insert_records(records)
+                      return view
+
+                  return await self._store.mutate(mutate)
+
+              async def get_graph(self, graph_id: str, *, tenant_id: str) -> TaskGraphView | None:
+                  if tenant_id != self._tenant_id:
+                      return None
+                  record = await self._record(self._graph_key(graph_id))
+                  if record is None:
+                      return None
+                  graph = await self._decode(record, TaskGraphView)
+                  nodes = await self.list_nodes(graph_id, tenant_id=tenant_id)
+                  return TaskGraphView(graph_id, _graph_status(nodes), graph.nodes)
+
+              async def snapshot_graph(
+                  self,
+                  graph_id: str,
+                  *,
+                  tenant_id: str,
+              ) -> TaskGraphSnapshot | None:
+                  if tenant_id != self._tenant_id:
+                      return None
+
+                  async def read(transaction: StateTransaction) -> TaskGraphSnapshot | None:
+                      graph_record = await transaction.get_record(self._graph_key(graph_id))
+                      if graph_record is None:
+                          return None
+                      graph = await self._decode(graph_record, TaskGraphView)
+                      records = await transaction.list_records(
+                          RecordQuery(
+                              parent_digest=self._parent("task_node", "graph", graph_id),
+                              kind="task_node",
+                          )
+                      )
+                      states = await self._decode_many(records)
+                      by_id = {state.node_id: state for state in states}
+                      if len(by_id) != len(states):
+                          raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                      try:
+                          ordered = tuple(by_id[node.node_id] for node in graph.nodes)
+                      except KeyError as error:
+                          raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
+                      if len(ordered) != len(states):
+                          raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                      return TaskGraphSnapshot(
+                          graph.graph_id,
+                          _graph_status(ordered),
+                          graph.nodes,
+                          ordered,
+                      )
+
+                  return await self._store.read(read)
+
+              async def get_results(
+                  self,
+                  graph_id: str,
+                  node_ids: tuple[str, ...],
+                  *,
+                  tenant_id: str,
+              ) -> Mapping[str, TaskResultRecord]:
+                  if tenant_id != self._tenant_id:
+                      return {}
+                  if not isinstance(node_ids, tuple):
+                      raise TypeError("node_ids must be a tuple")
+                  if any(not isinstance(node_id, str) or not node_id for node_id in node_ids):
+                      raise ValueError("node_ids must contain non-empty strings")
+                  if len(set(node_ids)) != len(node_ids):
+                      raise ValueError("node_ids must not contain duplicates")
+                  if not node_ids:
+                      return {}
+                  keys = tuple(self._result_key(graph_id, node_id) for node_id in node_ids)
+
+                  async def read(transaction: StateTransaction) -> Mapping[str, TaskResultRecord]:
+                      records = await transaction.get_records(keys)
+                      result: dict[str, TaskResultRecord] = {}
+                      for node_id, key in zip(node_ids, keys, strict=True):
+                          record = records.get(key)
+                          if record is None:
+                              continue
+                          if record.kind != "task_result" or record.key_digest != key:
+                              raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                          value = await self._decode(record, TaskResultRecord)
+                          if value.graph_id != graph_id or value.node_id != node_id:
+                              raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                          result[node_id] = value
+                      return result
+
+                  return await self._store.read(read)
+
+              async def reconcile_graph(self, graph_id: str, *, tenant_id: str) -> TaskGraphView:
+                  _require_repository_tenant(tenant_id, self._tenant_id)
+                  async def mutate(transaction: StateTransaction) -> TaskGraphView:
+                      graph_record = await transaction.get_record(self._graph_key(graph_id))
+                      if graph_record is None:
+                          raise AIError(ErrorCode.STORAGE_NOT_FOUND)
+                      graph = await self._decode(graph_record, TaskGraphView)
+                      node_records = await transaction.list_records(
+                          RecordQuery(
+                              parent_digest=self._parent("task_node", "graph", graph_id),
+                              kind="task_node",
+                          )
+                      )
+                      decoded_nodes = await self._decode_many(node_records)
+                      node_records_by_id = {
+                          node.node_id: record
+                          for node, record in zip(decoded_nodes, node_records, strict=True)
+                      }
+                      current_nodes = {node.node_id: node for node in decoded_nodes}
+                      next_nodes = dict(current_nodes)
+                      changed_nodes: list[tuple[TaskNodeView, TaskNodeView]] = []
+                      changed = True
+                      while changed:
+                          changed = False
+                          for node in tuple(next_nodes.values()):
+                              if node.status in {
+                                  TaskStatus.SUCCEEDED,
+                                  TaskStatus.FAILED,
+                                  TaskStatus.CANCELLED,
+                                  TaskStatus.BLOCKED,
+                              }:
+                                  continue
+                              dependencies = tuple(next_nodes[dependency] for dependency in node.dependencies)
+                              if any(
+                                  dependency.status in {TaskStatus.FAILED, TaskStatus.BLOCKED, TaskStatus.CANCELLED}
+                                  for dependency in dependencies
+                              ):
+                                  value = replace(
+                                      node,
+                                      status=TaskStatus.BLOCKED,
+                                      error_code=ErrorCode.TASK_DEPENDENCY_FAILED.value,
+                                      error_digest=None,
+                                  )
+                              elif node.status is TaskStatus.PENDING and all(
+                                  dependency.status is TaskStatus.SUCCEEDED for dependency in dependencies
+                              ):
+                                  value = replace(node, status=TaskStatus.READY)
+                              else:
+                                  continue
+                              next_nodes[node.node_id] = value
+                              changed_nodes.append((node, value))
+                              changed = True
+                      next_status = _graph_status(tuple(next_nodes.values()))
+                      graph_changed = graph.status is not next_status or graph_record.state != next_status.value
+                      if not changed_nodes and not graph_changed:
+                          return TaskGraphView(graph.graph_id, next_status, graph.nodes)
+                      next_graph = replace(graph, status=next_status)
+                      replacements: list[RecordReplacement] = []
+                      for current, value in changed_nodes:
+                          node_record = node_records_by_id.get(current.node_id)
+                          if node_record is None:
+                              raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                          stored_node = await self._decode(node_record, TaskNodeView)
+                          if stored_node != current:
+                              raise AIError(ErrorCode.STORAGE_CONFLICT)
+                          replacements.append(
+                              RecordReplacement(
+                                  _projected_record(self, node_record, value),
+                                  node_record.storage_version,
+                              )
+                          )
+                      if graph_changed:
+                          replacements.append(
+                              RecordReplacement(
+                                  _task_graph_record(self, graph_record, next_graph),
+                                  graph_record.storage_version,
+                              )
+                          )
+                      await transaction.replace_records(replacements)
+                      _logger.info(
+                          "task graph reconciled atomically: graph_id=%s changed_nodes=%s",
+                          graph_id,
+                          len(changed_nodes),
+                      )
+                      return TaskGraphView(graph.graph_id, next_graph.status, graph.nodes)
+
+                  return await self._store.mutate(mutate)
+
+              async def cancel_graph(self, graph_id: str, *, tenant_id: str) -> TaskGraphView:
+                  _require_repository_tenant(tenant_id, self._tenant_id)
+                  async def mutate(transaction: StateTransaction) -> TaskGraphView:
+                      graph_record = await transaction.get_record(self._graph_key(graph_id))
+                      if graph_record is None:
+                          raise AIError(ErrorCode.STORAGE_NOT_FOUND)
+                      graph = await self._decode(graph_record, TaskGraphView)
+                      node_records = await transaction.list_records(
+                          RecordQuery(
+                              parent_digest=self._parent("task_node", "graph", graph_id),
+                              kind="task_node",
+                          )
+                      )
+                      nodes = await self._decode_many(node_records)
+                      node_records_by_id = {
+                          node.node_id: record
+                          for node, record in zip(nodes, node_records, strict=True)
+                      }
+                      changed = [
+                          (node, replace(node, status=TaskStatus.CANCELLED, owner=None, lease_expires_at=None))
+                          for node in nodes
+                          if node.status not in {TaskStatus.SUCCEEDED, TaskStatus.FAILED, TaskStatus.CANCELLED}
+                      ]
+                      changed_ids = {current.node_id for current, _ in changed}
+                      next_nodes = tuple(value for _, value in changed) + tuple(
+                          node for node in nodes if node.node_id not in changed_ids
+                      )
+                      next_status = _graph_status(next_nodes)
+                      graph_changed = (
+                          graph.status is not next_status
+                          or graph_record.state != next_status.value
+                      )
+                      if not changed and not graph_changed:
+                          return TaskGraphView(graph.graph_id, next_status, graph.nodes)
+                      next_graph = replace(graph, status=next_status)
+                      replacements: list[RecordReplacement] = []
+                      for current, value in changed:
+                          node_record = node_records_by_id.get(current.node_id)
+                          if node_record is None:
+                              raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                          replacements.append(
+                              RecordReplacement(
+                                  _projected_record(self, node_record, value),
+                                  node_record.storage_version,
+                              )
+                          )
+                      if graph_changed:
+                          replacements.append(
+                              RecordReplacement(
+                                  _task_graph_record(self, graph_record, next_graph),
+                                  graph_record.storage_version,
+                              )
+                          )
+                      await transaction.replace_records(replacements)
+                      _logger.info("task graph cancelled atomically: graph_id=%s changed_nodes=%s", graph_id, len(changed))
+                      return TaskGraphView(graph.graph_id, next_graph.status, graph.nodes)
+
+                  return await self._store.mutate(mutate)
+
+              async def claim(self, graph_id: str, node_id: str, *, tenant_id: str, owner: str, lease_seconds: int) -> TaskLease:
+                  if tenant_id != self._tenant_id:
+                      raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
+                  validate_lease_owner(owner)
+                  validate_lease_seconds(lease_seconds)
+
+                  async def mutate(transaction: StateTransaction) -> TaskLease:
+                      records = await transaction.get_records(
+                          (self._graph_key(graph_id), self._node_key(graph_id, node_id))
+                      )
+                      graph_record = records.get(self._graph_key(graph_id))
+                      record = records.get(self._node_key(graph_id, node_id))
+                      if graph_record is None or record is None:
+                          raise AIError(ErrorCode.TASK_NOT_READY)
+                      graph = await self._decode(graph_record, TaskGraphView)
+                      node = await self._decode(record, TaskNodeView)
+                      dependency_keys = tuple(
+                          self._node_key(graph_id, dependency)
+                          for dependency in node.dependencies
+                      )
+                      dependency_records = await transaction.get_records(dependency_keys)
+                      nodes = {
+                          dependency: await self._decode(
+                              dependency_records[self._node_key(graph_id, dependency)],
+                              TaskNodeView,
+                          )
+                          for dependency in node.dependencies
+                          if self._node_key(graph_id, dependency) in dependency_records
+                      }
+                      if graph.graph_id != graph_id or any(
+                          dependency not in nodes for dependency in node.dependencies
+                      ):
+                          raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                      now = await transaction.now()
+                      expired = node.lease_expires_at is not None and node.lease_expires_at <= now
+                      if node.status is TaskStatus.RUNNING and node.owner not in {None, owner} and not expired:
+                          raise AIError(ErrorCode.TASK_OWNER_CONFLICT)
+                      dependencies_succeeded = all(
+                          nodes[dependency].status is TaskStatus.SUCCEEDED
+                          for dependency in node.dependencies
+                      )
+                      if node.status not in {TaskStatus.PENDING, TaskStatus.READY} and not (
+                          node.status is TaskStatus.RUNNING and expired
+                      ):
+                          raise AIError(ErrorCode.TASK_NOT_READY)
+                      if node.status in {TaskStatus.PENDING, TaskStatus.READY} and not dependencies_succeeded:
+                          raise AIError(ErrorCode.TASK_NOT_READY)
+                      fence = node.fence + 1
+                      expires = now + timedelta(seconds=lease_seconds)
+                      value = replace(node, status=TaskStatus.RUNNING, owner=owner, fence=fence, lease_expires_at=expires)
+                      await self._update_node_in_transaction(transaction, node, value)
+                      return TaskLease(graph_id, node_id, tenant_id, owner, fence, expires)
+
+                  return await self._store.mutate(mutate)
+
+              async def renew(self, lease: TaskLease, *, tenant_id: str, lease_seconds: int) -> TaskLease:
+                  _validate_task_lease_scope(lease, tenant_id)
+                  if tenant_id != self._tenant_id:
+                      raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
+                  validate_lease_seconds(lease_seconds)
+
+                  async def mutate(transaction: StateTransaction) -> TaskLease:
+                      records = await transaction.get_records(
+                          (self._graph_key(lease.graph_id), self._node_key(lease.graph_id, lease.node_id))
+                      )
+                      graph_record = records.get(self._graph_key(lease.graph_id))
+                      node_record = records.get(self._node_key(lease.graph_id, lease.node_id))
+                      if graph_record is None or node_record is None:
+                          raise AIError(ErrorCode.TASK_FENCE_STALE)
+                      node = await self._decode(node_record, TaskNodeView)
+                      now = await transaction.now()
+                      _require_live_task_lease(node, lease, now)
+                      expires = now + timedelta(seconds=lease_seconds)
+                      if not await transaction.update_record_lease(
+                          node_record.key_digest,
+                          expected_storage_version=node_record.storage_version,
+                          lease_owner=node.owner,
+                          lease_fence=node.fence,
+                          lease_expires_at=expires,
+                      ):
+                          raise AIError(ErrorCode.TASK_FENCE_STALE)
+                      return replace(lease, lease_expires_at=expires)
+
+                  return await self._store.mutate(mutate)
+
+              async def bind_execution(
+                  self,
+                  lease: TaskLease,
+                  *,
+                  tenant_id: str,
+                  execution_id: str,
+              ) -> TaskNodeView:
+                  _validate_task_lease_scope(lease, tenant_id)
+                  if tenant_id != self._tenant_id:
+                      raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
+                  if not isinstance(execution_id, str) or not execution_id.strip():
+                      raise ValueError("execution_id must be a non-empty string")
+
+                  async def mutate(transaction: StateTransaction) -> TaskNodeView:
+                      records = await transaction.get_records(
+                          (
+                              self._graph_key(lease.graph_id),
+                              self._node_key(lease.graph_id, lease.node_id),
+                          )
+                      )
+                      graph_record = records.get(self._graph_key(lease.graph_id))
+                      node_record = records.get(self._node_key(lease.graph_id, lease.node_id))
+                      if graph_record is None or node_record is None:
+                          raise AIError(ErrorCode.TASK_FENCE_STALE)
+                      node = await self._decode(node_record, TaskNodeView)
+                      now = await transaction.now()
+                      _require_live_task_lease(node, lease, now)
+                      if node.execution_id == execution_id:
+                          return node
+                      if node.execution_id is not None:
+                          raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                      value = replace(node, execution_id=execution_id)
+                      await self._update_node_in_transaction(transaction, node, value)
+                      return value
+
+                  return await self._store.mutate(mutate)
+
+              async def complete(
+                  self,
+                  lease: TaskLease,
+                  *,
+                  tenant_id: str,
+                  execution_id: str | None,
+                  result_digest: str,
+                  result_payload: StoredPayload | None = None,
+              ) -> TaskTerminalRecord:
+                  _validate_task_lease_scope(lease, tenant_id)
+                  if tenant_id != self._tenant_id:
+                      raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
+                  if result_payload is not None and result_payload.digest != result_digest:
+                      raise AIError(ErrorCode.TASK_RESULT_CONFLICT)
+
+                  async def mutate(transaction: StateTransaction) -> TaskTerminalRecord:
+                      result_key = self._result_key(lease.graph_id, lease.node_id)
+                      records = await transaction.get_records(
+                          (
+                              self._graph_key(lease.graph_id),
+                              self._node_key(lease.graph_id, lease.node_id),
+                              result_key,
+                          )
+                      )
+                      graph_record = records.get(self._graph_key(lease.graph_id))
+                      node_record = records.get(self._node_key(lease.graph_id, lease.node_id))
+                      if graph_record is None or node_record is None:
+                          raise AIError(ErrorCode.TASK_FENCE_STALE)
+                      node = await self._decode(node_record, TaskNodeView)
+                      now = await transaction.now()
+                      _require_live_task_lease(node, lease, now)
+                      resolved_execution_id = _resolve_task_execution_id(
+                          node.execution_id,
+                          execution_id,
+                      )
+                      if result_payload is not None:
+                          current_result_record = records.get(result_key)
+                          if current_result_record is None:
+                              result = TaskResultRecord(
+                                  lease.graph_id,
+                                  lease.node_id,
+                                  result_digest,
+                                  result_payload,
+                              )
+                              await transaction.insert_record(
+                                  self._stored(
+                                      "task_result",
+                                      [lease.graph_id, lease.node_id],
+                                      result,
+                                      scope=self._result_scope(lease.graph_id),
+                                      parent=self._result_parent(lease.graph_id),
+                                  )
+                              )
+                          else:
+                              if (
+                                  current_result_record.kind != "task_result"
+                                  or current_result_record.key_digest != result_key
+                              ):
+                                  raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                              current_result = await self._decode(
+                                  current_result_record,
+                                  TaskResultRecord,
+                              )
+                              if (
+                                  current_result.graph_id != lease.graph_id
+                                  or current_result.node_id != lease.node_id
+                                  or current_result.result_digest != result_digest
+                              ):
+                                  raise AIError(ErrorCode.TASK_RESULT_CONFLICT)
+                      value = replace(
+                          node,
+                          status=TaskStatus.SUCCEEDED,
+                          owner=None,
+                          lease_expires_at=None,
+                          result_digest=result_digest,
+                          error_code=None,
+                          error_digest=None,
+                          execution_id=resolved_execution_id,
+                      )
+                      await self._update_node_in_transaction(transaction, node, value)
+                      return TaskTerminalRecord(
+                          lease.node_id,
+                          lease.owner,
+                          lease.fence,
+                          TaskStatus.SUCCEEDED,
+                          result_digest,
+                          None,
+                          None,
+                          execution_id=resolved_execution_id,
+                      )
+
+                  return await self._store.mutate(mutate)
+
+              async def fail(
+                  self,
+                  lease: TaskLease,
+                  *,
+                  tenant_id: str,
+                  error_code: str,
+                  error_digest: str,
+                  execution_id: str | None = None,
+              ) -> TaskTerminalRecord:
+                  return await self._finish(
+                      lease,
+                      tenant_id=tenant_id,
+                      status=TaskStatus.FAILED,
+                      execution_id=execution_id,
+                      result_digest=None,
+                      error_code=error_code,
+                      error_digest=error_digest,
+                  )
+
+              async def _finish(
+                  self,
+                  lease: TaskLease,
+                  *,
+                  tenant_id: str,
+                  status: TaskStatus,
+                  execution_id: str | None,
+                  result_digest: str | None,
+                  error_code: str | None,
+                  error_digest: str | None,
+              ) -> TaskTerminalRecord:
+                  _validate_task_lease_scope(lease, tenant_id)
+                  if tenant_id != self._tenant_id:
+                      raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
+
+                  async def mutate(transaction: StateTransaction) -> TaskTerminalRecord:
+                      record = await transaction.get_record(self._node_key(lease.graph_id, lease.node_id))
+                      if record is None:
+                          raise AIError(ErrorCode.TASK_FENCE_STALE)
+                      node = await self._decode(record, TaskNodeView)
+                      now = await transaction.now()
+                      _require_live_task_lease(node, lease, now)
+                      resolved_execution_id = _resolve_task_execution_id(
+                          node.execution_id,
+                          execution_id,
+                      )
+                      value = replace(
+                          node,
+                          status=status,
+                          owner=None,
+                          lease_expires_at=None,
+                          result_digest=result_digest,
+                          error_code=error_code,
+                          error_digest=error_digest,
+                          execution_id=resolved_execution_id,
+                      )
+                      await self._update_node_in_transaction(transaction, node, value)
+                      return TaskTerminalRecord(
+                          lease.node_id,
+                          lease.owner,
+                          lease.fence,
+                          status,
+                          result_digest,
+                          error_code,
+                          error_digest,
+                          execution_id=resolved_execution_id,
+                      )
+
+                  return await self._store.mutate(mutate)
+
+              async def list_nodes(self, graph_id: str, *, tenant_id: str) -> tuple[TaskNodeView, ...]:
+                  if tenant_id != self._tenant_id:
+                      return ()
+                  records = await self._records("task_node", parent=self._parent("task_node", "graph", graph_id))
+                  return await self._decode_many(records)
+
+              async def _decode_many(self, records: tuple[StoredRecord, ...]) -> tuple[TaskNodeView, ...]:
+                  return tuple([await self._decode(record, TaskNodeView) for record in records])
+
+              async def _node(self, graph_id: str, node_id: str, tenant_id: str) -> TaskNodeView:
+                  _require_repository_tenant(tenant_id, self._tenant_id)
+                  record = await self._record(self._node_key(graph_id, node_id))
+                  if record is None:
+                      raise AIError(ErrorCode.STORAGE_NOT_FOUND)
+                  return await self._decode(record, TaskNodeView)
+
+              async def _update_node(self, current: TaskNodeView, value: TaskNodeView) -> None:
+                  async def mutate(transaction: StateTransaction) -> None:
+                      await self._update_node_in_transaction(transaction, current, value)
+
+                  await self._store.mutate(mutate)
+
+              async def _update_node_in_transaction(
+                  self,
+                  transaction: StateTransaction,
+                  current: TaskNodeView,
+                  value: TaskNodeView,
+              ) -> None:
+                  graph_record = await transaction.get_record(self._graph_key(current.graph_id))
+                  if graph_record is None:
+                      raise AIError(ErrorCode.STORAGE_NOT_FOUND)
+                  graph = await self._decode(graph_record, TaskGraphView)
+                  if graph.graph_id != current.graph_id:
+                      raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                  node_record = await transaction.get_record(
+                      self._node_key(current.graph_id, current.node_id)
+                  )
+                  if node_record is None:
+                      raise AIError(ErrorCode.STORAGE_NOT_FOUND)
+                  stored_node = await self._decode(node_record, TaskNodeView)
+                  if stored_node != current:
+                      raise AIError(ErrorCode.STORAGE_CONFLICT)
+                  node_candidate = _projected_record(self, node_record, value)
+                  await _replace_checked(transaction, node_candidate, node_record.storage_version)
+          '''
+          text = text[:start] + new_block + text[end:]
+          repo_path.write_text(text)
+
+          durable_path = Path("linktools-ai/src/linktools/ai/runtime/state/_task_recovery_repository.py")
+          durable = durable_path.read_text()
+          start = durable.index("class DurableTaskRepositoryImpl(TaskRepositoryImpl):")
+          end = durable.index("\n\nclass DurableTaskAdmissionRepositoryImpl", start)
+          old_block = durable[start:end]
+          assert "while True" not in old_block
+          assert "result_payload" in old_block
+
+          new_block = '''class DurableTaskRepositoryImpl(TaskRepositoryImpl):
+              """Keep Task authority and recovery projections convergent under CAS races."""
+
+              def _admission_key(self, graph_id: str) -> bytes:
+                  return self._key("task_admission", graph_id)
+
+              def _recovery_scope(self) -> bytes:
+                  return self._scope("task_admission", "recoverable", "graphs")
+
+              def _legacy_recovery_scope(self) -> bytes:
+                  return self._scope("task_graph", "recoverable", "graphs")
+
+              async def bind_execution(
+                  self,
+                  lease: TaskLease,
+                  *,
+                  tenant_id: str,
+                  execution_id: str,
+              ) -> TaskNodeView:
+                  try:
+                      return await super().bind_execution(
+                          lease,
+                          tenant_id=tenant_id,
+                          execution_id=execution_id,
+                      )
+                  except AIError as error:
+                      if error.code not in _COMMIT_READBACK_CODES:
+                          raise
+                      current = await self._node(lease.graph_id, lease.node_id, tenant_id)
+                      if current.fence != lease.fence:
+                          raise AIError(ErrorCode.TASK_FENCE_STALE) from error
+                      if current.execution_id == execution_id:
+                          return current
+                      if current.execution_id is not None:
+                          raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
+                      if current.owner != lease.owner:
+                          raise AIError(ErrorCode.TASK_OWNER_CONFLICT) from error
+                      if error.code is ErrorCode.STORAGE_COMMIT_UNKNOWN:
+                          raise AIError(
+                              ErrorCode.STORAGE_RECOVERY_REQUIRED,
+                              safe_details={
+                                  "phase": "task_execution_bind",
+                                  "graph_id": lease.graph_id,
+                                  "node_id": lease.node_id,
+                              },
+                          ) from error
+                      raise AIError(ErrorCode.STORAGE_CONFLICT) from error
+
+              async def reconcile_graph(self, graph_id: str, *, tenant_id: str) -> TaskGraphView:
+                  async def mutate(transaction: StateTransaction) -> TaskGraphView:
+                      view = await super(DurableTaskRepositoryImpl, self).reconcile_graph(
+                          graph_id,
+                          tenant_id=tenant_id,
+                      )
+                      await self._sync_recovery_projection(transaction, view)
+                      return view
+
+                  try:
+                      return await self.state_store.mutate(mutate)
+                  except AIError as error:
+                      if error.code not in _COMMIT_READBACK_CODES:
+                          raise
+                      view, converged = await self._projection_readback(
+                          graph_id,
+                          tenant_id=tenant_id,
+                      )
+                      if converged:
+                          return view
+                      if error.code is ErrorCode.STORAGE_COMMIT_UNKNOWN:
+                          raise AIError(
+                              ErrorCode.STORAGE_RECOVERY_REQUIRED,
+                              safe_details={
+                                  "phase": "task_reconcile",
+                                  "graph_id": graph_id,
+                              },
+                          ) from error
+                      raise AIError(ErrorCode.STORAGE_CONFLICT) from error
+
+              async def cancel_graph(self, graph_id: str, *, tenant_id: str) -> TaskGraphView:
+                  async def mutate(transaction: StateTransaction) -> TaskGraphView:
+                      view = await super(DurableTaskRepositoryImpl, self).cancel_graph(
+                          graph_id,
+                          tenant_id=tenant_id,
+                      )
+                      await self._sync_recovery_projection(transaction, view)
+                      return view
+
+                  try:
+                      return await self.state_store.mutate(mutate)
+                  except AIError as error:
+                      if error.code not in _COMMIT_READBACK_CODES:
+                          raise
+                      view, _ = await self._projection_readback(
+                          graph_id,
+                          tenant_id=tenant_id,
+                      )
+                      if view.status in {
+                          TaskStatus.SUCCEEDED,
+                          TaskStatus.FAILED,
+                          TaskStatus.CANCELLED,
+                          TaskStatus.BLOCKED,
+                      }:
+                          return view
+                      if error.code is ErrorCode.STORAGE_COMMIT_UNKNOWN:
+                          raise AIError(
+                              ErrorCode.STORAGE_RECOVERY_REQUIRED,
+                              safe_details={
+                                  "phase": "task_cancel",
+                                  "graph_id": graph_id,
+                              },
+                          ) from error
+                      raise AIError(ErrorCode.STORAGE_CONFLICT) from error
+
+              async def claim(
+                  self,
+                  graph_id: str,
+                  node_id: str,
+                  *,
+                  tenant_id: str,
+                  owner: str,
+                  lease_seconds: int,
+              ) -> TaskLease:
+                  try:
+                      return await super().claim(
+                          graph_id,
+                          node_id,
+                          tenant_id=tenant_id,
+                          owner=owner,
+                          lease_seconds=lease_seconds,
+                      )
+                  except AIError as error:
+                      if error.code not in _COMMIT_READBACK_CODES:
+                          raise
+                      current = await self._node(graph_id, node_id, tenant_id)
+                      if (
+                          current.status is TaskStatus.RUNNING
+                          and current.owner == owner
+                          and current.lease_expires_at is not None
+                      ):
+                          return TaskLease(
+                              graph_id,
+                              node_id,
+                              tenant_id,
+                              owner,
+                              current.fence,
+                              current.lease_expires_at,
+                          )
+                      if current.status is TaskStatus.RUNNING and current.owner != owner:
+                          raise AIError(ErrorCode.TASK_OWNER_CONFLICT) from error
+                      if current.status in {
+                          TaskStatus.SUCCEEDED,
+                          TaskStatus.FAILED,
+                          TaskStatus.CANCELLED,
+                          TaskStatus.BLOCKED,
+                      }:
+                          raise AIError(ErrorCode.TASK_NOT_READY) from error
+                      if error.code is ErrorCode.STORAGE_COMMIT_UNKNOWN:
+                          raise AIError(
+                              ErrorCode.STORAGE_RECOVERY_REQUIRED,
+                              safe_details={
+                                  "phase": "task_claim",
+                                  "graph_id": graph_id,
+                                  "node_id": node_id,
+                              },
+                          ) from error
+                      raise AIError(ErrorCode.STORAGE_CONFLICT) from error
+
+              async def complete(
+                  self,
+                  lease: TaskLease,
+                  *,
+                  tenant_id: str,
+                  execution_id: str | None,
+                  result_digest: str,
+                  result_payload: StoredPayload | None = None,
+              ) -> TaskTerminalRecord:
+                  try:
+                      return await super().complete(
+                          lease,
+                          tenant_id=tenant_id,
+                          execution_id=execution_id,
+                          result_digest=result_digest,
+                          result_payload=result_payload,
+                      )
+                  except AIError as error:
+                      if error.code not in _COMMIT_READBACK_CODES:
+                          raise
+                      return await self._classify_terminal_readback(
+                          lease,
+                          tenant_id=tenant_id,
+                          status=TaskStatus.SUCCEEDED,
+                          execution_id=execution_id,
+                          result_digest=result_digest,
+                          result_payload=result_payload,
+                          error_code=None,
+                          error_digest=None,
+                          conflict=error,
+                      )
+
+              async def fail(
+                  self,
+                  lease: TaskLease,
+                  *,
+                  tenant_id: str,
+                  error_code: str,
+                  error_digest: str,
+                  execution_id: str | None = None,
+              ) -> TaskTerminalRecord:
+                  try:
+                      return await super().fail(
+                          lease,
+                          tenant_id=tenant_id,
+                          error_code=error_code,
+                          error_digest=error_digest,
+                          execution_id=execution_id,
+                      )
+                  except AIError as error:
+                      if error.code not in _COMMIT_READBACK_CODES:
+                          raise
+                      return await self._classify_terminal_readback(
+                          lease,
+                          tenant_id=tenant_id,
+                          status=TaskStatus.FAILED,
+                          execution_id=execution_id,
+                          result_digest=None,
+                          result_payload=None,
+                          error_code=error_code,
+                          error_digest=error_digest,
+                          conflict=error,
+                      )
+
+              async def _classify_terminal_readback(
+                  self,
+                  lease: TaskLease,
+                  *,
+                  tenant_id: str,
+                  status: TaskStatus,
+                  execution_id: str | None,
+                  result_digest: str | None,
+                  result_payload: StoredPayload | None,
+                  error_code: str | None,
+                  error_digest: str | None,
+                  conflict: AIError,
+              ) -> TaskTerminalRecord:
+                  current = await self._node(lease.graph_id, lease.node_id, tenant_id)
+                  if current.fence != lease.fence:
+                      raise AIError(ErrorCode.TASK_FENCE_STALE) from conflict
+                  if current.status is status:
+                      if (
+                          current.result_digest != result_digest
+                          or current.error_code != error_code
+                          or current.error_digest != error_digest
+                          or (
+                              execution_id is not None
+                              and current.execution_id != execution_id
+                          )
+                      ):
+                          raise AIError(ErrorCode.TASK_RESULT_CONFLICT) from conflict
+                      if status is TaskStatus.SUCCEEDED and result_payload is not None:
+                          results = await self.get_results(
+                              lease.graph_id,
+                              (lease.node_id,),
+                              tenant_id=tenant_id,
+                          )
+                          result = results.get(lease.node_id)
+                          if result is None or result.result_digest != result_digest:
+                              raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from conflict
+                      return TaskTerminalRecord(
+                          lease.node_id,
+                          lease.owner,
+                          lease.fence,
+                          status,
+                          result_digest,
+                          error_code,
+                          error_digest,
+                          execution_id=current.execution_id,
+                      )
+                  if current.status in {
+                      TaskStatus.SUCCEEDED,
+                      TaskStatus.FAILED,
+                      TaskStatus.CANCELLED,
+                      TaskStatus.BLOCKED,
+                  }:
+                      raise AIError(ErrorCode.TASK_TERMINAL_CONFLICT) from conflict
+                  if current.owner != lease.owner:
+                      raise AIError(ErrorCode.TASK_FENCE_STALE) from conflict
+                  if conflict.code is ErrorCode.STORAGE_COMMIT_UNKNOWN:
+                      raise AIError(
+                          ErrorCode.STORAGE_RECOVERY_REQUIRED,
+                          safe_details={
+                              "phase": "task_terminal_commit",
+                              "graph_id": lease.graph_id,
+                              "node_id": lease.node_id,
+                          },
+                      ) from conflict
+                  raise AIError(ErrorCode.STORAGE_CONFLICT) from conflict
+
+              async def _projection_readback(
+                  self,
+                  graph_id: str,
+                  *,
+                  tenant_id: str,
+              ) -> tuple[TaskGraphView, bool]:
+                  if tenant_id != self._tenant_id:
+                      raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
+
+                  async def read(transaction: StateTransaction) -> tuple[TaskGraphView, bool]:
+                      graph_key = self._graph_key(graph_id)
+                      admission_key = self._admission_key(graph_id)
+                      records = await transaction.get_records((graph_key, admission_key))
+                      graph_record = records.get(graph_key)
+                      if graph_record is None:
+                          raise AIError(ErrorCode.STORAGE_NOT_FOUND)
+                      graph = await self._decode(graph_record, TaskGraphView)
+                      node_records = await transaction.list_records(
+                          RecordQuery(
+                              parent_digest=self._parent("task_node", "graph", graph_id),
+                              kind="task_node",
+                          )
+                      )
+                      states = await self._decode_task_nodes(node_records)
+                      snapshot = TaskGraphSnapshot(
+                          graph.graph_id,
+                          _graph_status(states),
+                          graph.nodes,
+                          tuple(
+                              {state.node_id: state for state in states}[node.node_id]
+                              for node in graph.nodes
+                          ),
+                      )
+                      view = TaskGraphView(graph.graph_id, snapshot.status, graph.nodes)
+                      graph_converged = (
+                          graph.status is snapshot.status
+                          and graph_record.state == snapshot.status.value
+                      )
+                      admission_record = records.get(admission_key)
+                      if admission_record is None:
+                          return view, graph_converged
+                      if admission_record.scope_digest == self._recovery_scope():
+                          if (
+                              admission_record.kind != "task_admission"
+                              or admission_record.key_digest != admission_key
+                          ):
+                              raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                          return view, graph_converged and admission_record.state == snapshot.status.value
+                      if (
+                          admission_record.scope_digest is None
+                          and graph_record.scope_digest == self._legacy_recovery_scope()
+                      ):
+                          return view, graph_converged
+                      raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+
+                  try:
+                      return await self.state_store.read(read)
+                  except (KeyError, ValueError) as error:
+                      raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
+
+              async def _sync_recovery_projection(
+                  self,
+                  transaction: StateTransaction,
+                  view: TaskGraphView,
+              ) -> None:
+                  admission_key = self._admission_key(view.graph_id)
+                  graph_key = self._graph_key(view.graph_id)
+                  records = await transaction.get_records((admission_key, graph_key))
+                  admission_record = records.get(admission_key)
+                  if admission_record is None:
+                      return
+                  graph_record = records.get(graph_key)
+                  if graph_record is None:
+                      raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                  if admission_record.key_digest != admission_key or admission_record.kind != "task_admission":
+                      raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                  if admission_record.scope_digest == self._recovery_scope():
+                      if admission_record.state == view.status.value:
+                          return
+                      candidate = replace(
+                          admission_record,
+                          state=view.status.value,
+                          storage_version=admission_record.storage_version + 1,
+                      )
+                      if not await transaction.replace_record(
+                          candidate,
+                          expected_storage_version=admission_record.storage_version,
+                      ):
+                          raise AIError(ErrorCode.STORAGE_CONFLICT)
+                      return
+                  if (
+                      admission_record.scope_digest is None
+                      and graph_record.scope_digest == self._legacy_recovery_scope()
+                  ):
+                      return
+                  raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+          '''
+          durable = durable[:start] + new_block + durable[end:]
+          durable_path.write_text(durable)
+
+          planner_path = Path("linktools-ai/src/linktools/ai/runtime/_planner.py")
+          planner = planner_path.read_text()
+          start = planner.index("    async def _materialize_result(\n")
+          end = planner.index("    async def _materialize_result_inner(\n", start)
+          old_block = planner[start:end]
+          assert "self._materialization_tasks.add(task)" in old_block
+          new_block = '''    async def _materialize_result(
+                  self,
+                  output: JsonValue,
+                  *,
+                  tenant_id: str,
+                  graph_id: str,
+                  node_id: str,
+              ) -> StoredPayload:
+                  task = asyncio.create_task(
+                      self._materialize_result_inner(output, tenant_id=tenant_id),
+                      name=f"task-result-materialize-{graph_id}-{node_id}",
+                  )
+                  try:
+                      return await asyncio.shield(task)
+                  except asyncio.CancelledError:
+                      if task.done():
+                          self._consume_materialization(task, graph_id=graph_id, node_id=node_id)
+                      else:
+                          self._materialization_tasks.add(task)
+
+                          def consume(done: asyncio.Task[StoredPayload]) -> None:
+                              try:
+                                  self._consume_materialization(
+                                      done,
+                                      graph_id=graph_id,
+                                      node_id=node_id,
+                                  )
+                              finally:
+                                  self._materialization_tasks.discard(done)
+
+                          task.add_done_callback(consume)
+                      raise
+
+              def _consume_materialization(
+                  self,
+                  task: asyncio.Task[StoredPayload],
+                  *,
+                  graph_id: str,
+                  node_id: str,
+              ) -> None:
+                  try:
+                      task.result()
+                  except asyncio.CancelledError:
+                      return
+                  except BaseException as error:  # noqa: BLE001
+                      if self._background_failure is not None:
+                          return
+                      details = dict(error.safe_details) if isinstance(error, AIError) else {}
+                      details.setdefault("phase", "task_result_materialize")
+                      details.setdefault("graph_id", graph_id)
+                      details.setdefault("node_id", node_id)
+                      self._background_failure = AIError(
+                          ErrorCode.STORAGE_RECOVERY_REQUIRED,
+                          safe_details=details,
+                      )
+
+          '''
+          planner = planner[:start] + new_block + planner[end:]
+          planner_path.write_text(planner)
+          PY
+
+          python -m py_compile \
+            linktools-ai/src/linktools/ai/runtime/state/_repositories.py \
+            linktools-ai/src/linktools/ai/runtime/state/_task_recovery_repository.py \
+            linktools-ai/src/linktools/ai/runtime/_planner.py \
+            linktools-ai/src/linktools/ai/task/_local.py \
+            linktools-ai/src/linktools/ai/runtime/_local.py
+          git diff --check
+      - name: Commit validated patch and remove helper workflow
+        shell: bash
+        run: |
+          rm .github/workflows/taskgraph-implementation-patch.yml
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add \
+            .github/workflows/taskgraph-implementation-patch.yml \
+            linktools-ai/src/linktools/ai/runtime/state/_repositories.py \
+            linktools-ai/src/linktools/ai/runtime/state/_task_recovery_repository.py \
+            linktools-ai/src/linktools/ai/runtime/_planner.py
+          git diff --cached --check
+          git commit -m "fix(ai-task): complete repository authority"
+          git push origin HEAD:feat/ai-taskgraph-reliable-mixed-nodes
