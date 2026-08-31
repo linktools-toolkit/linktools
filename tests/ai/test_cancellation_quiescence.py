@@ -54,6 +54,7 @@ def _local_backend(current: object) -> LocalExecutionBackend:
     backend._checkpoint_tasks = set()
     backend._execution_durable_tasks = {}
     backend._worker_cancel_requests = set()
+    backend._worker_shutdown_requests = set()
     backend._live_broker = _LiveBroker()
     backend._executor = _Executor()
     backend._subagent_dispatcher = None
