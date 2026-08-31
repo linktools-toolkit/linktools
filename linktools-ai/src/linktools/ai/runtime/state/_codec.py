@@ -345,6 +345,21 @@ def _decode_v1_task_node(
     )
 
 
+def _encode_v1_task_result(
+    value: object,
+    codec: "_VersionCodec",
+    persisted: bool,
+) -> Mapping[str, JsonValue]:
+    if not isinstance(value, TaskResultRecord):
+        raise TypeError("V1 task_result encoder received the wrong type")
+    return {
+        "graph_id": _encode_domain(value.graph_id, codec, persisted=persisted),
+        "node_id": _encode_domain(value.node_id, codec, persisted=persisted),
+        "result_digest": _encode_domain(value.result_digest, codec, persisted=persisted),
+        "payload": _encode_domain(value.payload, codec, persisted=persisted),
+    }
+
+
 def _decode_v1_task_result(
     raw_fields: Mapping[str, object],
     codec: "_VersionCodec",
@@ -369,7 +384,10 @@ def _decode_v1_task_result(
 
 
 _V1_DATACLASS_ENCODERS: Mapping[str, DataclassEncoder] = MappingProxyType(
-    {"task_node": _encode_v1_task_node}
+    {
+        "task_node": _encode_v1_task_node,
+        "task_result": _encode_v1_task_result,
+    }
 )
 _V1_DATACLASS_DECODERS: Mapping[str, DataclassDecoder] = MappingProxyType(
     {
@@ -1692,7 +1710,7 @@ def _validate_v1_codec_definition() -> None:
         raise RuntimeError("GA v1 enum type registry is incomplete")
     if set(_CURRENT_CODEC.enum_wire_ids.values()) != set(enum_wire_ids):
         raise RuntimeError("GA v1 enum wire-id registry is incomplete")
-    custom_dataclasses = {"task_node"}
+    custom_dataclasses = {"task_node", "task_result"}
     if set(_V1_DATACLASS_ENCODERS) != custom_dataclasses:
         raise RuntimeError("GA v1 dataclass encoder mapping is invalid")
     if set(_V1_DATACLASS_DECODERS) != custom_dataclasses:

@@ -13,9 +13,11 @@ from linktools.core import environ
 
 from ..agent import AgentBindingSnapshot, AgentCatalog, AgentCompiler
 from ..core import (
+    ExecutionMode,
     ExecutionStatus,
     JsonValue,
     Principal,
+    ThinkingValue,
     canonical_json_bytes,
     canonical_sha256,
     normalize_execution_mode,
@@ -395,9 +397,9 @@ class _AgentTaskNodeHandler:
             principal=principal,
             idempotency_key=idempotency_key,
             memory_scope=None,
-            mode=cast(str, normalized["mode"]),
+            mode=cast(ExecutionMode, normalized["mode"]),
             planning=cast(bool, normalized["planning"]),
-            thinking=normalized["thinking"],
+            thinking=cast(ThinkingValue, normalized["thinking"]),
         )
 
     async def _bind_execution(

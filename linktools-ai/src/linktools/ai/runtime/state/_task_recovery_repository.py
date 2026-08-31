@@ -169,6 +169,8 @@ class DurableTaskRepositoryImpl(TaskRepositoryImpl):
         owner: str,
         lease_seconds: int,
     ) -> TaskLease:
+        before = await self._node(graph_id, node_id, tenant_id)
+        expected_fence = before.fence + 1
         try:
             return await super().claim(
                 graph_id,
@@ -181,21 +183,16 @@ class DurableTaskRepositoryImpl(TaskRepositoryImpl):
             if error.code not in _COMMIT_READBACK_CODES:
                 raise
             current = await self._node(graph_id, node_id, tenant_id)
-            if (
-                current.status is TaskStatus.RUNNING
-                and current.owner == owner
-                and current.lease_expires_at is not None
-            ):
+            if current.status is TaskStatus.RUNNING:
+                if current.owner != owner:
+                    raise AIError(ErrorCode.TASK_OWNER_CONFLICT) from error
+                if current.fence != expected_fence:
+                    raise AIError(ErrorCode.TASK_FENCE_STALE) from error
+                if current.lease_expires_at is None:
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
                 return TaskLease(
-                    graph_id,
-                    node_id,
-                    tenant_id,
-                    owner,
-                    current.fence,
-                    current.lease_expires_at,
+                    graph_id, node_id, tenant_id, owner, current.fence, current.lease_expires_at
                 )
-            if current.status is TaskStatus.RUNNING and current.owner != owner:
-                raise AIError(ErrorCode.TASK_OWNER_CONFLICT) from error
             if current.status in {
                 TaskStatus.SUCCEEDED,
                 TaskStatus.FAILED,

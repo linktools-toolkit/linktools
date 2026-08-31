@@ -6050,22 +6050,6 @@ def _stored_operation_error(operation: OperationLedgerRecord) -> AIError:
 
 def _graph_status(nodes: "tuple[TaskNodeView, ...]") -> TaskStatus:
     statuses = {node.status for node in nodes}
-    by_id = {node.node_id: node for node in nodes}
-    failure_states = {
-        TaskStatus.FAILED,
-        TaskStatus.BLOCKED,
-        TaskStatus.CANCELLED,
-    }
-    projection_pending = any(
-        node.status in {TaskStatus.PENDING, TaskStatus.READY, TaskStatus.RUNNING}
-        and any(
-            by_id[dependency].status in failure_states
-            for dependency in node.dependencies
-        )
-        for node in nodes
-    )
-    if projection_pending:
-        return TaskStatus.RUNNING if TaskStatus.RUNNING in statuses else TaskStatus.PENDING
     if not statuses or statuses <= {TaskStatus.SUCCEEDED}:
         return TaskStatus.SUCCEEDED
     if TaskStatus.FAILED in statuses:
@@ -6077,6 +6061,7 @@ def _graph_status(nodes: "tuple[TaskNodeView, ...]") -> TaskStatus:
     if TaskStatus.RUNNING in statuses:
         return TaskStatus.RUNNING
     return TaskStatus.PENDING
+
 
 def _record_cursor(record: StoredRecord) -> str:
     payload = {
