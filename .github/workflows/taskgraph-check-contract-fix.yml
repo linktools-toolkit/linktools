@@ -1,0 +1,115 @@
+name: TaskGraph check contract fixes
+
+on:
+  push:
+    branches:
+      - feat/ai-taskgraph-reliable-mixed-nodes
+    paths:
+      - .github/workflows/taskgraph-check-contract-fix.yml
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feat/ai-taskgraph-reliable-mixed-nodes
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+      - name: Apply contract fixes
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          def replace_once(path: str, old: str, new: str) -> None:
+              target = Path(path)
+              text = target.read_text()
+              if text.count(old) != 1:
+                  raise SystemExit(f"expected one match in {path}: {text.count(old)}")
+              target.write_text(text.replace(old, new, 1))
+
+          replace_once(
+              "linktools-ai/src/linktools/ai/runtime/_local.py",
+              "        self._worker_shutdown_requests.discard(execution.execution_id)\n",
+              "        self._worker_shutdown_set().discard(execution.execution_id)\n",
+          )
+          replace_once(
+              "linktools-ai/src/linktools/ai/runtime/_planner.py",
+              "            if isinstance(cause, AIError) and cause.code is ErrorCode.AGENT_DEFINITION_UNAVAILABLE:\n                raise cause\n",
+              "            if isinstance(cause, AIError) and cause.code in {\n                ErrorCode.AGENT_DEFINITION_UNAVAILABLE,\n                ErrorCode.STORAGE_VERSION_UNSUPPORTED,\n            }:\n                raise cause\n",
+          )
+
+          path = Path("tests/ai/test_error_contract_matrix.py")
+          text = path.read_text()
+          text = text.replace(
+              "from linktools.ai.task import DefaultTaskService\n",
+              "from linktools.ai.task import (\n    DefaultTaskService,\n    TaskGraphSnapshot,\n    TaskNode,\n    TaskNodeView,\n)\n",
+              1,
+          )
+          marker = '''    async def get_graph(self, graph_id: str, *, tenant_id: str) -> object:\n        del graph_id, tenant_id\n        return SimpleNamespace(status=TaskStatus.RUNNING)\n'''
+          addition = marker + '''\n    async def snapshot_graph(\n        self,\n        graph_id: str,\n        *,\n        tenant_id: str,\n    ) -> TaskGraphSnapshot:\n        del tenant_id\n        node = TaskNode("node")\n        state = TaskNodeView(\n            graph_id,\n            node.node_id,\n            (),\n            TaskStatus.READY,\n            None,\n            0,\n            None,\n            None,\n            None,\n            None,\n        )\n        return TaskGraphSnapshot(\n            graph_id,\n            TaskStatus.PENDING,\n            (node,),\n            (state,),\n        )\n'''
+          if text.count(marker) != 1:
+              raise SystemExit("running task fake marker mismatch")
+          path.write_text(text.replace(marker, addition, 1))
+
+          path = Path("tests/ai/test_skill_subagent_final_refactor.py")
+          text = path.read_text()
+          text = text.replace(
+              "from linktools.ai.runtime._planner import RuntimeTaskNodeRunner\n",
+              "from linktools.ai.runtime._planner import (\n    RuntimeTaskNodeRunner,\n    _AgentTaskNodeHandler,\n)\n",
+              1,
+          )
+          start = text.index(
+              "@pytest.mark.asyncio\nasync def test_task_prepare_preserves_future_binding_version_error() -> None:\n"
+          )
+          end = text.index(
+              "\ndef test_skill_markdown_preserves_description_and_rejects_mismatch() -> None:\n",
+              start,
+          )
+          replacement = '''def test_agent_task_recovery_preserves_future_binding_version_error() -> None:\n    binding = _load_json("agent_binding_subagent_v1_golden.json")\n    binding["version"] = 2\n    body = {\n        "binding": binding,\n        "user_prompt": "work",\n        "user_prompt_codec": "text",\n        "mode": "run",\n        "planning": False,\n        "thinking": False,\n    }\n    handler = object.__new__(_AgentTaskNodeHandler)\n    handler._catalog = None\n    handler._compiler = None\n\n    with pytest.raises(AIError) as error:\n        handler.validate_recovery(\n            body,  # type: ignore[arg-type]\n            graph_id="graph",\n            node_id="node",\n        )\n\n    assert error.value.code is ErrorCode.STORAGE_VERSION_UNSUPPORTED\n\n'''
+          path.write_text(text[:start] + replacement + text[end + 1 :])
+
+          replace_once(
+              "tests/ai/fixtures/runtime_state_v1_golden.json",
+              '    "task_node_view",\n    "task_terminal",\n',
+              '    "task_node_view",\n    "task_result",\n    "task_terminal",\n',
+          )
+          PY
+          python -m compileall -q \
+            linktools-ai/src/linktools/ai/runtime/_local.py \
+            linktools-ai/src/linktools/ai/runtime/_planner.py \
+            tests/ai/test_error_contract_matrix.py \
+            tests/ai/test_skill_subagent_final_refactor.py
+          git diff --check
+      - name: Install test environment
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -U -r requirements.txt
+          python manage.py install --editable
+      - name: Run focused checks
+        run: |
+          python -m pytest -q -p no:cacheprovider \
+            tests/ai/test_local_execution_recovery.py \
+            tests/ai/test_error_contract_matrix.py::test_task_wait_timeout_has_stable_code \
+            tests/ai/test_skill_subagent_final_refactor.py::test_agent_task_recovery_preserves_future_binding_version_error \
+            tests/ai/test_state_codec_protocol.py::test_v1_wire_registry_matches_golden_manifest
+      - name: Commit fixes
+        shell: bash
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add \
+            linktools-ai/src/linktools/ai/runtime/_local.py \
+            linktools-ai/src/linktools/ai/runtime/_planner.py \
+            tests/ai/test_error_contract_matrix.py \
+            tests/ai/test_skill_subagent_final_refactor.py \
+            tests/ai/fixtures/runtime_state_v1_golden.json
+          git rm .github/workflows/taskgraph-check-contract-fix.yml
+          git commit -m "fix(ai-task): align recovery and check contracts"
+          git push origin HEAD:feat/ai-taskgraph-reliable-mixed-nodes
