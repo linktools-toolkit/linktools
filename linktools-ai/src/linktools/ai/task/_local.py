@@ -834,7 +834,7 @@ def _scheduler_failure(error: BaseException, graph_id: str) -> AIError:
             safe_details={**dict(error.safe_details), "graph_id": graph_id},
         )
     return AIError(
-        ErrorCode.STORAGE_RECOVERY_REQUIRED,
+        ErrorCode.INTERNAL_ERROR,
         safe_details={"graph_id": graph_id, "phase": "task_scheduler"},
     )
 

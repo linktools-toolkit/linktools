@@ -356,7 +356,7 @@ async def test_task_launcher_shutdown_drains_runner_owned_cancellation_cleanup()
 
     launcher = object.__new__(LocalTaskGraphLauncher)
     launcher._accepting = True
-    launcher._runs = {}
+    launcher._graphs = {}
     launcher._lock = asyncio.Lock()
     launcher._runner = Runner()
 
@@ -400,7 +400,7 @@ async def test_task_launcher_shutdown_drains_runner_cancelled_leftover() -> None
 
     launcher = object.__new__(LocalTaskGraphLauncher)
     launcher._accepting = True
-    launcher._runs = {}
+    launcher._graphs = {}
     launcher._lock = asyncio.Lock()
     launcher._runner = Runner()
 
