@@ -22,6 +22,7 @@ from ..core import (
     validate_tenant_id,
 )
 from ..errors import AIError, ErrorCode
+from ..storage import StoredPayload
 
 
 @dataclass(frozen=True, slots=True)
@@ -272,8 +273,6 @@ class TaskCompletionLedger:
                 return previous
             if candidate.status is not previous.status:
                 raise AIError(ErrorCode.TASK_TERMINAL_CONFLICT)
-            if candidate.status is TaskStatus.SUCCEEDED:
-                raise AIError(ErrorCode.TASK_RESULT_CONFLICT)
             raise AIError(ErrorCode.TASK_RESULT_CONFLICT)
         raise AIError(ErrorCode.TASK_TERMINAL_CONFLICT)
 
@@ -403,13 +402,39 @@ class TaskNodeResult:
 
 
 @dataclass(frozen=True, slots=True)
+class TaskResultRecord:
+    graph_id: str
+    node_id: str
+    result_digest: str
+    payload: StoredPayload
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.graph_id, str) or not self.graph_id.strip():
+            raise ValueError("task result graph id is required")
+        if not isinstance(self.node_id, str) or not self.node_id.strip():
+            raise ValueError("task result node id is required")
+        if re.fullmatch(r"[0-9a-f]{64}", self.result_digest) is None:
+            raise ValueError("task result digest is invalid")
+        if not isinstance(self.payload, StoredPayload):
+            raise TypeError("task result payload is invalid")
+        if self.payload.digest != self.result_digest:
+            raise ValueError("task result payload digest does not match result")
+
+
+@dataclass(frozen=True, slots=True)
 class TaskDependencyResult:
     result_digest: str
     execution_id: "str | None" = None
+    result_payload: "StoredPayload | None" = None
 
     def __post_init__(self) -> None:
         if re.fullmatch(r"[0-9a-f]{64}", self.result_digest) is None:
             raise ValueError("task dependency result digest is invalid")
+        if self.result_payload is not None:
+            if not isinstance(self.result_payload, StoredPayload):
+                raise TypeError("task dependency result payload is invalid")
+            if self.result_payload.digest != self.result_digest:
+                raise ValueError("task dependency result payload digest does not match result")
 
 
 @dataclass(frozen=True, slots=True)
@@ -423,6 +448,46 @@ class TaskGraphView:
     graph_id: str
     status: TaskStatus
     nodes: "tuple[TaskNode, ...]"
+
+
+@dataclass(frozen=True, slots=True)
+class TaskGraphSnapshot:
+    graph_id: str
+    status: TaskStatus
+    nodes: "tuple[TaskNode, ...]"
+    node_states: "tuple[TaskNodeView, ...]"
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.graph_id, str) or not self.graph_id.strip():
+            raise ValueError("task graph snapshot id is required")
+        nodes = tuple(self.nodes)
+        states = tuple(self.node_states)
+        node_ids = tuple(node.node_id for node in nodes)
+        state_ids = tuple(state.node_id for state in states)
+        if len(set(node_ids)) != len(node_ids) or node_ids != state_ids:
+            raise ValueError("task graph snapshot node set is invalid")
+        for node, state in zip(nodes, states, strict=True):
+            if state.graph_id != self.graph_id or state.dependencies != node.dependencies:
+                raise ValueError("task graph snapshot node identity is invalid")
+        if _aggregate_graph_status(states) is not self.status:
+            raise ValueError("task graph snapshot aggregate status is invalid")
+        object.__setattr__(self, "nodes", nodes)
+        object.__setattr__(self, "node_states", states)
+
+
+def _aggregate_graph_status(nodes: "tuple[TaskNodeView, ...]") -> TaskStatus:
+    statuses = {node.status for node in nodes}
+    if not statuses or statuses <= {TaskStatus.SUCCEEDED}:
+        return TaskStatus.SUCCEEDED
+    if TaskStatus.FAILED in statuses:
+        return TaskStatus.FAILED
+    if TaskStatus.BLOCKED in statuses:
+        return TaskStatus.BLOCKED
+    if statuses <= {TaskStatus.CANCELLED, TaskStatus.SUCCEEDED}:
+        return TaskStatus.CANCELLED
+    if TaskStatus.RUNNING in statuses:
+        return TaskStatus.RUNNING
+    return TaskStatus.PENDING
 
 
 @dataclass(frozen=True, slots=True)
@@ -447,14 +512,19 @@ __all__ = [
     "TaskDependencyResult",
     "TaskGraph",
     "TaskGraphAdmission",
-    "TaskGraphLaunch",
     "TaskGraphHandle",
+    "TaskGraphLaunch",
     "TaskGraphLimits",
     "TaskGraphRequest",
     "TaskGraphResult",
+    "TaskGraphSnapshot",
     "TaskGraphValidationError",
     "TaskGraphView",
+    "TaskLease",
     "TaskNode",
+    "TaskNodeResult",
+    "TaskNodeView",
+    "TaskResultRecord",
     "TaskStatus",
     "TaskTerminalRecord",
     "ready_nodes",
