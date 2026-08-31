@@ -1,0 +1,152 @@
+name: TaskGraph observation closure fix
+
+on:
+  push:
+    branches:
+      - feat/ai-taskgraph-reliable-mixed-nodes
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  fix-and-verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+      - name: Apply minimal observation fix
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          path = Path("linktools-ai/src/linktools/ai/task/_service_impl.py")
+          text = path.read_text()
+
+          initial = '''            if _terminal(snapshot.status):
+              await self._request_graph_release(graph_id, tenant_id)
+          fingerprint = _observation_fingerprint(snapshot)
+          '''
+          initial_replacement = '''            if _terminal(snapshot.status):
+              await self._request_graph_release(graph_id, tenant_id)
+          snapshot, generation = await self._stabilize_local_terminal(
+              snapshot,
+              tenant_id=tenant_id,
+              generation=generation,
+          )
+          fingerprint = _observation_fingerprint(snapshot)
+          '''
+          if text.count(initial) != 1:
+              raise SystemExit(f"initial observation anchor count={text.count(initial)}")
+          text = text.replace(initial, initial_replacement, 1)
+
+          latest = '''            latest = await self._snapshot_with_terminal_release(
+              graph_id,
+              tenant_id=tenant_id,
+          )
+          latest_fingerprint = _observation_fingerprint(latest)
+          '''
+          latest_replacement = '''            latest = await self._snapshot_with_terminal_release(
+              graph_id,
+              tenant_id=tenant_id,
+          )
+          latest, generation = await self._stabilize_local_terminal(
+              latest,
+              tenant_id=tenant_id,
+              generation=generation,
+          )
+          latest_fingerprint = _observation_fingerprint(latest)
+          '''
+          if text.count(latest) != 1:
+              raise SystemExit(f"latest observation anchor count={text.count(latest)}")
+          text = text.replace(latest, latest_replacement, 1)
+
+          helper_anchor = '''    async def _snapshot_with_terminal_release(
+          self,
+          graph_id: str,
+          *,
+          tenant_id: str,
+      ) -> TaskGraphSnapshot:
+          '''
+          helper = '''    async def _stabilize_local_terminal(
+          self,
+          snapshot: TaskGraphSnapshot,
+          *,
+          tenant_id: str,
+          generation: "int | None",
+      ) -> "tuple[TaskGraphSnapshot, int | None]":
+          while _terminal(snapshot.status):
+              waiter = self._local_waiter
+              if waiter is None or not waiter.owns_graph(
+                  snapshot.graph_id,
+                  tenant_id=tenant_id,
+              ):
+                  return snapshot, generation
+              try:
+                  await self._wait_observation_opportunity(
+                      snapshot,
+                      tenant_id=tenant_id,
+                      after_generation=generation,
+                  )
+              except AIError:
+                  latest = await self._snapshot_with_terminal_release(
+                      snapshot.graph_id,
+                      tenant_id=tenant_id,
+                  )
+                  if _terminal(latest.status):
+                      return latest, self._local_activity_generation(
+                          snapshot.graph_id,
+                          tenant_id=tenant_id,
+                      )
+                  raise
+              generation = self._local_activity_generation(
+                  snapshot.graph_id,
+                  tenant_id=tenant_id,
+              )
+              snapshot = await self._snapshot_with_terminal_release(
+                  snapshot.graph_id,
+                  tenant_id=tenant_id,
+              )
+          return snapshot, generation
+
+''' + helper_anchor
+          if text.count(helper_anchor) != 1:
+              raise SystemExit(f"helper anchor count={text.count(helper_anchor)}")
+          text = text.replace(helper_anchor, helper, 1)
+          path.write_text(text)
+          PY
+          git diff --check
+          git diff -- linktools-ai/src/linktools/ai/task/_service_impl.py
+      - name: Install tooling
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -U -r requirements.txt
+      - name: Install editable
+        run: python manage.py install --editable
+      - name: Focused regression
+        run: |
+          python -m pytest -q \
+            tests/ai/test_task_runtime_recovery.py::test_sqlite_runtime_open_recovers_expired_task_lease \
+            tests/ai/test_task_sqlite_cas_convergence.py::test_sqlite_public_runtime_task_failure_blocks_dependency
+      - name: Check linktools-ai
+        run: python manage.py check linktools-ai
+      - name: Build linktools-ai
+        run: python manage.py build linktools-ai
+      - name: Verify linktools-ai
+        run: python manage.py verify linktools-ai
+      - name: Commit verified fix and remove temporary workflows
+        shell: bash
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git rm .github/workflows/taskgraph-observation-closure-fix.yml
+          if [ -f .github/workflows/taskgraph-final-verification.yml ]; then
+            git rm .github/workflows/taskgraph-final-verification.yml
+          fi
+          git add linktools-ai/src/linktools/ai/task/_service_impl.py
+          git diff --cached --check
+          git commit -m "fix(ai-task): stabilize terminal graph observation"
+          git push origin HEAD:feat/ai-taskgraph-reliable-mixed-nodes
