@@ -1,0 +1,87 @@
+name: TaskGraph CI fix patch
+
+on:
+  push:
+    branches:
+      - feat/ai-taskgraph-reliable-mixed-nodes
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feat/ai-taskgraph-reliable-mixed-nodes
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+      - name: Apply exact fixes
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          def replace_once(text: str, old: str, new: str, label: str) -> str:
+              count = text.count(old)
+              if count != 1:
+                  raise RuntimeError(f"{label}: expected one match, got {count}")
+              return text.replace(old, new, 1)
+
+          handler_path = Path('linktools-ai/src/linktools/ai/task/_handler.py')
+          handler = handler_path.read_text()
+          old = '''    function: Callable[[TaskNodeContext[AppT]], Awaitable[JsonValue]] = field(\n        repr=False,\n        compare=False,\n    )\n\n    def __post_init__(self) -> None:\n'''
+          new = '''    function: Callable[[TaskNodeContext[AppT]], Awaitable[JsonValue]] = field(\n        repr=False,\n        compare=False,\n    )\n    __orig_class__: object = field(\n        init=False,\n        repr=False,\n        compare=False,\n        default=None,\n    )\n\n    def __post_init__(self) -> None:\n'''
+          handler_path.write_text(replace_once(handler, old, new, 'TaskFunction generic slot'))
+
+          recovery_path = Path('linktools-ai/src/linktools/ai/runtime/state/_task_recovery_repository.py')
+          recovery = recovery_path.read_text()
+          start = recovery.index('    async def _projection_readback(')
+          end = recovery.index('    async def _sync_recovery_projection(', start)
+          section = recovery[start:end]
+          section = replace_once(
+              section,
+              '            states = await self._decode_task_nodes(node_records)\n',
+              '            states = await self._decode_many(node_records)\n',
+              'durable projection decoder',
+          )
+          recovery_path.write_text(recovery[:start] + section + recovery[end:])
+
+          test_path = Path('tests/ai/test_task_mixed_node_reliability.py')
+          test = test_path.read_text()
+          test = replace_once(
+              test,
+              '''    TaskFunction,\n    TaskGraph,\n    TaskGraphLaunch,\n    TaskGraphLimits,\n''',
+              '''    TaskFunction,\n    TaskGraph,\n    TaskGraphAdmission,\n    TaskGraphLaunch,\n    TaskGraphLimits,\n    TaskGraphRequest,\n''',
+              'test task admission imports',
+          )
+          test = replace_once(
+              test,
+              '''        repository = state.task.tasks\n        await repository.create_graph(graph, tenant_id="tenant")\n        runner = _BindingRunner()\n        launcher = LocalTaskGraphLauncher(repository, runner, owner="worker")\n        principal = trusted_workspace_principal("tenant")\n        await launcher.start(TaskGraphLaunch(graph, principal, TaskGraphLimits()))\n''',
+              '''        repository = state.task.tasks\n        principal = trusted_workspace_principal("tenant")\n        request = TaskGraphRequest(\n            graph,\n            principal,\n            idempotency_key="observation-graph-run-0001",\n        )\n        admission = TaskGraphAdmission.from_request(request)\n        await state.task.admissions.admit(admission, graph)\n        runner = _BindingRunner()\n        launcher = LocalTaskGraphLauncher(repository, runner, owner="worker")\n        await launcher.start(TaskGraphLaunch(graph, principal, TaskGraphLimits()))\n''',
+              'admitted generation regression setup',
+          )
+          test_path.write_text(test)
+          PY
+          python -m py_compile \
+            linktools-ai/src/linktools/ai/task/_handler.py \
+            linktools-ai/src/linktools/ai/runtime/state/_task_recovery_repository.py \
+            tests/ai/test_task_mixed_node_reliability.py
+          git diff --check
+      - name: Commit exact fixes and remove patch workflow
+        shell: bash
+        run: |
+          rm .github/workflows/taskgraph-ci-fix-patch.yml
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add \
+            linktools-ai/src/linktools/ai/task/_handler.py \
+            linktools-ai/src/linktools/ai/runtime/state/_task_recovery_repository.py \
+            tests/ai/test_task_mixed_node_reliability.py \
+            .github/workflows/taskgraph-ci-fix-patch.yml
+          git diff --cached --check
+          git commit -m 'fix(ai-task): close mixed-node CI regressions'
+          git push origin HEAD:feat/ai-taskgraph-reliable-mixed-nodes
