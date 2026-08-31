@@ -1,0 +1,40 @@
+name: TaskGraph cancel request restore
+
+on:
+  push:
+    branches:
+      - feat/ai-taskgraph-reliable-mixed-nodes
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feat/ai-taskgraph-reliable-mixed-nodes
+      - name: Restore CancelGraphRequest
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          path = Path('linktools-ai/src/linktools/ai/task/_graph.py')
+          text = path.read_text()
+          marker = '\ndef ready_nodes(graph: TaskGraph, completed: "frozenset[str]") -> "tuple[TaskNode, ...]":\n'
+          if marker not in text:
+              raise SystemExit('ready_nodes marker not found')
+          if 'class CancelGraphRequest:' in text:
+              raise SystemExit('CancelGraphRequest already present')
+          block = '''\n\n@dataclass(frozen=True, slots=True)\nclass CancelGraphRequest:\n    principal: Principal\n    idempotency_key: str\n    force: bool = False\n\n    def __post_init__(self) -> None:\n        validate_idempotency_key(self.idempotency_key)\n\n'''
+          path.write_text(text.replace(marker, block + marker.lstrip('\n'), 1))
+          PY
+      - name: Commit restore and remove patch workflow
+        run: |
+          rm .github/workflows/taskgraph-cancel-request-restore.yml
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add linktools-ai/src/linktools/ai/task/_graph.py .github/workflows/taskgraph-cancel-request-restore.yml
+          git commit -m 'fix(ai-task): restore cancel graph request'
+          git push origin HEAD:feat/ai-taskgraph-reliable-mixed-nodes
