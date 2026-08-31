@@ -25,14 +25,23 @@ jobs:
           python - <<'PY'
           from pathlib import Path
 
+          def replace_once(text: str, old: str, new: str, label: str) -> str:
+              count = text.count(old)
+              if count != 1:
+                  raise AssertionError(f"{label}: expected one match, got {count}")
+              return text.replace(old, new, 1)
+
           local_path = Path('linktools-ai/src/linktools/ai/task/_local.py')
           text = local_path.read_text()
-          old = 'from collections.abc import Mapping\n'
-          new = 'from collections.abc import Awaitable, Callable, Mapping\n'
-          assert text.count(old) == 1
-          text = text.replace(old, new, 1)
-
-          old = '''class _TaskNodeRunControlImpl:
+          text = replace_once(
+              text,
+              'from collections.abc import Mapping\n',
+              'from collections.abc import Awaitable, Callable, Mapping\n',
+              'local imports',
+          )
+          text = replace_once(
+              text,
+              '''class _TaskNodeRunControlImpl:
               def __init__(
                   self,
                   repository: _TaskRepository,
@@ -53,8 +62,8 @@ jobs:
                           tenant_id=self._tenant_id,
                           execution_id=execution_id,
                       )
-          '''
-          new = '''class _TaskNodeRunControlImpl:
+          ''',
+              '''class _TaskNodeRunControlImpl:
               def __init__(
                   self,
                   repository: _TaskRepository,
@@ -78,11 +87,12 @@ jobs:
                           execution_id=execution_id,
                       )
                   await self._on_activity()
-          '''
-          assert text.count(old) == 1
-          text = text.replace(old, new, 1)
-
-          old = '''    def owns_graph(self, graph_id: str, *, tenant_id: str) -> bool:
+          ''',
+              'run control activity',
+          )
+          text = replace_once(
+              text,
+              '''    def owns_graph(self, graph_id: str, *, tenant_id: str) -> bool:
                   run = self._runs.get((tenant_id, graph_id))
                   return run is not None and (not run.closed or run.failure is not None)
 
@@ -109,8 +119,8 @@ jobs:
                       )
                   if run.failure is not None:
                       raise AIError(run.failure.code, safe_details=dict(run.failure.safe_details))
-          '''
-          new = '''    def owns_graph(self, graph_id: str, *, tenant_id: str) -> bool:
+          ''',
+              '''    def owns_graph(self, graph_id: str, *, tenant_id: str) -> bool:
                   run = self._runs.get((tenant_id, graph_id))
                   return run is not None and (not run.closed or run.failure is not None)
 
@@ -150,40 +160,44 @@ jobs:
                       )
                   if run.failure is not None:
                       raise AIError(run.failure.code, safe_details=dict(run.failure.safe_details))
-          '''
-          assert text.count(old) == 1
-          text = text.replace(old, new, 1)
-
-          old = '''                    inflight[node.node_id] = _InflightNode(task, lease_state)
+          ''',
+              'lossless activity wait',
+          )
+          text = replace_once(
+              text,
+              '''                    inflight[node.node_id] = _InflightNode(task, lease_state)
                   if inflight:
-          '''
-          new = '''                    inflight[node.node_id] = _InflightNode(task, lease_state)
+          ''',
+              '''                    inflight[node.node_id] = _InflightNode(task, lease_state)
                       await self._notify(run)
                   if inflight:
-          '''
-          assert text.count(old) == 1
-          text = text.replace(old, new, 1)
-
-          old = '''        control = _TaskNodeRunControlImpl(
+          ''',
+              'claim activity signal',
+          )
+          text = replace_once(
+              text,
+              '''        control = _TaskNodeRunControlImpl(
                   self._repository,
                   lease_state,
                   tenant_id=tenant_id,
               )
-          '''
-          new = '''        control = _TaskNodeRunControlImpl(
+          ''',
+              '''        control = _TaskNodeRunControlImpl(
                   self._repository,
                   lease_state,
                   tenant_id=tenant_id,
                   on_activity=lambda: self._notify(run),
               )
-          '''
-          assert text.count(old) == 1
-          text = text.replace(old, new, 1)
+          ''',
+              'bind activity callback',
+          )
           local_path.write_text(text)
 
           service_path = Path('linktools-ai/src/linktools/ai/task/_service_impl.py')
           text = service_path.read_text()
-          old = '''class _LocalTaskWaiter(Protocol):
+          text = replace_once(
+              text,
+              '''class _LocalTaskWaiter(Protocol):
               def owns_graph(self, graph_id: str, *, tenant_id: str) -> bool: ...
 
               async def wait_graph_activity(
@@ -192,8 +206,8 @@ jobs:
                   *,
                   tenant_id: str,
               ) -> None: ...
-          '''
-          new = '''class _LocalTaskWaiter(Protocol):
+          ''',
+              '''class _LocalTaskWaiter(Protocol):
               def owns_graph(self, graph_id: str, *, tenant_id: str) -> bool: ...
 
               def graph_activity_generation(
@@ -210,37 +224,53 @@ jobs:
                   tenant_id: str,
                   after_generation: int,
               ) -> None: ...
-          '''
-          assert text.count(old) == 1
-          text = text.replace(old, new, 1)
-
-          old = '''        tenant_id = principal.tenant_id
+          ''',
+              'waiter protocol',
+          )
+          text = replace_once(
+              text,
+              '''    async def _observe_graph(
+              self,
+              graph_id: str,
+              *,
+              principal: Principal,
+          ) -> AsyncIterator[TaskGraphSnapshot]:
+              tenant_id = principal.tenant_id
               async with self._graph_consumer(graph_id, tenant_id):
-          '''
-          new = '''        tenant_id = principal.tenant_id
+          ''',
+              '''    async def _observe_graph(
+              self,
+              graph_id: str,
+              *,
+              principal: Principal,
+          ) -> AsyncIterator[TaskGraphSnapshot]:
+              tenant_id = principal.tenant_id
               generation = self._local_activity_generation(graph_id, tenant_id=tenant_id)
               async with self._graph_consumer(graph_id, tenant_id):
-          '''
-          assert text.count(old) == 1
-          text = text.replace(old, new, 1)
-
-          old = '''                await self._wait_observation_opportunity(snapshot, tenant_id=tenant_id)
-          '''
-          new = '''                await self._wait_observation_opportunity(
+          ''',
+              'initial observation generation',
+          )
+          text = replace_once(
+              text,
+              '                await self._wait_observation_opportunity(snapshot, tenant_id=tenant_id)\n',
+              '''                await self._wait_observation_opportunity(
                       snapshot,
                       tenant_id=tenant_id,
                       after_generation=generation,
                   )
-          '''
-          assert text.count(old) == 1
-          text = text.replace(old, new, 1)
-
-          old = '''            latest = await self._snapshot_with_terminal_release(
+          ''',
+              'wait generation argument',
+          )
+          text = replace_once(
+              text,
+              '''                raise
+              latest = await self._snapshot_with_terminal_release(
                   graph_id,
                   tenant_id=tenant_id,
               )
-          '''
-          new = '''            generation = self._local_activity_generation(
+          ''',
+              '''                raise
+              generation = self._local_activity_generation(
                   graph_id,
                   tenant_id=tenant_id,
               )
@@ -248,11 +278,12 @@ jobs:
                   graph_id,
                   tenant_id=tenant_id,
               )
-          '''
-          assert text.count(old) == 1
-          text = text.replace(old, new, 1)
-
-          old = '''    async def _wait_observation_opportunity(
+          ''',
+              'next observation generation',
+          )
+          text = replace_once(
+              text,
+              '''    async def _wait_observation_opportunity(
               self,
               snapshot: TaskGraphSnapshot,
               *,
@@ -275,8 +306,8 @@ jobs:
                   )
               except asyncio.TimeoutError:
                   return
-          '''
-          new = '''    def _local_activity_generation(
+          ''',
+              '''    def _local_activity_generation(
               self,
               graph_id: str,
               *,
@@ -288,51 +319,51 @@ jobs:
               return waiter.graph_activity_generation(graph_id, tenant_id=tenant_id)
 
               async def _wait_observation_opportunity(
-                  self,
-                  snapshot: TaskGraphSnapshot,
-                  *,
-                  tenant_id: str,
-                  after_generation: int | None,
-              ) -> None:
-                  waiter = self._local_waiter
-                  if waiter is None or not waiter.owns_graph(snapshot.graph_id, tenant_id=tenant_id):
-                      await asyncio.sleep(_GRAPH_OBSERVATION_RECHECK_SECONDS)
-                      return
-                  if after_generation is None:
-                      return
-                  timeout = _nearest_live_lease_delay(snapshot)
-                  if timeout is None:
-                      await waiter.wait_graph_activity(
+              self,
+              snapshot: TaskGraphSnapshot,
+              *,
+              tenant_id: str,
+              after_generation: int | None,
+          ) -> None:
+              waiter = self._local_waiter
+              if waiter is None or not waiter.owns_graph(snapshot.graph_id, tenant_id=tenant_id):
+                  await asyncio.sleep(_GRAPH_OBSERVATION_RECHECK_SECONDS)
+                  return
+              if after_generation is None:
+                  return
+              timeout = _nearest_live_lease_delay(snapshot)
+              if timeout is None:
+                  await waiter.wait_graph_activity(
+                      snapshot.graph_id,
+                      tenant_id=tenant_id,
+                      after_generation=after_generation,
+                  )
+                  return
+              if timeout <= 0:
+                  return
+              try:
+                  await asyncio.wait_for(
+                      waiter.wait_graph_activity(
                           snapshot.graph_id,
                           tenant_id=tenant_id,
                           after_generation=after_generation,
-                      )
-                      return
-                  if timeout <= 0:
-                      return
-                  try:
-                      await asyncio.wait_for(
-                          waiter.wait_graph_activity(
-                              snapshot.graph_id,
-                              tenant_id=tenant_id,
-                              after_generation=after_generation,
-                          ),
-                          timeout=timeout,
-                      )
-                  except asyncio.TimeoutError:
-                      return
-          '''
-          assert text.count(old) == 1
-          text = text.replace(old, new, 1)
-
-          old = '''        if state.lease_expires_at is not None and state.lease_expires_at > now
-          '''
-          new = '''        if state.status is TaskStatus.RUNNING
+                      ),
+                      timeout=timeout,
+                  )
+              except asyncio.TimeoutError:
+                  return
+          ''',
+              'observation wait implementation',
+          )
+          text = replace_once(
+              text,
+              '        if state.lease_expires_at is not None and state.lease_expires_at > now\n',
+              '''        if state.status is TaskStatus.RUNNING
               and state.lease_expires_at is not None
               and state.lease_expires_at > now
-          '''
-          assert text.count(old) == 1
-          text = text.replace(old, new, 1)
+          ''',
+              'running lease deadline',
+          )
           service_path.write_text(text)
           PY
           python -m py_compile \
