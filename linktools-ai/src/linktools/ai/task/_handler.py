@@ -99,6 +99,12 @@ class TaskFunction(Generic[AppT]):
         repr=False,
         compare=False,
     )
+    __orig_class__: object = field(
+        init=False,
+        repr=False,
+        compare=False,
+        default=None,
+    )
 
     def __post_init__(self) -> None:
         if (

@@ -15,8 +15,10 @@ from linktools.ai.task import (
     LocalTaskGraphLauncher,
     TaskFunction,
     TaskGraph,
+    TaskGraphAdmission,
     TaskGraphLaunch,
     TaskGraphLimits,
+    TaskGraphRequest,
     TaskNode,
     TaskNodeContext,
     TaskNodeRunControl,
@@ -237,10 +239,16 @@ async def test_local_activity_generation_does_not_lose_pre_wait_bind_signal() ->
     try:
         graph = TaskGraph("observation-graph", (TaskNode("node"),))
         repository = state.task.tasks
-        await repository.create_graph(graph, tenant_id="tenant")
+        principal = trusted_workspace_principal("tenant")
+        request = TaskGraphRequest(
+            graph,
+            principal,
+            idempotency_key="observation-graph-run-0001",
+        )
+        admission = TaskGraphAdmission.from_request(request)
+        await state.task.admissions.admit(admission, graph)
         runner = _BindingRunner()
         launcher = LocalTaskGraphLauncher(repository, runner, owner="worker")
-        principal = trusted_workspace_principal("tenant")
         await launcher.start(TaskGraphLaunch(graph, principal, TaskGraphLimits()))
         await asyncio.wait_for(runner.entered.wait(), 1)
 

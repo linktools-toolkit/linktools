@@ -367,7 +367,7 @@ class DurableTaskRepositoryImpl(TaskRepositoryImpl):
                     kind="task_node",
                 )
             )
-            states = await self._decode_task_nodes(node_records)
+            states = await self._decode_many(node_records)
             snapshot = TaskGraphSnapshot(
                 graph.graph_id,
                 _graph_status(states),
