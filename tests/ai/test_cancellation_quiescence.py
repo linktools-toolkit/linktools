@@ -347,14 +347,17 @@ async def test_task_launcher_shutdown_drains_runner_owned_cancellation_cleanup()
             return () if cleanup_task.done() else (cleanup_task,)
 
         @property
+        def pending_cancelled_tasks(self) -> tuple[asyncio.Task[object], ...]:
+            return ()
+
+        @property
         def background_failure(self) -> None:
             return None
 
     launcher = object.__new__(LocalTaskGraphLauncher)
     launcher._accepting = True
-    launcher._graphs = {}
-    launcher._wait_observations = {}
-    launcher._detached_tasks = set()
+    launcher._runs = {}
+    launcher._lock = asyncio.Lock()
     launcher._runner = Runner()
 
     shutdown = asyncio.create_task(launcher.shutdown())
@@ -397,9 +400,8 @@ async def test_task_launcher_shutdown_rejects_runner_cancelled_leftover() -> Non
 
     launcher = object.__new__(LocalTaskGraphLauncher)
     launcher._accepting = True
-    launcher._graphs = {}
-    launcher._wait_observations = {}
-    launcher._detached_tasks = set()
+    launcher._runs = {}
+    launcher._lock = asyncio.Lock()
     launcher._runner = Runner()
 
     try:
