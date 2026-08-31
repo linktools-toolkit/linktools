@@ -26,7 +26,9 @@ class ModelBinding(Protocol):
     @property
     def fingerprint(self) -> str: ...
 
-    def materialize(self) -> Model: ...
+    def materialize(self) -> Model:
+        """Build the provider model; expected configuration failures raise AIError."""
+        ...
 
 
 class ModelResolver(Protocol):

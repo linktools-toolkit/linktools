@@ -136,12 +136,23 @@ class DurableTaskRepositoryImpl(TaskRepositoryImpl):
         tenant_id: str,
         error_code: str,
         error_digest: str,
+        execution_id: str | None = None,
     ) -> TaskTerminalRecord:
         while True:
             try:
-                return await super().fail(
+                if execution_id is None:
+                    return await super().fail(
+                        lease,
+                        tenant_id=tenant_id,
+                        error_code=error_code,
+                        error_digest=error_digest,
+                    )
+                return await self._finish(
                     lease,
                     tenant_id=tenant_id,
+                    status=TaskStatus.FAILED,
+                    execution_id=execution_id,
+                    result_digest=None,
                     error_code=error_code,
                     error_digest=error_digest,
                 )

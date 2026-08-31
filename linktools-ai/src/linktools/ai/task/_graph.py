@@ -227,11 +227,28 @@ class TaskCompletionLedger:
             TaskTerminalRecord(node_id, owner, fence, TaskStatus.SUCCEEDED, result_digest, None, None, execution_id=execution_id)
         )
 
-    def fail(self, node_id: str, owner: str, fence: int, error_code: str, error_digest: str) -> TaskTerminalRecord:
+    def fail(
+        self,
+        node_id: str,
+        owner: str,
+        fence: int,
+        error_code: str,
+        error_digest: str,
+        execution_id: "str | None" = None,
+    ) -> TaskTerminalRecord:
         if not error_code or not error_digest:
             raise ValueError("failure code and digest are required")
         return self._apply(
-            TaskTerminalRecord(node_id, owner, fence, TaskStatus.FAILED, None, error_code, error_digest)
+            TaskTerminalRecord(
+                node_id,
+                owner,
+                fence,
+                TaskStatus.FAILED,
+                None,
+                error_code,
+                error_digest,
+                execution_id=execution_id,
+            )
         )
 
     def get(self, node_id: str) -> 'TaskTerminalRecord | None':
