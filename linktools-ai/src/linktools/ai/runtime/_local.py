@@ -3753,12 +3753,27 @@ class LocalExecutionBackend:
             operation_result = _execution_operation_result(committed.status)
             _logger.debug("local execution completed: execution=%s run=%s", execution_id, run_id)
         except asyncio.CancelledError:
-            current = await self._execution.executions.get(execution_id, tenant_id=original.tenant_id)
+            current = await self._execution.executions.get(
+                execution_id,
+                tenant_id=original.tenant_id,
+            )
             if current is not None and current.status is ExecutionStatus.FINALIZING:
                 raise
-            if current is not None and current.status not in {ExecutionStatus.SUCCEEDED, ExecutionStatus.FAILED, ExecutionStatus.CANCELLED}:
-                current = await self._commit_terminal(current, ExecutionStatus.CANCELLED, None, ErrorCode.EXECUTION_CANCELLED.value, StopReason.CANCELLED, run_id=run_id)
-            if current is not None:
+            if current is not None and current.status is ExecutionStatus.CANCELLING:
+                current = await self._commit_terminal(
+                    current,
+                    ExecutionStatus.CANCELLED,
+                    None,
+                    ErrorCode.EXECUTION_CANCELLED.value,
+                    StopReason.CANCELLED,
+                    run_id=run_id,
+                )
+            if current is not None and current.status in {
+                ExecutionStatus.SUCCEEDED,
+                ExecutionStatus.FAILED,
+                ExecutionStatus.CANCELLED,
+                ExecutionStatus.CANCELLING,
+            }:
                 operation_result = _execution_operation_result(current.status)
             raise
         except Exception:
