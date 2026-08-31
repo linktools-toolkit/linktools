@@ -71,6 +71,7 @@ from ._repositories import (
     RecoveryCheckpointRepositoryImpl,
     SessionRepositoryImpl,
     ToolRepositoryImpl,
+    _tool_admission_matches,
 )
 from ._plan import RuntimeDomain
 from ._steps import (
@@ -1354,7 +1355,8 @@ class RuntimeStateCommands:
         error_code: str | None = None,
         error_payload: StoredPayload | None = None,
     ) -> ToolOperationRecord:
-        if self._tools is None:
+        tools = self._tools
+        if tools is None:
             raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
         if result_payload is None and error_code is None:
             raise ValueError("tool terminal command requires a result or error")
@@ -1364,17 +1366,13 @@ class RuntimeStateCommands:
             else ToolOperationStatus.FAILED
         )
         terminal_error_code = error_code or ErrorCode.EXECUTION_FAILED.value
-        _logger.debug(
-            "tool terminal checkpoint requested: operation=%s status=%s",
-            tool_operation_id,
-            expected_status.value,
-        )
-        stores = [self._tools.state_store]
+        stores = [tools.state_store]
+        cancelled = False
 
         async def callback(group: StateGroupTransaction) -> ToolOperationRecord:
-            transaction = group.transaction(self._tools.state_store)
+            transaction = group.transaction(tools.state_store)
             if result_payload is not None:
-                return await self._tools.complete_in_transaction(
+                return await tools.complete_in_transaction(
                     transaction,
                     tool_operation_id,
                     tenant_id=tenant_id,
@@ -1382,123 +1380,172 @@ class RuntimeStateCommands:
                     fence=fence,
                     result_payload=result_payload,
                 )
-            return await self._tools.fail_in_transaction(
+            return await tools.fail_in_transaction(
                 transaction,
                 tool_operation_id,
                 tenant_id=tenant_id,
                 owner=owner,
                 fence=fence,
-                error_code=error_code or ErrorCode.EXECUTION_FAILED.value,
+                error_code=terminal_error_code,
                 error_payload=error_payload,
             )
 
         async def readback() -> CommitObservation[ToolOperationRecord]:
-            try:
-                observed = await self._tools.get_operation(
-                    tool_operation_id,
-                    tenant_id=tenant_id,
-                )
-                if observed is None:
-                    return CommitObservation(DurableCommitState.NOT_COMMITTED)
-                payload_matches = (
-                    observed.result_payload == result_payload
-                    if result_payload is not None
-                    else observed.error_code == terminal_error_code
-                    and observed.error_payload == error_payload
-                )
-                if observed.status is expected_status:
-                    if not payload_matches:
+            observed = await tools.get_operation(
+                tool_operation_id,
+                tenant_id=tenant_id,
+            )
+            if observed is None:
+                return CommitObservation(DurableCommitState.NOT_COMMITTED)
+            if observed.status is expected_status:
+                if observed.owner != owner or observed.fence != fence:
+                    return CommitObservation(
+                        DurableCommitState.NOT_COMMITTED,
+                        error=AIError(ErrorCode.TOOL_OPERATION_CONFLICT),
+                    )
+                if result_payload is not None:
+                    if observed.result_payload != result_payload:
                         return CommitObservation(
-                            DurableCommitState.PARTIAL_INTEGRITY_ERROR,
+                            DurableCommitState.NOT_COMMITTED,
                             error=AIError(ErrorCode.TOOL_RESULT_CONFLICT),
                         )
-                    return CommitObservation(
-                        DurableCommitState.COMMITTED,
-                        value=observed,
-                    )
-                if (
-                    observed.status is ToolOperationStatus.CLAIMED
-                    and observed.owner == owner
-                    and observed.fence == fence
+                elif (
+                    observed.error_code != terminal_error_code
+                    or observed.error_payload != error_payload
                 ):
-                    return CommitObservation(DurableCommitState.NOT_COMMITTED)
-                return CommitObservation(DurableCommitState.UNRESOLVED)
-            except AIError as error:
-                if error.code is ErrorCode.STORAGE_INTEGRITY_ERROR:
                     return CommitObservation(
-                        DurableCommitState.PARTIAL_INTEGRITY_ERROR,
-                        error=error,
+                        DurableCommitState.NOT_COMMITTED,
+                        error=AIError(ErrorCode.TOOL_OPERATION_CONFLICT),
                     )
                 return CommitObservation(
-                    DurableCommitState.UNRESOLVED,
-                    error=error,
+                    DurableCommitState.COMMITTED,
+                    value=observed,
                 )
+            if (
+                observed.status is ToolOperationStatus.CLAIMED
+                and observed.owner == owner
+                and observed.fence == fence
+            ):
+                return CommitObservation(DurableCommitState.NOT_COMMITTED)
+            if observed.status is ToolOperationStatus.EFFECT_UNKNOWN:
+                return CommitObservation(
+                    DurableCommitState.NOT_COMMITTED,
+                    error=AIError(ErrorCode.TOOL_EFFECT_UNKNOWN),
+                )
+            return CommitObservation(
+                DurableCommitState.NOT_COMMITTED,
+                error=AIError(ErrorCode.TOOL_OPERATION_CONFLICT),
+            )
 
-        result = await run_durable_commit(
-            lambda: stores[0].storage_group.mutate(stores, callback),
-            readback,
-            background_tasks=self._background_tasks,
-        )
-        if result.state is DurableCommitState.COMMITTED:
-            if result.value is None:
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            if result.cancelled:
-                raise asyncio.CancelledError
-            return result.value
-        if result.state is DurableCommitState.NOT_COMMITTED:
-            if result.error is not None:
+        while True:
+            result = await run_durable_commit(
+                lambda: stores[0].storage_group.mutate(stores, callback),
+                readback,
+                background_tasks=self._background_tasks,
+            )
+            cancelled = cancelled or result.cancelled
+            if result.state is DurableCommitState.COMMITTED:
+                if result.value is None:
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                if cancelled:
+                    raise asyncio.CancelledError
+                return result.value
+            if result.state is DurableCommitState.NOT_COMMITTED:
+                if (
+                    isinstance(result.error, AIError)
+                    and result.error.code is ErrorCode.STORAGE_CONFLICT
+                ):
+                    await asyncio.sleep(0)
+                    continue
+                if result.error is not None:
+                    raise result.error
+                raise AIError(ErrorCode.STORAGE_CONFLICT)
+            if result.state is DurableCommitState.PARTIAL_INTEGRITY_ERROR:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from result.error
+            if isinstance(result.error, AIError) and result.error.code in {
+                ErrorCode.TOOL_OPERATION_CONFLICT,
+                ErrorCode.TOOL_RESULT_CONFLICT,
+                ErrorCode.TOOL_EFFECT_UNKNOWN,
+            }:
                 raise result.error
-            raise AIError(ErrorCode.STORAGE_CONFLICT)
-        if result.state is DurableCommitState.PARTIAL_INTEGRITY_ERROR:
-            raise AIError(
-                ErrorCode.STORAGE_INTEGRITY_ERROR,
-                "tool terminal commit left partial durable state",
-            ) from result.error
-        raise AIError(ErrorCode.STORAGE_COMMIT_UNKNOWN) from result.error
+            raise AIError(ErrorCode.STORAGE_COMMIT_UNKNOWN) from result.error
 
     async def commit_tool_admission(
         self,
         request: ToolOperationAdmission,
     ) -> ToolOperationRecord:
-        if self._tools is None:
-            raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
-        _logger.debug(
-            "tool admission checkpoint requested: operation=%s",
-            request.tool_operation_id,
-        )
-        stores = [self._tools.state_store]
-
-        async def callback(group: StateGroupTransaction) -> ToolOperationRecord:
-            operation = await self._tools.admit_in_transaction(
-                group.transaction(self._tools.state_store),
-                request,
-            )
-            return operation
-
-        try:
-            return await stores[0].storage_group.mutate(stores, callback)
-        except AIError as error:
-            if error.code is not ErrorCode.STORAGE_COMMIT_UNKNOWN:
-                raise
-            observed = await self._tools.get_operation(
+        async def attempt() -> ToolOperationRecord:
+            if self._tools is None:
+                raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+            _logger.debug(
+                "tool admission checkpoint requested: operation=%s",
                 request.tool_operation_id,
-                tenant_id=request.tenant_id,
             )
-            if observed is None:
+            stores = [self._tools.state_store]
+
+            async def callback(group: StateGroupTransaction) -> ToolOperationRecord:
+                operation = await self._tools.admit_in_transaction(
+                    group.transaction(self._tools.state_store),
+                    request,
+                )
+                return operation
+
+            try:
                 return await stores[0].storage_group.mutate(stores, callback)
-            if not _tool_admission_matches(observed, request):
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
-            if observed.status is ToolOperationStatus.EFFECT_UNKNOWN:
-                raise AIError(ErrorCode.TOOL_EFFECT_UNKNOWN) from error
-            if observed.status is ToolOperationStatus.CANCELLED:
-                raise AIError(ErrorCode.TOOL_OPERATION_CONFLICT) from error
-            if observed.status in {
-                ToolOperationStatus.CLAIMED,
-                ToolOperationStatus.COMPLETED,
-                ToolOperationStatus.FAILED,
-            }:
-                return observed
-            return await stores[0].storage_group.mutate(stores, callback)
+            except AIError as error:
+                if error.code is not ErrorCode.STORAGE_COMMIT_UNKNOWN:
+                    raise
+                observed = await self._tools.get_operation(
+                    request.tool_operation_id,
+                    tenant_id=request.tenant_id,
+                )
+                if observed is None:
+                    return await stores[0].storage_group.mutate(stores, callback)
+                if not _tool_admission_matches(observed, request):
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
+                if observed.status is ToolOperationStatus.EFFECT_UNKNOWN:
+                    raise AIError(ErrorCode.TOOL_EFFECT_UNKNOWN) from error
+                if observed.status is ToolOperationStatus.CANCELLED:
+                    raise AIError(ErrorCode.TOOL_OPERATION_CONFLICT) from error
+                if observed.status in {
+                    ToolOperationStatus.CLAIMED,
+                    ToolOperationStatus.COMPLETED,
+                    ToolOperationStatus.FAILED,
+                }:
+                    return observed
+                return await stores[0].storage_group.mutate(stores, callback)
+
+        while True:
+            try:
+                return await attempt()
+            except AIError as error:
+                if error.code is not ErrorCode.STORAGE_CONFLICT:
+                    raise
+                tools = self._tools
+                if tools is None:
+                    raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY) from error
+                observed = await tools.get_operation(
+                    request.tool_operation_id,
+                    tenant_id=request.tenant_id,
+                )
+                if observed is None:
+                    await asyncio.sleep(0)
+                    continue
+                if not _tool_admission_matches(observed, request):
+                    raise AIError(ErrorCode.IDEMPOTENCY_CONFLICT) from error
+                if observed.status is ToolOperationStatus.EFFECT_UNKNOWN:
+                    raise AIError(ErrorCode.TOOL_EFFECT_UNKNOWN) from error
+                if observed.status is ToolOperationStatus.CANCELLED:
+                    raise AIError(ErrorCode.TOOL_OPERATION_CONFLICT) from error
+                if observed.status in {
+                    ToolOperationStatus.COMPLETED,
+                    ToolOperationStatus.FAILED,
+                }:
+                    return observed
+                # CLAIMED/PENDING must be classified by a fresh repository
+                # transaction so lease expiry and owner takeover semantics are
+                # never guessed from an out-of-transaction readback.
+                await asyncio.sleep(0)
 
     async def commit_terminal_checkpoint(
         self,
@@ -3007,21 +3054,6 @@ def _same_group(stores: Sequence[StateStore]) -> bool:
     return bool(stores) and all(store.storage_group is stores[0].storage_group for store in stores[1:])
 
 
-def _tool_admission_matches(
-    operation: ToolOperationRecord,
-    request: ToolOperationAdmission,
-) -> bool:
-    return (
-        operation.tenant_id == request.tenant_id
-        and operation.tool_operation_id == request.tool_operation_id
-        and operation.step_run_id in {request.step_run_id, request.recovery_step_run_id}
-        and operation.tool_call_id == request.tool_call_id
-        and operation.idempotency_key_digest == request.idempotency_key_digest
-        and operation.tool_name == request.tool_name
-        and operation.arguments_digest == request.arguments_digest
-        and operation.binding_digest == request.binding_digest
-        and operation.replay_safe is request.replay_safe
-    )
 
 
 def _recovery_completion_predecessor(

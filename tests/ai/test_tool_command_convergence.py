@@ -11,7 +11,6 @@ from linktools.ai.core import ToolOperationStatus, canonical_sha256
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.runtime._tool import ToolOperationRecord
 from linktools.ai.runtime.state import RuntimeStateCommands, ToolOperationAdmission
-from linktools.ai.runtime.state._commands import RuntimeStateCommands as BaseRuntimeStateCommands
 from linktools.ai.storage import StoredPayload
 
 
@@ -59,9 +58,37 @@ def _admission() -> ToolOperationAdmission:
     )
 
 
+class _AdmissionTransaction:
+    def __init__(self) -> None:
+        self.value = object()
+
+    def transaction(self, store: object) -> object:
+        del store
+        return self.value
+
+
+class _AdmissionGroup:
+    def __init__(self) -> None:
+        self.attempts = 0
+
+    async def mutate(self, stores, callback):
+        del stores
+        self.attempts += 1
+        if self.attempts == 1:
+            raise AIError(ErrorCode.STORAGE_CONFLICT)
+        return await callback(_AdmissionTransaction())
+
+
+class _AdmissionStateStore:
+    def __init__(self, group: _AdmissionGroup) -> None:
+        self.storage_group = group
+
+
 class _AdmissionTools:
     def __init__(self, current: ToolOperationRecord) -> None:
         self.current = current
+        self.group = _AdmissionGroup()
+        self.state_store = _AdmissionStateStore(self.group)
 
     async def get_operation(
         self,
@@ -72,31 +99,26 @@ class _AdmissionTools:
         del tool_operation_id, tenant_id
         return self.current
 
-
-@pytest.mark.asyncio
-async def test_tool_admission_conflict_reenters_fresh_repository_attempt(monkeypatch) -> None:
-    current = _record()
-    attempts = 0
-
-    async def admit(
-        self: BaseRuntimeStateCommands,
+    async def admit_in_transaction(
+        self,
+        transaction: object,
         request: ToolOperationAdmission,
     ) -> ToolOperationRecord:
-        nonlocal attempts
-        del self, request
-        attempts += 1
-        if attempts == 1:
-            raise AIError(ErrorCode.STORAGE_CONFLICT)
-        return current
+        del transaction, request
+        return self.current
 
-    monkeypatch.setattr(BaseRuntimeStateCommands, "commit_tool_admission", admit)
+
+@pytest.mark.asyncio
+async def test_tool_admission_conflict_reenters_fresh_repository_attempt() -> None:
+    current = _record()
+    tools = _AdmissionTools(current)
     commands = object.__new__(RuntimeStateCommands)
-    commands._tools = _AdmissionTools(current)
+    commands._tools = tools
 
     result = await commands.commit_tool_admission(_admission())
 
     assert result == current
-    assert attempts == 2
+    assert tools.group.attempts == 2
 
 
 class _GroupTransaction:
