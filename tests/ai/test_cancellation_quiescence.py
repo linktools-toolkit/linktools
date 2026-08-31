@@ -369,7 +369,7 @@ async def test_task_launcher_shutdown_drains_runner_owned_cancellation_cleanup()
 
 
 @pytest.mark.asyncio
-async def test_task_launcher_shutdown_rejects_runner_cancelled_leftover() -> None:
+async def test_task_launcher_shutdown_drains_runner_cancelled_leftover() -> None:
     started = asyncio.Event()
     release = asyncio.Event()
 
@@ -404,11 +404,10 @@ async def test_task_launcher_shutdown_rejects_runner_cancelled_leftover() -> Non
     launcher._lock = asyncio.Lock()
     launcher._runner = Runner()
 
-    try:
-        with pytest.raises(AIError) as error:
-            await launcher.shutdown()
-        assert error.value.code is ErrorCode.STORAGE_RECOVERY_REQUIRED
-        assert error.value.safe_details["phase"] == "task_graph_shutdown"
-    finally:
-        release.set()
-        await task
+    shutdown = asyncio.create_task(launcher.shutdown())
+    await asyncio.sleep(0)
+    assert not shutdown.done()
+
+    release.set()
+    await shutdown
+    assert task.done()
