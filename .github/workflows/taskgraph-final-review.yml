@@ -21,132 +21,84 @@ jobs:
         run: |
           python - <<'PY'
           from pathlib import Path
+          import re
 
-          def replace_once(path: str, old: str, new: str) -> None:
+          def literal(path: str, old: str, new: str) -> None:
               file = Path(path)
               text = file.read_text()
-              count = text.count(old)
-              if count != 1:
-                  raise SystemExit(f"{path}: expected one match, got {count}: {old[:120]!r}")
+              if text.count(old) != 1:
+                  raise SystemExit(f"{path}: literal anchor count={text.count(old)}: {old[:100]!r}")
               file.write_text(text.replace(old, new, 1))
 
-          def replace_between(
-              path: str,
-              start: str,
-              end: str,
-              replacement: str,
-              *,
-              after: str | None = None,
-          ) -> None:
+          def regex(path: str, pattern: str, replacement: str) -> None:
               file = Path(path)
               text = file.read_text()
-              offset = text.index(after) if after is not None else 0
-              left = text.index(start, offset)
-              right = text.index(end, left)
+              updated, count = re.subn(pattern, replacement, text, count=1, flags=re.M | re.S)
+              if count != 1:
+                  raise SystemExit(f"{path}: regex anchor count={count}: {pattern[:100]!r}")
+              file.write_text(updated)
+
+          def class_method(path: str, class_name: str, method: str, next_method: str, replacement: str) -> None:
+              file = Path(path)
+              text = file.read_text()
+              class_start = text.index(f"class {class_name}")
+              left = text.index(f"    async def {method}(\n", class_start)
+              right = text.index(f"    async def {next_method}(\n", left)
               file.write_text(text[:left] + replacement + text[right:])
 
-          # TaskResultRecord is a v1 wire type. It needs a paired custom encoder/decoder
-          # because StoredPayload is only imported for TaskGraph annotations under TYPE_CHECKING.
           codec = "linktools-ai/src/linktools/ai/runtime/state/_codec.py"
-          replace_once(
+          literal(
               codec,
-              '''def _decode_v1_task_result(\n''',
-              '''def _encode_v1_task_result(\n    value: object,\n    codec: "_VersionCodec",\n    persisted: bool,\n) -> Mapping[str, JsonValue]:\n    if not isinstance(value, TaskResultRecord):\n        raise TypeError("V1 task_result encoder received the wrong type")\n    return {\n        "graph_id": _encode_domain(value.graph_id, codec, persisted=persisted),\n        "node_id": _encode_domain(value.node_id, codec, persisted=persisted),\n        "result_digest": _encode_domain(\n            value.result_digest, codec, persisted=persisted\n        ),\n        "payload": _encode_domain(value.payload, codec, persisted=persisted),\n    }\n\n\ndef _decode_v1_task_result(\n''',
+              "def _decode_v1_task_result(\n",
+              '''def _encode_v1_task_result(\n    value: object,\n    codec: "_VersionCodec",\n    persisted: bool,\n) -> Mapping[str, JsonValue]:\n    if not isinstance(value, TaskResultRecord):\n        raise TypeError("V1 task_result encoder received the wrong type")\n    return {\n        "graph_id": _encode_domain(value.graph_id, codec, persisted=persisted),\n        "node_id": _encode_domain(value.node_id, codec, persisted=persisted),\n        "result_digest": _encode_domain(value.result_digest, codec, persisted=persisted),\n        "payload": _encode_domain(value.payload, codec, persisted=persisted),\n    }\n\n\ndef _decode_v1_task_result(\n''',
           )
-          replace_once(
+          literal(
               codec,
               '''_V1_DATACLASS_ENCODERS: Mapping[str, DataclassEncoder] = MappingProxyType(\n    {"task_node": _encode_v1_task_node}\n)\n''',
               '''_V1_DATACLASS_ENCODERS: Mapping[str, DataclassEncoder] = MappingProxyType(\n    {\n        "task_node": _encode_v1_task_node,\n        "task_result": _encode_v1_task_result,\n    }\n)\n''',
           )
-          replace_once(
-              codec,
-              '''    custom_dataclasses = {"task_node"}\n''',
-              '''    custom_dataclasses = {"task_node", "task_result"}\n''',
-          )
+          literal(codec, '    custom_dataclasses = {"task_node"}\n', '    custom_dataclasses = {"task_node", "task_result"}\n')
 
-          # Snapshot aggregation must stay identical to the baseline TaskGraph state machine.
-          graph = "linktools-ai/src/linktools/ai/task/_graph.py"
-          baseline_graph_status = '''def _aggregate_graph_status(nodes: "tuple[TaskNodeView, ...]") -> TaskStatus:\n    statuses = {node.status for node in nodes}\n    if not statuses or statuses <= {TaskStatus.SUCCEEDED}:\n        return TaskStatus.SUCCEEDED\n    if TaskStatus.FAILED in statuses:\n        return TaskStatus.FAILED\n    if TaskStatus.BLOCKED in statuses:\n        return TaskStatus.BLOCKED\n    if statuses <= {TaskStatus.CANCELLED, TaskStatus.SUCCEEDED}:\n        return TaskStatus.CANCELLED\n    if TaskStatus.RUNNING in statuses:\n        return TaskStatus.RUNNING\n    return TaskStatus.PENDING\n\n\n'''
-          replace_between(
-              graph,
-              'def _aggregate_graph_status(nodes: "tuple[TaskNodeView, ...]") -> TaskStatus:\n',
-              '@dataclass(frozen=True, slots=True)\nclass CancelGraphRequest:',
-              baseline_graph_status,
+          aggregate = '''def _aggregate_graph_status(nodes: "tuple[TaskNodeView, ...]") -> TaskStatus:\n    statuses = {node.status for node in nodes}\n    if not statuses or statuses <= {TaskStatus.SUCCEEDED}:\n        return TaskStatus.SUCCEEDED\n    if TaskStatus.FAILED in statuses:\n        return TaskStatus.FAILED\n    if TaskStatus.BLOCKED in statuses:\n        return TaskStatus.BLOCKED\n    if statuses <= {TaskStatus.CANCELLED, TaskStatus.SUCCEEDED}:\n        return TaskStatus.CANCELLED\n    if TaskStatus.RUNNING in statuses:\n        return TaskStatus.RUNNING\n    return TaskStatus.PENDING\n\n\n'''
+          regex(
+              "linktools-ai/src/linktools/ai/task/_graph.py",
+              r'^def _aggregate_graph_status\([^\n]*\) -> TaskStatus:\n.*?(?=^@dataclass\(frozen=True, slots=True\)\nclass CancelGraphRequest:)',
+              aggregate,
           )
-
-          repositories = "linktools-ai/src/linktools/ai/runtime/state/_repositories.py"
-          baseline_repo_status = '''def _graph_status(nodes: "tuple[TaskNodeView, ...]") -> TaskStatus:\n    statuses = {node.status for node in nodes}\n    if not statuses or statuses <= {TaskStatus.SUCCEEDED}:\n        return TaskStatus.SUCCEEDED\n    if TaskStatus.FAILED in statuses:\n        return TaskStatus.FAILED\n    if TaskStatus.BLOCKED in statuses:\n        return TaskStatus.BLOCKED\n    if statuses <= {TaskStatus.CANCELLED, TaskStatus.SUCCEEDED}:\n        return TaskStatus.CANCELLED\n    if TaskStatus.RUNNING in statuses:\n        return TaskStatus.RUNNING\n    return TaskStatus.PENDING\n\n\n'''
-          replace_between(
-              repositories,
-              'def _graph_status(nodes: "tuple[TaskNodeView, ...]") -> TaskStatus:\n',
-              'def _record_cursor(record: StoredRecord) -> str:\n',
-              baseline_repo_status,
+          repo_aggregate = aggregate.replace("_aggregate_graph_status", "_graph_status")
+          regex(
+              "linktools-ai/src/linktools/ai/runtime/state/_repositories.py",
+              r'^def _graph_status\([^\n]*\) -> TaskStatus:\n.*?(?=^def _record_cursor\()',
+              repo_aggregate,
           )
 
           local = "linktools-ai/src/linktools/ai/task/_local.py"
-          launcher = "class LocalTaskGraphLauncher:"
-          cancel_method = '''    async def cancel(\n        self,\n        graph_id: str,\n        request: CancelGraphRequest,\n    ) -> TaskGraphView:\n        tenant_id = request.principal.tenant_id\n        key = (tenant_id, graph_id)\n        view = await self._repository.cancel_graph(graph_id, tenant_id=tenant_id)\n        states = await self._repository.list_nodes(graph_id, tenant_id=tenant_id)\n        static = {node.node_id: node for node in view.nodes}\n        cleanup_error: BaseException | None = None\n        for state in states:\n            if state.status is not TaskStatus.CANCELLED or state.fence < 1:\n                continue\n            node = static.get(state.node_id)\n            if node is None:\n                if cleanup_error is None:\n                    cleanup_error = AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)\n                continue\n            try:\n                await self._runner.cancel(\n                    node,\n                    graph_id=graph_id,\n                    principal=request.principal,\n                    dependency_results=await self._dependency_results(\n                        graph_id,\n                        node,\n                        tenant_id=tenant_id,\n                    ),\n                )\n            except asyncio.CancelledError:\n                raise\n            except BaseException as error:  # noqa: BLE001\n                if cleanup_error is None:\n                    cleanup_error = error\n\n        async with self._lock:\n            run = self._runs.get(key)\n            if run is not None:\n                run.closed = True\n                task = run.task\n            else:\n                task = None\n        if task is not None and not task.done():\n            task.cancel()\n            await asyncio.gather(task, return_exceptions=True)\n        if run is not None:\n            await self._notify(run)\n\n        if cleanup_error is not None:\n            if isinstance(cleanup_error, AIError):\n                raise cleanup_error\n            raise AIError(\n                ErrorCode.STORAGE_RECOVERY_REQUIRED,\n                safe_details={\n                    "phase": "task_graph_cancel_cleanup",\n                    "graph_id": graph_id,\n                },\n            ) from cleanup_error\n        if view.status not in _TERMINAL:\n            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)\n        return view\n\n'''
-          replace_between(
+          cancel = '''    async def cancel(\n        self,\n        graph_id: str,\n        request: CancelGraphRequest,\n    ) -> TaskGraphView:\n        tenant_id = request.principal.tenant_id\n        key = (tenant_id, graph_id)\n        view = await self._repository.cancel_graph(graph_id, tenant_id=tenant_id)\n        states = await self._repository.list_nodes(graph_id, tenant_id=tenant_id)\n        static = {node.node_id: node for node in view.nodes}\n        cleanup_error: BaseException | None = None\n        for state in states:\n            if state.status is not TaskStatus.CANCELLED or state.fence < 1:\n                continue\n            node = static.get(state.node_id)\n            if node is None:\n                if cleanup_error is None:\n                    cleanup_error = AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)\n                continue\n            try:\n                await self._runner.cancel(\n                    node,\n                    graph_id=graph_id,\n                    principal=request.principal,\n                    dependency_results=await self._dependency_results(\n                        graph_id, node, tenant_id=tenant_id\n                    ),\n                )\n            except asyncio.CancelledError:\n                raise\n            except BaseException as error:  # noqa: BLE001\n                if cleanup_error is None:\n                    cleanup_error = error\n        async with self._lock:\n            run = self._runs.get(key)\n            if run is not None:\n                run.closed = True\n                task = run.task\n            else:\n                task = None\n        if task is not None and not task.done():\n            task.cancel()\n            await asyncio.gather(task, return_exceptions=True)\n        if run is not None:\n            await self._notify(run)\n        if cleanup_error is not None:\n            if isinstance(cleanup_error, AIError):\n                raise cleanup_error\n            raise AIError(\n                ErrorCode.STORAGE_RECOVERY_REQUIRED,\n                safe_details={"phase": "task_graph_cancel_cleanup", "graph_id": graph_id},\n            ) from cleanup_error\n        if view.status not in _TERMINAL:\n            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)\n        return view\n\n'''
+          class_method(local, "LocalTaskGraphLauncher", "cancel", "shutdown", cancel)
+          literal(
               local,
-              '    async def cancel(\n',
-              '    async def shutdown(\n',
-              cancel_method,
-              after=launcher,
+              '''                states = await self._repository.list_nodes(\n                    request.graph.graph_id,\n                    tenant_id=tenant_id,\n                )\n                await self._notify(run)\n                if view.status in _TERMINAL:\n''',
+              '''                states = await self._repository.list_nodes(\n                    request.graph.graph_id,\n                    tenant_id=tenant_id,\n                )\n                if view.status in _TERMINAL:\n''',
           )
 
-          replace_once(
-              local,
-              '''                states = await self._repository.list_nodes(\n                    request.graph.graph_id,\n                    tenant_id=tenant_id,\n                )\n                await self._notify(run)\n                if view.status in _TERMINAL:\n                    if view.status in {TaskStatus.FAILED, TaskStatus.BLOCKED}:\n                        await self._cancel_terminal_effects(run, states)\n                    return\n''',
-              '''                states = await self._repository.list_nodes(\n                    request.graph.graph_id,\n                    tenant_id=tenant_id,\n                )\n                if view.status in _TERMINAL:\n                    if view.status in {TaskStatus.FAILED, TaskStatus.BLOCKED}:\n                        await self._cancel_terminal_effects(run, states)\n                    await self._notify(run)\n                    return\n''',
-          )
-
-          run_node = '''    async def _run_node(\n        self,\n        run: _GraphRun,\n        node: TaskNode,\n        lease_state: _LeaseState,\n    ) -> None:\n        request = run.request\n        graph_id = request.graph.graph_id\n        tenant_id = request.principal.tenant_id\n        dependency_results = await self._dependency_results(\n            graph_id,\n            node,\n            tenant_id=tenant_id,\n        )\n        control = _TaskNodeRunControlImpl(\n            self._repository,\n            lease_state,\n            tenant_id=tenant_id,\n            on_activity=lambda: self._notify(run),\n        )\n        heartbeat_stop = asyncio.Event()\n        runner_task = asyncio.create_task(\n            self._runner.run(\n                node,\n                graph_id=graph_id,\n                principal=request.principal,\n                dependency_results=dependency_results,\n                control=control,\n            ),\n            name=f"task-runner-{graph_id}-{node.node_id}",\n        )\n        heartbeat = asyncio.create_task(\n            self._heartbeat(lease_state, tenant_id=tenant_id, stop=heartbeat_stop),\n            name=f"task-heartbeat-{graph_id}-{node.node_id}",\n        )\n        try:\n            done, _ = await asyncio.wait(\n                (runner_task, heartbeat),\n                return_when=asyncio.FIRST_COMPLETED,\n            )\n            if heartbeat in done:\n                try:\n                    heartbeat.result()\n                except asyncio.CancelledError:\n                    heartbeat_error: BaseException | None = AIError(\n                        ErrorCode.STORAGE_RECOVERY_REQUIRED\n                    )\n                except BaseException as error:  # noqa: BLE001\n                    heartbeat_error = error\n                else:\n                    heartbeat_error = AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)\n                if not runner_task.done():\n                    runner_task.cancel()\n                await asyncio.gather(runner_task, return_exceptions=True)\n                if isinstance(heartbeat_error, AIError):\n                    if heartbeat_error.code in _RECOVERY_UNKNOWN_CODES:\n                        await self._defer_recovery(\n                            run,\n                            node,\n                            cause_code=heartbeat_error.code,\n                        )\n                        return\n                    if heartbeat_error.code in {\n                        ErrorCode.TASK_FENCE_STALE,\n                        ErrorCode.TASK_OWNER_CONFLICT,\n                        ErrorCode.TASK_NOT_READY,\n                    }:\n                        return\n                raise heartbeat_error\n\n            try:\n                completion = runner_task.result()\n            except asyncio.CancelledError:\n                raise\n            except BaseException as error:  # noqa: BLE001\n                await _stop_heartbeat(heartbeat_stop, heartbeat)\n                if isinstance(error, AIError) and error.code in _RECOVERY_UNKNOWN_CODES:\n                    await self._defer_recovery(run, node, cause_code=error.code)\n                    return\n                code = (\n                    error.code.value\n                    if isinstance(error, AIError)\n                    else ErrorCode.TASK_NODE_FAILED.value\n                )\n                execution_id = (\n                    error.execution_id if isinstance(error, TaskNodeRunError) else None\n                )\n                digest = canonical_sha256(\n                    {\n                        "graph_id": graph_id,\n                        "node_id": node.node_id,\n                        "code": code,\n                    }\n                )\n                async with lease_state.lock:\n                    try:\n                        await self._repository.fail(\n                            lease_state.lease,\n                            tenant_id=tenant_id,\n                            error_code=code,\n                            error_digest=digest,\n                            execution_id=execution_id,\n                        )\n                    except AIError as terminal_error:\n                        if terminal_error.code is not ErrorCode.TASK_FENCE_STALE:\n                            raise\n                return\n\n            await _stop_heartbeat(heartbeat_stop, heartbeat)\n            async with lease_state.lock:\n                try:\n                    await self._repository.complete(\n                        lease_state.lease,\n                        tenant_id=tenant_id,\n                        execution_id=completion.execution_id,\n                        result_digest=completion.result_digest,\n                        result_payload=completion.result_payload,\n                    )\n                    return\n                except AIError as error:\n                    if error.code not in _RECOVERY_UNKNOWN_CODES:\n                        raise\n                    if await self._completion_committed(\n                        graph_id,\n                        node.node_id,\n                        completion,\n                        tenant_id=tenant_id,\n                    ):\n                        return\n                    await self._defer_recovery(run, node, cause_code=error.code)\n        except asyncio.CancelledError:\n            if not runner_task.done():\n                runner_task.cancel()\n            await asyncio.gather(runner_task, return_exceptions=True)\n            await _stop_heartbeat(heartbeat_stop, heartbeat)\n            raise\n        finally:\n            await self._notify(run)\n\n'''
-          replace_between(
-              local,
-              '    async def _run_node(\n',
-              '    async def _completion_committed(\n',
-              run_node,
-              after=launcher,
-          )
-
+          run_node = '''    async def _run_node(\n        self,\n        run: _GraphRun,\n        node: TaskNode,\n        lease_state: _LeaseState,\n    ) -> None:\n        request = run.request\n        graph_id = request.graph.graph_id\n        tenant_id = request.principal.tenant_id\n        dependency_results = await self._dependency_results(\n            graph_id, node, tenant_id=tenant_id\n        )\n        control = _TaskNodeRunControlImpl(\n            self._repository,\n            lease_state,\n            tenant_id=tenant_id,\n            on_activity=lambda: self._notify(run),\n        )\n        heartbeat_stop = asyncio.Event()\n        runner_task = asyncio.create_task(\n            self._runner.run(\n                node,\n                graph_id=graph_id,\n                principal=request.principal,\n                dependency_results=dependency_results,\n                control=control,\n            ),\n            name=f"task-runner-{graph_id}-{node.node_id}",\n        )\n        heartbeat = asyncio.create_task(\n            self._heartbeat(lease_state, tenant_id=tenant_id, stop=heartbeat_stop),\n            name=f"task-heartbeat-{graph_id}-{node.node_id}",\n        )\n        try:\n            done, _ = await asyncio.wait(\n                (runner_task, heartbeat), return_when=asyncio.FIRST_COMPLETED\n            )\n            if heartbeat in done:\n                try:\n                    heartbeat.result()\n                except asyncio.CancelledError:\n                    heartbeat_error: BaseException = AIError(\n                        ErrorCode.STORAGE_RECOVERY_REQUIRED\n                    )\n                except BaseException as error:  # noqa: BLE001\n                    heartbeat_error = error\n                else:\n                    heartbeat_error = AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)\n                if not runner_task.done():\n                    runner_task.cancel()\n                await asyncio.gather(runner_task, return_exceptions=True)\n                if isinstance(heartbeat_error, AIError):\n                    if heartbeat_error.code in _RECOVERY_UNKNOWN_CODES:\n                        await self._defer_recovery(\n                            run, node, cause_code=heartbeat_error.code\n                        )\n                        return\n                    if heartbeat_error.code in {\n                        ErrorCode.TASK_FENCE_STALE,\n                        ErrorCode.TASK_OWNER_CONFLICT,\n                        ErrorCode.TASK_NOT_READY,\n                    }:\n                        return\n                raise heartbeat_error\n            try:\n                completion = runner_task.result()\n            except asyncio.CancelledError:\n                raise\n            except BaseException as error:  # noqa: BLE001\n                await _stop_heartbeat(heartbeat_stop, heartbeat)\n                if isinstance(error, AIError) and error.code in _RECOVERY_UNKNOWN_CODES:\n                    await self._defer_recovery(run, node, cause_code=error.code)\n                    return\n                code = (\n                    error.code.value\n                    if isinstance(error, AIError)\n                    else ErrorCode.TASK_NODE_FAILED.value\n                )\n                execution_id = (\n                    error.execution_id if isinstance(error, TaskNodeRunError) else None\n                )\n                digest = canonical_sha256(\n                    {"graph_id": graph_id, "node_id": node.node_id, "code": code}\n                )\n                async with lease_state.lock:\n                    try:\n                        await self._repository.fail(\n                            lease_state.lease,\n                            tenant_id=tenant_id,\n                            error_code=code,\n                            error_digest=digest,\n                            execution_id=execution_id,\n                        )\n                    except AIError as terminal_error:\n                        if terminal_error.code is not ErrorCode.TASK_FENCE_STALE:\n                            raise\n                return\n            await _stop_heartbeat(heartbeat_stop, heartbeat)\n            async with lease_state.lock:\n                try:\n                    await self._repository.complete(\n                        lease_state.lease,\n                        tenant_id=tenant_id,\n                        execution_id=completion.execution_id,\n                        result_digest=completion.result_digest,\n                        result_payload=completion.result_payload,\n                    )\n                    return\n                except AIError as error:\n                    if error.code not in _RECOVERY_UNKNOWN_CODES:\n                        raise\n                    if await self._completion_committed(\n                        graph_id,\n                        node.node_id,\n                        completion,\n                        tenant_id=tenant_id,\n                    ):\n                        return\n                    await self._defer_recovery(run, node, cause_code=error.code)\n        except asyncio.CancelledError:\n            if not runner_task.done():\n                runner_task.cancel()\n            await asyncio.gather(runner_task, return_exceptions=True)\n            await _stop_heartbeat(heartbeat_stop, heartbeat)\n            raise\n        finally:\n            await self._notify(run)\n\n'''
+          class_method(local, "LocalTaskGraphLauncher", "_run_node", "_completion_committed", run_node)
           drain = '''    async def _drain_runner_background(self) -> None:\n        if not isinstance(self._runner, _RunnerBackgroundOwner):\n            return\n        while True:\n            pending = {\n                task\n                for task in (\n                    *self._runner.pending_background_tasks,\n                    *self._runner.pending_cancelled_tasks,\n                )\n                if not task.done()\n            }\n            if not pending:\n                break\n            await asyncio.gather(\n                *(asyncio.shield(task) for task in pending),\n                return_exceptions=True,\n            )\n        failure = self._runner.background_failure\n        if failure is not None:\n            raise AIError(failure.code, safe_details=dict(failure.safe_details))\n\n'''
-          replace_between(
-              local,
-              '    async def _drain_runner_background(self) -> None:\n',
-              '    @staticmethod\n    def _consume_run(',
-              drain,
-              after=launcher,
-          )
+          class_method(local, "LocalTaskGraphLauncher", "_drain_runner_background", "_consume_run", drain)
 
           durable = "linktools-ai/src/linktools/ai/runtime/state/_task_recovery_repository.py"
-          durable_class = "class DurableTaskRepositoryImpl(TaskRepositoryImpl):"
-          claim = '''    async def claim(\n        self,\n        graph_id: str,\n        node_id: str,\n        *,\n        tenant_id: str,\n        owner: str,\n        lease_seconds: int,\n    ) -> TaskLease:\n        try:\n            before = await self._node(graph_id, node_id, tenant_id)\n        except AIError as error:\n            if error.code is not ErrorCode.STORAGE_NOT_FOUND:\n                raise\n            return await super().claim(\n                graph_id,\n                node_id,\n                tenant_id=tenant_id,\n                owner=owner,\n                lease_seconds=lease_seconds,\n            )\n        expected_fence = before.fence + 1\n        try:\n            return await super().claim(\n                graph_id,\n                node_id,\n                tenant_id=tenant_id,\n                owner=owner,\n                lease_seconds=lease_seconds,\n            )\n        except AIError as error:\n            if error.code not in _COMMIT_READBACK_CODES:\n                raise\n            current = await self._node(graph_id, node_id, tenant_id)\n            if current.status is TaskStatus.RUNNING:\n                if current.owner != owner:\n                    raise AIError(ErrorCode.TASK_OWNER_CONFLICT) from error\n                if current.fence != expected_fence:\n                    raise AIError(ErrorCode.TASK_FENCE_STALE) from error\n                if current.lease_expires_at is None:\n                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error\n                return TaskLease(\n                    graph_id,\n                    node_id,\n                    tenant_id,\n                    owner,\n                    current.fence,\n                    current.lease_expires_at,\n                )\n            if current.status in {\n                TaskStatus.SUCCEEDED,\n                TaskStatus.FAILED,\n                TaskStatus.CANCELLED,\n                TaskStatus.BLOCKED,\n            }:\n                raise AIError(ErrorCode.TASK_NOT_READY) from error\n            if error.code is ErrorCode.STORAGE_COMMIT_UNKNOWN:\n                raise AIError(\n                    ErrorCode.STORAGE_RECOVERY_REQUIRED,\n                    safe_details={\n                        "phase": "task_claim",\n                        "graph_id": graph_id,\n                        "node_id": node_id,\n                    },\n                ) from error\n            raise AIError(ErrorCode.STORAGE_CONFLICT) from error\n\n'''
-          replace_between(
-              durable,
-              '    async def claim(\n',
-              '    async def complete(\n',
-              claim,
-              after=durable_class,
-          )
+          claim = '''    async def claim(\n        self,\n        graph_id: str,\n        node_id: str,\n        *,\n        tenant_id: str,\n        owner: str,\n        lease_seconds: int,\n    ) -> TaskLease:\n        before = await self._node(graph_id, node_id, tenant_id)\n        expected_fence = before.fence + 1\n        try:\n            return await super().claim(\n                graph_id,\n                node_id,\n                tenant_id=tenant_id,\n                owner=owner,\n                lease_seconds=lease_seconds,\n            )\n        except AIError as error:\n            if error.code not in _COMMIT_READBACK_CODES:\n                raise\n            current = await self._node(graph_id, node_id, tenant_id)\n            if current.status is TaskStatus.RUNNING:\n                if current.owner != owner:\n                    raise AIError(ErrorCode.TASK_OWNER_CONFLICT) from error\n                if current.fence != expected_fence:\n                    raise AIError(ErrorCode.TASK_FENCE_STALE) from error\n                if current.lease_expires_at is None:\n                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error\n                return TaskLease(\n                    graph_id, node_id, tenant_id, owner, current.fence, current.lease_expires_at\n                )\n            if current.status in {\n                TaskStatus.SUCCEEDED,\n                TaskStatus.FAILED,\n                TaskStatus.CANCELLED,\n                TaskStatus.BLOCKED,\n            }:\n                raise AIError(ErrorCode.TASK_NOT_READY) from error\n            if error.code is ErrorCode.STORAGE_COMMIT_UNKNOWN:\n                raise AIError(\n                    ErrorCode.STORAGE_RECOVERY_REQUIRED,\n                    safe_details={\n                        "phase": "task_claim",\n                        "graph_id": graph_id,\n                        "node_id": node_id,\n                    },\n                ) from error\n            raise AIError(ErrorCode.STORAGE_CONFLICT) from error\n\n'''
+          class_method(durable, "DurableTaskRepositoryImpl", "claim", "complete", claim)
 
           planner = "linktools-ai/src/linktools/ai/runtime/_planner.py"
-          replace_once(
+          literal(
               planner,
-              '''    ExecutionStatus,\n    JsonValue,\n    Principal,\n''',
-              '''    ExecutionMode,\n    ExecutionStatus,\n    JsonValue,\n    Principal,\n    ThinkingValue,\n''',
+              "    ExecutionStatus,\n    JsonValue,\n    Principal,\n",
+              "    ExecutionMode,\n    ExecutionStatus,\n    JsonValue,\n    Principal,\n    ThinkingValue,\n",
           )
-          replace_once(
-              planner,
-              '''            mode=cast(str, normalized["mode"]),\n''',
-              '''            mode=cast(ExecutionMode, normalized["mode"]),\n''',
-          )
-          replace_once(
-              planner,
-              '''            thinking=normalized["thinking"],\n''',
-              '''            thinking=cast(ThinkingValue, normalized["thinking"]),\n''',
-          )
+          literal(planner, '            mode=cast(str, normalized["mode"]),\n', '            mode=cast(ExecutionMode, normalized["mode"]),\n')
+          literal(planner, '            thinking=normalized["thinking"],\n', '            thinking=cast(ThinkingValue, normalized["thinking"]),\n')
 
-          # Remove all temporary mutation workflows from the final branch.
           for name in (
               ".github/workflows/taskgraph-review-p0-fixes.yml",
               ".github/workflows/taskgraph-review-p0-fixes-retry.yml",
