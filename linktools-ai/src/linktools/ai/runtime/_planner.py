@@ -815,28 +815,49 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
             self._materialize_result_inner(output, tenant_id=tenant_id),
             name=f"task-result-materialize-{graph_id}-{node_id}",
         )
-        self._materialization_tasks.add(task)
+        try:
+            return await asyncio.shield(task)
+        except asyncio.CancelledError:
+            if task.done():
+                self._consume_materialization(task, graph_id=graph_id, node_id=node_id)
+            else:
+                self._materialization_tasks.add(task)
 
-        def consume(done: asyncio.Task[StoredPayload]) -> None:
-            try:
-                done.result()
-            except asyncio.CancelledError:
-                pass
-            except BaseException as error:  # noqa: BLE001
-                if self._background_failure is None:
-                    details = dict(error.safe_details) if isinstance(error, AIError) else {}
-                    details.setdefault("phase", "task_result_materialize")
-                    details.setdefault("graph_id", graph_id)
-                    details.setdefault("node_id", node_id)
-                    self._background_failure = AIError(
-                        ErrorCode.STORAGE_RECOVERY_REQUIRED,
-                        safe_details=details,
-                    )
-            finally:
-                self._materialization_tasks.discard(done)
+                def consume(done: asyncio.Task[StoredPayload]) -> None:
+                    try:
+                        self._consume_materialization(
+                            done,
+                            graph_id=graph_id,
+                            node_id=node_id,
+                        )
+                    finally:
+                        self._materialization_tasks.discard(done)
 
-        task.add_done_callback(consume)
-        return await asyncio.shield(task)
+                task.add_done_callback(consume)
+            raise
+
+    def _consume_materialization(
+        self,
+        task: asyncio.Task[StoredPayload],
+        *,
+        graph_id: str,
+        node_id: str,
+    ) -> None:
+        try:
+            task.result()
+        except asyncio.CancelledError:
+            return
+        except BaseException as error:  # noqa: BLE001
+            if self._background_failure is not None:
+                return
+            details = dict(error.safe_details) if isinstance(error, AIError) else {}
+            details.setdefault("phase", "task_result_materialize")
+            details.setdefault("graph_id", graph_id)
+            details.setdefault("node_id", node_id)
+            self._background_failure = AIError(
+                ErrorCode.STORAGE_RECOVERY_REQUIRED,
+                safe_details=details,
+            )
 
     async def _materialize_result_inner(
         self,
