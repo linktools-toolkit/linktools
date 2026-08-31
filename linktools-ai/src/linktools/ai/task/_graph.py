@@ -505,6 +505,16 @@ def _aggregate_graph_status(nodes: "tuple[TaskNodeView, ...]") -> TaskStatus:
         return TaskStatus.RUNNING
     return TaskStatus.PENDING
 
+
+@dataclass(frozen=True, slots=True)
+class CancelGraphRequest:
+    principal: Principal
+    idempotency_key: str
+    force: bool = False
+
+    def __post_init__(self) -> None:
+        validate_idempotency_key(self.idempotency_key)
+
 def ready_nodes(graph: TaskGraph, completed: "frozenset[str]") -> "tuple[TaskNode, ...]":
     return tuple(
         node for node in graph.nodes if node.node_id not in completed and all(dependency in completed for dependency in node.dependencies)
