@@ -26,6 +26,7 @@ from ..core import (
     Principal,
     PrincipalKind,
     SessionStatus,
+    TaskStatus,
     ThinkingValue,
     normalize_execution_mode,
     normalize_thinking,
@@ -45,11 +46,13 @@ from ..task import (
     TaskGraphLimits,
     TaskGraphRequest,
     TaskGraphResult,
+    TaskGraphSnapshot,
     TaskNode,
+    TaskResultRecord,
 )
 from ..workspace import Workspace
 from ._agent import Agent, Execution, Session
-from ._input import UserPromptTransport, user_prompt_transport
+from ._input import UserPromptTransport
 from .service_api import (
     ApprovalService,
     ArtifactService,
@@ -84,18 +87,6 @@ from .state import RuntimeState
 
 _logger = environ.get_logger("ai.runtime")
 AppT = TypeVar("AppT")
-_AGENT_TASK_V1_FIELDS = frozenset(
-    {
-        "type",
-        "version",
-        "binding",
-        "user_prompt",
-        "user_prompt_codec",
-        "mode",
-        "planning",
-        "thinking",
-    }
-)
 
 
 class _LocalRuntimeCoordinatorPort(Protocol):
@@ -106,6 +97,28 @@ class _LocalRuntimeCoordinatorPort(Protocol):
         principal: Principal,
         after_sequence: int = 0,
     ) -> AsyncIterator[ExecutionStreamEvent]: ...
+
+
+class _TaskNodeRuntimePort(Protocol):
+    def admit_node(self, node: "TaskNode") -> "TaskNode": ...
+
+    async def get_result_record(
+        self,
+        graph_id: str,
+        node_id: str,
+        *,
+        tenant_id: str,
+    ) -> "TaskResultRecord | None": ...
+
+    async def read_result_record(self, record: "TaskResultRecord") -> JsonValue: ...
+
+    async def read_legacy_agent_result(
+        self,
+        execution_id: str,
+        *,
+        principal: Principal,
+        expected_digest: str,
+    ) -> JsonValue: ...
 
 
 class Runtime(Generic[AppT]):
@@ -128,6 +141,7 @@ class Runtime(Generic[AppT]):
         tenant_id: str = "default",
         close_callback: "Callable[[], Awaitable[None]] | None" = None,
         local_coordinator: "_LocalRuntimeCoordinatorPort | None" = None,
+        task_node_runtime: "_TaskNodeRuntimePort | None" = None,
     ) -> None:
         if any(
             value is None
@@ -164,6 +178,7 @@ class Runtime(Generic[AppT]):
         )
         self._close_callback = close_callback
         self._local_coordinator = local_coordinator
+        self._task_node_runtime = task_node_runtime
         self._closed = False
         self._closing = False
         self._close_lock = asyncio.Lock()
@@ -617,6 +632,66 @@ class Runtime(Generic[AppT]):
             timeout_seconds=timeout_seconds,
         )
 
+    async def read_task_result(
+        self,
+        graph_id: str,
+        node_id: str,
+        *,
+        principal: "Principal | None" = None,
+    ) -> JsonValue:
+        self._ensure_open()
+        resolved_principal = self._resolve_principal(principal)
+        snapshot = await self.task.inspect_graph_state(
+            graph_id,
+            principal=resolved_principal,
+        )
+        state = next(
+            (value for value in snapshot.node_states if value.node_id == node_id),
+            None,
+        )
+        if state is None:
+            raise AIError(
+                ErrorCode.STORAGE_NOT_FOUND,
+                safe_details={"graph_id": graph_id, "node_id": node_id},
+            )
+        if state.status in {TaskStatus.PENDING, TaskStatus.READY, TaskStatus.RUNNING}:
+            raise AIError(
+                ErrorCode.TASK_NOT_READY,
+                safe_details={"graph_id": graph_id, "node_id": node_id},
+            )
+        if state.status in {
+            TaskStatus.FAILED,
+            TaskStatus.BLOCKED,
+            TaskStatus.CANCELLED,
+        }:
+            details: dict[str, JsonValue] = {
+                "graph_id": graph_id,
+                "node_id": node_id,
+                "status": state.status.value,
+            }
+            if state.error_code is not None:
+                details["error_code"] = state.error_code
+            raise AIError(ErrorCode.TASK_NODE_FAILED, safe_details=details)
+        if state.status is not TaskStatus.SUCCEEDED or state.result_digest is None:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        task_runtime = self._require_task_node_runtime()
+        record = await task_runtime.get_result_record(
+            graph_id,
+            node_id,
+            tenant_id=resolved_principal.tenant_id,
+        )
+        if record is not None:
+            if record.result_digest != state.result_digest:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            return await task_runtime.read_result_record(record)
+        if state.execution_id is not None:
+            return await task_runtime.read_legacy_agent_result(
+                state.execution_id,
+                principal=resolved_principal,
+                expected_digest=state.result_digest,
+            )
+        raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
+
     async def _admit_graph(
         self,
         graph: TaskGraph,
@@ -630,61 +705,16 @@ class Runtime(Generic[AppT]):
         selected_limits = limits or TaskGraphLimits()
         validate_idempotency_key(idempotency_key)
         graph.validate_limits(selected_limits)
-        admitted_nodes: list[TaskNode] = []
-        agent_ids: set[str] = set()
-        for node in graph.nodes:
-            payload = node.input
-            if set(payload) != _AGENT_TASK_V1_FIELDS:
-                raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
-            if payload.get("type") != "linktools.ai.agent" or payload.get("version") != 1:
-                raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
-            user_prompt = payload.get("user_prompt")
-            user_prompt_codec = payload.get("user_prompt_codec")
-            mode = payload.get("mode")
-            planning = payload.get("planning")
-            thinking = payload.get("thinking")
-            if not isinstance(user_prompt, str) or not isinstance(user_prompt_codec, str):
-                raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
-            try:
-                transport = user_prompt_transport(user_prompt, user_prompt_codec)
-                resolved_mode = normalize_execution_mode(mode)
-                resolved_thinking = normalize_thinking(thinking)
-            except (AIError, TypeError, ValueError) as error:
-                raise AIError(ErrorCode.REQUEST_FIELD_INVALID) from error
-            if resolved_mode != "run" or not isinstance(planning, bool):
-                raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
-            try:
-                snapshot = AgentBindingSnapshot.from_payload(payload.get("binding"))
-                binding = self._restore_binding(snapshot)
-            except AIError as error:
-                if error.code is ErrorCode.AGENT_DEFINITION_UNAVAILABLE:
-                    raise
-                raise AIError(ErrorCode.REQUEST_FIELD_INVALID) from error
-            validate_user_prompt(str(transport))
-            agent_ids.add(binding.definition.spec.id)
-            admitted_nodes.append(
-                TaskNode(
-                    node.node_id,
-                    node.dependencies,
-                    input={
-                        "type": "linktools.ai.agent",
-                        "version": 1,
-                        "binding": binding.snapshot.to_payload(),
-                        "user_prompt": str(transport),
-                        "user_prompt_codec": transport.codec,
-                        "mode": "run",
-                        "planning": planning,
-                        "thinking": resolved_thinking,
-                    },
-                    budget_cost=node.budget_cost,
-                )
-            )
-        admitted = TaskGraph(graph.graph_id, tuple(admitted_nodes))
+        task_runtime = self._require_task_node_runtime()
+        admitted = TaskGraph(
+            graph.graph_id,
+            tuple(task_runtime.admit_node(node) for node in graph.nodes),
+        )
+        admitted.validate_limits(selected_limits)
         _logger.info(
-            "agent task graph admitted: graph=%s tenant=%s agents=%s nodes=%s",
+            "task graph admitted: graph=%s tenant=%s nodes=%s",
             graph.graph_id,
             resolved_principal.tenant_id,
-            tuple(sorted(agent_ids)),
             len(admitted.nodes),
         )
         return TaskGraphRequest(
@@ -737,6 +767,11 @@ class Runtime(Generic[AppT]):
         if principal is not None:
             return principal
         return self._default_principal
+
+    def _require_task_node_runtime(self) -> _TaskNodeRuntimePort:
+        if self._task_node_runtime is None:
+            raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+        return self._task_node_runtime
 
     async def close(self) -> None:
         async with self._close_lock:
@@ -861,6 +896,7 @@ async def _open_runtime(
             tenant_id=components.tenant_id,
             close_callback=components.close_callback,
             local_coordinator=components.local_coordinator,
+            task_node_runtime=components.task_node_runtime,
         )
     except BaseException:
         await components.close_callback()
