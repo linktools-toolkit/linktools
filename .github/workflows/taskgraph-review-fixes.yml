@@ -16,171 +16,25 @@ jobs:
       - uses: actions/checkout@v4
         with:
           ref: feat/ai-taskgraph-reliable-mixed-nodes
-          fetch-depth: 0
+          fetch-depth: 2
       - uses: actions/setup-python@v5
         with:
           python-version: '3.10'
+      - name: Install project
+        run: python manage.py install --editable
       - name: Apply reviewed fixes
         run: |
-          python - <<'PY'
-          from pathlib import Path
-
-          def replace(path: str, old: str, new: str) -> None:
-              file = Path(path)
-              text = file.read_text()
-              count = text.count(old)
-              if count != 1:
-                  raise SystemExit(f"{path}: expected one match, got {count}: {old[:80]!r}")
-              file.write_text(text.replace(old, new, 1))
-
-          # capability: keep Task handler as a type-only public contract; no capability -> task runtime dependency.
-          path = "linktools-ai/src/linktools/ai/capability/_group.py"
-          replace(
-              path,
-              'from typing import Generic, Literal, Protocol, TypeAlias, TypeVar, cast\n',
-              'from typing import TYPE_CHECKING, Generic, Literal, Protocol, TypeAlias, TypeVar, cast, runtime_checkable\n',
-          )
-          replace(
-              path,
-              'from ..task import TaskNodeHandler\nfrom ._context import RunContext\n',
-              'if TYPE_CHECKING:\n    from ..task import TaskNodeHandler\n\nfrom ._context import RunContext\n',
-          )
-          replace(
-              path,
-              '''AppT = TypeVar("AppT")\nContributionKind = Literal["tool", "agent", "skill", "mcp", "capability", "task"]\nContributionSemanticValue: TypeAlias = (\n    Tool\n    | AgentSpec\n    | SkillDefinition\n    | MCPServerSpec\n    | AbstractCapability\n    | TaskNodeHandler[object]\n)\n''',
-              '''AppT = TypeVar("AppT")\n\n\n@runtime_checkable\nclass _TaskHandlerValue(Protocol):\n    @property\n    def type(self) -> str: ...\n\n    @property\n    def version(self) -> int: ...\n\n    def normalize(self, input: Mapping[str, JsonValue]) -> Mapping[str, JsonValue]: ...\n\n    async def run(self, context: object) -> JsonValue: ...\n\n    async def cancel(self, context: object) -> None: ...\n\n\nContributionKind = Literal["tool", "agent", "skill", "mcp", "capability", "task"]\nContributionSemanticValue: TypeAlias = (\n    Tool\n    | AgentSpec\n    | SkillDefinition\n    | MCPServerSpec\n    | AbstractCapability\n    | _TaskHandlerValue\n)\n''',
-          )
-          replace(
-              path,
-              '        if self.kind == "task" and not isinstance(self.value, TaskNodeHandler):\n            raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)\n',
-              '        if self.kind == "task" and not isinstance(self.value, _TaskHandlerValue):\n            raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)\n',
-          )
-          replace(
-              path,
-              '            handler = cast("TaskNodeHandler[object]", self.value)\n',
-              '            handler = cast(_TaskHandlerValue, self.value)\n',
-          )
-          replace(
-              path,
-              '    def task(self, handler: TaskNodeHandler[AppT]) -> TaskNodeHandler[AppT]:\n',
-              '    def task(self, handler: "TaskNodeHandler[AppT]") -> "TaskNodeHandler[AppT]":\n',
-          )
-          replace(
-              path,
-              '    if kind == "task" and isinstance(value, TaskNodeHandler):\n',
-              '    if kind == "task" and isinstance(value, _TaskHandlerValue):\n',
-          )
-          replace(
-              path,
-              'def _task_identity(handler: TaskNodeHandler[object]) -> tuple[str, int]:\n',
-              'def _task_identity(handler: _TaskHandlerValue) -> tuple[str, int]:\n',
-          )
-
-          # task values: StoredPayload is a type-only contract; runtime codec owns concrete storage decoding.
-          path = "linktools-ai/src/linktools/ai/task/_graph.py"
-          replace(
-              path,
-              'from datetime import datetime, timezone\n\nfrom ..core import (\n',
-              'from datetime import datetime, timezone\nfrom typing import TYPE_CHECKING\n\nfrom ..core import (\n',
-          )
-          replace(
-              path,
-              'from ..errors import AIError, ErrorCode\nfrom ..storage import StoredPayload\n\n\n@dataclass',
-              'from ..errors import AIError, ErrorCode\n\nif TYPE_CHECKING:\n    from ..storage import StoredPayload\n\n\ndef _payload_digest(value: object) -> str:\n    try:\n        digest = value.digest  # type: ignore[attr-defined]\n    except AttributeError as error:\n        raise TypeError("task result payload is invalid") from error\n    if not isinstance(digest, str) or re.fullmatch(r"[0-9a-f]{64}", digest) is None:\n        raise TypeError("task result payload digest is invalid")\n    return digest\n\n\n@dataclass',
-          )
-          replace(path, '    payload: StoredPayload\n', '    payload: "StoredPayload"\n')
-          replace(
-              path,
-              '        if not isinstance(self.payload, StoredPayload):\n            raise TypeError("task result payload is invalid")\n        if self.payload.digest != self.result_digest:\n',
-              '        if _payload_digest(self.payload) != self.result_digest:\n',
-          )
-          replace(
-              path,
-              '        if self.result_payload is not None:\n            if not isinstance(self.result_payload, StoredPayload):\n                raise TypeError("task dependency result payload is invalid")\n            if self.result_payload.digest != self.result_digest:\n',
-              '        if self.result_payload is not None:\n            if _payload_digest(self.result_payload) != self.result_digest:\n',
-          )
-
-          # task launcher: no task -> storage runtime dependency, preserve default lease, restore terminal business cleanup.
-          path = "linktools-ai/src/linktools/ai/task/_local.py"
-          replace(
-              path,
-              'from typing import Protocol, runtime_checkable\n',
-              'from typing import TYPE_CHECKING, Protocol, runtime_checkable\n',
-          )
-          replace(
-              path,
-              'from ..errors import AIError, ErrorCode\nfrom ..storage import StoredPayload\nfrom ._graph import (\n',
-              'from ..errors import AIError, ErrorCode\n\nif TYPE_CHECKING:\n    from ..storage import StoredPayload\n\nfrom ._graph import (\n',
-          )
-          replace(path, '_LEASE_SECONDS = 90\n', '_LEASE_SECONDS = 60\n')
-          replace(
-              path,
-              '        if self.result_payload is not None:\n            if not isinstance(self.result_payload, StoredPayload):\n                raise TypeError("task node result payload is invalid")\n            if self.result_payload.digest != self.result_digest:\n',
-              '        if self.result_payload is not None:\n            try:\n                payload_digest = self.result_payload.digest\n            except AttributeError as error:\n                raise TypeError("task node result payload is invalid") from error\n            if payload_digest != self.result_digest:\n',
-          )
-          replace(
-              path,
-              '''                await self._notify(run)\n                if view.status in _TERMINAL:\n                    return\n                _reap_inflight(inflight)\n''',
-              '''                await self._notify(run)\n                if view.status in _TERMINAL:\n                    if view.status in {TaskStatus.FAILED, TaskStatus.BLOCKED}:\n                        await self._cancel_terminal_effects(run, states)\n                    return\n                _reap_inflight(inflight)\n''',
-          )
-          marker = '''    async def _wait_scheduler(\n        self,\n        run: _GraphRun,\n        states: "tuple[TaskNodeView, ...]",\n    ) -> None:\n'''
-          file = Path(path)
-          text = file.read_text()
-          if text.count(marker) != 1 or '    async def _cancel_terminal_effects(' in text:
-              raise SystemExit('task/_local.py: terminal cleanup insertion precondition failed')
-          method = '''    async def _cancel_terminal_effects(\n        self,\n        run: _GraphRun,\n        states: "tuple[TaskNodeView, ...]",\n    ) -> None:\n        request = run.request\n        static = {node.node_id: node for node in request.graph.nodes}\n        for state in states:\n            if state.status is not TaskStatus.RUNNING or state.fence < 1:\n                continue\n            node = static.get(state.node_id)\n            if node is None:\n                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)\n            await self._runner.cancel(\n                node,\n                graph_id=request.graph.graph_id,\n                principal=request.principal,\n                dependency_results=await self._dependency_results(\n                    request.graph.graph_id,\n                    node,\n                    tenant_id=request.principal.tenant_id,\n                ),\n            )\n\n'''
-          file.write_text(text.replace(marker, method + marker, 1))
-
-          # Runtime public TaskService protocol must match TaskApi implementation.
-          path = "linktools-ai/src/linktools/ai/runtime/service_api.py"
-          replace(path, '    TaskCompletionLedger,\n', '')
-          replace(
-              path,
-              '''    def stream_graph(\n        self,\n        graph_id: str,\n        *,\n        principal: Principal,\n        after_version: int = 0,\n    ) -> "AsyncIterator[TaskCompletionLedger]": ...\n''',
-              '''    def stream_graph(\n        self,\n        graph_id: str,\n        *,\n        principal: Principal,\n    ) -> "AsyncIterator[TaskGraphSnapshot]": ...\n''',
-          )
-
-          # Runtime codec explicitly owns storage-aware TaskResultRecord decode.
-          path = "linktools-ai/src/linktools/ai/runtime/state/_codec.py"
-          marker = '''def _decode_v1_task_node(\n    raw_fields: Mapping[str, object],\n    codec: "_VersionCodec",\n    persisted: bool,\n) -> TaskNode:\n'''
-          text = Path(path).read_text()
-          start = text.index(marker)
-          map_marker = '\n\n_V1_DATACLASS_ENCODERS: Mapping[str, DataclassEncoder] = MappingProxyType('
-          insert_at = text.index(map_marker, start)
-          if 'def _decode_v1_task_result(' in text:
-              raise SystemExit('runtime/state/_codec.py: task result decoder already present')
-          decoder = '''\n\ndef _decode_v1_task_result(\n    raw_fields: Mapping[str, object],\n    codec: "_VersionCodec",\n    persisted: bool,\n) -> TaskResultRecord:\n    _require_fields(\n        raw_fields,\n        frozenset({"graph_id", "node_id", "result_digest", "payload"}),\n    )\n    return TaskResultRecord(\n        cast(str, _decode_domain(raw_fields["graph_id"], str, codec, persisted=persisted)),\n        cast(str, _decode_domain(raw_fields["node_id"], str, codec, persisted=persisted)),\n        cast(\n            str,\n            _decode_domain(raw_fields["result_digest"], str, codec, persisted=persisted),\n        ),\n        cast(\n            StoredPayload,\n            _decode_domain(raw_fields["payload"], StoredPayload, codec, persisted=persisted),\n        ),\n    )\n'''
-          Path(path).write_text(text[:insert_at] + decoder + text[insert_at:])
-          replace(
-              path,
-              '_V1_DATACLASS_DECODERS: Mapping[str, DataclassDecoder] = MappingProxyType(\n    {"task_node": _decode_v1_task_node}\n)\n',
-              '_V1_DATACLASS_DECODERS: Mapping[str, DataclassDecoder] = MappingProxyType(\n    {\n        "task_node": _decode_v1_task_node,\n        "task_result": _decode_v1_task_result,\n    }\n)\n',
-          )
-
-          # Remove Python 3.10 typing-internal dataclass field; a non-slotted frozen adapter is sufficient.
-          path = "linktools-ai/src/linktools/ai/task/_handler.py"
-          replace(path, '@dataclass(frozen=True, slots=True)\nclass TaskFunction(Generic[AppT]):\n', '@dataclass(frozen=True)\nclass TaskFunction(Generic[AppT]):\n')
-          replace(
-              path,
-              '''    __orig_class__: object = field(\n        init=False,\n        repr=False,\n        compare=False,\n        default=None,\n    )\n\n''',
-              '',
-          )
-
-          # Restore an existing non-obvious close invariant comment; removing it was unrelated cleanup.
-          path = "linktools-ai/src/linktools/ai/runtime/state/_root.py"
-          replace(
-              path,
-              '        except BaseException:  # noqa: BLE001\n            pass\n\n    async def _run_close_actions',
-              '        except BaseException:  # noqa: BLE001\n            # A later close() resumes from _close_cursor and retries the failed action.\n            pass\n\n    async def _run_close_actions',
-          )
-          PY
-      - name: Remove temporary validation workflow
-        run: |
+          git show HEAD^:.github/workflows/taskgraph-review-fixes.yml \
+            | sed -n "/          python - <<'PY'/,/^          PY$/p" \
+            | sed '1d;$d;s/^          //' > /tmp/taskgraph_review_patch.py
+          test -s /tmp/taskgraph_review_patch.py
+          python /tmp/taskgraph_review_patch.py
           rm -f .github/workflows/taskgraph-final-validation.yml
-      - name: Static gates
+      - name: Static and focused gates
         run: |
           python -m compileall -q linktools-ai/src/linktools/ai
           python -m scripts.check.ai
+          python -m pytest -q tests/ai/test_task_mixed_node_reliability.py
           git diff --check
       - name: Commit fixes and remove patch workflow
         run: |
