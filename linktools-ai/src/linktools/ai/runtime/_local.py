@@ -169,6 +169,9 @@ class _WorkerFailure:
     code: ErrorCode
     safe_details: Mapping[str, JsonValue]
     diagnostics: ErrorDiagnostics | None = None
+    category: str | None = None
+    retryable: bool | None = None
+    operation_id: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -698,6 +701,7 @@ class LocalExecutionBackend:
             terminal_handoff=None,
             handoff_contract_digest=None,
             pending_operation_id=None,
+            pending_approval=None,
             revision=0,
             created_at=now,
             updated_at=now,
@@ -996,6 +1000,9 @@ class LocalExecutionBackend:
                 error.code,
                 dict(error.safe_details),
                 error.diagnostics,
+                error.category,
+                error.retryable,
+                error.operation_id,
             )
         else:
             failure = _WorkerFailure(
@@ -1009,6 +1016,9 @@ class LocalExecutionBackend:
             failure.code,
             details,
             failure.diagnostics,
+            failure.category,
+            failure.retryable,
+            failure.operation_id,
         )
         _logger.error(
             "local execution worker failed: execution=%s code=%s",
@@ -1071,6 +1081,9 @@ class LocalExecutionBackend:
             return None
         return AIError(
             failure.code,
+            category=failure.category,
+            retryable=failure.retryable,
+            operation_id=failure.operation_id,
             safe_details=dict(failure.safe_details),
             diagnostics=failure.diagnostics,
         )
@@ -1765,7 +1778,7 @@ class LocalExecutionBackend:
             operation_kind=OperationKind.APPROVAL,
             status=OperationStatus.SUCCEEDED,
             request_digest=request_digest,
-            result_ref=call.approval_id,
+            result_ref=request.approval_id,
             result_digest=result_digest,
             error_code=None,
             compactable=True,
@@ -2225,7 +2238,7 @@ class LocalExecutionBackend:
             )
             return
         elif execution.status is ExecutionStatus.START_UNKNOWN:
-            raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
+            raise AIError(ErrorCode.EXECUTION_START_UNKNOWN)
         elif checkpoint.state is RecoveryCheckpointState.ADMITTED and execution.status is ExecutionStatus.STARTED:
             await self._ensure_recovery_idempotency(
                 checkpoint,
@@ -3234,20 +3247,27 @@ class LocalExecutionBackend:
             worker_failure = self._worker_failures[sorted(self._worker_failures)[0]]
             raise AIError(
                 worker_failure.code,
+                category=worker_failure.category,
+                retryable=worker_failure.retryable,
+                operation_id=worker_failure.operation_id,
                 safe_details=dict(worker_failure.safe_details),
                 diagnostics=worker_failure.diagnostics,
             )
         if dispatcher_failure is not None:
+            details = dict(dispatcher_failure.safe_details)
+            details.setdefault("phase", "local_execution_close")
+            details.setdefault("pending_workers", 0)
+            details.setdefault("pending_background_tasks", 0)
+            details.setdefault("pending_checkpoint_tasks", 0)
+            details.setdefault("pending_execution_tasks", 0)
+            details.setdefault("background_failures", 1)
             raise AIError(
-                ErrorCode.STORAGE_RECOVERY_REQUIRED,
-                safe_details={
-                    "phase": "local_execution_close",
-                    "pending_workers": 0,
-                    "pending_background_tasks": 0,
-                    "pending_checkpoint_tasks": 0,
-                    "pending_execution_tasks": 0,
-                    "background_failures": 1,
-                },
+                dispatcher_failure.code,
+                category=dispatcher_failure.category,
+                retryable=dispatcher_failure.retryable,
+                operation_id=dispatcher_failure.operation_id,
+                safe_details=details,
+                diagnostics=dispatcher_failure.diagnostics,
             )
         self._tasks.clear()
         self._captured_usage.clear()
