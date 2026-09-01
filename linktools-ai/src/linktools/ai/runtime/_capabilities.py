@@ -507,7 +507,7 @@ class _RuntimeStepPersistence(StepPersistence[None]):
             if state.policy.replay_safe:
                 state.preserve_started = True
                 raise AIError(
-                    ErrorCode.STORAGE_RECOVERY_REQUIRED,
+                    ErrorCode.TOOL_EFFECT_UNKNOWN,
                     safe_details={"phase": "tool_effect_replay"},
                 ) from error
             await self._mark_unknown(state, error)
@@ -590,7 +590,7 @@ class _RuntimeStepPersistence(StepPersistence[None]):
                 if state.policy.replay_safe:
                     state.preserve_started = True
                     raise AIError(
-                        ErrorCode.STORAGE_RECOVERY_REQUIRED,
+                        ErrorCode.TOOL_EFFECT_UNKNOWN,
                         safe_details={"phase": "tool_effect_replay"},
                     ) from error
                 await self._mark_unknown(state, error)
