@@ -11,7 +11,12 @@ from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any, Protocol, cast
 
 from linktools.core import environ
-from openai import APIError as OpenAIAPIError
+from openai import (
+    APIConnectionError as OpenAIAPIConnectionError,
+    APIError as OpenAIAPIError,
+    APIStatusError as OpenAIAPIStatusError,
+    APITimeoutError as OpenAIAPITimeoutError,
+)
 from pydantic import ValidationError
 from pydantic_ai import Agent as PydanticAgent
 from pydantic_ai import AgentRunResultEvent, ModelSettings, TextOutput, Tool
@@ -962,6 +967,18 @@ def _map_event(event: object) -> "AgentEmission | None":
     return None
 
 
+def _model_http_error_code(status_code: int) -> ErrorCode:
+    if status_code == 408:
+        return ErrorCode.MODEL_TIMEOUT
+    if status_code == 429:
+        return ErrorCode.MODEL_RATE_LIMITED
+    if status_code >= 500:
+        return ErrorCode.MODEL_UNAVAILABLE
+    if 400 <= status_code < 500:
+        return ErrorCode.MODEL_REQUEST_REJECTED
+    return ErrorCode.MODEL_API_ERROR
+
+
 def _execution_error(
     error: Exception,
     *,
@@ -1005,22 +1022,34 @@ def _execution_error(
         retry_after = error.retry_after
         if isinstance(retry_after, (int, float, str)) and not isinstance(retry_after, bool):
             details["retry_after"] = retry_after
-        if error.status_code == 408:
-            code = ErrorCode.MODEL_TIMEOUT
-        elif error.status_code == 429:
-            code = ErrorCode.MODEL_RATE_LIMITED
-        elif error.status_code >= 500:
-            code = ErrorCode.MODEL_UNAVAILABLE
-        elif 400 <= error.status_code < 500:
-            code = ErrorCode.MODEL_REQUEST_REJECTED
-        else:
-            code = ErrorCode.MODEL_API_ERROR
-        return AIError(code, safe_details=details, diagnostics=diagnostics)
+        return AIError(
+            _model_http_error_code(error.status_code),
+            safe_details=details,
+            diagnostics=diagnostics,
+        )
     if isinstance(error, ModelAPIError):
         return AIError(
             ErrorCode.MODEL_API_ERROR,
             retryable=False,
             safe_details={"model_name": error.model_name},
+            diagnostics=diagnostics,
+        )
+    if isinstance(error, OpenAIAPITimeoutError):
+        return AIError(
+            ErrorCode.MODEL_TIMEOUT,
+            retryable=True,
+            diagnostics=diagnostics,
+        )
+    if isinstance(error, OpenAIAPIConnectionError):
+        return AIError(
+            ErrorCode.MODEL_UNAVAILABLE,
+            retryable=True,
+            diagnostics=diagnostics,
+        )
+    if isinstance(error, OpenAIAPIStatusError):
+        return AIError(
+            _model_http_error_code(error.status_code),
+            safe_details={"status_code": error.status_code},
             diagnostics=diagnostics,
         )
     if isinstance(error, OpenAIAPIError):
