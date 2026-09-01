@@ -7,16 +7,13 @@ import re
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import TYPE_CHECKING, Protocol, runtime_checkable
+from typing import Protocol, runtime_checkable
 
 from linktools.core import environ
 
 from ..core import JsonValue, Principal, TaskStatus, canonical_sha256, validate_lease_owner
 from ..errors import AIError, ErrorCode
-
-if TYPE_CHECKING:
-    from ..storage import StoredPayload
-
+from ..storage import StoredPayload
 from ._graph import (
     CancelGraphRequest,
     TaskDependencyResult,
@@ -64,13 +61,11 @@ class TaskNodeRunResult:
             not isinstance(self.execution_id, str) or not self.execution_id.strip()
         ):
             raise ValueError("task node result execution id is invalid")
-        if self.result_payload is not None:
-            try:
-                payload_digest = self.result_payload.digest
-            except AttributeError as error:
-                raise TypeError("task node result payload is invalid") from error
-            if payload_digest != self.result_digest:
-                raise ValueError("task node result payload digest does not match result")
+        if (
+            self.result_payload is not None
+            and self.result_payload.digest != self.result_digest
+        ):
+            raise ValueError("task node result payload digest does not match result")
 
 
 class TaskNodeRunError(AIError):
@@ -356,6 +351,24 @@ class LocalTaskGraphLauncher:
         return view
 
     async def shutdown(self) -> None:
+        cleanup = asyncio.create_task(
+            self._shutdown_owned(),
+            name="task-graph-launcher-shutdown",
+        )
+        try:
+            await asyncio.shield(cleanup)
+        except asyncio.CancelledError:
+            while not cleanup.done():
+                try:
+                    await asyncio.shield(cleanup)
+                except asyncio.CancelledError:
+                    continue
+            error = cleanup.exception()
+            if error is not None:
+                raise error
+            raise
+
+    async def _shutdown_owned(self) -> None:
         self._accepting = False
         async with self._lock:
             runs = tuple(self._graphs.values())
@@ -439,8 +452,6 @@ class LocalTaskGraphLauncher:
                     tenant_id=tenant_id,
                 )
                 if view.status in _TERMINAL:
-                    if view.status in {TaskStatus.FAILED, TaskStatus.BLOCKED}:
-                        await self._cancel_terminal_effects(run, states)
                     return
                 _reap_inflight(inflight)
                 now = datetime.now(timezone.utc)
@@ -500,30 +511,6 @@ class LocalTaskGraphLauncher:
                 )
             run.closed = True
             await self._notify(run)
-
-    async def _cancel_terminal_effects(
-        self,
-        run: _GraphRun,
-        states: "tuple[TaskNodeView, ...]",
-    ) -> None:
-        request = run.request
-        static = {node.node_id: node for node in request.graph.nodes}
-        for state in states:
-            if state.status is not TaskStatus.RUNNING or state.fence < 1:
-                continue
-            node = static.get(state.node_id)
-            if node is None:
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            await self._runner.cancel(
-                node,
-                graph_id=request.graph.graph_id,
-                principal=request.principal,
-                dependency_results=await self._dependency_results(
-                    request.graph.graph_id,
-                    node,
-                    tenant_id=request.principal.tenant_id,
-                ),
-            )
 
     async def _wait_scheduler(
         self,
