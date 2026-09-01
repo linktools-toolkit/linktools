@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 """Public runtime contracts."""
 
+from ..errors import ErrorDiagnostics
 from ._agent import Agent, Execution, Session
 from ._approval import DefaultApprovalService
 from ._artifact import DefaultArtifactService
@@ -101,6 +102,7 @@ __all__ = [
     "DefaultExecutionService",
     "DefaultSessionService",
     "DefaultTaskService",
+    "ErrorDiagnostics",
     "EvaluationComparison",
     "EvaluationHandle",
     "EvaluationService",
