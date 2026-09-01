@@ -219,6 +219,7 @@ async def _cancel_interrupted_execution(execution: "Execution[object]") -> None:
 
 
 def _result_payload(result: ExecutionResult) -> dict[str, object]:
+    diagnostics = result.error_diagnostics
     return {
         "execution_id": result.execution_id,
         "status": result.status.value,
@@ -226,6 +227,15 @@ def _result_payload(result: ExecutionResult) -> dict[str, object]:
         "output_fingerprint": result.output_fingerprint,
         "error_code": result.error_code,
         "safe_error_details": dict(result.safe_error_details),
+        "error_diagnostics": (
+            None
+            if diagnostics is None
+            else {
+                "exception_type": diagnostics.exception_type,
+                "exception_message": diagnostics.exception_message,
+                "cause_digest": diagnostics.cause_digest,
+            }
+        ),
     }
 
 
