@@ -21,11 +21,21 @@ _SafeJsonValue: TypeAlias = (
     | list["_SafeJsonValue"]
     | dict[str, "_SafeJsonValue"]
 )
+_DIAGNOSTIC_EXCEPTION_TYPE_MAX_LENGTH = 256
+_DIAGNOSTIC_EXCEPTION_MESSAGE_MAX_LENGTH = 2048
 
 
 def _cause_digest(value: Mapping[str, str]) -> str:
     raw = json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+def _is_sha256(value: object) -> bool:
+    return (
+        isinstance(value, str)
+        and len(value) == 64
+        and all(character in "0123456789abcdef" for character in value)
+    )
 
 
 def _safe_json_mapping(
@@ -207,6 +217,46 @@ class ErrorCode(str, Enum):
 
 
 @dataclass(frozen=True, slots=True)
+class ErrorDiagnostics:
+    exception_type: str
+    exception_message: str
+    cause_digest: str
+
+    def __post_init__(self) -> None:
+        if (
+            not isinstance(self.exception_type, str)
+            or not self.exception_type
+            or len(self.exception_type) > _DIAGNOSTIC_EXCEPTION_TYPE_MAX_LENGTH
+        ):
+            raise ValueError("diagnostic exception type is invalid")
+        if (
+            not isinstance(self.exception_message, str)
+            or len(self.exception_message) > _DIAGNOSTIC_EXCEPTION_MESSAGE_MAX_LENGTH
+        ):
+            raise ValueError("diagnostic exception message is invalid")
+        if not _is_sha256(self.cause_digest):
+            raise ValueError("diagnostic cause digest must be lowercase SHA-256")
+
+    @classmethod
+    def from_exception(cls, error: BaseException) -> "ErrorDiagnostics":
+        exception_type = type(error).__name__
+        try:
+            exception_message = str(error)
+        except BaseException:
+            exception_message = ""
+        return cls(
+            exception_type[:_DIAGNOSTIC_EXCEPTION_TYPE_MAX_LENGTH],
+            exception_message[:_DIAGNOSTIC_EXCEPTION_MESSAGE_MAX_LENGTH],
+            _cause_digest(
+                {
+                    "exception_message": exception_message,
+                    "exception_type": exception_type,
+                }
+            ),
+        )
+
+
+@dataclass(frozen=True, slots=True)
 class SafeError:
     code: str
     category: str
@@ -228,8 +278,11 @@ class AIError(Error):
         retryable: "bool | None" = None,
         operation_id: "str | None" = None,
         safe_details: "Mapping[str, _SafeJsonValue] | None" = None,
+        diagnostics: "ErrorDiagnostics | None" = None,
     ) -> None:
         super().__init__(message or code.value)
+        if diagnostics is not None and not isinstance(diagnostics, ErrorDiagnostics):
+            raise TypeError("error diagnostics are invalid")
         self.code = code
         self.category = category or code.value.split("_", 1)[0]
         self.retryable = (
@@ -256,6 +309,7 @@ class AIError(Error):
         )
         self.operation_id = operation_id
         self.safe_details = _safe_json_mapping(safe_details)
+        self.diagnostics = diagnostics
 
     def to_safe_error(self, *, operation_id: str) -> SafeError:
         return SafeError(
@@ -320,6 +374,7 @@ __all__ = [
     "AssetNotFoundError",
     "AssetParseError",
     "ErrorCode",
+    "ErrorDiagnostics",
     "InvalidAssetError",
     "InvalidStoragePathError",
     "SafeError",
