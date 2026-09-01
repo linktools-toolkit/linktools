@@ -42,7 +42,7 @@ from ...core import (
     normalize_thinking,
     validate_agent_id,
 )
-from ...errors import AIError, ErrorCode
+from ...errors import AIError, ErrorCode, ErrorDiagnostics
 from ...storage import ObjectRef, StoredPayload
 from ...task import (
     TaskGraph,
@@ -64,6 +64,14 @@ def _is_sha256(value: object) -> bool:
     return isinstance(value, str) and len(value) == 64 and all(
         character in "0123456789abcdef" for character in value
     )
+
+
+def _error_diagnostics_payload(diagnostics: ErrorDiagnostics) -> dict[str, JsonValue]:
+    return {
+        "exception_type": diagnostics.exception_type,
+        "exception_message": diagnostics.exception_message,
+        "cause_digest": diagnostics.cause_digest,
+    }
 
 
 @dataclass(frozen=True, slots=True)
@@ -457,6 +465,7 @@ class ExecutionRecord:
     conversation_step_run_id: str | None = None
     result: ResultRecord | None = None
     repository_instructions: RuntimePayloadRef | None = None
+    error_diagnostics: ErrorDiagnostics | None = None
 
     def __post_init__(self) -> None:
         mode = normalize_execution_mode(self.mode)
@@ -469,6 +478,12 @@ class ExecutionRecord:
         object.__setattr__(self, "thinking", thinking)
         if not isinstance(self.binding, AgentBindingSnapshot) or self.binding.binding_digest != self.binding_digest:
             raise ValueError("execution binding snapshot does not match binding digest")
+        if self.error_diagnostics is not None and not isinstance(
+            self.error_diagnostics, ErrorDiagnostics
+        ):
+            raise TypeError("execution error diagnostics are invalid")
+        if self.status is not ExecutionStatus.FAILED and self.error_diagnostics is not None:
+            raise ValueError("only failed execution can carry error diagnostics")
 
 
 @dataclass(frozen=True, slots=True)
@@ -705,6 +720,26 @@ class ExecutionTerminalCommit:
             raise ValueError("successful terminal result requires output")
         if status is not ExecutionStatus.SUCCEEDED and self.result.output is not None:
             raise ValueError("failed terminal result cannot contain output")
+        if status is ExecutionStatus.FAILED:
+            if self.terminal_event_type is not ExecutionEventType.EXECUTION_FAILED:
+                raise ValueError("failed terminal commit requires failed event")
+            if self.terminal_event_payload.get("error_code") != self.execution.error_code:
+                raise ValueError("failed terminal error code mismatch")
+            safe_details = self.terminal_event_payload.get("safe_error_details")
+            if not isinstance(safe_details, Mapping) or dict(safe_details) != dict(
+                self.execution.safe_error_details
+            ):
+                raise ValueError("failed terminal safe error details mismatch")
+            diagnostics = self.execution.error_diagnostics
+            if diagnostics is None:
+                if "error_diagnostics" in self.terminal_event_payload:
+                    raise ValueError("historical failed terminal cannot invent diagnostics")
+            elif self.terminal_event_payload.get("error_diagnostics") != _error_diagnostics_payload(
+                diagnostics
+            ):
+                raise ValueError("failed terminal error diagnostics mismatch")
+        elif "error_diagnostics" in self.terminal_event_payload:
+            raise ValueError("non-failed terminal cannot carry error diagnostics")
 
 
 @dataclass(frozen=True, slots=True)
@@ -977,6 +1012,7 @@ class RecoveryTerminalOutcome:
     terminal_event_type: ExecutionEventType
     terminal_event_payload: Mapping[str, JsonValue]
     result_created_at: datetime
+    error_diagnostics: ErrorDiagnostics | None = None
 
     def __post_init__(self) -> None:
         if self.terminal_status is ExecutionStatus.SUCCEEDED and self.output is None:
@@ -993,6 +1029,12 @@ class RecoveryTerminalOutcome:
             raise ValueError("recovery object source domain is invalid")
         if self.result_created_at.tzinfo is None:
             raise ValueError("recovery outcome requires an aware timestamp")
+        if self.error_diagnostics is not None and not isinstance(
+            self.error_diagnostics, ErrorDiagnostics
+        ):
+            raise TypeError("recovery error diagnostics are invalid")
+        if self.terminal_status is not ExecutionStatus.FAILED and self.error_diagnostics is not None:
+            raise ValueError("only failed recovery outcome can carry error diagnostics")
 
 
 @dataclass(frozen=True, slots=True)
