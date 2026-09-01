@@ -221,13 +221,13 @@ async def _capability(replay_safe: bool):
 
 
 @pytest.mark.parametrize("replay_safe", [True, False])
-async def test_model_retry_respects_effect_replay_safety(replay_safe: bool) -> None:
+async def test_model_retry_is_known_failure_regardless_of_replay_safety(replay_safe: bool) -> None:
     capability, bridge, store, context, call, definition = await _capability(replay_safe)
 
     async def handler(_args: dict[str, Any]) -> None:
         raise ModelRetry("retry")
 
-    with pytest.raises((ModelRetry, AIError)) as raised:
+    with pytest.raises(ModelRetry):
         await capability.wrap_tool_execute(
             context,
             call=call,
@@ -235,23 +235,8 @@ async def test_model_retry_respects_effect_replay_safety(replay_safe: bool) -> N
             args={},
             handler=handler,
         )
-    if replay_safe:
-        assert isinstance(raised.value, ModelRetry)
-        assert bridge.calls == ["begin", "fail"]
-        assert [effect.status for effect in store.effects] == ["started", "failed"]
-    else:
-        assert isinstance(raised.value, AIError)
-        assert raised.value.code is ErrorCode.TOOL_EFFECT_UNKNOWN
-        with pytest.raises(AIError):
-            await capability.on_tool_execute_error(
-                context,
-                call=call,
-                tool_def=definition,
-                args={},
-                error=raised.value,
-            )
-        assert bridge.calls == ["begin", "unknown"]
-        assert [effect.status for effect in store.effects] == ["started"]
+    assert bridge.calls == ["begin", "fail"]
+    assert [effect.status for effect in store.effects] == ["started", "failed"]
 
 
 class _TaskRepository:
