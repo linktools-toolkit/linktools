@@ -2867,16 +2867,8 @@ class LocalExecutionBackend:
         self,
         execution: ExecutionRecord,
     ) -> ExecutionRecord:
-        if execution.session_id is None or execution.status is not ExecutionStatus.STARTED:
-            if execution.status in {
-                ExecutionStatus.FINALIZING,
-                ExecutionStatus.CANCELLING,
-                ExecutionStatus.SUCCEEDED,
-                ExecutionStatus.FAILED,
-                ExecutionStatus.CANCELLED,
-            }:
-                return execution
-            raise AIError(ErrorCode.STORAGE_CONFLICT)
+        if execution.session_id is None:
+            return execution
         return await self._claim_session_finalizing(execution)
 
     async def _rewrite_prepared_success_handoff(
