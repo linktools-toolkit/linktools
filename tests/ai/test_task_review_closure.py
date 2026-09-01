@@ -93,6 +93,52 @@ async def test_natural_failure_is_visible_before_explicit_cancel_override() -> N
 
 
 @pytest.mark.asyncio
+async def test_service_cancel_overrides_failed_graph_with_active_node() -> None:
+    state = RuntimeState.in_memory()
+    await state.initialize(namespace="task-service-cancel-override", tenant_id="tenant")
+    try:
+        repository = state.task.tasks
+        graph = TaskGraph("service-cancel-override", (TaskNode("failed"), TaskNode("active")))
+        await repository.create_graph(graph, tenant_id="tenant")
+        lease = await repository.claim(
+            graph.graph_id,
+            "failed",
+            tenant_id="tenant",
+            owner="worker",
+            lease_seconds=30,
+        )
+        await repository.fail(
+            lease,
+            tenant_id="tenant",
+            error_code=ErrorCode.TASK_NODE_FAILED.value,
+            error_digest="c" * 64,
+        )
+        before = await repository.snapshot_graph(graph.graph_id, tenant_id="tenant")
+        assert before is not None
+        assert before.status is TaskStatus.FAILED
+        assert {item.node_id: item.status for item in before.node_states}["active"] is TaskStatus.READY
+
+        service = DefaultTaskService(state.task, _AllowAuthorization())
+        view = await service.cancel_graph(
+            graph.graph_id,
+            CancelGraphRequest(
+                trusted_workspace_principal("tenant"),
+                "service-cancel-override-0001",
+            ),
+        )
+
+        assert view.status is TaskStatus.CANCELLED
+        after = await repository.snapshot_graph(graph.graph_id, tenant_id="tenant")
+        assert after is not None
+        states = {item.node_id: item.status for item in after.node_states}
+        assert after.status is TaskStatus.CANCELLED
+        assert states["failed"] is TaskStatus.FAILED
+        assert states["active"] is TaskStatus.CANCELLED
+    finally:
+        await state.close()
+
+
+@pytest.mark.asyncio
 async def test_explicit_cancel_preserves_blocked_terminal_node() -> None:
     state = RuntimeState.in_memory()
     await state.initialize(namespace="task-cancel-blocked", tenant_id="tenant")

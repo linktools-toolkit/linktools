@@ -879,11 +879,10 @@ class DefaultTaskService(TaskApi):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         if claimed:
             try:
-                if not _terminal(view.status):
-                    view = await self._persistence.tasks.cancel_graph(
-                        graph_id,
-                        tenant_id=tenant_id,
-                    )
+                view = await self._persistence.tasks.cancel_graph(
+                    graph_id,
+                    tenant_id=tenant_id,
+                )
                 view = await self._persistence.tasks.get_graph(
                     graph_id,
                     tenant_id=tenant_id,
