@@ -233,7 +233,7 @@ class _AgentTaskNodeHandler:
             if launch_task.done() and self._active_launch_tasks.get(key) is launch_task:
                 self._active_launch_tasks.pop(key, None)
         if not handle.execution_id:
-            raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
+            raise AIError(ErrorCode.EXECUTION_START_UNKNOWN)
         await self._bind_execution(
             control,
             handle.execution_id,
@@ -326,7 +326,7 @@ class _AgentTaskNodeHandler:
             if not handle.execution_id:
                 raise self._record_background_failure(
                     key,
-                    AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED),
+                    AIError(ErrorCode.EXECUTION_START_UNKNOWN),
                     phase="task_execution_resolve_cancel",
                 )
             execution_id = handle.execution_id
@@ -466,7 +466,7 @@ class _AgentTaskNodeHandler:
         try:
             handle = await launch_task
             if not handle.execution_id:
-                raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
+                raise AIError(ErrorCode.EXECUTION_START_UNKNOWN)
             await control.bind_execution(handle.execution_id)
         except asyncio.CancelledError:
             raise
@@ -503,7 +503,8 @@ class _AgentTaskNodeHandler:
         details.setdefault("phase", phase)
         details.setdefault("graph_id", key[1])
         details.setdefault("node_id", key[2])
-        failure = AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED, safe_details=details)
+        code = error.code if isinstance(error, AIError) else ErrorCode.INTERNAL_ERROR
+        failure = AIError(code, safe_details=details)
         self._background_failures[key] = failure
         return failure
 

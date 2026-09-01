@@ -446,7 +446,12 @@ class _RuntimeStepPersistence(StepPersistence[None]):
             ToolFailed,
             ToolFailedError,
         ) as error:
-            if state.handler_entered and not state.policy.effect_free and not state.policy.replay_safe:
+            if (
+                isinstance(error, ValidationError)
+                and state.handler_entered
+                and not state.policy.effect_free
+                and not state.policy.replay_safe
+            ):
                 await self._mark_unknown(state, error)
                 raise AIError(ErrorCode.TOOL_EFFECT_UNKNOWN) from error
             try:
@@ -502,7 +507,7 @@ class _RuntimeStepPersistence(StepPersistence[None]):
             if state.policy.replay_safe:
                 state.preserve_started = True
                 raise AIError(
-                    ErrorCode.STORAGE_RECOVERY_REQUIRED,
+                    ErrorCode.TOOL_EFFECT_UNKNOWN,
                     safe_details={"phase": "tool_effect_replay"},
                 ) from error
             await self._mark_unknown(state, error)
@@ -565,7 +570,12 @@ class _RuntimeStepPersistence(StepPersistence[None]):
                 error,
                 (ValidationError, ModelRetry, ToolRetryError, ToolFailed, ToolFailedError),
             ):
-                if state.handler_entered and not state.policy.effect_free and not state.policy.replay_safe:
+                if (
+                    isinstance(error, ValidationError)
+                    and state.handler_entered
+                    and not state.policy.effect_free
+                    and not state.policy.replay_safe
+                ):
                     await self._mark_unknown(state, error)
                     raise AIError(ErrorCode.TOOL_EFFECT_UNKNOWN) from error
                 return await self._fail_known_effect(
@@ -580,7 +590,7 @@ class _RuntimeStepPersistence(StepPersistence[None]):
                 if state.policy.replay_safe:
                     state.preserve_started = True
                     raise AIError(
-                        ErrorCode.STORAGE_RECOVERY_REQUIRED,
+                        ErrorCode.TOOL_EFFECT_UNKNOWN,
                         safe_details={"phase": "tool_effect_replay"},
                     ) from error
                 await self._mark_unknown(state, error)

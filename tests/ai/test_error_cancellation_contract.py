@@ -284,7 +284,7 @@ async def test_task_runner_start_unknown_after_caller_cancel_blocks_shutdown() -
     assert handler.pending_background_tasks == ()
     failure = handler.background_failure
     assert failure is not None
-    assert failure.code is ErrorCode.STORAGE_RECOVERY_REQUIRED
+    assert failure.code is ErrorCode.EXECUTION_START_UNKNOWN
 
     launcher = object.__new__(LocalTaskGraphLauncher)
     launcher._accepting = True
@@ -293,7 +293,7 @@ async def test_task_runner_start_unknown_after_caller_cancel_blocks_shutdown() -
     launcher._runner = handler
     with pytest.raises(AIError) as shutdown_error:
         await launcher.shutdown()
-    assert shutdown_error.value.code is ErrorCode.STORAGE_RECOVERY_REQUIRED
+    assert shutdown_error.value.code is ErrorCode.EXECUTION_START_UNKNOWN
 
 
 @pytest.mark.asyncio
