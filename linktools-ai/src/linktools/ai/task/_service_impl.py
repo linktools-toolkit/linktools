@@ -487,10 +487,7 @@ class DefaultTaskService(TaskApi):
         waiter = self._local_waiter
         if waiter is None or not waiter.owns_graph(graph_id, tenant_id=tenant_id):
             return None
-        try:
-            return waiter.graph_activity_generation(graph_id, tenant_id=tenant_id)
-        except AttributeError:
-            return None
+        return waiter.graph_activity_generation(graph_id, tenant_id=tenant_id)
 
     async def _wait_observation_opportunity(
         self,
@@ -711,66 +708,80 @@ class DefaultTaskService(TaskApi):
         graph_id: str,
         request_digest: str,
     ) -> tuple[bool, OperationLedgerRecord]:
-        while True:
-            operation = await self._persistence.operations.get(
+        operation = await self._persistence.operations.get(
+            operation_id,
+            tenant_id=tenant_id,
+        )
+        if operation is None:
+            now = datetime.now(timezone.utc)
+            pending = OperationLedgerInput(
                 operation_id,
-                tenant_id=tenant_id,
+                tenant_id,
+                ResourceKind.TASK_GRAPH,
+                graph_id,
+                None,
+                OperationKind.TASK_CANCEL,
+                OperationStatus.PENDING,
+                request_digest,
+                None,
+                None,
+                None,
+                True,
+                now,
+                now,
             )
-            if operation is None:
-                now = datetime.now(timezone.utc)
-                try:
-                    operation = await self._persistence.operations.append(
-                        OperationLedgerInput(
-                            operation_id,
-                            tenant_id,
-                            ResourceKind.TASK_GRAPH,
-                            graph_id,
-                            None,
-                            OperationKind.TASK_CANCEL,
-                            OperationStatus.PENDING,
-                            request_digest,
-                            None,
-                            None,
-                            None,
-                            True,
-                            now,
-                            now,
-                        )
-                    )
-                except AIError as error:
-                    if error.code is not ErrorCode.STORAGE_CONFLICT:
-                        raise
-                    continue
-            if operation.request_digest != request_digest:
-                raise AIError(ErrorCode.IDEMPOTENCY_CONFLICT)
-            if operation.status is OperationStatus.PENDING:
-                running = replace(
-                    operation,
-                    status=OperationStatus.RUNNING,
-                    updated_at=datetime.now(timezone.utc),
+            try:
+                operation = await self._persistence.operations.append(pending)
+            except AIError as error:
+                if error.code is not ErrorCode.STORAGE_CONFLICT:
+                    raise
+                operation = await self._persistence.operations.get(
+                    operation_id,
+                    tenant_id=tenant_id,
                 )
-                try:
-                    claimed = await self._persistence.operations.compare_and_swap(
-                        operation_id,
-                        tenant_id=tenant_id,
-                        expected_status=OperationStatus.PENDING,
-                        next_record=running,
-                    )
-                except AIError as error:
-                    if error.code is not ErrorCode.STORAGE_CONFLICT:
-                        raise
-                    continue
+                if operation is None:
+                    raise AIError(ErrorCode.STORAGE_CONFLICT) from error
+        if operation.request_digest != request_digest:
+            raise AIError(ErrorCode.IDEMPOTENCY_CONFLICT)
+        if operation.status is OperationStatus.PENDING:
+            running = replace(
+                operation,
+                status=OperationStatus.RUNNING,
+                updated_at=datetime.now(timezone.utc),
+            )
+            try:
+                claimed = await self._persistence.operations.compare_and_swap(
+                    operation_id,
+                    tenant_id=tenant_id,
+                    expected_status=OperationStatus.PENDING,
+                    next_record=running,
+                )
+            except AIError as error:
+                if error.code is not ErrorCode.STORAGE_CONFLICT:
+                    raise
+                current = await self._persistence.operations.get(
+                    operation_id,
+                    tenant_id=tenant_id,
+                )
+                if current is None:
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
+                if current.request_digest != request_digest:
+                    raise AIError(ErrorCode.IDEMPOTENCY_CONFLICT) from error
+                if current.status is OperationStatus.PENDING:
+                    raise AIError(ErrorCode.STORAGE_CONFLICT) from error
+                operation = current
+            else:
                 return True, claimed
-            if operation.status is OperationStatus.SUCCEEDED:
-                return False, operation
-            if operation.status is OperationStatus.FAILED:
-                raise _stable_operation_error(operation.error_code)
-            if operation.status in {
-                OperationStatus.RUNNING,
-                OperationStatus.EFFECT_UNKNOWN,
-            }:
-                return False, operation
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        if operation.status is OperationStatus.SUCCEEDED:
+            return False, operation
+        if operation.status is OperationStatus.FAILED:
+            raise _stable_operation_error(operation.error_code)
+        if operation.status in {
+            OperationStatus.RUNNING,
+            OperationStatus.EFFECT_UNKNOWN,
+        }:
+            return False, operation
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
 
     async def _cancel_finalizer(
         self,
