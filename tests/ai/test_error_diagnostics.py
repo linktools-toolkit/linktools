@@ -6,6 +6,8 @@ import hashlib
 import json
 
 import pytest
+from httpx import Request
+from openai import APIConnectionError
 from pydantic_ai.usage import RunUsage, UsageLimits
 
 from linktools.ai.core import ExecutionStatus, UsageMetrics
@@ -69,6 +71,21 @@ def test_unknown_agent_exception_keeps_safe_contract_and_adds_diagnostics() -> N
     safe = mapped.to_safe_error(operation_id="operation")
     assert safe.safe_details == {"phase": "agent_execution"}
     assert "provider disconnected" not in str(safe)
+
+
+def test_provider_connection_error_preserves_original_diagnostics() -> None:
+    error = APIConnectionError(
+        request=Request("POST", "https://provider.invalid/v1/chat/completions")
+    )
+    mapped = _execution_error(
+        error,
+        usage_limits=UsageLimits(),
+        run_usage=RunUsage(),
+    )
+    assert mapped.code is ErrorCode.MODEL_API_ERROR
+    assert mapped.safe_details == {}
+    assert mapped.diagnostics == ErrorDiagnostics.from_exception(error)
+    assert mapped.diagnostics.exception_type == "APIConnectionError"
 
 
 def test_failed_execution_result_exposes_diagnostics() -> None:
