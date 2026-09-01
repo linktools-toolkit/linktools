@@ -98,6 +98,7 @@ async def test_cached_task_failure_rethrows_full_metadata() -> None:
 @pytest.mark.asyncio
 async def test_task_waiter_rethrows_full_failure_metadata() -> None:
     launcher = object.__new__(LocalTaskGraphLauncher)
+    launcher._lock = asyncio.Lock()
     launcher._graphs = {
         ("tenant", "graph"): SimpleNamespace(
             failure=_source_error(),
