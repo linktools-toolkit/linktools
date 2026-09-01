@@ -398,7 +398,14 @@ async def test_terminal_local_bookkeeping_survives_caller_cancellation() -> None
     )
     pending = ExecutionEventAppend(ExecutionEventType.ASSISTANT_PART_COMPLETED, {"part": "text"})
     current = _execution()
-    terminal = replace(current, status=ExecutionStatus.FAILED, revision=2, event_sequence=2)
+    terminal = replace(
+        current,
+        status=ExecutionStatus.FAILED,
+        revision=2,
+        event_sequence=2,
+        error_code=ErrorCode.EXECUTION_FAILED.value,
+        safe_error_details={},
+    )
     result = ResultRecord(
         execution_id="execution",
         tenant_id="tenant",
@@ -413,7 +420,10 @@ async def test_terminal_local_bookkeeping_survives_caller_cancellation() -> None
         terminal,
         result,
         ExecutionEventType.EXECUTION_FAILED,
-        {"error_code": ErrorCode.EXECUTION_FAILED.value},
+        {
+            "error_code": ErrorCode.EXECUTION_FAILED.value,
+            "safe_error_details": {},
+        },
     )
     committed = ExecutionTerminalCommitResult(terminal, result)
 
