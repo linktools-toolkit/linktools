@@ -27,7 +27,7 @@ from ..core import (
     validate_resource_id,
     validate_user_prompt,
 )
-from ..errors import AIError, ErrorCode
+from ..errors import AIError, ErrorCode, ErrorDiagnostics
 from ..observe import RunSnapshot
 from ..storage import ObjectRef
 from ..task import (
@@ -129,12 +129,17 @@ class ExecutionResult:
     usage: UsageMetrics
     error_code: "str | None" = None
     safe_error_details: "Mapping[str, JsonValue]" = field(default_factory=dict)
+    error_diagnostics: "ErrorDiagnostics | None" = None
 
     def __post_init__(self) -> None:
         details = dict(self.safe_error_details)
         object.__setattr__(self, "safe_error_details", details)
+        if self.error_diagnostics is not None and not isinstance(
+            self.error_diagnostics, ErrorDiagnostics
+        ):
+            raise ValueError("execution result error diagnostics are invalid")
         if self.status is ExecutionStatus.SUCCEEDED:
-            if self.error_code is not None or details:
+            if self.error_code is not None or details or self.error_diagnostics is not None:
                 raise ValueError("successful execution result cannot carry an error")
             if self.output is None or not _is_digest(self.output_fingerprint):
                 raise ValueError("successful execution result requires output contract")
@@ -142,8 +147,8 @@ class ExecutionResult:
         if self.status is ExecutionStatus.CANCELLED:
             if self.error_code != ErrorCode.EXECUTION_CANCELLED.value:
                 raise ValueError("cancelled execution result requires EXECUTION_CANCELLED")
-            if _has_output_contract(self):
-                raise ValueError("cancelled execution result cannot carry output")
+            if _has_output_contract(self) or self.error_diagnostics is not None:
+                raise ValueError("cancelled execution result cannot carry output or diagnostics")
             return
         if self.status is ExecutionStatus.FAILED:
             if self.error_code is None:
