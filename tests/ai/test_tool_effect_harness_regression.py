@@ -22,7 +22,8 @@ pytestmark = pytest.mark.asyncio
 
 
 class _Bridge:
-    def __init__(self) -> None:
+    def __init__(self, replay_safe: bool) -> None:
+        self.replay_safe = replay_safe
         self.transitions: list[str] = []
 
     async def begin(
@@ -34,9 +35,9 @@ class _Bridge:
         replay_safe: bool,
     ) -> ToolOperationDecision:
         del ctx, call, tool_def, args
-        assert replay_safe is True
+        assert replay_safe is self.replay_safe
         self.transitions.append("begin")
-        return ToolOperationDecision("operation", "owner", 1, True)
+        return ToolOperationDecision("operation", "owner", 1, replay_safe)
 
     async def renew(self, decision: ToolOperationDecision) -> ToolOperationDecision:
         return decision
@@ -68,7 +69,7 @@ def _context() -> RunContext[None]:
 async def test_missing_harness_file_is_failed_retry_not_unknown(tmp_path: Path) -> None:
     filesystem = FileSystem(root_dir=tmp_path, id="workspace-filesystem")
     toolset = filesystem.get_toolset()
-    bridge = _Bridge()
+    bridge = _Bridge(True)
     store = InMemoryStepStore()
     capability = _RuntimeStepPersistence(
         tool_operations=bridge,
@@ -102,6 +103,56 @@ async def test_missing_harness_file_is_failed_retry_not_unknown(tmp_path: Path) 
             validated_args,
             context,
             tools["read_file"],
+        )
+
+    with pytest.raises(ModelRetry):
+        await capability.wrap_tool_execute(
+            context,
+            call=call,
+            tool_def=definition,
+            args=args,
+            handler=handler,
+        )
+
+    assert bridge.transitions == ["begin", "fail"]
+    effect = await store.get_tool_effect(run_id="run", tool_call_id="call")
+    assert effect is not None
+    assert effect.status == "failed"
+
+
+async def test_missing_write_parent_is_failed_retry_not_unknown(tmp_path: Path) -> None:
+    filesystem = FileSystem(root_dir=tmp_path, id="workspace-filesystem")
+    toolset = filesystem.get_toolset()
+    bridge = _Bridge(False)
+    store = InMemoryStepStore()
+    capability = _RuntimeStepPersistence(
+        tool_operations=bridge,
+        store=store,
+        agent_name="agent",
+        run_id="run",
+        trusted_tool_classes=(("write_file", "filesystem.write"),),
+    )
+    context = _context()
+    args = {"path": "worker/personnel_context/report.md", "content": "report"}
+    call = ToolCallPart("write_file", args, tool_call_id="call")
+    definition = ToolDefinition(
+        name="write_file",
+        capability_id="workspace-filesystem",
+    )
+    await capability.before_tool_execute(
+        context,
+        call=call,
+        tool_def=definition,
+        args=args,
+    )
+    tools = await toolset.get_tools(context)
+
+    async def handler(validated_args: dict[str, Any]) -> Any:
+        return await toolset.call_tool(
+            "write_file",
+            validated_args,
+            context,
+            tools["write_file"],
         )
 
     with pytest.raises(ModelRetry):
