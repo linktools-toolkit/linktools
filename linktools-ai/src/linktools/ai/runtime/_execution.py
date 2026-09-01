@@ -1481,10 +1481,20 @@ class DefaultExecutionService:
                     )
                     details.setdefault("phase", "execution_cancel_finalizer")
                     details.setdefault("execution_id", execution_id)
-                    self._detached_cancel_failure = AIError(
-                        ErrorCode.STORAGE_RECOVERY_REQUIRED,
-                        safe_details=details,
-                    )
+                    if isinstance(error, AIError):
+                        self._detached_cancel_failure = AIError(
+                            error.code,
+                            category=error.category,
+                            retryable=error.retryable,
+                            operation_id=error.operation_id,
+                            safe_details=details,
+                            diagnostics=error.diagnostics,
+                        )
+                    else:
+                        self._detached_cancel_failure = AIError(
+                            ErrorCode.STORAGE_RECOVERY_REQUIRED,
+                            safe_details=details,
+                        )
             finally:
                 self._detached_cancel_finalizers.discard(done)
 
@@ -1507,7 +1517,11 @@ class DefaultExecutionService:
         if failure is not None:
             raise AIError(
                 failure.code,
+                category=failure.category,
+                retryable=failure.retryable,
+                operation_id=failure.operation_id,
                 safe_details=dict(failure.safe_details),
+                diagnostics=failure.diagnostics,
             )
 
     async def _cancel(self, execution_id: str, request: CancelExecutionRequest) -> CancelExecutionResult:
