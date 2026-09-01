@@ -83,6 +83,7 @@ def test_provider_connection_error_preserves_original_diagnostics() -> None:
         run_usage=RunUsage(),
     )
     assert mapped.code is ErrorCode.MODEL_UNAVAILABLE
+    assert mapped.category == "MODEL"
     assert mapped.retryable is True
     assert mapped.safe_details == {}
     assert mapped.diagnostics == ErrorDiagnostics.from_exception(error)
