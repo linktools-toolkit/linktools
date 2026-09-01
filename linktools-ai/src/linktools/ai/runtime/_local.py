@@ -66,7 +66,7 @@ from ..core import (
     step_run_id,
     validate_tenant_id,
 )
-from ..errors import AIError, ErrorCode
+from ..errors import AIError, ErrorCode, ErrorDiagnostics
 from ..storage import (
     ObjectStore,
     PayloadPolicy,
@@ -168,6 +168,7 @@ _HANDOFF_PHASE_RANK = {
 class _WorkerFailure:
     code: ErrorCode
     safe_details: Mapping[str, JsonValue]
+    diagnostics: ErrorDiagnostics | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -379,7 +380,6 @@ class LocalExecutionBackend:
             task_map: dict[str, set[asyncio.Task[object]]] = {}
             self._execution_durable_tasks = task_map
             return task_map
-
 
     def _execution_task_set(
         self,
@@ -992,15 +992,24 @@ class LocalExecutionBackend:
                 live_broker.complete(execution_id)
             return
         if isinstance(error, AIError):
-            failure = _WorkerFailure(error.code, dict(error.safe_details))
+            failure = _WorkerFailure(
+                error.code,
+                dict(error.safe_details),
+                error.diagnostics,
+            )
         else:
             failure = _WorkerFailure(
                 ErrorCode.INTERNAL_ERROR,
                 {"phase": "local_execution_worker"},
+                ErrorDiagnostics.from_exception(error),
             )
         details = dict(failure.safe_details)
         details["execution_id"] = execution_id
-        self._worker_failures[execution_id] = _WorkerFailure(failure.code, details)
+        self._worker_failures[execution_id] = _WorkerFailure(
+            failure.code,
+            details,
+            failure.diagnostics,
+        )
         _logger.error(
             "local execution worker failed: execution=%s code=%s",
             execution_id,
@@ -1060,7 +1069,11 @@ class LocalExecutionBackend:
         failure = self._worker_failures.get(execution_id)
         if failure is None:
             return None
-        return AIError(failure.code, safe_details=dict(failure.safe_details))
+        return AIError(
+            failure.code,
+            safe_details=dict(failure.safe_details),
+            diagnostics=failure.diagnostics,
+        )
 
     def worker_installed(self, execution_id: str) -> bool:
         task = self._tasks.get(execution_id)
@@ -2423,6 +2436,7 @@ class LocalExecutionBackend:
                 None,
                 error.code.value,
                 StopReason.ERROR,
+                error_diagnostics=_execution_error_diagnostics(error),
             )
             return False
         return True
@@ -2543,6 +2557,7 @@ class LocalExecutionBackend:
                     target_status=ExecutionStatus.FAILED,
                     error_code=error.code.value,
                     stop_reason=StopReason.ERROR,
+                    error_diagnostics=_execution_error_diagnostics(error),
                 )
                 return await self._reconcile_handoff(checkpoint)
             execution = await self._commit_reconciled_terminal(checkpoint)
@@ -2863,6 +2878,7 @@ class LocalExecutionBackend:
         target_status: ExecutionStatus,
         error_code: str,
         stop_reason: StopReason,
+        error_diagnostics: ErrorDiagnostics | None = None,
     ) -> RecoveryCheckpoint:
         handoff = checkpoint.terminal_handoff
         if (
@@ -2875,7 +2891,14 @@ class LocalExecutionBackend:
             }
         ):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        if target_status is not ExecutionStatus.FAILED and error_diagnostics is not None:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         outcome = handoff.outcome
+        terminal_payload = _terminal_error_payload(
+            error_code,
+            {},
+            error_diagnostics,
+        )
         rewritten = RecoveryTerminalHandoff(
             RecoveryTerminalOutcome(
                 terminal_status=target_status,
@@ -2890,12 +2913,9 @@ class LocalExecutionBackend:
                     if target_status is ExecutionStatus.CANCELLED
                     else ExecutionEventType.EXECUTION_FAILED
                 ),
-                terminal_event_payload=(
-                    {"error_code": ErrorCode.EXECUTION_CANCELLED.value}
-                    if target_status is ExecutionStatus.CANCELLED
-                    else {"error_code": error_code}
-                ),
+                terminal_event_payload=terminal_payload,
                 result_created_at=outcome.result_created_at,
+                error_diagnostics=error_diagnostics,
             ),
             None,
             None,
@@ -3005,6 +3025,7 @@ class LocalExecutionBackend:
             outcome.result_created_at,
             error_code=outcome.error_code,
             safe_error_details=outcome.safe_error_details,
+            error_diagnostics=outcome.error_diagnostics,
         )
         result = ResultRecord(
             current.execution_id,
@@ -3071,6 +3092,8 @@ class LocalExecutionBackend:
             execution is None
             or execution.status is not handoff.outcome.terminal_status
             or execution.error_code != handoff.outcome.error_code
+            or dict(execution.safe_error_details) != dict(handoff.outcome.safe_error_details)
+            or execution.error_diagnostics != handoff.outcome.error_diagnostics
         ):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         self._validate_recovery_identity(execution, checkpoint.input)
@@ -3212,6 +3235,7 @@ class LocalExecutionBackend:
             raise AIError(
                 worker_failure.code,
                 safe_details=dict(worker_failure.safe_details),
+                diagnostics=worker_failure.diagnostics,
             )
         if dispatcher_failure is not None:
             raise AIError(
@@ -4297,6 +4321,9 @@ class LocalExecutionBackend:
             StopReason.CANCELLED if cancelled else StopReason.ERROR,
             run_id=run_id,
             safe_error_details=details,
+            error_diagnostics=(
+                None if cancelled else _execution_error_diagnostics(error)
+            ),
         )
 
     async def _commit_terminal(
@@ -4311,6 +4338,7 @@ class LocalExecutionBackend:
         run_id: str | None = None,
         usage: UsageMetrics | None = None,
         safe_error_details: Mapping[str, JsonValue] | None = None,
+        error_diagnostics: ErrorDiagnostics | None = None,
         expected_cursor: ConversationCursor | None = None,
         conversation_run: RunRecord | None = None,
         conversation_snapshot: ContinuableSnapshot | None = None,
@@ -4328,6 +4356,8 @@ class LocalExecutionBackend:
             ExecutionStatus.CANCELLED,
         }:
             return current
+        if status is not ExecutionStatus.FAILED and error_diagnostics is not None:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         now = datetime.now(timezone.utc)
         captured_usage = usage or self._captured_usage.get(execution.execution_id, UsageMetrics())
         if status is ExecutionStatus.SUCCEEDED:
@@ -4362,6 +4392,7 @@ class LocalExecutionBackend:
                     run_id=run_id,
                     usage=captured_usage,
                     safe_error_details=safe_error_details,
+                    error_diagnostics=error_diagnostics,
                 )
             if recovery_checkpoint.handoff_phase is RecoveryHandoffPhase.NONE:
                 if status is ExecutionStatus.SUCCEEDED and run_id is None:
@@ -4432,12 +4463,14 @@ class LocalExecutionBackend:
                         terminal_event_payload=(
                             {"run_id": run_id}
                             if status is ExecutionStatus.SUCCEEDED and run_id is not None
-                            else {
-                                "error_code": error_code,
-                                "safe_error_details": safe_error_details or {},
-                            }
+                            else _terminal_error_payload(
+                                error_code,
+                                safe_error_details or {},
+                                error_diagnostics,
+                            )
                         ),
                         result_created_at=now,
+                        error_diagnostics=error_diagnostics,
                     ),
                     run_id or recovery_checkpoint.step_run_id,
                     conversation,
@@ -4487,6 +4520,7 @@ class LocalExecutionBackend:
             now,
             error_code=error_code,
             safe_error_details=safe_error_details,
+            error_diagnostics=error_diagnostics,
         )
         terminal_commit = ExecutionTerminalCommit(
             current.revision,
@@ -4510,10 +4544,11 @@ class LocalExecutionBackend:
             (
                 {"run_id": run_id}
                 if status is ExecutionStatus.SUCCEEDED and run_id is not None
-                else {
-                    "error_code": error_code,
-                    "safe_error_details": safe_error_details or {},
-                }
+                else _terminal_error_payload(
+                    error_code,
+                    safe_error_details or {},
+                    error_diagnostics,
+                )
             ),
         )
         committed = await self._commit_execution_terminal_checkpoint(
@@ -4575,6 +4610,7 @@ class LocalExecutionBackend:
         run_id: str | None,
         usage: UsageMetrics,
         safe_error_details: Mapping[str, JsonValue] | None,
+        error_diagnostics: ErrorDiagnostics | None,
     ) -> ExecutionRecord:
         if current.status in {
             ExecutionStatus.SUCCEEDED,
@@ -4613,6 +4649,7 @@ class LocalExecutionBackend:
             now,
             error_code=error_code,
             safe_error_details=safe_error_details,
+            error_diagnostics=error_diagnostics,
         )
         commit = ExecutionTerminalCommit(
             current.revision,
@@ -4633,7 +4670,11 @@ class LocalExecutionBackend:
             else ExecutionEventType.EXECUTION_FAILED,
             {"run_id": run_id}
             if status is ExecutionStatus.SUCCEEDED and run_id is not None
-            else {"error_code": error_code, "safe_error_details": safe_error_details or {}},
+            else _terminal_error_payload(
+                error_code,
+                safe_error_details or {},
+                error_diagnostics,
+            ),
         )
         target = replace(
             checkpoint,
@@ -4935,7 +4976,10 @@ def _terminal_record(
     *,
     error_code: str | None,
     safe_error_details: Mapping[str, JsonValue] | None = None,
+    error_diagnostics: ErrorDiagnostics | None = None,
 ) -> ExecutionRecord:
+    if status is not ExecutionStatus.FAILED and error_diagnostics is not None:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     return replace(
         record,
         status=status,
@@ -4943,8 +4987,27 @@ def _terminal_record(
         event_sequence=record.event_sequence + 1,
         error_code=error_code,
         safe_error_details={} if safe_error_details is None else safe_error_details,
+        error_diagnostics=error_diagnostics,
         updated_at=now,
     )
+
+
+def _terminal_error_payload(
+    error_code: str | None,
+    safe_error_details: Mapping[str, JsonValue],
+    error_diagnostics: ErrorDiagnostics | None,
+) -> dict[str, JsonValue]:
+    payload: dict[str, JsonValue] = {
+        "error_code": error_code,
+        "safe_error_details": dict(safe_error_details),
+    }
+    if error_diagnostics is not None:
+        payload["error_diagnostics"] = {
+            "exception_type": error_diagnostics.exception_type,
+            "exception_message": error_diagnostics.exception_message,
+            "cause_digest": error_diagnostics.cause_digest,
+        }
+    return payload
 
 
 def _admission_matches(existing: RecoveryCheckpoint, candidate: RecoveryCheckpoint) -> bool:
@@ -4974,6 +5037,12 @@ def _execution_error_details(error: Exception) -> dict[str, JsonValue]:
     return dict(error.safe_details) if isinstance(error, AIError) else {}
 
 
+def _execution_error_diagnostics(error: Exception) -> ErrorDiagnostics:
+    if isinstance(error, AIError) and error.diagnostics is not None:
+        return error.diagnostics
+    return ErrorDiagnostics.from_exception(error)
+
+
 def _secondary_execution_error(error: Exception, primary: Exception) -> AIError:
     primary_details: dict[str, JsonValue] = {
         "primary_error_code": _execution_error_code(primary).value,
@@ -4988,6 +5057,7 @@ def _secondary_execution_error(error: Exception, primary: Exception) -> AIError:
             retryable=error.retryable,
             operation_id=error.operation_id,
             safe_details=details,
+            diagnostics=error.diagnostics,
         )
     return AIError(
         ErrorCode.INTERNAL_ERROR,
@@ -4995,6 +5065,7 @@ def _secondary_execution_error(error: Exception, primary: Exception) -> AIError:
             "phase": "execution_terminal_commit",
             **primary_details,
         },
+        diagnostics=ErrorDiagnostics.from_exception(error),
     )
 
 

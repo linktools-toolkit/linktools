@@ -85,7 +85,7 @@ from ..core import (
     canonical_sha256,
     normalize_json_value,
 )
-from ..errors import AIError, ErrorCode
+from ..errors import AIError, ErrorCode, ErrorDiagnostics
 from ..observe import MiddlewarePipeline, context_for
 if TYPE_CHECKING:
     from ..workspace import RepositoryInstructionResolver, RepositoryInstructions
@@ -968,6 +968,7 @@ def _execution_error(
     usage_limits: UsageLimits,
     run_usage: RunUsage,
 ) -> AIError:
+    diagnostics = ErrorDiagnostics.from_exception(error)
     if isinstance(error, UsageLimitExceeded):
         return AIError(
             ErrorCode.EXECUTION_USAGE_LIMIT_EXCEEDED,
@@ -976,16 +977,26 @@ def _execution_error(
                 "limits": _limit_details(usage_limits),
                 "usage": _usage_details(run_usage),
             },
+            diagnostics=diagnostics,
         )
     if isinstance(error, RunCancelled):
-        return AIError(ErrorCode.EXECUTION_CANCELLED, retryable=False)
+        return AIError(
+            ErrorCode.EXECUTION_CANCELLED,
+            retryable=False,
+            diagnostics=diagnostics,
+        )
     if isinstance(error, ConcurrencyLimitExceeded):
         return AIError(
             ErrorCode.EXECUTION_CONCURRENCY_LIMIT_EXCEEDED,
             retryable=True,
+            diagnostics=diagnostics,
         )
     if isinstance(error, ContentFilterError):
-        return AIError(ErrorCode.MODEL_CONTENT_FILTERED, retryable=False)
+        return AIError(
+            ErrorCode.MODEL_CONTENT_FILTERED,
+            retryable=False,
+            diagnostics=diagnostics,
+        )
     if isinstance(error, ModelHTTPError):
         details: dict[str, JsonValue] = {
             "model_name": error.model_name,
@@ -1004,29 +1015,44 @@ def _execution_error(
             code = ErrorCode.MODEL_REQUEST_REJECTED
         else:
             code = ErrorCode.MODEL_API_ERROR
-        return AIError(code, safe_details=details)
+        return AIError(code, safe_details=details, diagnostics=diagnostics)
     if isinstance(error, ModelAPIError):
         return AIError(
             ErrorCode.MODEL_API_ERROR,
             retryable=False,
             safe_details={"model_name": error.model_name},
+            diagnostics=diagnostics,
         )
     if isinstance(error, OpenAIAPIError):
-        return AIError(ErrorCode.MODEL_API_ERROR, retryable=False)
+        return AIError(
+            ErrorCode.MODEL_API_ERROR,
+            retryable=False,
+            diagnostics=diagnostics,
+        )
     if isinstance(error, UnexpectedModelBehavior):
-        return AIError(ErrorCode.MODEL_RESPONSE_INVALID, retryable=False)
+        return AIError(
+            ErrorCode.MODEL_RESPONSE_INVALID,
+            retryable=False,
+            diagnostics=diagnostics,
+        )
     if isinstance(error, ValidationError):
-        return AIError(ErrorCode.OUTPUT_VALIDATION_FAILED, retryable=False)
+        return AIError(
+            ErrorCode.OUTPUT_VALIDATION_FAILED,
+            retryable=False,
+            diagnostics=diagnostics,
+        )
     if isinstance(error, UserError):
         return AIError(
             ErrorCode.INTERNAL_ERROR,
             retryable=False,
             safe_details={"phase": "agent_execution"},
+            diagnostics=diagnostics,
         )
     return AIError(
         ErrorCode.INTERNAL_ERROR,
         retryable=False,
         safe_details={"phase": "agent_execution"},
+        diagnostics=diagnostics,
     )
 
 

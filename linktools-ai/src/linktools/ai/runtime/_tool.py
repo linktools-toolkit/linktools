@@ -29,7 +29,7 @@ from ..core import (
     validate_lease_owner,
     validate_tenant_id,
 )
-from ..errors import AIError, ErrorCode
+from ..errors import AIError, ErrorCode, ErrorDiagnostics
 from ..storage import (
     ObjectStore,
     PayloadPolicy,
@@ -590,8 +590,15 @@ class RuntimeToolOperationBridge:
             safe_details = value.get("safe_details", {})
             if not isinstance(safe_details, dict):
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            diagnostics = None
+            if "diagnostics" in value:
+                diagnostics = self._decode_error_diagnostics(value["diagnostics"])
             try:
-                return AIError(code, safe_details=safe_details)
+                return AIError(
+                    code,
+                    safe_details=safe_details,
+                    diagnostics=diagnostics,
+                )
             except (TypeError, ValueError) as error:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -611,14 +618,16 @@ class RuntimeToolOperationBridge:
                 await self._message_error_payload("tool_failed_message", error.tool_failed),
             )
         if isinstance(error, AIError):
-            return error.code.value, await self._json_payload(
-                {
-                    "kind": "error",
-                    "code": error.code.value,
-                    "safe_details": dict(error.safe_details),
-                }
-            )
+            value: dict[str, object] = {
+                "kind": "error",
+                "code": error.code.value,
+                "safe_details": dict(error.safe_details),
+            }
+            if error.diagnostics is not None:
+                value["diagnostics"] = self._error_diagnostics_payload(error.diagnostics)
+            return error.code.value, await self._json_payload(value)
         digest = hashlib.sha256(type(error).__qualname__.encode("utf-8")).hexdigest()
+        diagnostics = ErrorDiagnostics.from_exception(error)
         return ErrorCode.TOOL_EXECUTION_FAILED.value, await self._json_payload(
             {
                 "kind": "error",
@@ -627,8 +636,44 @@ class RuntimeToolOperationBridge:
                     "error_digest": digest,
                     "phase": "tool_execution",
                 },
+                "diagnostics": self._error_diagnostics_payload(diagnostics),
             }
         )
+
+    @staticmethod
+    def _error_diagnostics_payload(
+        diagnostics: ErrorDiagnostics,
+    ) -> dict[str, str]:
+        return {
+            "exception_type": diagnostics.exception_type,
+            "exception_message": diagnostics.exception_message,
+            "cause_digest": diagnostics.cause_digest,
+        }
+
+    @staticmethod
+    def _decode_error_diagnostics(value: object) -> ErrorDiagnostics:
+        if not isinstance(value, dict) or set(value) != {
+            "exception_type",
+            "exception_message",
+            "cause_digest",
+        }:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        exception_type = value["exception_type"]
+        exception_message = value["exception_message"]
+        cause_digest = value["cause_digest"]
+        if not all(
+            isinstance(item, str)
+            for item in (exception_type, exception_message, cause_digest)
+        ):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        try:
+            return ErrorDiagnostics(
+                exception_type,
+                exception_message,
+                cause_digest,
+            )
+        except (TypeError, ValueError) as error:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
 
     async def _message_error_payload(
         self,

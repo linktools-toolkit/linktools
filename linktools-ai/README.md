@@ -230,7 +230,33 @@ SQLite-backed Runtime state supports the built-in durable TaskGraph scheduler wi
 
 Durable local execution and recovery are provided by Runtime state and recovery checkpoints and do not require an external workflow server.
 
-## 8. Public API boundary
+## 8. Execution failure diagnostics
+
+`execution-error-diagnostics-v1` extends failed execution results with durable diagnostic context while keeping the existing safe error contract unchanged:
+
+```python
+result = await execution.wait()
+
+result.error_code
+result.safe_error_details
+result.error_diagnostics
+```
+
+`error_code` remains the stable machine-readable classification used by Runtime control flow. `safe_error_details` remains the redacted/safe mapping for ordinary application handling. A failed execution may additionally expose `error_diagnostics` with:
+
+- `exception_type`: original exception class name, at most 256 Unicode code points;
+- `exception_message`: `str(original_exception)`, at most 2048 Unicode code points;
+- `cause_digest`: 64 lowercase hexadecimal SHA-256 characters computed from the untruncated original exception type and message.
+
+`exception_message` is diagnostic data, not a safe/redacted field. It may contain sensitive text already present in the originating exception. Runtime does not add prompts, model responses, headers, request payloads, or URLs to diagnostics, but it also does not redact the exception message. Applications should apply the same authorization and retention controls to diagnostics as to other execution investigation data.
+
+Diagnostics are durable with the failed execution and are returned after Runtime restart through the normal public execution result and terminal event APIs. Historical failed records that predate the field return `error_diagnostics is None`. Successful and cancelled executions never carry diagnostics.
+
+Diagnostics do not participate in error classification, retry decisions, TaskGraph scheduling, idempotency identity, or terminal-state decisions. The field meanings, truncation limits, and digest input above define `execution-error-diagnostics-v1`; incompatible semantic changes require a new diagnostics contract version.
+
+The `ai run --json` terminal object includes `error_diagnostics`; ordinary non-JSON CLI failure text continues to report only `error_code` and `safe_error_details`.
+
+## 9. Public API boundary
 
 The top-level composition API is intentionally small:
 
@@ -246,6 +272,6 @@ from linktools.ai import (
 )
 ```
 
-Package-specific public contracts remain available from their owning packages, for example `linktools.ai.asset`, `linktools.ai.model`, `linktools.ai.spec`, and `linktools.ai.runtime`.
+Package-specific public contracts remain available from their owning packages, for example `linktools.ai.asset`, `linktools.ai.model`, `linktools.ai.spec`, and `linktools.ai.runtime`. `ErrorDiagnostics` is available from `linktools.ai.runtime`.
 
 Private modules prefixed with `_` are implementation details. Downstream applications should not import Runtime execution infrastructure, state repository internals, or private compiler helpers directly.
