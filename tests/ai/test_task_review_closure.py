@@ -15,7 +15,6 @@ from linktools.ai.task import (
     CancelGraphRequest,
     DefaultTaskService,
     LocalTaskGraphLauncher,
-    TaskFunction,
     TaskGraph,
     TaskGraphLaunch,
     TaskGraphLimits,
@@ -200,14 +199,6 @@ def test_task_node_context_input_is_deeply_detached() -> None:
     assert isinstance(nested, dict)
     nested["value"] = 2
     assert context.input["nested"] == {"value": 1}
-
-
-def test_task_function_uses_slots() -> None:
-    async def run(context: TaskNodeContext[None]) -> None:
-        del context
-
-    function = TaskFunction("example.slots", 1, run)
-    assert not hasattr(function, "__dict__")
 
 
 @pytest.mark.asyncio

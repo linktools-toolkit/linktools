@@ -145,7 +145,7 @@ async def test_explicit_cancel_keeps_failed_node_but_marks_graph_cancelled() -> 
 
         before = await repository.snapshot_graph(graph.graph_id, tenant_id="tenant")
         assert before is not None
-        assert before.status is TaskStatus.PENDING
+        assert before.status is TaskStatus.FAILED
 
         view = await repository.cancel_graph(graph.graph_id, tenant_id="tenant")
         snapshot = await repository.snapshot_graph(graph.graph_id, tenant_id="tenant")

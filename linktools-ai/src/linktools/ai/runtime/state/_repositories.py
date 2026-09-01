@@ -3946,7 +3946,12 @@ class TaskRepositoryImpl(_RepositoryBase):
             return None
         graph = await self._decode(record, TaskGraphView)
         nodes = await self.list_nodes(graph_id, tenant_id=tenant_id)
-        return TaskGraphView(graph_id, _graph_status(nodes), graph.nodes)
+        status = (
+            TaskStatus.CANCELLED
+            if graph.status is TaskStatus.CANCELLED
+            else _graph_status(nodes)
+        )
+        return TaskGraphView(graph_id, status, graph.nodes)
 
     async def snapshot_graph(
         self,
@@ -3978,9 +3983,14 @@ class TaskRepositoryImpl(_RepositoryBase):
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
             if len(ordered) != len(states):
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            status = (
+                TaskStatus.CANCELLED
+                if graph.status is TaskStatus.CANCELLED
+                else _graph_status(ordered)
+            )
             return TaskGraphSnapshot(
                 graph.graph_id,
-                _graph_status(ordered),
+                status,
                 graph.nodes,
                 ordered,
             )
@@ -4075,7 +4085,11 @@ class TaskRepositoryImpl(_RepositoryBase):
                     next_nodes[node.node_id] = value
                     changed_nodes.append((node, value))
                     changed = True
-            next_status = _graph_status(tuple(next_nodes.values()))
+            next_status = (
+                TaskStatus.CANCELLED
+                if graph.status is TaskStatus.CANCELLED
+                else _graph_status(tuple(next_nodes.values()))
+            )
             graph_changed = graph.status is not next_status or graph_record.state != next_status.value
             if not changed_nodes and not graph_changed:
                 return TaskGraphView(graph.graph_id, next_status, graph.nodes)
@@ -4132,13 +4146,22 @@ class TaskRepositoryImpl(_RepositoryBase):
             changed = [
                 (node, replace(node, status=TaskStatus.CANCELLED, owner=None, lease_expires_at=None))
                 for node in nodes
-                if node.status not in {TaskStatus.SUCCEEDED, TaskStatus.FAILED, TaskStatus.CANCELLED}
+                if node.status not in {
+                    TaskStatus.SUCCEEDED,
+                    TaskStatus.FAILED,
+                    TaskStatus.BLOCKED,
+                    TaskStatus.CANCELLED,
+                }
             ]
             changed_ids = {current.node_id for current, _ in changed}
             next_nodes = tuple(value for _, value in changed) + tuple(
                 node for node in nodes if node.node_id not in changed_ids
             )
-            next_status = _graph_status(next_nodes)
+            next_status = (
+                TaskStatus.CANCELLED
+                if graph.status is TaskStatus.CANCELLED or changed
+                else _graph_status(next_nodes)
+            )
             graph_changed = (
                 graph.status is not next_status
                 or graph_record.state != next_status.value

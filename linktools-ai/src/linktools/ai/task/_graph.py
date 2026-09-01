@@ -469,33 +469,39 @@ class TaskGraphSnapshot:
         for node, state in zip(nodes, states, strict=True):
             if state.graph_id != self.graph_id or state.dependencies != node.dependencies:
                 raise ValueError("task graph snapshot node identity is invalid")
-        if _aggregate_graph_status(states) is not self.status:
-            raise ValueError("task graph snapshot aggregate status is invalid")
+        aggregate = _aggregate_graph_status(states)
+        if aggregate is not self.status:
+            terminal = {
+                TaskStatus.SUCCEEDED,
+                TaskStatus.FAILED,
+                TaskStatus.BLOCKED,
+                TaskStatus.CANCELLED,
+            }
+            explicit_cancelled = (
+                self.status is TaskStatus.CANCELLED
+                and bool(states)
+                and all(state.status in terminal for state in states)
+                and any(state.status is TaskStatus.CANCELLED for state in states)
+            )
+            if not explicit_cancelled:
+                raise ValueError("task graph snapshot aggregate status is invalid")
         object.__setattr__(self, "nodes", nodes)
         object.__setattr__(self, "node_states", states)
 
 
 def _aggregate_graph_status(nodes: "tuple[TaskNodeView, ...]") -> TaskStatus:
     statuses = {node.status for node in nodes}
-    if not statuses:
+    if not statuses or statuses <= {TaskStatus.SUCCEEDED}:
         return TaskStatus.SUCCEEDED
-    terminal = {
-        TaskStatus.SUCCEEDED,
-        TaskStatus.FAILED,
-        TaskStatus.BLOCKED,
-        TaskStatus.CANCELLED,
-    }
-    if any(status not in terminal for status in statuses):
-        if TaskStatus.RUNNING in statuses:
-            return TaskStatus.RUNNING
-        return TaskStatus.PENDING
-    if TaskStatus.CANCELLED in statuses:
-        return TaskStatus.CANCELLED
     if TaskStatus.FAILED in statuses:
         return TaskStatus.FAILED
     if TaskStatus.BLOCKED in statuses:
         return TaskStatus.BLOCKED
-    return TaskStatus.SUCCEEDED
+    if statuses <= {TaskStatus.CANCELLED, TaskStatus.SUCCEEDED}:
+        return TaskStatus.CANCELLED
+    if TaskStatus.RUNNING in statuses:
+        return TaskStatus.RUNNING
+    return TaskStatus.PENDING
 
 
 @dataclass(frozen=True, slots=True)

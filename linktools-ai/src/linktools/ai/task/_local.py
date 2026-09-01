@@ -227,11 +227,24 @@ class _TaskNodeRunControlImpl:
         if not isinstance(execution_id, str) or not execution_id.strip():
             raise ValueError("execution id is required")
         async with self._lease_state.lock:
-            await self._repository.bind_execution(
-                self._lease_state.lease,
-                tenant_id=self._tenant_id,
-                execution_id=execution_id,
-            )
+            try:
+                await self._repository.bind_execution(
+                    self._lease_state.lease,
+                    tenant_id=self._tenant_id,
+                    execution_id=execution_id,
+                )
+            except AIError as error:
+                if error.code is not ErrorCode.STORAGE_CONFLICT:
+                    raise
+                lease = self._lease_state.lease
+                raise AIError(
+                    ErrorCode.STORAGE_RECOVERY_REQUIRED,
+                    safe_details={
+                        "phase": "task_execution_bind",
+                        "graph_id": lease.graph_id,
+                        "node_id": lease.node_id,
+                    },
+                ) from error
             lease = self._lease_state.lease
         _logger.info(
             "task execution bound: graph=%s node=%s execution=%s fence=%s",
@@ -456,14 +469,28 @@ class LocalTaskGraphLauncher:
                     tenant_id=tenant_id,
                 )
                 if view.status in _TERMINAL:
+                    if view.status in {TaskStatus.FAILED, TaskStatus.BLOCKED}:
+                        await self._cancel_terminal_effects(run, states)
                     return
                 _reap_inflight(inflight)
                 now = datetime.now(timezone.utc)
+                persisted = {
+                    state.node_id
+                    for state in states
+                    if state.status is TaskStatus.RUNNING
+                    and state.lease_expires_at is not None
+                    and state.lease_expires_at > now
+                }
+                used = persisted | set(inflight)
+                capacity = max(
+                    0,
+                    request.limits.max_concurrency - len(used),
+                )
                 static = {node.node_id: node for node in request.graph.nodes}
                 for state in states:
-                    if len(inflight) >= request.limits.max_concurrency:
+                    if capacity <= 0:
                         break
-                    if state.node_id in inflight or not _runnable(state, now):
+                    if state.node_id in used or not _runnable(state, now):
                         continue
                     node = static.get(state.node_id)
                     if node is None:
@@ -490,6 +517,8 @@ class LocalTaskGraphLauncher:
                         name=f"task-node-{request.graph.graph_id}-{node.node_id}",
                     )
                     inflight[node.node_id] = _InflightNode(task, lease_state)
+                    used.add(node.node_id)
+                    capacity -= 1
                     await self._notify(run)
                 if inflight:
                     await asyncio.wait(
@@ -516,6 +545,31 @@ class LocalTaskGraphLauncher:
                 )
             run.closed = True
             await self._notify(run)
+
+    async def _cancel_terminal_effects(
+        self,
+        run: _GraphRun,
+        states: "tuple[TaskNodeView, ...]",
+    ) -> None:
+        request = run.request
+        static = {node.node_id: node for node in request.graph.nodes}
+        tenant_id = request.principal.tenant_id
+        for state in states:
+            if state.status is not TaskStatus.RUNNING or state.fence < 1:
+                continue
+            node = static.get(state.node_id)
+            if node is None:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            await self._runner.cancel(
+                node,
+                graph_id=request.graph.graph_id,
+                principal=request.principal,
+                dependency_results=await self._dependency_results(
+                    request.graph.graph_id,
+                    node,
+                    tenant_id=tenant_id,
+                ),
+            )
 
     async def _wait_scheduler(
         self,
@@ -624,6 +678,12 @@ class LocalTaskGraphLauncher:
                 await _stop_heartbeat(heartbeat_stop, heartbeat)
                 if isinstance(error, AIError) and error.code in _RECOVERY_UNKNOWN_CODES:
                     await self._defer_recovery(run, node, cause_code=error.code)
+                    return
+                if isinstance(error, AIError) and error.code in {
+                    ErrorCode.TASK_FENCE_STALE,
+                    ErrorCode.TASK_OWNER_CONFLICT,
+                    ErrorCode.TASK_NOT_READY,
+                }:
                     return
                 code = (
                     error.code.value

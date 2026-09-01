@@ -419,11 +419,43 @@ class _AgentTaskNodeHandler:
         try:
             await asyncio.shield(task)
         except asyncio.CancelledError:
+            continuation = asyncio.create_task(
+                self._settle_detached_bind(task, key),
+                name=f"task-execution-bind-settle-{key[1]}-{key[2]}",
+            )
             self._detach(
-                cast("asyncio.Task[object]", task),
+                cast("asyncio.Task[object]", continuation),
                 f"task execution bind graph={key[1]} task={key[2]}",
             )
             raise
+
+    async def _settle_detached_bind(
+        self,
+        task: asyncio.Task[None],
+        key: tuple[str, str, str],
+    ) -> None:
+        try:
+            await task
+        except asyncio.CancelledError:
+            raise
+        except AIError as error:
+            if error.code in {
+                ErrorCode.TASK_FENCE_STALE,
+                ErrorCode.TASK_OWNER_CONFLICT,
+                ErrorCode.TASK_NOT_READY,
+            }:
+                return
+            raise self._record_background_failure(
+                key,
+                error,
+                phase="task_execution_bind",
+            ) from error
+        except BaseException as error:  # noqa: BLE001
+            raise self._record_background_failure(
+                key,
+                error,
+                phase="task_execution_bind",
+            ) from error
 
     async def _bind_after_launch(
         self,
@@ -438,6 +470,18 @@ class _AgentTaskNodeHandler:
             await control.bind_execution(handle.execution_id)
         except asyncio.CancelledError:
             raise
+        except AIError as error:
+            if error.code in {
+                ErrorCode.TASK_FENCE_STALE,
+                ErrorCode.TASK_OWNER_CONFLICT,
+                ErrorCode.TASK_NOT_READY,
+            }:
+                return
+            raise self._record_background_failure(
+                key,
+                error,
+                phase="task_execution_bind_after_launch",
+            ) from error
         except BaseException as error:  # noqa: BLE001
             raise self._record_background_failure(
                 key,

@@ -8,7 +8,13 @@ from dataclasses import dataclass, field
 from types import MappingProxyType
 from typing import Generic, Protocol, TypeVar, runtime_checkable
 
-from ..core import JsonValue, Principal, canonical_sha256, normalize_json_value
+from ..core import (
+    ImmutableJsonMapping,
+    JsonValue,
+    Principal,
+    canonical_sha256,
+    normalize_json_value,
+)
 from ._graph import TaskNode
 
 AppT = TypeVar("AppT")
@@ -69,7 +75,7 @@ class TaskNodeContext(Generic[AppT]):
             for key, value in dependencies.items()
         ):
             raise ValueError("task dependency mapping is invalid")
-        object.__setattr__(self, "input", MappingProxyType(normalized_input))
+        object.__setattr__(self, "input", ImmutableJsonMapping(normalized_input))
         object.__setattr__(self, "dependencies", MappingProxyType(dependencies))
 
 

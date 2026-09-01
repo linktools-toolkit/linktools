@@ -453,6 +453,11 @@ class DefaultTaskService(TaskApi):
                 graph_id,
                 tenant_id=tenant_id,
             )
+            latest, generation = await self._stabilize_local_terminal(
+                latest,
+                tenant_id=tenant_id,
+                generation=generation,
+            )
             latest_fingerprint = _observation_fingerprint(latest)
             if latest_fingerprint != fingerprint or _terminal(latest.status):
                 yield latest
@@ -474,9 +479,55 @@ class DefaultTaskService(TaskApi):
             )
             if snapshot is None:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            if _terminal(snapshot.status):
+            if _terminal(snapshot.status) and (
+                self._local_waiter is None
+                or not self._local_waiter.owns_graph(graph_id, tenant_id=tenant_id)
+            ):
                 await self._request_graph_release(graph_id, tenant_id)
             return snapshot
+
+    async def _stabilize_local_terminal(
+        self,
+        snapshot: TaskGraphSnapshot,
+        *,
+        tenant_id: str,
+        generation: int | None,
+    ) -> tuple[TaskGraphSnapshot, int | None]:
+        waiter = self._local_waiter
+        while (
+            _terminal(snapshot.status)
+            and waiter is not None
+            and waiter.owns_graph(snapshot.graph_id, tenant_id=tenant_id)
+        ):
+            try:
+                await self._wait_observation_opportunity(
+                    snapshot,
+                    tenant_id=tenant_id,
+                    after_generation=generation,
+                )
+            except AIError:
+                latest = await self._snapshot_with_terminal_release(
+                    snapshot.graph_id,
+                    tenant_id=tenant_id,
+                )
+                if _terminal(latest.status):
+                    return (
+                        latest,
+                        self._local_activity_generation(
+                            snapshot.graph_id,
+                            tenant_id=tenant_id,
+                        ),
+                    )
+                raise
+            generation = self._local_activity_generation(
+                snapshot.graph_id,
+                tenant_id=tenant_id,
+            )
+            snapshot = await self._snapshot_with_terminal_release(
+                snapshot.graph_id,
+                tenant_id=tenant_id,
+            )
+        return snapshot, generation
 
     def _local_activity_generation(
         self,
@@ -861,7 +912,15 @@ class DefaultTaskService(TaskApi):
             or operation.status
             in {OperationStatus.RUNNING, OperationStatus.EFFECT_UNKNOWN}
         ) and view.status is TaskStatus.CANCELLED:
-            await self._cleanup_cancelled_graph(graph_id, request)
+            try:
+                await self._cleanup_cancelled_graph(graph_id, request)
+            except BaseException as error:  # noqa: BLE001
+                await self._raise_cancel_cleanup_error(
+                    operation,
+                    tenant_id,
+                    graph_id,
+                    error,
+                )
         if claimed or operation.status in {
             OperationStatus.RUNNING,
             OperationStatus.EFFECT_UNKNOWN,
@@ -912,7 +971,15 @@ class DefaultTaskService(TaskApi):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         if _terminal(view.status):
             if view.status is TaskStatus.CANCELLED:
-                await self._cleanup_cancelled_graph(graph_id, request)
+                try:
+                    await self._cleanup_cancelled_graph(graph_id, request)
+                except BaseException as cleanup_error:  # noqa: BLE001
+                    await self._raise_cancel_cleanup_error(
+                        operation,
+                        tenant_id,
+                        graph_id,
+                        cleanup_error,
+                    )
             current = await self._record_success(
                 operation,
                 tenant_id,
@@ -933,6 +1000,23 @@ class DefaultTaskService(TaskApi):
         raise AIError(
             ErrorCode.INTERNAL_ERROR,
             safe_details={"phase": "task_cancel"},
+        ) from error
+
+    async def _raise_cancel_cleanup_error(
+        self,
+        operation: OperationLedgerRecord,
+        tenant_id: str,
+        graph_id: str,
+        error: BaseException,
+    ) -> None:
+        await self._record_effect_unknown(operation, tenant_id)
+        if isinstance(error, asyncio.CancelledError):
+            raise error
+        if isinstance(error, AIError):
+            raise error
+        raise AIError(
+            ErrorCode.STORAGE_RECOVERY_REQUIRED,
+            safe_details={"phase": "task_cancel_cleanup", "graph_id": graph_id},
         ) from error
 
     async def _cleanup_cancelled_graph(

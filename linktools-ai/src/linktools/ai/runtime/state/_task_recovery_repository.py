@@ -208,12 +208,15 @@ class DurableTaskRepositoryImpl(TaskRepositoryImpl):
                 )
             )
             nodes = await self._decode_many(node_records)
-            status_before_cancel = _effective_graph_status(graph, nodes)
+            had_nonterminal = any(
+                node.status not in _TERMINAL_TASK_STATUSES
+                for node in nodes
+            )
             await super(DurableTaskRepositoryImpl, self).cancel_graph(
                 graph_id,
                 tenant_id=tenant_id,
             )
-            if status_before_cancel in _TERMINAL_TASK_STATUSES:
+            if not had_nonterminal:
                 view = await self._stabilize_graph_projection(
                     transaction,
                     graph_id,
@@ -982,19 +985,17 @@ _RECOVERABLE_STATES = frozenset(
 
 def _isolated_graph_status(nodes: tuple[TaskNodeView, ...]) -> TaskStatus:
     statuses = {node.status for node in nodes}
-    if not statuses:
+    if not statuses or statuses <= {TaskStatus.SUCCEEDED}:
         return TaskStatus.SUCCEEDED
-    if any(status not in _TERMINAL_TASK_STATUSES for status in statuses):
-        if TaskStatus.RUNNING in statuses:
-            return TaskStatus.RUNNING
-        return TaskStatus.PENDING
     if TaskStatus.FAILED in statuses:
         return TaskStatus.FAILED
     if TaskStatus.BLOCKED in statuses:
         return TaskStatus.BLOCKED
-    if TaskStatus.CANCELLED in statuses:
+    if statuses <= {TaskStatus.CANCELLED, TaskStatus.SUCCEEDED}:
         return TaskStatus.CANCELLED
-    return TaskStatus.SUCCEEDED
+    if TaskStatus.RUNNING in statuses:
+        return TaskStatus.RUNNING
+    return TaskStatus.PENDING
 
 
 def _effective_graph_status(
