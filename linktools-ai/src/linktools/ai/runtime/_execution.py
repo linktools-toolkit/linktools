@@ -46,7 +46,7 @@ from ..core import (
 from ..core import (
     idempotency_key_digest as compute_idempotency_key_digest,
 )
-from ..errors import AIError, ErrorCode
+from ..errors import AIError, ErrorCode, ErrorDiagnostics
 from ..storage import (
     ObjectStore,
     PayloadPolicy,
@@ -1049,12 +1049,14 @@ class DefaultExecutionService:
             if idempotency.status is not IdempotencyStatus.RESERVED:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             now = datetime.now(timezone.utc)
+            diagnostics = error.diagnostics or ErrorDiagnostics.from_exception(error)
             terminal = _next_execution(
                 current,
                 ExecutionStatus.FAILED,
                 now,
                 error_code=error.code.value,
                 safe_error_details=error.safe_details,
+                error_diagnostics=diagnostics,
                 terminal_event=True,
             )
             if self._terminal_committer is None:
@@ -1074,10 +1076,11 @@ class DefaultExecutionService:
                             now,
                         ),
                         terminal_event_type=ExecutionEventType.EXECUTION_FAILED,
-                        terminal_event_payload={
-                            "error_code": error.code.value,
-                            "safe_error_details": dict(error.safe_details),
-                        },
+                        terminal_event_payload=_failed_event_payload(
+                            error.code.value,
+                            error.safe_details,
+                            diagnostics,
+                        ),
                         idempotency=IdempotencyTerminalUpdate(
                             idempotency.scope,
                             idempotency.idempotency_key_digest,
@@ -1253,6 +1256,7 @@ class DefaultExecutionService:
                     result.usage,
                     error_code,
                     safe_details,
+                    execution.error_diagnostics,
                 )
             except ValueError as error:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
@@ -1866,6 +1870,22 @@ def _terminal_error(
     return code.value, details
 
 
+def _failed_event_payload(
+    error_code: str,
+    safe_error_details: Mapping[str, JsonValue],
+    diagnostics: ErrorDiagnostics,
+) -> dict[str, JsonValue]:
+    return {
+        "error_code": error_code,
+        "safe_error_details": dict(safe_error_details),
+        "error_diagnostics": {
+            "exception_type": diagnostics.exception_type,
+            "exception_message": diagnostics.exception_message,
+            "cause_digest": diagnostics.cause_digest,
+        },
+    }
+
+
 def _request_digest(
     request: ExecutionRequest,
     binding_digest: str,
@@ -1973,6 +1993,7 @@ def _next_execution(
     *,
     error_code: "str | None" = None,
     safe_error_details: "Mapping[str, JsonValue] | None" = None,
+    error_diagnostics: "ErrorDiagnostics | None" = None,
     agent_run_sequence: int | None = None,
     terminal_event: bool = False,
 ) -> ExecutionRecord:
@@ -1988,6 +2009,7 @@ def _next_execution(
             if safe_error_details is None
             else dict(safe_error_details)
         ),
+        error_diagnostics=error_diagnostics,
         updated_at=now,
     )
 
