@@ -961,7 +961,7 @@ class _WorkspaceToolGate(AbstractCapability[None]):
             if not isinstance(target, str):
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             subset = await self._instruction_resolver.resolve(
-                target,
+                _repository_instruction_target(target),
                 exclude_sources=frozenset(self._exposure_map),
             )
             if any(document.source in self._exposure_map for document in subset.documents):
@@ -1079,7 +1079,10 @@ class _WorkspaceToolGate(AbstractCapability[None]):
             target = arguments.get("path")
             if not isinstance(target, str):
                 raise ValueError("repository marker target is invalid")
-            target_scope = _logical_target_scope(self._workspace_root, target)
+            target_scope = _logical_target_scope(
+                self._workspace_root,
+                _repository_instruction_target(target),
+            )
             if any(
                 not _scope_applies_to_target(document.scope, target_scope)
                 for document in instructions.documents
@@ -1140,6 +1143,10 @@ def _marker_execution_id(content: str) -> str | None:
     if not execution_id or execution_id != execution_id.strip():
         return None
     return execution_id
+
+
+def _repository_instruction_target(target: str) -> str:
+    return "." if target == "" else target
 
 
 def _logical_target_scope(root: Path, target: str) -> str:
