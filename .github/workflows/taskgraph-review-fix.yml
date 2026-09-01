@@ -38,6 +38,14 @@ jobs:
           if text.count(block) != 1:
               raise RuntimeError("TaskFunction slots test anchor mismatch")
           tests.write_text(text.replace(block, "\n", 1))
+
+          service = Path("linktools-ai/src/linktools/ai/task/_service_impl.py")
+          text = service.read_text()
+          old = '''            if _terminal(snapshot.status) and (\n                self._local_waiter is None\n                or not self._local_waiter.owns_graph(graph_id, tenant_id=tenant_id)\n            ):\n                await self._request_graph_release(graph_id, tenant_id)\n        snapshot, generation = await self._stabilize_local_terminal(\n            snapshot,\n            tenant_id=tenant_id,\n            generation=generation,\n        )\n        fingerprint = _observation_fingerprint(snapshot)\n'''
+          new = '''            if _terminal(snapshot.status):\n                await self._request_graph_release(graph_id, tenant_id)\n        fingerprint = _observation_fingerprint(snapshot)\n'''
+          if text.count(old) != 1:
+              raise RuntimeError("initial terminal stabilization anchor mismatch")
+          service.write_text(text.replace(old, new, 1))
           PY
           git diff --check
       - name: Install tooling
@@ -52,7 +60,9 @@ jobs:
             tests/ai/test_task_reliable_review_regressions.py \
             tests/ai/test_task_sqlite_cas_convergence.py \
             tests/ai/test_task_runtime_recovery.py \
-            tests/ai/test_error_cancellation_contract.py
+            tests/ai/test_error_cancellation_contract.py \
+            tests/ai/test_durable_contract_repairs.py::test_task_wait_returns_current_terminal_snapshot_without_local_wait \
+            tests/ai/test_durable_contract_repairs.py::test_task_wait_prefers_terminal_truth_after_scheduler_failure
       - name: Run final gates
         run: |
           python manage.py check linktools-ai
