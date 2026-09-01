@@ -2,11 +2,14 @@
 # -*- coding: utf-8 -*-
 """Focused durable tool-effect control-flow regressions."""
 
+import asyncio
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
 
 import pytest
+from pydantic import BaseModel
+
 from linktools.ai.core import ToolOperationStatus
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.runtime._agent_executor import _RuntimePersistenceBoundary
@@ -14,7 +17,14 @@ from linktools.ai.runtime._capabilities import ToolOperationDecision, _RuntimeSt
 from linktools.ai.runtime._tool import RuntimeToolOperationBridge, ToolOperationRecord
 from linktools.ai.storage import PayloadPolicy
 from pydantic_ai.capabilities import AbstractCapability, CombinedCapability
-from pydantic_ai.exceptions import CallDeferred, ModelRetry, SkipToolExecution, ToolFailedError, ToolRetryError
+from pydantic_ai.exceptions import (
+    CallDeferred,
+    ModelRetry,
+    SkipToolExecution,
+    ToolFailed,
+    ToolFailedError,
+    ToolRetryError,
+)
 from pydantic_ai.messages import RetryPromptPart, ToolCallPart, ToolReturnPart
 from pydantic_ai.models.test import TestModel
 from pydantic_ai.tools import RunContext, ToolDefinition
@@ -52,8 +62,15 @@ class _StepStore:
 
 
 class _Bridge:
-    def __init__(self, replay_safe: bool, *, fail_error: BaseException | None = None) -> None:
+    def __init__(
+        self,
+        replay_safe: bool,
+        *,
+        begin_error: BaseException | None = None,
+        fail_error: BaseException | None = None,
+    ) -> None:
         self.decision = ToolOperationDecision("operation", "owner", 1, replay_safe)
+        self.begin_error = begin_error
         self.fail_error = fail_error
         self.calls: list[str] = []
 
@@ -68,6 +85,8 @@ class _Bridge:
         del ctx, call, tool_def, args
         assert replay_safe is self.decision.replay_safe
         self.calls.append("begin")
+        if self.begin_error is not None:
+            raise self.begin_error
         return self.decision
 
     async def renew(self, decision: ToolOperationDecision) -> ToolOperationDecision:
@@ -97,9 +116,14 @@ def _context() -> RunContext[None]:
 async def _capability(
     replay_safe: bool,
     *,
+    begin_error: BaseException | None = None,
     fail_error: BaseException | None = None,
 ) -> tuple[_RuntimeStepPersistence, _Bridge, _StepStore, RunContext[None], ToolCallPart, ToolDefinition]:
-    bridge = _Bridge(replay_safe, fail_error=fail_error)
+    bridge = _Bridge(
+        replay_safe,
+        begin_error=begin_error,
+        fail_error=fail_error,
+    )
     store = _StepStore()
     capability = _RuntimeStepPersistence(
         tool_operations=bridge,
@@ -216,7 +240,7 @@ async def test_custom_wrap_failure_is_inside_durable_effect_boundary() -> None:
     async def raw_handler(_args: dict[str, Any]) -> None:
         raise AssertionError("custom wrapper must fail before the raw tool")
 
-    with pytest.raises(AIError) as raised:
+    with pytest.raises(ToolFailed) as raised:
         await combined.wrap_tool_execute(
             context,
             call=call,
@@ -225,9 +249,10 @@ async def test_custom_wrap_failure_is_inside_durable_effect_boundary() -> None:
             handler=raw_handler,
         )
 
-    assert raised.value.code is ErrorCode.TOOL_EFFECT_UNKNOWN
+    assert raised.value.message == "TOOL_EFFECT_UNKNOWN: verify side effects before retry"
     assert bridge.calls == ["begin", "unknown"]
     assert [effect.status for effect in store.effects] == ["started"]
+    assert not capability._calls
 
 
 async def test_replay_safe_handler_failure_reports_tool_effect_unknown() -> None:
@@ -258,6 +283,206 @@ async def test_replay_safe_handler_failure_reports_tool_effect_unknown() -> None
     assert propagated.value is raised.value
     assert bridge.calls == ["begin"]
     assert [effect.status for effect in store.effects] == ["started"]
+    assert not capability._calls
+
+
+async def test_model_retry_is_prefixed_for_model_feedback() -> None:
+    capability, bridge, store, context, call, definition = await _capability(True)
+
+    async def handler(_args: dict[str, Any]) -> None:
+        raise ModelRetry("correct the path")
+
+    with pytest.raises(ModelRetry) as raised:
+        await capability.wrap_tool_execute(
+            context,
+            call=call,
+            tool_def=definition,
+            args={},
+            handler=handler,
+        )
+
+    assert raised.value.message == "TOOL_RETRY_REQUIRED: correct the path"
+    assert bridge.calls == ["begin", "fail"]
+    assert [effect.status for effect in store.effects] == ["started", "failed"]
+    assert not capability._calls
+
+
+async def test_tool_failed_is_prefixed_for_model_feedback() -> None:
+    capability, bridge, store, context, call, definition = await _capability(True)
+
+    async def handler(_args: dict[str, Any]) -> None:
+        raise ToolFailed("resource is unavailable")
+
+    with pytest.raises(ToolFailed) as raised:
+        await capability.wrap_tool_execute(
+            context,
+            call=call,
+            tool_def=definition,
+            args={},
+            handler=handler,
+        )
+
+    assert raised.value.message == "TOOL_EXECUTION_FAILED: resource is unavailable"
+    assert bridge.calls == ["begin", "fail"]
+    assert [effect.status for effect in store.effects] == ["started", "failed"]
+    assert not capability._calls
+
+
+async def test_structured_tool_failed_error_uses_compact_json() -> None:
+    capability, bridge, store, context, call, definition = await _capability(True)
+
+    async def handler(_args: dict[str, Any]) -> None:
+        raise ToolFailedError(
+            ToolReturnPart(
+                "tool",
+                {"retryable": False, "reason": "missing"},
+                tool_call_id="call",
+                outcome="failed",
+            )
+        )
+
+    with pytest.raises(ToolFailed) as raised:
+        await capability.wrap_tool_execute(
+            context,
+            call=call,
+            tool_def=definition,
+            args={},
+            handler=handler,
+        )
+
+    assert (
+        raised.value.message
+        == 'TOOL_EXECUTION_FAILED: {"reason":"missing","retryable":false}'
+    )
+    assert bridge.calls == ["begin", "fail"]
+    assert [effect.status for effect in store.effects] == ["started", "failed"]
+    assert not capability._calls
+
+
+async def test_tool_retry_error_is_prefixed_for_model_feedback() -> None:
+    capability, bridge, store, context, call, definition = await _capability(True)
+
+    async def handler(_args: dict[str, Any]) -> None:
+        raise ToolRetryError(
+            RetryPromptPart(
+                "correct the path",
+                tool_name="tool",
+                tool_call_id="call",
+            )
+        )
+
+    with pytest.raises(ModelRetry) as raised:
+        await capability.wrap_tool_execute(
+            context,
+            call=call,
+            tool_def=definition,
+            args={},
+            handler=handler,
+        )
+
+    assert raised.value.message == "TOOL_RETRY_REQUIRED: correct the path"
+    assert bridge.calls == ["begin", "fail"]
+    assert [effect.status for effect in store.effects] == ["started", "failed"]
+    assert not capability._calls
+
+
+async def test_validation_error_is_prefixed_for_replay_safe_tool() -> None:
+    capability, bridge, store, context, call, definition = await _capability(True)
+
+    class Payload(BaseModel):
+        value: int
+
+    async def handler(_args: dict[str, Any]) -> None:
+        Payload.model_validate({"value": {"invalid": True}})
+
+    with pytest.raises(ModelRetry) as raised:
+        await capability.wrap_tool_execute(
+            context,
+            call=call,
+            tool_def=definition,
+            args={},
+            handler=handler,
+        )
+
+    assert raised.value.message.startswith("TOOL_RETRY_REQUIRED: [")
+    assert '"type":"int_type"' in raised.value.message
+    assert bridge.calls == ["begin", "fail"]
+    assert [effect.status for effect in store.effects] == ["started", "failed"]
+    assert not capability._calls
+
+
+async def test_historical_unknown_effect_is_model_visible_without_reexecution() -> None:
+    unknown = AIError(ErrorCode.TOOL_EFFECT_UNKNOWN)
+    capability, bridge, store, context, call, definition = await _capability(
+        False,
+        begin_error=unknown,
+    )
+    entered = False
+
+    async def handler(_args: dict[str, Any]) -> None:
+        nonlocal entered
+        entered = True
+
+    with pytest.raises(ToolFailed) as raised:
+        await capability.wrap_tool_execute(
+            context,
+            call=call,
+            tool_def=definition,
+            args={},
+            handler=handler,
+        )
+
+    assert raised.value.message == "TOOL_EFFECT_UNKNOWN: verify side effects before retry"
+    assert entered is False
+    assert bridge.calls == ["begin"]
+    assert store.effects == []
+    assert not capability._calls
+
+
+async def test_cancellation_keeps_cancellation_control_flow() -> None:
+    capability, bridge, store, context, call, definition = await _capability(False)
+
+    async def handler(_args: dict[str, Any]) -> None:
+        raise asyncio.CancelledError
+
+    with pytest.raises(asyncio.CancelledError):
+        await capability.wrap_tool_execute(
+            context,
+            call=call,
+            tool_def=definition,
+            args={},
+            handler=handler,
+        )
+
+    assert bridge.calls == ["begin", "unknown"]
+    assert [effect.status for effect in store.effects] == ["started"]
+    assert not capability._calls
+
+
+async def test_model_tool_error_truncation_preserves_head_and_tail() -> None:
+    capability, _bridge, _store, context, call, definition = await _capability(True)
+    message = "H" * 4500 + "TAIL"
+    full = f"TOOL_RETRY_REQUIRED: {message}"
+
+    async def handler(_args: dict[str, Any]) -> None:
+        raise ModelRetry(message)
+
+    with pytest.raises(ModelRetry) as raised:
+        await capability.wrap_tool_execute(
+            context,
+            call=call,
+            tool_def=definition,
+            args={},
+            handler=handler,
+        )
+
+    rendered = raised.value.message
+    marker = "...[truncated]..."
+    tail_chars = 4096 - 1024 - len(marker)
+    assert len(rendered) == 4096
+    assert rendered[:1024] == full[:1024]
+    assert rendered.count(marker) == 1
+    assert rendered[-tail_chars:] == full[-tail_chars:]
     assert not capability._calls
 
 
@@ -323,7 +548,7 @@ async def test_replay_unsafe_deferral_after_handler_entry_fails_closed() -> None
     async def handler(_args: dict[str, Any]) -> None:
         raise CallDeferred({"reason": "later"})
 
-    with pytest.raises(AIError) as raised:
+    with pytest.raises(ToolFailed) as raised:
         await capability.wrap_tool_execute(
             context,
             call=call,
@@ -332,16 +557,7 @@ async def test_replay_unsafe_deferral_after_handler_entry_fails_closed() -> None
             handler=handler,
         )
 
-    assert raised.value.code is ErrorCode.TOOL_EFFECT_UNKNOWN
-    with pytest.raises(AIError) as propagated:
-        await capability.on_tool_execute_error(
-            context,
-            call=call,
-            tool_def=definition,
-            args={},
-            error=raised.value,
-        )
-    assert propagated.value.code is ErrorCode.TOOL_EFFECT_UNKNOWN
+    assert raised.value.message == "TOOL_EFFECT_UNKNOWN: verify side effects before retry"
     assert bridge.calls == ["begin", "unknown"]
     assert [effect.status for effect in store.effects] == ["started"]
     assert not capability._calls

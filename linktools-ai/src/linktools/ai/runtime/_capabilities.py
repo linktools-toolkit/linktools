@@ -80,6 +80,12 @@ _MODEL_USAGE_INPUT_METADATA_KEY = "linktools.ai.model_usage.input_tokens"
 _MODEL_USAGE_OUTPUT_METADATA_KEY = "linktools.ai.model_usage.output_tokens"
 _MODEL_USAGE_CACHE_READ_METADATA_KEY = "linktools.ai.model_usage.cache_read_tokens"
 _MODEL_USAGE_CACHE_WRITE_METADATA_KEY = "linktools.ai.model_usage.cache_write_tokens"
+_MODEL_TOOL_ERROR_MAX_CHARS = 4096
+_MODEL_TOOL_ERROR_HEAD_CHARS = 1024
+_MODEL_TOOL_ERROR_TRUNCATION_MARKER = "...[truncated]..."
+_MODEL_EFFECT_UNKNOWN_MESSAGE = "TOOL_EFFECT_UNKNOWN: verify side effects before retry"
+_MODEL_RETRY_PREFIX = "TOOL_RETRY_REQUIRED"
+_MODEL_FAILED_PREFIX = "TOOL_EXECUTION_FAILED"
 _REPOSITORY_MARKER_HEADER = "[linktools.repository-instructions.v1]"
 _REPOSITORY_MARKER_ACTION = (
     "Apply the payload as newly applicable repository instructions for this failed "
@@ -318,13 +324,18 @@ class _RuntimeStepPersistence(StepPersistence[None]):
             tool_def,
             trusted_tool_classes=self._trusted_tool_classes,
         )
-        decision = await self._tool_operations.begin(
-            ctx,
-            call,
-            tool_def,
-            args,
-            policy.replay_safe,
-        )
+        try:
+            decision = await self._tool_operations.begin(
+                ctx,
+                call,
+                tool_def,
+                args,
+                policy.replay_safe,
+            )
+        except AIError as error:
+            if error.code is ErrorCode.TOOL_EFFECT_UNKNOWN:
+                raise ToolFailed(_MODEL_EFFECT_UNKNOWN_MESSAGE) from error
+            raise
         if decision.replay_safe is not policy.replay_safe:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         key = self._decision_key(ctx, call)
@@ -394,7 +405,8 @@ class _RuntimeStepPersistence(StepPersistence[None]):
                     handler_detached = True
                     if state.handler_entered and not state.policy.replay_safe:
                         await self._mark_unknown(state, heartbeat_error)
-                        raise AIError(ErrorCode.TOOL_EFFECT_UNKNOWN) from heartbeat_error
+                        keep_call_state = False
+                        raise ToolFailed(_MODEL_EFFECT_UNKNOWN_MESSAGE) from heartbeat_error
                     state.preserve_started = True
                     raise heartbeat_error
             try:
@@ -453,7 +465,8 @@ class _RuntimeStepPersistence(StepPersistence[None]):
                 and not state.policy.replay_safe
             ):
                 await self._mark_unknown(state, error)
-                raise AIError(ErrorCode.TOOL_EFFECT_UNKNOWN) from error
+                keep_call_state = False
+                raise ToolFailed(_MODEL_EFFECT_UNKNOWN_MESSAGE) from error
             try:
                 await self._fail_known_effect(
                     ctx,
@@ -472,7 +485,8 @@ class _RuntimeStepPersistence(StepPersistence[None]):
         except (CallDeferred, ApprovalRequired) as signal:
             if state.handler_entered and not state.policy.replay_safe and not state.policy.effect_free:
                 await self._mark_unknown(state, signal)
-                raise AIError(ErrorCode.TOOL_EFFECT_UNKNOWN) from signal
+                keep_call_state = False
+                raise ToolFailed(_MODEL_EFFECT_UNKNOWN_MESSAGE) from signal
             unsupported = AIError(
                 ErrorCode.CAPABILITY_POLICY_CONFLICT,
                 safe_details={
@@ -511,7 +525,8 @@ class _RuntimeStepPersistence(StepPersistence[None]):
                     safe_details={"phase": "tool_effect_replay"},
                 ) from error
             await self._mark_unknown(state, error)
-            raise AIError(ErrorCode.TOOL_EFFECT_UNKNOWN) from error
+            keep_call_state = False
+            raise ToolFailed(_MODEL_EFFECT_UNKNOWN_MESSAGE) from error
         finally:
             await self._stop_heartbeat(state)
             if not handler_detached:
@@ -577,7 +592,7 @@ class _RuntimeStepPersistence(StepPersistence[None]):
                     and not state.policy.replay_safe
                 ):
                     await self._mark_unknown(state, error)
-                    raise AIError(ErrorCode.TOOL_EFFECT_UNKNOWN) from error
+                    raise ToolFailed(_MODEL_EFFECT_UNKNOWN_MESSAGE) from error
                 return await self._fail_known_effect(
                     ctx,
                     call=call,
@@ -594,7 +609,7 @@ class _RuntimeStepPersistence(StepPersistence[None]):
                         safe_details={"phase": "tool_effect_replay"},
                     ) from error
                 await self._mark_unknown(state, error)
-                raise AIError(ErrorCode.TOOL_EFFECT_UNKNOWN) from error
+                raise ToolFailed(_MODEL_EFFECT_UNKNOWN_MESSAGE) from error
             state.preserve_started = True
             cancelled = await self._tool_operations.fail(state.decision, error)
             state.operation_terminalized = True
@@ -715,8 +730,12 @@ class _RuntimeStepPersistence(StepPersistence[None]):
                 args=args,
                 error=error,
             )
-        except BaseException:
+        except BaseException as raised:
             state.effect_terminalized = True
+            if raised is error:
+                model_error = _model_tool_error(error, call=call, tool_def=tool_def)
+                if model_error is not error:
+                    raise model_error from error
             raise
         state.effect_terminalized = True
         return result
@@ -942,7 +961,7 @@ class _WorkspaceToolGate(AbstractCapability[None]):
             if not isinstance(target, str):
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             subset = await self._instruction_resolver.resolve(
-                target,
+                _repository_instruction_lookup_target(self._workspace_root, target),
                 exclude_sources=frozenset(self._exposure_map),
             )
             if any(document.source in self._exposure_map for document in subset.documents):
@@ -1060,7 +1079,10 @@ class _WorkspaceToolGate(AbstractCapability[None]):
             target = arguments.get("path")
             if not isinstance(target, str):
                 raise ValueError("repository marker target is invalid")
-            target_scope = _logical_target_scope(self._workspace_root, target)
+            target_scope = _logical_target_scope(
+                self._workspace_root,
+                _repository_instruction_target(target),
+            )
             if any(
                 not _scope_applies_to_target(document.scope, target_scope)
                 for document in instructions.documents
@@ -1123,6 +1145,24 @@ def _marker_execution_id(content: str) -> str | None:
     return execution_id
 
 
+def _repository_instruction_target(target: str) -> str:
+    return "." if target == "" else target
+
+
+def _repository_instruction_lookup_target(root: Path, target: str) -> str:
+    lookup_target = _repository_instruction_target(target)
+    try:
+        _logical_target_scope(root, lookup_target)
+    except (OSError, ValueError) as error:
+        raise ModelRetry(
+            _format_model_tool_error(
+                _MODEL_RETRY_PREFIX,
+                "workspace path is invalid or outside the workspace; use a path within the workspace root and retry",
+            )
+        ) from error
+    return lookup_target
+
+
 def _logical_target_scope(root: Path, target: str) -> str:
     raw = os.fspath(target)
     if not isinstance(raw, str) or not raw or "\x00" in raw:
@@ -1141,7 +1181,11 @@ def _logical_target_scope(root: Path, target: str) -> str:
     scope = relative.as_posix()
     if scope in {"", "."}:
         return "."
-    if "\\" in scope or "\x00" in scope:
+    if (
+        "\\" in scope
+        or "\x00" in scope
+        or any(character in "\r\n|[]" for character in scope)
+    ):
         raise ValueError("repository marker target scope is invalid")
     parts = scope.split("/")
     if any(part in {"", ".", ".."} for part in parts):
@@ -1469,6 +1513,81 @@ def _durable_failure_error(
             )
         )
     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+
+
+def _model_tool_error(
+    error: BaseException,
+    *,
+    call: ToolCallPart,
+    tool_def: ToolDefinition,
+) -> BaseException:
+    if isinstance(error, ValidationError):
+        content = RetryPromptPart.from_error(
+            error,
+            tool_name=tool_def.name,
+            tool_call_id=call.tool_call_id,
+        ).content
+        return ModelRetry(
+            _format_model_tool_error(
+                _MODEL_RETRY_PREFIX,
+                _model_tool_error_content(content, "correct the call and retry"),
+            )
+        )
+    if isinstance(error, ModelRetry):
+        return ModelRetry(_format_model_tool_error(_MODEL_RETRY_PREFIX, error.message))
+    if isinstance(error, ToolRetryError):
+        return ModelRetry(
+            _format_model_tool_error(
+                _MODEL_RETRY_PREFIX,
+                _model_tool_error_content(
+                    error.tool_retry.content,
+                    "correct the call and retry",
+                ),
+            )
+        )
+    if isinstance(error, ToolFailed):
+        return ToolFailed(_format_model_tool_error(_MODEL_FAILED_PREFIX, error.message))
+    if isinstance(error, ToolFailedError):
+        return ToolFailed(
+            _format_model_tool_error(
+                _MODEL_FAILED_PREFIX,
+                _model_tool_error_content(
+                    error.tool_failed.content,
+                    "adapt and continue",
+                ),
+            )
+        )
+    return error
+
+
+def _model_tool_error_content(content: object, fallback: str) -> str:
+    if isinstance(content, str):
+        return content
+    try:
+        return json.dumps(
+            content,
+            ensure_ascii=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        )
+    except (TypeError, ValueError):
+        return fallback
+
+
+def _format_model_tool_error(prefix: str, message: str) -> str:
+    value = f"{prefix}: {message}"
+    if len(value) <= _MODEL_TOOL_ERROR_MAX_CHARS:
+        return value
+    tail_chars = (
+        _MODEL_TOOL_ERROR_MAX_CHARS
+        - _MODEL_TOOL_ERROR_HEAD_CHARS
+        - len(_MODEL_TOOL_ERROR_TRUNCATION_MARKER)
+    )
+    return (
+        value[:_MODEL_TOOL_ERROR_HEAD_CHARS]
+        + _MODEL_TOOL_ERROR_TRUNCATION_MARKER
+        + value[-tail_chars:]
+    )
 
 
 def _bypasses_tool_error_hook(error: BaseException) -> bool:
