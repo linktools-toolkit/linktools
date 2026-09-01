@@ -961,7 +961,7 @@ class _WorkspaceToolGate(AbstractCapability[None]):
             if not isinstance(target, str):
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             subset = await self._instruction_resolver.resolve(
-                _repository_instruction_target(target),
+                _repository_instruction_lookup_target(self._workspace_root, target),
                 exclude_sources=frozenset(self._exposure_map),
             )
             if any(document.source in self._exposure_map for document in subset.documents):
@@ -1149,6 +1149,20 @@ def _repository_instruction_target(target: str) -> str:
     return "." if target == "" else target
 
 
+def _repository_instruction_lookup_target(root: Path, target: str) -> str:
+    lookup_target = _repository_instruction_target(target)
+    try:
+        _logical_target_scope(root, lookup_target)
+    except (OSError, ValueError) as error:
+        raise ModelRetry(
+            _format_model_tool_error(
+                _MODEL_RETRY_PREFIX,
+                "workspace path is invalid or outside the workspace; use a path within the workspace root and retry",
+            )
+        ) from error
+    return lookup_target
+
+
 def _logical_target_scope(root: Path, target: str) -> str:
     raw = os.fspath(target)
     if not isinstance(raw, str) or not raw or "\x00" in raw:
@@ -1167,7 +1181,11 @@ def _logical_target_scope(root: Path, target: str) -> str:
     scope = relative.as_posix()
     if scope in {"", "."}:
         return "."
-    if "\\" in scope or "\x00" in scope:
+    if (
+        "\\" in scope
+        or "\x00" in scope
+        or any(character in "\r\n|[]" for character in scope)
+    ):
         raise ValueError("repository marker target scope is invalid")
     parts = scope.split("/")
     if any(part in {"", ".", ".."} for part in parts):
