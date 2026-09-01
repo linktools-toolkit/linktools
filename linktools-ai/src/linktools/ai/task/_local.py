@@ -430,7 +430,7 @@ class LocalTaskGraphLauncher:
         if run is None:
             return
         if run.failure is not None:
-            raise AIError(run.failure.code, safe_details=dict(run.failure.safe_details))
+            raise _copy_ai_error(run.failure)
         if run.closed:
             async with self._lock:
                 if self._graphs.get(key) is run:
@@ -444,7 +444,7 @@ class LocalTaskGraphLauncher:
                 or run.failure is not None
             )
         if run.failure is not None:
-            raise AIError(run.failure.code, safe_details=dict(run.failure.safe_details))
+            raise _copy_ai_error(run.failure)
         if run.closed:
             async with self._lock:
                 if self._graphs.get(key) is run:
@@ -783,7 +783,7 @@ class LocalTaskGraphLauncher:
         details.setdefault("graph_id", graph_id)
         details.setdefault("node_id", node.node_id)
         details.setdefault("cause_code", cause.code.value)
-        failure = AIError(cause.code, safe_details=details)
+        failure = _copy_ai_error(cause, safe_details=details)
         async with self._lock:
             current = self._graphs.get((run.request.principal.tenant_id, graph_id))
             if current is run:
@@ -871,7 +871,7 @@ class LocalTaskGraphLauncher:
             )
         failure = self._runner.background_failure
         if failure is not None:
-            raise AIError(failure.code, safe_details=dict(failure.safe_details))
+            raise _copy_ai_error(failure)
 
     @staticmethod
     def _consume_run(run: _GraphRun, task: "asyncio.Task[None]") -> None:
@@ -882,10 +882,27 @@ class LocalTaskGraphLauncher:
             run.failure = _scheduler_failure(error, run.request.graph.graph_id)
 
 
+def _copy_ai_error(
+    error: AIError,
+    *,
+    safe_details: "Mapping[str, JsonValue] | None" = None,
+) -> AIError:
+    return AIError(
+        error.code,
+        category=error.category,
+        retryable=error.retryable,
+        operation_id=error.operation_id,
+        safe_details=(
+            dict(error.safe_details) if safe_details is None else safe_details
+        ),
+        diagnostics=error.diagnostics,
+    )
+
+
 def _scheduler_failure(error: BaseException, graph_id: str) -> AIError:
     if isinstance(error, AIError):
-        return AIError(
-            error.code,
+        return _copy_ai_error(
+            error,
             safe_details={**dict(error.safe_details), "graph_id": graph_id},
         )
     return AIError(

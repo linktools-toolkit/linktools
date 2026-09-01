@@ -127,7 +127,14 @@ class _AgentTaskNodeHandler:
         if not self._background_failures:
             return None
         failure = next(iter(self._background_failures.values()))
-        return AIError(failure.code, safe_details=dict(failure.safe_details))
+        return AIError(
+            failure.code,
+            category=failure.category,
+            retryable=failure.retryable,
+            operation_id=failure.operation_id,
+            safe_details=dict(failure.safe_details),
+            diagnostics=failure.diagnostics,
+        )
 
     def normalize(self, input: Mapping[str, JsonValue]) -> Mapping[str, JsonValue]:
         if set(input) != _AGENT_BODY_FIELDS:
@@ -503,8 +510,17 @@ class _AgentTaskNodeHandler:
         details.setdefault("phase", phase)
         details.setdefault("graph_id", key[1])
         details.setdefault("node_id", key[2])
-        code = error.code if isinstance(error, AIError) else ErrorCode.INTERNAL_ERROR
-        failure = AIError(code, safe_details=details)
+        if isinstance(error, AIError):
+            failure = AIError(
+                error.code,
+                category=error.category,
+                retryable=error.retryable,
+                operation_id=error.operation_id,
+                safe_details=details,
+                diagnostics=error.diagnostics,
+            )
+        else:
+            failure = AIError(ErrorCode.INTERNAL_ERROR, safe_details=details)
         self._background_failures[key] = failure
         return failure
 
@@ -596,7 +612,11 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
         if self._background_failure is not None:
             return AIError(
                 self._background_failure.code,
+                category=self._background_failure.category,
+                retryable=self._background_failure.retryable,
+                operation_id=self._background_failure.operation_id,
                 safe_details=dict(self._background_failure.safe_details),
+                diagnostics=self._background_failure.diagnostics,
             )
         return self._agent.background_failure
 
