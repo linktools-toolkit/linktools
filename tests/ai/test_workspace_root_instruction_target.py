@@ -6,9 +6,11 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from pydantic_ai.exceptions import ModelRetry
 from pydantic_ai.messages import ModelRequest, ModelResponse, ToolCallPart, ToolReturnPart
 from pydantic_ai.tools import ToolDefinition
 
+from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.runtime._capabilities import (
     _WorkspaceToolGate,
     _repository_instruction_marker,
@@ -32,7 +34,8 @@ _TOOL_CLASSES = (
 
 
 class _Resolver:
-    def __init__(self) -> None:
+    def __init__(self, error: AIError | None = None) -> None:
+        self.error = error
         self.calls: list[tuple[str | Path, frozenset[str]]] = []
 
     async def resolve(
@@ -42,6 +45,8 @@ class _Resolver:
         exclude_sources: frozenset[str] = frozenset(),
     ) -> RepositoryInstructions:
         self.calls.append((path, exclude_sources))
+        if self.error is not None:
+            raise self.error
         return RepositoryInstructions(())
 
 
@@ -90,6 +95,66 @@ async def test_empty_path_uses_root_for_instruction_lookup_without_rewriting_arg
     assert resolver.calls == [(".", frozenset())]
     assert result is args
     assert args == {"path": ""}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("path", ("\x00", "../outside", "bad\\path", "bad|path"))
+async def test_invalid_instruction_target_is_returned_to_model_without_resolver_call(
+    tmp_path: Path,
+    path: str,
+) -> None:
+    resolver = _Resolver()
+    gate = _gate(
+        tmp_path,
+        resolver,
+        trusted_tool_classes=(("list_directory", "filesystem.read"),),
+    )
+    args = {"path": path}
+
+    with pytest.raises(ModelRetry) as raised:
+        await gate.before_tool_execute(
+            SimpleNamespace(tool_call_approved=False),  # type: ignore[arg-type]
+            call=ToolCallPart(
+                tool_name="list_directory",
+                args=args,
+                tool_call_id="call-1",
+            ),
+            tool_def=ToolDefinition(name="list_directory"),
+            args=args,
+        )
+
+    assert raised.value.message == (
+        "TOOL_RETRY_REQUIRED: workspace path is invalid or outside the workspace; "
+        "use a path within the workspace root and retry"
+    )
+    assert resolver.calls == []
+    assert args == {"path": path}
+
+
+@pytest.mark.asyncio
+async def test_resolver_contract_error_for_valid_target_remains_fatal(tmp_path: Path) -> None:
+    error = AIError(ErrorCode.OUTPUT_CONTRACT_INVALID)
+    resolver = _Resolver(error)
+    gate = _gate(
+        tmp_path,
+        resolver,
+        trusted_tool_classes=(("list_directory", "filesystem.read"),),
+    )
+
+    with pytest.raises(AIError) as raised:
+        await gate.before_tool_execute(
+            SimpleNamespace(tool_call_approved=False),  # type: ignore[arg-type]
+            call=ToolCallPart(
+                tool_name="list_directory",
+                args={"path": "pkg"},
+                tool_call_id="call-1",
+            ),
+            tool_def=ToolDefinition(name="list_directory"),
+            args={"path": "pkg"},
+        )
+
+    assert raised.value is error
+    assert resolver.calls == [("pkg", frozenset())]
 
 
 def test_empty_path_root_marker_restores_as_valid_scope(tmp_path: Path) -> None:
