@@ -8,7 +8,6 @@ import re
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import TYPE_CHECKING
 
 from ..core import (
     JsonValue,
@@ -23,19 +22,7 @@ from ..core import (
     validate_tenant_id,
 )
 from ..errors import AIError, ErrorCode
-
-if TYPE_CHECKING:
-    from ..storage import StoredPayload
-
-
-def _payload_digest(value: object) -> str:
-    try:
-        digest = value.digest  # type: ignore[attr-defined]
-    except AttributeError as error:
-        raise TypeError("task result payload is invalid") from error
-    if not isinstance(digest, str) or re.fullmatch(r"[0-9a-f]{64}", digest) is None:
-        raise TypeError("task result payload digest is invalid")
-    return digest
+from ..storage import StoredPayload
 
 
 @dataclass(frozen=True, slots=True)
@@ -419,7 +406,7 @@ class TaskResultRecord:
     graph_id: str
     node_id: str
     result_digest: str
-    payload: "StoredPayload"
+    payload: StoredPayload
 
     def __post_init__(self) -> None:
         if not isinstance(self.graph_id, str) or not self.graph_id.strip():
@@ -428,7 +415,9 @@ class TaskResultRecord:
             raise ValueError("task result node id is required")
         if re.fullmatch(r"[0-9a-f]{64}", self.result_digest) is None:
             raise ValueError("task result digest is invalid")
-        if _payload_digest(self.payload) != self.result_digest:
+        if not isinstance(self.payload, StoredPayload):
+            raise TypeError("task result payload is invalid")
+        if self.payload.digest != self.result_digest:
             raise ValueError("task result payload digest does not match result")
 
 
@@ -442,7 +431,9 @@ class TaskDependencyResult:
         if re.fullmatch(r"[0-9a-f]{64}", self.result_digest) is None:
             raise ValueError("task dependency result digest is invalid")
         if self.result_payload is not None:
-            if _payload_digest(self.result_payload) != self.result_digest:
+            if not isinstance(self.result_payload, StoredPayload):
+                raise TypeError("task dependency result payload is invalid")
+            if self.result_payload.digest != self.result_digest:
                 raise ValueError("task dependency result payload digest does not match result")
 
 
@@ -486,17 +477,25 @@ class TaskGraphSnapshot:
 
 def _aggregate_graph_status(nodes: "tuple[TaskNodeView, ...]") -> TaskStatus:
     statuses = {node.status for node in nodes}
-    if not statuses or statuses <= {TaskStatus.SUCCEEDED}:
+    if not statuses:
         return TaskStatus.SUCCEEDED
+    terminal = {
+        TaskStatus.SUCCEEDED,
+        TaskStatus.FAILED,
+        TaskStatus.BLOCKED,
+        TaskStatus.CANCELLED,
+    }
+    if any(status not in terminal for status in statuses):
+        if TaskStatus.RUNNING in statuses:
+            return TaskStatus.RUNNING
+        return TaskStatus.PENDING
+    if TaskStatus.CANCELLED in statuses:
+        return TaskStatus.CANCELLED
     if TaskStatus.FAILED in statuses:
         return TaskStatus.FAILED
     if TaskStatus.BLOCKED in statuses:
         return TaskStatus.BLOCKED
-    if statuses <= {TaskStatus.CANCELLED, TaskStatus.SUCCEEDED}:
-        return TaskStatus.CANCELLED
-    if TaskStatus.RUNNING in statuses:
-        return TaskStatus.RUNNING
-    return TaskStatus.PENDING
+    return TaskStatus.SUCCEEDED
 
 
 @dataclass(frozen=True, slots=True)
@@ -507,6 +506,7 @@ class CancelGraphRequest:
 
     def __post_init__(self) -> None:
         validate_idempotency_key(self.idempotency_key)
+
 
 def ready_nodes(graph: TaskGraph, completed: "frozenset[str]") -> "tuple[TaskNode, ...]":
     return tuple(
