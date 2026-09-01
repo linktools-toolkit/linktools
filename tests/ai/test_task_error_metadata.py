@@ -74,6 +74,28 @@ def test_task_scheduler_failure_preserves_metadata() -> None:
 
 
 @pytest.mark.asyncio
+async def test_cached_task_failure_rethrows_full_metadata() -> None:
+    launcher = object.__new__(LocalTaskGraphLauncher)
+    launcher._accepting = True
+    launcher._lock = asyncio.Lock()
+    launcher._graphs = {
+        ("tenant", "graph"): SimpleNamespace(
+            failure=_source_error(),
+            closed=False,
+        )
+    }
+    request = SimpleNamespace(
+        principal=SimpleNamespace(tenant_id="tenant"),
+        graph=SimpleNamespace(graph_id="graph"),
+    )
+
+    with pytest.raises(AIError) as captured:
+        await launcher.start(request)  # type: ignore[arg-type]
+    _assert_source_metadata(captured.value)
+    assert captured.value.safe_details == {"status_code": 503}
+
+
+@pytest.mark.asyncio
 async def test_task_waiter_rethrows_full_failure_metadata() -> None:
     launcher = object.__new__(LocalTaskGraphLauncher)
     launcher._graphs = {
