@@ -230,6 +230,37 @@ async def test_custom_wrap_failure_is_inside_durable_effect_boundary() -> None:
     assert [effect.status for effect in store.effects] == ["started"]
 
 
+async def test_replay_safe_handler_failure_reports_tool_effect_unknown() -> None:
+    capability, bridge, store, context, call, definition = await _capability(True)
+
+    async def handler(_args: dict[str, Any]) -> None:
+        raise RuntimeError("tool outcome is unknown")
+
+    with pytest.raises(AIError) as raised:
+        await capability.wrap_tool_execute(
+            context,
+            call=call,
+            tool_def=definition,
+            args={},
+            handler=handler,
+        )
+
+    assert raised.value.code is ErrorCode.TOOL_EFFECT_UNKNOWN
+    assert raised.value.safe_details == {"phase": "tool_effect_replay"}
+    with pytest.raises(AIError) as propagated:
+        await capability.on_tool_execute_error(
+            context,
+            call=call,
+            tool_def=definition,
+            args={},
+            error=raised.value,
+        )
+    assert propagated.value is raised.value
+    assert bridge.calls == ["begin"]
+    assert [effect.status for effect in store.effects] == ["started"]
+    assert not capability._calls
+
+
 async def test_skip_tool_execution_terminalizes_as_success() -> None:
     capability, bridge, store, context, call, definition = await _capability(True)
     result = {"skipped": True}
