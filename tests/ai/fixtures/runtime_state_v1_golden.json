@@ -9,6 +9,7 @@
     "conversation_history",
     "conversation_history_segment",
     "context_projection",
+    "error_diagnostics",
     "evaluation_record",
     "execution_event",
     "execution_history_head",
