@@ -5,6 +5,7 @@
 import asyncio
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -275,6 +276,39 @@ def _task_request() -> TaskGraphRequest:
         Principal("user", "tenant"),
         idempotency_key="request",
     )
+
+
+@pytest.mark.parametrize(
+    "code",
+    (
+        ErrorCode.STORAGE_COMMIT_UNKNOWN,
+        ErrorCode.EXECUTION_START_UNKNOWN,
+        ErrorCode.TOOL_EFFECT_UNKNOWN,
+    ),
+)
+async def test_task_recovery_preserves_original_error_code(code: ErrorCode) -> None:
+    launcher = object.__new__(LocalTaskGraphLauncher)
+    launcher._lock = asyncio.Lock()
+    request = _task_request()
+    run = SimpleNamespace(
+        request=request,
+        condition=asyncio.Condition(),
+        generation=0,
+        failure=None,
+        closed=False,
+    )
+    launcher._graphs = {(request.principal.tenant_id, request.graph.graph_id): run}
+    cause = AIError(code, safe_details={"source": "original"})
+
+    await launcher._defer_recovery(run, request.graph.nodes[0], cause=cause)
+
+    assert run.failure is not None
+    assert run.failure.code is code
+    assert run.failure.safe_details["source"] == "original"
+    assert run.failure.safe_details["graph_id"] == "graph"
+    assert run.failure.safe_details["node_id"] == "node"
+    assert run.failure.safe_details["cause_code"] == code.value
+    assert run.closed is True
 
 
 async def test_local_scheduler_terminal_exit_wakes_waiter_and_cleans_entry() -> None:
