@@ -21,6 +21,7 @@ from linktools.ai.errors import AIError, ErrorCode, ErrorDiagnostics
 from linktools.ai.migrate import provision_runtime_database
 from linktools.ai.runtime import Runtime, RuntimeState
 from linktools.ai.runtime._agent_executor import _execution_error
+from linktools.ai.runtime._local import LocalExecutionBackend
 from linktools.ai.runtime._tool import RuntimeToolOperationBridge, ToolOperationRecord
 from linktools.ai.runtime.state._codec import (
     _decode_enveloped_domain,
@@ -263,6 +264,18 @@ def test_historical_execution_without_diagnostics_defaults_to_none() -> None:
     assert decoded.error_diagnostics is None
     assert decoded.status is ExecutionStatus.FAILED
     assert decoded.error_code == ErrorCode.INTERNAL_ERROR.value
+
+
+@pytest.mark.asyncio
+async def test_standalone_recovery_finalization_keeps_started_execution() -> None:
+    backend = object.__new__(LocalExecutionBackend)
+    execution = _started_execution(datetime.now(timezone.utc))
+    assert execution.session_id is None
+    assert execution.status is ExecutionStatus.STARTED
+    assert (
+        await backend._claim_session_or_recovery_finalizing(execution)
+        is execution
+    )
 
 
 def test_model_timeout_preserves_diagnostics_without_changing_safe_contract() -> None:
