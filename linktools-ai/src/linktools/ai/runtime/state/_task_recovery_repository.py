@@ -24,7 +24,6 @@ from ._repositories import (
     TaskRepositoryImpl,
     _decode_operation,
     _decode_record_cursor,
-    _graph_status,
     _record_cursor,
     _replace_checked,
     _require_live_task_lease,
@@ -45,6 +44,14 @@ _LEGACY_CURSOR_PREFIX = "g:"
 _COMMIT_READBACK_CODES = frozenset(
     {ErrorCode.STORAGE_CONFLICT, ErrorCode.STORAGE_COMMIT_UNKNOWN}
 )
+_TERMINAL_TASK_STATUSES = frozenset(
+    {
+        TaskStatus.SUCCEEDED,
+        TaskStatus.FAILED,
+        TaskStatus.BLOCKED,
+        TaskStatus.CANCELLED,
+    }
+)
 
 
 class DurableTaskRepositoryImpl(TaskRepositoryImpl):
@@ -58,6 +65,59 @@ class DurableTaskRepositoryImpl(TaskRepositoryImpl):
 
     def _legacy_recovery_scope(self) -> bytes:
         return self._scope("task_graph", "recoverable", "graphs")
+
+    async def get_graph(self, graph_id: str, *, tenant_id: str) -> TaskGraphView | None:
+        if tenant_id != self._tenant_id:
+            return None
+        record = await self._record(self._graph_key(graph_id))
+        if record is None:
+            return None
+        graph = await self._decode(record, TaskGraphView)
+        nodes = await self.list_nodes(graph_id, tenant_id=tenant_id)
+        return TaskGraphView(
+            graph.graph_id,
+            _effective_graph_status(graph, nodes),
+            graph.nodes,
+        )
+
+    async def snapshot_graph(
+        self,
+        graph_id: str,
+        *,
+        tenant_id: str,
+    ) -> TaskGraphSnapshot | None:
+        if tenant_id != self._tenant_id:
+            return None
+
+        async def read(transaction: StateTransaction) -> TaskGraphSnapshot | None:
+            graph_record = await transaction.get_record(self._graph_key(graph_id))
+            if graph_record is None:
+                return None
+            graph = await self._decode(graph_record, TaskGraphView)
+            records = await transaction.list_records(
+                RecordQuery(
+                    parent_digest=self._parent("task_node", "graph", graph_id),
+                    kind="task_node",
+                )
+            )
+            states = await self._decode_many(records)
+            by_id = {state.node_id: state for state in states}
+            if len(by_id) != len(states):
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            try:
+                ordered = tuple(by_id[node.node_id] for node in graph.nodes)
+            except KeyError as error:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
+            if len(ordered) != len(states):
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            return TaskGraphSnapshot(
+                graph.graph_id,
+                _effective_graph_status(graph, ordered),
+                graph.nodes,
+                ordered,
+            )
+
+        return await self.state_store.read(read)
 
     async def bind_execution(
         self,
@@ -97,9 +157,19 @@ class DurableTaskRepositoryImpl(TaskRepositoryImpl):
 
     async def reconcile_graph(self, graph_id: str, *, tenant_id: str) -> TaskGraphView:
         async def mutate(transaction: StateTransaction) -> TaskGraphView:
-            view = await super(DurableTaskRepositoryImpl, self).reconcile_graph(
+            graph_record = await transaction.get_record(self._graph_key(graph_id))
+            if graph_record is None:
+                raise AIError(ErrorCode.STORAGE_NOT_FOUND)
+            current_graph = await self._decode(graph_record, TaskGraphView)
+            preserve_cancelled = current_graph.status is TaskStatus.CANCELLED
+            await super(DurableTaskRepositoryImpl, self).reconcile_graph(
                 graph_id,
                 tenant_id=tenant_id,
+            )
+            view = await self._stabilize_graph_projection(
+                transaction,
+                graph_id,
+                preserve_cancelled=preserve_cancelled,
             )
             await self._sync_recovery_projection(transaction, view)
             return view
@@ -127,10 +197,33 @@ class DurableTaskRepositoryImpl(TaskRepositoryImpl):
 
     async def cancel_graph(self, graph_id: str, *, tenant_id: str) -> TaskGraphView:
         async def mutate(transaction: StateTransaction) -> TaskGraphView:
-            view = await super(DurableTaskRepositoryImpl, self).cancel_graph(
+            graph_record = await transaction.get_record(self._graph_key(graph_id))
+            if graph_record is None:
+                raise AIError(ErrorCode.STORAGE_NOT_FOUND)
+            graph = await self._decode(graph_record, TaskGraphView)
+            node_records = await transaction.list_records(
+                RecordQuery(
+                    parent_digest=self._parent("task_node", "graph", graph_id),
+                    kind="task_node",
+                )
+            )
+            nodes = await self._decode_many(node_records)
+            status_before_cancel = _effective_graph_status(graph, nodes)
+            await super(DurableTaskRepositoryImpl, self).cancel_graph(
                 graph_id,
                 tenant_id=tenant_id,
             )
+            if status_before_cancel in _TERMINAL_TASK_STATUSES:
+                view = await self._stabilize_graph_projection(
+                    transaction,
+                    graph_id,
+                    preserve_cancelled=graph.status is TaskStatus.CANCELLED,
+                )
+            else:
+                view = await self._force_cancelled_graph_projection(
+                    transaction,
+                    graph_id,
+                )
             await self._sync_recovery_projection(transaction, view)
             return view
 
@@ -139,14 +232,15 @@ class DurableTaskRepositoryImpl(TaskRepositoryImpl):
         except AIError as error:
             if error.code not in _COMMIT_READBACK_CODES:
                 raise
-            view, _ = await self._projection_readback(
+            view, converged = await self._projection_readback(
                 graph_id,
                 tenant_id=tenant_id,
             )
+            if converged and view.status is TaskStatus.CANCELLED:
+                return view
             if view.status in {
                 TaskStatus.SUCCEEDED,
                 TaskStatus.FAILED,
-                TaskStatus.CANCELLED,
                 TaskStatus.BLOCKED,
             }:
                 return view
@@ -341,6 +435,62 @@ class DurableTaskRepositoryImpl(TaskRepositoryImpl):
             ) from conflict
         raise AIError(ErrorCode.STORAGE_CONFLICT) from conflict
 
+    async def _stabilize_graph_projection(
+        self,
+        transaction: StateTransaction,
+        graph_id: str,
+        *,
+        preserve_cancelled: bool,
+    ) -> TaskGraphView:
+        graph_record = await transaction.get_record(self._graph_key(graph_id))
+        if graph_record is None:
+            raise AIError(ErrorCode.STORAGE_NOT_FOUND)
+        graph = await self._decode(graph_record, TaskGraphView)
+        node_records = await transaction.list_records(
+            RecordQuery(
+                parent_digest=self._parent("task_node", "graph", graph_id),
+                kind="task_node",
+            )
+        )
+        nodes = await self._decode_many(node_records)
+        status = (
+            TaskStatus.CANCELLED
+            if preserve_cancelled
+            else _isolated_graph_status(nodes)
+        )
+        view = TaskGraphView(graph.graph_id, status, graph.nodes)
+        if graph.status is status and graph_record.state == status.value:
+            return view
+        await _replace_checked(
+            transaction,
+            _task_graph_record(self, graph_record, replace(graph, status=status)),
+            graph_record.storage_version,
+        )
+        return view
+
+    async def _force_cancelled_graph_projection(
+        self,
+        transaction: StateTransaction,
+        graph_id: str,
+    ) -> TaskGraphView:
+        graph_record = await transaction.get_record(self._graph_key(graph_id))
+        if graph_record is None:
+            raise AIError(ErrorCode.STORAGE_NOT_FOUND)
+        graph = await self._decode(graph_record, TaskGraphView)
+        view = TaskGraphView(graph.graph_id, TaskStatus.CANCELLED, graph.nodes)
+        if graph.status is TaskStatus.CANCELLED and graph_record.state == TaskStatus.CANCELLED.value:
+            return view
+        await _replace_checked(
+            transaction,
+            _task_graph_record(
+                self,
+                graph_record,
+                replace(graph, status=TaskStatus.CANCELLED),
+            ),
+            graph_record.storage_version,
+        )
+        return view
+
     async def _projection_readback(
         self,
         graph_id: str,
@@ -365,9 +515,10 @@ class DurableTaskRepositoryImpl(TaskRepositoryImpl):
                 )
             )
             states = await self._decode_many(node_records)
+            status = _effective_graph_status(graph, states)
             snapshot = TaskGraphSnapshot(
                 graph.graph_id,
-                _graph_status(states),
+                status,
                 graph.nodes,
                 tuple(
                     {state.node_id: state for state in states}[node.node_id]
@@ -670,7 +821,7 @@ class DurableTaskAdmissionRepositoryImpl(TaskAdmissionRepositoryImpl):
         if operation.status is OperationStatus.SUCCEEDED:
             self._validate_succeeded_operation(operation, graph)
 
-        status = _graph_status(nodes)
+        status = _effective_graph_status(graph_view, nodes)
         next_graph = TaskGraphView(graph.graph_id, status, graph.nodes)
         if graph_view.status is not status or graph_record.state != status.value:
             await _replace_checked(
@@ -755,7 +906,7 @@ class DurableTaskAdmissionRepositoryImpl(TaskAdmissionRepositoryImpl):
         persisted_graph = TaskGraph(graph_view.graph_id, graph_view.nodes)
         existing.bind(persisted_graph)
         self._validate_graph(graph_view, persisted_graph, nodes)
-        status = _graph_status(nodes)
+        status = _effective_graph_status(graph_view, nodes)
         if graph_record.key_digest != self._graph_key(graph_view.graph_id):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         if admission_record.key_digest != self._admission_key(graph_view.graph_id):
@@ -827,6 +978,32 @@ _RECOVERABLE_STATES = frozenset(
         TaskStatus.RUNNING.value,
     }
 )
+
+
+def _isolated_graph_status(nodes: tuple[TaskNodeView, ...]) -> TaskStatus:
+    statuses = {node.status for node in nodes}
+    if not statuses:
+        return TaskStatus.SUCCEEDED
+    if any(status not in _TERMINAL_TASK_STATUSES for status in statuses):
+        if TaskStatus.RUNNING in statuses:
+            return TaskStatus.RUNNING
+        return TaskStatus.PENDING
+    if TaskStatus.FAILED in statuses:
+        return TaskStatus.FAILED
+    if TaskStatus.BLOCKED in statuses:
+        return TaskStatus.BLOCKED
+    if TaskStatus.CANCELLED in statuses:
+        return TaskStatus.CANCELLED
+    return TaskStatus.SUCCEEDED
+
+
+def _effective_graph_status(
+    graph: TaskGraphView,
+    nodes: tuple[TaskNodeView, ...],
+) -> TaskStatus:
+    if graph.status is TaskStatus.CANCELLED:
+        return TaskStatus.CANCELLED
+    return _isolated_graph_status(nodes)
 
 
 def _decode_recovery_cursor(cursor: str | None) -> tuple[str, str | None]:
