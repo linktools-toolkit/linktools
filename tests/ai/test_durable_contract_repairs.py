@@ -546,8 +546,23 @@ class _LostTaskWaiter:
         del graph_id, tenant_id
         return False
 
-    async def wait_graph_activity(self, graph_id: str, *, tenant_id: str) -> None:
+    def graph_activity_generation(
+        self,
+        graph_id: str,
+        *,
+        tenant_id: str,
+    ) -> "int | None":
         del graph_id, tenant_id
+        return None
+
+    async def wait_graph_activity(
+        self,
+        graph_id: str,
+        *,
+        tenant_id: str,
+        after_generation: "int | None" = None,
+    ) -> None:
+        del graph_id, tenant_id, after_generation
         raise AssertionError("lost owner must not wait for local activity")
 
 
@@ -610,8 +625,23 @@ class _TerminalTaskWaiter:
         del graph_id, tenant_id
         return self.owned
 
-    async def wait_graph_activity(self, graph_id: str, *, tenant_id: str) -> None:
+    def graph_activity_generation(
+        self,
+        graph_id: str,
+        *,
+        tenant_id: str,
+    ) -> int:
         del graph_id, tenant_id
+        return 0
+
+    async def wait_graph_activity(
+        self,
+        graph_id: str,
+        *,
+        tenant_id: str,
+        after_generation: "int | None" = None,
+    ) -> None:
+        del graph_id, tenant_id, after_generation
         self.started.set()
         if self.error is not None:
             raise self.error

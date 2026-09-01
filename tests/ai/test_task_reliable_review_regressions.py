@@ -119,6 +119,47 @@ class _FailingLocalWaiter:
 
 
 @pytest.mark.asyncio
+async def test_explicit_cancel_keeps_failed_node_but_marks_graph_cancelled() -> None:
+    state = RuntimeState.in_memory()
+    await state.initialize(namespace="task-cancel-after-failure", tenant_id="tenant")
+    try:
+        repository = state.task.tasks
+        graph = TaskGraph(
+            "cancel-after-failure",
+            (TaskNode("failed"), TaskNode("active")),
+        )
+        await repository.create_graph(graph, tenant_id="tenant")
+        lease = await repository.claim(
+            graph.graph_id,
+            "failed",
+            tenant_id="tenant",
+            owner="worker",
+            lease_seconds=30,
+        )
+        await repository.fail(
+            lease,
+            tenant_id="tenant",
+            error_code=ErrorCode.TASK_NODE_FAILED.value,
+            error_digest="a" * 64,
+        )
+
+        before = await repository.snapshot_graph(graph.graph_id, tenant_id="tenant")
+        assert before is not None
+        assert before.status is TaskStatus.PENDING
+
+        view = await repository.cancel_graph(graph.graph_id, tenant_id="tenant")
+        snapshot = await repository.snapshot_graph(graph.graph_id, tenant_id="tenant")
+        assert snapshot is not None
+        by_id = {node.node_id: node for node in snapshot.node_states}
+        assert view.status is TaskStatus.CANCELLED
+        assert snapshot.status is TaskStatus.CANCELLED
+        assert by_id["failed"].status is TaskStatus.FAILED
+        assert by_id["active"].status is TaskStatus.CANCELLED
+    finally:
+        await state.close()
+
+
+@pytest.mark.asyncio
 async def test_explicit_cancel_cleans_running_node_without_local_scheduler_ownership() -> None:
     state = RuntimeState.in_memory()
     await state.initialize(namespace="task-remote-cancel", tenant_id="tenant")
