@@ -256,32 +256,26 @@ class DefaultTaskService(TaskApi):
             try:
                 task.result()
             except asyncio.CancelledError as error:
-                raise AIError(
-                    ErrorCode.STORAGE_RECOVERY_REQUIRED,
-                    safe_details={
-                        "phase": "task_scheduler_arm",
-                        "graph_id": launch.graph.graph_id,
-                        "durable_admitted": True,
-                    },
+                raise _task_service_failure(
+                    error,
+                    phase="task_scheduler_arm",
+                    graph_id=launch.graph.graph_id,
+                    durable_admitted=True,
                 ) from error
             except BaseException as error:  # noqa: BLE001
-                raise AIError(
-                    ErrorCode.STORAGE_RECOVERY_REQUIRED,
-                    safe_details={
-                        "phase": "task_scheduler_arm",
-                        "graph_id": launch.graph.graph_id,
-                        "durable_admitted": True,
-                    },
+                raise _task_service_failure(
+                    error,
+                    phase="task_scheduler_arm",
+                    graph_id=launch.graph.graph_id,
+                    durable_admitted=True,
                 ) from error
             raise
         except BaseException as error:  # noqa: BLE001
-            raise AIError(
-                ErrorCode.STORAGE_RECOVERY_REQUIRED,
-                safe_details={
-                    "phase": "task_scheduler_arm",
-                    "graph_id": launch.graph.graph_id,
-                    "durable_admitted": True,
-                },
+            raise _task_service_failure(
+                error,
+                phase="task_scheduler_arm",
+                graph_id=launch.graph.graph_id,
+                durable_admitted=True,
             ) from error
 
     async def recover_pending(self) -> None:
@@ -1180,12 +1174,10 @@ class DefaultTaskService(TaskApi):
                     type(error).__name__,
                 )
                 if self._detached_finalizer_failure is None:
-                    details = dict(error.safe_details) if isinstance(error, AIError) else {}
-                    details.setdefault("phase", "task_service_finalizer")
-                    details.setdefault("graph_id", graph_id)
-                    self._detached_finalizer_failure = AIError(
-                        ErrorCode.STORAGE_RECOVERY_REQUIRED,
-                        safe_details=details,
+                    self._detached_finalizer_failure = _task_service_failure(
+                        error,
+                        phase="task_service_finalizer",
+                        graph_id=graph_id,
                     )
             finally:
                 self._detached_finalizers.discard(done)
@@ -1225,8 +1217,39 @@ class DefaultTaskService(TaskApi):
         if failure is not None:
             raise AIError(
                 failure.code,
+                category=failure.category,
+                retryable=failure.retryable,
+                operation_id=failure.operation_id,
                 safe_details=dict(failure.safe_details),
+                diagnostics=failure.diagnostics,
             )
+
+
+def _task_service_failure(
+    error: BaseException,
+    *,
+    phase: str,
+    graph_id: str,
+    durable_admitted: bool = False,
+) -> AIError:
+    details = dict(error.safe_details) if isinstance(error, AIError) else {}
+    details.setdefault("phase", phase)
+    details.setdefault("graph_id", graph_id)
+    if durable_admitted:
+        details.setdefault("durable_admitted", True)
+    if isinstance(error, AIError):
+        return AIError(
+            error.code,
+            category=error.category,
+            retryable=error.retryable,
+            operation_id=error.operation_id,
+            safe_details=details,
+            diagnostics=error.diagnostics,
+        )
+    return AIError(
+        ErrorCode.STORAGE_RECOVERY_REQUIRED,
+        safe_details=details,
+    )
 
 
 def _terminal(status: TaskStatus) -> bool:

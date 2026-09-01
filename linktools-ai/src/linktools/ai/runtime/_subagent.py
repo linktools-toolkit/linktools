@@ -41,7 +41,14 @@ class SubagentDispatcher:
         if not self._background_failures:
             return None
         failure = next(iter(self._background_failures.values()))
-        return AIError(failure.code, safe_details=dict(failure.safe_details))
+        return AIError(
+            failure.code,
+            category=failure.category,
+            retryable=failure.retryable,
+            operation_id=failure.operation_id,
+            safe_details=dict(failure.safe_details),
+            diagnostics=failure.diagnostics,
+        )
 
     def descriptions_for(
         self,
@@ -343,10 +350,20 @@ class SubagentDispatcher:
         details = dict(error.safe_details) if isinstance(error, AIError) else {}
         details.setdefault("phase", phase)
         details.setdefault("execution_id", execution_id)
-        failure = AIError(
-            ErrorCode.STORAGE_RECOVERY_REQUIRED,
-            safe_details=details,
-        )
+        if isinstance(error, AIError):
+            failure = AIError(
+                error.code,
+                category=error.category,
+                retryable=error.retryable,
+                operation_id=error.operation_id,
+                safe_details=details,
+                diagnostics=error.diagnostics,
+            )
+        else:
+            failure = AIError(
+                ErrorCode.STORAGE_RECOVERY_REQUIRED,
+                safe_details=details,
+            )
         self._background_failures[execution_id] = failure
         return failure
 
