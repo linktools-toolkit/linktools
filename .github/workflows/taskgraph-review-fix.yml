@@ -20,6 +20,25 @@ jobs:
       - name: Apply review fixes
         run: |
           python .github/taskgraph_review_fix.py
+          python - <<'PY'
+          from pathlib import Path
+
+          handler = Path("linktools-ai/src/linktools/ai/task/_handler.py")
+          text = handler.read_text()
+          old = "@dataclass(frozen=True, slots=True)\nclass TaskFunction(Generic[AppT]):\n"
+          new = "@dataclass(frozen=True)\nclass TaskFunction(Generic[AppT]):\n"
+          if text.count(old) != 1:
+              raise RuntimeError("TaskFunction slots rollback anchor mismatch")
+          handler.write_text(text.replace(old, new, 1))
+
+          tests = Path("tests/ai/test_task_review_closure.py")
+          text = tests.read_text()
+          text = text.replace("    TaskFunction,\n", "", 1)
+          block = '''\ndef test_task_function_uses_slots() -> None:\n    async def run(context: TaskNodeContext[None]) -> None:\n        del context\n\n    function = TaskFunction("example.slots", 1, run)\n    assert not hasattr(function, "__dict__")\n\n\n'''
+          if text.count(block) != 1:
+              raise RuntimeError("TaskFunction slots test anchor mismatch")
+          tests.write_text(text.replace(block, "\n", 1))
+          PY
           git diff --check
       - name: Install tooling
         run: |
