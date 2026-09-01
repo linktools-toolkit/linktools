@@ -238,6 +238,8 @@ async def test_recovery_start_unknown_uses_execution_error_domain() -> None:
     backend._catalog = SimpleNamespace(binding=lambda _digest: object())
     backend._conversation_durable = False
     recovery_input = SimpleNamespace(
+        principal_id="principal",
+        principal_kind="user",
         session_id=None,
         binding_digest="binding",
         parent_execution_id=None,
