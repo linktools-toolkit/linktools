@@ -58,7 +58,7 @@ from ...core import (
     UsageMetrics,
     canonical_json_bytes,
 )
-from ...errors import AIError, ErrorCode
+from ...errors import AIError, ErrorCode, ErrorDiagnostics
 from ...storage import ObjectRef, StoredPayload
 from ...task import (
     TaskGraph,
@@ -156,6 +156,7 @@ _V1_WIRE_TYPES: tuple[tuple[str, type[object]], ...] = (
     ("conversation_history", ConversationHistoryRecord),
     ("conversation_history_segment", ConversationHistorySegmentRef),
     ("context_projection", ContextProjection),
+    ("error_diagnostics", ErrorDiagnostics),
     ("evaluation_record", EvaluationRecord),
     ("execution_event", ExecutionEventRecord),
     ("execution_history_head", ExecutionHistoryHeadRecord),
@@ -383,8 +384,54 @@ def _decode_v1_task_result(
     )
 
 
+def _encode_v1_optional_error_diagnostics(
+    value: object,
+    codec: "_VersionCodec",
+    persisted: bool,
+) -> Mapping[str, JsonValue]:
+    encoded = {
+        field.name: _encode_domain(
+            attrgetter(field.name)(value),
+            codec,
+            persisted=persisted,
+        )
+        for field in fields(value)
+        if field.name != "error_diagnostics"
+    }
+    diagnostics = attrgetter("error_diagnostics")(value)
+    if diagnostics is not None:
+        encoded["error_diagnostics"] = _encode_domain(
+            diagnostics,
+            codec,
+            persisted=persisted,
+        )
+    return encoded
+
+
+def _encode_v1_execution_record(
+    value: object,
+    codec: "_VersionCodec",
+    persisted: bool,
+) -> Mapping[str, JsonValue]:
+    if not isinstance(value, ExecutionRecord):
+        raise TypeError("V1 execution_record encoder received the wrong type")
+    return _encode_v1_optional_error_diagnostics(value, codec, persisted)
+
+
+def _encode_v1_recovery_terminal_outcome(
+    value: object,
+    codec: "_VersionCodec",
+    persisted: bool,
+) -> Mapping[str, JsonValue]:
+    if not isinstance(value, RecoveryTerminalOutcome):
+        raise TypeError("V1 recovery_terminal_outcome encoder received the wrong type")
+    return _encode_v1_optional_error_diagnostics(value, codec, persisted)
+
+
 _V1_DATACLASS_ENCODERS: Mapping[str, DataclassEncoder] = MappingProxyType(
     {
+        "execution_record": _encode_v1_execution_record,
+        "recovery_terminal_outcome": _encode_v1_recovery_terminal_outcome,
         "task_node": _encode_v1_task_node,
         "task_result": _encode_v1_task_result,
     }
@@ -1710,10 +1757,16 @@ def _validate_v1_codec_definition() -> None:
         raise RuntimeError("GA v1 enum type registry is incomplete")
     if set(_CURRENT_CODEC.enum_wire_ids.values()) != set(enum_wire_ids):
         raise RuntimeError("GA v1 enum wire-id registry is incomplete")
-    custom_dataclasses = {"task_node", "task_result"}
-    if set(_V1_DATACLASS_ENCODERS) != custom_dataclasses:
+    custom_encoders = {
+        "execution_record",
+        "recovery_terminal_outcome",
+        "task_node",
+        "task_result",
+    }
+    custom_decoders = {"task_node", "task_result"}
+    if set(_V1_DATACLASS_ENCODERS) != custom_encoders:
         raise RuntimeError("GA v1 dataclass encoder mapping is invalid")
-    if set(_V1_DATACLASS_DECODERS) != custom_dataclasses:
+    if set(_V1_DATACLASS_DECODERS) != custom_decoders:
         raise RuntimeError("GA v1 dataclass decoder mapping is invalid")
     if not set(_V1_DATACLASS_ENCODERS).issubset(set(wire_ids)):
         raise RuntimeError(
