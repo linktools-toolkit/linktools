@@ -518,12 +518,14 @@ class LocalTaskGraphLauncher:
                     capacity -= 1
                     await self._notify(run)
                 if inflight:
-                    await asyncio.wait(
+                    done, _ = await asyncio.wait(
                         tuple(value.task for value in inflight.values()),
+                        timeout=_SCHEDULER_RECHECK_SECONDS,
                         return_when=asyncio.FIRST_COMPLETED,
                     )
-                    _reap_inflight(inflight)
-                    publish_reconciled = True
+                    if done:
+                        _reap_inflight(inflight)
+                        publish_reconciled = True
                     continue
                 await self._wait_scheduler(run, states)
         except asyncio.CancelledError:
