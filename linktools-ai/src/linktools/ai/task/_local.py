@@ -660,7 +660,7 @@ class LocalTaskGraphLauncher:
                 if isinstance(heartbeat_error, AIError):
                     if heartbeat_error.code in _RECOVERY_UNKNOWN_CODES:
                         await self._defer_recovery(
-                            run, node, cause_code=heartbeat_error.code
+                            run, node, cause=heartbeat_error
                         )
                         return
                     if heartbeat_error.code in {
@@ -677,7 +677,7 @@ class LocalTaskGraphLauncher:
             except BaseException as error:  # noqa: BLE001
                 await _stop_heartbeat(heartbeat_stop, heartbeat)
                 if isinstance(error, AIError) and error.code in _RECOVERY_UNKNOWN_CODES:
-                    await self._defer_recovery(run, node, cause_code=error.code)
+                    await self._defer_recovery(run, node, cause=error)
                     return
                 if isinstance(error, AIError) and error.code in {
                     ErrorCode.TASK_FENCE_STALE,
@@ -730,7 +730,7 @@ class LocalTaskGraphLauncher:
                         tenant_id=tenant_id,
                     ):
                         return
-                    await self._defer_recovery(run, node, cause_code=error.code)
+                    await self._defer_recovery(run, node, cause=error)
         except asyncio.CancelledError:
             if not runner_task.done():
                 runner_task.cancel()
@@ -775,18 +775,15 @@ class LocalTaskGraphLauncher:
         run: _GraphRun,
         node: TaskNode,
         *,
-        cause_code: ErrorCode,
+        cause: AIError,
     ) -> None:
         graph_id = run.request.graph.graph_id
-        failure = AIError(
-            ErrorCode.STORAGE_RECOVERY_REQUIRED,
-            safe_details={
-                "phase": "task_node_recovery",
-                "graph_id": graph_id,
-                "node_id": node.node_id,
-                "cause_code": cause_code.value,
-            },
-        )
+        details = dict(cause.safe_details)
+        details.setdefault("phase", "task_node_recovery")
+        details.setdefault("graph_id", graph_id)
+        details.setdefault("node_id", node.node_id)
+        details.setdefault("cause_code", cause.code.value)
+        failure = AIError(cause.code, safe_details=details)
         async with self._lock:
             current = self._graphs.get((run.request.principal.tenant_id, graph_id))
             if current is run:
