@@ -28,7 +28,10 @@ from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.model import ModelRegistry
 from linktools.ai.runtime._execution import DefaultExecutionService
 from linktools.ai.runtime._factory import _default_workspace_store
-from linktools.ai.runtime._planner import RuntimeTaskNodeRunner
+from linktools.ai.runtime._planner import (
+    RuntimeTaskNodeRunner,
+    _AgentTaskNodeHandler,
+)
 from linktools.ai.runtime._subagent import SubagentDispatcher
 from linktools.ai.runtime.service_api import ExecutionHandle, ExecutionRequest, ExecutionResult
 from linktools.ai.spec import (
@@ -185,37 +188,29 @@ def test_future_semantic_pin_version_is_not_misclassified_as_corruption() -> Non
     assert error.value.code is ErrorCode.STORAGE_VERSION_UNSUPPORTED
 
 
-@pytest.mark.asyncio
-async def test_task_prepare_preserves_future_binding_version_error() -> None:
+def test_agent_task_recovery_preserves_future_binding_version_error() -> None:
     binding = _load_json("agent_binding_subagent_v1_golden.json")
     binding["version"] = 2
-    node = SimpleNamespace(
-        input={
-            "type": "linktools.ai.agent",
-            "version": 1,
-            "binding": binding,
-            "user_prompt": "work",
-            "user_prompt_codec": "text",
-            "mode": "run",
-            "planning": False,
-            "thinking": False,
-        },
-        dependencies=(),
-    )
-    runner = object.__new__(RuntimeTaskNodeRunner)
-    runner._catalog = None
-    runner._compiler = None
+    body = {
+        "binding": binding,
+        "user_prompt": "work",
+        "user_prompt_codec": "text",
+        "mode": "run",
+        "planning": False,
+        "thinking": False,
+    }
+    handler = object.__new__(_AgentTaskNodeHandler)
+    handler._catalog = None
+    handler._compiler = None
 
     with pytest.raises(AIError) as error:
-        await runner.prepare(
-            node,  # type: ignore[arg-type]
+        handler.validate_recovery(
+            body,  # type: ignore[arg-type]
             graph_id="graph",
-            principal=Principal("principal", "tenant", "service"),
-            dependency_results={},
+            node_id="node",
         )
 
     assert error.value.code is ErrorCode.STORAGE_VERSION_UNSUPPORTED
-
 
 def test_skill_markdown_preserves_description_and_rejects_mismatch() -> None:
     content = "---\nname: review\ndescription: Review changes\n---\n\nDo the review.\n"

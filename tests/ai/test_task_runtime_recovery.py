@@ -3,57 +3,33 @@
 """Public Runtime recovery coverage for durable TaskGraph state."""
 
 import asyncio
-from collections.abc import Mapping
 from pathlib import Path
 
 import pytest
-from linktools.ai.core import Principal, TaskStatus, canonical_sha256
+from linktools.ai.capability import CapabilityGroup
+from linktools.ai.core import JsonValue, Principal, TaskStatus
 from linktools.ai.migrate import provision_runtime_database
 from linktools.ai.model import ModelRegistry
 from linktools.ai.runtime import Runtime, RuntimeState
-from linktools.ai.runtime._planner import RuntimeTaskNodeRunner
 from linktools.ai.task import (
-    TaskDependencyResult,
+    TaskFunction,
     TaskGraph,
     TaskGraphAdmission,
     TaskGraphLimits,
     TaskGraphRequest,
-    TaskNode,
-    TaskNodeRunResult,
+    TaskNodeContext,
 )
 from linktools.ai.workspace import Workspace
 from sqlalchemy.ext.asyncio import create_async_engine
 
 
-async def _run_digest(
-    self: RuntimeTaskNodeRunner,
-    node: TaskNode,
-    *,
-    graph_id: str,
-    principal: Principal,
-    dependency_results: Mapping[str, TaskDependencyResult],
-) -> TaskNodeRunResult:
-    del self, principal, dependency_results
-    return TaskNodeRunResult(
-        canonical_sha256({"graph_id": graph_id, "node_id": node.node_id})
-    )
-
-
-async def _cancel_noop(
-    self: RuntimeTaskNodeRunner,
-    node: TaskNode,
-    *,
-    graph_id: str,
-    principal: Principal,
-    dependency_results: Mapping[str, TaskDependencyResult],
-) -> None:
-    del self, node, graph_id, principal, dependency_results
+async def _recover_node(context: TaskNodeContext[None]) -> JsonValue:
+    return {"graph_id": context.graph_id, "node_id": context.node_id}
 
 
 @pytest.mark.asyncio
 async def test_sqlite_runtime_open_recovers_expired_task_lease(
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     database = tmp_path / "state.sqlite"
     engine = create_async_engine(f"sqlite+aiosqlite:///{database}")
@@ -65,7 +41,10 @@ async def test_sqlite_runtime_open_recovers_expired_task_lease(
     workspace_root = tmp_path / "workspace"
     workspace_root.mkdir()
     workspace = Workspace.load(workspace_root)
-    graph = TaskGraph("reopen-expired", (TaskNode("root"),))
+    capabilities: CapabilityGroup[None] = CapabilityGroup("application")
+    handler = TaskFunction[None]("test.recovery", 1, _recover_node)
+    capabilities.task(handler)
+    graph = TaskGraph("reopen-expired", (handler.node("root"),))
     request = TaskGraphRequest(
         graph,
         Principal("tester", "default"),
@@ -93,14 +72,13 @@ async def test_sqlite_runtime_open_recovers_expired_task_lease(
         await state.close()
 
     await asyncio.sleep(1.05)
-    monkeypatch.setattr(RuntimeTaskNodeRunner, "run", _run_digest)
-    monkeypatch.setattr(RuntimeTaskNodeRunner, "cancel", _cancel_noop)
 
     reopened = RuntimeState.sqlite(database)
     async with Runtime.open(
         workspace,
         models=ModelRegistry.openai(model="gpt-test"),
         state=reopened,
+        capabilities=(capabilities,),
     ) as runtime:
         result = await runtime.task.wait_graph(
             graph.graph_id,

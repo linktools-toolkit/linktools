@@ -385,6 +385,7 @@ def _validate_state_configuration(
         RuntimeDomain.MEMORY,
         RuntimeDomain.ARTIFACT,
         RuntimeDomain.RECOVERY,
+        RuntimeDomain.TASK,
     }
     if object_store is not None and not any(
         domain in object_domains

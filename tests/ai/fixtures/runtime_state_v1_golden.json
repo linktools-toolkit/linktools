@@ -70,6 +70,7 @@
     "task_lease",
     "task_node",
     "task_node_view",
+    "task_result",
     "task_terminal",
     "tool_operation",
     "usage_metrics",

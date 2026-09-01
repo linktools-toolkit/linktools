@@ -25,6 +25,7 @@ from linktools.ai.runtime.state._plan import RuntimeDomain
 from linktools.ai.runtime.state._retention import RuntimeRetentionController
 from linktools.ai.runtime.state._steps import RuntimeStepStore
 from linktools.ai.storage import FilesystemObjectStore, SqlObjectStore
+from linktools.ai.task import TaskGraphSnapshot, TaskNode, TaskNodeView
 from linktools.ai.task._api import open_local_task_api
 from linktools.ai.task._service_impl import DefaultTaskService
 from linktools.ai.spec import AgentSpec
@@ -481,6 +482,32 @@ async def test_execution_wait_rechecks_after_local_worker_quiescence() -> None:
     assert await task == "terminal"
 
 
+def _running_task_snapshot() -> TaskGraphSnapshot:
+    node = TaskNode("node")
+    state = TaskNodeView(
+        "graph",
+        "node",
+        (),
+        TaskStatus.RUNNING,
+        "worker",
+        1,
+        None,
+        None,
+        None,
+        None,
+    )
+    return TaskGraphSnapshot(
+        "graph",
+        TaskStatus.RUNNING,
+        (node,),
+        (state,),
+    )
+
+
+def _terminal_task_snapshot() -> TaskGraphSnapshot:
+    return TaskGraphSnapshot("graph", TaskStatus.SUCCEEDED, (), ())
+
+
 class _RunningTaskRepository:
     async def get_header(
         self,
@@ -499,6 +526,15 @@ class _RunningTaskRepository:
         del graph_id, tenant_id
         return SimpleNamespace(status=TaskStatus.RUNNING)
 
+    async def snapshot_graph(
+        self,
+        graph_id: str,
+        *,
+        tenant_id: str,
+    ) -> TaskGraphSnapshot:
+        del graph_id, tenant_id
+        return _running_task_snapshot()
+
 
 class _AllowAuthorization:
     async def authorize(self, *args: object, **kwargs: object) -> None:
@@ -510,8 +546,23 @@ class _LostTaskWaiter:
         del graph_id, tenant_id
         return False
 
-    async def wait_graph_activity(self, graph_id: str, *, tenant_id: str) -> None:
+    def graph_activity_generation(
+        self,
+        graph_id: str,
+        *,
+        tenant_id: str,
+    ) -> "int | None":
         del graph_id, tenant_id
+        return None
+
+    async def wait_graph_activity(
+        self,
+        graph_id: str,
+        *,
+        tenant_id: str,
+        after_generation: "int | None" = None,
+    ) -> None:
+        del graph_id, tenant_id, after_generation
         raise AssertionError("lost owner must not wait for local activity")
 
 
@@ -536,6 +587,32 @@ class _TerminalTaskRepository:
             status=TaskStatus.SUCCEEDED,
         )
 
+    async def snapshot_graph(
+        self,
+        graph_id: str,
+        *,
+        tenant_id: str,
+    ) -> TaskGraphSnapshot:
+        del graph_id, tenant_id
+        return _terminal_task_snapshot()
+
+
+class _TransitionTaskRepository(_TerminalTaskRepository):
+    def __init__(self) -> None:
+        self.snapshot_reads = 0
+
+    async def snapshot_graph(
+        self,
+        graph_id: str,
+        *,
+        tenant_id: str,
+    ) -> TaskGraphSnapshot:
+        del graph_id, tenant_id
+        self.snapshot_reads += 1
+        if self.snapshot_reads == 1:
+            return _running_task_snapshot()
+        return _terminal_task_snapshot()
+
 
 class _TerminalTaskWaiter:
     def __init__(self, error: "AIError | None" = None) -> None:
@@ -548,8 +625,23 @@ class _TerminalTaskWaiter:
         del graph_id, tenant_id
         return self.owned
 
-    async def wait_graph_activity(self, graph_id: str, *, tenant_id: str) -> None:
+    def graph_activity_generation(
+        self,
+        graph_id: str,
+        *,
+        tenant_id: str,
+    ) -> int:
         del graph_id, tenant_id
+        return 0
+
+    async def wait_graph_activity(
+        self,
+        graph_id: str,
+        *,
+        tenant_id: str,
+        after_generation: "int | None" = None,
+    ) -> None:
+        del graph_id, tenant_id, after_generation
         self.started.set()
         if self.error is not None:
             raise self.error
@@ -557,70 +649,67 @@ class _TerminalTaskWaiter:
         self.owned = False
 
 
-def _terminal_task_service(waiter: _TerminalTaskWaiter) -> DefaultTaskService:
-    service = DefaultTaskService(
-        SimpleNamespace(tasks=_TerminalTaskRepository()),
+def _terminal_task_service(
+    waiter: _TerminalTaskWaiter,
+    *,
+    tasks: "object | None" = None,
+) -> DefaultTaskService:
+    return DefaultTaskService(
+        SimpleNamespace(tasks=_TerminalTaskRepository() if tasks is None else tasks),
         _AllowAuthorization(),
         local_waiter=waiter,
     )
 
-    async def result(view: object, tenant_id: str) -> object:
-        del tenant_id
-        return view
-
-    async def request_release(graph_id: str, tenant_id: str) -> None:
-        del graph_id, tenant_id
-
-    service._result = result
-    service._request_graph_release = request_release
-    return service
-
 
 @pytest.mark.asyncio
-async def test_task_wait_rechecks_terminal_after_local_scheduler_quiescence() -> None:
+async def test_task_wait_returns_current_terminal_snapshot_without_local_wait() -> None:
     waiter = _TerminalTaskWaiter()
     service = _terminal_task_service(waiter)
-    task = asyncio.create_task(
-        service.wait_graph(
-            "graph",
-            principal=Principal("principal", "tenant", "service"),
-            timeout_seconds=1,
-        )
-    )
-    await waiter.started.wait()
-    assert not task.done()
-    waiter.release.set()
-    result = await task
-    assert result.status is TaskStatus.SUCCEEDED
 
-
-@pytest.mark.asyncio
-async def test_task_wait_prefers_terminal_truth_after_scheduler_failure() -> None:
-    waiter = _TerminalTaskWaiter(AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED))
-    service = _terminal_task_service(waiter)
     result = await service.wait_graph(
         "graph",
         principal=Principal("principal", "tenant", "service"),
         timeout_seconds=1,
     )
+
+    assert result.status is TaskStatus.SUCCEEDED
+    assert not waiter.started.is_set()
+
+
+@pytest.mark.asyncio
+async def test_task_wait_prefers_terminal_truth_after_scheduler_failure() -> None:
+    waiter = _TerminalTaskWaiter(AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED))
+    repository = _TransitionTaskRepository()
+    service = _terminal_task_service(waiter, tasks=repository)
+
+    result = await service.wait_graph(
+        "graph",
+        principal=Principal("principal", "tenant", "service"),
+        timeout_seconds=1,
+    )
+
+    assert waiter.started.is_set()
+    assert repository.snapshot_reads >= 2
     assert result.status is TaskStatus.SUCCEEDED
 
 
 @pytest.mark.asyncio
-async def test_task_wait_fails_immediately_after_local_owner_is_lost() -> None:
+async def test_task_wait_uses_durable_recheck_after_local_owner_is_lost() -> None:
     persistence = SimpleNamespace(tasks=_RunningTaskRepository())
     service = DefaultTaskService(
         persistence,
         _AllowAuthorization(),
         local_waiter=_LostTaskWaiter(),
     )
+
     with pytest.raises(AIError) as error:
         await service.wait_graph(
             "graph",
             principal=Principal("principal", "tenant", "service"),
-            timeout_seconds=1,
+            timeout_seconds=0.05,
         )
-    assert error.value.code is ErrorCode.STORAGE_RECOVERY_REQUIRED
+
+    assert error.value.code is ErrorCode.TASK_WAIT_TIMEOUT
 
 
 @pytest.mark.asyncio

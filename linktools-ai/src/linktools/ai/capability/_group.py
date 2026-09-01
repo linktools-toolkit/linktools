@@ -29,15 +29,23 @@ from ..spec import (
     SkillSpecCodec,
     ThinkingValue,
 )
+from ..task import TaskNodeHandler
 from ._context import RunContext
 from ._names import SKILL_TOOL_NAMES, SUBAGENT_TOOL_NAMES
 from ._skill import SkillDefinition
 from ._skill_source import AssetSkillResourceSource, SkillResourceSource, SkillSourceRef
 
 AppT = TypeVar("AppT")
-ContributionKind = Literal["tool", "agent", "skill", "mcp", "capability"]
+
+
+ContributionKind = Literal["tool", "agent", "skill", "mcp", "capability", "task"]
 ContributionSemanticValue: TypeAlias = (
-    Tool | AgentSpec | SkillDefinition | MCPServerSpec | AbstractCapability
+    Tool
+    | AgentSpec
+    | SkillDefinition
+    | MCPServerSpec
+    | AbstractCapability
+    | TaskNodeHandler[object]
 )
 _RESERVED_TOOL_NAMES = frozenset(
     {
@@ -61,6 +69,8 @@ _RESERVED_CAPABILITY_IDS = frozenset(
     }
 )
 _TOOL_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_.-]{0,127}$")
+_TASK_TYPE = re.compile(r"^[A-Za-z][A-Za-z0-9_.-]{0,127}$")
+_RESERVED_TASK_TYPE_PREFIX = "linktools.ai."
 
 
 @dataclass(frozen=True, slots=True)
@@ -68,10 +78,10 @@ class CapabilityContribution(Generic[AppT]):
     kind: ContributionKind
     id: str
     fingerprint: str
-    value: "Tool[RunContext[AppT]] | AgentSpec | SkillDefinition | MCPServerSpec | AbstractCapability[RunContext[AppT]]"
+    value: "Tool[RunContext[AppT]] | AgentSpec | SkillDefinition | MCPServerSpec | AbstractCapability[RunContext[AppT]] | TaskNodeHandler[AppT]"
 
     def __post_init__(self) -> None:
-        if self.kind not in {"tool", "agent", "skill", "mcp", "capability"}:
+        if self.kind not in {"tool", "agent", "skill", "mcp", "capability", "task"}:
             raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
         if not isinstance(self.id, str) or not self.id.strip():
             raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
@@ -85,6 +95,8 @@ class CapabilityContribution(Generic[AppT]):
         if self.kind == "mcp" and not isinstance(self.value, MCPServerSpec):
             raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
         if self.kind == "capability" and not isinstance(self.value, AbstractCapability):
+            raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
+        if self.kind == "task" and not isinstance(self.value, TaskNodeHandler):
             raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
         if self.kind == "tool" and cast(Tool, self.value).name != self.id:
             raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
@@ -105,6 +117,11 @@ class CapabilityContribution(Generic[AppT]):
                     safe_details={"capability_id": capability_id, "reason": "deferred_loading_not_supported"},
                 )
             _validate_external_capability_id(capability_id)
+        if self.kind == "task":
+            handler = cast("TaskNodeHandler[object]", self.value)
+            task_type, task_version = _task_identity(handler)
+            if self.id != f"{task_type}@{task_version}":
+                raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
         if self.fingerprint != capability_fingerprint(
             self.kind,
             self.id,
@@ -278,6 +295,31 @@ class CapabilityGroup(Generic[AppT]):
             )
         )
         return adapted
+
+    def task(self, handler: "TaskNodeHandler[AppT]") -> "TaskNodeHandler[AppT]":
+        """Register one application-owned TaskNode handler version."""
+        task_type, task_version = _task_identity(handler)
+        identity = f"{task_type}@{task_version}"
+        contract: dict[str, JsonValue] = {
+            "version": 1,
+            "task_type": task_type,
+            "task_version": task_version,
+        }
+        if any(
+            value.kind == "task" and value.id == identity
+            for value in self._contributions
+        ):
+            raise AIError(ErrorCode.CAPABILITY_CONFLICT)
+        self._contributions.append(
+            _SemanticContribution(
+                "task",
+                identity,
+                capability_fingerprint("task", identity, contract),
+                handler,
+                contract,
+            )
+        )
+        return handler
 
     def capability(
         self,
@@ -561,6 +603,15 @@ def contribution_semantic_contract(
             except (TypeError, ValueError) as error:
                 raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID) from error
         return contract
+    if kind == "task" and isinstance(value, TaskNodeHandler):
+        task_type, task_version = _task_identity(value)
+        if identity != f"{task_type}@{task_version}":
+            raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
+        return {
+            "version": 1,
+            "task_type": task_type,
+            "task_version": task_version,
+        }
     raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
 
 
@@ -577,6 +628,26 @@ def capability_fingerprint(
             "semantic": dict(semantic_contract),
         }
     )
+
+
+def _task_identity(handler: object) -> tuple[str, int]:
+    if not isinstance(handler, TaskNodeHandler):
+        raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
+    task_type = handler.type
+    task_version = handler.version
+    if (
+        not isinstance(task_type, str)
+        or _TASK_TYPE.fullmatch(task_type) is None
+        or task_type.startswith(_RESERVED_TASK_TYPE_PREFIX)
+    ):
+        raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
+    if (
+        not isinstance(task_version, int)
+        or isinstance(task_version, bool)
+        or task_version < 1
+    ):
+        raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
+    return task_type, task_version
 
 
 def _validate_business_tool_name(value: str) -> None:

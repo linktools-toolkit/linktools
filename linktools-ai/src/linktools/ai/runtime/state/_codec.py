@@ -68,6 +68,7 @@ from ...task import (
     TaskLease,
     TaskNode,
     TaskNodeView,
+    TaskResultRecord,
     TaskTerminalRecord,
 )
 from .._message import decode_model_messages, encode_model_messages
@@ -216,6 +217,7 @@ _V1_WIRE_TYPES: tuple[tuple[str, type[object]], ...] = (
     ("task_lease", TaskLease),
     ("task_node", TaskNode),
     ("task_node_view", TaskNodeView),
+    ("task_result", TaskResultRecord),
     ("task_terminal", TaskTerminalRecord),
     ("tool_operation", ToolOperationRecord),
     ("usage_metrics", UsageMetrics),
@@ -343,11 +345,55 @@ def _decode_v1_task_node(
     )
 
 
+def _encode_v1_task_result(
+    value: object,
+    codec: "_VersionCodec",
+    persisted: bool,
+) -> Mapping[str, JsonValue]:
+    if not isinstance(value, TaskResultRecord):
+        raise TypeError("V1 task_result encoder received the wrong type")
+    return {
+        "graph_id": _encode_domain(value.graph_id, codec, persisted=persisted),
+        "node_id": _encode_domain(value.node_id, codec, persisted=persisted),
+        "result_digest": _encode_domain(value.result_digest, codec, persisted=persisted),
+        "payload": _encode_domain(value.payload, codec, persisted=persisted),
+    }
+
+
+def _decode_v1_task_result(
+    raw_fields: Mapping[str, object],
+    codec: "_VersionCodec",
+    persisted: bool,
+) -> TaskResultRecord:
+    _require_fields(
+        raw_fields,
+        frozenset({"graph_id", "node_id", "result_digest", "payload"}),
+    )
+    return TaskResultRecord(
+        cast(str, _decode_domain(raw_fields["graph_id"], str, codec, persisted=persisted)),
+        cast(str, _decode_domain(raw_fields["node_id"], str, codec, persisted=persisted)),
+        cast(
+            str,
+            _decode_domain(raw_fields["result_digest"], str, codec, persisted=persisted),
+        ),
+        cast(
+            StoredPayload,
+            _decode_domain(raw_fields["payload"], StoredPayload, codec, persisted=persisted),
+        ),
+    )
+
+
 _V1_DATACLASS_ENCODERS: Mapping[str, DataclassEncoder] = MappingProxyType(
-    {"task_node": _encode_v1_task_node}
+    {
+        "task_node": _encode_v1_task_node,
+        "task_result": _encode_v1_task_result,
+    }
 )
 _V1_DATACLASS_DECODERS: Mapping[str, DataclassDecoder] = MappingProxyType(
-    {"task_node": _decode_v1_task_node}
+    {
+        "task_node": _decode_v1_task_node,
+        "task_result": _decode_v1_task_result,
+    }
 )
 
 _V1_EXTERNAL_SCHEMA_TYPES: Mapping[type[object], JsonValue] = MappingProxyType(
@@ -1664,7 +1710,7 @@ def _validate_v1_codec_definition() -> None:
         raise RuntimeError("GA v1 enum type registry is incomplete")
     if set(_CURRENT_CODEC.enum_wire_ids.values()) != set(enum_wire_ids):
         raise RuntimeError("GA v1 enum wire-id registry is incomplete")
-    custom_dataclasses = {"task_node"}
+    custom_dataclasses = {"task_node", "task_result"}
     if set(_V1_DATACLASS_ENCODERS) != custom_dataclasses:
         raise RuntimeError("GA v1 dataclass encoder mapping is invalid")
     if set(_V1_DATACLASS_DECODERS) != custom_dataclasses:

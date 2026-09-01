@@ -25,6 +25,7 @@ from linktools.ai.runtime._planner import RuntimeTaskNodeRunner
 from linktools.ai.runtime.state._repositories import TaskRepositoryImpl
 from linktools.ai.runtime.state._task_recovery_repository import DurableTaskRepositoryImpl
 from linktools.ai.spec import AgentSpec, AgentSpecCodec
+from linktools.ai.storage import StoredPayload
 from linktools.ai.task import (
     CancelGraphRequest,
     TaskDependencyResult,
@@ -32,9 +33,11 @@ from linktools.ai.task import (
     TaskGraphAdmission,
     TaskGraphLimits,
     TaskGraphRequest,
+    TaskGraphSnapshot,
     TaskGraphView,
     TaskLease,
     TaskNode,
+    TaskNodeRunControl,
     TaskNodeRunResult,
     TaskTerminalRecord,
 )
@@ -106,12 +109,12 @@ async def _digest_run(
     graph_id: str,
     principal: Principal,
     dependency_results: Mapping[str, TaskDependencyResult],
+    control: TaskNodeRunControl,
 ) -> TaskNodeRunResult:
-    del self, principal, dependency_results
+    del self, principal, dependency_results, control
     await asyncio.sleep(0)
-    return TaskNodeRunResult(
-        canonical_sha256({"graph_id": graph_id, "node_id": node.node_id})
-    )
+    payload = StoredPayload.inline_json({"graph_id": graph_id, "node_id": node.node_id})
+    return TaskNodeRunResult(payload.digest, result_payload=payload)
 
 
 async def _noop_cancel(
@@ -202,13 +205,15 @@ async def test_sqlite_public_runtime_task_failure_blocks_dependency(
         graph_id: str,
         principal: Principal,
         dependency_results: Mapping[str, TaskDependencyResult],
+        control: TaskNodeRunControl,
     ) -> TaskNodeRunResult:
-        del self, principal, dependency_results
+        del self, principal, dependency_results, control
         if node.node_id == "fail":
             raise AIError(ErrorCode.TASK_NODE_FAILED)
-        return TaskNodeRunResult(
-            canonical_sha256({"graph_id": graph_id, "node_id": node.node_id})
+        payload = StoredPayload.inline_json(
+            {"graph_id": graph_id, "node_id": node.node_id}
         )
+        return TaskNodeRunResult(payload.digest, result_payload=payload)
 
     monkeypatch.setattr(RuntimeTaskNodeRunner, "run", run)
     monkeypatch.setattr(RuntimeTaskNodeRunner, "cancel", _noop_cancel)
@@ -262,8 +267,9 @@ async def test_sqlite_public_runtime_task_wait_timeout_and_cancel(
         graph_id: str,
         principal: Principal,
         dependency_results: Mapping[str, TaskDependencyResult],
+        control: TaskNodeRunControl,
     ) -> TaskNodeRunResult:
-        del self, node, graph_id, principal, dependency_results
+        del self, node, graph_id, principal, dependency_results, control
         started.set()
         await asyncio.Event().wait()
         raise AssertionError("blocked task unexpectedly completed")
@@ -375,6 +381,20 @@ class _ReadOnlyTaskRepository:
         del graph_id, tenant_id
         return self.view
 
+    async def snapshot_graph(
+        self,
+        graph_id: str,
+        *,
+        tenant_id: str,
+    ) -> TaskGraphSnapshot:
+        del graph_id, tenant_id
+        return TaskGraphSnapshot(
+            self.view.graph_id,
+            self.view.status,
+            self.view.nodes,
+            (),
+        )
+
     async def reconcile_graph(
         self,
         graph_id: str,
@@ -483,7 +503,7 @@ async def test_task_claim_conflict_reloads_and_reclassifies_owner(
                 lease_seconds=60,
             )
         assert raised.value.code is ErrorCode.TASK_OWNER_CONFLICT
-        assert attempts == 2
+        assert attempts == 1
         nodes = await repository.list_nodes(request.graph.graph_id, tenant_id="tenant")
         assert nodes[0].owner == "winner"
         assert nodes[0].status is TaskStatus.RUNNING
@@ -492,7 +512,7 @@ async def test_task_claim_conflict_reloads_and_reclassifies_owner(
 
 
 @pytest.mark.asyncio
-async def test_task_complete_retries_after_same_fence_heartbeat(
+async def test_task_complete_conflict_reads_back_without_retry(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     state, request = await _admitted_state(TaskGraph("complete-race", (TaskNode("root"),)))
@@ -505,7 +525,6 @@ async def test_task_complete_retries_after_same_fence_heartbeat(
         owner="runner",
         lease_seconds=60,
     )
-    original_complete = TaskRepositoryImpl.complete
     original_renew = TaskRepositoryImpl.renew
     attempts = 0
 
@@ -516,43 +535,42 @@ async def test_task_complete_retries_after_same_fence_heartbeat(
         tenant_id: str,
         execution_id: str | None,
         result_digest: str,
+        result_payload: StoredPayload | None = None,
     ) -> TaskTerminalRecord:
+        del execution_id, result_digest, result_payload
         nonlocal attempts
         attempts += 1
-        if attempts == 1:
-            await original_renew(
-                self,
-                lease,
-                tenant_id=tenant_id,
-                lease_seconds=60,
-            )
-            raise AIError(ErrorCode.STORAGE_CONFLICT)
-        return await original_complete(
+        if attempts != 1:
+            raise AssertionError("durable complete must not retry internally")
+        await original_renew(
             self,
             lease,
             tenant_id=tenant_id,
-            execution_id=execution_id,
-            result_digest=result_digest,
+            lease_seconds=60,
         )
+        raise AIError(ErrorCode.STORAGE_CONFLICT)
 
     monkeypatch.setattr(TaskRepositoryImpl, "complete", complete)
     try:
-        terminal = await repository.complete(
-            lease,
-            tenant_id="tenant",
-            execution_id=None,
-            result_digest=canonical_sha256({"result": True}),
-        )
-        assert terminal.status is TaskStatus.SUCCEEDED
-        assert attempts == 2
+        with pytest.raises(AIError) as raised:
+            await repository.complete(
+                lease,
+                tenant_id="tenant",
+                execution_id=None,
+                result_digest=canonical_sha256({"result": True}),
+            )
+        assert raised.value.code is ErrorCode.STORAGE_CONFLICT
+        assert attempts == 1
         nodes = await repository.list_nodes(request.graph.graph_id, tenant_id="tenant")
-        assert nodes[0].status is TaskStatus.SUCCEEDED
+        assert nodes[0].status is TaskStatus.RUNNING
+        assert nodes[0].owner == "runner"
+        assert nodes[0].fence == lease.fence
     finally:
         await state.close()
 
 
 @pytest.mark.asyncio
-async def test_task_fail_retries_after_same_fence_heartbeat(
+async def test_task_fail_conflict_reads_back_without_retry(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     state, request = await _admitted_state(TaskGraph("fail-race", (TaskNode("root"),)))
@@ -565,7 +583,6 @@ async def test_task_fail_retries_after_same_fence_heartbeat(
         owner="runner",
         lease_seconds=60,
     )
-    original_fail = TaskRepositoryImpl.fail
     original_renew = TaskRepositoryImpl.renew
     attempts = 0
 
@@ -576,43 +593,42 @@ async def test_task_fail_retries_after_same_fence_heartbeat(
         tenant_id: str,
         error_code: str,
         error_digest: str,
+        execution_id: str | None = None,
     ) -> TaskTerminalRecord:
+        del error_code, error_digest, execution_id
         nonlocal attempts
         attempts += 1
-        if attempts == 1:
-            await original_renew(
-                self,
-                lease,
-                tenant_id=tenant_id,
-                lease_seconds=60,
-            )
-            raise AIError(ErrorCode.STORAGE_CONFLICT)
-        return await original_fail(
+        if attempts != 1:
+            raise AssertionError("durable fail must not retry internally")
+        await original_renew(
             self,
             lease,
             tenant_id=tenant_id,
-            error_code=error_code,
-            error_digest=error_digest,
+            lease_seconds=60,
         )
+        raise AIError(ErrorCode.STORAGE_CONFLICT)
 
     monkeypatch.setattr(TaskRepositoryImpl, "fail", fail)
     try:
-        terminal = await repository.fail(
-            lease,
-            tenant_id="tenant",
-            error_code=ErrorCode.TASK_NODE_FAILED.value,
-            error_digest=canonical_sha256({"failure": True}),
-        )
-        assert terminal.status is TaskStatus.FAILED
-        assert attempts == 2
+        with pytest.raises(AIError) as raised:
+            await repository.fail(
+                lease,
+                tenant_id="tenant",
+                error_code=ErrorCode.TASK_NODE_FAILED.value,
+                error_digest=canonical_sha256({"failure": True}),
+            )
+        assert raised.value.code is ErrorCode.STORAGE_CONFLICT
+        assert attempts == 1
         nodes = await repository.list_nodes(request.graph.graph_id, tenant_id="tenant")
-        assert nodes[0].status is TaskStatus.FAILED
+        assert nodes[0].status is TaskStatus.RUNNING
+        assert nodes[0].owner == "runner"
+        assert nodes[0].fence == lease.fence
     finally:
         await state.close()
 
 
 @pytest.mark.asyncio
-async def test_task_terminal_retry_preserves_cancelled_state(
+async def test_task_terminal_conflict_preserves_cancelled_state(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     state, request = await _admitted_state(TaskGraph("cancel-race", (TaskNode("root"),)))
@@ -625,7 +641,6 @@ async def test_task_terminal_retry_preserves_cancelled_state(
         owner="runner",
         lease_seconds=60,
     )
-    original_complete = TaskRepositoryImpl.complete
     attempts = 0
 
     async def complete(
@@ -635,19 +650,15 @@ async def test_task_terminal_retry_preserves_cancelled_state(
         tenant_id: str,
         execution_id: str | None,
         result_digest: str,
+        result_payload: StoredPayload | None = None,
     ) -> TaskTerminalRecord:
+        del execution_id, result_digest, result_payload
         nonlocal attempts
         attempts += 1
-        if attempts == 1:
-            await self.cancel_graph(lease.graph_id, tenant_id=tenant_id)
-            raise AIError(ErrorCode.STORAGE_CONFLICT)
-        return await original_complete(
-            self,
-            lease,
-            tenant_id=tenant_id,
-            execution_id=execution_id,
-            result_digest=result_digest,
-        )
+        if attempts != 1:
+            raise AssertionError("durable complete must not retry internally")
+        await self.cancel_graph(lease.graph_id, tenant_id=tenant_id)
+        raise AIError(ErrorCode.STORAGE_CONFLICT)
 
     monkeypatch.setattr(TaskRepositoryImpl, "complete", complete)
     try:
@@ -658,8 +669,8 @@ async def test_task_terminal_retry_preserves_cancelled_state(
                 execution_id=None,
                 result_digest=canonical_sha256({"result": True}),
             )
-        assert raised.value.code is ErrorCode.TASK_FENCE_STALE
-        assert attempts == 2
+        assert raised.value.code is ErrorCode.TASK_TERMINAL_CONFLICT
+        assert attempts == 1
         nodes = await repository.list_nodes(request.graph.graph_id, tenant_id="tenant")
         assert nodes[0].status is TaskStatus.CANCELLED
     finally:
@@ -667,7 +678,7 @@ async def test_task_terminal_retry_preserves_cancelled_state(
 
 
 @pytest.mark.asyncio
-async def test_task_reconcile_retries_whole_projection_transaction(
+async def test_task_reconcile_conflict_uses_readback_without_retry(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     graph = TaskGraph(
@@ -706,7 +717,7 @@ async def test_task_reconcile_retries_whole_projection_transaction(
             request.graph.graph_id,
             tenant_id="tenant",
         )
-        assert attempts == 2
+        assert attempts == 1
         assert view.status is TaskStatus.PENDING
         nodes = {
             node.node_id: node
@@ -716,13 +727,28 @@ async def test_task_reconcile_retries_whole_projection_transaction(
             )
         }
         assert nodes["a"].status is TaskStatus.SUCCEEDED
+        assert nodes["b"].status is TaskStatus.PENDING
+
+        view = await repository.reconcile_graph(
+            request.graph.graph_id,
+            tenant_id="tenant",
+        )
+        assert attempts == 2
+        assert view.status is TaskStatus.PENDING
+        nodes = {
+            node.node_id: node
+            for node in await repository.list_nodes(
+                request.graph.graph_id,
+                tenant_id="tenant",
+            )
+        }
         assert nodes["b"].status is TaskStatus.READY
     finally:
         await state.close()
 
 
 @pytest.mark.asyncio
-async def test_task_cancel_retries_whole_projection_transaction(
+async def test_task_cancel_conflict_requires_explicit_retry(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     state, request = await _admitted_state(
@@ -742,6 +768,19 @@ async def test_task_cancel_retries_whole_projection_transaction(
 
     monkeypatch.setattr(repository, "_sync_recovery_projection", sync)
     try:
+        with pytest.raises(AIError) as raised:
+            await repository.cancel_graph(
+                request.graph.graph_id,
+                tenant_id="tenant",
+            )
+        assert raised.value.code is ErrorCode.STORAGE_CONFLICT
+        assert attempts == 1
+        nodes = await repository.list_nodes(
+            request.graph.graph_id,
+            tenant_id="tenant",
+        )
+        assert {node.status for node in nodes} == {TaskStatus.READY}
+
         view = await repository.cancel_graph(
             request.graph.graph_id,
             tenant_id="tenant",

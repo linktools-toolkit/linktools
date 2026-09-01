@@ -311,6 +311,7 @@ class LocalExecutionBackend:
             set[asyncio.Task[object]],
         ] = {}
         self._worker_cancel_requests: set[str] = set()
+        self._worker_shutdown_requests: set[str] = set()
         self._accepting = True
         execution_steps = self._step_reads[RuntimeDomain.EXECUTION]
         conversation_steps = self._step_reads[RuntimeDomain.CONVERSATION]
@@ -970,6 +971,7 @@ class LocalExecutionBackend:
             return
         self._tasks.pop(execution_id, None)
         self._worker_cancel_requests.discard(execution_id)
+        self._worker_shutdown_set().discard(execution_id)
         self._captured_usage.pop(execution_id, None)
         if self._approval_pause_segments.get(execution_id) is task:
             self._approval_pause_segments.pop(execution_id, None)
@@ -1007,6 +1009,24 @@ class LocalExecutionBackend:
         )
         if live_broker is not None:
             live_broker.complete(execution_id)
+
+    def _worker_shutdown_set(self) -> set[str]:
+        try:
+            return self._worker_shutdown_requests
+        except AttributeError:
+            requests: set[str] = set()
+            self._worker_shutdown_requests = requests
+            return requests
+
+    def _request_worker_shutdown(
+        self,
+        execution_id: str,
+        task: asyncio.Task[None],
+    ) -> None:
+        if task.done() or execution_id in self._worker_cancel_requests:
+            return
+        self._worker_shutdown_set().add(execution_id)
+        self._request_worker_cancel(execution_id, task)
 
     def _request_worker_cancel(
         self,
@@ -1060,6 +1080,7 @@ class LocalExecutionBackend:
         return self._live_broker
 
     async def cancel(self, execution: ExecutionRecord) -> CancelEffectOutcome:
+        self._worker_shutdown_set().discard(execution.execution_id)
         current = await self._execution.executions.get(
             execution.execution_id,
             tenant_id=execution.tenant_id,
@@ -3105,7 +3126,10 @@ class LocalExecutionBackend:
                 ExecutionStatus.FAILED,
                 ExecutionStatus.CANCELLED,
             }:
-                self._request_worker_cancel(execution_id, task)
+                if self._recovery_enabled:
+                    self._request_worker_shutdown(execution_id, task)
+                else:
+                    self._request_worker_cancel(execution_id, task)
             else:
                 _logger.info(
                     "close draining terminal execution worker: execution=%s status=%s",
@@ -3212,6 +3236,7 @@ class LocalExecutionBackend:
         self._repository_instruction_provenance.clear()
         self._checkpoint_tasks.clear()
         self._worker_cancel_requests.clear()
+        self._worker_shutdown_set().clear()
         self._execution_task_map().clear()
 
     async def release_runtime_execution(
@@ -3241,6 +3266,7 @@ class LocalExecutionBackend:
         if task is not None:
             self._tasks.pop(execution_id, None)
         self._worker_cancel_requests.discard(execution_id)
+        self._worker_shutdown_set().discard(execution_id)
         self._terminal_events.pop(execution_id, None)
         self._worker_failures.pop(execution_id, None)
         self._captured_usage.pop(execution_id, None)
@@ -3753,13 +3779,48 @@ class LocalExecutionBackend:
             operation_result = _execution_operation_result(committed.status)
             _logger.debug("local execution completed: execution=%s run=%s", execution_id, run_id)
         except asyncio.CancelledError:
-            current = await self._execution.executions.get(execution_id, tenant_id=original.tenant_id)
+            current = await self._execution.executions.get(
+                execution_id,
+                tenant_id=original.tenant_id,
+            )
             if current is not None and current.status is ExecutionStatus.FINALIZING:
                 raise
-            if current is not None and current.status not in {ExecutionStatus.SUCCEEDED, ExecutionStatus.FAILED, ExecutionStatus.CANCELLED}:
-                current = await self._commit_terminal(current, ExecutionStatus.CANCELLED, None, ErrorCode.EXECUTION_CANCELLED.value, StopReason.CANCELLED, run_id=run_id)
-            if current is not None:
+            if current is not None and current.status is ExecutionStatus.CANCELLING:
+                self._worker_shutdown_set().discard(execution_id)
+                current = await self._commit_terminal(
+                    current,
+                    ExecutionStatus.CANCELLED,
+                    None,
+                    ErrorCode.EXECUTION_CANCELLED.value,
+                    StopReason.CANCELLED,
+                    run_id=run_id,
+                )
+            elif (
+                not self._recovery_enabled
+                and current is not None
+                and current.status not in {
+                    ExecutionStatus.SUCCEEDED,
+                    ExecutionStatus.FAILED,
+                    ExecutionStatus.CANCELLED,
+                }
+            ):
+                current = await self._commit_terminal(
+                    current,
+                    ExecutionStatus.CANCELLED,
+                    None,
+                    ErrorCode.EXECUTION_CANCELLED.value,
+                    StopReason.CANCELLED,
+                    run_id=run_id,
+                )
+            if current is not None and current.status in {
+                ExecutionStatus.SUCCEEDED,
+                ExecutionStatus.FAILED,
+                ExecutionStatus.CANCELLED,
+                ExecutionStatus.CANCELLING,
+            }:
                 operation_result = _execution_operation_result(current.status)
+            if execution_id in self._worker_shutdown_set():
+                operation_result = "cancelled"
             raise
         except Exception:
             _logger.exception(

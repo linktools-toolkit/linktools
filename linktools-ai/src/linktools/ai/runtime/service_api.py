@@ -34,6 +34,7 @@ from ..task import (
     CancelGraphRequest,
     TaskGraphRequest,
     TaskGraphResult,
+    TaskGraphSnapshot,
     TaskGraphView,
 )
 
@@ -640,6 +641,18 @@ class TaskService(Protocol):
     async def run_graph(self, request: TaskGraphRequest) -> TaskGraphResult: ...
     async def run_graph_and_wait(self, request: TaskGraphRequest, *, timeout_seconds: "float | None" = None) -> TaskGraphResult: ...
     async def inspect_graph(self, graph_id: str, *, principal: Principal) -> TaskGraphView: ...
+    async def inspect_graph_state(
+        self,
+        graph_id: str,
+        *,
+        principal: Principal,
+    ) -> TaskGraphSnapshot: ...
+    def stream_graph(
+        self,
+        graph_id: str,
+        *,
+        principal: Principal,
+    ) -> "AsyncIterator[TaskGraphSnapshot]": ...
     async def wait_graph(self, graph_id: str, *, principal: Principal, timeout_seconds: "float | None" = None) -> TaskGraphResult: ...
     async def cancel_graph(self, graph_id: str, request: CancelGraphRequest) -> TaskGraphView: ...
 
