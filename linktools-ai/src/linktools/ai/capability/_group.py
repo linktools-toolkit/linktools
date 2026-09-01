@@ -8,7 +8,7 @@ import inspect
 import re
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Generic, Literal, Protocol, TypeAlias, TypeVar, cast, runtime_checkable
+from typing import Generic, Literal, Protocol, TypeAlias, TypeVar, cast
 
 from pydantic_ai import Tool
 from pydantic_ai.capabilities import AbstractCapability
@@ -29,30 +29,13 @@ from ..spec import (
     SkillSpecCodec,
     ThinkingValue,
 )
-if TYPE_CHECKING:
-    from ..task import TaskNodeHandler
-
+from ..task import TaskNodeHandler
 from ._context import RunContext
 from ._names import SKILL_TOOL_NAMES, SUBAGENT_TOOL_NAMES
 from ._skill import SkillDefinition
 from ._skill_source import AssetSkillResourceSource, SkillResourceSource, SkillSourceRef
 
 AppT = TypeVar("AppT")
-
-
-@runtime_checkable
-class _TaskHandlerValue(Protocol):
-    @property
-    def type(self) -> str: ...
-
-    @property
-    def version(self) -> int: ...
-
-    def normalize(self, input: Mapping[str, JsonValue]) -> Mapping[str, JsonValue]: ...
-
-    async def run(self, context: object) -> JsonValue: ...
-
-    async def cancel(self, context: object) -> None: ...
 
 
 ContributionKind = Literal["tool", "agent", "skill", "mcp", "capability", "task"]
@@ -62,7 +45,7 @@ ContributionSemanticValue: TypeAlias = (
     | SkillDefinition
     | MCPServerSpec
     | AbstractCapability
-    | _TaskHandlerValue
+    | TaskNodeHandler[object]
 )
 _RESERVED_TOOL_NAMES = frozenset(
     {
@@ -113,7 +96,7 @@ class CapabilityContribution(Generic[AppT]):
             raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
         if self.kind == "capability" and not isinstance(self.value, AbstractCapability):
             raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
-        if self.kind == "task" and not isinstance(self.value, _TaskHandlerValue):
+        if self.kind == "task" and not isinstance(self.value, TaskNodeHandler):
             raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
         if self.kind == "tool" and cast(Tool, self.value).name != self.id:
             raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
@@ -135,7 +118,7 @@ class CapabilityContribution(Generic[AppT]):
                 )
             _validate_external_capability_id(capability_id)
         if self.kind == "task":
-            handler = cast(_TaskHandlerValue, self.value)
+            handler = cast("TaskNodeHandler[object]", self.value)
             task_type, task_version = _task_identity(handler)
             if self.id != f"{task_type}@{task_version}":
                 raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
@@ -620,7 +603,7 @@ def contribution_semantic_contract(
             except (TypeError, ValueError) as error:
                 raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID) from error
         return contract
-    if kind == "task" and isinstance(value, _TaskHandlerValue):
+    if kind == "task" and isinstance(value, TaskNodeHandler):
         task_type, task_version = _task_identity(value)
         if identity != f"{task_type}@{task_version}":
             raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
@@ -647,12 +630,11 @@ def capability_fingerprint(
     )
 
 
-def _task_identity(handler: _TaskHandlerValue) -> tuple[str, int]:
-    try:
-        task_type = handler.type
-        task_version = handler.version
-    except AttributeError as error:
-        raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID) from error
+def _task_identity(handler: object) -> tuple[str, int]:
+    if not isinstance(handler, TaskNodeHandler):
+        raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
+    task_type = handler.type
+    task_version = handler.version
     if (
         not isinstance(task_type, str)
         or _TASK_TYPE.fullmatch(task_type) is None
