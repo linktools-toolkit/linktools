@@ -441,12 +441,16 @@ class LocalTaskGraphLauncher:
         request = run.request
         tenant_id = request.principal.tenant_id
         inflight: dict[str, _InflightNode] = {}
+        publish_reconciled = False
         try:
             while not run.closed:
                 view = await self._repository.reconcile_graph(
                     request.graph.graph_id,
                     tenant_id=tenant_id,
                 )
+                if publish_reconciled:
+                    await self._notify(run)
+                    publish_reconciled = False
                 states = await self._repository.list_nodes(
                     request.graph.graph_id,
                     tenant_id=tenant_id,
@@ -493,6 +497,7 @@ class LocalTaskGraphLauncher:
                         return_when=asyncio.FIRST_COMPLETED,
                     )
                     _reap_inflight(inflight)
+                    publish_reconciled = True
                     continue
                 await self._wait_scheduler(run, states)
         except asyncio.CancelledError:
@@ -672,8 +677,6 @@ class LocalTaskGraphLauncher:
             await asyncio.gather(runner_task, return_exceptions=True)
             await _stop_heartbeat(heartbeat_stop, heartbeat)
             raise
-        finally:
-            await self._notify(run)
 
     async def _completion_committed(
         self,
