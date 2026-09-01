@@ -285,10 +285,7 @@ class LocalTaskGraphLauncher:
             existing = self._graphs.get(key)
             if existing is not None and not existing.closed:
                 if existing.failure is not None:
-                    raise AIError(
-                        existing.failure.code,
-                        safe_details=dict(existing.failure.safe_details),
-                    )
+                    raise _copy_ai_error(existing.failure)
                 return TaskGraphHandle(
                     request.graph.graph_id,
                     f"local:{key[0]}:{key[1]}",
