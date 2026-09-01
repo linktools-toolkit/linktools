@@ -446,7 +446,12 @@ class _RuntimeStepPersistence(StepPersistence[None]):
             ToolFailed,
             ToolFailedError,
         ) as error:
-            if state.handler_entered and not state.policy.effect_free and not state.policy.replay_safe:
+            if (
+                isinstance(error, ValidationError)
+                and state.handler_entered
+                and not state.policy.effect_free
+                and not state.policy.replay_safe
+            ):
                 await self._mark_unknown(state, error)
                 raise AIError(ErrorCode.TOOL_EFFECT_UNKNOWN) from error
             try:
@@ -565,7 +570,12 @@ class _RuntimeStepPersistence(StepPersistence[None]):
                 error,
                 (ValidationError, ModelRetry, ToolRetryError, ToolFailed, ToolFailedError),
             ):
-                if state.handler_entered and not state.policy.effect_free and not state.policy.replay_safe:
+                if (
+                    isinstance(error, ValidationError)
+                    and state.handler_entered
+                    and not state.policy.effect_free
+                    and not state.policy.replay_safe
+                ):
                     await self._mark_unknown(state, error)
                     raise AIError(ErrorCode.TOOL_EFFECT_UNKNOWN) from error
                 return await self._fail_known_effect(
