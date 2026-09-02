@@ -2,9 +2,11 @@
 # -*- coding: utf-8 -*-
 """Task repositories with durable recovery indexing and legacy admission repair."""
 
-from collections.abc import Mapping
+import asyncio
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, replace
 from datetime import datetime
+from typing import TypeVar
 
 from ...core import OperationStatus, Page, TaskStatus
 from ...errors import AIError, ErrorCode
@@ -46,6 +48,7 @@ from ._store import (
     stream_digest,
 )
 
+_ValueT = TypeVar("_ValueT")
 _CURRENT_CURSOR_PREFIX = "a:"
 _LEGACY_CURSOR_PREFIX = "g:"
 _COMMIT_READBACK_CODES = frozenset(
@@ -59,6 +62,10 @@ _TERMINAL_TASK_STATUSES = frozenset(
         TaskStatus.CANCELLED,
     }
 )
+
+
+class _TaskEventAppendConflict(RuntimeError):
+    pass
 
 
 @dataclass(frozen=True, slots=True)
@@ -200,7 +207,7 @@ async def _append_task_events(
         expected_storage_version=graph_record.storage_version,
     )
     if guarded is None:
-        raise AIError(ErrorCode.STORAGE_CONFLICT)
+        raise _TaskEventAppendConflict
     final_sequence = await transaction.reserve_sequence(
         _task_event_sequence(repository, graph_id),
         len(drafts),
@@ -300,6 +307,16 @@ class DurableTaskRepositoryImpl(TaskRepositoryImpl):
     def _legacy_recovery_scope(self) -> bytes:
         return self._scope("task_graph", "recoverable", "graphs")
 
+    async def _mutate_with_event_retry(
+        self,
+        operation: Callable[[StateTransaction], Awaitable[_ValueT]],
+    ) -> _ValueT:
+        while True:
+            try:
+                return await self.state_store.mutate(operation)
+            except _TaskEventAppendConflict:
+                await asyncio.sleep(0)
+
     async def create_graph(self, graph: TaskGraph, *, tenant_id: str) -> TaskGraphView:
         async def mutate(transaction: StateTransaction) -> TaskGraphView:
             view = await super(DurableTaskRepositoryImpl, self).create_graph(
@@ -312,7 +329,7 @@ class DurableTaskRepositoryImpl(TaskRepositoryImpl):
             await _append_task_snapshot_events(self, transaction, None, snapshot)
             return view
 
-        return await self.state_store.mutate(mutate)
+        return await self._mutate_with_event_retry(mutate)
 
     async def get_graph(self, graph_id: str, *, tenant_id: str) -> TaskGraphView | None:
         if tenant_id != self._tenant_id:
@@ -419,7 +436,7 @@ class DurableTaskRepositoryImpl(TaskRepositoryImpl):
                 await _append_task_snapshot_events(self, transaction, before, after)
                 return result
 
-            return await self.state_store.mutate(mutate)
+            return await self._mutate_with_event_retry(mutate)
         except AIError as error:
             if error.code not in _COMMIT_READBACK_CODES:
                 raise
@@ -470,7 +487,7 @@ class DurableTaskRepositoryImpl(TaskRepositoryImpl):
             return view
 
         try:
-            return await self.state_store.mutate(mutate)
+            return await self._mutate_with_event_retry(mutate)
         except AIError as error:
             if error.code not in _COMMIT_READBACK_CODES:
                 raise
@@ -533,7 +550,7 @@ class DurableTaskRepositoryImpl(TaskRepositoryImpl):
             return view
 
         try:
-            return await self.state_store.mutate(mutate)
+            return await self._mutate_with_event_retry(mutate)
         except AIError as error:
             if error.code not in _COMMIT_READBACK_CODES:
                 raise
@@ -588,7 +605,7 @@ class DurableTaskRepositoryImpl(TaskRepositoryImpl):
                 await _append_task_snapshot_events(self, transaction, before, after)
                 return result
 
-            return await self.state_store.mutate(mutate)
+            return await self._mutate_with_event_retry(mutate)
         except AIError as error:
             if error.code not in _COMMIT_READBACK_CODES:
                 raise
@@ -648,7 +665,7 @@ class DurableTaskRepositoryImpl(TaskRepositoryImpl):
                 await _append_task_snapshot_events(self, transaction, before, after)
                 return result
 
-            return await self.state_store.mutate(mutate)
+            return await self._mutate_with_event_retry(mutate)
         except AIError as error:
             if error.code not in _COMMIT_READBACK_CODES:
                 raise
@@ -691,7 +708,7 @@ class DurableTaskRepositoryImpl(TaskRepositoryImpl):
                 await _append_task_snapshot_events(self, transaction, before, after)
                 return result
 
-            return await self.state_store.mutate(mutate)
+            return await self._mutate_with_event_retry(mutate)
         except AIError as error:
             if error.code not in _COMMIT_READBACK_CODES:
                 raise
