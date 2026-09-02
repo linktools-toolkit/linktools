@@ -3,6 +3,7 @@
 
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 
 from linktools.cli.env import get_commands
 from linktools.system import get_interpreter_ident
@@ -14,19 +15,19 @@ class FakeEnviron:
     system = "linux"
     debug = False
 
-    def __init__(self, root):
+    def __init__(self, root: Path) -> None:
         self.root = Path(root)
         self.clean_calls = []
         self.logger = SimpleNamespace(info=lambda *args, **kwargs: None)
 
-    def get_data_path(self, *parts, **kwargs):
+    def get_data_path(self, *parts: str, **kwargs: Any) -> Path:
         return self.root.joinpath(*parts)
 
-    def clean_temp_files(self, *paths, expire_days=7):
+    def clean_temp_files(self, *paths: str, expire_days: int = 7) -> None:
         self.clean_calls.append((paths, expire_days))
 
 
-def test_clean_preserves_generated_alias_and_command_stubs(tmp_path):
+def test_clean_preserves_generated_alias_and_command_stubs(tmp_path: Path) -> None:
     environ = FakeEnviron(tmp_path)
     scripts = tmp_path / "scripts" / get_interpreter_ident()
     stub = scripts / "env_v1" / "ct-demo"

@@ -1,20 +1,22 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
+from typing import Any, Tuple
 
-def test_select_entry_points_prefers_select_over_mapping_interface(monkeypatch):
+
+def test_select_entry_points_prefers_select_over_mapping_interface(monkeypatch: Any) -> None:
     from linktools.core import _entrypoint
 
     class SelectableGroups(dict):
-        def __init__(self):
+        def __init__(self) -> None:
             super().__init__({"linktools.capability": ("legacy",)})
             self.select_calls = []
 
-        def select(self, **kwargs):
+        def select(self, **kwargs: str) -> "Tuple[str, ...]":
             self.select_calls.append(kwargs)
             return ("selected",)
 
-        def get(self, *args, **kwargs):
+        def get(self, *args: Any, **kwargs: Any) -> Any:
             raise AssertionError("deprecated mapping interface must not be used")
 
     entries = SelectableGroups()
