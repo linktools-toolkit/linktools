@@ -449,7 +449,7 @@ def _run_ruff(project: str, check: "typing.Dict[str, typing.Any]", environment: 
         print("[-] ruff is required; install repository requirements first", file=sys.stderr)
         raise SystemExit(1)
     print("[+] %s: ruff" % project)
-    command = [ruff, "check", "--no-cache", "--select", ",".join(check["select"])]
+    command = [ruff, "check", "--quiet", "--no-cache", "--select", ",".join(check["select"])]
     command.extend(check["paths"])
     _run_check(command, environment)
 
