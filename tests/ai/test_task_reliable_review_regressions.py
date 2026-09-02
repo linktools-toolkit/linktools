@@ -8,7 +8,6 @@ from types import SimpleNamespace
 
 import pytest
 import linktools.ai.task._local as task_local
-import linktools.ai.task._service_impl as task_service_impl
 from linktools.ai.core import Principal, TaskStatus
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.runtime import RuntimeState
@@ -408,7 +407,7 @@ async def test_inflight_node_does_not_suppress_expired_foreign_lease_reclaim(
 
 
 @pytest.mark.asyncio
-async def test_stream_graph_rechecks_foreign_update_while_local_node_is_inflight(
+async def test_event_stream_rechecks_foreign_update_while_local_node_is_inflight(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     state = RuntimeState.in_memory()
@@ -432,7 +431,6 @@ async def test_stream_graph_rechecks_foreign_update_while_local_node_is_inflight
         principal = trusted_workspace_principal("tenant")
         runner = _BlockingRunner()
         monkeypatch.setattr(task_local, "_SCHEDULER_RECHECK_SECONDS", 0.01)
-        monkeypatch.setattr(task_service_impl, "_GRAPH_OBSERVATION_RECHECK_SECONDS", 0.01)
         launcher = LocalTaskGraphLauncher(repository, runner, owner="local-worker")
         await launcher.start(
             TaskGraphLaunch(
@@ -448,11 +446,19 @@ async def test_stream_graph_rechecks_foreign_update_while_local_node_is_inflight
             _AllowAuthorization(),
             local_waiter=launcher,
         )
-        stream = service.stream_graph(graph.graph_id, principal=principal)
-        first = await asyncio.wait_for(anext(stream), 1)
-        first_by_id = {node.node_id: node for node in first.node_states}
-        assert first_by_id["local"].status is TaskStatus.RUNNING
-        assert first_by_id["foreign"].status is TaskStatus.RUNNING
+        history = await service.list_graph_events(
+            graph.graph_id,
+            principal=principal,
+            limit=100,
+        )
+        assert history.items
+        stream = service.stream_graph_events(
+            graph.graph_id,
+            principal=principal,
+            after_sequence=history.items[-1].sequence,
+        )
+        pending = asyncio.create_task(anext(stream))
+        await asyncio.sleep(0)
 
         await repository.complete(
             foreign_lease,
@@ -461,10 +467,11 @@ async def test_stream_graph_rechecks_foreign_update_while_local_node_is_inflight
             result_digest="b" * 64,
         )
 
-        second = await asyncio.wait_for(anext(stream), 1)
-        second_by_id = {node.node_id: node for node in second.node_states}
-        assert second_by_id["local"].status is TaskStatus.RUNNING
-        assert second_by_id["foreign"].status is TaskStatus.SUCCEEDED
+        event = await asyncio.wait_for(pending, 1)
+        assert event.node_id == "foreign"
+        assert event.previous_status is TaskStatus.RUNNING
+        assert event.status is TaskStatus.SUCCEEDED
+        assert event.result_digest == "b" * 64
     finally:
         if stream is not None:
             await stream.aclose()
