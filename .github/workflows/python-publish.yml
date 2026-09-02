@@ -86,7 +86,7 @@ jobs:
         python -m pip install --quiet --upgrade pip
         python -m pip install --quiet -U -r requirements.txt
     - name: Install projects
-      run: python manage.py install --editable --silent
+      run: python manage.py install --editable --quiet
     - name: Clean package
       run: python manage.py clean
     - name: Build package
