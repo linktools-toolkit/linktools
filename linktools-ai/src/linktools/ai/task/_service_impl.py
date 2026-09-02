@@ -545,10 +545,20 @@ class DefaultTaskService(TaskApi):
         if waiter is None or not waiter.owns_graph(snapshot.graph_id, tenant_id=tenant_id):
             await asyncio.sleep(_GRAPH_OBSERVATION_RECHECK_SECONDS)
             return
-        timeout = _GRAPH_OBSERVATION_RECHECK_SECONDS
-        lease_delay = _nearest_live_lease_delay(snapshot)
-        if lease_delay is not None:
-            timeout = min(timeout, lease_delay)
+        if after_generation is None:
+            await waiter.wait_graph_activity(
+                snapshot.graph_id,
+                tenant_id=tenant_id,
+            )
+            return
+        timeout = _nearest_live_lease_delay(snapshot)
+        if timeout is None:
+            await waiter.wait_graph_activity(
+                snapshot.graph_id,
+                tenant_id=tenant_id,
+                after_generation=after_generation,
+            )
+            return
         if timeout <= 0:
             return
         try:
