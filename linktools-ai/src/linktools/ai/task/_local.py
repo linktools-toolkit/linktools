@@ -770,8 +770,8 @@ class LocalTaskGraphLauncher:
                     (node_id,),
                     tenant_id=tenant_id,
                 )
-                result = results.get(node_id)
-                if result is None or result.result_digest != completion.result_digest:
+                record = results.get(node_id)
+                if record is None or record.result_digest != completion.result_digest:
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             return True
         if state.status in _TERMINAL:
