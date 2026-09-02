@@ -454,6 +454,9 @@ class DefaultTaskService(TaskApi):
         _validate_event_window(after_sequence, _TASK_EVENT_READ_LIMIT)
         tenant_id = principal.tenant_id
         cursor = after_sequence
+        baseline_checked = False
+        terminal_seen = False
+        pending_wait_error: AIError | None = None
         async with self._graph_consumer(graph_id, tenant_id):
             header = await self._persistence.tasks.get_header(
                 graph_id,
@@ -481,39 +484,56 @@ class DefaultTaskService(TaskApi):
                 if page.items:
                     for event in page.items:
                         cursor = event.sequence
+                        if event.node_id is None and _terminal(event.status):
+                            terminal_seen = True
                         yield event
                     continue
-                snapshot = await self._persistence.tasks.snapshot_graph(
-                    graph_id,
-                    tenant_id=tenant_id,
-                )
-                if snapshot is None:
-                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                if _terminal(snapshot.status):
-                    snapshot, generation = await self._stabilize_local_terminal(
-                        snapshot,
-                        tenant_id=tenant_id,
-                        generation=generation,
-                    )
-                    trailing = await self._persistence.tasks.list_events(
+                if terminal_seen:
+                    await self._settle_terminal_event_observation(
                         graph_id,
                         tenant_id=tenant_id,
-                        after_sequence=cursor,
-                        limit=_TASK_EVENT_READ_LIMIT,
                     )
-                    _validate_event_page(graph_id, cursor, trailing)
-                    if trailing.items:
-                        for event in trailing.items:
-                            cursor = event.sequence
-                            yield event
-                        continue
                     await self._request_graph_release(graph_id, tenant_id)
                     return
-                await self._wait_observation_opportunity(
-                    snapshot,
-                    tenant_id=tenant_id,
-                    after_generation=generation,
-                )
+                if not baseline_checked:
+                    baseline_checked = True
+                    snapshot = await self._persistence.tasks.snapshot_graph(
+                        graph_id,
+                        tenant_id=tenant_id,
+                    )
+                    if snapshot is None:
+                        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                    if _terminal(snapshot.status):
+                        await self._settle_terminal_event_observation(
+                            graph_id,
+                            tenant_id=tenant_id,
+                        )
+                        trailing = await self._persistence.tasks.list_events(
+                            graph_id,
+                            tenant_id=tenant_id,
+                            after_sequence=cursor,
+                            limit=_TASK_EVENT_READ_LIMIT,
+                        )
+                        _validate_event_page(graph_id, cursor, trailing)
+                        if trailing.items:
+                            for event in trailing.items:
+                                cursor = event.sequence
+                                if event.node_id is None and _terminal(event.status):
+                                    terminal_seen = True
+                                yield event
+                            continue
+                        await self._request_graph_release(graph_id, tenant_id)
+                        return
+                if pending_wait_error is not None:
+                    raise pending_wait_error
+                try:
+                    await self._wait_event_observation_opportunity(
+                        graph_id,
+                        tenant_id=tenant_id,
+                        after_generation=generation,
+                    )
+                except AIError as error:
+                    pending_wait_error = error
 
     async def _observe_graph(
         self,
@@ -659,6 +679,48 @@ class DefaultTaskService(TaskApi):
         if waiter is None or not waiter.owns_graph(graph_id, tenant_id=tenant_id):
             return None
         return waiter.graph_activity_generation(graph_id, tenant_id=tenant_id)
+
+    async def _wait_event_observation_opportunity(
+        self,
+        graph_id: str,
+        *,
+        tenant_id: str,
+        after_generation: int | None,
+    ) -> None:
+        waiter = self._local_waiter
+        if (
+            waiter is None
+            or not waiter.owns_graph(graph_id, tenant_id=tenant_id)
+            or after_generation is None
+        ):
+            await asyncio.sleep(_GRAPH_OBSERVATION_RECHECK_SECONDS)
+            return
+        await waiter.wait_graph_activity(
+            graph_id,
+            tenant_id=tenant_id,
+            after_generation=after_generation,
+        )
+
+    async def _settle_terminal_event_observation(
+        self,
+        graph_id: str,
+        *,
+        tenant_id: str,
+    ) -> None:
+        waiter = self._local_waiter
+        while waiter is not None and waiter.owns_graph(graph_id, tenant_id=tenant_id):
+            generation = waiter.graph_activity_generation(
+                graph_id,
+                tenant_id=tenant_id,
+            )
+            try:
+                await waiter.wait_graph_activity(
+                    graph_id,
+                    tenant_id=tenant_id,
+                    after_generation=generation,
+                )
+            except AIError:
+                return
 
     async def _wait_observation_opportunity(
         self,
