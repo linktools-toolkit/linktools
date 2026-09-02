@@ -206,6 +206,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     install_parser.add_argument("-e", "--editable", action="store_true", help="Install in editable mode")
     install_parser.add_argument("--no-isolation", action="store_true", help="Disable build isolation")
+    install_parser.add_argument("--silent", action="store_true", help="Suppress routine pip output")
     install_parser.set_defaults(func=handle_install)
 
     check_parser = subparsers.add_parser("check", help="Run source and test release gates")
@@ -432,7 +433,7 @@ def _run_python36_gate(
     scanner = os.path.join(PROJECT_PATH, "scripts", "check", "python36.py")
     paths = [os.path.join(PROJECT_PATH, "manage.py"), scanner]
     paths.extend(os.path.join(modules[project]["path"], "src") for project in compatible)
-    print("[+] Python 3.6 compatibility: %s" % ", ".join(compatible))
+    print("[+] Python 3.6 static compatibility: %s" % ", ".join(compatible))
     _run_check([sys.executable, scanner] + paths, environment)
 
 
@@ -555,6 +556,8 @@ def handle_init(args: argparse.Namespace) -> None:
 def handle_install(args: argparse.Namespace) -> None:
     requirements = _install_requirements(args, get_modules())
     pip_args = [sys.executable, "-m", "pip", "install"]
+    if args.silent:
+        pip_args.append("--quiet")
     for _, requirement in requirements:
         if args.editable:
             pip_args.append("-e")
