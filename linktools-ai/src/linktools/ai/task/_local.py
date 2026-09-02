@@ -542,6 +542,11 @@ class LocalTaskGraphLauncher:
                 )
             run.closed = True
             await self._notify(run)
+            if run.failure is None:
+                key = (tenant_id, request.graph.graph_id)
+                async with self._lock:
+                    if self._graphs.get(key) is run:
+                        self._graphs.pop(key, None)
 
     async def _cancel_terminal_effects(
         self,
