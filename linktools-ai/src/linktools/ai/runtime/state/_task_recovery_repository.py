@@ -29,7 +29,6 @@ from ._repositories import (
     TaskRepositoryImpl,
     _decode_operation,
     _decode_record_cursor,
-    _projected_record,
     _record_cursor,
     _replace_checked,
     _require_live_task_lease,
@@ -94,21 +93,27 @@ class _TaskEventState:
     node_states: tuple[TaskNodeView, ...]
 
 
-def _task_event_stream(repository: object, graph_id: str) -> bytes:
+def _task_event_stream(
+    repository: "DurableTaskRepositoryImpl | DurableTaskAdmissionRepositoryImpl",
+    graph_id: str,
+) -> bytes:
     return stream_digest(
-        repository._namespace,  # type: ignore[attr-defined]
-        repository._tenant_id,  # type: ignore[attr-defined]
-        repository._domain.value,  # type: ignore[attr-defined]
+        repository._namespace,
+        repository._tenant_id,
+        repository._domain.value,
         "task_event",
         graph_id,
     )
 
 
-def _task_event_sequence(repository: object, graph_id: str) -> bytes:
+def _task_event_sequence(
+    repository: "DurableTaskRepositoryImpl | DurableTaskAdmissionRepositoryImpl",
+    graph_id: str,
+) -> bytes:
     return sequence_key(
-        repository._namespace,  # type: ignore[attr-defined]
-        repository._tenant_id,  # type: ignore[attr-defined]
-        repository._domain.value,  # type: ignore[attr-defined]
+        repository._namespace,
+        repository._tenant_id,
+        repository._domain.value,
         "task_event",
         graph_id,
     )
@@ -264,13 +269,13 @@ def _task_event_payload(draft: _TaskEventDraft, occurred_at: datetime) -> dict[s
 
 
 async def _guard_task_event_owner(
-    repository: object,
+    repository: "DurableTaskRepositoryImpl | DurableTaskAdmissionRepositoryImpl",
     transaction: StateTransaction,
     graph_id: str,
     *,
     missing_code: ErrorCode = ErrorCode.STORAGE_INTEGRITY_ERROR,
 ) -> StoredRecord:
-    graph_key = repository._graph_key(graph_id)  # type: ignore[attr-defined]
+    graph_key = repository._graph_key(graph_id)
     graph_record = await transaction.get_record(graph_key)
     if graph_record is None:
         raise AIError(missing_code)
@@ -284,7 +289,7 @@ async def _guard_task_event_owner(
 
 
 async def _append_task_events(
-    repository: object,
+    repository: "DurableTaskRepositoryImpl | DurableTaskAdmissionRepositoryImpl",
     transaction: StateTransaction,
     graph_id: str,
     drafts: tuple[_TaskEventDraft, ...],
@@ -292,7 +297,7 @@ async def _append_task_events(
     if not drafts:
         return
     await _guard_task_event_owner(repository, transaction, graph_id)
-    graph_key = repository._graph_key(graph_id)  # type: ignore[attr-defined]
+    graph_key = repository._graph_key(graph_id)
     final_sequence = await transaction.reserve_sequence(
         _task_event_sequence(repository, graph_id),
         len(drafts),
@@ -316,7 +321,7 @@ async def _append_task_events(
 
 
 async def _append_task_state_events(
-    repository: object,
+    repository: "DurableTaskRepositoryImpl | DurableTaskAdmissionRepositoryImpl",
     transaction: StateTransaction,
     before: "_TaskEventState | None",
     after: _TaskEventState,
@@ -483,6 +488,31 @@ class DurableTaskRepositoryImpl(TaskRepositoryImpl):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         return value
 
+    def _task_node_record(
+        self,
+        current: StoredRecord,
+        value: TaskNodeView,
+    ) -> StoredRecord:
+        if (
+            current.kind != "task_node"
+            or current.key_digest != self._node_key(value.graph_id, value.node_id)
+        ):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        candidate = self._stored(
+            "task_node",
+            [value.graph_id, value.node_id],
+            value,
+            scope=current.scope_digest,
+            parent=current.parent_digest,
+            state=value.status.value,
+        )
+        if (
+            candidate.key_digest != current.key_digest
+            or candidate.partition_digest != current.partition_digest
+        ):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        return replace(candidate, storage_version=current.storage_version + 1)
+
     async def _apply_graph_transition(
         self,
         transaction: StateTransaction,
@@ -536,7 +566,7 @@ class DurableTaskRepositoryImpl(TaskRepositoryImpl):
                     raise AIError(ErrorCode.STORAGE_CONFLICT)
                 replacements.append(
                     RecordReplacement(
-                        _projected_record(self, node_record, value),
+                        self._task_node_record(node_record, value),
                         node_record.storage_version,
                     )
                 )
