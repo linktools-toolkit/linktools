@@ -29,6 +29,7 @@ from ._repositories import (
     TaskRepositoryImpl,
     _decode_operation,
     _decode_record_cursor,
+    _logger,
     _projected_record,
     _record_cursor,
     _replace_checked,
