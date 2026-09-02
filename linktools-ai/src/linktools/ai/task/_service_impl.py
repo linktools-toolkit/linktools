@@ -28,6 +28,7 @@ from ..core import (
     principal_identity_payload,
 )
 from ..errors import AIError, ErrorCode
+from ._event import TaskEvent
 from ._graph import (
     CancelGraphRequest,
     TaskGraph,
@@ -44,6 +45,7 @@ from ._service import TaskApi, TaskGraphLauncher
 
 _logger = environ.get_logger("ai.task.service")
 _GRAPH_OBSERVATION_RECHECK_SECONDS = 1.0
+_TASK_EVENT_READ_LIMIT = 200
 
 
 class _TaskReleaseCallback(Protocol):
@@ -119,6 +121,15 @@ class _TaskRepository(Protocol):
         *,
         tenant_id: str,
     ) -> TaskGraphSnapshot | None: ...
+
+    async def list_events(
+        self,
+        graph_id: str,
+        *,
+        tenant_id: str,
+        after_sequence: int,
+        limit: int,
+    ) -> Page[TaskEvent]: ...
 
     async def reconcile_graph(
         self,
@@ -381,13 +392,120 @@ class DefaultTaskService(TaskApi):
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             return snapshot
 
-    def stream_graph(
+    async def list_graph_events(
         self,
         graph_id: str,
         *,
         principal: Principal,
-    ) -> AsyncIterator[TaskGraphSnapshot]:
-        return self._observe_graph(graph_id, principal=principal)
+        after_sequence: int = 0,
+        limit: int = 100,
+    ) -> Page[TaskEvent]:
+        _validate_event_window(after_sequence, limit)
+        tenant_id = principal.tenant_id
+        async with self._graph_consumer(graph_id, tenant_id):
+            header = await self._persistence.tasks.get_header(
+                graph_id,
+                tenant_id=tenant_id,
+            )
+            if header is None:
+                raise AIError(ErrorCode.AUTHORIZATION_DENIED)
+            await self._authorization.authorize(
+                principal,
+                AuthorizationAction.TASK_READ,
+                header,
+            )
+            page = await self._persistence.tasks.list_events(
+                graph_id,
+                tenant_id=tenant_id,
+                after_sequence=after_sequence,
+                limit=limit,
+            )
+            _validate_event_page(graph_id, after_sequence, page)
+            return page
+
+    def stream_graph_events(
+        self,
+        graph_id: str,
+        *,
+        principal: Principal,
+        after_sequence: int = 0,
+    ) -> AsyncIterator[TaskEvent]:
+        return self._observe_graph_events(
+            graph_id,
+            principal=principal,
+            after_sequence=after_sequence,
+        )
+
+    async def _observe_graph_events(
+        self,
+        graph_id: str,
+        *,
+        principal: Principal,
+        after_sequence: int,
+    ) -> AsyncIterator[TaskEvent]:
+        _validate_event_window(after_sequence, _TASK_EVENT_READ_LIMIT)
+        tenant_id = principal.tenant_id
+        cursor = after_sequence
+        async with self._graph_consumer(graph_id, tenant_id):
+            header = await self._persistence.tasks.get_header(
+                graph_id,
+                tenant_id=tenant_id,
+            )
+            if header is None:
+                raise AIError(ErrorCode.AUTHORIZATION_DENIED)
+            await self._authorization.authorize(
+                principal,
+                AuthorizationAction.TASK_READ,
+                header,
+            )
+            while True:
+                generation = self._local_activity_generation(
+                    graph_id,
+                    tenant_id=tenant_id,
+                )
+                page = await self._persistence.tasks.list_events(
+                    graph_id,
+                    tenant_id=tenant_id,
+                    after_sequence=cursor,
+                    limit=_TASK_EVENT_READ_LIMIT,
+                )
+                _validate_event_page(graph_id, cursor, page)
+                if page.items:
+                    for event in page.items:
+                        cursor = event.sequence
+                        yield event
+                    continue
+                snapshot = await self._persistence.tasks.snapshot_graph(
+                    graph_id,
+                    tenant_id=tenant_id,
+                )
+                if snapshot is None:
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                if _terminal(snapshot.status):
+                    snapshot, generation = await self._stabilize_local_terminal(
+                        snapshot,
+                        tenant_id=tenant_id,
+                        generation=generation,
+                    )
+                    trailing = await self._persistence.tasks.list_events(
+                        graph_id,
+                        tenant_id=tenant_id,
+                        after_sequence=cursor,
+                        limit=_TASK_EVENT_READ_LIMIT,
+                    )
+                    _validate_event_page(graph_id, cursor, trailing)
+                    if trailing.items:
+                        for event in trailing.items:
+                            cursor = event.sequence
+                            yield event
+                        continue
+                    await self._request_graph_release(graph_id, tenant_id)
+                    return
+                await self._wait_observation_opportunity(
+                    snapshot,
+                    tenant_id=tenant_id,
+                    after_generation=generation,
+                )
 
     async def _observe_graph(
         self,
@@ -1223,6 +1341,25 @@ class DefaultTaskService(TaskApi):
                 safe_details=dict(failure.safe_details),
                 diagnostics=failure.diagnostics,
             )
+
+
+def _validate_event_window(after_sequence: int, limit: int) -> None:
+    if isinstance(after_sequence, bool) or not isinstance(after_sequence, int) or after_sequence < 0:
+        raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+    if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 1000:
+        raise AIError(ErrorCode.PAGE_LIMIT_INVALID)
+
+
+def _validate_event_page(
+    graph_id: str,
+    after_sequence: int,
+    page: Page[TaskEvent],
+) -> None:
+    expected = after_sequence
+    for event in page.items:
+        if event.graph_id != graph_id or event.sequence != expected + 1:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        expected = event.sequence
 
 
 def _task_service_failure(
