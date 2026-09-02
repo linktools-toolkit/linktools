@@ -454,10 +454,16 @@ class LocalTaskGraphLauncher:
         observed_fingerprint: str | None = None
         try:
             while not run.closed:
-                view = await self._repository.reconcile_graph(
-                    request.graph.graph_id,
-                    tenant_id=tenant_id,
-                )
+                try:
+                    view = await self._repository.reconcile_graph(
+                        request.graph.graph_id,
+                        tenant_id=tenant_id,
+                    )
+                except AIError as error:
+                    if error.code is not ErrorCode.STORAGE_CONFLICT:
+                        raise
+                    await asyncio.sleep(0)
+                    continue
                 states = await self._repository.list_nodes(
                     request.graph.graph_id,
                     tenant_id=tenant_id,
@@ -764,8 +770,8 @@ class LocalTaskGraphLauncher:
                     (node_id,),
                     tenant_id=tenant_id,
                 )
-                record = results.get(node_id)
-                if record is None or record.result_digest != completion.result_digest:
+                result = results.get(node_id)
+                if result is None or result.result_digest != completion.result_digest:
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             return True
         if state.status in _TERMINAL:
