@@ -29,6 +29,7 @@ from ._repositories import (
     TaskRepositoryImpl,
     _decode_operation,
     _decode_record_cursor,
+    _projected_record,
     _record_cursor,
     _replace_checked,
     _require_live_task_lease,
@@ -39,6 +40,7 @@ from ._repositories import (
 from ._store import (
     FactQuery,
     RecordQuery,
+    RecordReplacement,
     StateTransaction,
     StoredFact,
     StoredOperation,
@@ -205,7 +207,7 @@ def _task_event_drafts(
     return tuple(values)
 
 
-def _preview_reconciled_nodes(
+def _reconciled_task_nodes(
     nodes: tuple[TaskNodeView, ...],
 ) -> tuple[TaskNodeView, ...]:
     values = {node.node_id: node for node in nodes}
@@ -267,7 +269,7 @@ async def _guard_task_event_owner(
     graph_id: str,
     *,
     missing_code: ErrorCode = ErrorCode.STORAGE_INTEGRITY_ERROR,
-) -> None:
+) -> StoredRecord:
     graph_key = repository._graph_key(graph_id)  # type: ignore[attr-defined]
     graph_record = await transaction.get_record(graph_key)
     if graph_record is None:
@@ -278,6 +280,7 @@ async def _guard_task_event_owner(
     )
     if guarded is None:
         raise _TaskEventAppendConflict
+    return guarded
 
 
 async def _append_task_events(
@@ -677,51 +680,84 @@ class DurableTaskRepositoryImpl(TaskRepositoryImpl):
             graph_record = await transaction.get_record(self._graph_key(graph_id))
             if graph_record is None:
                 raise AIError(ErrorCode.STORAGE_NOT_FOUND)
-            current_graph = before.graph
-            preserve_cancelled = current_graph.status is TaskStatus.CANCELLED
-            preview_nodes = _preview_reconciled_nodes(before.node_states)
-            preview_status = (
-                TaskStatus.CANCELLED
-                if preserve_cancelled
-                else _isolated_graph_status(preview_nodes)
+
+            next_nodes = _reconciled_task_nodes(before.node_states)
+            changes = tuple(
+                (current, value)
+                for current, value in zip(before.node_states, next_nodes, strict=True)
+                if current != value
             )
-            if (
-                preview_nodes != before.node_states
-                or current_graph.status is not preview_status
-                or graph_record.state != preview_status.value
-            ):
-                await _guard_task_event_owner(
+            next_status = (
+                TaskStatus.CANCELLED
+                if before.graph.status is TaskStatus.CANCELLED
+                else _isolated_graph_status(next_nodes)
+            )
+            view = TaskGraphView(before.graph.graph_id, next_status, before.graph.nodes)
+            graph_changed = (
+                before.graph.status is not next_status
+                or graph_record.state != next_status.value
+            )
+            drafts: list[_TaskEventDraft] = []
+            for current, value in changes:
+                drafts.extend(_task_node_event_drafts(current, value))
+            drafts.extend(_task_graph_event_drafts(before.graph, view))
+            event_drafts = tuple(drafts)
+            if event_drafts:
+                graph_record = await _guard_task_event_owner(
                     self,
                     transaction,
                     graph_id,
                     missing_code=ErrorCode.STORAGE_NOT_FOUND,
                 )
-            await super(DurableTaskRepositoryImpl, self).reconcile_graph(
-                graph_id,
-                tenant_id=tenant_id,
+
+            node_keys = tuple(
+                self._node_key(graph_id, node.node_id)
+                for node in before.graph.nodes
             )
-            intermediate = await self._event_state_in_transaction(
-                transaction,
-                graph_id,
-                cached=True,
-            )
-            if intermediate is None:
+            node_records = await transaction.get_records(node_keys)
+            if len(node_records) != len(node_keys):
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            view = await self._stabilize_graph_projection(
-                transaction,
-                graph_id,
-                preserve_cancelled=preserve_cancelled,
-                nodes=intermediate.node_states,
-            )
+            replacements: list[RecordReplacement] = []
+            for current, value in changes:
+                node_record = node_records.get(
+                    self._node_key(graph_id, current.node_id)
+                )
+                if node_record is None:
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                stored_node = await self._decode(node_record, TaskNodeView)
+                if stored_node != current:
+                    raise AIError(ErrorCode.STORAGE_CONFLICT)
+                replacements.append(
+                    RecordReplacement(
+                        _projected_record(self, node_record, value),
+                        node_record.storage_version,
+                    )
+                )
+            if graph_changed:
+                replacements.append(
+                    RecordReplacement(
+                        _task_graph_record(
+                            self,
+                            graph_record,
+                            replace(before.graph, status=next_status),
+                        ),
+                        graph_record.storage_version,
+                    )
+                )
+            if replacements:
+                await transaction.replace_records(tuple(replacements))
+                _logger.info(
+                    "task graph reconciled atomically: graph_id=%s changed_nodes=%s",
+                    graph_id,
+                    len(changes),
+                )
             await self._sync_recovery_projection(transaction, view)
-            after = await self._event_state_in_transaction(
+            await _append_task_events(
+                self,
                 transaction,
                 graph_id,
-                cached=True,
+                event_drafts,
             )
-            if after is None:
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            await _append_task_state_events(self, transaction, before, after)
             return view
 
         try:
@@ -753,52 +789,96 @@ class DurableTaskRepositoryImpl(TaskRepositoryImpl):
             graph_record = await transaction.get_record(self._graph_key(graph_id))
             if graph_record is None:
                 raise AIError(ErrorCode.STORAGE_NOT_FOUND)
-            graph = before.graph
-            had_nonterminal = any(
-                node.status not in _TERMINAL_TASK_STATUSES
+
+            next_nodes = tuple(
+                (
+                    replace(
+                        node,
+                        status=TaskStatus.CANCELLED,
+                        owner=None,
+                        lease_expires_at=None,
+                    )
+                    if node.status not in _TERMINAL_TASK_STATUSES
+                    else node
+                )
                 for node in before.node_states
             )
-            preview_status = (
-                TaskStatus.CANCELLED
-                if graph.status is TaskStatus.CANCELLED or had_nonterminal
-                else _isolated_graph_status(before.node_states)
+            changes = tuple(
+                (current, value)
+                for current, value in zip(before.node_states, next_nodes, strict=True)
+                if current != value
             )
-            if (
-                had_nonterminal
-                or graph.status is not preview_status
-                or graph_record.state != preview_status.value
-            ):
-                await _guard_task_event_owner(
+            next_status = (
+                TaskStatus.CANCELLED
+                if before.graph.status is TaskStatus.CANCELLED or changes
+                else _isolated_graph_status(next_nodes)
+            )
+            view = TaskGraphView(before.graph.graph_id, next_status, before.graph.nodes)
+            graph_changed = (
+                before.graph.status is not next_status
+                or graph_record.state != next_status.value
+            )
+            drafts: list[_TaskEventDraft] = []
+            for current, value in changes:
+                drafts.extend(_task_node_event_drafts(current, value))
+            drafts.extend(_task_graph_event_drafts(before.graph, view))
+            event_drafts = tuple(drafts)
+            if event_drafts:
+                graph_record = await _guard_task_event_owner(
                     self,
                     transaction,
                     graph_id,
                     missing_code=ErrorCode.STORAGE_NOT_FOUND,
                 )
-            await super(DurableTaskRepositoryImpl, self).cancel_graph(
-                graph_id,
-                tenant_id=tenant_id,
+
+            node_keys = tuple(
+                self._node_key(graph_id, node.node_id)
+                for node in before.graph.nodes
             )
-            if not had_nonterminal:
-                view = await self._stabilize_graph_projection(
-                    transaction,
-                    graph_id,
-                    preserve_cancelled=graph.status is TaskStatus.CANCELLED,
-                    nodes=before.node_states,
+            node_records = await transaction.get_records(node_keys)
+            if len(node_records) != len(node_keys):
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            replacements: list[RecordReplacement] = []
+            for current, value in changes:
+                node_record = node_records.get(
+                    self._node_key(graph_id, current.node_id)
                 )
-            else:
-                view = await self._force_cancelled_graph_projection(
-                    transaction,
+                if node_record is None:
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                stored_node = await self._decode(node_record, TaskNodeView)
+                if stored_node != current:
+                    raise AIError(ErrorCode.STORAGE_CONFLICT)
+                replacements.append(
+                    RecordReplacement(
+                        _projected_record(self, node_record, value),
+                        node_record.storage_version,
+                    )
+                )
+            if graph_changed:
+                replacements.append(
+                    RecordReplacement(
+                        _task_graph_record(
+                            self,
+                            graph_record,
+                            replace(before.graph, status=next_status),
+                        ),
+                        graph_record.storage_version,
+                    )
+                )
+            if replacements:
+                await transaction.replace_records(tuple(replacements))
+                _logger.info(
+                    "task graph cancelled atomically: graph_id=%s changed_nodes=%s",
                     graph_id,
+                    len(changes),
                 )
             await self._sync_recovery_projection(transaction, view)
-            after = await self._event_state_in_transaction(
+            await _append_task_events(
+                self,
                 transaction,
                 graph_id,
-                cached=True,
+                event_drafts,
             )
-            if after is None:
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            await _append_task_state_events(self, transaction, before, after)
             return view
 
         try:
@@ -1124,29 +1204,6 @@ class DurableTaskRepositoryImpl(TaskRepositoryImpl):
         await _replace_checked(
             transaction,
             _task_graph_record(self, graph_record, replace(graph, status=status)),
-            graph_record.storage_version,
-        )
-        return view
-
-    async def _force_cancelled_graph_projection(
-        self,
-        transaction: StateTransaction,
-        graph_id: str,
-    ) -> TaskGraphView:
-        graph_record = await transaction.get_record(self._graph_key(graph_id))
-        if graph_record is None:
-            raise AIError(ErrorCode.STORAGE_NOT_FOUND)
-        graph = await self._decode(graph_record, TaskGraphView)
-        view = TaskGraphView(graph.graph_id, TaskStatus.CANCELLED, graph.nodes)
-        if graph.status is TaskStatus.CANCELLED and graph_record.state == TaskStatus.CANCELLED.value:
-            return view
-        await _replace_checked(
-            transaction,
-            _task_graph_record(
-                self,
-                graph_record,
-                replace(graph, status=TaskStatus.CANCELLED),
-            ),
             graph_record.storage_version,
         )
         return view
