@@ -486,6 +486,11 @@ class DefaultTaskService(TaskApi):
                         cursor = event.sequence
                         if event.node_id is None and _terminal(event.status):
                             terminal_seen = True
+                            await self._settle_terminal_event_observation(
+                                graph_id,
+                                tenant_id=tenant_id,
+                            )
+                            await self._request_graph_release(graph_id, tenant_id)
                         yield event
                     continue
                 if terminal_seen:
@@ -520,6 +525,14 @@ class DefaultTaskService(TaskApi):
                                 cursor = event.sequence
                                 if event.node_id is None and _terminal(event.status):
                                     terminal_seen = True
+                                    await self._settle_terminal_event_observation(
+                                        graph_id,
+                                        tenant_id=tenant_id,
+                                    )
+                                    await self._request_graph_release(
+                                        graph_id,
+                                        tenant_id,
+                                    )
                                 yield event
                             continue
                         await self._request_graph_release(graph_id, tenant_id)
