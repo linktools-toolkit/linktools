@@ -7,7 +7,7 @@ from datetime import datetime
 from enum import Enum
 
 from ..core import TaskStatus, validate_lease_owner
-from ..errors import AIError
+from ..errors import AIError, ErrorCode
 
 
 class TaskEventType(str, Enum):
@@ -34,8 +34,14 @@ class TaskEvent:
     error_digest: "str | None" = None
 
     def __post_init__(self) -> None:
+        if (
+            not isinstance(self.version, int)
+            or isinstance(self.version, bool)
+            or self.version < 1
+        ):
+            raise ValueError("task event version is invalid")
         if self.version != 1:
-            raise ValueError("task event version is unsupported")
+            raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
         if not isinstance(self.graph_id, str) or not self.graph_id.strip():
             raise ValueError("task event graph id is required")
         if isinstance(self.sequence, bool) or not isinstance(self.sequence, int) or self.sequence < 1:
