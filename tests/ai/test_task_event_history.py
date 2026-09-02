@@ -262,6 +262,54 @@ async def test_task_event_history_records_semantic_changes_but_not_heartbeat() -
 
 
 @pytest.mark.asyncio
+async def test_idempotent_admission_projection_repair_emits_graph_change() -> None:
+    state = RuntimeState.in_memory()
+    await state.initialize(namespace="task-event-admission-repair", tenant_id="tenant")
+    try:
+        repository = state.task.tasks
+        graph = TaskGraph("event-admission-repair", (TaskNode("node"),))
+        admission = TaskGraphAdmission.from_request(_request(graph))
+        await state.task.admissions.admit(admission, graph)
+        lease = await repository.claim(
+            graph.graph_id,
+            "node",
+            tenant_id="tenant",
+            owner="worker",
+            lease_seconds=30,
+        )
+        await repository.complete(
+            lease,
+            tenant_id="tenant",
+            execution_id=None,
+            result_digest="f" * 64,
+        )
+        before = await repository.list_events(
+            graph.graph_id,
+            tenant_id="tenant",
+            after_sequence=0,
+            limit=100,
+        )
+        assert before.items[-1].event_type is TaskEventType.NODE_CHANGED
+        assert before.items[-1].status is TaskStatus.SUCCEEDED
+
+        repaired = await state.task.admissions.admit(admission, graph)
+        after = await repository.list_events(
+            graph.graph_id,
+            tenant_id="tenant",
+            after_sequence=before.items[-1].sequence,
+            limit=100,
+        )
+
+        assert repaired.status is TaskStatus.SUCCEEDED
+        assert len(after.items) == 1
+        assert after.items[0].event_type is TaskEventType.GRAPH_CHANGED
+        assert after.items[0].previous_status is TaskStatus.PENDING
+        assert after.items[0].status is TaskStatus.SUCCEEDED
+    finally:
+        await state.close()
+
+
+@pytest.mark.asyncio
 async def test_terminal_event_stream_replays_from_durable_sequence() -> None:
     state = RuntimeState.in_memory()
     await state.initialize(namespace="task-event-terminal-stream", tenant_id="tenant")
