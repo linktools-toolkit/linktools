@@ -46,19 +46,14 @@ def get_commands(environ: "BaseEnviron") -> "Iterable[SubCommand]":
 
         return wrapper
 
+    def get_scripts_path() -> "pathlib.Path":
+        return environ.get_data_path("scripts", get_interpreter_ident())
+
     def get_stub_path() -> "pathlib.Path":
-        return environ.get_data_path(
-            "scripts",
-            get_interpreter_ident(),
-            f"env_v{environ.version}",
-        )
+        return get_scripts_path() / f"env_v{environ.version}"
 
     def get_alias_path() -> "pathlib.Path":
-        return environ.get_data_path(
-            "scripts",
-            get_interpreter_ident(),
-            f"alias_v{environ.version}",
-        )
+        return get_scripts_path() / f"alias_v{environ.version}"
 
     def remove_shell_artifacts() -> None:
         stub_path = get_stub_path()
@@ -70,6 +65,16 @@ def get_commands(environ: "BaseEnviron") -> "Iterable[SubCommand]":
         if os.path.exists(alias_path):
             environ.logger.info(f"Remove alias path {alias_path} ...")
             utils.remove_file(alias_path)
+
+    def remove_all_shell_artifacts() -> None:
+        scripts_path = get_scripts_path()
+        if not os.path.exists(scripts_path):
+            return
+        for pattern in ("env_v*", "alias_v*"):
+            for path in scripts_path.glob(pattern):
+                if path.is_dir():
+                    environ.logger.info(f"Remove shell artifact path {path} ...")
+                    utils.remove_file(path)
 
     def get_default_shell(environ: "BaseEnviron") -> str:
         return _detect_default_shell(system=environ.system)
@@ -276,7 +281,7 @@ def get_commands(environ: "BaseEnviron") -> "Iterable[SubCommand]":
 
         def run(self, args: "argparse.Namespace") -> None:
             if args.all:
-                remove_shell_artifacts()
+                remove_all_shell_artifacts()
             environ.clean_temp_files(expire_days=args.days)
 
     return commands

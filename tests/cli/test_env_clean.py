@@ -27,10 +27,10 @@ class FakeEnviron:
         self.clean_calls.append((paths, expire_days))
 
 
-def _write_shell_artifacts(root: Path) -> "Tuple[Path, Path]":
+def _write_shell_artifacts(root: Path, version: str = "1") -> "Tuple[Path, Path]":
     scripts = root / "scripts" / get_interpreter_ident()
-    stub = scripts / "env_v1" / "ct-demo"
-    alias = scripts / "alias_v1" / "alias.bash"
+    stub = scripts / ("env_v%s" % version) / "ct-demo"
+    alias = scripts / ("alias_v%s" % version) / "alias.bash"
     stub.parent.mkdir(parents=True)
     alias.parent.mkdir(parents=True)
     stub.write_text("stub", encoding="utf-8")
@@ -50,13 +50,16 @@ def test_clean_preserves_generated_alias_and_command_stubs(tmp_path: Path) -> No
     assert environ.clean_calls == [((), 3)]
 
 
-def test_clean_all_removes_generated_alias_and_command_stubs(tmp_path: Path) -> None:
+def test_clean_all_removes_all_generated_alias_and_command_stubs(tmp_path: Path) -> None:
     environ = FakeEnviron(tmp_path)
-    stub, alias = _write_shell_artifacts(tmp_path)
+    current_stub, current_alias = _write_shell_artifacts(tmp_path)
+    old_stub, old_alias = _write_shell_artifacts(tmp_path, version="0")
 
     clean = next(command for command in get_commands(environ) if command.name == "clean")
     assert clean.run(SimpleNamespace(days=3, all=True)) is None
 
-    assert not stub.exists()
-    assert not alias.exists()
+    assert not current_stub.exists()
+    assert not current_alias.exists()
+    assert not old_stub.exists()
+    assert not old_alias.exists()
     assert environ.clean_calls == [((), 3)]
