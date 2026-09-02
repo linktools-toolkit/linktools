@@ -59,17 +59,11 @@ async def test_task_admission_starts_contiguous_durable_event_history() -> None:
             limit=100,
         )
 
-        assert [event.sequence for event in page.items] == [1, 2, 3]
+        assert [event.sequence for event in page.items] == [1]
         assert [event.event_type for event in page.items] == [
             TaskEventType.GRAPH_ADMITTED,
-            TaskEventType.NODE_CHANGED,
-            TaskEventType.NODE_CHANGED,
         ]
         assert page.items[0].status is TaskStatus.PENDING
-        assert page.items[1].node_id == "root"
-        assert page.items[1].status is TaskStatus.READY
-        assert page.items[2].node_id == "child"
-        assert page.items[2].status is TaskStatus.PENDING
     finally:
         await state.close()
 
@@ -90,7 +84,7 @@ async def test_task_event_page_accepts_maximum_limit() -> None:
             limit=1000,
         )
 
-        assert [event.sequence for event in page.items] == [1, 2]
+        assert [event.sequence for event in page.items] == [1]
         assert page.next_cursor is None
     finally:
         await state.close()
@@ -158,11 +152,11 @@ async def test_node_event_mutations_do_not_read_full_graph_snapshot(
         page = await repository.list_events(
             graph.graph_id,
             tenant_id="tenant",
-            after_sequence=2,
+            after_sequence=1,
             limit=100,
         )
 
-        assert [event.sequence for event in page.items] == [3, 4, 5]
+        assert [event.sequence for event in page.items] == [2, 3, 4]
         assert all(event.event_type is TaskEventType.NODE_CHANGED for event in page.items)
     finally:
         await state.close()
@@ -182,7 +176,7 @@ async def test_task_event_history_records_semantic_changes_but_not_heartbeat() -
             after_sequence=0,
             limit=100,
         )
-        assert [event.sequence for event in initial.items] == [1, 2]
+        assert [event.sequence for event in initial.items] == [1]
 
         lease = await repository.claim(
             graph.graph_id,
@@ -197,7 +191,7 @@ async def test_task_event_history_records_semantic_changes_but_not_heartbeat() -
             after_sequence=initial.items[-1].sequence,
             limit=100,
         )
-        assert [event.sequence for event in claimed.items] == [3]
+        assert [event.sequence for event in claimed.items] == [2]
         assert claimed.items[0].event_type is TaskEventType.NODE_CHANGED
         assert claimed.items[0].previous_status is TaskStatus.READY
         assert claimed.items[0].status is TaskStatus.RUNNING
@@ -211,7 +205,7 @@ async def test_task_event_history_records_semantic_changes_but_not_heartbeat() -
             after_sequence=claimed.items[-1].sequence,
             limit=100,
         )
-        assert [event.sequence for event in running.items] == [4]
+        assert [event.sequence for event in running.items] == [3]
         assert running.items[0].event_type is TaskEventType.GRAPH_CHANGED
         assert running.items[0].previous_status is TaskStatus.PENDING
         assert running.items[0].status is TaskStatus.RUNNING
@@ -247,7 +241,7 @@ async def test_task_event_history_records_semantic_changes_but_not_heartbeat() -
             after_sequence=running.items[-1].sequence,
             limit=100,
         )
-        assert [event.sequence for event in terminal.items] == [5, 6, 7]
+        assert [event.sequence for event in terminal.items] == [4, 5, 6]
         assert terminal.items[0].execution_id == "execution-1"
         assert terminal.items[0].status is TaskStatus.RUNNING
         assert terminal.items[1].previous_status is TaskStatus.RUNNING

@@ -168,26 +168,9 @@ def _task_event_drafts(
     before: "_TaskEventState | None",
     after: _TaskEventState,
 ) -> tuple[_TaskEventDraft, ...]:
-    values: list[_TaskEventDraft] = []
     if before is None:
-        values.append(
-            _TaskEventDraft(TaskEventType.GRAPH_ADMITTED, after.graph.status)
-        )
-        for node in after.node_states:
-            values.append(
-                _TaskEventDraft(
-                    TaskEventType.NODE_CHANGED,
-                    node.status,
-                    node_id=node.node_id,
-                    owner=node.owner,
-                    fence=node.fence,
-                    execution_id=node.execution_id,
-                    result_digest=node.result_digest,
-                    error_code=node.error_code,
-                    error_digest=node.error_digest,
-                )
-            )
-        return tuple(values)
+        return (_TaskEventDraft(TaskEventType.GRAPH_ADMITTED, after.graph.status),)
+    values: list[_TaskEventDraft] = []
     if before.graph.graph_id != after.graph.graph_id:
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     before_nodes = {node.node_id: node for node in before.node_states}
@@ -298,17 +281,36 @@ async def _append_task_events(
     first_sequence = final_sequence - len(drafts) + 1
     occurred_at = await transaction.now()
     stream = _task_event_stream(namespace, tenant_id, domain, graph_id)
+    events = tuple(
+        TaskEvent(
+            1,
+            graph_id,
+            first_sequence + index,
+            draft.event_type,
+            occurred_at,
+            draft.status,
+            draft.previous_status,
+            draft.node_id,
+            draft.owner,
+            draft.fence,
+            draft.execution_id,
+            draft.result_digest,
+            draft.error_code,
+            draft.error_digest,
+        )
+        for index, draft in enumerate(drafts)
+    )
     facts = tuple(
         StoredFact(
             stream,
-            first_sequence + index,
+            event.sequence,
             graph_key,
-            draft.event_type.value,
+            event.event_type.value,
             None,
-            draft.status.value,
+            event.status.value,
             _task_event_payload(draft, occurred_at),
         )
-        for index, draft in enumerate(drafts)
+        for event, draft in zip(events, drafts, strict=True)
     )
     await transaction.insert_facts(facts)
 
