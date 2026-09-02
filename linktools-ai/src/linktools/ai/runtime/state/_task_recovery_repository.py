@@ -94,29 +94,21 @@ class _TaskEventState:
 
 
 def _task_event_stream(
-    repository: "DurableTaskRepositoryImpl | DurableTaskAdmissionRepositoryImpl",
+    namespace: str,
+    tenant_id: str,
+    domain: str,
     graph_id: str,
 ) -> bytes:
-    return stream_digest(
-        repository._namespace,
-        repository._tenant_id,
-        repository._domain.value,
-        "task_event",
-        graph_id,
-    )
+    return stream_digest(namespace, tenant_id, domain, "task_event", graph_id)
 
 
 def _task_event_sequence(
-    repository: "DurableTaskRepositoryImpl | DurableTaskAdmissionRepositoryImpl",
+    namespace: str,
+    tenant_id: str,
+    domain: str,
     graph_id: str,
 ) -> bytes:
-    return sequence_key(
-        repository._namespace,
-        repository._tenant_id,
-        repository._domain.value,
-        "task_event",
-        graph_id,
-    )
+    return sequence_key(namespace, tenant_id, domain, "task_event", graph_id)
 
 
 def _task_node_changed(left: TaskNodeView, right: TaskNodeView) -> bool:
@@ -269,13 +261,11 @@ def _task_event_payload(draft: _TaskEventDraft, occurred_at: datetime) -> dict[s
 
 
 async def _guard_task_event_owner(
-    repository: "DurableTaskRepositoryImpl | DurableTaskAdmissionRepositoryImpl",
     transaction: StateTransaction,
-    graph_id: str,
+    graph_key: bytes,
     *,
     missing_code: ErrorCode = ErrorCode.STORAGE_INTEGRITY_ERROR,
 ) -> StoredRecord:
-    graph_key = repository._graph_key(graph_id)
     graph_record = await transaction.get_record(graph_key)
     if graph_record is None:
         raise AIError(missing_code)
@@ -289,22 +279,25 @@ async def _guard_task_event_owner(
 
 
 async def _append_task_events(
-    repository: "DurableTaskRepositoryImpl | DurableTaskAdmissionRepositoryImpl",
     transaction: StateTransaction,
+    *,
+    namespace: str,
+    tenant_id: str,
+    domain: str,
     graph_id: str,
+    graph_key: bytes,
     drafts: tuple[_TaskEventDraft, ...],
 ) -> None:
     if not drafts:
         return
-    await _guard_task_event_owner(repository, transaction, graph_id)
-    graph_key = repository._graph_key(graph_id)
+    await _guard_task_event_owner(transaction, graph_key)
     final_sequence = await transaction.reserve_sequence(
-        _task_event_sequence(repository, graph_id),
+        _task_event_sequence(namespace, tenant_id, domain, graph_id),
         len(drafts),
     )
     first_sequence = final_sequence - len(drafts) + 1
     occurred_at = await transaction.now()
-    stream = _task_event_stream(repository, graph_id)
+    stream = _task_event_stream(namespace, tenant_id, domain, graph_id)
     facts = tuple(
         StoredFact(
             stream,
@@ -321,16 +314,23 @@ async def _append_task_events(
 
 
 async def _append_task_state_events(
-    repository: "DurableTaskRepositoryImpl | DurableTaskAdmissionRepositoryImpl",
     transaction: StateTransaction,
+    *,
+    namespace: str,
+    tenant_id: str,
+    domain: str,
+    graph_key: bytes,
     before: "_TaskEventState | None",
     after: _TaskEventState,
 ) -> None:
     await _append_task_events(
-        repository,
         transaction,
-        after.graph.graph_id,
-        _task_event_drafts(before, after),
+        namespace=namespace,
+        tenant_id=tenant_id,
+        domain=domain,
+        graph_id=after.graph.graph_id,
+        graph_key=graph_key,
+        drafts=_task_event_drafts(before, after),
     )
 
 
@@ -540,9 +540,8 @@ class DurableTaskRepositoryImpl(TaskRepositoryImpl):
         event_drafts = tuple(drafts)
         if event_drafts:
             graph_record = await _guard_task_event_owner(
-                self,
                 transaction,
-                before.graph.graph_id,
+                self._graph_key(before.graph.graph_id),
                 missing_code=ErrorCode.STORAGE_NOT_FOUND,
             )
 
@@ -585,10 +584,13 @@ class DurableTaskRepositoryImpl(TaskRepositoryImpl):
             await transaction.replace_records(tuple(replacements))
         await self._sync_recovery_projection(transaction, view)
         await _append_task_events(
-            self,
             transaction,
-            before.graph.graph_id,
-            event_drafts,
+            namespace=self._namespace,
+            tenant_id=self._tenant_id,
+            domain=self._domain.value,
+            graph_id=before.graph.graph_id,
+            graph_key=self._graph_key(before.graph.graph_id),
+            drafts=event_drafts,
         )
         return view
 
@@ -612,7 +614,15 @@ class DurableTaskRepositoryImpl(TaskRepositoryImpl):
             )
             if state is None:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            await _append_task_state_events(self, transaction, None, state)
+            await _append_task_state_events(
+                transaction,
+                namespace=self._namespace,
+                tenant_id=self._tenant_id,
+                domain=self._domain.value,
+                graph_key=self._graph_key(graph.graph_id),
+                before=None,
+                after=state,
+            )
             return view
 
         return await self._mutate_with_event_retry(mutate)
@@ -676,7 +686,12 @@ class DurableTaskRepositoryImpl(TaskRepositoryImpl):
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
         if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 1000:
             raise AIError(ErrorCode.PAGE_LIMIT_INVALID)
-        stream = _task_event_stream(self, graph_id)
+        stream = _task_event_stream(
+            self._namespace,
+            self._tenant_id,
+            self._domain.value,
+            graph_id,
+        )
         owner = self._graph_key(graph_id)
 
         async def read(transaction: StateTransaction) -> tuple[tuple[StoredFact, ...], bool]:
@@ -739,9 +754,8 @@ class DurableTaskRepositoryImpl(TaskRepositoryImpl):
                 )
                 if before.execution_id != execution_id:
                     await _guard_task_event_owner(
-                        self,
                         transaction,
-                        lease.graph_id,
+                        self._graph_key(lease.graph_id),
                         missing_code=ErrorCode.TASK_FENCE_STALE,
                     )
                 result = await super(DurableTaskRepositoryImpl, self).bind_execution(
@@ -750,10 +764,13 @@ class DurableTaskRepositoryImpl(TaskRepositoryImpl):
                     execution_id=execution_id,
                 )
                 await _append_task_events(
-                    self,
                     transaction,
-                    lease.graph_id,
-                    _task_node_event_drafts(before, result),
+                    namespace=self._namespace,
+                    tenant_id=self._tenant_id,
+                    domain=self._domain.value,
+                    graph_id=lease.graph_id,
+                    graph_key=self._graph_key(lease.graph_id),
+                    drafts=_task_node_event_drafts(before, result),
                 )
                 return result
 
@@ -900,9 +917,8 @@ class DurableTaskRepositoryImpl(TaskRepositoryImpl):
         try:
             async def mutate(transaction: StateTransaction) -> TaskLease:
                 await _guard_task_event_owner(
-                    self,
                     transaction,
-                    graph_id,
+                    self._graph_key(graph_id),
                     missing_code=ErrorCode.TASK_NOT_READY,
                 )
                 before = await self._node_in_transaction(
@@ -925,10 +941,13 @@ class DurableTaskRepositoryImpl(TaskRepositoryImpl):
                     missing_code=ErrorCode.STORAGE_INTEGRITY_ERROR,
                 )
                 await _append_task_events(
-                    self,
                     transaction,
-                    graph_id,
-                    _task_node_event_drafts(before, after),
+                    namespace=self._namespace,
+                    tenant_id=self._tenant_id,
+                    domain=self._domain.value,
+                    graph_id=graph_id,
+                    graph_key=self._graph_key(graph_id),
+                    drafts=_task_node_event_drafts(before, after),
                 )
                 return result
 
@@ -977,9 +996,8 @@ class DurableTaskRepositoryImpl(TaskRepositoryImpl):
         try:
             async def mutate(transaction: StateTransaction) -> TaskTerminalRecord:
                 await _guard_task_event_owner(
-                    self,
                     transaction,
-                    lease.graph_id,
+                    self._graph_key(lease.graph_id),
                     missing_code=ErrorCode.TASK_FENCE_STALE,
                 )
                 before = await self._node_in_transaction(
@@ -1002,10 +1020,13 @@ class DurableTaskRepositoryImpl(TaskRepositoryImpl):
                     missing_code=ErrorCode.STORAGE_INTEGRITY_ERROR,
                 )
                 await _append_task_events(
-                    self,
                     transaction,
-                    lease.graph_id,
-                    _task_node_event_drafts(before, after),
+                    namespace=self._namespace,
+                    tenant_id=self._tenant_id,
+                    domain=self._domain.value,
+                    graph_id=lease.graph_id,
+                    graph_key=self._graph_key(lease.graph_id),
+                    drafts=_task_node_event_drafts(before, after),
                 )
                 return result
 
@@ -1037,9 +1058,8 @@ class DurableTaskRepositoryImpl(TaskRepositoryImpl):
         try:
             async def mutate(transaction: StateTransaction) -> TaskTerminalRecord:
                 await _guard_task_event_owner(
-                    self,
                     transaction,
-                    lease.graph_id,
+                    self._graph_key(lease.graph_id),
                     missing_code=ErrorCode.TASK_FENCE_STALE,
                 )
                 before = await self._node_in_transaction(
@@ -1062,10 +1082,13 @@ class DurableTaskRepositoryImpl(TaskRepositoryImpl):
                     missing_code=ErrorCode.STORAGE_INTEGRITY_ERROR,
                 )
                 await _append_task_events(
-                    self,
                     transaction,
-                    lease.graph_id,
-                    _task_node_event_drafts(before, after),
+                    namespace=self._namespace,
+                    tenant_id=self._tenant_id,
+                    domain=self._domain.value,
+                    graph_id=lease.graph_id,
+                    graph_key=self._graph_key(lease.graph_id),
+                    drafts=_task_node_event_drafts(before, after),
                 )
                 return result
 
@@ -1528,10 +1551,13 @@ class DurableTaskAdmissionRepositoryImpl(TaskAdmissionRepositoryImpl):
                 graph_record.storage_version,
             )
         await _append_task_events(
-            self,
             transaction,
-            graph.graph_id,
-            _task_graph_event_drafts(graph_view, next_graph),
+            namespace=self._namespace,
+            tenant_id=self._tenant_id,
+            domain=self._domain.value,
+            graph_id=graph.graph_id,
+            graph_key=self._graph_key(graph.graph_id),
+            drafts=_task_graph_event_drafts(graph_view, next_graph),
         )
         await transaction.insert_record(
             self._stored(
@@ -1596,10 +1622,13 @@ class DurableTaskAdmissionRepositoryImpl(TaskAdmissionRepositoryImpl):
             )
         await transaction.insert_records(records)
         await _append_task_state_events(
-            self,
             transaction,
-            None,
-            _TaskEventState(view, tuple(node_views)),
+            namespace=self._namespace,
+            tenant_id=self._tenant_id,
+            domain=self._domain.value,
+            graph_key=self._graph_key(graph.graph_id),
+            before=None,
+            after=_TaskEventState(view, tuple(node_views)),
         )
         return view
 
@@ -1658,10 +1687,13 @@ class DurableTaskAdmissionRepositoryImpl(TaskAdmissionRepositoryImpl):
                 graph_record.storage_version,
             )
         await _append_task_events(
-            self,
             transaction,
-            view.graph_id,
-            _task_graph_event_drafts(graph_view, view),
+            namespace=self._namespace,
+            tenant_id=self._tenant_id,
+            domain=self._domain.value,
+            graph_id=view.graph_id,
+            graph_key=self._graph_key(view.graph_id),
+            drafts=_task_graph_event_drafts(graph_view, view),
         )
         if (
             admission_record.scope_digest == self._recovery_scope()
