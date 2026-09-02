@@ -273,7 +273,6 @@ def get_commands(environ: "BaseEnviron") -> "Iterable[SubCommand]":
             return parser
 
         def run(self, args: "argparse.Namespace") -> None:
-            remove_cache_files()
             environ.clean_temp_files(expire_days=args.days)
 
     return commands

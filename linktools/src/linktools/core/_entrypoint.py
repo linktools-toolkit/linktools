@@ -22,9 +22,9 @@ def get_entry_points() -> "Any":
 
 def select_entry_points(group: str) -> "tuple[Any, ...]":
     entries = get_entry_points()
-    if isinstance(entries, dict):
-        return tuple(entries.get(group, ()))
     select = getattr(entries, "select", None)
     if select is not None:
         return tuple(select(group=group))
+    if isinstance(entries, dict):
+        return tuple(entries.get(group, ()))
     return tuple(entry for entry in entries if getattr(entry, "group", None) == group)
