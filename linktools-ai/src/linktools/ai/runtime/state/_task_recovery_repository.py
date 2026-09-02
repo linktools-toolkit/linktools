@@ -191,13 +191,22 @@ async def _append_task_events(
 ) -> None:
     if not drafts:
         return
+    graph_key = repository._graph_key(graph_id)  # type: ignore[attr-defined]
+    graph_record = await transaction.get_record(graph_key)
+    if graph_record is None:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    guarded = await transaction.guard_record(
+        graph_key,
+        expected_storage_version=graph_record.storage_version,
+    )
+    if guarded is None:
+        raise AIError(ErrorCode.STORAGE_CONFLICT)
     final_sequence = await transaction.reserve_sequence(
         _task_event_sequence(repository, graph_id),
         len(drafts),
     )
     first_sequence = final_sequence - len(drafts) + 1
     occurred_at = await transaction.now()
-    graph_key = repository._graph_key(graph_id)  # type: ignore[attr-defined]
     stream = _task_event_stream(repository, graph_id)
     facts = tuple(
         StoredFact(
@@ -1080,7 +1089,10 @@ class DurableTaskAdmissionRepositoryImpl(TaskAdmissionRepositoryImpl):
                 if len(records) > limit and selected
                 else None
             )
-            return Page(tuple(launches), next_cursor)
+            return Page(
+                tuple(launches),
+                None if next_cursor is None else next_cursor,
+            )
 
         return await self.state_store.read(read)
 

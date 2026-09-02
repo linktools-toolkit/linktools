@@ -4,6 +4,7 @@
 
 import asyncio
 from collections.abc import Mapping
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -427,9 +428,13 @@ async def test_task_inspect_and_wait_are_read_only() -> None:
     principal = Principal("tester", "tenant")
 
     inspected = await service.inspect_graph("observed", principal=principal)
+    stream = service.stream_graph("observed", principal=principal)
+    streamed = await anext(stream)
+    await stream.aclose()
     waited = await service.wait_graph("observed", principal=principal)
 
     assert inspected.status is TaskStatus.SUCCEEDED
+    assert streamed.status is TaskStatus.SUCCEEDED
     assert waited.status is TaskStatus.SUCCEEDED
     assert tasks.reconcile_calls == 0
 
@@ -459,8 +464,18 @@ async def test_task_claim_conflict_reloads_and_reclassifies_owner(
     state, request = await _admitted_state(TaskGraph("claim-race", (TaskNode("root"),)))
     repository = state.task.tasks
     assert isinstance(repository, DurableTaskRepositoryImpl)
-    original = TaskRepositoryImpl.claim
+    initial = (
+        await repository.list_nodes(request.graph.graph_id, tenant_id="tenant")
+    )[0]
+    winner = replace(
+        initial,
+        status=TaskStatus.RUNNING,
+        owner="winner",
+        fence=initial.fence + 1,
+        lease_expires_at=datetime.now(timezone.utc) + timedelta(seconds=60),
+    )
     attempts = 0
+    readbacks = 0
 
     async def claim(
         self: TaskRepositoryImpl,
@@ -471,28 +486,19 @@ async def test_task_claim_conflict_reloads_and_reclassifies_owner(
         owner: str,
         lease_seconds: int,
     ) -> TaskLease:
+        del self, graph_id, node_id, tenant_id, owner, lease_seconds
         nonlocal attempts
         attempts += 1
-        if attempts == 1:
-            await original(
-                self,
-                graph_id,
-                node_id,
-                tenant_id=tenant_id,
-                owner="winner",
-                lease_seconds=lease_seconds,
-            )
-            raise AIError(ErrorCode.STORAGE_CONFLICT)
-        return await original(
-            self,
-            graph_id,
-            node_id,
-            tenant_id=tenant_id,
-            owner=owner,
-            lease_seconds=lease_seconds,
-        )
+        raise AIError(ErrorCode.STORAGE_CONFLICT)
+
+    async def node(graph_id: str, node_id: str, tenant_id: str):
+        del graph_id, node_id, tenant_id
+        nonlocal readbacks
+        readbacks += 1
+        return initial if readbacks == 1 else winner
 
     monkeypatch.setattr(TaskRepositoryImpl, "claim", claim)
+    monkeypatch.setattr(repository, "_node", node)
     try:
         with pytest.raises(AIError) as raised:
             await repository.claim(
@@ -504,9 +510,7 @@ async def test_task_claim_conflict_reloads_and_reclassifies_owner(
             )
         assert raised.value.code is ErrorCode.TASK_OWNER_CONFLICT
         assert attempts == 1
-        nodes = await repository.list_nodes(request.graph.graph_id, tenant_id="tenant")
-        assert nodes[0].owner == "winner"
-        assert nodes[0].status is TaskStatus.RUNNING
+        assert readbacks == 2
     finally:
         await state.close()
 
@@ -641,6 +645,15 @@ async def test_task_terminal_conflict_preserves_cancelled_state(
         owner="runner",
         lease_seconds=60,
     )
+    running = (
+        await repository.list_nodes(request.graph.graph_id, tenant_id="tenant")
+    )[0]
+    cancelled = replace(
+        running,
+        status=TaskStatus.CANCELLED,
+        owner=None,
+        lease_expires_at=None,
+    )
     attempts = 0
 
     async def complete(
@@ -652,15 +665,19 @@ async def test_task_terminal_conflict_preserves_cancelled_state(
         result_digest: str,
         result_payload: StoredPayload | None = None,
     ) -> TaskTerminalRecord:
-        del execution_id, result_digest, result_payload
+        del self, lease, tenant_id, execution_id, result_digest, result_payload
         nonlocal attempts
         attempts += 1
         if attempts != 1:
             raise AssertionError("durable complete must not retry internally")
-        await self.cancel_graph(lease.graph_id, tenant_id=tenant_id)
         raise AIError(ErrorCode.STORAGE_CONFLICT)
 
+    async def node(graph_id: str, node_id: str, tenant_id: str):
+        del graph_id, node_id, tenant_id
+        return cancelled
+
     monkeypatch.setattr(TaskRepositoryImpl, "complete", complete)
+    monkeypatch.setattr(repository, "_node", node)
     try:
         with pytest.raises(AIError) as raised:
             await repository.complete(
@@ -671,8 +688,6 @@ async def test_task_terminal_conflict_preserves_cancelled_state(
             )
         assert raised.value.code is ErrorCode.TASK_TERMINAL_CONFLICT
         assert attempts == 1
-        nodes = await repository.list_nodes(request.graph.graph_id, tenant_id="tenant")
-        assert nodes[0].status is TaskStatus.CANCELLED
     finally:
         await state.close()
 

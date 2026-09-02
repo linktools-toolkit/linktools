@@ -392,6 +392,14 @@ class DefaultTaskService(TaskApi):
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             return snapshot
 
+    def stream_graph(
+        self,
+        graph_id: str,
+        *,
+        principal: Principal,
+    ) -> AsyncIterator[TaskGraphSnapshot]:
+        return self._observe_graph(graph_id, principal=principal)
+
     async def list_graph_events(
         self,
         graph_id: str,
