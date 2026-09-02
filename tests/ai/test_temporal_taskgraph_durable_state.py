@@ -5,6 +5,8 @@
 from pathlib import Path
 
 import pytest
+
+from ._task_test_helpers import admit_graph
 from linktools.ai.core import TaskStatus, canonical_sha256
 from linktools.ai.errors import ErrorCode
 from linktools.ai.migrate import provision_database
@@ -37,7 +39,7 @@ async def test_reconcile_propagates_transitive_blocked_state(
             ),
         )
         repository = state.task.tasks
-        await repository.create_graph(graph, tenant_id="tenant")
+        await admit_graph(state, graph)
         await repository.reconcile_graph("graph", tenant_id="tenant")
         lease = await repository.claim(
             "graph",

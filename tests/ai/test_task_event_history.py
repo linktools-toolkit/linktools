@@ -6,6 +6,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from ._task_test_helpers import admit_graph
 from linktools.ai.core import Principal, TaskStatus
 from linktools.ai.migrate import provision_runtime_database
 from linktools.ai.runtime import RuntimeState
@@ -75,7 +76,7 @@ async def test_task_event_page_accepts_maximum_limit() -> None:
     try:
         repository = state.task.tasks
         graph = TaskGraph("event-max-limit", (TaskNode("node"),))
-        await repository.create_graph(graph, tenant_id="tenant")
+        await admit_graph(state, graph)
 
         page = await repository.list_events(
             graph.graph_id,
@@ -98,7 +99,7 @@ async def test_empty_graph_create_is_terminal_from_first_event() -> None:
         repository = state.task.tasks
         graph = TaskGraph("event-empty", ())
 
-        view = await repository.create_graph(graph, tenant_id="tenant")
+        view = await admit_graph(state, graph)
         page = await repository.list_events(
             graph.graph_id,
             tenant_id="tenant",
@@ -123,13 +124,15 @@ async def test_node_event_mutations_do_not_read_full_graph_snapshot(
     try:
         repository = state.task.tasks
         graph = TaskGraph("event-local-mutations", (TaskNode("node"),))
-        await repository.create_graph(graph, tenant_id="tenant")
+        await admit_graph(state, graph)
 
         async def forbidden_snapshot(*args: object, **kwargs: object):
             del args, kwargs
             raise AssertionError("node event mutation must not scan the full graph")
 
-        monkeypatch.setattr(repository, "_snapshot_graph_in_transaction", forbidden_snapshot)
+        monkeypatch.setattr(
+            repository, "_snapshot_graph_in_transaction", forbidden_snapshot
+        )
 
         lease = await repository.claim(
             graph.graph_id,
@@ -157,7 +160,9 @@ async def test_node_event_mutations_do_not_read_full_graph_snapshot(
         )
 
         assert [event.sequence for event in page.items] == [2, 3, 4]
-        assert all(event.event_type is TaskEventType.NODE_CHANGED for event in page.items)
+        assert all(
+            event.event_type is TaskEventType.NODE_CHANGED for event in page.items
+        )
     finally:
         await state.close()
 
@@ -169,7 +174,7 @@ async def test_task_event_history_records_semantic_changes_but_not_heartbeat() -
     try:
         repository = state.task.tasks
         graph = TaskGraph("event-transitions", (TaskNode("node"),))
-        await repository.create_graph(graph, tenant_id="tenant")
+        await admit_graph(state, graph)
         initial = await repository.list_events(
             graph.graph_id,
             tenant_id="tenant",
@@ -311,7 +316,7 @@ async def test_terminal_event_stream_replays_from_durable_sequence() -> None:
     try:
         repository = state.task.tasks
         graph = TaskGraph("event-terminal-stream", (TaskNode("node"),))
-        await repository.create_graph(graph, tenant_id="tenant")
+        await admit_graph(state, graph)
         lease = await repository.claim(
             graph.graph_id,
             "node",
@@ -357,62 +362,6 @@ async def test_terminal_event_stream_replays_from_durable_sequence() -> None:
 
 
 @pytest.mark.asyncio
-async def test_terminal_event_early_close_releases_graph_handoff() -> None:
-    state = RuntimeState.in_memory()
-    await state.initialize(namespace="task-event-terminal-release", tenant_id="tenant")
-    stream = None
-    try:
-        repository = state.task.tasks
-        graph = TaskGraph("event-terminal-release", (TaskNode("node"),))
-        await repository.create_graph(graph, tenant_id="tenant")
-        lease = await repository.claim(
-            graph.graph_id,
-            "node",
-            tenant_id="tenant",
-            owner="worker",
-            lease_seconds=30,
-        )
-        await repository.complete(
-            lease,
-            tenant_id="tenant",
-            execution_id=None,
-            result_digest="d" * 64,
-        )
-        await repository.reconcile_graph(graph.graph_id, tenant_id="tenant")
-
-        released: list[tuple[str, str]] = []
-
-        async def release_terminal(graph_id: str, *, tenant_id: str) -> None:
-            released.append((tenant_id, graph_id))
-
-        service = DefaultTaskService(
-            SimpleNamespace(tasks=repository),
-            _AllowAuthorization(),
-            release_terminal=release_terminal,
-        )
-        stream = service.stream_graph_events(
-            graph.graph_id,
-            principal=Principal("tester", "tenant"),
-        )
-        terminal = None
-        async for event in stream:
-            if event.node_id is None and event.status is TaskStatus.SUCCEEDED:
-                terminal = event
-                break
-        assert terminal is not None
-        assert released == []
-
-        await stream.aclose()
-        stream = None
-
-        assert released == [("tenant", graph.graph_id)]
-    finally:
-        if stream is not None:
-            await stream.aclose()
-        await state.close()
-
-
-@pytest.mark.asyncio
 async def test_sqlite_task_event_history_survives_reopen(tmp_path: Path) -> None:
     database = tmp_path / "task-events.sqlite"
     engine = create_async_engine(f"sqlite+aiosqlite:///{database}")
@@ -426,7 +375,7 @@ async def test_sqlite_task_event_history_survives_reopen(tmp_path: Path) -> None
     await state.initialize(namespace="task-event-sqlite", tenant_id="tenant")
     try:
         repository = state.task.tasks
-        await repository.create_graph(graph, tenant_id="tenant")
+        await admit_graph(state, graph)
         lease = await repository.claim(
             graph.graph_id,
             "node",

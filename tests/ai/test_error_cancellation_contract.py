@@ -86,7 +86,6 @@ async def test_execution_handoff_cleanup_restores_state_before_cancellation() ->
     (
         (DefaultEvaluationService, "_evaluation_consumer", "evaluation"),
         (DefaultSessionService, "_session_consumer", "session"),
-        (DefaultTaskService, "_graph_consumer", "graph"),
     ),
 )
 async def test_transient_handoff_cleanup_preserves_cancellation(
@@ -115,7 +114,9 @@ async def test_transient_handoff_cleanup_preserves_cancellation(
 
 
 @pytest.mark.asyncio
-async def test_task_runner_cancellation_does_not_business_cancel_running_execution() -> None:
+async def test_task_runner_cancellation_does_not_business_cancel_running_execution() -> (
+    None
+):
     class Execution:
         def __init__(self) -> None:
             self.wait_started = asyncio.Event()
@@ -174,7 +175,9 @@ async def test_task_runner_cancellation_does_not_business_cancel_running_executi
 
 
 @pytest.mark.asyncio
-async def test_task_runner_binds_execution_that_finishes_launch_after_caller_cancel() -> None:
+async def test_task_runner_binds_execution_that_finishes_launch_after_caller_cancel() -> (
+    None
+):
     class Execution:
         def __init__(self) -> None:
             self.launch_started = asyncio.Event()
@@ -349,9 +352,7 @@ async def test_task_shutdown_waits_for_cancellation_resistant_graph_cleanup() ->
 
     task = asyncio.create_task(graph_cleanup())
     await asyncio.sleep(0)
-    launcher._graphs = {
-        ("tenant", "graph"): SimpleNamespace(task=task, closed=False)
-    }
+    launcher._graphs = {("tenant", "graph"): SimpleNamespace(task=task, closed=False)}
 
     shutdown = asyncio.create_task(launcher.shutdown())
     await asyncio.wait_for(cancelled.wait(), 1)

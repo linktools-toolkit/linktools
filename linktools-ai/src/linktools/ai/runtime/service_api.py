@@ -141,16 +141,24 @@ class ExecutionResult:
         ):
             raise ValueError("execution result error diagnostics are invalid")
         if self.status is ExecutionStatus.SUCCEEDED:
-            if self.error_code is not None or details or self.error_diagnostics is not None:
+            if (
+                self.error_code is not None
+                or details
+                or self.error_diagnostics is not None
+            ):
                 raise ValueError("successful execution result cannot carry an error")
             if self.output is None or not _is_digest(self.output_fingerprint):
                 raise ValueError("successful execution result requires output contract")
             return
         if self.status is ExecutionStatus.CANCELLED:
             if self.error_code != ErrorCode.EXECUTION_CANCELLED.value:
-                raise ValueError("cancelled execution result requires EXECUTION_CANCELLED")
+                raise ValueError(
+                    "cancelled execution result requires EXECUTION_CANCELLED"
+                )
             if _has_output_contract(self) or self.error_diagnostics is not None:
-                raise ValueError("cancelled execution result cannot carry output or diagnostics")
+                raise ValueError(
+                    "cancelled execution result cannot carry output or diagnostics"
+                )
             return
         if self.status is ExecutionStatus.FAILED:
             if self.error_code is None:
@@ -158,9 +166,13 @@ class ExecutionResult:
             try:
                 code = ErrorCode(self.error_code)
             except ValueError as error:
-                raise ValueError("failed execution result contains an unknown error code") from error
+                raise ValueError(
+                    "failed execution result contains an unknown error code"
+                ) from error
             if code is ErrorCode.EXECUTION_CANCELLED:
-                raise ValueError("failed execution result cannot carry EXECUTION_CANCELLED")
+                raise ValueError(
+                    "failed execution result cannot carry EXECUTION_CANCELLED"
+                )
             if _has_output_contract(self):
                 raise ValueError("failed execution result cannot carry output")
             return
@@ -172,8 +184,10 @@ def _has_output_contract(result: ExecutionResult) -> bool:
 
 
 def _is_digest(value: object) -> bool:
-    return isinstance(value, str) and len(value) == 64 and all(
-        character in "0123456789abcdef" for character in value
+    return (
+        isinstance(value, str)
+        and len(value) == 64
+        and all(character in "0123456789abcdef" for character in value)
     )
 
 
@@ -186,7 +200,10 @@ class ExecutionTraceItem:
     def __post_init__(self) -> None:
         if self.sequence < 0:
             raise ValueError("execution trace sequence must be non-negative")
-        if not isinstance(self.payload, Mapping) or self.payload.get("kind") != "MODEL_RESPONSE":
+        if (
+            not isinstance(self.payload, Mapping)
+            or self.payload.get("kind") != "MODEL_RESPONSE"
+        ):
             return
         if "token_usage" not in self.payload:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -228,7 +245,15 @@ class ExecutionHistoryItem:
     tool_call_id: "str | None" = None
 
     def __post_init__(self) -> None:
-        if self.sequence < 0 or self.item_kind not in {"system", "user", "assistant", "thinking", "tool_call", "tool_result", "retry"}:
+        if self.sequence < 0 or self.item_kind not in {
+            "system",
+            "user",
+            "assistant",
+            "thinking",
+            "tool_call",
+            "tool_result",
+            "retry",
+        }:
             raise ValueError("execution history item is invalid")
 
 
@@ -242,7 +267,13 @@ class SessionHistoryItem:
 
     def __post_init__(self) -> None:
         if self.sequence < 1 or self.item_kind not in {
-            "system", "user", "assistant", "thinking", "tool_call", "tool_result", "retry"
+            "system",
+            "user",
+            "assistant",
+            "thinking",
+            "tool_call",
+            "tool_result",
+            "retry",
         }:
             raise ValueError("session history item is invalid")
 
@@ -457,7 +488,15 @@ class EvaluationComparison:
         if (
             not self.baseline_id.strip()
             or not self.candidate_id.strip()
-            or min(self.pass_rate, self.error_rate, self.refusal_rate, self.total_cost, self.latency_p50, self.latency_p95) < 0
+            or min(
+                self.pass_rate,
+                self.error_rate,
+                self.refusal_rate,
+                self.total_cost,
+                self.latency_p50,
+                self.latency_p95,
+            )
+            < 0
             or min(self.retry_count, self.input_tokens, self.output_tokens) < 0
         ):
             raise ValueError("evaluation comparison contains invalid metrics")
@@ -614,52 +653,116 @@ class ExecutionHistoryService(Protocol):
 
 
 class ExecutionService(Protocol):
-    async def run(self, binding_digest: str, request: ExecutionRequest) -> ExecutionHandle: ...
+    async def run(
+        self, binding_digest: str, request: ExecutionRequest
+    ) -> ExecutionHandle: ...
     async def resolve_existing(
         self,
         binding_digest: str,
         request: ExecutionRequest,
     ) -> "ExecutionHandle | None": ...
-    async def inspect(self, execution_id: str, *, principal: Principal) -> ExecutionView: ...
-    async def result(self, execution_id: str, *, principal: Principal) -> ExecutionResult: ...
-    async def wait(self, execution_id: str, *, principal: Principal, timeout_seconds: "float | None" = None) -> ExecutionResult: ...
-    async def run_and_wait(self, binding_digest: str, request: ExecutionRequest, *, timeout_seconds: "float | None" = None) -> ExecutionResult: ...
-    async def retry(self, binding_digest: str, execution_id: str, request: RetryExecutionRequest) -> ExecutionHandle: ...
-    async def fork(self, binding_digest: str, execution_id: str, request: ForkExecutionRequest) -> ExecutionHandle: ...
-    async def cancel(self, execution_id: str, request: CancelExecutionRequest) -> CancelExecutionResult: ...
-    async def trace(self, execution_id: str, *, principal: Principal, cursor: 'str | None' = None, limit: int = 100) -> 'Page[ExecutionTraceItem]': ...
-    async def transcript(self, execution_id: str, *, principal: Principal, cursor: 'str | None' = None, limit: int = 100) -> 'Page[TranscriptItem]': ...
-    async def history(self, execution_id: str, *, principal: Principal, cursor: 'str | None' = None, limit: int = 100) -> 'Page[ExecutionHistoryItem]': ...
+    async def inspect(
+        self, execution_id: str, *, principal: Principal
+    ) -> ExecutionView: ...
+    async def result(
+        self, execution_id: str, *, principal: Principal
+    ) -> ExecutionResult: ...
+    async def wait(
+        self,
+        execution_id: str,
+        *,
+        principal: Principal,
+        timeout_seconds: "float | None" = None,
+    ) -> ExecutionResult: ...
+    async def run_and_wait(
+        self,
+        binding_digest: str,
+        request: ExecutionRequest,
+        *,
+        timeout_seconds: "float | None" = None,
+    ) -> ExecutionResult: ...
+    async def retry(
+        self, binding_digest: str, execution_id: str, request: RetryExecutionRequest
+    ) -> ExecutionHandle: ...
+    async def fork(
+        self, binding_digest: str, execution_id: str, request: ForkExecutionRequest
+    ) -> ExecutionHandle: ...
+    async def cancel(
+        self, execution_id: str, request: CancelExecutionRequest
+    ) -> CancelExecutionResult: ...
+    async def trace(
+        self,
+        execution_id: str,
+        *,
+        principal: Principal,
+        cursor: "str | None" = None,
+        limit: int = 100,
+    ) -> "Page[ExecutionTraceItem]": ...
+    async def transcript(
+        self,
+        execution_id: str,
+        *,
+        principal: Principal,
+        cursor: "str | None" = None,
+        limit: int = 100,
+    ) -> "Page[TranscriptItem]": ...
+    async def history(
+        self,
+        execution_id: str,
+        *,
+        principal: Principal,
+        cursor: "str | None" = None,
+        limit: int = 100,
+    ) -> "Page[ExecutionHistoryItem]": ...
 
 
 class SessionService(Protocol):
-    async def create(self, agent_id: str, request: CreateSessionRequest) -> SessionView: ...
+    async def create(
+        self, agent_id: str, request: CreateSessionRequest
+    ) -> SessionView: ...
     async def get(self, session_id: str, *, principal: Principal) -> SessionView: ...
-    async def list(self, request: ListSessionRequest) -> 'Page[SessionView]': ...
-    async def history(self, session_id: str, *, principal: Principal, cursor: 'str | None' = None, limit: int = 100) -> 'Page[SessionHistoryItem]': ...
+    async def list(self, request: ListSessionRequest) -> "Page[SessionView]": ...
+    async def history(
+        self,
+        session_id: str,
+        *,
+        principal: Principal,
+        cursor: "str | None" = None,
+        limit: int = 100,
+    ) -> "Page[SessionHistoryItem]": ...
     async def load(self, session_id: str, *, principal: Principal) -> LoadedSession: ...
-    async def resume(self, agent_id: str, binding_digest: str, session_id: str, request: ResumeSessionRequest) -> ExecutionHandle: ...
-    async def fork(self, agent_id: str, session_id: str, request: ForkSessionRequest) -> SessionView: ...
-    async def update(self, agent_id: str, session_id: str, request: UpdateSessionRequest) -> SessionView: ...
-    async def close(self, session_id: str, request: CloseSessionRequest) -> SessionView: ...
+    async def resume(
+        self,
+        agent_id: str,
+        binding_digest: str,
+        session_id: str,
+        request: ResumeSessionRequest,
+    ) -> ExecutionHandle: ...
+    async def fork(
+        self, agent_id: str, session_id: str, request: ForkSessionRequest
+    ) -> SessionView: ...
+    async def update(
+        self, agent_id: str, session_id: str, request: UpdateSessionRequest
+    ) -> SessionView: ...
+    async def close(
+        self, session_id: str, request: CloseSessionRequest
+    ) -> SessionView: ...
 
 
 class TaskService(Protocol):
     async def run_graph(self, request: TaskGraphRequest) -> TaskGraphResult: ...
-    async def run_graph_and_wait(self, request: TaskGraphRequest, *, timeout_seconds: "float | None" = None) -> TaskGraphResult: ...
-    async def inspect_graph(self, graph_id: str, *, principal: Principal) -> TaskGraphView: ...
+    async def run_graph_and_wait(
+        self, request: TaskGraphRequest, *, timeout_seconds: "float | None" = None
+    ) -> TaskGraphResult: ...
+    async def inspect_graph(
+        self, graph_id: str, *, principal: Principal
+    ) -> TaskGraphView: ...
     async def inspect_graph_state(
         self,
         graph_id: str,
         *,
         principal: Principal,
     ) -> TaskGraphSnapshot: ...
-    def stream_graph(
-        self,
-        graph_id: str,
-        *,
-        principal: Principal,
-    ) -> "AsyncIterator[TaskGraphSnapshot]": ...
     async def list_graph_events(
         self,
         graph_id: str,
@@ -675,37 +778,81 @@ class TaskService(Protocol):
         principal: Principal,
         after_sequence: int = 0,
     ) -> "AsyncIterator[TaskEvent]": ...
-    async def wait_graph(self, graph_id: str, *, principal: Principal, timeout_seconds: "float | None" = None) -> TaskGraphResult: ...
-    async def cancel_graph(self, graph_id: str, request: CancelGraphRequest) -> TaskGraphView: ...
+    async def wait_graph(
+        self,
+        graph_id: str,
+        *,
+        principal: Principal,
+        timeout_seconds: "float | None" = None,
+    ) -> TaskGraphResult: ...
+    async def cancel_graph(
+        self, graph_id: str, request: CancelGraphRequest
+    ) -> TaskGraphView: ...
 
 
 class EvaluationService(Protocol):
-    async def run(self, binding_digest: str, request: RunEvaluationRequest) -> EvaluationHandle: ...
-    async def inspect(self, evaluation_id: str, *, principal: Principal) -> EvaluationView: ...
-    async def compare(self, request: CompareEvaluationRequest) -> EvaluationComparison: ...
-    async def snapshot(self, evaluation_id: str, *, principal: Principal) -> RunSnapshot: ...
-    async def replay(self, binding_digest: str, snapshot_id: str, request: ReplayEvaluationRequest) -> ExecutionHandle: ...
+    async def run(
+        self, binding_digest: str, request: RunEvaluationRequest
+    ) -> EvaluationHandle: ...
+    async def inspect(
+        self, evaluation_id: str, *, principal: Principal
+    ) -> EvaluationView: ...
+    async def compare(
+        self, request: CompareEvaluationRequest
+    ) -> EvaluationComparison: ...
+    async def snapshot(
+        self, evaluation_id: str, *, principal: Principal
+    ) -> RunSnapshot: ...
+    async def replay(
+        self, binding_digest: str, snapshot_id: str, request: ReplayEvaluationRequest
+    ) -> ExecutionHandle: ...
 
 
 class ApprovalService(Protocol):
-    async def create(self, execution_id: str, request: ApprovalCreateRequest) -> ApprovalView: ...
-    async def list(self, execution_id: str, *, principal: Principal) -> 'tuple[ApprovalView, ...]': ...
-    async def decide(self, execution_id: str, request: ApprovalDecisionRequest) -> ApprovalDecisionResult: ...
+    async def create(
+        self, execution_id: str, request: ApprovalCreateRequest
+    ) -> ApprovalView: ...
+    async def list(
+        self, execution_id: str, *, principal: Principal
+    ) -> "tuple[ApprovalView, ...]": ...
+    async def decide(
+        self, execution_id: str, request: ApprovalDecisionRequest
+    ) -> ApprovalDecisionResult: ...
 
 
 class ExternalService(Protocol):
-    async def supply(self, execution_id: str, request: ExternalSupplyRequest) -> ExternalSupplyResult: ...
+    async def supply(
+        self, execution_id: str, request: ExternalSupplyRequest
+    ) -> ExternalSupplyResult: ...
 
 
 class EventService(Protocol):
-    async def list(self, execution_id: str, *, principal: Principal, after_sequence: int = 0, limit: int = 100) -> 'Page[ExecutionEvent]': ...
+    async def list(
+        self,
+        execution_id: str,
+        *,
+        principal: Principal,
+        after_sequence: int = 0,
+        limit: int = 100,
+    ) -> "Page[ExecutionEvent]": ...
 
-    def stream(self, execution_id: str, *, principal: Principal, after_sequence: int = 0) -> 'AsyncIterator[ExecutionStreamEvent]': ...
+    def stream(
+        self, execution_id: str, *, principal: Principal, after_sequence: int = 0
+    ) -> "AsyncIterator[ExecutionStreamEvent]": ...
 
 
 class ArtifactService(Protocol):
-    async def list(self, execution_id: str, *, principal: Principal, cursor: 'str | None' = None, limit: int = 100) -> 'Page[ArtifactView]': ...
-    async def get(self, artifact_id: str, *, principal: Principal) -> ArtifactDownload: ...
+    async def list(
+        self,
+        execution_id: str,
+        *,
+        principal: Principal,
+        cursor: "str | None" = None,
+        limit: int = 100,
+    ) -> "Page[ArtifactView]": ...
+    async def get(
+        self, artifact_id: str, *, principal: Principal
+    ) -> ArtifactDownload: ...
 
 
 __all__ = [

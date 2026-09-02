@@ -16,7 +16,13 @@ from linktools.core import environ
 from pydantic_ai_harness.memory import SearchableMemoryStore
 
 from ..agent import AgentCatalog, AgentCompiler, AgentDefinition
-from ..asset import AssetKey, AssetPathAdapter, AssetStore, DirectoryAssetBackend, PrefixAssetPathAdapter
+from ..asset import (
+    AssetKey,
+    AssetPathAdapter,
+    AssetStore,
+    DirectoryAssetBackend,
+    PrefixAssetPathAdapter,
+)
 from ..capability import (
     CapabilityContribution,
     CapabilityGroup,
@@ -24,10 +30,16 @@ from ..capability import (
     SkillSourceRegistry,
     workspace_tool_contributions,
 )
-from ..core import DEFAULT_DISCOVERY_POLICY, HmacCursorSigner, TenantAuthorizationPolicy, validate_tenant_id
+from ..core import (
+    DEFAULT_DISCOVERY_POLICY,
+    HmacCursorSigner,
+    TenantAuthorizationPolicy,
+    validate_tenant_id,
+)
 from ..errors import AIError, ErrorCode
 from ..model import ModelRegistry
 from ..observe import MiddlewarePipeline
+
 if TYPE_CHECKING:
     from ..observe import Middleware
 from ..spec import AgentSpec, AgentSpecCodec
@@ -102,7 +114,9 @@ async def compose_runtime_components(
         try:
             mutating = item.mutating
         except AttributeError as error:
-            raise TypeError("middleware must define a bool mutating attribute") from error
+            raise TypeError(
+                "middleware must define a bool mutating attribute"
+            ) from error
         if not isinstance(mutating, bool):
             raise TypeError("middleware mutating attribute must be bool")
         if mutating:
@@ -207,7 +221,9 @@ async def compose_runtime_components(
             recovery_steps = selected_state.steps.read_store(RuntimeDomain.RECOVERY)
             if not isinstance(recovery_steps, StateStepArchive):
                 raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
-            approval_group = selected_state.execution.executions.state_store.storage_group
+            approval_group = (
+                selected_state.execution.executions.state_store.storage_group
+            )
             if (
                 selected_state.recovery.checkpoints.state_store.storage_group
                 is not approval_group
@@ -251,7 +267,9 @@ async def compose_runtime_components(
             ),
             session_history_reader=StepSessionHistoryReader(
                 store=selected_state.steps.read_store(RuntimeDomain.CONVERSATION),
-                cursor_signer=HmacCursorSigner("session-history", _grant_key(workspace)),
+                cursor_signer=HmacCursorSigner(
+                    "session-history", _grant_key(workspace)
+                ),
             ),
             memory_store_factory=_memory_store_factory(workspace, selected_state),
             skill_sources=skill_sources,
@@ -539,7 +557,9 @@ async def _build_local_components(
             ),
             tool_operations=state.recovery.tools,
         )
-        state.retention.bind_execution_runtime_release(backend.release_runtime_execution)
+        state.retention.bind_execution_runtime_release(
+            backend.release_runtime_execution
+        )
         execution.bind_backend(backend)
         execution.bind_local_waiter(backend)
         execution.bind_terminal_committer(backend)
@@ -575,7 +595,6 @@ async def _build_local_components(
             state.task,
             authorization,
             task_launcher,
-            release_terminal=state.retention.release_task_graph,
             local_waiter=task_launcher,
             preflight=task_runner,
         )

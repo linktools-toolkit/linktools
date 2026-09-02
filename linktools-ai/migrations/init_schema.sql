@@ -49,7 +49,7 @@ CREATE TABLE ai_state_facts (
     PRIMARY KEY (id), UNIQUE KEY uk_stream_digest_sequence (stream_digest, sequence),
     KEY ix_owner_key_digest (owner_key_digest), KEY ix_stream_digest_subject_digest_sequence (stream_digest, subject_digest, sequence),
     KEY ix_updated_at (updated_at), KEY ix_created_at (created_at)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin COMMENT='Immutable ordered execution and step facts including events, snapshots, and tool effects.';
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin COMMENT='Immutable ordered runtime facts including events, snapshots, and effects.';
 
 CREATE TABLE ai_state_sequences (
     id BIGINT NOT NULL AUTO_INCREMENT COMMENT 'Surrogate row identifier used only by the SQL backend.',
@@ -58,7 +58,7 @@ CREATE TABLE ai_state_sequences (
     updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT 'Update timestamp',
     created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT 'Creation timestamp',
     PRIMARY KEY (id), UNIQUE KEY uk_key_digest (key_digest), KEY ix_updated_at (updated_at), KEY ix_created_at (created_at)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin COMMENT='Durable monotonic counters used to allocate ordered runtime and step sequence numbers.';
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin COMMENT='Durable monotonic counters used to allocate ordered runtime sequence numbers.';
 
 CREATE TABLE ai_state_operations (
     id BIGINT NOT NULL AUTO_INCREMENT COMMENT 'Surrogate row identifier used only by the SQL backend.',

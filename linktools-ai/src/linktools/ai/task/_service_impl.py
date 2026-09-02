@@ -4,8 +4,7 @@
 
 import asyncio
 from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager
-from dataclasses import dataclass, replace
+from dataclasses import replace
 from datetime import datetime, timezone
 from typing import Protocol, cast
 
@@ -48,15 +47,6 @@ _GRAPH_OBSERVATION_RECHECK_SECONDS = 1.0
 _TASK_EVENT_READ_LIMIT = 200
 
 
-class _TaskReleaseCallback(Protocol):
-    async def __call__(
-        self,
-        graph_id: str,
-        *,
-        tenant_id: str,
-    ) -> None: ...
-
-
 class _LocalTaskWaiter(Protocol):
     def owns_graph(self, graph_id: str, *, tenant_id: str) -> bool: ...
 
@@ -82,17 +72,6 @@ class _TaskGraphPreflight(Protocol):
     def validate_recovery(self, graph: TaskGraph) -> None: ...
 
 
-async def _no_release_terminal(graph_id: str, *, tenant_id: str) -> None:
-    del graph_id, tenant_id
-
-
-@dataclass
-class _TaskHandoffState:
-    active_consumers: int = 0
-    release_requested: bool = False
-    release_in_progress: bool = False
-
-
 class _TaskRepository(Protocol):
     async def get_header(
         self,
@@ -100,13 +79,6 @@ class _TaskRepository(Protocol):
         *,
         tenant_id: str,
     ) -> ResourceRef | None: ...
-
-    async def create_graph(
-        self,
-        graph: TaskGraph,
-        *,
-        tenant_id: str,
-    ) -> TaskGraphView: ...
 
     async def get_graph(
         self,
@@ -130,6 +102,13 @@ class _TaskRepository(Protocol):
         after_sequence: int,
         limit: int,
     ) -> Page[TaskEvent]: ...
+
+    async def latest_event(
+        self,
+        graph_id: str,
+        *,
+        tenant_id: str,
+    ) -> TaskEvent | None: ...
 
     async def reconcile_graph(
         self,
@@ -177,7 +156,9 @@ class _OperationRepository(Protocol):
 
 
 class _TaskAdmissionPersistence(Protocol):
-    async def admit(self, admission: TaskGraphAdmission, graph: TaskGraph) -> TaskGraphView: ...
+    async def admit(
+        self, admission: TaskGraphAdmission, graph: TaskGraph
+    ) -> TaskGraphView: ...
 
     async def list_recoverable_page(
         self,
@@ -202,50 +183,40 @@ class DefaultTaskService(TaskApi):
         authorization: AuthorizationPolicy,
         launcher: TaskGraphLauncher | None = None,
         *,
-        release_terminal: _TaskReleaseCallback | None = None,
         local_waiter: "_LocalTaskWaiter | None" = None,
         preflight: "_TaskGraphPreflight | None" = None,
     ) -> None:
         self._persistence = persistence
         self._authorization = authorization
         self._launcher = launcher
-        self._release_terminal = release_terminal or _no_release_terminal
         self._local_waiter = local_waiter
         self._preflight = preflight
-        self._handoff_states: dict[tuple[str, str], _TaskHandoffState] = {}
-        self._handoff_condition = asyncio.Condition()
         self._detached_finalizers: set[asyncio.Task[object]] = set()
         self._detached_finalizer_failure: AIError | None = None
 
     async def run_graph(self, request: TaskGraphRequest) -> TaskGraphResult:
-        return await self._run_graph(request, release_terminal=True)
+        return await self._run_graph(request)
 
     async def _run_graph(
         self,
         request: TaskGraphRequest,
-        *,
-        release_terminal: bool,
     ) -> TaskGraphResult:
         if self._launcher is None:
             raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
         graph_id = request.graph.graph_id
         tenant_id = request.principal.tenant_id
-        async with self._graph_consumer(graph_id, tenant_id):
-            await self._authorization.authorize(
-                request.principal,
-                AuthorizationAction.TASK_RUN,
-                ResourceRef(ResourceKind.TASK_GRAPH, graph_id, tenant_id),
-            )
-            if self._preflight is not None:
-                self._preflight.validate_request(request.graph)
-            admission = TaskGraphAdmission.from_request(request)
-            view = await self._persistence.admissions.admit(admission, request.graph)
-            if not _terminal(view.status):
-                await self._arm_graph(admission.bind(request.graph))
-            result = await self._result(view, tenant_id)
-            if release_terminal and _terminal(result.status):
-                await self._request_graph_release(graph_id, tenant_id)
-            return result
+        await self._authorization.authorize(
+            request.principal,
+            AuthorizationAction.TASK_RUN,
+            ResourceRef(ResourceKind.TASK_GRAPH, graph_id, tenant_id),
+        )
+        if self._preflight is not None:
+            self._preflight.validate_request(request.graph)
+        admission = TaskGraphAdmission.from_request(request)
+        view = await self._persistence.admissions.admit(admission, request.graph)
+        if not _terminal(view.status):
+            await self._arm_graph(admission.bind(request.graph))
+        return await self._result(view, tenant_id)
 
     async def _arm_graph(self, launch: TaskGraphLaunch) -> None:
         if self._launcher is None:
@@ -333,7 +304,7 @@ class DefaultTaskService(TaskApi):
         *,
         timeout_seconds: "float | None" = None,
     ) -> TaskGraphResult:
-        submitted = await self._run_graph(request, release_terminal=False)
+        submitted = await self._run_graph(request)
         return await self.wait_graph(
             submitted.graph_id,
             principal=request.principal,
@@ -346,25 +317,24 @@ class DefaultTaskService(TaskApi):
         *,
         principal: Principal,
     ) -> TaskGraphView:
-        async with self._graph_consumer(graph_id, principal.tenant_id):
-            header = await self._persistence.tasks.get_header(
-                graph_id,
-                tenant_id=principal.tenant_id,
-            )
-            if header is None:
-                raise AIError(ErrorCode.AUTHORIZATION_DENIED)
-            await self._authorization.authorize(
-                principal,
-                AuthorizationAction.TASK_READ,
-                header,
-            )
-            view = await self._persistence.tasks.get_graph(
-                graph_id,
-                tenant_id=principal.tenant_id,
-            )
-            if view is None:
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            return view
+        header = await self._persistence.tasks.get_header(
+            graph_id,
+            tenant_id=principal.tenant_id,
+        )
+        if header is None:
+            raise AIError(ErrorCode.AUTHORIZATION_DENIED)
+        await self._authorization.authorize(
+            principal,
+            AuthorizationAction.TASK_READ,
+            header,
+        )
+        view = await self._persistence.tasks.get_graph(
+            graph_id,
+            tenant_id=principal.tenant_id,
+        )
+        if view is None:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        return view
 
     async def inspect_graph_state(
         self,
@@ -372,33 +342,24 @@ class DefaultTaskService(TaskApi):
         *,
         principal: Principal,
     ) -> TaskGraphSnapshot:
-        async with self._graph_consumer(graph_id, principal.tenant_id):
-            header = await self._persistence.tasks.get_header(
-                graph_id,
-                tenant_id=principal.tenant_id,
-            )
-            if header is None:
-                raise AIError(ErrorCode.AUTHORIZATION_DENIED)
-            await self._authorization.authorize(
-                principal,
-                AuthorizationAction.TASK_READ,
-                header,
-            )
-            snapshot = await self._persistence.tasks.snapshot_graph(
-                graph_id,
-                tenant_id=principal.tenant_id,
-            )
-            if snapshot is None:
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            return snapshot
-
-    def stream_graph(
-        self,
-        graph_id: str,
-        *,
-        principal: Principal,
-    ) -> AsyncIterator[TaskGraphSnapshot]:
-        return self._observe_graph(graph_id, principal=principal)
+        header = await self._persistence.tasks.get_header(
+            graph_id,
+            tenant_id=principal.tenant_id,
+        )
+        if header is None:
+            raise AIError(ErrorCode.AUTHORIZATION_DENIED)
+        await self._authorization.authorize(
+            principal,
+            AuthorizationAction.TASK_READ,
+            header,
+        )
+        snapshot = await self._persistence.tasks.snapshot_graph(
+            graph_id,
+            tenant_id=principal.tenant_id,
+        )
+        if snapshot is None:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        return snapshot
 
     async def list_graph_events(
         self,
@@ -410,26 +371,35 @@ class DefaultTaskService(TaskApi):
     ) -> Page[TaskEvent]:
         _validate_event_window(after_sequence, limit)
         tenant_id = principal.tenant_id
-        async with self._graph_consumer(graph_id, tenant_id):
-            header = await self._persistence.tasks.get_header(
-                graph_id,
-                tenant_id=tenant_id,
-            )
-            if header is None:
-                raise AIError(ErrorCode.AUTHORIZATION_DENIED)
-            await self._authorization.authorize(
-                principal,
-                AuthorizationAction.TASK_READ,
-                header,
-            )
-            page = await self._persistence.tasks.list_events(
-                graph_id,
-                tenant_id=tenant_id,
-                after_sequence=after_sequence,
-                limit=limit,
-            )
-            _validate_event_page(graph_id, after_sequence, page)
-            return page
+        header = await self._persistence.tasks.get_header(
+            graph_id,
+            tenant_id=tenant_id,
+        )
+        if header is None:
+            raise AIError(ErrorCode.AUTHORIZATION_DENIED)
+        await self._authorization.authorize(
+            principal,
+            AuthorizationAction.TASK_READ,
+            header,
+        )
+        latest = await self._persistence.tasks.latest_event(
+            graph_id,
+            tenant_id=tenant_id,
+        )
+        if latest is None:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        page = await self._persistence.tasks.list_events(
+            graph_id,
+            tenant_id=tenant_id,
+            after_sequence=after_sequence,
+            limit=limit,
+        )
+        _validate_event_page(graph_id, after_sequence, page)
+        if after_sequence == 0 and (
+            not page.items or page.items[0].event_type.value != "GRAPH_ADMITTED"
+        ):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        return page
 
     def stream_graph_events(
         self,
@@ -454,233 +424,84 @@ class DefaultTaskService(TaskApi):
         _validate_event_window(after_sequence, _TASK_EVENT_READ_LIMIT)
         tenant_id = principal.tenant_id
         cursor = after_sequence
-        baseline_checked = False
         terminal_seen = False
         pending_wait_error: AIError | None = None
-        async with self._graph_consumer(graph_id, tenant_id):
-            header = await self._persistence.tasks.get_header(
+        header = await self._persistence.tasks.get_header(
+            graph_id,
+            tenant_id=tenant_id,
+        )
+        if header is None:
+            raise AIError(ErrorCode.AUTHORIZATION_DENIED)
+        await self._authorization.authorize(
+            principal,
+            AuthorizationAction.TASK_READ,
+            header,
+        )
+        latest = await self._persistence.tasks.latest_event(
+            graph_id,
+            tenant_id=tenant_id,
+        )
+        if latest is None:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        if (
+            latest.node_id is None
+            and _terminal(latest.status)
+            and latest.sequence <= cursor
+        ):
+            return
+        while True:
+            generation = self._local_activity_generation(
                 graph_id,
                 tenant_id=tenant_id,
             )
-            if header is None:
-                raise AIError(ErrorCode.AUTHORIZATION_DENIED)
-            await self._authorization.authorize(
-                principal,
-                AuthorizationAction.TASK_READ,
-                header,
+            page = await self._persistence.tasks.list_events(
+                graph_id,
+                tenant_id=tenant_id,
+                after_sequence=cursor,
+                limit=_TASK_EVENT_READ_LIMIT,
             )
-            while True:
-                generation = self._local_activity_generation(
-                    graph_id,
-                    tenant_id=tenant_id,
-                )
-                page = await self._persistence.tasks.list_events(
-                    graph_id,
-                    tenant_id=tenant_id,
-                    after_sequence=cursor,
-                    limit=_TASK_EVENT_READ_LIMIT,
-                )
-                _validate_event_page(graph_id, cursor, page)
-                if page.items:
-                    for event in page.items:
-                        cursor = event.sequence
-                        if event.node_id is None and _terminal(event.status):
-                            terminal_seen = True
-                            await self._settle_terminal_event_observation(
-                                graph_id,
-                                tenant_id=tenant_id,
-                            )
-                            await self._request_graph_release(graph_id, tenant_id)
-                        yield event
-                    continue
+            _validate_event_page(graph_id, cursor, page)
+            if cursor == 0 and (
+                not page.items or page.items[0].event_type.value != "GRAPH_ADMITTED"
+            ):
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            if page.items:
+                pending_wait_error = None
+                for event in page.items:
+                    cursor = event.sequence
+                    if event.node_id is None and _terminal(event.status):
+                        terminal_seen = True
+                    yield event
                 if terminal_seen:
                     await self._settle_terminal_event_observation(
                         graph_id,
                         tenant_id=tenant_id,
                     )
-                    await self._request_graph_release(graph_id, tenant_id)
-                    return
-                if not baseline_checked:
-                    baseline_checked = True
-                    snapshot = await self._persistence.tasks.snapshot_graph(
-                        graph_id,
-                        tenant_id=tenant_id,
-                    )
-                    if snapshot is None:
-                        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                    if _terminal(snapshot.status):
-                        await self._settle_terminal_event_observation(
-                            graph_id,
-                            tenant_id=tenant_id,
-                        )
-                        trailing = await self._persistence.tasks.list_events(
-                            graph_id,
-                            tenant_id=tenant_id,
-                            after_sequence=cursor,
-                            limit=_TASK_EVENT_READ_LIMIT,
-                        )
-                        _validate_event_page(graph_id, cursor, trailing)
-                        if trailing.items:
-                            for event in trailing.items:
-                                cursor = event.sequence
-                                if event.node_id is None and _terminal(event.status):
-                                    terminal_seen = True
-                                    await self._settle_terminal_event_observation(
-                                        graph_id,
-                                        tenant_id=tenant_id,
-                                    )
-                                    await self._request_graph_release(
-                                        graph_id,
-                                        tenant_id,
-                                    )
-                                yield event
-                            continue
-                        await self._request_graph_release(graph_id, tenant_id)
-                        return
-                if pending_wait_error is not None:
-                    raise pending_wait_error
-                try:
-                    await self._wait_event_observation_opportunity(
-                        graph_id,
-                        tenant_id=tenant_id,
-                        after_generation=generation,
-                    )
-                except AIError as error:
-                    pending_wait_error = error
-
-    async def _observe_graph(
-        self,
-        graph_id: str,
-        *,
-        principal: Principal,
-    ) -> AsyncIterator[TaskGraphSnapshot]:
-        tenant_id = principal.tenant_id
-        generation = self._local_activity_generation(graph_id, tenant_id=tenant_id)
-        async with self._graph_consumer(graph_id, tenant_id):
-            header = await self._persistence.tasks.get_header(
+                continue
+            if terminal_seen:
+                return
+            latest = await self._persistence.tasks.latest_event(
                 graph_id,
                 tenant_id=tenant_id,
             )
-            if header is None:
-                raise AIError(ErrorCode.AUTHORIZATION_DENIED)
-            await self._authorization.authorize(
-                principal,
-                AuthorizationAction.TASK_READ,
-                header,
-            )
-            snapshot = await self._persistence.tasks.snapshot_graph(
-                graph_id,
-                tenant_id=tenant_id,
-            )
-            if snapshot is None:
+            if latest is None:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            if _terminal(snapshot.status):
-                await self._request_graph_release(graph_id, tenant_id)
-        fingerprint = _observation_fingerprint(snapshot)
-        yield snapshot
-        if _terminal(snapshot.status):
-            return
-        while True:
+            if (
+                latest.node_id is None
+                and _terminal(latest.status)
+                and latest.sequence <= cursor
+            ):
+                return
+            if pending_wait_error is not None:
+                raise pending_wait_error
             try:
-                await self._wait_observation_opportunity(
-                    snapshot,
-                    tenant_id=tenant_id,
-                    after_generation=generation,
-                )
-            except AIError:
-                latest = await self._snapshot_with_terminal_release(
+                await self._wait_event_observation_opportunity(
                     graph_id,
                     tenant_id=tenant_id,
-                )
-                if _terminal(latest.status):
-                    latest_fingerprint = _observation_fingerprint(latest)
-                    if latest_fingerprint != fingerprint or not _terminal(snapshot.status):
-                        yield latest
-                    return
-                raise
-            generation = self._local_activity_generation(
-                graph_id,
-                tenant_id=tenant_id,
-            )
-            latest = await self._snapshot_with_terminal_release(
-                graph_id,
-                tenant_id=tenant_id,
-            )
-            latest, generation = await self._stabilize_local_terminal(
-                latest,
-                tenant_id=tenant_id,
-                generation=generation,
-            )
-            latest_fingerprint = _observation_fingerprint(latest)
-            if latest_fingerprint != fingerprint or _terminal(latest.status):
-                yield latest
-                fingerprint = latest_fingerprint
-            if _terminal(latest.status):
-                return
-            snapshot = latest
-
-    async def _snapshot_with_terminal_release(
-        self,
-        graph_id: str,
-        *,
-        tenant_id: str,
-    ) -> TaskGraphSnapshot:
-        async with self._graph_consumer(graph_id, tenant_id):
-            snapshot = await self._persistence.tasks.snapshot_graph(
-                graph_id,
-                tenant_id=tenant_id,
-            )
-            if snapshot is None:
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            if _terminal(snapshot.status) and (
-                self._local_waiter is None
-                or not self._local_waiter.owns_graph(graph_id, tenant_id=tenant_id)
-            ):
-                await self._request_graph_release(graph_id, tenant_id)
-            return snapshot
-
-    async def _stabilize_local_terminal(
-        self,
-        snapshot: TaskGraphSnapshot,
-        *,
-        tenant_id: str,
-        generation: int | None,
-    ) -> tuple[TaskGraphSnapshot, int | None]:
-        waiter = self._local_waiter
-        while (
-            _terminal(snapshot.status)
-            and waiter is not None
-            and waiter.owns_graph(snapshot.graph_id, tenant_id=tenant_id)
-        ):
-            try:
-                await self._wait_observation_opportunity(
-                    snapshot,
-                    tenant_id=tenant_id,
                     after_generation=generation,
                 )
-            except AIError:
-                latest = await self._snapshot_with_terminal_release(
-                    snapshot.graph_id,
-                    tenant_id=tenant_id,
-                )
-                if _terminal(latest.status):
-                    return (
-                        latest,
-                        self._local_activity_generation(
-                            snapshot.graph_id,
-                            tenant_id=tenant_id,
-                        ),
-                    )
-                raise
-            generation = self._local_activity_generation(
-                snapshot.graph_id,
-                tenant_id=tenant_id,
-            )
-            snapshot = await self._snapshot_with_terminal_release(
-                snapshot.graph_id,
-                tenant_id=tenant_id,
-            )
-        return snapshot, generation
+            except AIError as error:
+                pending_wait_error = error
 
     def _local_activity_generation(
         self,
@@ -735,45 +556,6 @@ class DefaultTaskService(TaskApi):
             except AIError:
                 return
 
-    async def _wait_observation_opportunity(
-        self,
-        snapshot: TaskGraphSnapshot,
-        *,
-        tenant_id: str,
-        after_generation: int | None,
-    ) -> None:
-        waiter = self._local_waiter
-        if waiter is None or not waiter.owns_graph(snapshot.graph_id, tenant_id=tenant_id):
-            await asyncio.sleep(_GRAPH_OBSERVATION_RECHECK_SECONDS)
-            return
-        if after_generation is None:
-            await waiter.wait_graph_activity(
-                snapshot.graph_id,
-                tenant_id=tenant_id,
-            )
-            return
-        timeout = _nearest_live_lease_delay(snapshot)
-        if timeout is None:
-            await waiter.wait_graph_activity(
-                snapshot.graph_id,
-                tenant_id=tenant_id,
-                after_generation=after_generation,
-            )
-            return
-        if timeout <= 0:
-            return
-        try:
-            await asyncio.wait_for(
-                waiter.wait_graph_activity(
-                    snapshot.graph_id,
-                    tenant_id=tenant_id,
-                    after_generation=after_generation,
-                ),
-                timeout=timeout,
-            )
-        except asyncio.TimeoutError:
-            return
-
     async def wait_graph(
         self,
         graph_id: str,
@@ -785,14 +567,41 @@ class DefaultTaskService(TaskApi):
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
 
         async def consume() -> TaskGraphResult:
-            terminal: TaskGraphSnapshot | None = None
-            async for snapshot in self._observe_graph(graph_id, principal=principal):
-                if _terminal(snapshot.status):
-                    terminal = snapshot
-                    break
-            if terminal is None:
+            tenant_id = principal.tenant_id
+            header = await self._persistence.tasks.get_header(
+                graph_id,
+                tenant_id=tenant_id,
+            )
+            if header is None:
+                raise AIError(ErrorCode.AUTHORIZATION_DENIED)
+            await self._authorization.authorize(
+                principal,
+                AuthorizationAction.TASK_READ,
+                header,
+            )
+            latest = await self._persistence.tasks.latest_event(
+                graph_id,
+                tenant_id=tenant_id,
+            )
+            if latest is None:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            return _snapshot_result(terminal)
+            if not (latest.node_id is None and _terminal(latest.status)):
+                async for event in self._observe_graph_events(
+                    graph_id,
+                    principal=principal,
+                    after_sequence=latest.sequence,
+                ):
+                    if event.node_id is None and _terminal(event.status):
+                        break
+                else:
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            snapshot = await self._persistence.tasks.snapshot_graph(
+                graph_id,
+                tenant_id=tenant_id,
+            )
+            if snapshot is None or not _terminal(snapshot.status):
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            return _snapshot_result(snapshot)
 
         try:
             if timeout_seconds is None:
@@ -810,142 +619,41 @@ class DefaultTaskService(TaskApi):
         request: CancelGraphRequest,
     ) -> TaskGraphView:
         tenant_id = request.principal.tenant_id
-        async with self._graph_consumer(graph_id, tenant_id):
-            header = await self._persistence.tasks.get_header(
-                graph_id,
-                tenant_id=tenant_id,
-            )
-            if header is None:
-                raise AIError(ErrorCode.AUTHORIZATION_DENIED)
-            await self._authorization.authorize(
-                request.principal,
-                AuthorizationAction.TASK_CANCEL,
-                header,
-            )
-            request_digest = canonical_sha256(
-                {
-                    "action": "task.cancel",
-                    "principal": principal_identity_payload(request.principal),
-                    "graph_id": graph_id,
-                    "force": request.force,
-                }
-            )
-            finalizer = asyncio.create_task(
-                self._cancel_finalizer_with_handoff(
-                    graph_id,
-                    request,
-                    idempotency_key_digest(request.idempotency_key),
-                    request_digest,
-                ),
-                name=f"task-cancel-finalizer-{tenant_id}-{graph_id}",
-            )
-            try:
-                return await asyncio.shield(finalizer)
-            except asyncio.CancelledError:
-                if finalizer.done():
-                    try:
-                        return finalizer.result()
-                    except asyncio.CancelledError:
-                        raise
-                    except BaseException:  # noqa: BLE001
-                        raise
-                self._detach_finalizer(
-                    cast("asyncio.Task[object]", finalizer),
-                    graph_id,
-                )
-                raise
-
-    async def _cancel_finalizer_with_handoff(
-        self,
-        graph_id: str,
-        request: CancelGraphRequest,
-        operation_id: str,
-        request_digest: str,
-    ) -> TaskGraphView:
-        tenant_id = request.principal.tenant_id
-        async with self._graph_consumer(graph_id, tenant_id):
-            view = await self._cancel_finalizer(
+        header = await self._persistence.tasks.get_header(
+            graph_id,
+            tenant_id=tenant_id,
+        )
+        if header is None:
+            raise AIError(ErrorCode.AUTHORIZATION_DENIED)
+        await self._authorization.authorize(
+            request.principal,
+            AuthorizationAction.TASK_CANCEL,
+            header,
+        )
+        request_digest = canonical_sha256(
+            {
+                "action": "task.cancel",
+                "principal": principal_identity_payload(request.principal),
+                "graph_id": graph_id,
+                "force": request.force,
+            }
+        )
+        finalizer = asyncio.create_task(
+            self._cancel_finalizer(
                 graph_id,
                 request,
-                operation_id,
+                idempotency_key_digest(request.idempotency_key),
                 request_digest,
-            )
-            await self._request_graph_release(graph_id, tenant_id)
-            return view
-
-    @asynccontextmanager
-    async def _graph_consumer(self, graph_id: str, tenant_id: str):
-        key = (tenant_id, graph_id)
-        async with self._handoff_condition:
-            while True:
-                state = self._handoff_states.get(key)
-                if state is None:
-                    state = _TaskHandoffState()
-                    self._handoff_states[key] = state
-                if not state.release_in_progress:
-                    state.active_consumers += 1
-                    break
-                await self._handoff_condition.wait()
-        cleanup_owner = False
+            ),
+            name=f"task-cancel-finalizer-{tenant_id}-{graph_id}",
+        )
         try:
-            yield
-        finally:
-            async with self._handoff_condition:
-                state.active_consumers -= 1
-                if state.active_consumers < 0:
-                    raise RuntimeError("task graph consumer count became negative")
-                if state.active_consumers == 0:
-                    if state.release_requested and not state.release_in_progress:
-                        state.release_in_progress = True
-                        cleanup_owner = True
-                    elif (
-                        not state.release_requested
-                        and self._handoff_states.get(key) is state
-                    ):
-                        self._handoff_states.pop(key, None)
-                self._handoff_condition.notify_all()
-            if cleanup_owner:
-                cleanup_succeeded = False
-                cleanup_error: BaseException | None = None
-                try:
-                    await self._release_terminal(
-                        graph_id,
-                        tenant_id=tenant_id,
-                    )
-                    cleanup_succeeded = True
-                except BaseException as error:  # noqa: BLE001
-                    cleanup_error = error
-                    if isinstance(error, Exception):
-                        _logger.error(
-                            "task graph transient handoff cleanup failed: graph=%s",
-                            graph_id,
-                            exc_info=environ.debug,
-                        )
-                async with self._handoff_condition:
-                    if self._handoff_states.get(key) is state:
-                        if cleanup_succeeded and state.active_consumers == 0:
-                            self._handoff_states.pop(key, None)
-                        else:
-                            state.release_in_progress = False
-                            state.release_requested = True
-                    self._handoff_condition.notify_all()
-                if cleanup_error is not None and not isinstance(
-                    cleanup_error,
-                    Exception,
-                ):
-                    raise cleanup_error
-
-    async def _request_graph_release(
-        self,
-        graph_id: str,
-        tenant_id: str,
-    ) -> None:
-        async with self._handoff_condition:
-            state = self._handoff_states.get((tenant_id, graph_id))
-            if state is None:
-                raise RuntimeError("task graph release requested without consumer")
-            state.release_requested = True
-            self._handoff_condition.notify_all()
+            return await asyncio.shield(finalizer)
+        except asyncio.CancelledError:
+            if finalizer.done():
+                return finalizer.result()
+            self._detach_finalizer(cast("asyncio.Task[object]", finalizer), graph_id)
+            raise
 
     async def _claim_cancel_operation(
         self,
@@ -1399,9 +1107,7 @@ class DefaultTaskService(TaskApi):
             )
 
     async def preflight_close(self) -> None:
-        pending = tuple(
-            task for task in self._detached_finalizers if not task.done()
-        )
+        pending = tuple(task for task in self._detached_finalizers if not task.done())
         if pending:
             _logger.warning(
                 "task service close blocked by detached finalizers: tasks=%s",
@@ -1427,7 +1133,11 @@ class DefaultTaskService(TaskApi):
 
 
 def _validate_event_window(after_sequence: int, limit: int) -> None:
-    if isinstance(after_sequence, bool) or not isinstance(after_sequence, int) or after_sequence < 0:
+    if (
+        isinstance(after_sequence, bool)
+        or not isinstance(after_sequence, int)
+        or after_sequence < 0
+    ):
         raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
     if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 1000:
         raise AIError(ErrorCode.PAGE_LIMIT_INVALID)
@@ -1479,51 +1189,6 @@ def _terminal(status: TaskStatus) -> bool:
         TaskStatus.CANCELLED,
         TaskStatus.BLOCKED,
     }
-
-
-def _nearest_live_lease_delay(snapshot: TaskGraphSnapshot) -> "float | None":
-    now = datetime.now(timezone.utc)
-    expiries = tuple(
-        state.lease_expires_at
-        for state in snapshot.node_states
-        if state.status is TaskStatus.RUNNING
-        and state.lease_expires_at is not None
-        and state.lease_expires_at > now
-    )
-    if not expiries:
-        return None
-    return max(0.0, (min(expiries) - now).total_seconds())
-
-
-def _lease_phase(node: TaskNodeView, now: datetime) -> str:
-    if node.lease_expires_at is None:
-        return "none"
-    if node.lease_expires_at <= now:
-        return "expired"
-    return "live"
-
-
-def _observation_fingerprint(snapshot: TaskGraphSnapshot) -> str:
-    now = datetime.now(timezone.utc)
-    return canonical_sha256(
-        {
-            "status": snapshot.status.value,
-            "nodes": [
-                {
-                    "node_id": node.node_id,
-                    "status": node.status.value,
-                    "owner": node.owner,
-                    "fence": node.fence,
-                    "execution_id": node.execution_id,
-                    "result_digest": node.result_digest,
-                    "error_code": node.error_code,
-                    "error_digest": node.error_digest,
-                    "lease_phase": _lease_phase(node, now),
-                }
-                for node in snapshot.node_states
-            ],
-        }
-    )
 
 
 def _snapshot_result(snapshot: TaskGraphSnapshot) -> TaskGraphResult:

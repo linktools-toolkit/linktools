@@ -45,12 +45,15 @@ from ...core import (
 from ...errors import AIError, ErrorCode, ErrorDiagnostics
 from ...storage import ObjectRef, StoredPayload
 from ...task import (
+    TaskEvent,
     TaskGraph,
     TaskGraphAdmission,
     TaskGraphLaunch,
+    TaskGraphSnapshot,
     TaskGraphView,
     TaskLease,
     TaskNodeView,
+    TaskResultRecord,
     TaskTerminalRecord,
 )
 from ._plan import RuntimeDomain
@@ -61,8 +64,10 @@ if TYPE_CHECKING:
 
 
 def _is_sha256(value: object) -> bool:
-    return isinstance(value, str) and len(value) == 64 and all(
-        character in "0123456789abcdef" for character in value
+    return (
+        isinstance(value, str)
+        and len(value) == 64
+        and all(character in "0123456789abcdef" for character in value)
     )
 
 
@@ -227,10 +232,7 @@ class TranscriptSeekRecord:
     def __post_init__(self) -> None:
         if self.block_start < 0 or self.fact_sequence < 1:
             raise ValueError("transcript seek boundary values are invalid")
-        if (
-            self.chunk_first_message_index < 0
-            or self.chunk_first_view_item_index < 0
-        ):
+        if self.chunk_first_message_index < 0 or self.chunk_first_view_item_index < 0:
             raise ValueError("transcript seek chunk offsets cannot be negative")
         if self.view_version < 1:
             raise ValueError("transcript seek view version must be positive")
@@ -335,8 +337,7 @@ class ConversationHistoryRecord:
             ):
                 raise ValueError("root history cannot inherit messages")
         elif self.prefix_index_head_id is None and (
-            self.inherited_message_count != 0
-            or self.inherited_history_item_count != 0
+            self.inherited_message_count != 0 or self.inherited_history_item_count != 0
         ):
             raise ValueError("forked history with content requires a prefix head")
 
@@ -364,7 +365,10 @@ class SessionRecord:
     agent_id: str | None = None
 
     def __post_init__(self) -> None:
-        if self.active_execution_id is not None and not self.active_execution_id.strip():
+        if (
+            self.active_execution_id is not None
+            and not self.active_execution_id.strip()
+        ):
             raise ValueError("active execution identifier cannot be empty")
         if self.status is SessionStatus.CLOSED and self.active_execution_id is not None:
             raise ValueError("closed session cannot have an active execution")
@@ -476,13 +480,19 @@ class ExecutionRecord:
             raise ValueError("plan mode requires planning")
         object.__setattr__(self, "mode", mode)
         object.__setattr__(self, "thinking", thinking)
-        if not isinstance(self.binding, AgentBindingSnapshot) or self.binding.binding_digest != self.binding_digest:
+        if (
+            not isinstance(self.binding, AgentBindingSnapshot)
+            or self.binding.binding_digest != self.binding_digest
+        ):
             raise ValueError("execution binding snapshot does not match binding digest")
         if self.error_diagnostics is not None and not isinstance(
             self.error_diagnostics, ErrorDiagnostics
         ):
             raise TypeError("execution error diagnostics are invalid")
-        if self.status is not ExecutionStatus.FAILED and self.error_diagnostics is not None:
+        if (
+            self.status is not ExecutionStatus.FAILED
+            and self.error_diagnostics is not None
+        ):
             raise ValueError("only failed execution can carry error diagnostics")
 
 
@@ -637,7 +647,9 @@ class IdempotencyRecord:
             RuntimeDomain.EVALUATION: ResourceKind.EVALUATION,
         }.get(self.runtime_domain)
         if expected is None or self.resource_kind is not expected:
-            raise ValueError("idempotency resource identity does not match runtime domain")
+            raise ValueError(
+                "idempotency resource identity does not match runtime domain"
+            )
         if self.created_at.tzinfo is None or self.updated_at.tzinfo is None:
             raise ValueError("idempotency timestamps require timezone awareness")
 
@@ -712,9 +724,16 @@ class ExecutionTerminalCommit:
 
     def __post_init__(self) -> None:
         status = self.execution.status
-        if status not in {ExecutionStatus.SUCCEEDED, ExecutionStatus.FAILED, ExecutionStatus.CANCELLED}:
+        if status not in {
+            ExecutionStatus.SUCCEEDED,
+            ExecutionStatus.FAILED,
+            ExecutionStatus.CANCELLED,
+        }:
             raise ValueError("terminal commit requires a terminal Execution")
-        if self.result.execution_id != self.execution.execution_id or self.result.tenant_id != self.execution.tenant_id:
+        if (
+            self.result.execution_id != self.execution.execution_id
+            or self.result.tenant_id != self.execution.tenant_id
+        ):
             raise ValueError("terminal result identity mismatch")
         if status is ExecutionStatus.SUCCEEDED and self.result.output is None:
             raise ValueError("successful terminal result requires output")
@@ -723,7 +742,10 @@ class ExecutionTerminalCommit:
         if status is ExecutionStatus.FAILED:
             if self.terminal_event_type is not ExecutionEventType.EXECUTION_FAILED:
                 raise ValueError("failed terminal commit requires failed event")
-            if self.terminal_event_payload.get("error_code") != self.execution.error_code:
+            if (
+                self.terminal_event_payload.get("error_code")
+                != self.execution.error_code
+            ):
                 raise ValueError("failed terminal error code mismatch")
             safe_details = self.terminal_event_payload.get("safe_error_details")
             if not isinstance(safe_details, Mapping) or dict(safe_details) != dict(
@@ -733,10 +755,12 @@ class ExecutionTerminalCommit:
             diagnostics = self.execution.error_diagnostics
             if diagnostics is None:
                 if "error_diagnostics" in self.terminal_event_payload:
-                    raise ValueError("historical failed terminal cannot invent diagnostics")
-            elif self.terminal_event_payload.get("error_diagnostics") != _error_diagnostics_payload(
-                diagnostics
-            ):
+                    raise ValueError(
+                        "historical failed terminal cannot invent diagnostics"
+                    )
+            elif self.terminal_event_payload.get(
+                "error_diagnostics"
+            ) != _error_diagnostics_payload(diagnostics):
                 raise ValueError("failed terminal error diagnostics mismatch")
         elif "error_diagnostics" in self.terminal_event_payload:
             raise ValueError("non-failed terminal cannot carry error diagnostics")
@@ -851,11 +875,15 @@ class RecoveryCheckpoint:
             or self.pending_approval is not None
         ):
             raise ValueError("admitted recovery checkpoint cannot have an attempt")
-        if self.state in {RecoveryCheckpointState.ACTIVE, RecoveryCheckpointState.WAITING} and (
-            self.agent_run_sequence < 1 or self.step_run_id is None
-        ):
+        if self.state in {
+            RecoveryCheckpointState.ACTIVE,
+            RecoveryCheckpointState.WAITING,
+        } and (self.agent_run_sequence < 1 or self.step_run_id is None):
             raise ValueError("active recovery checkpoint requires an attempt")
-        if self.state is RecoveryCheckpointState.WAITING and self.pending_approval is not None:
+        if (
+            self.state is RecoveryCheckpointState.WAITING
+            and self.pending_approval is not None
+        ):
             if (
                 self.step_run_id != self.pending_approval.source_step_run_id
                 or self.pending_operation_id is not None
@@ -863,23 +891,46 @@ class RecoveryCheckpoint:
                 or self.terminal_handoff is not None
             ):
                 raise ValueError("approval waiting checkpoint is inconsistent")
-        if self.state is RecoveryCheckpointState.ACTIVE and self.pending_approval is not None:
-            if self.step_run_id is None or self.step_run_id == self.pending_approval.source_step_run_id:
-                raise ValueError("approval continuation active checkpoint is inconsistent")
-        if self.state in {RecoveryCheckpointState.HANDOFF, RecoveryCheckpointState.COMPLETED} and self.pending_approval is not None:
-            raise ValueError("terminal recovery checkpoint cannot retain approval continuation")
+        if (
+            self.state is RecoveryCheckpointState.ACTIVE
+            and self.pending_approval is not None
+        ):
+            if (
+                self.step_run_id is None
+                or self.step_run_id == self.pending_approval.source_step_run_id
+            ):
+                raise ValueError(
+                    "approval continuation active checkpoint is inconsistent"
+                )
+        if (
+            self.state
+            in {RecoveryCheckpointState.HANDOFF, RecoveryCheckpointState.COMPLETED}
+            and self.pending_approval is not None
+        ):
+            raise ValueError(
+                "terminal recovery checkpoint cannot retain approval continuation"
+            )
         if self.handoff_phase is RecoveryHandoffPhase.NONE:
-            if self.terminal_handoff is not None or self.handoff_contract_digest is not None:
-                raise ValueError("unprepared recovery checkpoint cannot contain a handoff")
+            if (
+                self.terminal_handoff is not None
+                or self.handoff_contract_digest is not None
+            ):
+                raise ValueError(
+                    "unprepared recovery checkpoint cannot contain a handoff"
+                )
             if self.state is RecoveryCheckpointState.HANDOFF:
-                raise ValueError("unprepared recovery checkpoint cannot be in handoff state")
+                raise ValueError(
+                    "unprepared recovery checkpoint cannot be in handoff state"
+                )
         elif self.handoff_phase is RecoveryHandoffPhase.COMPLETED:
             if self.state is not RecoveryCheckpointState.COMPLETED:
                 raise ValueError("completed recovery checkpoint must be completed")
         elif self.terminal_handoff is None or self.handoff_contract_digest is None:
             raise ValueError("prepared recovery checkpoint requires a handoff contract")
         elif self.state is not RecoveryCheckpointState.HANDOFF:
-            raise ValueError("active recovery checkpoint handoff must be in handoff state")
+            raise ValueError(
+                "active recovery checkpoint handoff must be in handoff state"
+            )
 
 
 @dataclass(frozen=True, slots=True)
@@ -983,8 +1034,13 @@ class RecoveryExecutionInput:
             raise ValueError("plan mode requires planning")
         object.__setattr__(self, "mode", mode)
         object.__setattr__(self, "thinking", thinking)
-        if not isinstance(self.binding, AgentBindingSnapshot) or self.binding.binding_digest != self.binding_digest:
-            raise ValueError("recovery binding snapshot does not match execution identity")
+        if (
+            not isinstance(self.binding, AgentBindingSnapshot)
+            or self.binding.binding_digest != self.binding_digest
+        ):
+            raise ValueError(
+                "recovery binding snapshot does not match execution identity"
+            )
 
     def prompt_text(self) -> str:
         value = self.user_prompt.decode()
@@ -1017,15 +1073,30 @@ class RecoveryTerminalOutcome:
     def __post_init__(self) -> None:
         if self.terminal_status is ExecutionStatus.SUCCEEDED and self.output is None:
             raise ValueError("successful recovery outcome requires output")
-        if self.terminal_status is not ExecutionStatus.SUCCEEDED and self.output is not None:
+        if (
+            self.terminal_status is not ExecutionStatus.SUCCEEDED
+            and self.output is not None
+        ):
             raise ValueError("failed terminal result cannot contain output")
         if self.output is None and self.object_source_domain is not None:
             raise ValueError("recovery object source requires output")
-        if self.output is not None and self.output.kind == "inline" and self.object_source_domain is not None:
+        if (
+            self.output is not None
+            and self.output.kind == "inline"
+            and self.object_source_domain is not None
+        ):
             raise ValueError("inline recovery output cannot have an object source")
-        if self.output is not None and self.output.kind == "object" and self.object_source_domain is None:
+        if (
+            self.output is not None
+            and self.output.kind == "object"
+            and self.object_source_domain is None
+        ):
             raise ValueError("object recovery output requires an object source")
-        if self.object_source_domain not in {None, RuntimeDomain.EXECUTION, RuntimeDomain.RECOVERY}:
+        if self.object_source_domain not in {
+            None,
+            RuntimeDomain.EXECUTION,
+            RuntimeDomain.RECOVERY,
+        }:
             raise ValueError("recovery object source domain is invalid")
         if self.result_created_at.tzinfo is None:
             raise ValueError("recovery outcome requires an aware timestamp")
@@ -1033,7 +1104,10 @@ class RecoveryTerminalOutcome:
             self.error_diagnostics, ErrorDiagnostics
         ):
             raise TypeError("recovery error diagnostics are invalid")
-        if self.terminal_status is not ExecutionStatus.FAILED and self.error_diagnostics is not None:
+        if (
+            self.terminal_status is not ExecutionStatus.FAILED
+            and self.error_diagnostics is not None
+        ):
             raise ValueError("only failed recovery outcome can carry error diagnostics")
 
 
@@ -1051,7 +1125,10 @@ class RecoveryTerminalHandoff:
     conversation: RecoveryConversationIntent | None
 
     def __post_init__(self) -> None:
-        if self.outcome.terminal_status is ExecutionStatus.SUCCEEDED and self.source_step_run_id is None:
+        if (
+            self.outcome.terminal_status is ExecutionStatus.SUCCEEDED
+            and self.source_step_run_id is None
+        ):
             raise ValueError("successful recovery handoff requires a source attempt")
         if self.conversation is not None and self.source_step_run_id is None:
             raise ValueError("conversation recovery intent requires a source attempt")
@@ -1080,7 +1157,9 @@ class SessionRepository(RuntimeRepository, Protocol):
         expected_source_revision: int,
         operation: OperationLedgerInput,
     ) -> tuple[SessionRecord, bool]: ...
-    async def list(self, *, tenant_id: str, owner_principal_id: str | None = None) -> tuple[SessionRecord, ...]: ...
+    async def list(
+        self, *, tenant_id: str, owner_principal_id: str | None = None
+    ) -> tuple[SessionRecord, ...]: ...
     async def list_page(
         self,
         *,
@@ -1090,10 +1169,17 @@ class SessionRepository(RuntimeRepository, Protocol):
         limit: int,
         snapshot: int | None = None,
     ) -> tuple[int, Page[SessionRecord]]: ...
-    async def get_header(self, session_id: str, *, tenant_id: str) -> ResourceRef | None: ...
+    async def get_header(
+        self, session_id: str, *, tenant_id: str
+    ) -> ResourceRef | None: ...
     async def get(self, session_id: str, *, tenant_id: str) -> SessionRecord | None: ...
     async def compare_and_swap(
-        self, session_id: str, *, tenant_id: str, expected_revision: int, next_record: SessionRecord
+        self,
+        session_id: str,
+        *,
+        tenant_id: str,
+        expected_revision: int,
+        next_record: SessionRecord,
     ) -> SessionRecord: ...
     async def compare_and_swap_with_operation(
         self,
@@ -1149,7 +1235,9 @@ class SessionRepository(RuntimeRepository, Protocol):
 
 
 class ConversationHistoryRepository(RuntimeRepository, Protocol):
-    async def create(self, record: ConversationHistoryRecord) -> ConversationHistoryRecord: ...
+    async def create(
+        self, record: ConversationHistoryRecord
+    ) -> ConversationHistoryRecord: ...
     async def create_in_transaction(
         self,
         transaction: StateTransaction,
@@ -1214,14 +1302,20 @@ class ConversationHistoryRepository(RuntimeRepository, Protocol):
 
 class ExecutionRepository(RuntimeRepository, Protocol):
     async def create(self, record: ExecutionRecord) -> ExecutionRecord: ...
-    async def create_with_history_head(self, record: ExecutionRecord) -> ExecutionRecord: ...
+    async def create_with_history_head(
+        self, record: ExecutionRecord
+    ) -> ExecutionRecord: ...
     async def create_with_history_head_in_transaction(
         self,
         transaction: StateTransaction,
         record: ExecutionRecord,
     ) -> ExecutionRecord: ...
-    async def get_header(self, execution_id: str, *, tenant_id: str) -> ResourceRef | None: ...
-    async def get(self, execution_id: str, *, tenant_id: str) -> ExecutionRecord | None: ...
+    async def get_header(
+        self, execution_id: str, *, tenant_id: str
+    ) -> ResourceRef | None: ...
+    async def get(
+        self, execution_id: str, *, tenant_id: str
+    ) -> ExecutionRecord | None: ...
     async def get_in_transaction(
         self,
         transaction: StateTransaction,
@@ -1229,18 +1323,38 @@ class ExecutionRepository(RuntimeRepository, Protocol):
         *,
         tenant_id: str,
     ) -> ExecutionRecord | None: ...
-    async def get_start_idempotency(self, claim: ExecutionStartClaim) -> IdempotencyRecord | None: ...
+    async def get_start_idempotency(
+        self, claim: ExecutionStartClaim
+    ) -> IdempotencyRecord | None: ...
     async def compare_and_swap(
-        self, execution_id: str, *, tenant_id: str, expected_revision: int, next_record: ExecutionRecord
+        self,
+        execution_id: str,
+        *,
+        tenant_id: str,
+        expected_revision: int,
+        next_record: ExecutionRecord,
     ) -> ExecutionRecord: ...
     async def list_by_session(
-        self, session_id: str, *, tenant_id: str, statuses: frozenset[ExecutionStatus] | None = None
+        self,
+        session_id: str,
+        *,
+        tenant_id: str,
+        statuses: frozenset[ExecutionStatus] | None = None,
     ) -> tuple[ExecutionRecord, ...]: ...
-    async def list_children(self, execution_id: str, *, tenant_id: str) -> tuple[ExecutionRecord, ...]: ...
+    async def list_children(
+        self, execution_id: str, *, tenant_id: str
+    ) -> tuple[ExecutionRecord, ...]: ...
     async def claim_start(self, claim: ExecutionStartClaim) -> ExecutionRecord: ...
-    async def reserve_start(self, reservation: ExecutionStartReservation) -> ExecutionStartReservationResult: ...
+    async def reserve_start(
+        self, reservation: ExecutionStartReservation
+    ) -> ExecutionStartReservationResult: ...
     async def claim_next_agent_run(
-        self, execution_id: str, *, tenant_id: str, expected_revision: int, expected_agent_run_sequence: int
+        self,
+        execution_id: str,
+        *,
+        tenant_id: str,
+        expected_revision: int,
+        expected_agent_run_sequence: int,
     ) -> ExecutionRecord: ...
     async def claim_next_agent_run_in_transaction(
         self,
@@ -1274,7 +1388,9 @@ class ExecutionRepository(RuntimeRepository, Protocol):
         expected_event_sequence: int,
         expected_agent_run_sequence: int,
     ) -> ExecutionRecord: ...
-    async def mark_start_unknown(self, commit: ExecutionStartUnknownCommit) -> ExecutionRecord: ...
+    async def mark_start_unknown(
+        self, commit: ExecutionStartUnknownCommit
+    ) -> ExecutionRecord: ...
     async def request_cancel(
         self,
         commit: ExecutionCancelRequestCommit,
@@ -1298,7 +1414,9 @@ class ExecutionRepository(RuntimeRepository, Protocol):
         *,
         pending_events: Sequence[ExecutionEventAppend] = (),
     ) -> ExecutionTerminalCommitResult: ...
-    async def get_result(self, execution_id: str, *, tenant_id: str) -> ResultRecord | None: ...
+    async def get_result(
+        self, execution_id: str, *, tenant_id: str
+    ) -> ResultRecord | None: ...
     async def get_history_seal(
         self,
         execution_id: str,
@@ -1338,7 +1456,9 @@ class ExecutionRepository(RuntimeRepository, Protocol):
 
 class IdempotencyRepository(RuntimeRepository, Protocol):
     async def reserve(self, record: IdempotencyRecord) -> IdempotencyRecord: ...
-    async def get(self, scope: str, idempotency_key_digest: str, *, tenant_id: str) -> IdempotencyRecord | None: ...
+    async def get(
+        self, scope: str, idempotency_key_digest: str, *, tenant_id: str
+    ) -> IdempotencyRecord | None: ...
     async def list_by_resource(
         self, resource_kind: ResourceKind, resource_id: str, *, tenant_id: str
     ) -> tuple[IdempotencyRecord, ...]: ...
@@ -1428,7 +1548,9 @@ class ExecutionEventRecord:
 
 
 class ApprovalRepository(RuntimeRepository, Protocol):
-    async def get_header(self, approval_id: str, *, tenant_id: str) -> ResourceRef | None: ...
+    async def get_header(
+        self, approval_id: str, *, tenant_id: str
+    ) -> ResourceRef | None: ...
     async def create(self, record: ApprovalRecord) -> ApprovalRecord: ...
     async def create_with_operation(
         self,
@@ -1443,7 +1565,9 @@ class ApprovalRepository(RuntimeRepository, Protocol):
         *,
         operation: OperationLedgerInput,
     ) -> tuple[ApprovalRecord, bool]: ...
-    async def get(self, approval_id: str, *, tenant_id: str) -> ApprovalRecord | None: ...
+    async def get(
+        self, approval_id: str, *, tenant_id: str
+    ) -> ApprovalRecord | None: ...
     async def get_approval_in_transaction(
         self,
         transaction: StateTransaction,
@@ -1472,13 +1596,19 @@ class ApprovalRepository(RuntimeRepository, Protocol):
         tenant_id: str,
         decided_at: datetime,
     ) -> tuple[ApprovalRecord, ...]: ...
-    async def list_pending(self, execution_id: str, *, tenant_id: str) -> tuple[ApprovalRecord, ...]: ...
+    async def list_pending(
+        self, execution_id: str, *, tenant_id: str
+    ) -> tuple[ApprovalRecord, ...]: ...
 
 
 class ExternalCallRepository(RuntimeRepository, Protocol):
-    async def get_header(self, call_id: str, *, tenant_id: str) -> ResourceRef | None: ...
+    async def get_header(
+        self, call_id: str, *, tenant_id: str
+    ) -> ResourceRef | None: ...
     async def create_call(self, record: ExternalCallRecord) -> ExternalCallRecord: ...
-    async def get(self, call_id: str, *, tenant_id: str) -> ExternalCallRecord | None: ...
+    async def get(
+        self, call_id: str, *, tenant_id: str
+    ) -> ExternalCallRecord | None: ...
     async def supply(
         self,
         call_id: str,
@@ -1490,12 +1620,16 @@ class ExternalCallRepository(RuntimeRepository, Protocol):
         payload_digest: str,
         supplied_at: datetime,
     ) -> ExternalCallRecord: ...
-    async def list_pending(self, execution_id: str, *, tenant_id: str) -> tuple[ExternalCallRecord, ...]: ...
+    async def list_pending(
+        self, execution_id: str, *, tenant_id: str
+    ) -> tuple[ExternalCallRecord, ...]: ...
 
 
 class RecoveryCheckpointRepository(RuntimeRepository, Protocol):
     async def create(self, record: RecoveryCheckpoint) -> RecoveryCheckpoint: ...
-    async def get(self, execution_id: str, *, tenant_id: str) -> RecoveryCheckpoint | None: ...
+    async def get(
+        self, execution_id: str, *, tenant_id: str
+    ) -> RecoveryCheckpoint | None: ...
     async def get_in_transaction(
         self,
         transaction: StateTransaction,
@@ -1517,7 +1651,12 @@ class RecoveryCheckpointRepository(RuntimeRepository, Protocol):
         tenant_id: str,
     ) -> RecoveryIntegrityReport: ...
     async def compare_and_swap(
-        self, execution_id: str, *, tenant_id: str, expected_revision: int, next_record: RecoveryCheckpoint
+        self,
+        execution_id: str,
+        *,
+        tenant_id: str,
+        expected_revision: int,
+        next_record: RecoveryCheckpoint,
     ) -> RecoveryCheckpoint: ...
     async def compare_and_swap_in_transaction(
         self,
@@ -1532,59 +1671,139 @@ class RecoveryCheckpointRepository(RuntimeRepository, Protocol):
 
 class OperationLedgerRepository(RuntimeRepository, Protocol):
     async def append(self, record: OperationLedgerInput) -> OperationLedgerRecord: ...
-    async def get(self, operation_id: str, *, tenant_id: str) -> OperationLedgerRecord | None: ...
+    async def get(
+        self, operation_id: str, *, tenant_id: str
+    ) -> OperationLedgerRecord | None: ...
     async def compare_and_swap(
-        self, operation_id: str, *, tenant_id: str, expected_status: OperationStatus, next_record: OperationLedgerRecord
+        self,
+        operation_id: str,
+        *,
+        tenant_id: str,
+        expected_status: OperationStatus,
+        next_record: OperationLedgerRecord,
     ) -> OperationLedgerRecord: ...
     async def list_pending(
-        self, resource_kind: ResourceKind, resource_id: str, *, tenant_id: str, limit: int
+        self,
+        resource_kind: ResourceKind,
+        resource_id: str,
+        *,
+        tenant_id: str,
+        limit: int,
     ) -> tuple[OperationLedgerRecord, ...]: ...
     async def compact_terminal(
-        self, resource_kind: ResourceKind, resource_id: str, *, tenant_id: str, through_sequence: int
+        self,
+        resource_kind: ResourceKind,
+        resource_id: str,
+        *,
+        tenant_id: str,
+        through_sequence: int,
     ) -> str: ...
 
 
 class TaskRepository(RuntimeRepository, Protocol):
-    async def get_header(self, graph_id: str, *, tenant_id: str) -> ResourceRef | None: ...
-    async def create_graph(self, graph: TaskGraph, *, tenant_id: str) -> TaskGraphView: ...
-    async def get_graph(self, graph_id: str, *, tenant_id: str) -> TaskGraphView | None: ...
-    async def reconcile_graph(self, graph_id: str, *, tenant_id: str) -> TaskGraphView: ...
+    async def get_header(
+        self, graph_id: str, *, tenant_id: str
+    ) -> ResourceRef | None: ...
+    async def get_graph(
+        self, graph_id: str, *, tenant_id: str
+    ) -> TaskGraphView | None: ...
+    async def snapshot_graph(
+        self, graph_id: str, *, tenant_id: str
+    ) -> TaskGraphSnapshot | None: ...
+    async def get_results(
+        self, graph_id: str, node_ids: tuple[str, ...], *, tenant_id: str
+    ) -> Mapping[str, TaskResultRecord]: ...
+    async def list_events(
+        self, graph_id: str, *, tenant_id: str, after_sequence: int, limit: int
+    ) -> Page[TaskEvent]: ...
+    async def latest_event(
+        self, graph_id: str, *, tenant_id: str
+    ) -> TaskEvent | None: ...
+    async def reconcile_graph(
+        self, graph_id: str, *, tenant_id: str
+    ) -> TaskGraphView: ...
     async def cancel_graph(self, graph_id: str, *, tenant_id: str) -> TaskGraphView: ...
     async def claim(
-        self, graph_id: str, node_id: str, *, tenant_id: str, owner: str, lease_seconds: int
+        self,
+        graph_id: str,
+        node_id: str,
+        *,
+        tenant_id: str,
+        owner: str,
+        lease_seconds: int,
     ) -> TaskLease: ...
-    async def renew(self, lease: TaskLease, *, tenant_id: str, lease_seconds: int) -> TaskLease: ...
+    async def renew(
+        self, lease: TaskLease, *, tenant_id: str, lease_seconds: int
+    ) -> TaskLease: ...
+    async def bind_execution(
+        self, lease: TaskLease, *, tenant_id: str, execution_id: str
+    ) -> TaskNodeView: ...
     async def complete(
-        self, lease: TaskLease, *, tenant_id: str, execution_id: str | None, result_digest: str
+        self,
+        lease: TaskLease,
+        *,
+        tenant_id: str,
+        execution_id: str | None,
+        result_digest: str,
+        result_payload: StoredPayload | None = None,
     ) -> TaskTerminalRecord: ...
     async def fail(
-        self, lease: TaskLease, *, tenant_id: str, error_code: str, error_digest: str
+        self,
+        lease: TaskLease,
+        *,
+        tenant_id: str,
+        error_code: str,
+        error_digest: str,
+        execution_id: str | None = None,
     ) -> TaskTerminalRecord: ...
-    async def list_nodes(self, graph_id: str, *, tenant_id: str) -> tuple[TaskNodeView, ...]: ...
+    async def list_nodes(
+        self, graph_id: str, *, tenant_id: str
+    ) -> tuple[TaskNodeView, ...]: ...
 
 
 class TaskAdmissionRepository(RuntimeRepository, Protocol):
-    async def admit(self, admission: TaskGraphAdmission, graph: TaskGraph) -> TaskGraphView: ...
+    async def admit(
+        self, admission: TaskGraphAdmission, graph: TaskGraph
+    ) -> TaskGraphView: ...
     async def list_recoverable_page(
         self, *, cursor: str | None, limit: int
     ) -> Page[TaskGraphLaunch]: ...
 
 
 class EvaluationRepository(RuntimeRepository, Protocol):
-    async def get_header(self, evaluation_id: str, *, tenant_id: str) -> ResourceRef | None: ...
+    async def get_header(
+        self, evaluation_id: str, *, tenant_id: str
+    ) -> ResourceRef | None: ...
     async def create(self, record: EvaluationRecord) -> EvaluationRecord: ...
-    async def get(self, evaluation_id: str, *, tenant_id: str) -> EvaluationRecord | None: ...
+    async def get(
+        self, evaluation_id: str, *, tenant_id: str
+    ) -> EvaluationRecord | None: ...
     async def compare_and_swap(
-        self, evaluation_id: str, *, tenant_id: str, expected_revision: int, next_record: EvaluationRecord
+        self,
+        evaluation_id: str,
+        *,
+        tenant_id: str,
+        expected_revision: int,
+        next_record: EvaluationRecord,
     ) -> EvaluationRecord: ...
-    async def list_by_execution(self, execution_id: str, *, tenant_id: str) -> tuple[EvaluationRecord, ...]: ...
+    async def list_by_execution(
+        self, execution_id: str, *, tenant_id: str
+    ) -> tuple[EvaluationRecord, ...]: ...
 
 
 class MemoryRepository(RuntimeRepository, Protocol):
-    async def get_header(self, memory_id: str, *, tenant_id: str) -> ResourceRef | None: ...
-    async def put(self, record: MemoryRecord, *, expected_revision: int | None) -> MemoryRecord: ...
+    async def get_header(
+        self, memory_id: str, *, tenant_id: str
+    ) -> ResourceRef | None: ...
+    async def put(
+        self, record: MemoryRecord, *, expected_revision: int | None
+    ) -> MemoryRecord: ...
     async def put_with_operation(
-        self, record: MemoryRecord, *, expected_revision: int | None, operation: OperationLedgerInput | None
+        self,
+        record: MemoryRecord,
+        *,
+        expected_revision: int | None,
+        operation: OperationLedgerInput | None,
     ) -> tuple[MemoryRecord | None, bool]: ...
     async def get(self, memory_id: str, *, tenant_id: str) -> MemoryRecord | None: ...
     async def list(
@@ -1595,16 +1814,27 @@ class MemoryRepository(RuntimeRepository, Protocol):
         cursor: str | None,
         limit: int,
     ) -> Page[MemoryRecord]: ...
-    async def delete(self, memory_id: str, *, tenant_id: str, expected_revision: int) -> None: ...
+    async def delete(
+        self, memory_id: str, *, tenant_id: str, expected_revision: int
+    ) -> None: ...
     async def delete_with_operation(
-        self, memory_id: str, *, tenant_id: str, expected_revision: int | None, operation: OperationLedgerInput | None
+        self,
+        memory_id: str,
+        *,
+        tenant_id: str,
+        expected_revision: int | None,
+        operation: OperationLedgerInput | None,
     ) -> tuple[bool, bool]: ...
 
 
 class ArtifactRepository(RuntimeRepository, Protocol):
     async def put_metadata(self, record: ArtifactRecord) -> ArtifactRecord: ...
-    async def get_header(self, artifact_id: str, *, tenant_id: str) -> ResourceRef | None: ...
-    async def get_metadata(self, artifact_id: str, *, tenant_id: str) -> ArtifactRecord | None: ...
+    async def get_header(
+        self, artifact_id: str, *, tenant_id: str
+    ) -> ResourceRef | None: ...
+    async def get_metadata(
+        self, artifact_id: str, *, tenant_id: str
+    ) -> ArtifactRecord | None: ...
     async def list_by_execution(
         self, execution_id: str, *, tenant_id: str, cursor: str | None, limit: int
     ) -> Page[ArtifactRecord]: ...

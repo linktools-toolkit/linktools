@@ -4,6 +4,7 @@
 
 import pytest
 
+from ._task_test_helpers import admit_graph
 from linktools.ai.core import ExecutionStatus, TaskStatus, UsageMetrics
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.model._openai import _OpenAIModelBinding
@@ -61,9 +62,9 @@ async def test_failed_task_node_persists_execution_identity() -> None:
     await state.initialize(namespace="task-error-propagation", tenant_id="tenant")
     try:
         repository = state.task.tasks
-        await repository.create_graph(
+        await admit_graph(
+            state,
             TaskGraph("graph", (TaskNode("node"),)),
-            tenant_id="tenant",
         )
         lease = await repository.claim(
             "graph",
@@ -95,9 +96,9 @@ async def test_generic_failed_task_node_keeps_execution_identity_empty() -> None
     await state.initialize(namespace="task-error-generic", tenant_id="tenant")
     try:
         repository = state.task.tasks
-        await repository.create_graph(
+        await admit_graph(
+            state,
             TaskGraph("graph", (TaskNode("node"),)),
-            tenant_id="tenant",
         )
         lease = await repository.claim(
             "graph",

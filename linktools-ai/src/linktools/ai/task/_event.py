@@ -60,7 +60,10 @@ class TaskEvent:
             raise ValueError("task event sequence must be positive")
         if not isinstance(self.event_type, TaskEventType):
             raise TypeError("task event type is invalid")
-        if not isinstance(self.occurred_at, datetime) or self.occurred_at.tzinfo is None:
+        if (
+            not isinstance(self.occurred_at, datetime)
+            or self.occurred_at.utcoffset() is None
+        ):
             raise ValueError("task event time must be timezone-aware")
         if not isinstance(self.status, TaskStatus):
             raise TypeError("task event status is invalid")
@@ -68,7 +71,11 @@ class TaskEvent:
             self.previous_status, TaskStatus
         ):
             raise TypeError("task event previous status is invalid")
-        if isinstance(self.fence, bool) or not isinstance(self.fence, int) or self.fence < 0:
+        if (
+            isinstance(self.fence, bool)
+            or not isinstance(self.fence, int)
+            or self.fence < 0
+        ):
             raise ValueError("task event fence must be non-negative")
         if self.result_digest is not None and not _is_sha256(self.result_digest):
             raise ValueError("task event result digest must be lowercase SHA-256")
@@ -80,8 +87,12 @@ class TaskEvent:
             raise ValueError("task event error code is invalid")
 
         if self.event_type is TaskEventType.GRAPH_ADMITTED:
+            if self.status not in {TaskStatus.PENDING, TaskStatus.SUCCEEDED}:
+                raise ValueError("task graph admission event status is invalid")
             if self.previous_status is not None:
-                raise ValueError("task graph admission event cannot have previous status")
+                raise ValueError(
+                    "task graph admission event cannot have previous status"
+                )
             self._validate_graph_only_fields()
             return
 

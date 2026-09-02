@@ -22,7 +22,6 @@ from ..capability import CapabilityGroup
 from ..core import (
     ExecutionMode,
     JsonValue,
-    Page,
     Principal,
     PrincipalKind,
     SessionStatus,
@@ -39,16 +38,16 @@ from ..core import (
 )
 from ..errors import AIError, ErrorCode
 from ..model import ModelRegistry
+
 if TYPE_CHECKING:
     from ..observe import Middleware
+    from ..task import TaskResultRecord
 from ..task import (
     TaskGraph,
     TaskGraphLimits,
     TaskGraphRequest,
     TaskGraphResult,
-    TaskGraphSnapshot,
     TaskNode,
-    TaskResultRecord,
 )
 from ..workspace import Workspace
 from ._agent import Agent, Execution, Session
@@ -63,24 +62,18 @@ from .service_api import (
     EvaluationHandle,
     EvaluationService,
     EventService,
-    ExecutionHandle,
-    ExecutionHistoryItem,
     ExecutionRequest,
-    ExecutionResult,
     ExecutionService,
     ExecutionStreamEvent,
-    ExecutionTraceItem,
     ForkExecutionRequest,
     ForkSessionRequest,
     ReplayEvaluationRequest,
     ResumeSessionRequest,
     RetryExecutionRequest,
     RunEvaluationRequest,
-    SessionHistoryItem,
     SessionService,
     SessionView,
     TaskService,
-    TranscriptItem,
     UpdateSessionRequest,
 )
 from .state import RuntimeState
@@ -111,14 +104,6 @@ class _TaskNodeRuntimePort(Protocol):
     ) -> "TaskResultRecord | None": ...
 
     async def read_result_record(self, record: "TaskResultRecord") -> JsonValue: ...
-
-    async def read_legacy_agent_result(
-        self,
-        execution_id: str,
-        *,
-        principal: Principal,
-        expected_digest: str,
-    ) -> JsonValue: ...
 
 
 class Runtime(Generic[AppT]):
@@ -680,17 +665,9 @@ class Runtime(Generic[AppT]):
             node_id,
             tenant_id=resolved_principal.tenant_id,
         )
-        if record is not None:
-            if record.result_digest != state.result_digest:
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            return await task_runtime.read_result_record(record)
-        if state.execution_id is not None:
-            return await task_runtime.read_legacy_agent_result(
-                state.execution_id,
-                principal=resolved_principal,
-                expected_digest=state.result_digest,
-            )
-        raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
+        if record is None or record.result_digest != state.result_digest:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        return await task_runtime.read_result_record(record)
 
     async def _admit_graph(
         self,
@@ -845,9 +822,7 @@ def _execution_policy(
     if resolved_mode == "plan":
         resolved_planning = True
     resolved_thinking = (
-        definition.spec.thinking
-        if thinking is None
-        else normalize_thinking(thinking)
+        definition.spec.thinking if thinking is None else normalize_thinking(thinking)
     )
     return resolved_mode, resolved_planning, resolved_thinking
 

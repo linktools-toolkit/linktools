@@ -7,7 +7,13 @@ from types import SimpleNamespace
 
 import pytest
 
-from linktools.ai.core import OperationStatus, Principal, TaskStatus, idempotency_key_digest
+from ._task_test_helpers import admit_graph
+from linktools.ai.core import (
+    OperationStatus,
+    Principal,
+    TaskStatus,
+    idempotency_key_digest,
+)
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.runtime import RuntimeState
 from linktools.ai.runtime._planner import _AgentTaskNodeHandler
@@ -61,7 +67,7 @@ async def test_natural_failure_is_visible_before_explicit_cancel_override() -> N
     try:
         repository = state.task.tasks
         graph = TaskGraph("natural-aggregate", (TaskNode("failed"), TaskNode("active")))
-        await repository.create_graph(graph, tenant_id="tenant")
+        await admit_graph(state, graph)
         lease = await repository.claim(
             graph.graph_id,
             "failed",
@@ -98,8 +104,10 @@ async def test_service_cancel_overrides_failed_graph_with_active_node() -> None:
     await state.initialize(namespace="task-service-cancel-override", tenant_id="tenant")
     try:
         repository = state.task.tasks
-        graph = TaskGraph("service-cancel-override", (TaskNode("failed"), TaskNode("active")))
-        await repository.create_graph(graph, tenant_id="tenant")
+        graph = TaskGraph(
+            "service-cancel-override", (TaskNode("failed"), TaskNode("active"))
+        )
+        await admit_graph(state, graph)
         lease = await repository.claim(
             graph.graph_id,
             "failed",
@@ -116,7 +124,9 @@ async def test_service_cancel_overrides_failed_graph_with_active_node() -> None:
         before = await repository.snapshot_graph(graph.graph_id, tenant_id="tenant")
         assert before is not None
         assert before.status is TaskStatus.FAILED
-        assert {item.node_id: item.status for item in before.node_states}["active"] is TaskStatus.READY
+        assert {item.node_id: item.status for item in before.node_states}[
+            "active"
+        ] is TaskStatus.READY
 
         service = DefaultTaskService(state.task, _AllowAuthorization())
         view = await service.cancel_graph(
@@ -152,7 +162,7 @@ async def test_explicit_cancel_preserves_blocked_terminal_node() -> None:
                 TaskNode("active"),
             ),
         )
-        await repository.create_graph(graph, tenant_id="tenant")
+        await admit_graph(state, graph)
         await repository.claim(
             graph.graph_id,
             "active",
@@ -201,7 +211,7 @@ async def test_launcher_counts_remote_live_lease_in_max_concurrency() -> None:
     try:
         repository = state.task.tasks
         graph = TaskGraph("global-capacity", (TaskNode("remote"), TaskNode("local")))
-        await repository.create_graph(graph, tenant_id="tenant")
+        await admit_graph(state, graph)
         await repository.claim(
             graph.graph_id,
             "remote",
@@ -253,7 +263,7 @@ async def test_cancel_cleanup_failure_marks_operation_effect_unknown() -> None:
     await state.initialize(namespace="task-cancel-ledger", tenant_id="tenant")
     try:
         graph = TaskGraph("cancel-ledger", (TaskNode("node"),))
-        await state.task.tasks.create_graph(graph, tenant_id="tenant")
+        await admit_graph(state, graph)
         service = DefaultTaskService(
             state.task,
             _AllowAuthorization(),
