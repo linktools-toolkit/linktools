@@ -33,13 +33,6 @@ class TaskQueryApi(Protocol):
         principal: Principal,
     ) -> TaskGraphSnapshot: ...
 
-    def stream_graph(
-        self,
-        graph_id: str,
-        *,
-        principal: Principal,
-    ) -> AsyncIterator[TaskGraphSnapshot]: ...
-
     async def list_graph_events(
         self,
         graph_id: str,
