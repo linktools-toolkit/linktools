@@ -25,7 +25,7 @@ from linktools.ai.runtime import Runtime, RuntimeState
 from linktools.ai.runtime._planner import RuntimeTaskNodeRunner
 from linktools.ai.runtime.state._task_repository import TaskRepositoryImpl
 from linktools.ai.spec import AgentSpec, AgentSpecCodec
-from linktools.ai.storage import StoredPayload
+from linktools.ai.storage import ObjectRef, StoredPayload
 from linktools.ai.task import (
     CancelGraphRequest,
     TaskDependencyResult,
@@ -574,6 +574,58 @@ async def test_task_complete_conflict_reads_back_without_retry(
         assert nodes[0].status is TaskStatus.RUNNING
         assert nodes[0].owner == "runner"
         assert nodes[0].fence == lease.fence
+    finally:
+        await state.close()
+
+
+@pytest.mark.asyncio
+async def test_task_complete_readback_rejects_same_digest_different_payload(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    state, request = await _admitted_state(
+        TaskGraph("complete-payload-race", (TaskNode("root"),))
+    )
+    repository = state.task.tasks
+    assert isinstance(repository, TaskRepositoryImpl)
+    lease = await repository.claim(
+        request.graph.graph_id,
+        "root",
+        tenant_id="tenant",
+        owner="runner",
+        lease_seconds=60,
+    )
+    stored_payload = StoredPayload.inline_bytes(b"same payload bytes")
+    await repository.complete(
+        lease,
+        tenant_id="tenant",
+        execution_id=None,
+        result_digest=stored_payload.digest,
+        result_payload=stored_payload,
+    )
+    conflicting_payload = StoredPayload.object(
+        ObjectRef(
+            "alternate-store",
+            "alternate-key",
+            stored_payload.digest,
+            stored_payload.size,
+        )
+    )
+
+    async def conflict(operation):
+        del operation
+        raise AIError(ErrorCode.STORAGE_CONFLICT)
+
+    monkeypatch.setattr(repository, "_mutate_with_event_retry", conflict)
+    try:
+        with pytest.raises(AIError) as raised:
+            await repository.complete(
+                lease,
+                tenant_id="tenant",
+                execution_id=None,
+                result_digest=stored_payload.digest,
+                result_payload=conflicting_payload,
+            )
+        assert raised.value.code is ErrorCode.TASK_RESULT_CONFLICT
     finally:
         await state.close()
 

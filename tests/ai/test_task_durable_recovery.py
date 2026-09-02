@@ -19,6 +19,8 @@ from linktools.ai.core import (
 )
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.runtime.state import RuntimeState, RuntimeStatePlan, RuntimeStateRoute
+from linktools.ai.runtime.state._plan import RuntimeDomain
+from linktools.ai.runtime.state._store import OperationQuery, stream_digest
 from linktools.ai.task import (
     TaskGraph,
     TaskGraphAdmission,
@@ -90,7 +92,7 @@ def _partial_operation(
         graph.graph_id if terminal else None,
         _submit_result_digest(graph) if terminal else None,
         None,
-        True,
+        False,
         now,
         now,
     )
@@ -147,6 +149,20 @@ async def test_memory_admission_is_atomic_replay_safe_and_recoverable() -> None:
         assert operation is not None
         assert operation.status is OperationStatus.SUCCEEDED
         assert operation.result_ref == request.graph.graph_id
+        assert operation.compactable is False
+        await state.task.operations.compact_terminal(
+            ResourceKind.TASK_GRAPH,
+            request.graph.graph_id,
+            tenant_id="tenant",
+            through_sequence=operation.sequence,
+        )
+        assert (
+            await state.task.operations.get(
+                admission.operation_id,
+                tenant_id="tenant",
+            )
+            == operation
+        )
         assert page.items == (admission.bind(request.graph),)
 
         changed = _request(
@@ -213,6 +229,55 @@ async def test_existing_admitted_graph_rejects_different_operation_as_storage_co
                 second.graph,
             )
         assert raised.value.code is ErrorCode.STORAGE_CONFLICT
+    finally:
+        await state.close()
+
+
+@pytest.mark.asyncio
+async def test_corrupt_occupied_graph_without_its_admission_operation_fails_closed(
+) -> None:
+    state = RuntimeState.in_memory()
+    await state.initialize(namespace="task-test", tenant_id="tenant")
+    try:
+        first = _request(
+            "occupied-corrupt",
+            idempotency_key="submit:occupied:original",
+        )
+        second = _request(
+            "occupied-corrupt",
+            idempotency_key="submit:occupied:second",
+        )
+        admission = TaskGraphAdmission.from_request(first)
+        await state.task.admissions.admit(admission, first.graph)
+        operation = await state.task.operations.get(
+            admission.operation_id,
+            tenant_id="tenant",
+        )
+        assert operation is not None
+        operation_stream = stream_digest(
+            "task-test",
+            "tenant",
+            RuntimeDomain.TASK.value,
+            "operation",
+            [ResourceKind.TASK_GRAPH.value, first.graph.graph_id],
+        )
+        deleted = await state.task.operations.state_store.mutate(
+            lambda transaction: transaction.delete_operations(
+                OperationQuery(
+                    stream_digest=operation_stream,
+                    states=frozenset({OperationStatus.SUCCEEDED.value}),
+                    through_sequence=operation.sequence,
+                )
+            )
+        )
+        assert len(deleted) == 1
+
+        with pytest.raises(AIError) as raised:
+            await state.task.admissions.admit(
+                TaskGraphAdmission.from_request(second),
+                second.graph,
+            )
+        assert raised.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
     finally:
         await state.close()
 
