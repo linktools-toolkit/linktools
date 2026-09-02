@@ -35,7 +35,7 @@ jobs:
             -w /workspace \
             python:3.6.15 \
             bash -lc '
-              set -euo pipefail
+              set -eu
               python -m pip install --quiet "tomlkit==0.11.6" "PyYAML==6.0.1"
               python -m py_compile manage.py scripts/check/python36.py
               python manage.py check --compatibility
@@ -55,11 +55,7 @@ jobs:
           python -m pip install --quiet -U -r requirements.txt
           python manage.py install --editable --silent
       - name: Run checks
-        shell: bash
-        run: |
-          set -o pipefail
-          python manage.py check --skip-compatibility \
-            | awk '!/^[.[:space:]]+\[[[:space:]]*[0-9]+%\]$/'
+        run: python manage.py check --skip-compatibility
 
   python_latest:
     name: Python latest checks
@@ -76,8 +72,4 @@ jobs:
           python -m pip install --quiet -U -r requirements.txt
           python manage.py install --editable --silent
       - name: Run checks
-        shell: bash
-        run: |
-          set -o pipefail
-          python manage.py check --skip-compatibility \
-            | awk '!/^[.[:space:]]+\[[[:space:]]*[0-9]+%\]$/'
+        run: python manage.py check --skip-compatibility
