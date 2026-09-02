@@ -22,6 +22,7 @@ Repository-wide instructions for coding agents.
 ### Architecture
 
 - Use public APIs across module/package boundaries. Do not access private state through reflection or another module's private members. Add a public operation when required and implement it across affected backends/Protocol implementations.
+- Test code is exempt from the public-only boundary rule: tests may import or access private modules and members when needed to verify internal behavior, regression invariants, or implementation-specific failure modes. This repository-wide exception applies unless a package `AGENTS.md` explicitly opts tests out; production/runtime code is never exempt, and tests of public contracts should still prefer public APIs.
 - Keep files, classes, and packages cohesive. Behavior that belongs to a class stays on the class; prefer `classmethod` over `staticmethod` when class ownership matters.
 - `_`-prefixed modules are private and re-exported through the package surface. Externally addressed modules (entry points, dotted paths, directory scanning) remain public.
 - Runtime dependencies must remain acyclic at module and package level; `TYPE_CHECKING`-only references are allowed.
