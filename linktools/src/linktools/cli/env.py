@@ -55,7 +55,7 @@ def get_commands(environ: "BaseEnviron") -> "Iterable[SubCommand]":
     def get_alias_path() -> "pathlib.Path":
         return get_scripts_path() / f"alias_v{environ.version}"
 
-    def remove_shell_artifacts() -> None:
+    def remove_generated_command_artifacts() -> None:
         stub_path = get_stub_path()
         if os.path.exists(stub_path):
             environ.logger.info(f"Remove stub path {stub_path} ...")
@@ -66,14 +66,14 @@ def get_commands(environ: "BaseEnviron") -> "Iterable[SubCommand]":
             environ.logger.info(f"Remove alias path {alias_path} ...")
             utils.remove_file(alias_path)
 
-    def remove_all_shell_artifacts() -> None:
+    def remove_all_generated_command_artifacts() -> None:
         scripts_path = get_scripts_path()
         if not os.path.exists(scripts_path):
             return
         for pattern in ("env_v*", "alias_v*"):
             for path in scripts_path.glob(pattern):
                 if path.is_dir():
-                    environ.logger.info(f"Remove shell artifact path {path} ...")
+                    environ.logger.info(f"Remove generated command artifact path {path} ...")
                     utils.remove_file(path)
 
     def get_default_shell(environ: "BaseEnviron") -> str:
@@ -266,7 +266,7 @@ def get_commands(environ: "BaseEnviron") -> "Iterable[SubCommand]":
                 if args.no_build_isolation:
                     pip_args.append("--no-build-isolation")
 
-                remove_shell_artifacts()
+                remove_generated_command_artifacts()
                 return popen(get_interpreter(), "-m", *pip_args).check_call()
 
     @register_command(name="clean", description="clean temporary and cached files")
@@ -281,7 +281,7 @@ def get_commands(environ: "BaseEnviron") -> "Iterable[SubCommand]":
 
         def run(self, args: "argparse.Namespace") -> None:
             if args.all:
-                remove_all_shell_artifacts()
+                remove_all_generated_command_artifacts()
             environ.clean_temp_files(expire_days=args.days)
 
     return commands
