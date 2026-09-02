@@ -148,6 +148,23 @@ def _task_node_event_drafts(
     )
 
 
+def _task_graph_event_drafts(
+    before: TaskGraphView,
+    after: TaskGraphView,
+) -> tuple[_TaskEventDraft, ...]:
+    if before.graph_id != after.graph_id or before.nodes != after.nodes:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    if before.status is after.status:
+        return ()
+    return (
+        _TaskEventDraft(
+            TaskEventType.GRAPH_CHANGED,
+            after.status,
+            previous_status=before.status,
+        ),
+    )
+
+
 def _task_event_drafts(
     before: "_TaskEventState | None",
     after: _TaskEventState,
@@ -184,14 +201,7 @@ def _task_event_drafts(
         values.extend(_task_node_event_drafts(previous, node))
     if len(before_nodes) != len(after.node_states):
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-    if before.graph.status is not after.graph.status:
-        values.append(
-            _TaskEventDraft(
-                TaskEventType.GRAPH_CHANGED,
-                after.graph.status,
-                previous_status=before.graph.status,
-            )
-        )
+    values.extend(_task_graph_event_drafts(before.graph, after.graph))
     return tuple(values)
 
 
@@ -1482,6 +1492,12 @@ class DurableTaskAdmissionRepositoryImpl(TaskAdmissionRepositoryImpl):
                 _task_graph_record(self, graph_record, next_graph),
                 graph_record.storage_version,
             )
+        await _append_task_events(
+            self,
+            transaction,
+            graph.graph_id,
+            _task_graph_event_drafts(graph_view, next_graph),
+        )
         await transaction.insert_record(
             self._stored(
                 "task_admission",
@@ -1606,6 +1622,12 @@ class DurableTaskAdmissionRepositoryImpl(TaskAdmissionRepositoryImpl):
                 _task_graph_record(self, graph_record, replace(graph_view, status=view.status)),
                 graph_record.storage_version,
             )
+        await _append_task_events(
+            self,
+            transaction,
+            view.graph_id,
+            _task_graph_event_drafts(graph_view, view),
+        )
         if (
             admission_record.scope_digest == self._recovery_scope()
             and admission_record.state != view.status.value
