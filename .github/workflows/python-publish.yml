@@ -18,11 +18,15 @@ on:
 permissions:
   contents: write
 
+env:
+  PIP_DISABLE_PIP_VERSION_CHECK: "1"
+  PYTHONUNBUFFERED: "1"
+
 jobs:
   validate:
     runs-on: ubuntu-latest
     steps:
-    - uses: actions/checkout@v3
+    - uses: actions/checkout@v7
     - name: Validate version
       run: |
         VERSION="${{ inputs.version }}"
@@ -46,12 +50,12 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-    - uses: actions/checkout@v3
+    - uses: actions/checkout@v7
 
     # build frida.min.js
     - name: Set up Node
       if: ${{ !env.ACT }}
-      uses: actions/setup-node@v3
+      uses: actions/setup-node@v7
       with:
         node-version: 20
     - name: Build frida scripts
@@ -61,28 +65,28 @@ jobs:
     # build android-tools.apk
     - name: Set up JDK 17
       if: ${{ !env.ACT }}
-      uses: actions/setup-java@v4
+      uses: actions/setup-java@v6
       with:
         distribution: temurin
         java-version: 17
     - name: Setup Android SDK
       if: ${{ !env.ACT }}
-      uses: android-actions/setup-android@v3
+      uses: android-actions/setup-android@v4
     - name: Build android tools
       if: ${{ !env.ACT }}
       run: cd linktools-mobile/agents/android && ./gradlew --no-daemon :tools:buildTools
 
     # build python package
     - name: Set up Python
-      uses: actions/setup-python@v3
+      uses: actions/setup-python@v7
       with:
         python-version: '3.10'
     - name: Install dependencies
       run: |
-        python -m pip install --upgrade pip
-        pip install -U -r requirements.txt
+        python -m pip install --quiet --upgrade pip
+        python -m pip install --quiet -U -r requirements.txt
     - name: Install projects
-      run: python manage.py install --editable
+      run: python manage.py install --editable --silent
     - name: Clean package
       run: python manage.py clean
     - name: Build package
