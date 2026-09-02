@@ -350,13 +350,36 @@ class DurableTaskRepositoryImpl(TaskRepositoryImpl):
             ordered,
         )
 
+    async def _snapshot_graph_cached(
+        self,
+        transaction: StateTransaction,
+        graph_id: str,
+    ) -> TaskGraphSnapshot | None:
+        graph_record = await transaction.get_record(self._graph_key(graph_id))
+        if graph_record is None:
+            return None
+        graph = await self._decode(graph_record, TaskGraphView)
+        keys = tuple(self._node_key(graph_id, node.node_id) for node in graph.nodes)
+        records = await transaction.get_records(keys)
+        if len(records) != len(keys):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        states = tuple(
+            [await self._decode(records[key], TaskNodeView) for key in keys]
+        )
+        return TaskGraphSnapshot(
+            graph.graph_id,
+            _effective_graph_status(graph, states),
+            graph.nodes,
+            states,
+        )
+
     async def create_graph(self, graph: TaskGraph, *, tenant_id: str) -> TaskGraphView:
         async def mutate(transaction: StateTransaction) -> TaskGraphView:
             view = await super(DurableTaskRepositoryImpl, self).create_graph(
                 graph,
                 tenant_id=tenant_id,
             )
-            snapshot = await self.snapshot_graph(graph.graph_id, tenant_id=tenant_id)
+            snapshot = await self._snapshot_graph_cached(transaction, graph.graph_id)
             if snapshot is None:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             await _append_task_snapshot_events(self, transaction, None, snapshot)
@@ -407,19 +430,38 @@ class DurableTaskRepositoryImpl(TaskRepositoryImpl):
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
         if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 1000:
             raise AIError(ErrorCode.PAGE_LIMIT_INVALID)
+        stream = _task_event_stream(self, graph_id)
+        owner = self._graph_key(graph_id)
         values = await self.state_store.read(
             lambda transaction: transaction.list_facts(
                 FactQuery(
-                    _task_event_stream(self, graph_id),
+                    stream,
                     after_sequence=after_sequence,
                     limit=limit + 1,
                 )
             )
         )
-        items = tuple(_decode_task_event(graph_id, value) for value in values[:limit])
+        items: list[TaskEvent] = []
+        expected_sequence = after_sequence
+        for value in values[:limit]:
+            expected_sequence += 1
+            if (
+                value.stream_digest != stream
+                or value.owner_key_digest != owner
+                or value.subject_digest is not None
+                or value.sequence != expected_sequence
+            ):
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            event = _decode_task_event(graph_id, value)
+            if value.state != event.status.value:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            items.append(event)
+        page_items = tuple(items)
         return Page(
-            items,
-            str(items[-1].sequence) if len(values) > limit and items else None,
+            page_items,
+            str(page_items[-1].sequence)
+            if len(values) > limit and page_items
+            else None,
         )
 
     async def bind_execution(
@@ -431,7 +473,10 @@ class DurableTaskRepositoryImpl(TaskRepositoryImpl):
     ) -> TaskNodeView:
         try:
             async def mutate(transaction: StateTransaction) -> TaskNodeView:
-                before = await self.snapshot_graph(lease.graph_id, tenant_id=tenant_id)
+                before = await self._snapshot_graph_in_transaction(
+                    transaction,
+                    lease.graph_id,
+                )
                 if before is None:
                     raise AIError(ErrorCode.TASK_FENCE_STALE)
                 result = await super(DurableTaskRepositoryImpl, self).bind_execution(
@@ -439,7 +484,7 @@ class DurableTaskRepositoryImpl(TaskRepositoryImpl):
                     tenant_id=tenant_id,
                     execution_id=execution_id,
                 )
-                after = await self.snapshot_graph(lease.graph_id, tenant_id=tenant_id)
+                after = await self._snapshot_graph_cached(transaction, lease.graph_id)
                 if after is None:
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                 await _append_task_snapshot_events(self, transaction, before, after)
@@ -483,15 +528,16 @@ class DurableTaskRepositoryImpl(TaskRepositoryImpl):
                 graph_id,
                 tenant_id=tenant_id,
             )
+            after = await self._snapshot_graph_cached(transaction, graph_id)
+            if after is None:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             view = await self._stabilize_graph_projection(
                 transaction,
                 graph_id,
                 preserve_cancelled=preserve_cancelled,
+                nodes=after.node_states,
             )
             await self._sync_recovery_projection(transaction, view)
-            after = await self._snapshot_graph_in_transaction(transaction, graph_id)
-            if after is None:
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             await _append_task_snapshot_events(self, transaction, before, after)
             return view
 
@@ -518,23 +564,16 @@ class DurableTaskRepositoryImpl(TaskRepositoryImpl):
 
     async def cancel_graph(self, graph_id: str, *, tenant_id: str) -> TaskGraphView:
         async def mutate(transaction: StateTransaction) -> TaskGraphView:
-            before = await self.snapshot_graph(graph_id, tenant_id=tenant_id)
+            before = await self._snapshot_graph_in_transaction(transaction, graph_id)
             if before is None:
                 raise AIError(ErrorCode.STORAGE_NOT_FOUND)
             graph_record = await transaction.get_record(self._graph_key(graph_id))
             if graph_record is None:
                 raise AIError(ErrorCode.STORAGE_NOT_FOUND)
             graph = await self._decode(graph_record, TaskGraphView)
-            node_records = await transaction.list_records(
-                RecordQuery(
-                    parent_digest=self._parent("task_node", "graph", graph_id),
-                    kind="task_node",
-                )
-            )
-            nodes = await self._decode_many(node_records)
             had_nonterminal = any(
                 node.status not in _TERMINAL_TASK_STATUSES
-                for node in nodes
+                for node in before.node_states
             )
             await super(DurableTaskRepositoryImpl, self).cancel_graph(
                 graph_id,
@@ -545,6 +584,7 @@ class DurableTaskRepositoryImpl(TaskRepositoryImpl):
                     transaction,
                     graph_id,
                     preserve_cancelled=graph.status is TaskStatus.CANCELLED,
+                    nodes=before.node_states,
                 )
             else:
                 view = await self._force_cancelled_graph_projection(
@@ -552,7 +592,7 @@ class DurableTaskRepositoryImpl(TaskRepositoryImpl):
                     graph_id,
                 )
             await self._sync_recovery_projection(transaction, view)
-            after = await self.snapshot_graph(graph_id, tenant_id=tenant_id)
+            after = await self._snapshot_graph_cached(transaction, graph_id)
             if after is None:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             await _append_task_snapshot_events(self, transaction, before, after)
@@ -598,7 +638,7 @@ class DurableTaskRepositoryImpl(TaskRepositoryImpl):
         expected_fence = before_node.fence + 1
         try:
             async def mutate(transaction: StateTransaction) -> TaskLease:
-                before = await self.snapshot_graph(graph_id, tenant_id=tenant_id)
+                before = await self._snapshot_graph_in_transaction(transaction, graph_id)
                 if before is None:
                     raise AIError(ErrorCode.TASK_NOT_READY)
                 result = await super(DurableTaskRepositoryImpl, self).claim(
@@ -608,7 +648,7 @@ class DurableTaskRepositoryImpl(TaskRepositoryImpl):
                     owner=owner,
                     lease_seconds=lease_seconds,
                 )
-                after = await self.snapshot_graph(graph_id, tenant_id=tenant_id)
+                after = await self._snapshot_graph_cached(transaction, graph_id)
                 if after is None:
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                 await _append_task_snapshot_events(self, transaction, before, after)
@@ -658,7 +698,10 @@ class DurableTaskRepositoryImpl(TaskRepositoryImpl):
     ) -> TaskTerminalRecord:
         try:
             async def mutate(transaction: StateTransaction) -> TaskTerminalRecord:
-                before = await self.snapshot_graph(lease.graph_id, tenant_id=tenant_id)
+                before = await self._snapshot_graph_in_transaction(
+                    transaction,
+                    lease.graph_id,
+                )
                 if before is None:
                     raise AIError(ErrorCode.TASK_FENCE_STALE)
                 result = await super(DurableTaskRepositoryImpl, self).complete(
@@ -668,7 +711,7 @@ class DurableTaskRepositoryImpl(TaskRepositoryImpl):
                     result_digest=result_digest,
                     result_payload=result_payload,
                 )
-                after = await self.snapshot_graph(lease.graph_id, tenant_id=tenant_id)
+                after = await self._snapshot_graph_cached(transaction, lease.graph_id)
                 if after is None:
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                 await _append_task_snapshot_events(self, transaction, before, after)
@@ -701,7 +744,10 @@ class DurableTaskRepositoryImpl(TaskRepositoryImpl):
     ) -> TaskTerminalRecord:
         try:
             async def mutate(transaction: StateTransaction) -> TaskTerminalRecord:
-                before = await self.snapshot_graph(lease.graph_id, tenant_id=tenant_id)
+                before = await self._snapshot_graph_in_transaction(
+                    transaction,
+                    lease.graph_id,
+                )
                 if before is None:
                     raise AIError(ErrorCode.TASK_FENCE_STALE)
                 result = await super(DurableTaskRepositoryImpl, self).fail(
@@ -711,7 +757,7 @@ class DurableTaskRepositoryImpl(TaskRepositoryImpl):
                     error_digest=error_digest,
                     execution_id=execution_id,
                 )
-                after = await self.snapshot_graph(lease.graph_id, tenant_id=tenant_id)
+                after = await self._snapshot_graph_cached(transaction, lease.graph_id)
                 if after is None:
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                 await _append_task_snapshot_events(self, transaction, before, after)
@@ -805,18 +851,20 @@ class DurableTaskRepositoryImpl(TaskRepositoryImpl):
         graph_id: str,
         *,
         preserve_cancelled: bool,
+        nodes: tuple[TaskNodeView, ...] | None = None,
     ) -> TaskGraphView:
         graph_record = await transaction.get_record(self._graph_key(graph_id))
         if graph_record is None:
             raise AIError(ErrorCode.STORAGE_NOT_FOUND)
         graph = await self._decode(graph_record, TaskGraphView)
-        node_records = await transaction.list_records(
-            RecordQuery(
-                parent_digest=self._parent("task_node", "graph", graph_id),
-                kind="task_node",
+        if nodes is None:
+            node_records = await transaction.list_records(
+                RecordQuery(
+                    parent_digest=self._parent("task_node", "graph", graph_id),
+                    kind="task_node",
+                )
             )
-        )
-        nodes = await self._decode_many(node_records)
+            nodes = await self._decode_many(node_records)
         status = (
             TaskStatus.CANCELLED
             if preserve_cancelled
