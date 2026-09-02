@@ -46,21 +46,16 @@ def get_commands(environ: "BaseEnviron") -> "Iterable[SubCommand]":
 
         return wrapper
 
+    def get_scripts_path() -> "pathlib.Path":
+        return environ.get_data_path("scripts", get_interpreter_ident())
+
     def get_stub_path() -> "pathlib.Path":
-        return environ.get_data_path(
-            "scripts",
-            get_interpreter_ident(),
-            f"env_v{environ.version}",
-        )
+        return get_scripts_path() / f"env_v{environ.version}"
 
     def get_alias_path() -> "pathlib.Path":
-        return environ.get_data_path(
-            "scripts",
-            get_interpreter_ident(),
-            f"alias_v{environ.version}",
-        )
+        return get_scripts_path() / f"alias_v{environ.version}"
 
-    def remove_cache_files() -> None:
+    def remove_shell_artifacts() -> None:
         stub_path = get_stub_path()
         if os.path.exists(stub_path):
             environ.logger.info(f"Remove stub path {stub_path} ...")
@@ -70,6 +65,16 @@ def get_commands(environ: "BaseEnviron") -> "Iterable[SubCommand]":
         if os.path.exists(alias_path):
             environ.logger.info(f"Remove alias path {alias_path} ...")
             utils.remove_file(alias_path)
+
+    def remove_all_shell_artifacts() -> None:
+        scripts_path = get_scripts_path()
+        if not os.path.exists(scripts_path):
+            return
+        for pattern in ("env_v*", "alias_v*"):
+            for path in scripts_path.glob(pattern):
+                if path.is_dir():
+                    environ.logger.info(f"Remove shell artifact path {path} ...")
+                    utils.remove_file(path)
 
     def get_default_shell(environ: "BaseEnviron") -> str:
         return _detect_default_shell(system=environ.system)
@@ -261,19 +266,22 @@ def get_commands(environ: "BaseEnviron") -> "Iterable[SubCommand]":
                 if args.no_build_isolation:
                     pip_args.append("--no-build-isolation")
 
-                remove_cache_files()
+                remove_shell_artifacts()
                 return popen(get_interpreter(), "-m", *pip_args).check_call()
 
-    @register_command(name="clean", description="clean temporary files")
+    @register_command(name="clean", description="clean temporary and cached files")
     class CleanCommand(SubCommand):
 
         def create_parser(self, type: "Callable[..., CommandParser]") -> "CommandParser":
             parser = super().create_parser(type)
             parser.add_argument("days", metavar="DAYS", nargs="?", type=int, default=7, help="expire days")
+            parser.add_argument("--all", action="store_true",
+                                help="also remove generated shell aliases and command stubs")
             return parser
 
         def run(self, args: "argparse.Namespace") -> None:
-            remove_cache_files()
+            if args.all:
+                remove_all_shell_artifacts()
             environ.clean_temp_files(expire_days=args.days)
 
     return commands
