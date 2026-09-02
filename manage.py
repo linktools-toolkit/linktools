@@ -206,7 +206,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     install_parser.add_argument("-e", "--editable", action="store_true", help="Install in editable mode")
     install_parser.add_argument("--no-isolation", action="store_true", help="Disable build isolation")
-    install_parser.add_argument("--silent", action="store_true", help="Suppress routine pip output")
+    install_parser.add_argument("--quiet", action="store_true", help="Suppress routine pip output")
     install_parser.set_defaults(func=handle_install)
 
     check_parser = subparsers.add_parser("check", help="Run source and test release gates")
@@ -556,7 +556,7 @@ def handle_init(args: argparse.Namespace) -> None:
 def handle_install(args: argparse.Namespace) -> None:
     requirements = _install_requirements(args, get_modules())
     pip_args = [sys.executable, "-m", "pip", "install"]
-    if args.silent:
+    if args.quiet:
         pip_args.append("--quiet")
     for _, requirement in requirements:
         if args.editable:
