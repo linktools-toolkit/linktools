@@ -223,3 +223,71 @@ async def test_local_stream_observers_do_not_poll_durable_snapshots_when_idle(
             await asyncio.wait_for(runner.cancelled.wait(), 1)
             await launcher.shutdown()
         await state.close()
+
+
+@pytest.mark.asyncio
+async def test_local_stream_observes_foreign_update_via_scheduler_notification(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    state = RuntimeState.in_memory()
+    await state.initialize(namespace="task-observer-scheduler-notify", tenant_id="tenant")
+    launcher: LocalTaskGraphLauncher | None = None
+    stream = None
+    try:
+        repository = state.task.tasks
+        graph = TaskGraph(
+            "observer-scheduler-notify",
+            (TaskNode("local"), TaskNode("foreign")),
+        )
+        await repository.create_graph(graph, tenant_id="tenant")
+        foreign_lease = await repository.claim(
+            graph.graph_id,
+            "foreign",
+            tenant_id="tenant",
+            owner="remote-worker",
+            lease_seconds=30,
+        )
+        principal = trusted_workspace_principal("tenant")
+        runner = _BlockingRunner()
+        monkeypatch.setattr(task_local, "_SCHEDULER_RECHECK_SECONDS", 0.01)
+        monkeypatch.setattr(task_service_impl, "_GRAPH_OBSERVATION_RECHECK_SECONDS", 60.0)
+        launcher = LocalTaskGraphLauncher(repository, runner, owner="local-worker")
+        await launcher.start(
+            TaskGraphLaunch(
+                graph,
+                principal,
+                TaskGraphLimits(max_concurrency=2),
+            )
+        )
+        await asyncio.wait_for(runner.entered.wait(), 1)
+
+        service = DefaultTaskService(
+            SimpleNamespace(tasks=repository),
+            _AllowAuthorization(),
+            local_waiter=launcher,
+        )
+        stream = service.stream_graph(graph.graph_id, principal=principal)
+        first = await asyncio.wait_for(anext(stream), 1)
+        first_by_id = {node.node_id: node for node in first.node_states}
+        assert first_by_id["local"].status is TaskStatus.RUNNING
+        assert first_by_id["foreign"].status is TaskStatus.RUNNING
+
+        await repository.complete(
+            foreign_lease,
+            tenant_id="tenant",
+            execution_id=None,
+            result_digest="b" * 64,
+        )
+
+        second = await asyncio.wait_for(anext(stream), 1)
+        second_by_id = {node.node_id: node for node in second.node_states}
+        assert second_by_id["local"].status is TaskStatus.RUNNING
+        assert second_by_id["foreign"].status is TaskStatus.SUCCEEDED
+    finally:
+        if stream is not None:
+            await stream.aclose()
+        if launcher is not None:
+            await repository.cancel_graph(graph.graph_id, tenant_id="tenant")
+            await asyncio.wait_for(runner.cancelled.wait(), 1)
+            await launcher.shutdown()
+        await state.close()
