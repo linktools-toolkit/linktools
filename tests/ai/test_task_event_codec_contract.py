@@ -45,3 +45,20 @@ def test_task_event_corrupt_v1_payload_fails_closed() -> None:
         _decode_task_event("graph", fact)
 
     assert raised.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
+
+
+def test_task_event_graph_changed_rejects_node_only_ready_status() -> None:
+    fact = _fact(
+        "GRAPH_CHANGED",
+        {
+            "version": 1,
+            "occurred_at": "2026-09-02T00:00:00+00:00",
+            "status": "READY",
+            "previous_status": "PENDING",
+        },
+    )
+
+    with pytest.raises(AIError) as raised:
+        _decode_task_event("graph", fact)
+
+    assert raised.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR

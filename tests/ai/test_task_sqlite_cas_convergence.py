@@ -39,6 +39,7 @@ from linktools.ai.task import (
     TaskGraphView,
     TaskLease,
     TaskNode,
+    TaskNodeView,
     TaskNodeRunControl,
     TaskNodeRunResult,
     TaskTerminalRecord,
@@ -462,6 +463,103 @@ async def _admitted_state(
         graph,
     )
     return state, request
+
+
+@pytest.mark.asyncio
+async def test_task_node_dependency_projection_fails_closed() -> None:
+    state, request = await _admitted_state(
+        TaskGraph(
+            "dependency-integrity",
+            (TaskNode("a"), TaskNode("b", ("a",))),
+        )
+    )
+    repository = state.task.tasks
+    assert isinstance(repository, TaskRepositoryImpl)
+
+    async def corrupt(transaction) -> None:
+        key = repository._node_key(request.graph.graph_id, "b")
+        record = await transaction.get_record(key)
+        assert record is not None
+        node = await repository._decode(record, TaskNodeView)
+        candidate = repository._task_node_record(
+            record,
+            replace(node, dependencies=()),
+        )
+        assert await transaction.replace_record(
+            candidate,
+            expected_storage_version=record.storage_version,
+        )
+
+    await repository.state_store.mutate(corrupt)
+    try:
+        with pytest.raises(AIError) as reconcile_error:
+            await repository.reconcile_graph(
+                request.graph.graph_id,
+                tenant_id="tenant",
+            )
+        assert reconcile_error.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
+
+        with pytest.raises(AIError) as claim_error:
+            await repository.claim(
+                request.graph.graph_id,
+                "b",
+                tenant_id="tenant",
+                owner="runner",
+                lease_seconds=60,
+            )
+        assert claim_error.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
+    finally:
+        await state.close()
+
+
+@pytest.mark.asyncio
+async def test_task_projection_readback_rejects_corrupt_admission_payload(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    state, request = await _admitted_state(
+        TaskGraph("readback-integrity", (TaskNode("root"),))
+    )
+    repository = state.task.tasks
+    assert isinstance(repository, TaskRepositoryImpl)
+
+    async def corrupt(transaction) -> None:
+        key = repository._admission_key(request.graph.graph_id)
+        record = await transaction.get_record(key)
+        assert record is not None
+        admission = await repository._decode(record, TaskGraphAdmission)
+        tampered = replace(admission, operation_id="f" * 64)
+        encoded = repository._stored(
+            "task_admission",
+            request.graph.graph_id,
+            tampered,
+            scope=repository._recovery_scope(),
+            state=record.state,
+        )
+        candidate = replace(
+            record,
+            data=encoded.data,
+            storage_version=record.storage_version + 1,
+        )
+        assert await transaction.replace_record(
+            candidate,
+            expected_storage_version=record.storage_version,
+        )
+
+    async def conflict(operation):
+        del operation
+        raise AIError(ErrorCode.STORAGE_CONFLICT)
+
+    await repository.state_store.mutate(corrupt)
+    monkeypatch.setattr(repository, "_mutate_with_event_retry", conflict)
+    try:
+        with pytest.raises(AIError) as raised:
+            await repository.reconcile_graph(
+                request.graph.graph_id,
+                tenant_id="tenant",
+            )
+        assert raised.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
+    finally:
+        await state.close()
 
 
 @pytest.mark.asyncio

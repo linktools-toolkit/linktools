@@ -99,6 +99,10 @@ class TaskEvent:
         if self.event_type is TaskEventType.GRAPH_CHANGED:
             if self.previous_status is None:
                 raise ValueError("task graph change event requires previous status")
+            if self.status is TaskStatus.READY or self.previous_status is TaskStatus.READY:
+                raise ValueError(
+                    "task graph change event cannot use node-only READY status"
+                )
             if self.previous_status is self.status:
                 raise ValueError("task graph change event requires a status transition")
             self._validate_graph_only_fields()
