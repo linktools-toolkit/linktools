@@ -20,8 +20,7 @@ def pytest_runtest_protocol(
     item: pytest.Item,
     nextitem: pytest.Item | None,
 ) -> Generator[None, None, None]:
-    del nextitem
-    print(f"DIAGNOSTIC TEST START: {item.nodeid}", flush=True)
+    del item, nextitem
     previous = signal.signal(signal.SIGALRM, _raise_timeout)
     signal.alarm(_TIMEOUT_SECONDS)
     try:
