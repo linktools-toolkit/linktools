@@ -11,6 +11,10 @@ on:
 permissions:
   contents: read
 
+env:
+  PIP_DISABLE_PIP_VERSION_CHECK: "1"
+  PIP_QUIET: "1"
+
 concurrency:
   group: python-check-${{ github.event_name }}-${{ github.ref }}
   cancel-in-progress: true
@@ -25,14 +29,16 @@ jobs:
         shell: bash
         run: |
           docker run --rm \
+            -e PIP_DISABLE_PIP_VERSION_CHECK \
+            -e PIP_QUIET \
             -v "$PWD:/workspace" \
             -w /workspace \
             python:3.6.15 \
             bash -lc '
-              set -eu
+              set -euo pipefail
               python -m pip install "tomlkit==0.11.6" "PyYAML==6.0.1"
               python -m py_compile manage.py scripts/check/python36.py
-              python manage.py check --compatibility
+              python -u manage.py check --compatibility | sed "/^\[+\] Running: /d"
             '
 
   python310:
@@ -49,7 +55,10 @@ jobs:
           python -m pip install -U -r requirements.txt
           python manage.py install --editable
       - name: Run checks
-        run: python manage.py check
+        shell: bash
+        run: |
+          set -o pipefail
+          python -u manage.py check | sed '/^\[+\] Running: /d'
 
   python_latest:
     name: Python latest checks
@@ -66,4 +75,7 @@ jobs:
           python -m pip install -U -r requirements.txt
           python manage.py install --editable
       - name: Run checks
-        run: python manage.py check
+        shell: bash
+        run: |
+          set -o pipefail
+          python -u manage.py check | sed '/^\[+\] Running: /d'
