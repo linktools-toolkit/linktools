@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Static scan for Python 3.7+-only syntax and stdlib usage."""
+"""Static scan for Python 3.6 compatibility issues in syntax and stdlib usage."""
 
 import argparse
 import ast
@@ -218,9 +218,10 @@ def main() -> int:
     elif violations:
         for violation in violations:
             print(str(violation))
-        print("\n%d potential Python 3.6 incompatibilit%s found." % (len(violations), "y" if len(violations) == 1 else "ies"))
+        suffix = "issue" if len(violations) == 1 else "issues"
+        print("\n%d potential Python 3.6 static compatibility %s found." % (len(violations), suffix))
     else:
-        print("No Python 3.6-incompatible syntax found in %d file(s)." % len(files))
+        print("No Python 3.6 static compatibility issues found in %d file(s)." % len(files))
     return 1 if violations else 0
 
 

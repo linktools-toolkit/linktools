@@ -206,14 +206,21 @@ def build_parser() -> argparse.ArgumentParser:
     )
     install_parser.add_argument("-e", "--editable", action="store_true", help="Install in editable mode")
     install_parser.add_argument("--no-isolation", action="store_true", help="Disable build isolation")
+    install_parser.add_argument("--quiet", action="store_true", help="Suppress routine pip output")
     install_parser.set_defaults(func=handle_install)
 
     check_parser = subparsers.add_parser("check", help="Run source and test release gates")
     _add_project_argument(check_parser, modules)
-    check_parser.add_argument(
+    compatibility_group = check_parser.add_mutually_exclusive_group()
+    compatibility_group.add_argument(
         "--compatibility",
         action="store_true",
         help="Run Python compatibility gates only",
+    )
+    compatibility_group.add_argument(
+        "--skip-compatibility",
+        action="store_true",
+        help="Skip Python compatibility gates",
     )
     check_parser.set_defaults(func=handle_check)
 
@@ -411,7 +418,6 @@ def _check_environment() -> "typing.Dict[str, str]":
 
 
 def _run_check(command: "typing.Sequence[str]", environment: "typing.Dict[str, str]") -> None:
-    print("[+] Running: %s" % " ".join(command))
     subprocess.check_call(list(command), cwd=PROJECT_PATH, env=environment)
 
 
@@ -427,7 +433,7 @@ def _run_python36_gate(
     scanner = os.path.join(PROJECT_PATH, "scripts", "check", "python36.py")
     paths = [os.path.join(PROJECT_PATH, "manage.py"), scanner]
     paths.extend(os.path.join(modules[project]["path"], "src") for project in compatible)
-    print("[+] Python 3.6 compatibility: %s" % ", ".join(compatible))
+    print("[+] Python 3.6 static compatibility: %s" % ", ".join(compatible))
     _run_check([sys.executable, scanner] + paths, environment)
 
 
@@ -443,7 +449,7 @@ def _run_ruff(project: str, check: "typing.Dict[str, typing.Any]", environment: 
         print("[-] ruff is required; install repository requirements first", file=sys.stderr)
         raise SystemExit(1)
     print("[+] %s: ruff" % project)
-    command = [ruff, "check", "--no-cache", "--select", ",".join(check["select"])]
+    command = [ruff, "check", "--quiet", "--no-cache", "--select", ",".join(check["select"])]
     command.extend(check["paths"])
     _run_check(command, environment)
 
@@ -550,14 +556,15 @@ def handle_init(args: argparse.Namespace) -> None:
 def handle_install(args: argparse.Namespace) -> None:
     requirements = _install_requirements(args, get_modules())
     pip_args = [sys.executable, "-m", "pip", "install"]
-    for name, requirement in requirements:
-        print("[+] Adding module to install list: %s" % name)
+    if args.quiet:
+        pip_args.append("--quiet")
+    for _, requirement in requirements:
         if args.editable:
             pip_args.append("-e")
         pip_args.append(requirement)
     if args.no_isolation:
         pip_args.append("--no-build-isolation")
-    print("[+] Running pip install with arguments: %s" % " ".join(pip_args))
+    print("[+] Installing projects: %s" % ", ".join(name for name, _ in requirements))
     subprocess.check_call(pip_args)
 
 
@@ -573,7 +580,8 @@ def handle_check(args: argparse.Namespace) -> None:
 
     compatible = _compatible_projects(args, projects, requirements)
     environment = _check_environment()
-    _run_python36_gate(compatible, requirements, modules, environment)
+    if not args.skip_compatibility:
+        _run_python36_gate(compatible, requirements, modules, environment)
 
     if not args.compatibility:
         for project in compatible:
