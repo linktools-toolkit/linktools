@@ -361,7 +361,7 @@ def _load_project_checks(project: str, project_path: str) -> "typing.Dict[str, t
 
     if "ruff" in checks:
         ruff = _require_mapping(checks["ruff"], "%s checks.ruff" % project)
-        unknown = _unknown_fields(ruff, _RUFF_FIELDS, "%s checks.ruff")
+        unknown = _unknown_fields(ruff, _RUFF_FIELDS, "%s checks.ruff" % project)
         if unknown:
             print("[-] %s checks.ruff has unknown field(s): %s" % (project, ", ".join(unknown)), file=sys.stderr)
             raise SystemExit(1)
