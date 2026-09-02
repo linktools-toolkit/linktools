@@ -32,6 +32,8 @@ from ..observe import RunSnapshot
 from ..storage import ObjectRef
 from ..task import (
     CancelGraphRequest,
+    TaskEvent,
+    TaskEventType,
     TaskGraphRequest,
     TaskGraphResult,
     TaskGraphSnapshot,
@@ -652,12 +654,21 @@ class TaskService(Protocol):
         *,
         principal: Principal,
     ) -> TaskGraphSnapshot: ...
-    def stream_graph(
+    async def list_graph_events(
         self,
         graph_id: str,
         *,
         principal: Principal,
-    ) -> "AsyncIterator[TaskGraphSnapshot]": ...
+        after_sequence: int = 0,
+        limit: int = 100,
+    ) -> Page[TaskEvent]: ...
+    def stream_graph_events(
+        self,
+        graph_id: str,
+        *,
+        principal: Principal,
+        after_sequence: int = 0,
+    ) -> "AsyncIterator[TaskEvent]": ...
     async def wait_graph(self, graph_id: str, *, principal: Principal, timeout_seconds: "float | None" = None) -> TaskGraphResult: ...
     async def cancel_graph(self, graph_id: str, request: CancelGraphRequest) -> TaskGraphView: ...
 
@@ -741,6 +752,8 @@ __all__ = [
     "SessionHistoryReader",
     "SessionService",
     "SessionView",
+    "TaskEvent",
+    "TaskEventType",
     "TaskService",
     "TranscriptItem",
     "UpdateSessionRequest",
