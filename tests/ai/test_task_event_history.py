@@ -209,6 +209,61 @@ async def test_terminal_event_stream_replays_from_durable_sequence() -> None:
 
 
 @pytest.mark.asyncio
+async def test_terminal_event_early_close_releases_graph_handoff() -> None:
+    state = RuntimeState.in_memory()
+    await state.initialize(namespace="task-event-terminal-release", tenant_id="tenant")
+    stream = None
+    try:
+        repository = state.task.tasks
+        graph = TaskGraph("event-terminal-release", (TaskNode("node"),))
+        await repository.create_graph(graph, tenant_id="tenant")
+        lease = await repository.claim(
+            graph.graph_id,
+            "node",
+            tenant_id="tenant",
+            owner="worker",
+            lease_seconds=30,
+        )
+        await repository.complete(
+            lease,
+            tenant_id="tenant",
+            execution_id=None,
+            result_digest="d" * 64,
+        )
+
+        released: list[tuple[str, str]] = []
+
+        async def release_terminal(graph_id: str, *, tenant_id: str) -> None:
+            released.append((tenant_id, graph_id))
+
+        service = DefaultTaskService(
+            SimpleNamespace(tasks=repository),
+            _AllowAuthorization(),
+            release_terminal=release_terminal,
+        )
+        stream = service.stream_graph_events(
+            graph.graph_id,
+            principal=Principal("tester", "tenant"),
+        )
+        terminal = None
+        async for event in stream:
+            if event.node_id is None and event.status is TaskStatus.SUCCEEDED:
+                terminal = event
+                break
+        assert terminal is not None
+        assert released == []
+
+        await stream.aclose()
+        stream = None
+
+        assert released == [("tenant", graph.graph_id)]
+    finally:
+        if stream is not None:
+            await stream.aclose()
+        await state.close()
+
+
+@pytest.mark.asyncio
 async def test_sqlite_task_event_history_survives_reopen(tmp_path: Path) -> None:
     database = tmp_path / "task-events.sqlite"
     engine = create_async_engine(f"sqlite+aiosqlite:///{database}")
