@@ -9,6 +9,7 @@ from types import SimpleNamespace
 import pytest
 import linktools.ai.task._local as task_local
 from linktools.ai.core import Principal, TaskStatus
+from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.runtime import RuntimeState
 from linktools.ai.task import (
     LocalTaskGraphLauncher,
@@ -62,6 +63,49 @@ class _BlockingRunner:
         dependency_results: Mapping[str, TaskDependencyResult],
     ) -> None:
         del node, graph_id, principal, dependency_results
+
+
+@pytest.mark.asyncio
+async def test_scheduler_retries_transient_reconcile_conflict(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    state = RuntimeState.in_memory()
+    await state.initialize(namespace="task-reconcile-retry", tenant_id="tenant")
+    launcher: LocalTaskGraphLauncher | None = None
+    try:
+        repository = state.task.tasks
+        graph = TaskGraph("reconcile-retry", (TaskNode("node"),))
+        await repository.create_graph(graph, tenant_id="tenant")
+        original_reconcile = repository.reconcile_graph
+        attempts = 0
+
+        async def reconcile(graph_id: str, *, tenant_id: str):
+            nonlocal attempts
+            attempts += 1
+            if attempts == 1:
+                raise AIError(ErrorCode.STORAGE_CONFLICT)
+            return await original_reconcile(graph_id, tenant_id=tenant_id)
+
+        monkeypatch.setattr(repository, "reconcile_graph", reconcile)
+        runner = _BlockingRunner()
+        launcher = LocalTaskGraphLauncher(repository, runner, owner="local-worker")
+        await launcher.start(
+            TaskGraphLaunch(
+                graph,
+                trusted_workspace_principal("tenant"),
+                TaskGraphLimits(),
+            )
+        )
+
+        await asyncio.wait_for(runner.entered.wait(), 1)
+
+        assert attempts >= 2
+        assert launcher.owns_graph(graph.graph_id, tenant_id="tenant")
+    finally:
+        if launcher is not None:
+            await repository.cancel_graph(graph.graph_id, tenant_id="tenant")
+            await launcher.shutdown()
+        await state.close()
 
 
 @pytest.mark.asyncio
