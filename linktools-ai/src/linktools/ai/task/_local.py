@@ -451,26 +451,27 @@ class LocalTaskGraphLauncher:
         request = run.request
         tenant_id = request.principal.tenant_id
         inflight: dict[str, _InflightNode] = {}
-        publish_reconciled = False
+        observed_fingerprint: str | None = None
         try:
             while not run.closed:
                 view = await self._repository.reconcile_graph(
                     request.graph.graph_id,
                     tenant_id=tenant_id,
                 )
-                if publish_reconciled:
-                    await self._notify(run)
-                    publish_reconciled = False
                 states = await self._repository.list_nodes(
                     request.graph.graph_id,
                     tenant_id=tenant_id,
                 )
+                now = datetime.now(timezone.utc)
+                fingerprint = _scheduler_observation_fingerprint(view, states, now)
+                if fingerprint != observed_fingerprint:
+                    observed_fingerprint = fingerprint
+                    await self._notify(run)
                 if view.status in _TERMINAL:
                     if view.status in {TaskStatus.FAILED, TaskStatus.BLOCKED}:
                         await self._cancel_terminal_effects(run, states)
                     return
                 _reap_inflight(inflight)
-                now = datetime.now(timezone.utc)
                 persisted = {
                     state.node_id
                     for state in states
@@ -520,10 +521,9 @@ class LocalTaskGraphLauncher:
                 if inflight:
                     await asyncio.wait(
                         tuple(value.task for value in inflight.values()),
+                        timeout=_SCHEDULER_RECHECK_SECONDS,
                         return_when=asyncio.FIRST_COMPLETED,
                     )
-                    _reap_inflight(inflight)
-                    publish_reconciled = True
                     continue
                 await self._wait_scheduler(run, states)
         except asyncio.CancelledError:
@@ -916,6 +916,38 @@ async def _stop_heartbeat(stop: asyncio.Event, task: "asyncio.Task[None]") -> No
     error = result[0]
     if isinstance(error, BaseException) and not isinstance(error, asyncio.CancelledError):
         raise error
+
+
+def _scheduler_observation_fingerprint(
+    view: TaskGraphView,
+    states: "tuple[TaskNodeView, ...]",
+    now: datetime,
+) -> str:
+    return canonical_sha256(
+        {
+            "status": view.status.value,
+            "nodes": [
+                {
+                    "node_id": state.node_id,
+                    "status": state.status.value,
+                    "owner": state.owner,
+                    "fence": state.fence,
+                    "execution_id": state.execution_id,
+                    "result_digest": state.result_digest,
+                    "error_code": state.error_code,
+                    "error_digest": state.error_digest,
+                    "lease_phase": (
+                        "none"
+                        if state.lease_expires_at is None
+                        else "expired"
+                        if state.lease_expires_at <= now
+                        else "live"
+                    ),
+                }
+                for state in states
+            ],
+        }
+    )
 
 
 def _runnable(node: TaskNodeView, now: datetime) -> bool:
