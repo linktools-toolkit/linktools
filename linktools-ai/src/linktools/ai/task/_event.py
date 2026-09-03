@@ -140,6 +140,7 @@ class TaskEvent:
         if self.status in {TaskStatus.PENDING, TaskStatus.READY}:
             if (
                 self.owner is not None
+                or self.fence != 0
                 or self.execution_id is not None
                 or self.result_digest is not None
                 or self.error_code is not None
