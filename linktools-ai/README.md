@@ -130,6 +130,20 @@ A store-backed group reads metadata, batch-loads the corresponding bytes, verifi
 
 For downstream declaration formats or custom kinds such as `worker` or `audit`, implement `CapabilityLoader` and register it with `group.loader(loader)`. The loader receives the frozen `AssetInfo` sequence and matching byte mapping and returns normal `CapabilityContribution` values. No additional Registry/Provider abstraction is required.
 
+### Workspace sandbox
+
+Workspace filesystem and shell tool effects run through the public `Sandbox` / `SandboxSession` boundary. Inject a custom implementation with `Workspace(..., sandbox=...)`, `Workspace.load(..., sandbox=...)`, or `Workspace.discover(..., sandbox=...)`.
+
+When `sandbox=None`, LinkTools uses its built-in local adapter. That adapter delegates actual filesystem/process operations to the local Harness implementation, but LinkTools owns the stable model-visible workspace tool signatures, descriptions, metadata, and durable semantic pins.
+
+A run with no selected workspace filesystem/shell tools does not open a sandbox. Otherwise the run opens exactly one `SandboxSession`; filesystem tools, foreground shell commands, and background `start/check/stop` commands share that session, which is closed when the model run succeeds, fails, or is cancelled.
+
+Use `DisabledSandbox` to keep workspace tool declarations and historical binding recovery available while making runtime workspace tool materialization fail with `SANDBOX_UNAVAILABLE`. A custom Sandbox failure does not fall back to the local host environment.
+
+Sandbox v1 virtualizes only workspace filesystem and shell tool effects. Runtime state, `AssetStore`, Skill loading, and repository-instruction discovery are not automatically moved into a remote Sandbox. A remote implementation must therefore expose the intended logical project tree itself; LinkTools does not provide project-tree synchronization for an unsynchronized remote Sandbox in v1.
+
+The built-in local Sandbox is an execution boundary, not a claim of container- or VM-level operating-system isolation.
+
 ## 4. Agent selection and capability policy
 
 `AgentSpec` contains declarative selection policy:
