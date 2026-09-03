@@ -675,7 +675,6 @@ class _RuntimeStepPersistence(StepPersistence[None]):
                 args=args,
                 error=error,
                 state=state,
-                model_visible=state.handler_entered,
             )
         finally:
             await self._stop_heartbeat(state)
@@ -771,7 +770,6 @@ class _RuntimeStepPersistence(StepPersistence[None]):
         args: dict[str, Any],
         error: Exception,
         state: _ToolCallState,
-        model_visible: bool = True,
     ) -> Any:
         state.preserve_started = True
         cancelled = await self.tool_operations.fail(state.decision, error)
@@ -792,7 +790,6 @@ class _RuntimeStepPersistence(StepPersistence[None]):
             args=args,
             error=error,
             state=state,
-            model_visible=model_visible,
         )
 
     async def _record_failed_effect(
@@ -804,7 +801,6 @@ class _RuntimeStepPersistence(StepPersistence[None]):
         args: dict[str, Any],
         error: BaseException,
         state: _ToolCallState,
-        model_visible: bool = True,
     ) -> Any:
         if state.effect_terminalized:
             raise error
@@ -818,7 +814,7 @@ class _RuntimeStepPersistence(StepPersistence[None]):
             )
         except BaseException as raised:
             state.effect_terminalized = True
-            if raised is error and model_visible:
+            if raised is error:
                 model_error = _model_tool_error(
                     error,
                     call=call,
