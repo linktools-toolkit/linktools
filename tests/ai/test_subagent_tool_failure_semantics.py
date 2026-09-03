@@ -2,7 +2,6 @@
 # -*- coding: utf-8 -*-
 """Subagent child failures remain typed through the model adapter."""
 
-import json
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -116,9 +115,4 @@ async def test_subagent_adapter_returns_child_failure_to_parent_model() -> None:
             tools["delegate_task"],
         )
 
-    assert raised.value.message == "subagent execution failed: " + json.dumps(
-        details,
-        ensure_ascii=False,
-        separators=(",", ":"),
-        sort_keys=True,
-    )
+    assert raised.value.message == "subagent execution failed; adapt and continue"
