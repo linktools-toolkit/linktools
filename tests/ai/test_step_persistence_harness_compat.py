@@ -1,6 +1,8 @@
 from types import SimpleNamespace
+from typing import Any, cast
 
 import pytest
+from pydantic_ai.tools import RunContext
 
 from linktools.ai.runtime._capabilities import (
     _MissingToolOperationBridge,
@@ -11,14 +13,14 @@ from linktools.ai.runtime._capabilities import (
 @pytest.mark.asyncio
 async def test_runtime_step_persistence_for_run_preserves_config_and_resets_state() -> None:
     bridge = _MissingToolOperationBridge()
-    background_tasks: set[object] = set()
+    background_tasks: set[Any] = set()
     pauses: list[int] = []
     pause_sink = pauses.append
     persistence = _RuntimeStepPersistence(
         tool_operations=bridge,
         run_id="run",
         plan_mode=True,
-        background_tasks=background_tasks,  # type: ignore[arg-type]
+        background_tasks=background_tasks,
         deferred_pause_sink=pause_sink,
     )
     calls = persistence._calls
@@ -26,7 +28,8 @@ async def test_runtime_step_persistence_for_run_preserves_config_and_resets_stat
     persistence._event_sequence = 3
     persistence._snapshot_sequence = 4
 
-    materialized = await persistence.for_run(SimpleNamespace(run_id="ignored"))  # type: ignore[arg-type]
+    ctx = cast(RunContext[None], SimpleNamespace(run_id="ignored"))
+    materialized = await persistence.for_run(ctx)
 
     assert isinstance(materialized, _RuntimeStepPersistence)
     assert materialized is not persistence
