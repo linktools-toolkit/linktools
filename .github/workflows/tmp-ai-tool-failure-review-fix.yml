@@ -1,0 +1,40 @@
+name: Temporary AI tool failure review fix
+
+on:
+  push:
+    branches:
+      - fix/ai-tool-failure-semantics
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: fix/ai-tool-failure-semantics
+          fetch-depth: 0
+
+      - name: Restore model-correctable workspace path retry
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          path = Path("linktools-ai/src/linktools/ai/runtime/_capabilities.py")
+          text = path.read_text(encoding="utf-8")
+          old = '''    except (OSError, ValueError) as error:\n        raise ToolFailed(\n            _format_model_tool_error(\n                _MODEL_FAILED_PREFIX,\n                "workspace path is invalid or outside the workspace; use a path within the workspace root",\n            )\n        ) from error\n'''
+          new = '''    except (OSError, ValueError) as error:\n        raise ModelRetry(\n            _format_model_tool_error(\n                _MODEL_RETRY_PREFIX,\n                "workspace path is invalid or outside the workspace; use a path within the workspace root and retry",\n            )\n        ) from error\n'''
+          if text.count(old) != 1:
+              raise RuntimeError("workspace retry block not found exactly once")
+          path.write_text(text.replace(old, new, 1), encoding="utf-8")
+          PY
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add linktools-ai/src/linktools/ai/runtime/_capabilities.py
+          git diff --cached --check
+          git commit -m "refactor(ai): preserve workspace path retry"
+          git push origin HEAD:fix/ai-tool-failure-semantics
