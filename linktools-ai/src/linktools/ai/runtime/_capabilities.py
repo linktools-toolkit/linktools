@@ -527,6 +527,12 @@ class _RuntimeStepPersistence(StepPersistence[None]):
         except Exception as error:
             if not state.handler_entered or state.policy.effect_free:
                 raise
+            if isinstance(error, AIError):
+                if state.policy.replay_safe:
+                    state.preserve_started = True
+                else:
+                    await self._mark_unknown(state, error)
+                raise
             if state.policy.replay_safe:
                 state.preserve_started = True
                 raise AIError(

@@ -6,7 +6,7 @@ from collections.abc import Awaitable, Callable
 from typing import cast
 
 from pydantic_ai.capabilities import AbstractCapability
-from pydantic_ai.exceptions import ModelRetry
+from pydantic_ai.exceptions import ModelRetry, ToolFailed
 from pydantic_ai.tools import RunContext as PydanticRunContext
 from pydantic_ai.toolsets import FunctionToolset
 
@@ -14,10 +14,14 @@ from ..capability import RunContext, SkillCapability
 from ..errors import AIError, ErrorCode
 
 _SKILL_CAPABILITY_ID = "linktools-skill"
-_MODEL_CORRECTABLE_ERRORS = frozenset(
+_MODEL_RETRY_ERRORS = frozenset(
     {
         ErrorCode.CAPABILITY_RESOLUTION_INVALID,
         ErrorCode.REQUEST_FIELD_INVALID,
+    }
+)
+_MODEL_FAILURE_ERRORS = frozenset(
+    {
         ErrorCode.ASSET_PATH_OUTSIDE_ROOT,
         ErrorCode.ASSET_NOT_FOUND,
         ErrorCode.ASSET_CODEC_UNKNOWN,
@@ -66,9 +70,11 @@ class _PydanticSkillCapability(AbstractCapability[RunContext[object]]):
                     await self._capability.load_skill(skill_id, path),
                 )
             except AIError as error:
-                if error.code not in _MODEL_CORRECTABLE_ERRORS:
-                    raise
-                raise ModelRetry(_skill_retry_message(error.code)) from error
+                if error.code in _MODEL_RETRY_ERRORS:
+                    raise ModelRetry(_skill_error_message(error.code)) from error
+                if error.code in _MODEL_FAILURE_ERRORS:
+                    raise ToolFailed(_skill_error_message(error.code)) from error
+                raise
 
         return toolset
 
@@ -77,7 +83,7 @@ class _PydanticSkillCapability(AbstractCapability[RunContext[object]]):
         return None
 
 
-def _skill_retry_message(code: ErrorCode) -> str:
+def _skill_error_message(code: ErrorCode) -> str:
     if code is ErrorCode.CAPABILITY_RESOLUTION_INVALID:
         return "skill not found"
     if code is ErrorCode.ASSET_NOT_FOUND:

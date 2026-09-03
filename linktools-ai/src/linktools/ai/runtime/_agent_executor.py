@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import asyncio
+import sys
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
@@ -118,6 +119,7 @@ _RUNTIME_RESERVED_TOOL_NAMES = frozenset(
     (*SKILL_TOOL_NAMES, *MEMORY_TOOL_NAMES, *PLANNING_TOOL_NAMES, *SUBAGENT_TOOL_NAMES)
 )
 _WORKSPACE_CAPABILITY_IDS = frozenset({"workspace-filesystem", "workspace-shell"})
+_MAX_TOOL_RETRIES = sys.maxsize
 
 
 @dataclass(frozen=True, slots=True)
@@ -690,6 +692,7 @@ async def _materialize_agent(
             instructions=runtime_instructions,
             output_type=output_type,
             deps_type=RunContext,
+            retries={"tools": _MAX_TOOL_RETRIES},
             tools=tuple(business_tools),
         ),
     )

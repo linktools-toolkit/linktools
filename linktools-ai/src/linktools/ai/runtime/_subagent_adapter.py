@@ -7,7 +7,7 @@ from typing import cast
 
 from pydantic import JsonValue as PydanticJsonValue
 from pydantic_ai.capabilities import AbstractCapability
-from pydantic_ai.exceptions import ModelRetry
+from pydantic_ai.exceptions import ModelRetry, ToolFailed
 from pydantic_ai.tools import RunContext as PydanticRunContext
 from pydantic_ai.toolsets import FunctionToolset
 
@@ -69,6 +69,8 @@ class _PydanticSubagentCapability(AbstractCapability[RunContext[object]]):
                     ),
                 )
             except AIError as error:
+                if error.code is ErrorCode.TOOL_EXECUTION_FAILED:
+                    raise ToolFailed("subagent execution failed; adapt and continue") from error
                 if error.code not in _MODEL_CORRECTABLE_ERRORS:
                     raise
                 raise ModelRetry("requested subagent or task is invalid") from error

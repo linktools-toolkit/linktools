@@ -204,7 +204,23 @@ class SubagentDispatcher:
                 raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED) from primary
             raise
         self._background_failures.pop(child.execution_id, None)
-        return _subagent_result(result)
+        if result.status is ExecutionStatus.SUCCEEDED:
+            return _subagent_result(result)
+        if result.status in {ExecutionStatus.FAILED, ExecutionStatus.CANCELLED}:
+            details: dict[str, JsonValue] = {
+                "phase": "subagent_execution",
+                "subagent_id": ref.id,
+                "execution_id": result.execution_id,
+                "status": result.status.value,
+                "safe_error_details": dict(result.safe_error_details),
+            }
+            if result.error_code is not None:
+                details["error_code"] = result.error_code
+            raise AIError(
+                ErrorCode.TOOL_EXECUTION_FAILED,
+                safe_details=details,
+            )
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
 
     async def cancel_children(
         self,

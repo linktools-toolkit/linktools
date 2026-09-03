@@ -286,6 +286,38 @@ async def test_replay_safe_handler_failure_reports_tool_effect_unknown() -> None
     assert not capability._calls
 
 
+@pytest.mark.parametrize("replay_safe", (True, False))
+async def test_effectful_ai_error_remains_runtime_failure(replay_safe: bool) -> None:
+    capability, bridge, store, context, call, definition = await _capability(replay_safe)
+    failure = AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+
+    async def handler(_args: dict[str, Any]) -> None:
+        raise failure
+
+    with pytest.raises(AIError) as execution:
+        await capability.wrap_tool_execute(
+            context,
+            call=call,
+            tool_def=definition,
+            args={},
+            handler=handler,
+        )
+    assert execution.value is failure
+
+    with pytest.raises(AIError) as propagated:
+        await capability.on_tool_execute_error(
+            context,
+            call=call,
+            tool_def=definition,
+            args={},
+            error=failure,
+        )
+    assert propagated.value is failure
+    assert bridge.calls == (["begin"] if replay_safe else ["begin", "unknown"])
+    assert [effect.status for effect in store.effects] == ["started"]
+    assert not capability._calls
+
+
 async def test_model_retry_is_prefixed_for_model_feedback() -> None:
     capability, bridge, store, context, call, definition = await _capability(True)
 
