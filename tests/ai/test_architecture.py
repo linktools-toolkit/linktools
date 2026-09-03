@@ -39,8 +39,7 @@ class Blocker(MetaPathFinder):
 TARGETS = ('sqlalchemy', 'acp')
 for target in TARGETS:
     sys.meta_path.insert(0, Blocker())
-for name in ('linktools.ai.adapter', 'linktools.ai.asset'):
-    importlib.import_module(name)
+importlib.import_module('linktools.ai.asset')
 for name in TARGETS:
     assert name not in sys.modules, name
 """

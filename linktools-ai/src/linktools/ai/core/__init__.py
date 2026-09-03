@@ -28,7 +28,6 @@ from ._paging import CursorPayload, CursorSigner, HmacCursorSigner, Page
 from ._principal import (
     AuthorizationAction,
     AuthorizationPolicy,
-    PrincipalProvider,
     ResourceRef,
     TenantAuthorizationPolicy,
     service_principal,
@@ -115,7 +114,6 @@ __all__ = [
     "Page",
     "Principal",
     "PrincipalKind",
-    "PrincipalProvider",
     "RedactedValue",
     "RedactionClass",
     "RedactionPolicy",
