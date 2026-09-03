@@ -29,7 +29,7 @@ async def test_local_sandbox_preserves_harness_shell_dispatch(tmp_path: Path) ->
     context = _context()
     command = (
         f"{shlex.quote(sys.executable)} -c "
-        f"{shlex.quote(\"print('x' * 60000)\")}"
+        + shlex.quote("print('x' * 60000)")
     )
     args = {"command": command, "timeout_seconds": None}
 
