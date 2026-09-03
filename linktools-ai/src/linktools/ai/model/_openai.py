@@ -16,7 +16,7 @@ from pydantic_ai.models.openai import OpenAIChatModel
 from pydantic_ai.profiles import ModelProfile
 from pydantic_ai.providers.openai import OpenAIProvider
 from pydantic_ai.retries import AsyncHTTPX2TenacityTransport, RetryConfig, wait_retry_after
-from tenacity import retry_if_exception_type, stop_after_attempt, wait_fixed
+from tenacity import RetryCallState, retry_if_exception_type, stop_after_attempt, wait_fixed
 
 from ..core import JsonValue, canonical_sha256
 from ..errors import AIError, ErrorCode
@@ -137,7 +137,7 @@ def _openai_provider(
             retry=retry_if_exception_type((httpx2.HTTPStatusError, httpx2.TransportError)),
             wait=wait_retry_after(fallback_strategy=wait_fixed(retry_delay_seconds)),
             stop=stop_after_attempt(cast(int, max_retries) + 1),
-            reraise=True,
+            retry_error_callback=_retry_error_result,
         ),
         validate_response=_raise_retryable_status,
     )
@@ -148,6 +148,18 @@ def _openai_provider(
     )
     provider.client.max_retries = 0
     return provider
+
+
+def _retry_error_result(state: RetryCallState) -> httpx2.Response:
+    outcome = state.outcome
+    if outcome is None or not outcome.failed:
+        raise RuntimeError("retry exhausted without a failed attempt")
+    error = outcome.exception()
+    if isinstance(error, httpx2.HTTPStatusError):
+        return error.response
+    if error is None:
+        raise RuntimeError("retry exhausted without an exception")
+    raise error
 
 
 def _raise_retryable_status(response: httpx2.Response) -> None:
