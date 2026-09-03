@@ -3,13 +3,13 @@
 """Observation lifecycle contracts."""
 
 from ._middleware import Middleware, MiddlewarePipeline
-from ._scope import RunContext, context_for, current_context, reset_context, set_context
+from ._scope import ObservationContext, context_for, current_context, reset_context, set_context
 from ._snapshot import RunSnapshot, snapshot_digest
 
 __all__ = [
     "Middleware",
     "MiddlewarePipeline",
-    "RunContext",
+    "ObservationContext",
     "RunSnapshot",
     "context_for",
     "current_context",

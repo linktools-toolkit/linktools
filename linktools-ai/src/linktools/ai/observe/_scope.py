@@ -15,7 +15,7 @@ from ..errors import AIError
 
 
 @dataclass(frozen=True, slots=True)
-class RunContext:
+class ObservationContext:
     tenant_id: str
     principal_id: str
     execution_id: str
@@ -46,18 +46,21 @@ class RunContext:
             raise ValueError("run context is incomplete")
 
 
-_current: ContextVar[RunContext | None] = ContextVar("linktools_ai_run_context", default=None)
+_current: ContextVar[ObservationContext | None] = ContextVar(
+    "linktools_ai_run_context",
+    default=None,
+)
 
 
-def set_context(context: RunContext) -> 'Token[RunContext | None]':
+def set_context(context: ObservationContext) -> 'Token[ObservationContext | None]':
     return _current.set(context)
 
 
-def reset_context(token: 'Token[RunContext | None]') -> None:
+def reset_context(token: 'Token[ObservationContext | None]') -> None:
     _current.reset(token)
 
 
-def current_context() -> 'RunContext | None':
+def current_context() -> 'ObservationContext | None':
     return _current.get()
 
 
@@ -67,8 +70,8 @@ def context_for(
     session_id: "str | None",
     run_id: str,
     agent_id: str,
-) -> RunContext:
-    return RunContext(principal.tenant_id, principal.principal_id, execution_id, session_id, run_id, agent_id)
+) -> ObservationContext:
+    return ObservationContext(principal.tenant_id, principal.principal_id, execution_id, session_id, run_id, agent_id)
 
 
-__all__ = ["RunContext", "context_for", "current_context", "reset_context", "set_context"]
+__all__ = ["ObservationContext", "context_for", "current_context", "reset_context", "set_context"]
