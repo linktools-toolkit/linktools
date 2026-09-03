@@ -394,8 +394,8 @@ async def test_effect_free_ai_error_remains_runtime_failure() -> None:
             error=failure,
         )
     assert propagated.value is failure
-    assert bridge.calls == ["begin"]
-    assert [effect.status for effect in store.effects] == ["started"]
+    assert bridge.calls == ["begin", "fail"]
+    assert [effect.status for effect in store.effects] == ["started", "failed"]
     assert not capability._calls
 
 

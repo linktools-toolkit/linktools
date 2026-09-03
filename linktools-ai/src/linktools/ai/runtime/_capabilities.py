@@ -211,31 +211,40 @@ class _MissingToolOperationBridge:
         raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
 
 
+@dataclass(kw_only=True, eq=False)
 class _RuntimeStepPersistence(StepPersistence[None]):
-    def __init__(
-        self,
-        *,
-        tool_operations: ToolOperationBridge,
-        plan_mode: bool = False,
-        trusted_tool_classes: "tuple[tuple[str, str], ...]" = (),
-        trusted_mcp_selectors: "tuple[str, ...]" = (),
-        background_tasks: "set[asyncio.Task[Any]] | None" = None,
-        deferred_pause_sink: "Callable[[int], None] | None" = None,
-        **kwargs: Any,
-    ) -> None:
-        if not isinstance(plan_mode, bool):
+    tool_operations: ToolOperationBridge = field(repr=False, compare=False)
+    plan_mode: bool = False
+    trusted_tool_classes: "tuple[tuple[str, str], ...]" = ()
+    trusted_mcp_selectors: "tuple[str, ...]" = ()
+    background_tasks: "set[asyncio.Task[Any]]" = field(
+        default_factory=set,
+        repr=False,
+        compare=False,
+    )
+    deferred_pause_sink: "Callable[[int], None] | None" = field(
+        default=None,
+        repr=False,
+        compare=False,
+    )
+    _calls: "dict[tuple[str, str], _ToolCallState]" = field(
+        default_factory=dict,
+        init=False,
+        repr=False,
+        compare=False,
+    )
+    _last_observed_step_index: "int | None" = field(
+        default=None,
+        init=False,
+        repr=False,
+        compare=False,
+    )
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.plan_mode, bool):
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
-        _validate_trusted_tool_classes(trusted_tool_classes)
-        _validate_trusted_mcp_selectors(trusted_mcp_selectors)
-        super().__init__(**kwargs)
-        self._tool_operations = tool_operations
-        self._plan_mode = plan_mode
-        self._trusted_tool_classes = trusted_tool_classes
-        self._trusted_mcp_selectors = trusted_mcp_selectors
-        self._calls: dict[tuple[str, str], _ToolCallState] = {}
-        self._background_tasks = set() if background_tasks is None else background_tasks
-        self._deferred_pause_sink = deferred_pause_sink
-        self._last_observed_step_index: int | None = None
+        _validate_trusted_tool_classes(self.trusted_tool_classes)
+        _validate_trusted_mcp_selectors(self.trusted_mcp_selectors)
 
     async def after_node_run(
         self,
@@ -260,9 +269,9 @@ class _RuntimeStepPersistence(StepPersistence[None]):
                 raise AIError(ErrorCode.CAPABILITY_POLICY_CONFLICT)
             if self._last_observed_step_index is None:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            if self._deferred_pause_sink is None:
+            if self.deferred_pause_sink is None:
                 raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
-            self._deferred_pause_sink(self._last_observed_step_index)
+            self.deferred_pause_sink(self._last_observed_step_index)
         return await super().after_run(ctx, result=result)
 
     async def after_model_request(
@@ -300,10 +309,10 @@ class _RuntimeStepPersistence(StepPersistence[None]):
         args: dict[str, Any],
     ) -> dict[str, Any]:
         del ctx, call
-        if self._plan_mode and not tool_allowed_in_planning(
+        if self.plan_mode and not tool_allowed_in_planning(
             tool_def,
-            trusted_tool_classes=self._trusted_tool_classes,
-            trusted_mcp_selectors=self._trusted_mcp_selectors,
+            trusted_tool_classes=self.trusted_tool_classes,
+            trusted_mcp_selectors=self.trusted_mcp_selectors,
         ):
             raise AIError(
                 ErrorCode.CAPABILITY_POLICY_CONFLICT,
@@ -323,10 +332,10 @@ class _RuntimeStepPersistence(StepPersistence[None]):
     ) -> Any:
         policy = _tool_effect_policy(
             tool_def,
-            trusted_tool_classes=self._trusted_tool_classes,
+            trusted_tool_classes=self.trusted_tool_classes,
         )
         try:
-            decision = await self._tool_operations.begin(
+            decision = await self.tool_operations.begin(
                 ctx,
                 call,
                 tool_def,
@@ -415,7 +424,7 @@ class _RuntimeStepPersistence(StepPersistence[None]):
             finally:
                 state.handler_observed = True
             try:
-                cancelled = await self._tool_operations.complete(
+                cancelled = await self.tool_operations.complete(
                     state.decision,
                     result,
                 )
@@ -431,7 +440,7 @@ class _RuntimeStepPersistence(StepPersistence[None]):
             return result
         except SkipToolExecution as signal:
             state.preserve_started = True
-            cancelled = await self._tool_operations.complete(
+            cancelled = await self.tool_operations.complete(
                 state.decision,
                 signal.result,
             )
@@ -738,7 +747,7 @@ class _RuntimeStepPersistence(StepPersistence[None]):
             await asyncio.sleep(15)
             if handler_task.done():
                 return
-            state.decision = await self._tool_operations.renew(state.decision)
+            state.decision = await self.tool_operations.renew(state.decision)
 
     async def _stop_heartbeat(self, state: _ToolCallState) -> None:
         task = state.heartbeat_task
@@ -755,15 +764,15 @@ class _RuntimeStepPersistence(StepPersistence[None]):
         if task.done():
             self._consume_task(task, label)
             return
-        if task in self._background_tasks:
+        if task in self.background_tasks:
             return
-        self._background_tasks.add(task)
+        self.background_tasks.add(task)
 
         def consume(done: asyncio.Task[Any]) -> None:
             try:
                 self._consume_task(done, label)
             finally:
-                self._background_tasks.discard(done)
+                self.background_tasks.discard(done)
 
         task.add_done_callback(consume)
 
@@ -790,7 +799,7 @@ class _RuntimeStepPersistence(StepPersistence[None]):
     ) -> Any:
         state.preserve_started = True
         durable_error = _durable_failure_error(error, call=call, tool_def=tool_def)
-        cancelled = await self._tool_operations.fail(state.decision, durable_error)
+        cancelled = await self.tool_operations.fail(state.decision, durable_error)
         state.operation_terminalized = True
         state.preserve_started = False
         if cancelled:
@@ -821,7 +830,7 @@ class _RuntimeStepPersistence(StepPersistence[None]):
         state: _ToolCallState,
     ) -> Any:
         state.preserve_started = True
-        cancelled = await self._tool_operations.fail(state.decision, error)
+        cancelled = await self.tool_operations.fail(state.decision, error)
         state.operation_terminalized = True
         state.preserve_started = False
         if cancelled:
@@ -905,7 +914,7 @@ class _RuntimeStepPersistence(StepPersistence[None]):
     async def _mark_unknown(self, state: _ToolCallState, error: BaseException) -> None:
         state.preserve_started = True
         state.operation_terminalized = True
-        await self._tool_operations.unknown(state.decision, error)
+        await self.tool_operations.unknown(state.decision, error)
 
     def _decision_key(self, ctx: "RunContext[None]", call: ToolCallPart) -> tuple[str, str]:
         return self._effective_run_id(ctx), call.tool_call_id
