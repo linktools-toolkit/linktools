@@ -23,7 +23,7 @@ def _context() -> RunContext[None]:
     )
 
 
-def _toolset():
+def _skill_toolset():
     capability = _PydanticSkillCapability(
         SkillCapability(
             (SkillDefinition(SkillSpec("known", content="instructions")),),
@@ -34,7 +34,7 @@ def _toolset():
 
 
 async def test_missing_skill_id_is_model_retry() -> None:
-    toolset = _toolset()
+    toolset = _skill_toolset()
     context = _context()
     tools = await toolset.get_tools(context)
 
@@ -48,7 +48,7 @@ async def test_missing_skill_id_is_model_retry() -> None:
 
 
 async def test_invalid_skill_resource_path_is_model_retry() -> None:
-    toolset = _toolset()
+    toolset = _skill_toolset()
     context = _context()
     tools = await toolset.get_tools(context)
 
@@ -62,7 +62,7 @@ async def test_invalid_skill_resource_path_is_model_retry() -> None:
 
 
 async def test_missing_skill_resource_is_tool_failure() -> None:
-    toolset = _toolset()
+    toolset = _skill_toolset()
     context = _context()
     tools = await toolset.get_tools(context)
 
