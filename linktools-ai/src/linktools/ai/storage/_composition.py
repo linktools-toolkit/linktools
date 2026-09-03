@@ -338,25 +338,7 @@ class StorageOverlay(Generic[KeyT, ValueT, InfoT]):
                 )
             refreshed = await self._state()
             return await self._get_from_state(key, refreshed, retried=True)
-        try:
-            self._validate_value(key, value, info)
-        except Exception:  # noqa: BLE001
-            self._views[owner].invalidate()
-            if retried:
-                _logger.error(
-                    "storage owner mismatch after refresh: key=%s",
-                    key,
-                    extra={"error_code": ErrorCode.STORAGE_OWNER_MISMATCH.value},
-                )
-                raise AIError(
-                    ErrorCode.STORAGE_INTEGRITY_ERROR,
-                    "storage metadata and origin disagree",
-                    safe_details={
-                        "storage_key_digest": canonical_sha256(str(key)),
-                    },
-                )
-            refreshed = await self._state()
-            return await self._get_from_state(key, refreshed, retried=True)
+        self._validate_value(key, value, info)
         if self.cache is not None and cache_key is not None:
             await write_cache(self.cache, cache_key, self.cache_adapter.to_cache(value))
         return value
@@ -398,11 +380,7 @@ class StorageOverlay(Generic[KeyT, ValueT, InfoT]):
                 continue
             info = state.entries[key]
             value = raw
-            try:
-                self._validate_value(key, value, info)
-            except Exception:  # noqa: BLE001
-                raced.add(state.owners[key])
-                continue
+            self._validate_value(key, value, info)
             values[key] = value
             if self.cache is not None and self.cache_adapter is not None:
                 await write_cache(
@@ -605,11 +583,7 @@ class StorageOverlay(Generic[KeyT, ValueT, InfoT]):
                     failed += 1
                     continue
                 value = raw
-                try:
-                    self._validate_value(key, value, state.entries[key])
-                except Exception:  # noqa: BLE001
-                    failed += 1
-                    continue
+                self._validate_value(key, value, state.entries[key])
                 await write_cache(
                     self.cache,
                     identities[key],

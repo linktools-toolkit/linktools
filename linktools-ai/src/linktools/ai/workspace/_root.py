@@ -6,14 +6,11 @@ import unicodedata
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Literal, cast
+from typing import Literal
 
-try:
-    import yaml as _yaml
-except ImportError:
-    _yaml = None
+import yaml as _yaml
 
-from ..core import JsonValue, Principal, PrincipalKind, canonical_sha256
+from ..core import JsonValue, Principal, PrincipalKind, canonical_sha256, normalize_json_value
 from ..errors import AIError, ErrorCode
 
 _STORAGE_DIR_NAME = ".linktools"
@@ -234,10 +231,18 @@ def trusted_workspace_principal(
 
 
 def load_config(path: Path) -> "dict[str, JsonValue]":
-    if not path.exists() or _yaml is None:
+    if not path.exists():
         return {}
-    value = _yaml.safe_load(path.read_text(encoding="utf-8"))
-    return cast("dict[str, JsonValue]", value) if isinstance(value, dict) else {}
+    try:
+        raw = _yaml.safe_load(path.read_text(encoding="utf-8"))
+        if raw is None:
+            return {}
+        value = normalize_json_value(raw)
+        if not isinstance(value, dict):
+            raise TypeError("workspace config root must be a mapping")
+        return value
+    except (_yaml.YAMLError, TypeError, ValueError) as error:
+        raise AIError(ErrorCode.WORKSPACE_CONFIG_INVALID) from error
 
 
 def _select_policy(policy: "WorkspacePolicy | None") -> WorkspacePolicy:
