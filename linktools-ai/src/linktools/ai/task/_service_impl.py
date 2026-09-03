@@ -422,10 +422,7 @@ class DefaultTaskService(TaskApi):
         principal: Principal,
         after_sequence: int,
     ) -> AsyncIterator[TaskEvent]:
-        _validate_event_window(after_sequence, _TASK_EVENT_READ_LIMIT)
         tenant_id = principal.tenant_id
-        cursor = after_sequence
-        pending_wait_error: AIError | None = None
         header = await self._persistence.tasks.get_header(
             graph_id,
             tenant_id=tenant_id,
@@ -437,6 +434,23 @@ class DefaultTaskService(TaskApi):
             AuthorizationAction.TASK_READ,
             header,
         )
+        async for event in self._observe_graph_events_authorized(
+            graph_id,
+            tenant_id=tenant_id,
+            after_sequence=after_sequence,
+        ):
+            yield event
+
+    async def _observe_graph_events_authorized(
+        self,
+        graph_id: str,
+        *,
+        tenant_id: str,
+        after_sequence: int,
+    ) -> AsyncIterator[TaskEvent]:
+        _validate_event_window(after_sequence, _TASK_EVENT_READ_LIMIT)
+        cursor = after_sequence
+        pending_wait_error: AIError | None = None
         while True:
             generation = self._local_activity_generation(
                 graph_id,
@@ -546,9 +560,9 @@ class DefaultTaskService(TaskApi):
             if latest is None:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             if not (latest.node_id is None and _terminal(latest.status)):
-                async for event in self._observe_graph_events(
+                async for event in self._observe_graph_events_authorized(
                     graph_id,
-                    principal=principal,
+                    tenant_id=tenant_id,
                     after_sequence=latest.sequence,
                 ):
                     if event.node_id is None and _terminal(event.status):

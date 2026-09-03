@@ -121,6 +121,7 @@ class TaskEvent:
             not isinstance(self.execution_id, str) or not self.execution_id.strip()
         ):
             raise ValueError("task event execution id is invalid")
+        self._validate_node_state_fields()
 
     def _validate_graph_only_fields(self) -> None:
         if self.node_id is not None:
@@ -134,6 +135,67 @@ class TaskEvent:
             or self.error_digest is not None
         ):
             raise ValueError("task graph event cannot carry node state")
+
+    def _validate_node_state_fields(self) -> None:
+        if self.status in {TaskStatus.PENDING, TaskStatus.READY}:
+            if (
+                self.owner is not None
+                or self.execution_id is not None
+                or self.result_digest is not None
+                or self.error_code is not None
+                or self.error_digest is not None
+            ):
+                raise ValueError("pending task event carries active or terminal state")
+            return
+        if self.status is TaskStatus.RUNNING:
+            if (
+                self.owner is None
+                or self.fence < 1
+                or self.result_digest is not None
+                or self.error_code is not None
+                or self.error_digest is not None
+            ):
+                raise ValueError("running task event state is invalid")
+            return
+        if self.status is TaskStatus.SUCCEEDED:
+            if (
+                self.owner is not None
+                or self.fence < 1
+                or self.result_digest is None
+                or self.error_code is not None
+                or self.error_digest is not None
+            ):
+                raise ValueError("successful task event state is invalid")
+            return
+        if self.status is TaskStatus.FAILED:
+            if (
+                self.owner is not None
+                or self.fence < 1
+                or self.result_digest is not None
+                or self.error_code is None
+                or self.error_digest is None
+            ):
+                raise ValueError("failed task event state is invalid")
+            return
+        if self.status is TaskStatus.BLOCKED:
+            if (
+                self.owner is not None
+                or self.execution_id is not None
+                or self.result_digest is not None
+                or self.error_code is None
+            ):
+                raise ValueError("blocked task event state is invalid")
+            return
+        if self.status is TaskStatus.CANCELLED:
+            if (
+                self.owner is not None
+                or self.result_digest is not None
+                or self.error_code is not None
+                or self.error_digest is not None
+            ):
+                raise ValueError("cancelled task event state is invalid")
+            return
+        raise ValueError("task node event status is unsupported")
 
 
 __all__ = ["TaskEvent", "TaskEventType"]

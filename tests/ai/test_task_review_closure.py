@@ -3,6 +3,7 @@
 """Regression coverage for TaskGraph review closure invariants."""
 
 import asyncio
+from dataclasses import replace
 from types import SimpleNamespace
 
 import pytest
@@ -10,23 +11,28 @@ import pytest
 from ._task_test_helpers import admit_graph
 from linktools.ai.core import (
     OperationStatus,
+    Page,
     Principal,
+    ResourceRef,
     TaskStatus,
     idempotency_key_digest,
 )
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.runtime import RuntimeState
 from linktools.ai.runtime._planner import _AgentTaskNodeHandler
+from linktools.ai.runtime.state._store import StateTransaction
 from linktools.ai.task import (
     CancelGraphRequest,
     DefaultTaskService,
     LocalTaskGraphLauncher,
+    TaskEvent,
     TaskGraph,
     TaskGraphLaunch,
     TaskGraphLimits,
     TaskNode,
     TaskNodeContext,
     TaskNodeRunResult,
+    TaskNodeView,
 )
 from linktools.ai.workspace import trusted_workspace_principal
 
@@ -34,6 +40,15 @@ from linktools.ai.workspace import trusted_workspace_principal
 class _AllowAuthorization:
     async def authorize(self, *args: object, **kwargs: object) -> None:
         del args, kwargs
+
+
+class _CountingAuthorization:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def authorize(self, *args: object, **kwargs: object) -> None:
+        del args, kwargs
+        self.calls += 1
 
 
 class _NoopRunner:
@@ -342,3 +357,193 @@ async def test_bind_after_launch_ignores_expected_ownership_loss() -> None:
         Control(),
     )
     assert handler.background_failure is None
+
+
+@pytest.mark.asyncio
+async def test_task_get_graph_rejects_missing_canonical_node() -> None:
+    state = RuntimeState.in_memory()
+    await state.initialize(namespace="task-get-graph-missing-node", tenant_id="tenant")
+    try:
+        repository = state.task.tasks
+        graph = TaskGraph("get-graph-missing-node", (TaskNode("node"),))
+        await admit_graph(state, graph)
+        node_key = repository._node_key(graph.graph_id, "node")
+
+        async def delete_node(transaction: StateTransaction) -> None:
+            record = await transaction.get_record(node_key)
+            assert record is not None
+            assert await transaction.delete_record(
+                node_key,
+                expected_storage_version=record.storage_version,
+            )
+
+        await repository.state_store.mutate(delete_node)
+
+        with pytest.raises(AIError) as repository_error:
+            await repository.get_graph(graph.graph_id, tenant_id="tenant")
+        assert repository_error.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
+
+        service = DefaultTaskService(state.task, _AllowAuthorization())
+        with pytest.raises(AIError) as service_error:
+            await service.inspect_graph(
+                graph.graph_id,
+                principal=trusted_workspace_principal("tenant"),
+            )
+        assert service_error.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
+    finally:
+        await state.close()
+
+
+@pytest.mark.asyncio
+async def test_task_get_graph_rejects_tampered_node_dependencies() -> None:
+    state = RuntimeState.in_memory()
+    await state.initialize(namespace="task-get-graph-dependencies", tenant_id="tenant")
+    try:
+        repository = state.task.tasks
+        graph = TaskGraph(
+            "get-graph-dependencies",
+            (TaskNode("root"), TaskNode("child", ("root",))),
+        )
+        await admit_graph(state, graph)
+        node_key = repository._node_key(graph.graph_id, "child")
+
+        async def corrupt_dependencies(transaction: StateTransaction) -> None:
+            record = await transaction.get_record(node_key)
+            assert record is not None
+            node = await repository._decode(record, TaskNodeView)
+            candidate = repository._task_node_record(
+                record,
+                replace(node, dependencies=()),
+            )
+            assert await transaction.replace_record(
+                candidate,
+                expected_storage_version=record.storage_version,
+            )
+
+        await repository.state_store.mutate(corrupt_dependencies)
+
+        with pytest.raises(AIError) as error:
+            await repository.get_graph(graph.graph_id, tenant_id="tenant")
+        assert error.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
+    finally:
+        await state.close()
+
+
+@pytest.mark.asyncio
+async def test_cancel_readback_does_not_accept_corrupt_graph_as_terminal() -> None:
+    state = RuntimeState.in_memory()
+    await state.initialize(namespace="task-cancel-corrupt-readback", tenant_id="tenant")
+    try:
+        repository = state.task.tasks
+        graph = TaskGraph("cancel-corrupt-readback", (TaskNode("node"),))
+        await admit_graph(state, graph)
+        node_key = repository._node_key(graph.graph_id, "node")
+
+        async def delete_node(transaction: StateTransaction) -> None:
+            record = await transaction.get_record(node_key)
+            assert record is not None
+            assert await transaction.delete_record(
+                node_key,
+                expected_storage_version=record.storage_version,
+            )
+
+        await repository.state_store.mutate(delete_node)
+        service = DefaultTaskService(state.task, _AllowAuthorization())
+        key = "cancel-corrupt-readback-0001"
+
+        with pytest.raises(AIError) as error:
+            await service.cancel_graph(
+                graph.graph_id,
+                CancelGraphRequest(
+                    trusted_workspace_principal("tenant"),
+                    key,
+                ),
+            )
+        assert error.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
+
+        operation = await state.task.operations.get(
+            idempotency_key_digest(key),
+            tenant_id="tenant",
+        )
+        assert operation is not None
+        assert operation.status is OperationStatus.EFFECT_UNKNOWN
+    finally:
+        await state.close()
+
+
+@pytest.mark.asyncio
+async def test_wait_graph_reuses_existing_read_authorization(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    state = RuntimeState.in_memory()
+    await state.initialize(namespace="task-wait-auth-read", tenant_id="tenant")
+    try:
+        repository = state.task.tasks
+        graph = TaskGraph("wait-auth-read", (TaskNode("node"),))
+        await admit_graph(state, graph)
+        lease = await repository.claim(
+            graph.graph_id,
+            "node",
+            tenant_id="tenant",
+            owner="worker",
+            lease_seconds=30,
+        )
+        await repository.reconcile_graph(graph.graph_id, tenant_id="tenant")
+
+        original_get_header = repository.get_header
+        original_list_events = repository.list_events
+        header_calls = 0
+        completed = False
+
+        async def counted_get_header(
+            graph_id: str,
+            *,
+            tenant_id: str,
+        ) -> ResourceRef | None:
+            nonlocal header_calls
+            header_calls += 1
+            return await original_get_header(graph_id, tenant_id=tenant_id)
+
+        async def complete_before_read(
+            graph_id: str,
+            *,
+            tenant_id: str,
+            after_sequence: int,
+            limit: int,
+        ) -> Page[TaskEvent]:
+            nonlocal completed
+            if not completed:
+                completed = True
+                await repository.complete(
+                    lease,
+                    tenant_id="tenant",
+                    execution_id=None,
+                    result_digest="d" * 64,
+                )
+                await repository.reconcile_graph(graph.graph_id, tenant_id="tenant")
+            return await original_list_events(
+                graph_id,
+                tenant_id=tenant_id,
+                after_sequence=after_sequence,
+                limit=limit,
+            )
+
+        monkeypatch.setattr(repository, "get_header", counted_get_header)
+        monkeypatch.setattr(repository, "list_events", complete_before_read)
+        authorization = _CountingAuthorization()
+        service = DefaultTaskService(
+            SimpleNamespace(tasks=repository),
+            authorization,
+        )
+
+        result = await service.wait_graph(
+            graph.graph_id,
+            principal=trusted_workspace_principal("tenant"),
+            timeout_seconds=1,
+        )
+
+        assert result.status is TaskStatus.SUCCEEDED
+        assert header_calls == 1
+        assert authorization.calls == 1
+    finally:
+        await state.close()

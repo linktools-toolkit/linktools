@@ -865,18 +865,10 @@ class TaskRepositoryImpl(RepositoryBase):
     async def get_graph(self, graph_id: str, *, tenant_id: str) -> TaskGraphView | None:
         if tenant_id != self._tenant_id:
             return None
-        record = await self._record(self._graph_key(graph_id))
-        if record is None:
+        snapshot = await self.snapshot_graph(graph_id, tenant_id=tenant_id)
+        if snapshot is None:
             return None
-        self._validate_graph_record(record, graph_id)
-        graph = await self._decode(record, TaskGraphView)
-        _require_canonical_graph_status(graph.status)
-        nodes = await self.list_nodes(graph_id, tenant_id=tenant_id)
-        return TaskGraphView(
-            graph.graph_id,
-            _effective_graph_status(graph, nodes),
-            graph.nodes,
-        )
+        return TaskGraphView(snapshot.graph_id, snapshot.status, snapshot.nodes)
 
     async def snapshot_graph(
         self,
