@@ -192,7 +192,10 @@ class _AsyncClientTransport(httpx2.AsyncBaseTransport):
         self._client = client
 
     async def handle_async_request(self, request: httpx2.Request) -> httpx2.Response:
-        return await self._client.send(request, stream=True)
+        response = await self._client.send(request, stream=True)
+        if _should_retry_response(response):
+            await response.aread()
+        return response
 
     async def aclose(self) -> None:
         await self._client.aclose()
@@ -252,9 +255,19 @@ def _retry_error_result(state: RetryCallState) -> httpx2.Response:
 
 
 def _raise_retryable_status(response: httpx2.Response) -> None:
-    status_code = response.status_code
-    if status_code in {408, 409, 429} or status_code >= 500:
+    if _should_retry_response(response):
         response.raise_for_status()
+
+
+def _should_retry_response(response: httpx2.Response) -> bool:
+    if response.status_code < 400:
+        return False
+    should_retry = response.headers.get("x-should-retry")
+    if should_retry == "false":
+        return False
+    if should_retry == "true":
+        return True
+    return response.status_code in {408, 409, 429} or response.status_code >= 500
 
 
 def _validate_positive_number(name: str, value: "float | None") -> None:
