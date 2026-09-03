@@ -16,7 +16,7 @@ from ..capability import RunContext, SubagentCapability
 from ..errors import AIError, ErrorCode
 
 _SUBAGENT_CAPABILITY_ID = "linktools-subagent"
-_MODEL_RETRY_ERRORS = frozenset(
+_MODEL_CORRECTABLE_ERRORS = frozenset(
     {
         ErrorCode.CAPABILITY_RESOLUTION_INVALID,
         ErrorCode.REQUEST_FIELD_INVALID,
@@ -70,29 +70,17 @@ class _PydanticSubagentCapability(AbstractCapability[RunContext[object]]):
                     ),
                 )
             except AIError as error:
-                if error.code in _MODEL_RETRY_ERRORS:
-                    raise ModelRetry(_subagent_retry_message(error)) from error
                 if error.code is ErrorCode.TOOL_EXECUTION_FAILED:
                     raise ToolFailed(_subagent_failure_message(error)) from error
-                raise
+                if error.code not in _MODEL_CORRECTABLE_ERRORS:
+                    raise
+                raise ModelRetry("requested subagent or task is invalid") from error
 
         return toolset
 
     @classmethod
     def get_serialization_name(cls) -> "str | None":
         return None
-
-
-def _subagent_retry_message(error: AIError) -> str:
-    if error.code is ErrorCode.CAPABILITY_RESOLUTION_INVALID:
-        subagent_id = error.safe_details.get("subagent_id")
-        target = (
-            f"subagent {subagent_id!r}"
-            if isinstance(subagent_id, str) and subagent_id
-            else "requested subagent"
-        )
-        return f"{target} is not available; call list_subagents and choose an available subagent"
-    return "requested subagent or task is invalid"
 
 
 def _subagent_failure_message(error: AIError) -> str:
