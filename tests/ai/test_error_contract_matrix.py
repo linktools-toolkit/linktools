@@ -3,6 +3,7 @@
 """Required error-contract matrix coverage."""
 
 import json
+from datetime import datetime, timezone
 from collections.abc import AsyncIterator
 from types import SimpleNamespace
 
@@ -13,6 +14,7 @@ from linktools.ai.core import (
     ExecutionStatus,
     JsonValue,
     Principal,
+    Page,
     ResourceKind,
     ResourceRef,
     StructuredRedactor,
@@ -21,13 +23,23 @@ from linktools.ai.core import (
 )
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.model import ModelRegistry
-from linktools.ai.runtime import DefaultExecutionService, ExecutionResult, ExecutionStreamEvent
-from linktools.ai.runtime._agent_executor import DurableBoundary, _execution_error, _map_event
+from linktools.ai.runtime import (
+    DefaultExecutionService,
+    ExecutionResult,
+    ExecutionStreamEvent,
+)
+from linktools.ai.runtime._agent_executor import (
+    DurableBoundary,
+    _execution_error,
+    _map_event,
+)
 from linktools.ai.runtime._planner import _execution_failure
 from linktools.ai.runtime._subagent import _subagent_result
 from linktools.ai.storage import StoragePath
 from linktools.ai.task import (
     DefaultTaskService,
+    TaskEvent,
+    TaskEventType,
     TaskGraphSnapshot,
     TaskNode,
     TaskNodeView,
@@ -74,8 +86,16 @@ def _failed_result(
     [
         (ModelAPIError("model", "provider failed"), ErrorCode.MODEL_API_ERROR, False),
         (ContentFilterError("filtered"), ErrorCode.MODEL_CONTENT_FILTERED, False),
-        (UnexpectedModelBehavior("invalid response"), ErrorCode.MODEL_RESPONSE_INVALID, False),
-        (ConcurrencyLimitExceeded("queue full"), ErrorCode.EXECUTION_CONCURRENCY_LIMIT_EXCEEDED, True),
+        (
+            UnexpectedModelBehavior("invalid response"),
+            ErrorCode.MODEL_RESPONSE_INVALID,
+            False,
+        ),
+        (
+            ConcurrencyLimitExceeded("queue full"),
+            ErrorCode.EXECUTION_CONCURRENCY_LIMIT_EXCEEDED,
+            True,
+        ),
     ],
 )
 def test_pydantic_execution_errors_have_stable_domain_codes(
@@ -196,9 +216,13 @@ async def test_execution_wait_timeout_has_stable_code() -> None:
 
     service.inspect = inspect  # type: ignore[method-assign]
 
-    async def load_authorized(execution_id: str, principal: Principal, action: object) -> object:
+    async def load_authorized(
+        execution_id: str, principal: Principal, action: object
+    ) -> object:
         del principal, action
-        return SimpleNamespace(execution_id=execution_id, status=ExecutionStatus.STARTED)
+        return SimpleNamespace(
+            execution_id=execution_id, status=ExecutionStatus.STARTED
+        )
 
     service._load_authorized = load_authorized  # type: ignore[method-assign]
     service._backend = None
@@ -254,6 +278,37 @@ class _RunningTasks:
             (node,),
             (state,),
         )
+
+    async def latest_event(
+        self,
+        graph_id: str,
+        *,
+        tenant_id: str,
+    ) -> TaskEvent:
+        del graph_id, tenant_id
+        return TaskEvent(
+            1,
+            "graph",
+            2,
+            TaskEventType.NODE_CHANGED,
+            datetime.now(timezone.utc),
+            TaskStatus.RUNNING,
+            TaskStatus.READY,
+            "node",
+            "worker",
+            1,
+        )
+
+    async def list_events(
+        self,
+        graph_id: str,
+        *,
+        tenant_id: str,
+        after_sequence: int,
+        limit: int,
+    ) -> Page[TaskEvent]:
+        del graph_id, tenant_id, after_sequence, limit
+        return Page(())
 
 
 @pytest.mark.asyncio

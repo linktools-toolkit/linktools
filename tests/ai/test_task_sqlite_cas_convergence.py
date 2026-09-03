@@ -4,6 +4,7 @@
 
 import asyncio
 from collections.abc import Mapping
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -22,13 +23,14 @@ from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.migrate import provision_runtime_database
 from linktools.ai.runtime import Runtime, RuntimeState
 from linktools.ai.runtime._planner import RuntimeTaskNodeRunner
-from linktools.ai.runtime.state._repositories import TaskRepositoryImpl
-from linktools.ai.runtime.state._task_recovery_repository import DurableTaskRepositoryImpl
+from linktools.ai.runtime.state._task_repository import TaskRepositoryImpl
 from linktools.ai.spec import AgentSpec, AgentSpecCodec
-from linktools.ai.storage import StoredPayload
+from linktools.ai.storage import ObjectRef, StoredPayload
 from linktools.ai.task import (
     CancelGraphRequest,
     TaskDependencyResult,
+    TaskEvent,
+    TaskEventType,
     TaskGraph,
     TaskGraphAdmission,
     TaskGraphLimits,
@@ -37,6 +39,7 @@ from linktools.ai.task import (
     TaskGraphView,
     TaskLease,
     TaskNode,
+    TaskNodeView,
     TaskNodeRunControl,
     TaskNodeRunResult,
     TaskTerminalRecord,
@@ -87,9 +90,7 @@ def _workspace(root: Path) -> Workspace:
     agent_path = root / ".linktools" / "agents" / "default"
     agent_path.parent.mkdir(parents=True)
     agent_path.write_bytes(
-        AgentSpecCodec().encode(
-            AgentSpec("default", model="default", allow_tools=())
-        )
+        AgentSpecCodec().encode(AgentSpec("default", model="default", allow_tools=()))
     )
     return Workspace.load(root)
 
@@ -162,8 +163,7 @@ async def test_sqlite_public_runtime_task_graph_repeated_concurrency_is_stable(
             )
             assert result.status is TaskStatus.SUCCEEDED
             assert all(
-                node.status is TaskStatus.SUCCEEDED
-                for node in result.node_results
+                node.status is TaskStatus.SUCCEEDED for node in result.node_results
             )
 
         for index in range(20):
@@ -188,8 +188,7 @@ async def test_sqlite_public_runtime_task_graph_repeated_concurrency_is_stable(
             )
             assert result.status is TaskStatus.SUCCEEDED
             assert all(
-                node.status is TaskStatus.SUCCEEDED
-                for node in result.node_results
+                node.status is TaskStatus.SUCCEEDED for node in result.node_results
             )
 
 
@@ -395,6 +394,22 @@ class _ReadOnlyTaskRepository:
             (),
         )
 
+    async def latest_event(
+        self,
+        graph_id: str,
+        *,
+        tenant_id: str,
+    ) -> TaskEvent:
+        del graph_id, tenant_id
+        return TaskEvent(
+            1,
+            self.view.graph_id,
+            1,
+            TaskEventType.GRAPH_ADMITTED,
+            datetime.now(timezone.utc),
+            self.view.status,
+        )
+
     async def reconcile_graph(
         self,
         graph_id: str,
@@ -417,9 +432,7 @@ class _ReadOnlyTaskRepository:
 
 @pytest.mark.asyncio
 async def test_task_inspect_and_wait_are_read_only() -> None:
-    tasks = _ReadOnlyTaskRepository(
-        TaskGraphView("observed", TaskStatus.SUCCEEDED, ())
-    )
+    tasks = _ReadOnlyTaskRepository(TaskGraphView("observed", TaskStatus.SUCCEEDED, ()))
     service = DefaultTaskService(
         SimpleNamespace(tasks=tasks),
         TenantAuthorizationPolicy("tenant"),
@@ -453,46 +466,140 @@ async def _admitted_state(
 
 
 @pytest.mark.asyncio
+async def test_task_node_dependency_projection_fails_closed() -> None:
+    state, request = await _admitted_state(
+        TaskGraph(
+            "dependency-integrity",
+            (TaskNode("a"), TaskNode("b", ("a",))),
+        )
+    )
+    repository = state.task.tasks
+    assert isinstance(repository, TaskRepositoryImpl)
+
+    async def corrupt(transaction) -> None:
+        key = repository._node_key(request.graph.graph_id, "b")
+        record = await transaction.get_record(key)
+        assert record is not None
+        node = await repository._decode(record, TaskNodeView)
+        candidate = repository._task_node_record(
+            record,
+            replace(node, dependencies=()),
+        )
+        assert await transaction.replace_record(
+            candidate,
+            expected_storage_version=record.storage_version,
+        )
+
+    await repository.state_store.mutate(corrupt)
+    try:
+        with pytest.raises(AIError) as reconcile_error:
+            await repository.reconcile_graph(
+                request.graph.graph_id,
+                tenant_id="tenant",
+            )
+        assert reconcile_error.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
+
+        with pytest.raises(AIError) as claim_error:
+            await repository.claim(
+                request.graph.graph_id,
+                "b",
+                tenant_id="tenant",
+                owner="runner",
+                lease_seconds=60,
+            )
+        assert claim_error.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
+    finally:
+        await state.close()
+
+
+@pytest.mark.asyncio
+async def test_task_projection_readback_rejects_corrupt_admission_graph_identity(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    state, request = await _admitted_state(
+        TaskGraph("readback-integrity", (TaskNode("root"),))
+    )
+    repository = state.task.tasks
+    assert isinstance(repository, TaskRepositoryImpl)
+
+    async def corrupt(transaction) -> None:
+        key = repository._admission_key(request.graph.graph_id)
+        record = await transaction.get_record(key)
+        assert record is not None
+        admission = await repository._decode(record, TaskGraphAdmission)
+        tampered = replace(admission, graph_id="other-graph")
+        encoded = repository._stored(
+            "task_admission",
+            request.graph.graph_id,
+            tampered,
+            scope=repository._recovery_scope(),
+            state=record.state,
+        )
+        candidate = replace(
+            record,
+            data=encoded.data,
+            storage_version=record.storage_version + 1,
+        )
+        assert await transaction.replace_record(
+            candidate,
+            expected_storage_version=record.storage_version,
+        )
+
+    async def conflict(operation):
+        del operation
+        raise AIError(ErrorCode.STORAGE_CONFLICT)
+
+    await repository.state_store.mutate(corrupt)
+    monkeypatch.setattr(repository, "_mutate_with_event_retry", conflict)
+    try:
+        with pytest.raises(AIError) as raised:
+            await repository.reconcile_graph(
+                request.graph.graph_id,
+                tenant_id="tenant",
+            )
+        assert raised.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
+    finally:
+        await state.close()
+
+
+@pytest.mark.asyncio
 async def test_task_claim_conflict_reloads_and_reclassifies_owner(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     state, request = await _admitted_state(TaskGraph("claim-race", (TaskNode("root"),)))
     repository = state.task.tasks
-    assert isinstance(repository, DurableTaskRepositoryImpl)
-    original = TaskRepositoryImpl.claim
+    assert isinstance(repository, TaskRepositoryImpl)
+    initial = (await repository.list_nodes(request.graph.graph_id, tenant_id="tenant"))[
+        0
+    ]
+    winner = replace(
+        initial,
+        status=TaskStatus.RUNNING,
+        owner="winner",
+        fence=initial.fence + 1,
+        lease_expires_at=datetime.now(timezone.utc) + timedelta(seconds=60),
+    )
     attempts = 0
+    readbacks = 0
 
-    async def claim(
-        self: TaskRepositoryImpl,
-        graph_id: str,
-        node_id: str,
-        *,
-        tenant_id: str,
-        owner: str,
-        lease_seconds: int,
-    ) -> TaskLease:
+    async def mutate_with_event_retry(operation):
+        del operation
         nonlocal attempts
         attempts += 1
-        if attempts == 1:
-            await original(
-                self,
-                graph_id,
-                node_id,
-                tenant_id=tenant_id,
-                owner="winner",
-                lease_seconds=lease_seconds,
-            )
-            raise AIError(ErrorCode.STORAGE_CONFLICT)
-        return await original(
-            self,
-            graph_id,
-            node_id,
-            tenant_id=tenant_id,
-            owner=owner,
-            lease_seconds=lease_seconds,
-        )
+        raise AIError(ErrorCode.STORAGE_CONFLICT)
 
-    monkeypatch.setattr(TaskRepositoryImpl, "claim", claim)
+    async def node(graph_id: str, node_id: str, tenant_id: str):
+        del graph_id, node_id, tenant_id
+        nonlocal readbacks
+        readbacks += 1
+        return winner
+
+    monkeypatch.setattr(
+        repository,
+        "_mutate_with_event_retry",
+        mutate_with_event_retry,
+    )
+    monkeypatch.setattr(repository, "_node", node)
     try:
         with pytest.raises(AIError) as raised:
             await repository.claim(
@@ -504,9 +611,7 @@ async def test_task_claim_conflict_reloads_and_reclassifies_owner(
             )
         assert raised.value.code is ErrorCode.TASK_OWNER_CONFLICT
         assert attempts == 1
-        nodes = await repository.list_nodes(request.graph.graph_id, tenant_id="tenant")
-        assert nodes[0].owner == "winner"
-        assert nodes[0].status is TaskStatus.RUNNING
+        assert readbacks == 1
     finally:
         await state.close()
 
@@ -515,9 +620,11 @@ async def test_task_claim_conflict_reloads_and_reclassifies_owner(
 async def test_task_complete_conflict_reads_back_without_retry(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    state, request = await _admitted_state(TaskGraph("complete-race", (TaskNode("root"),)))
+    state, request = await _admitted_state(
+        TaskGraph("complete-race", (TaskNode("root"),))
+    )
     repository = state.task.tasks
-    assert isinstance(repository, DurableTaskRepositoryImpl)
+    assert isinstance(repository, TaskRepositoryImpl)
     lease = await repository.claim(
         request.graph.graph_id,
         "root",
@@ -570,12 +677,64 @@ async def test_task_complete_conflict_reads_back_without_retry(
 
 
 @pytest.mark.asyncio
+async def test_task_complete_readback_rejects_same_digest_different_payload(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    state, request = await _admitted_state(
+        TaskGraph("complete-payload-race", (TaskNode("root"),))
+    )
+    repository = state.task.tasks
+    assert isinstance(repository, TaskRepositoryImpl)
+    lease = await repository.claim(
+        request.graph.graph_id,
+        "root",
+        tenant_id="tenant",
+        owner="runner",
+        lease_seconds=60,
+    )
+    stored_payload = StoredPayload.inline_bytes(b"same payload bytes")
+    await repository.complete(
+        lease,
+        tenant_id="tenant",
+        execution_id=None,
+        result_digest=stored_payload.digest,
+        result_payload=stored_payload,
+    )
+    conflicting_payload = StoredPayload.object(
+        ObjectRef(
+            "alternate-store",
+            "alternate-key",
+            stored_payload.digest,
+            stored_payload.size,
+        )
+    )
+
+    async def conflict(operation):
+        del operation
+        raise AIError(ErrorCode.STORAGE_CONFLICT)
+
+    monkeypatch.setattr(repository, "_mutate_with_event_retry", conflict)
+    try:
+        with pytest.raises(AIError) as raised:
+            await repository.complete(
+                lease,
+                tenant_id="tenant",
+                execution_id=None,
+                result_digest=stored_payload.digest,
+                result_payload=conflicting_payload,
+            )
+        assert raised.value.code is ErrorCode.TASK_RESULT_CONFLICT
+    finally:
+        await state.close()
+
+
+@pytest.mark.asyncio
 async def test_task_fail_conflict_reads_back_without_retry(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     state, request = await _admitted_state(TaskGraph("fail-race", (TaskNode("root"),)))
     repository = state.task.tasks
-    assert isinstance(repository, DurableTaskRepositoryImpl)
+    assert isinstance(repository, TaskRepositoryImpl)
     lease = await repository.claim(
         request.graph.graph_id,
         "root",
@@ -631,9 +790,11 @@ async def test_task_fail_conflict_reads_back_without_retry(
 async def test_task_terminal_conflict_preserves_cancelled_state(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    state, request = await _admitted_state(TaskGraph("cancel-race", (TaskNode("root"),)))
+    state, request = await _admitted_state(
+        TaskGraph("cancel-race", (TaskNode("root"),))
+    )
     repository = state.task.tasks
-    assert isinstance(repository, DurableTaskRepositoryImpl)
+    assert isinstance(repository, TaskRepositoryImpl)
     lease = await repository.claim(
         request.graph.graph_id,
         "root",
@@ -641,26 +802,35 @@ async def test_task_terminal_conflict_preserves_cancelled_state(
         owner="runner",
         lease_seconds=60,
     )
+    running = (await repository.list_nodes(request.graph.graph_id, tenant_id="tenant"))[
+        0
+    ]
+    cancelled = replace(
+        running,
+        status=TaskStatus.CANCELLED,
+        owner=None,
+        lease_expires_at=None,
+    )
     attempts = 0
 
-    async def complete(
-        self: TaskRepositoryImpl,
-        lease: TaskLease,
-        *,
-        tenant_id: str,
-        execution_id: str | None,
-        result_digest: str,
-        result_payload: StoredPayload | None = None,
-    ) -> TaskTerminalRecord:
-        del execution_id, result_digest, result_payload
+    async def mutate_with_event_retry(operation):
+        del operation
         nonlocal attempts
         attempts += 1
         if attempts != 1:
             raise AssertionError("durable complete must not retry internally")
-        await self.cancel_graph(lease.graph_id, tenant_id=tenant_id)
         raise AIError(ErrorCode.STORAGE_CONFLICT)
 
-    monkeypatch.setattr(TaskRepositoryImpl, "complete", complete)
+    async def node(graph_id: str, node_id: str, tenant_id: str):
+        del graph_id, node_id, tenant_id
+        return cancelled
+
+    monkeypatch.setattr(
+        repository,
+        "_mutate_with_event_retry",
+        mutate_with_event_retry,
+    )
+    monkeypatch.setattr(repository, "_node", node)
     try:
         with pytest.raises(AIError) as raised:
             await repository.complete(
@@ -671,8 +841,6 @@ async def test_task_terminal_conflict_preserves_cancelled_state(
             )
         assert raised.value.code is ErrorCode.TASK_TERMINAL_CONFLICT
         assert attempts == 1
-        nodes = await repository.list_nodes(request.graph.graph_id, tenant_id="tenant")
-        assert nodes[0].status is TaskStatus.CANCELLED
     finally:
         await state.close()
 
@@ -687,7 +855,7 @@ async def test_task_reconcile_conflict_uses_readback_without_retry(
     )
     state, request = await _admitted_state(graph)
     repository = state.task.tasks
-    assert isinstance(repository, DurableTaskRepositoryImpl)
+    assert isinstance(repository, TaskRepositoryImpl)
     lease = await repository.claim(
         request.graph.graph_id,
         "a",
@@ -755,7 +923,7 @@ async def test_task_cancel_conflict_requires_explicit_retry(
         TaskGraph("cancel-projection-race", (TaskNode("a"), TaskNode("b")))
     )
     repository = state.task.tasks
-    assert isinstance(repository, DurableTaskRepositoryImpl)
+    assert isinstance(repository, TaskRepositoryImpl)
     original = repository._sync_recovery_projection
     attempts = 0
 

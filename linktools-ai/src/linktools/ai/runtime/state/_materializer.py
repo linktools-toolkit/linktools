@@ -45,7 +45,7 @@ from ._plan import (
     RuntimeStatePlan,
     RuntimeStateRoute,
 )
-from ._repositories import build_repository_bundle
+from ._repositories import OperationLedgerRepository, build_repository_bundle
 from ._retention import RuntimeRetentionController
 from ._sql import SqlStateStorageGroup, SqlStateStore
 from ._steps import (
@@ -54,10 +54,7 @@ from ._steps import (
     StagingStepStore,
     StateStepArchive,
 )
-from ._task_recovery_repository import (
-    DurableTaskAdmissionRepositoryImpl,
-    DurableTaskRepositoryImpl,
-)
+from ._task_repository import TaskAdmissionRepositoryImpl, TaskRepositoryImpl
 
 _logger = environ.get_logger("ai.runtime.state.materializer")
 _OBJECT_DOMAINS = frozenset(
@@ -70,7 +67,11 @@ _OBJECT_DOMAINS = frozenset(
         RuntimeDomain.TASK,
     }
 )
-_STEP_DOMAINS = (RuntimeDomain.CONVERSATION, RuntimeDomain.EXECUTION, RuntimeDomain.RECOVERY)
+_STEP_DOMAINS = (
+    RuntimeDomain.CONVERSATION,
+    RuntimeDomain.EXECUTION,
+    RuntimeDomain.RECOVERY,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -106,20 +107,26 @@ class _RuntimeObjectRouter:
         except KeyError as error:
             raise AIError(ErrorCode.STORAGE_DEPENDENCY_NOT_READY) from error
 
-    def resolve_object(self, domain: RuntimeDomain, reference: ObjectRef) -> ObjectStore:
+    def resolve_object(
+        self, domain: RuntimeDomain, reference: ObjectRef
+    ) -> ObjectStore:
         """Resolve an object by its durable runtime domain, never by store id."""
         store = self.object_store(domain)
         if reference.store_id != store.store_id:
             raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
         return store
 
-    def working_object_store(self, domain: RuntimeDomain, *, owner_scope: str) -> ObjectStore:
+    def working_object_store(
+        self, domain: RuntimeDomain, *, owner_scope: str
+    ) -> ObjectStore:
         store = self.object_store(domain)
         if isinstance(store, TransientObjectStore):
             return store.scoped(f"runtime:{domain.value}:{owner_scope}")
         return store
 
-    async def release_object_scope(self, domain: RuntimeDomain, *, owner_scope: str) -> None:
+    async def release_object_scope(
+        self, domain: RuntimeDomain, *, owner_scope: str
+    ) -> None:
         store = self.object_store(domain)
         if isinstance(store, TransientObjectStore):
             await store.release_scope(f"runtime:{domain.value}:{owner_scope}")
@@ -204,7 +211,9 @@ async def materialize_runtime_state(
                 for domain in domains
             }
             standalone = route.transaction_root is None
-            scope = _filesystem_group_scope(namespace, tenant_id, group_root, member_roots)
+            scope = _filesystem_group_scope(
+                namespace, tenant_id, group_root, member_roots
+            )
             group = FilesystemStateStorageGroup(
                 group_root if not standalone else member_roots[domains[0]],
                 namespace=namespace,
@@ -233,7 +242,9 @@ async def materialize_runtime_state(
             if key[0] == "sqlite":
                 if route.path is None:
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                await asyncio.to_thread(route.path.parent.mkdir, parents=True, exist_ok=True)
+                await asyncio.to_thread(
+                    route.path.parent.mkdir, parents=True, exist_ok=True
+                )
                 from sqlalchemy.ext.asyncio import create_async_engine
 
                 engine = create_async_engine(f"sqlite+aiosqlite:///{route.path}")
@@ -281,24 +292,36 @@ async def materialize_runtime_state(
                 cleanups.append(group.close)
 
         bundles = {
-            domain: build_repository_bundle(stores[domain], namespace=namespace, tenant_id=tenant_id, domain=domain)
+            domain: build_repository_bundle(
+                stores[domain], namespace=namespace, tenant_id=tenant_id, domain=domain
+            )
             for domain in RuntimeDomain
+            if domain is not RuntimeDomain.TASK
         }
         bundles[RuntimeDomain.RECOVERY]["approvals"] = ApprovalAdmissionRepositoryImpl(
             stores[RuntimeDomain.RECOVERY],
             namespace=namespace,
             tenant_id=tenant_id,
         )
-        bundles[RuntimeDomain.TASK]["tasks"] = DurableTaskRepositoryImpl(
-            stores[RuntimeDomain.TASK],
-            namespace=namespace,
-            tenant_id=tenant_id,
-        )
-        bundles[RuntimeDomain.TASK]["admissions"] = DurableTaskAdmissionRepositoryImpl(
-            stores[RuntimeDomain.TASK],
-            namespace=namespace,
-            tenant_id=tenant_id,
-        )
+        task_store = stores[RuntimeDomain.TASK]
+        bundles[RuntimeDomain.TASK] = {
+            "operations": OperationLedgerRepository(
+                task_store,
+                namespace=namespace,
+                tenant_id=tenant_id,
+                domain=RuntimeDomain.TASK,
+            ),
+            "tasks": TaskRepositoryImpl(
+                task_store,
+                namespace=namespace,
+                tenant_id=tenant_id,
+            ),
+            "admissions": TaskAdmissionRepositoryImpl(
+                task_store,
+                namespace=namespace,
+                tenant_id=tenant_id,
+            ),
+        }
         components = tuple(
             value
             for bundle in bundles.values()
@@ -325,7 +348,6 @@ async def materialize_runtime_state(
             execution=states.execution,
             memory=states.memory,
             artifact=states.artifact,
-            task=states.task,
             evaluation=states.evaluation,
             recovery=states.recovery,
             objects=objects,
@@ -393,10 +415,12 @@ def _states(bundles: Mapping[RuntimeDomain, Mapping[str, object]]) -> object:
                     bundles[RuntimeDomain.EXECUTION]["operations"],
                 ),
                 "memory": MemoryState(
-                    bundles[RuntimeDomain.MEMORY]["records"], bundles[RuntimeDomain.MEMORY]["operations"]
+                    bundles[RuntimeDomain.MEMORY]["records"],
+                    bundles[RuntimeDomain.MEMORY]["operations"],
                 ),
                 "artifact": ArtifactState(
-                    bundles[RuntimeDomain.ARTIFACT]["records"], bundles[RuntimeDomain.ARTIFACT]["operations"]
+                    bundles[RuntimeDomain.ARTIFACT]["records"],
+                    bundles[RuntimeDomain.ARTIFACT]["operations"],
                 ),
                 "task": TaskState(
                     bundles[RuntimeDomain.TASK]["tasks"],
@@ -476,7 +500,10 @@ def _build_steps(
     archives: dict[RuntimeDomain, object] = {}
     for domain in _STEP_DOMAINS:
         route = plan.route(domain)
-        if route.retention is RuntimeRetentionMode.TRANSIENT and domain is not RuntimeDomain.CONVERSATION:
+        if (
+            route.retention is RuntimeRetentionMode.TRANSIENT
+            and domain is not RuntimeDomain.CONVERSATION
+        ):
             continue
         if route.retention is RuntimeRetentionMode.DURABLE:
             context_sources = None
@@ -493,14 +520,10 @@ def _build_steps(
                 runtime_domain=domain,
                 context_sources=context_sources,
                 history_repository=(
-                    history_repository
-                    if domain is RuntimeDomain.CONVERSATION
-                    else None
+                    history_repository if domain is RuntimeDomain.CONVERSATION else None
                 ),
                 execution_repository=(
-                    execution_repository
-                    if domain is RuntimeDomain.EXECUTION
-                    else None
+                    execution_repository if domain is RuntimeDomain.EXECUTION else None
                 ),
             )
         else:
@@ -530,7 +553,9 @@ def _tenant_scope_digest(tenant_id: str) -> str:
     return hashlib.sha256(("tenant:" + tenant_id).encode("utf-8")).hexdigest()
 
 
-def _route_domain_path(route: RuntimeStateRoute, namespace: str, tenant_id: str) -> Path:
+def _route_domain_path(
+    route: RuntimeStateRoute, namespace: str, tenant_id: str
+) -> Path:
     if route.path is None:
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     return route.path / namespace_digest(namespace) / _tenant_scope_digest(tenant_id)

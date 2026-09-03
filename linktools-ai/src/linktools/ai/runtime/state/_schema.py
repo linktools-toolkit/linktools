@@ -22,9 +22,15 @@ if TYPE_CHECKING:
 
 
 _RECORD_COMMENT = "Current durable state for runtime and step resources persisted as versioned records."
-_ALIAS_COMMENT = "Secondary unique lookup identities that resolve to canonical runtime records."
-_FACT_COMMENT = "Immutable ordered execution and step facts including events, snapshots, and tool effects."
-_SEQUENCE_COMMENT = "Durable monotonic counters used to allocate ordered runtime and step sequence numbers."
+_ALIAS_COMMENT = (
+    "Secondary unique lookup identities that resolve to canonical runtime records."
+)
+_FACT_COMMENT = (
+    "Immutable ordered runtime facts including events, snapshots, and effects."
+)
+_SEQUENCE_COMMENT = (
+    "Durable monotonic counters used to allocate ordered runtime sequence numbers."
+)
 _OPERATION_COMMENT = "Ordered durable operation ledger for replay, result recovery, status transition, and compaction."
 
 
@@ -65,7 +71,10 @@ def build_runtime_sql_metadata(
         metadata,
         sql_id_column(),
         Column(
-            "key_digest", digest, nullable=False, comment="Canonical SHA-256 identity of the persisted runtime record."
+            "key_digest",
+            digest,
+            nullable=False,
+            comment="Canonical SHA-256 identity of the persisted runtime record.",
         ),
         Column(
             "partition_digest",
@@ -209,7 +218,12 @@ def build_runtime_sql_metadata(
             nullable=True,
             comment="Queryable fact state such as snapshot completeness or tool-effect lifecycle state.",
         ),
-        Column("payload_json", JSON, nullable=False, comment="Versioned canonical immutable fact payload."),
+        Column(
+            "payload_json",
+            JSON,
+            nullable=False,
+            comment="Versioned canonical immutable fact payload.",
+        ),
         *_audit(),
         comment=_FACT_COMMENT,
         **sql_table_options(),
@@ -229,7 +243,12 @@ def build_runtime_sql_metadata(
             nullable=False,
             comment="Canonical SHA-256 identity of the monotonic sequence counter.",
         ),
-        Column("value", BigInteger, nullable=False, comment="Last committed value allocated by the sequence."),
+        Column(
+            "value",
+            BigInteger,
+            nullable=False,
+            comment="Last committed value allocated by the sequence.",
+        ),
         *_audit(),
         comment=_SEQUENCE_COMMENT,
         **sql_table_options(),
@@ -241,7 +260,12 @@ def build_runtime_sql_metadata(
         "ai_state_operations",
         metadata,
         sql_id_column(),
-        Column("key_digest", digest, nullable=False, comment="Canonical SHA-256 identity of the durable operation."),
+        Column(
+            "key_digest",
+            digest,
+            nullable=False,
+            comment="Canonical SHA-256 identity of the durable operation.",
+        ),
         Column(
             "stream_digest",
             digest,
@@ -285,7 +309,9 @@ def build_runtime_sql_metadata(
 
 def required_runtime_sql_tables(plan: RuntimeStatePlan) -> frozenset[str]:
     """Return the stable Runtime table set for a durable plan."""
-    if not any(plan.route(domain).retention.value == "durable" for domain in RuntimeDomain):
+    if not any(
+        plan.route(domain).retention.value == "durable" for domain in RuntimeDomain
+    ):
         return frozenset()
     return frozenset(
         {

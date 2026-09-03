@@ -6,6 +6,7 @@ import asyncio
 
 import pytest
 
+from ._task_test_helpers import admit_graph
 from linktools.ai.core import TaskStatus
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.runtime import RuntimeState
@@ -18,9 +19,9 @@ async def test_active_foreign_task_lease_cannot_be_stolen() -> None:
     await state.initialize(namespace="task-lease-test", tenant_id="tenant")
     try:
         repository = state.task.tasks
-        await repository.create_graph(
+        await admit_graph(
+            state,
             TaskGraph("graph", (TaskNode("node"),)),
-            tenant_id="tenant",
         )
         first = await repository.claim(
             "graph",
@@ -55,9 +56,9 @@ async def test_expired_task_lease_reclaim_fences_stale_terminal_write() -> None:
     await state.initialize(namespace="task-reclaim-test", tenant_id="tenant")
     try:
         repository = state.task.tasks
-        await repository.create_graph(
+        await admit_graph(
+            state,
             TaskGraph("graph", (TaskNode("node"),)),
-            tenant_id="tenant",
         )
         stale = await repository.claim(
             "graph",

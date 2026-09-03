@@ -454,10 +454,16 @@ class LocalTaskGraphLauncher:
         observed_fingerprint: str | None = None
         try:
             while not run.closed:
-                view = await self._repository.reconcile_graph(
-                    request.graph.graph_id,
-                    tenant_id=tenant_id,
-                )
+                try:
+                    view = await self._repository.reconcile_graph(
+                        request.graph.graph_id,
+                        tenant_id=tenant_id,
+                    )
+                except AIError as error:
+                    if error.code is not ErrorCode.STORAGE_CONFLICT:
+                        raise
+                    await asyncio.sleep(0)
+                    continue
                 states = await self._repository.list_nodes(
                     request.graph.graph_id,
                     tenant_id=tenant_id,
@@ -542,6 +548,11 @@ class LocalTaskGraphLauncher:
                 )
             run.closed = True
             await self._notify(run)
+            if run.failure is None:
+                key = (tenant_id, request.graph.graph_id)
+                async with self._lock:
+                    if self._graphs.get(key) is run:
+                        self._graphs.pop(key, None)
 
     async def _cancel_terminal_effects(
         self,

@@ -5,7 +5,8 @@
 from collections.abc import AsyncIterator
 from typing import Protocol
 
-from ..core import Principal
+from ..core import Page, Principal
+from ._event import TaskEvent
 from ._graph import (
     CancelGraphRequest,
     TaskGraphHandle,
@@ -32,12 +33,22 @@ class TaskQueryApi(Protocol):
         principal: Principal,
     ) -> TaskGraphSnapshot: ...
 
-    def stream_graph(
+    async def list_graph_events(
         self,
         graph_id: str,
         *,
         principal: Principal,
-    ) -> AsyncIterator[TaskGraphSnapshot]: ...
+        after_sequence: int = 0,
+        limit: int = 100,
+    ) -> Page[TaskEvent]: ...
+
+    def stream_graph_events(
+        self,
+        graph_id: str,
+        *,
+        principal: Principal,
+        after_sequence: int = 0,
+    ) -> AsyncIterator[TaskEvent]: ...
 
     async def wait_graph(
         self,

@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 """Generic TaskGraph value objects."""
 
+import heapq
 import json
 import math
 import re
@@ -34,7 +35,10 @@ class TaskGraphLimits:
 
     def __post_init__(self) -> None:
         values = (self.max_concurrency, self.max_depth, self.max_nodes, self.max_budget)
-        if any(not isinstance(value, int) or isinstance(value, bool) or value < 1 for value in values):
+        if any(
+            not isinstance(value, int) or isinstance(value, bool) or value < 1
+            for value in values
+        ):
             raise ValueError("task graph limits must be positive")
 
 
@@ -85,7 +89,10 @@ class TaskNode:
         if (
             not isinstance(node_id, str)
             or not node_id.strip()
-            or any(not isinstance(item, str) or not item.strip() for item in normalized_dependencies)
+            or any(
+                not isinstance(item, str) or not item.strip()
+                for item in normalized_dependencies
+            )
             or len(set(normalized_dependencies)) != len(normalized_dependencies)
             or not isinstance(budget_cost, int)
             or isinstance(budget_cost, bool)
@@ -121,7 +128,12 @@ class TaskLease:
             validate_lease_owner(self.owner)
         except AIError as error:
             raise ValueError("task lease identity is invalid") from error
-        if not self.graph_id.strip() or not self.node_id.strip() or self.fence < 1 or self.lease_expires_at.tzinfo is None:
+        if (
+            not self.graph_id.strip()
+            or not self.node_id.strip()
+            or self.fence < 1
+            or self.lease_expires_at.tzinfo is None
+        ):
             raise ValueError("task lease is invalid")
 
 
@@ -157,31 +169,51 @@ class TaskGraph:
             raise ValueError("task graph id is required")
         object.__setattr__(self, "nodes", tuple(self.nodes))
         ids = {node.node_id for node in self.nodes}
-        if len(ids) != len(self.nodes) or any(dependency not in ids for node in self.nodes for dependency in node.dependencies):
-            raise TaskGraphValidationError(ErrorCode.TASK_DEPENDENCY_UNKNOWN, "task graph contains an unknown dependency")
+        if len(ids) != len(self.nodes) or any(
+            dependency not in ids
+            for node in self.nodes
+            for dependency in node.dependencies
+        ):
+            raise TaskGraphValidationError(
+                ErrorCode.TASK_DEPENDENCY_UNKNOWN,
+                "task graph contains an unknown dependency",
+            )
         self._topological_order()
 
-    def _topological_order(self) -> 'tuple[str, ...]':
-        remaining = {node.node_id: set(node.dependencies) for node in self.nodes}
+    def _topological_order(self) -> "tuple[str, ...]":
+        indegree = {node.node_id: len(node.dependencies) for node in self.nodes}
+        dependents: dict[str, list[str]] = {node.node_id: [] for node in self.nodes}
+        for node in self.nodes:
+            for dependency in node.dependencies:
+                dependents[dependency].append(node.node_id)
+        ready = [node_id for node_id, degree in indegree.items() if degree == 0]
+        heapq.heapify(ready)
         order: list[str] = []
-        while remaining:
-            ready = tuple(sorted(node_id for node_id, dependencies in remaining.items() if not dependencies))
-            if not ready:
-                raise TaskGraphValidationError(ErrorCode.TASK_GRAPH_CYCLE, "task graph contains a cycle")
-            order.extend(ready)
-            for node_id in ready:
-                remaining.pop(node_id)
-            for dependencies in remaining.values():
-                dependencies.difference_update(ready)
+        while ready:
+            node_id = heapq.heappop(ready)
+            order.append(node_id)
+            for dependent in dependents[node_id]:
+                indegree[dependent] -= 1
+                if indegree[dependent] == 0:
+                    heapq.heappush(ready, dependent)
+        if len(order) != len(self.nodes):
+            raise TaskGraphValidationError(
+                ErrorCode.TASK_GRAPH_CYCLE,
+                "task graph contains a cycle",
+            )
         return tuple(order)
 
     def validate_limits(self, limits: TaskGraphLimits) -> None:
         if len(self.nodes) > limits.max_nodes:
             raise AIError(ErrorCode.TASK_DAG_INVALID, "task graph exceeds node limit")
+        nodes = {node.node_id: node for node in self.nodes}
         depths: dict[str, int] = {}
         for node_id in self._topological_order():
-            node = next(node for node in self.nodes if node.node_id == node_id)
-            depths[node_id] = 1 + max((depths[item] for item in node.dependencies), default=0)
+            node = nodes[node_id]
+            depths[node_id] = 1 + max(
+                (depths[item] for item in node.dependencies),
+                default=0,
+            )
         if max(depths.values(), default=0) > limits.max_depth:
             raise AIError(ErrorCode.TASK_DAG_INVALID, "task graph exceeds depth limit")
         if sum(node.budget_cost for node in self.nodes) > limits.max_budget:
@@ -221,11 +253,27 @@ class TaskCompletionLedger:
     def __init__(self) -> None:
         self._records: dict[str, TaskTerminalRecord] = {}
 
-    def complete(self, node_id: str, owner: str, fence: int, result_digest: str, execution_id: "str | None" = None) -> TaskTerminalRecord:
+    def complete(
+        self,
+        node_id: str,
+        owner: str,
+        fence: int,
+        result_digest: str,
+        execution_id: "str | None" = None,
+    ) -> TaskTerminalRecord:
         if not result_digest:
             raise ValueError("result digest is required")
         return self._apply(
-            TaskTerminalRecord(node_id, owner, fence, TaskStatus.SUCCEEDED, result_digest, None, None, execution_id=execution_id)
+            TaskTerminalRecord(
+                node_id,
+                owner,
+                fence,
+                TaskStatus.SUCCEEDED,
+                result_digest,
+                None,
+                None,
+                execution_id=execution_id,
+            )
         )
 
     def fail(
@@ -252,12 +300,17 @@ class TaskCompletionLedger:
             )
         )
 
-    def get(self, node_id: str) -> 'TaskTerminalRecord | None':
+    def get(self, node_id: str) -> "TaskTerminalRecord | None":
         return self._records.get(node_id)
 
     def _apply(self, candidate: TaskTerminalRecord) -> TaskTerminalRecord:
         if candidate.fence < 1 or not candidate.node_id or not candidate.owner:
-            if candidate.fence < 1 and candidate.node_id and candidate.owner and candidate.node_id in self._records:
+            if (
+                candidate.fence < 1
+                and candidate.node_id
+                and candidate.owner
+                and candidate.node_id in self._records
+            ):
                 raise AIError(ErrorCode.TASK_FENCE_STALE)
             raise ValueError("task terminal identity is invalid")
         previous = self._records.get(candidate.node_id)
@@ -366,7 +419,9 @@ class TaskGraphAdmission:
             request.principal,
             request.limits,
             idempotency_key_digest(request.idempotency_key),
-            _task_graph_request_digest(request.graph, request.principal, request.limits),
+            _task_graph_request_digest(
+                request.graph, request.principal, request.limits
+            ),
         )
 
     def bind(self, graph: TaskGraph) -> TaskGraphLaunch:
@@ -376,7 +431,10 @@ class TaskGraphAdmission:
             if graph.graph_id != self.graph_id:
                 raise ValueError("task graph admission graph mismatch")
             graph.validate_limits(self.limits)
-            if _task_graph_request_digest(graph, self.principal, self.limits) != self.request_digest:
+            if (
+                _task_graph_request_digest(graph, self.principal, self.limits)
+                != self.request_digest
+            ):
                 raise ValueError("task graph admission digest mismatch")
         except (AIError, TypeError, ValueError) as error:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
@@ -434,7 +492,9 @@ class TaskDependencyResult:
             if not isinstance(self.result_payload, StoredPayload):
                 raise TypeError("task dependency result payload is invalid")
             if self.result_payload.digest != self.result_digest:
-                raise ValueError("task dependency result payload digest does not match result")
+                raise ValueError(
+                    "task dependency result payload digest does not match result"
+                )
 
 
 @dataclass(frozen=True, slots=True)
@@ -467,7 +527,10 @@ class TaskGraphSnapshot:
         if len(set(node_ids)) != len(node_ids) or node_ids != state_ids:
             raise ValueError("task graph snapshot node set is invalid")
         for node, state in zip(nodes, states, strict=True):
-            if state.graph_id != self.graph_id or state.dependencies != node.dependencies:
+            if (
+                state.graph_id != self.graph_id
+                or state.dependencies != node.dependencies
+            ):
                 raise ValueError("task graph snapshot node identity is invalid")
         aggregate = _aggregate_graph_status(states)
         if aggregate is not self.status:
@@ -514,9 +577,14 @@ class CancelGraphRequest:
         validate_idempotency_key(self.idempotency_key)
 
 
-def ready_nodes(graph: TaskGraph, completed: "frozenset[str]") -> "tuple[TaskNode, ...]":
+def ready_nodes(
+    graph: TaskGraph, completed: "frozenset[str]"
+) -> "tuple[TaskNode, ...]":
     return tuple(
-        node for node in graph.nodes if node.node_id not in completed and all(dependency in completed for dependency in node.dependencies)
+        node
+        for node in graph.nodes
+        if node.node_id not in completed
+        and all(dependency in completed for dependency in node.dependencies)
     )
 
 

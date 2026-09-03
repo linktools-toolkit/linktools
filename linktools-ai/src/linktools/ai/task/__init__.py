@@ -3,6 +3,7 @@
 """Generic TaskGraph contracts and local scheduling."""
 
 from ._api import open_local_task_api
+from ._event import TaskEvent, TaskEventType
 from ._graph import (
     CancelGraphRequest,
     TaskCompletionLedger,
@@ -44,6 +45,8 @@ __all__ = [
     "TaskCompletionLedger",
     "TaskDependency",
     "TaskDependencyResult",
+    "TaskEvent",
+    "TaskEventType",
     "TaskFunction",
     "TaskGraph",
     "TaskGraphAdmission",

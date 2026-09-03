@@ -7,9 +7,10 @@ from collections.abc import Mapping
 from types import SimpleNamespace
 
 import pytest
+from ._task_test_helpers import admit_graph
 import linktools.ai.task._local as task_local
-import linktools.ai.task._service_impl as task_service_impl
 from linktools.ai.core import Principal, TaskStatus
+from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.runtime import RuntimeState
 from linktools.ai.task import (
     LocalTaskGraphLauncher,
@@ -66,6 +67,49 @@ class _BlockingRunner:
 
 
 @pytest.mark.asyncio
+async def test_scheduler_retries_transient_reconcile_conflict(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    state = RuntimeState.in_memory()
+    await state.initialize(namespace="task-reconcile-retry", tenant_id="tenant")
+    launcher: LocalTaskGraphLauncher | None = None
+    try:
+        repository = state.task.tasks
+        graph = TaskGraph("reconcile-retry", (TaskNode("node"),))
+        await admit_graph(state, graph)
+        original_reconcile = repository.reconcile_graph
+        attempts = 0
+
+        async def reconcile(graph_id: str, *, tenant_id: str):
+            nonlocal attempts
+            attempts += 1
+            if attempts == 1:
+                raise AIError(ErrorCode.STORAGE_CONFLICT)
+            return await original_reconcile(graph_id, tenant_id=tenant_id)
+
+        monkeypatch.setattr(repository, "reconcile_graph", reconcile)
+        runner = _BlockingRunner()
+        launcher = LocalTaskGraphLauncher(repository, runner, owner="local-worker")
+        await launcher.start(
+            TaskGraphLaunch(
+                graph,
+                trusted_workspace_principal("tenant"),
+                TaskGraphLimits(),
+            )
+        )
+
+        await asyncio.wait_for(runner.entered.wait(), 1)
+
+        assert attempts >= 2
+        assert launcher.owns_graph(graph.graph_id, tenant_id="tenant")
+    finally:
+        if launcher is not None:
+            await repository.cancel_graph(graph.graph_id, tenant_id="tenant")
+            await launcher.shutdown()
+        await state.close()
+
+
+@pytest.mark.asyncio
 async def test_scheduler_timeout_boundary_does_not_lose_completion_activity(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -78,7 +122,7 @@ async def test_scheduler_timeout_boundary_does_not_lose_completion_activity(
             "boundary-activity",
             (TaskNode("local"), TaskNode("foreign")),
         )
-        await repository.create_graph(graph, tenant_id="tenant")
+        await admit_graph(state, graph)
         await repository.claim(
             graph.graph_id,
             "foreign",
@@ -160,7 +204,7 @@ async def test_scheduler_timeout_boundary_does_not_lose_completion_activity(
 
 
 @pytest.mark.asyncio
-async def test_local_stream_observers_do_not_poll_durable_snapshots_when_idle(
+async def test_local_event_stream_observers_do_not_poll_durable_snapshots_when_idle(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     state = RuntimeState.in_memory()
@@ -171,15 +215,27 @@ async def test_local_stream_observers_do_not_poll_durable_snapshots_when_idle(
     try:
         repository = state.task.tasks
         graph = TaskGraph("observer-idle", (TaskNode("local"),))
-        await repository.create_graph(graph, tenant_id="tenant")
+        await admit_graph(state, graph)
         principal = trusted_workspace_principal("tenant")
         runner = _BlockingRunner()
         monkeypatch.setattr(task_local, "_SCHEDULER_RECHECK_SECONDS", 0.01)
-        monkeypatch.setattr(task_service_impl, "_GRAPH_OBSERVATION_RECHECK_SECONDS", 0.01)
         launcher = LocalTaskGraphLauncher(repository, runner, owner="local-worker")
         await launcher.start(TaskGraphLaunch(graph, principal, TaskGraphLimits()))
         await asyncio.wait_for(runner.entered.wait(), 1)
         await asyncio.sleep(0.05)
+
+        service = DefaultTaskService(
+            SimpleNamespace(tasks=repository),
+            _AllowAuthorization(),
+            local_waiter=launcher,
+        )
+        history = await service.list_graph_events(
+            graph.graph_id,
+            principal=principal,
+            limit=100,
+        )
+        assert history.items
+        after_sequence = history.items[-1].sequence
 
         snapshot_calls = 0
         original_snapshot = repository.snapshot_graph
@@ -194,22 +250,22 @@ async def test_local_stream_observers_do_not_poll_durable_snapshots_when_idle(
             return await original_snapshot(graph_id, tenant_id=tenant_id)
 
         monkeypatch.setattr(repository, "snapshot_graph", counting_snapshot)
-        service = DefaultTaskService(
-            SimpleNamespace(tasks=repository),
-            _AllowAuthorization(),
-            local_waiter=launcher,
-        )
         streams = [
-            service.stream_graph(graph.graph_id, principal=principal),
-            service.stream_graph(graph.graph_id, principal=principal),
+            service.stream_graph_events(
+                graph.graph_id,
+                principal=principal,
+                after_sequence=after_sequence,
+            ),
+            service.stream_graph_events(
+                graph.graph_id,
+                principal=principal,
+                after_sequence=after_sequence,
+            ),
         ]
-        first = [await asyncio.wait_for(anext(stream), 1) for stream in streams]
-        assert all(snapshot.node_states[0].status is TaskStatus.RUNNING for snapshot in first)
-        assert snapshot_calls == 2
-
         pending = [asyncio.create_task(anext(stream)) for stream in streams]
         await asyncio.sleep(0.05)
-        assert snapshot_calls == 2
+
+        assert snapshot_calls == 0
         assert all(not task.done() for task in pending)
     finally:
         for task in pending:
@@ -226,11 +282,13 @@ async def test_local_stream_observers_do_not_poll_durable_snapshots_when_idle(
 
 
 @pytest.mark.asyncio
-async def test_local_stream_observes_foreign_update_via_scheduler_notification(
+async def test_local_event_stream_observes_foreign_update_via_scheduler_notification(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     state = RuntimeState.in_memory()
-    await state.initialize(namespace="task-observer-scheduler-notify", tenant_id="tenant")
+    await state.initialize(
+        namespace="task-observer-scheduler-notify", tenant_id="tenant"
+    )
     launcher: LocalTaskGraphLauncher | None = None
     stream = None
     try:
@@ -239,7 +297,7 @@ async def test_local_stream_observes_foreign_update_via_scheduler_notification(
             "observer-scheduler-notify",
             (TaskNode("local"), TaskNode("foreign")),
         )
-        await repository.create_graph(graph, tenant_id="tenant")
+        await admit_graph(state, graph)
         foreign_lease = await repository.claim(
             graph.graph_id,
             "foreign",
@@ -250,7 +308,6 @@ async def test_local_stream_observes_foreign_update_via_scheduler_notification(
         principal = trusted_workspace_principal("tenant")
         runner = _BlockingRunner()
         monkeypatch.setattr(task_local, "_SCHEDULER_RECHECK_SECONDS", 0.01)
-        monkeypatch.setattr(task_service_impl, "_GRAPH_OBSERVATION_RECHECK_SECONDS", 60.0)
         launcher = LocalTaskGraphLauncher(repository, runner, owner="local-worker")
         await launcher.start(
             TaskGraphLaunch(
@@ -266,11 +323,19 @@ async def test_local_stream_observes_foreign_update_via_scheduler_notification(
             _AllowAuthorization(),
             local_waiter=launcher,
         )
-        stream = service.stream_graph(graph.graph_id, principal=principal)
-        first = await asyncio.wait_for(anext(stream), 1)
-        first_by_id = {node.node_id: node for node in first.node_states}
-        assert first_by_id["local"].status is TaskStatus.RUNNING
-        assert first_by_id["foreign"].status is TaskStatus.RUNNING
+        history = await service.list_graph_events(
+            graph.graph_id,
+            principal=principal,
+            limit=100,
+        )
+        assert history.items
+        stream = service.stream_graph_events(
+            graph.graph_id,
+            principal=principal,
+            after_sequence=history.items[-1].sequence,
+        )
+        pending = asyncio.create_task(anext(stream))
+        await asyncio.sleep(0)
 
         await repository.complete(
             foreign_lease,
@@ -279,10 +344,11 @@ async def test_local_stream_observes_foreign_update_via_scheduler_notification(
             result_digest="b" * 64,
         )
 
-        second = await asyncio.wait_for(anext(stream), 1)
-        second_by_id = {node.node_id: node for node in second.node_states}
-        assert second_by_id["local"].status is TaskStatus.RUNNING
-        assert second_by_id["foreign"].status is TaskStatus.SUCCEEDED
+        event = await asyncio.wait_for(pending, 1)
+        assert event.node_id == "foreign"
+        assert event.previous_status is TaskStatus.RUNNING
+        assert event.status is TaskStatus.SUCCEEDED
+        assert event.result_digest == "b" * 64
     finally:
         if stream is not None:
             await stream.aclose()

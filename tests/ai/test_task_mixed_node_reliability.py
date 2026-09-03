@@ -6,6 +6,7 @@ import asyncio
 from pathlib import Path
 
 import pytest
+from ._task_test_helpers import admit_graph
 from linktools.ai.capability import CapabilityGroup
 from linktools.ai.core import JsonValue, TaskStatus
 from linktools.ai.errors import AIError, ErrorCode
@@ -75,7 +76,9 @@ async def _echo_task(context: TaskNodeContext[None]) -> JsonValue:
 
 
 @pytest.mark.asyncio
-async def test_task_handler_versions_are_exact_and_reserved_namespace_is_closed() -> None:
+async def test_task_handler_versions_are_exact_and_reserved_namespace_is_closed() -> (
+    None
+):
     group = CapabilityGroup[None]("application")
     v1 = TaskFunction[None]("example.echo", 1, _echo_task)
     v2 = TaskFunction[None]("example.echo", 2, _echo_task)
@@ -102,7 +105,7 @@ async def test_task_result_commit_preserves_early_execution_binding() -> None:
     try:
         repository = state.task.tasks
         graph = TaskGraph("result-graph", (TaskNode("node"),))
-        await repository.create_graph(graph, tenant_id="tenant")
+        await admit_graph(state, graph)
         lease = await repository.claim(
             graph.graph_id,
             "node",

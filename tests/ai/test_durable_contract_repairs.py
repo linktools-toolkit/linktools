@@ -4,12 +4,20 @@
 
 import asyncio
 from dataclasses import replace
+from datetime import datetime, timezone
 from types import SimpleNamespace
 
 import pytest
 from linktools.ai.agent import AgentBindingSnapshot, AgentCompiler, bind_output
 from linktools.ai.capability import CapabilityContribution, CapabilityGroup
-from linktools.ai.core import ExecutionStatus, Principal, ResourceKind, ResourceRef, TaskStatus
+from linktools.ai.core import (
+    ExecutionStatus,
+    Page,
+    Principal,
+    ResourceKind,
+    ResourceRef,
+    TaskStatus,
+)
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.model import ModelRegistry
 from linktools.ai.runtime._factory import _RuntimeCloseCoordinator
@@ -25,7 +33,13 @@ from linktools.ai.runtime.state._plan import RuntimeDomain
 from linktools.ai.runtime.state._retention import RuntimeRetentionController
 from linktools.ai.runtime.state._steps import RuntimeStepStore
 from linktools.ai.storage import FilesystemObjectStore, SqlObjectStore
-from linktools.ai.task import TaskGraphSnapshot, TaskNode, TaskNodeView
+from linktools.ai.task import (
+    TaskEvent,
+    TaskEventType,
+    TaskGraphSnapshot,
+    TaskNode,
+    TaskNodeView,
+)
 from linktools.ai.task._api import open_local_task_api
 from linktools.ai.task._service_impl import DefaultTaskService
 from linktools.ai.spec import AgentSpec
@@ -111,7 +125,10 @@ async def test_opaque_capability_restore_requires_exact_current_semantic_pin() -
     compiler = _compiler(candidates=candidates)
     binding = compiler.bind(compiler.compile(_spec()))
 
-    assert _compiler(candidates=candidates).restore(binding.snapshot).snapshot == binding.snapshot
+    assert (
+        _compiler(candidates=candidates).restore(binding.snapshot).snapshot
+        == binding.snapshot
+    )
 
     with pytest.raises(AIError) as missing:
         _compiler().restore(binding.snapshot)
@@ -257,7 +274,9 @@ async def test_step_preflight_rejects_flights_tasks_and_terminal_seals() -> None
 
 
 @pytest.mark.asyncio
-async def test_runtime_object_preflight_rejects_pending_filesystem_work(tmp_path) -> None:
+async def test_runtime_object_preflight_rejects_pending_filesystem_work(
+    tmp_path,
+) -> None:
     store = FilesystemObjectStore(tmp_path)
     router = _RuntimeObjectRouter(
         {RuntimeDomain.EXECUTION: store},
@@ -275,7 +294,9 @@ async def test_runtime_object_preflight_rejects_pending_filesystem_work(tmp_path
 
 
 @pytest.mark.asyncio
-async def test_runtime_object_preflight_ignores_external_filesystem_work(tmp_path) -> None:
+async def test_runtime_object_preflight_ignores_external_filesystem_work(
+    tmp_path,
+) -> None:
     store = FilesystemObjectStore(tmp_path)
     router = _RuntimeObjectRouter(
         {RuntimeDomain.EXECUTION: store},
@@ -340,7 +361,9 @@ async def test_runtime_object_preflight_rejects_pending_sql_work(tmp_path) -> No
 
 
 @pytest.mark.asyncio
-async def test_runtime_close_coordinator_does_not_close_lower_resources_after_preflight() -> None:
+async def test_runtime_close_coordinator_does_not_close_lower_resources_after_preflight() -> (
+    None
+):
     calls: list[str] = []
     blocked = True
 
@@ -450,9 +473,13 @@ async def test_execution_wait_rechecks_after_local_worker_quiescence() -> None:
     abandoned: list[str] = []
     service._local_stream_abort = abandoned.append
 
-    async def load_authorized(execution_id: str, principal: Principal, action: object) -> object:
+    async def load_authorized(
+        execution_id: str, principal: Principal, action: object
+    ) -> object:
         del principal, action
-        return SimpleNamespace(execution_id=execution_id, status=ExecutionStatus.SUCCEEDED)
+        return SimpleNamespace(
+            execution_id=execution_id, status=ExecutionStatus.SUCCEEDED
+        )
 
     service._load_authorized = load_authorized  # type: ignore[method-assign]
 
@@ -508,6 +535,33 @@ def _terminal_task_snapshot() -> TaskGraphSnapshot:
     return TaskGraphSnapshot("graph", TaskStatus.SUCCEEDED, (), ())
 
 
+def _running_task_event() -> TaskEvent:
+    return TaskEvent(
+        1,
+        "graph",
+        2,
+        TaskEventType.NODE_CHANGED,
+        datetime.now(timezone.utc),
+        TaskStatus.RUNNING,
+        TaskStatus.READY,
+        "node",
+        "worker",
+        1,
+    )
+
+
+def _terminal_task_event(sequence: int = 1) -> TaskEvent:
+    return TaskEvent(
+        1,
+        "graph",
+        sequence,
+        TaskEventType.GRAPH_ADMITTED if sequence == 1 else TaskEventType.GRAPH_CHANGED,
+        datetime.now(timezone.utc),
+        TaskStatus.SUCCEEDED,
+        None if sequence == 1 else TaskStatus.RUNNING,
+    )
+
+
 class _RunningTaskRepository:
     async def get_header(
         self,
@@ -534,6 +588,26 @@ class _RunningTaskRepository:
     ) -> TaskGraphSnapshot:
         del graph_id, tenant_id
         return _running_task_snapshot()
+
+    async def latest_event(
+        self,
+        graph_id: str,
+        *,
+        tenant_id: str,
+    ) -> TaskEvent:
+        del graph_id, tenant_id
+        return _running_task_event()
+
+    async def list_events(
+        self,
+        graph_id: str,
+        *,
+        tenant_id: str,
+        after_sequence: int,
+        limit: int,
+    ) -> Page[TaskEvent]:
+        del graph_id, tenant_id, after_sequence, limit
+        return Page(())
 
 
 class _AllowAuthorization:
@@ -596,10 +670,43 @@ class _TerminalTaskRepository:
         del graph_id, tenant_id
         return _terminal_task_snapshot()
 
+    async def latest_event(
+        self,
+        graph_id: str,
+        *,
+        tenant_id: str,
+    ) -> TaskEvent:
+        del graph_id, tenant_id
+        return _terminal_task_event()
+
 
 class _TransitionTaskRepository(_TerminalTaskRepository):
     def __init__(self) -> None:
         self.snapshot_reads = 0
+        self.event_reads = 0
+
+    async def latest_event(
+        self,
+        graph_id: str,
+        *,
+        tenant_id: str,
+    ) -> TaskEvent:
+        del graph_id, tenant_id
+        return _running_task_event()
+
+    async def list_events(
+        self,
+        graph_id: str,
+        *,
+        tenant_id: str,
+        after_sequence: int,
+        limit: int,
+    ) -> Page[TaskEvent]:
+        del graph_id, tenant_id, limit
+        self.event_reads += 1
+        if self.event_reads == 1:
+            return Page(())
+        return Page((_terminal_task_event(after_sequence + 1),))
 
     async def snapshot_graph(
         self,
@@ -609,8 +716,6 @@ class _TransitionTaskRepository(_TerminalTaskRepository):
     ) -> TaskGraphSnapshot:
         del graph_id, tenant_id
         self.snapshot_reads += 1
-        if self.snapshot_reads == 1:
-            return _running_task_snapshot()
         return _terminal_task_snapshot()
 
 
@@ -689,7 +794,8 @@ async def test_task_wait_prefers_terminal_truth_after_scheduler_failure() -> Non
     )
 
     assert waiter.started.is_set()
-    assert repository.snapshot_reads >= 2
+    assert repository.snapshot_reads == 1
+    assert repository.event_reads == 2
     assert result.status is TaskStatus.SUCCEEDED
 
 
@@ -741,7 +847,9 @@ async def test_standalone_task_api_preflights_before_launcher_shutdown(
             self.shutdown_called = True
 
     class Service:
-        def __init__(self, persistence: object, authorization: object, launcher: object) -> None:
+        def __init__(
+            self, persistence: object, authorization: object, launcher: object
+        ) -> None:
             del persistence, authorization
             self.launcher = launcher
 

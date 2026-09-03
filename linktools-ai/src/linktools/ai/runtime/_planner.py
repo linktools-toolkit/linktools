@@ -306,7 +306,10 @@ class _AgentTaskNodeHandler:
                 except BaseException:
                     handle = None
                 finally:
-                    if launch_task.done() and self._active_launch_tasks.get(key) is launch_task:
+                    if (
+                        launch_task.done()
+                        and self._active_launch_tasks.get(key) is launch_task
+                    ):
                         self._active_launch_tasks.pop(key, None)
                 if handle is not None and handle.execution_id:
                     execution_id = handle.execution_id
@@ -357,7 +360,11 @@ class _AgentTaskNodeHandler:
         payload = node.input
         if payload.get("type") != self.type or payload.get("version") != self.version:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        body = {key: value for key, value in payload.items() if key not in {"type", "version"}}
+        body = {
+            key: value
+            for key, value in payload.items()
+            if key not in {"type", "version"}
+        }
         normalized = self.validate_recovery(
             body,
             graph_id=graph_id,
@@ -716,7 +723,6 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
         handler = self._handler(task_type, task_version, request=False)
         dependencies = await self._dependencies(
             node,
-            principal=principal,
             dependency_results=dependency_results,
         )
         execution_id: str | None = None
@@ -775,7 +781,6 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
         handler = self._handler(task_type, task_version, request=False)
         dependencies = await self._dependencies(
             node,
-            principal=principal,
             dependency_results=dependency_results,
         )
         if handler is self._agent:
@@ -786,7 +791,11 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
             if snapshot is None:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             state = next(
-                (value for value in snapshot.node_states if value.node_id == node.node_id),
+                (
+                    value
+                    for value in snapshot.node_states
+                    if value.node_id == node.node_id
+                ),
                 None,
             )
             if state is None:
@@ -830,24 +839,10 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         return output
 
-    async def read_legacy_agent_result(
-        self,
-        execution_id: str,
-        *,
-        principal: Principal,
-        expected_digest: str,
-    ) -> JsonValue:
-        return await self._agent.read_result(
-            execution_id,
-            principal=principal,
-            expected_digest=expected_digest,
-        )
-
     async def _dependencies(
         self,
         node: TaskNode,
         *,
-        principal: Principal,
         dependency_results: Mapping[str, TaskDependencyResult],
     ) -> dict[str, TaskDependency]:
         if set(dependency_results) != set(node.dependencies):
@@ -855,16 +850,9 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
         values: dict[str, TaskDependency] = {}
         for dependency_id in sorted(node.dependencies):
             dependency = dependency_results[dependency_id]
-            if dependency.result_payload is not None:
-                output = await self._read_payload(dependency.result_payload)
-            elif dependency.execution_id is not None:
-                output = await self.read_legacy_agent_result(
-                    dependency.execution_id,
-                    principal=principal,
-                    expected_digest=dependency.result_digest,
-                )
-            else:
-                raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
+            if dependency.result_payload is None:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            output = await self._read_payload(dependency.result_payload)
             values[dependency_id] = TaskDependency(
                 dependency_id,
                 output,
@@ -960,7 +948,12 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
             normalized = normalize_json_value(value)
         except AIError:
             raise
-        except (UnicodeDecodeError, json.JSONDecodeError, TypeError, ValueError) as error:
+        except (
+            UnicodeDecodeError,
+            json.JSONDecodeError,
+            TypeError,
+            ValueError,
+        ) as error:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
         if canonical_sha256(normalized) != payload.digest:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -979,7 +972,9 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
         if handler is not None:
             return handler
         raise AIError(
-            ErrorCode.REQUEST_FIELD_INVALID if request else ErrorCode.CAPABILITY_REQUIRED_MISSING,
+            ErrorCode.REQUEST_FIELD_INVALID
+            if request
+            else ErrorCode.CAPABILITY_REQUIRED_MISSING,
             safe_details={"task_type": task_type, "task_version": task_version},
         )
 
@@ -1000,9 +995,13 @@ def _parse_node(
         or task_version < 1
     ):
         raise AIError(
-            ErrorCode.REQUEST_FIELD_INVALID if request else ErrorCode.STORAGE_INTEGRITY_ERROR
+            ErrorCode.REQUEST_FIELD_INVALID
+            if request
+            else ErrorCode.STORAGE_INTEGRITY_ERROR
         )
-    body = {key: value for key, value in payload.items() if key not in {"type", "version"}}
+    body = {
+        key: value for key, value in payload.items() if key not in {"type", "version"}
+    }
     return task_type, task_version, body
 
 

@@ -29,7 +29,6 @@ from ...core import (
     ResourceKind,
     ResourceRef,
     SessionStatus,
-    TaskStatus,
     ToolOperationStatus,
     canonical_json_bytes,
     canonical_sha256,
@@ -41,12 +40,7 @@ from ...core import (
 from ...errors import AIError, ErrorCode
 from ...storage import ObjectRef, StoredPayload
 from ...task import (
-    TaskGraph,
-    TaskGraphAdmission,
-    TaskGraphLaunch,
-    TaskGraphSnapshot,
     TaskGraphView,
-    TaskLease,
     TaskNodeView,
     TaskResultRecord,
     TaskTerminalRecord,
@@ -131,7 +125,14 @@ _ACTIVE_RECORD_UNSET = object()
 
 
 class _RepositoryBase:
-    def __init__(self, store: StateStore, *, namespace: str, tenant_id: str, domain: RuntimeDomain) -> None:
+    def __init__(
+        self,
+        store: StateStore,
+        *,
+        namespace: str,
+        tenant_id: str,
+        domain: RuntimeDomain,
+    ) -> None:
         self._store = store
         self._namespace = namespace
         self._tenant_id = tenant_id
@@ -148,16 +149,34 @@ class _RepositoryBase:
         return self._store
 
     def _partition(self, kind: str) -> bytes:
-        return partition_digest(self._namespace, self._tenant_id, self._domain.value, kind)
+        return partition_digest(
+            self._namespace, self._tenant_id, self._domain.value, kind
+        )
 
     def _key(self, kind: str, identity: object) -> bytes:
-        return record_key_digest(self._namespace, self._tenant_id, self._domain.value, kind, identity)
+        return record_key_digest(
+            self._namespace, self._tenant_id, self._domain.value, kind, identity
+        )
 
     def _scope(self, kind: str, relation: str, identity: object) -> bytes:
-        return scope_digest(self._namespace, self._tenant_id, self._domain.value, kind, relation, identity)
+        return scope_digest(
+            self._namespace,
+            self._tenant_id,
+            self._domain.value,
+            kind,
+            relation,
+            identity,
+        )
 
     def _parent(self, kind: str, relation: str, identity: object) -> bytes:
-        return parent_digest(self._namespace, self._tenant_id, self._domain.value, kind, relation, identity)
+        return parent_digest(
+            self._namespace,
+            self._tenant_id,
+            self._domain.value,
+            kind,
+            relation,
+            identity,
+        )
 
     def _stored(
         self,
@@ -200,7 +219,10 @@ class _RepositoryBase:
                 "resource",
                 [value.resource_kind.value, value.resource_id],
             )
-        if isinstance(value, (EvaluationRecord, ArtifactRecord, ApprovalRecord, ExternalCallRecord)):
+        if isinstance(
+            value,
+            (EvaluationRecord, ArtifactRecord, ApprovalRecord, ExternalCallRecord),
+        ):
             return self._scope(kind, "execution", value.execution_id)
         if isinstance(value, MemoryRecord):
             return self._scope(kind, "memory_scope", value.memory_scope_digest)
@@ -232,7 +254,11 @@ class _RepositoryBase:
         return await self._store.read(
             lambda transaction: transaction.list_records(
                 RecordQuery(
-                    partition_digest=(self._partition(kind) if scope is None and parent is None else None),
+                    partition_digest=(
+                        self._partition(kind)
+                        if scope is None and parent is None
+                        else None
+                    ),
                     scope_digest=scope,
                     parent_digest=parent,
                     kind=kind,
@@ -316,7 +342,9 @@ class _ResourceRepository(_RepositoryBase, Generic[ValueT]):
     async def create(self, value: ValueT) -> ValueT:
         _require_tenant(value, self._tenant_id)
         identity = self._identity(value)
-        await self._insert(self._stored(self._kind, identity, value, state=_record_state(value)))
+        await self._insert(
+            self._stored(self._kind, identity, value, state=_record_state(value))
+        )
         _logger.debug("created Runtime record: kind=%s id=%s", self._kind, identity)
         return value
 
@@ -328,7 +356,11 @@ class _ResourceRepository(_RepositoryBase, Generic[ValueT]):
 
     async def get_header(self, identity: str, *, tenant_id: str) -> ResourceRef | None:
         value = await self.get(identity, tenant_id=tenant_id)
-        return None if value is None else self._header(value, self._resource_kind, identity)
+        return (
+            None
+            if value is None
+            else self._header(value, self._resource_kind, identity)
+        )
 
     async def compare_and_swap(
         self,
@@ -341,6 +373,7 @@ class _ResourceRepository(_RepositoryBase, Generic[ValueT]):
         if tenant_id != self._tenant_id:
             raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
         _require_tenant(next_record, self._tenant_id)
+
         async def mutate(transaction: StateTransaction) -> ValueT:
             current = await transaction.get_record(self._key(self._kind, identity))
             if current is None:
@@ -373,9 +406,13 @@ class OperationLedgerRepository(_RepositoryBase):
             [value.resource_kind.value, value.resource_id],
         )
 
-    def _stored_operation(self, value: OperationLedgerInput, sequence: int) -> StoredOperation:
+    def _stored_operation(
+        self, value: OperationLedgerInput, sequence: int
+    ) -> StoredOperation:
         return StoredOperation(
-            operation_key(self._namespace, self._tenant_id, self._domain.value, value.operation_id),
+            operation_key(
+                self._namespace, self._tenant_id, self._domain.value, value.operation_id
+            ),
             self._stream(value),
             sequence,
             value.status.value,
@@ -387,7 +424,9 @@ class OperationLedgerRepository(_RepositoryBase):
         _require_tenant(value, self._tenant_id)
 
         async def mutate(transaction: StateTransaction) -> OperationLedgerRecord:
-            key = operation_key(self._namespace, self._tenant_id, self._domain.value, value.operation_id)
+            key = operation_key(
+                self._namespace, self._tenant_id, self._domain.value, value.operation_id
+            )
             existing = await transaction.get_operation(key)
             if existing is not None:
                 current = _decode_operation(existing)
@@ -408,11 +447,17 @@ class OperationLedgerRepository(_RepositoryBase):
 
         return await self._store.mutate(mutate)
 
-    async def get(self, operation_id: str, *, tenant_id: str) -> OperationLedgerRecord | None:
+    async def get(
+        self, operation_id: str, *, tenant_id: str
+    ) -> OperationLedgerRecord | None:
         if tenant_id != self._tenant_id:
             return None
-        key = operation_key(self._namespace, self._tenant_id, self._domain.value, operation_id)
-        stored = await self._store.read(lambda transaction: transaction.get_operation(key))
+        key = operation_key(
+            self._namespace, self._tenant_id, self._domain.value, operation_id
+        )
+        stored = await self._store.read(
+            lambda transaction: transaction.get_operation(key)
+        )
         return None if stored is None else _decode_operation(stored)
 
     async def get_in_transaction(
@@ -423,7 +468,9 @@ class OperationLedgerRepository(_RepositoryBase):
         tenant_id: str,
     ) -> OperationLedgerRecord | None:
         _require_repository_tenant(tenant_id, self._tenant_id)
-        key = operation_key(self._namespace, self._tenant_id, self._domain.value, operation_id)
+        key = operation_key(
+            self._namespace, self._tenant_id, self._domain.value, operation_id
+        )
         stored = await transaction.get_operation(key)
         return None if stored is None else _decode_operation(stored)
 
@@ -438,7 +485,9 @@ class OperationLedgerRepository(_RepositoryBase):
         if tenant_id != self._tenant_id:
             raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
         _require_tenant(next_record, self._tenant_id)
-        key = operation_key(self._namespace, self._tenant_id, self._domain.value, operation_id)
+        key = operation_key(
+            self._namespace, self._tenant_id, self._domain.value, operation_id
+        )
 
         async def mutate(transaction: StateTransaction) -> OperationLedgerRecord:
             current = await transaction.get_operation(key)
@@ -446,12 +495,18 @@ class OperationLedgerRepository(_RepositoryBase):
                 raise AIError(ErrorCode.STORAGE_CONFLICT)
             if (
                 current.state
-                in {OperationStatus.SUCCEEDED.value, OperationStatus.FAILED.value, OperationStatus.CANCELLED.value}
+                in {
+                    OperationStatus.SUCCEEDED.value,
+                    OperationStatus.FAILED.value,
+                    OperationStatus.CANCELLED.value,
+                }
                 and next_record.status is not expected_status
             ):
                 raise AIError(ErrorCode.STORAGE_CONFLICT)
             candidate = _stored_from_operation(next_record, current)
-            if not await transaction.replace_operation(candidate, expected_state=expected_status.value):
+            if not await transaction.replace_operation(
+                candidate, expected_state=expected_status.value
+            ):
                 raise AIError(ErrorCode.STORAGE_CONFLICT)
             return next_record
 
@@ -476,7 +531,11 @@ class OperationLedgerRepository(_RepositoryBase):
         )
         values = await self._store.read(
             lambda transaction: transaction.list_operations(
-                OperationQuery(stream_digest=stream, states=frozenset({"PENDING", "RUNNING"}), limit=limit)
+                OperationQuery(
+                    stream_digest=stream,
+                    states=frozenset({"PENDING", "RUNNING"}),
+                    limit=limit,
+                )
             )
         )
         return tuple(_decode_operation(value) for value in values)
@@ -534,7 +593,9 @@ class ConversationHistoryRepositoryImpl(_RepositoryBase):
             domain=RuntimeDomain.CONVERSATION,
         )
 
-    async def create(self, record: ConversationHistoryRecord) -> ConversationHistoryRecord:
+    async def create(
+        self, record: ConversationHistoryRecord
+    ) -> ConversationHistoryRecord:
         _require_tenant(record, self._tenant_id)
 
         async def mutate(transaction: StateTransaction) -> ConversationHistoryRecord:
@@ -608,7 +669,9 @@ class ConversationHistoryRepositoryImpl(_RepositoryBase):
         tenant_id: str,
     ) -> ConversationHistoryRecord | None:
         _require_repository_tenant(tenant_id, self._tenant_id)
-        record = await transaction.get_record(self._key("conversation_history", history_id))
+        record = await transaction.get_record(
+            self._key("conversation_history", history_id)
+        )
         return None if record is None else await self._decode_history(record)
 
     async def local_head_in_transaction(
@@ -617,9 +680,7 @@ class ConversationHistoryRepositoryImpl(_RepositoryBase):
         history_id: str,
     ) -> tuple[int, int]:
         """Read one branch's local message and history-item counts."""
-        record = await transaction.get_record(
-            self._key("transcript_head", history_id)
-        )
+        record = await transaction.get_record(self._key("transcript_head", history_id))
         if record is None:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         head = await self._decode(record, TranscriptHeadRecord)
@@ -796,7 +857,6 @@ class ConversationHistoryRepositoryImpl(_RepositoryBase):
         return _decode_enveloped_domain(record.data, ConversationHistoryRecord)
 
 
-
 class SessionRepositoryImpl(_ResourceRepository[SessionRecord]):
     def __init__(self, store: StateStore, *, namespace: str, tenant_id: str) -> None:
         super().__init__(
@@ -815,7 +875,9 @@ class SessionRepositoryImpl(_ResourceRepository[SessionRecord]):
             self._namespace,
             self._tenant_id,
             self._domain.value,
-            "session_list_owner" if owner_principal_id is not None else "session_list_tenant",
+            "session_list_owner"
+            if owner_principal_id is not None
+            else "session_list_tenant",
             owner_principal_id if owner_principal_id is not None else [],
         )
 
@@ -879,7 +941,9 @@ class SessionRepositoryImpl(_ResourceRepository[SessionRecord]):
         async def mutate(transaction: StateTransaction) -> tuple[SessionRecord, bool]:
             _, replayed = await _append_operation(transaction, self, operation)
             if replayed:
-                current = await transaction.get_record(self._key("session", record.session_id))
+                current = await transaction.get_record(
+                    self._key("session", record.session_id)
+                )
                 if current is None:
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                 return await self._decode(current, SessionRecord), True
@@ -889,7 +953,9 @@ class SessionRepositoryImpl(_ResourceRepository[SessionRecord]):
                         "session",
                         record.session_id,
                         record,
-                        scope=self._scope("session", "owner", record.owner_principal_id),
+                        scope=self._scope(
+                            "session", "owner", record.owner_principal_id
+                        ),
                         state=record.status.value,
                     ),
                     self._stored(
@@ -961,10 +1027,13 @@ class SessionRepositoryImpl(_ResourceRepository[SessionRecord]):
                 raise AIError(ErrorCode.STORAGE_CONFLICT)
             if source.history_id is None:
                 raise AIError(ErrorCode.SESSION_HISTORY_UNAVAILABLE)
-            if await transaction.guard_record(
-                self._key("session", source_session_id),
-                expected_storage_version=source_stored.storage_version,
-            ) is None:
+            if (
+                await transaction.guard_record(
+                    self._key("session", source_session_id),
+                    expected_storage_version=source_stored.storage_version,
+                )
+                is None
+            ):
                 raise AIError(ErrorCode.STORAGE_CONFLICT)
             source_history_stored = await transaction.get_record(
                 self._key("conversation_history", source.history_id)
@@ -1017,9 +1086,7 @@ class SessionRepositoryImpl(_ResourceRepository[SessionRecord]):
                     )
                     prefix_head = node.node_id
             inherited = source_history.inherited_message_count + local_messages
-            inherited_items = (
-                source_history.inherited_history_item_count + local_items
-            )
+            inherited_items = source_history.inherited_history_item_count + local_items
             child = ConversationHistoryRecord(
                 history_id=child_history_id,
                 session_id=target.session_id,
@@ -1205,21 +1272,33 @@ class SessionRepositoryImpl(_ResourceRepository[SessionRecord]):
         )
         return record.inherited_message_count + local_messages
 
-    async def list(self, *, tenant_id: str, owner_principal_id: str | None = None) -> tuple[SessionRecord, ...]:
+    async def list(
+        self, *, tenant_id: str, owner_principal_id: str | None = None
+    ) -> tuple[SessionRecord, ...]:
         if tenant_id != self._tenant_id:
             return ()
-        scope = None if owner_principal_id is None else self._scope("session", "owner", owner_principal_id)
+        scope = (
+            None
+            if owner_principal_id is None
+            else self._scope("session", "owner", owner_principal_id)
+        )
 
         async def read(transaction: StateTransaction) -> tuple[SessionRecord, ...]:
-            await transaction.get_sequence(self._list_generation_key(owner_principal_id))
+            await transaction.get_sequence(
+                self._list_generation_key(owner_principal_id)
+            )
             records = await transaction.list_records(
                 RecordQuery(
-                    partition_digest=self._partition("session") if scope is None else None,
+                    partition_digest=self._partition("session")
+                    if scope is None
+                    else None,
                     scope_digest=scope,
                     kind="session",
                 )
             )
-            return tuple([await self._decode(record, SessionRecord) for record in records])
+            return tuple(
+                [await self._decode(record, SessionRecord) for record in records]
+            )
 
         return await self._store.read(read)
 
@@ -1244,14 +1323,20 @@ class SessionRepositoryImpl(_ResourceRepository[SessionRecord]):
             )
         )
 
-        async def read(transaction: StateTransaction) -> tuple[int, Page[SessionRecord]]:
-            generation = await transaction.get_sequence(self._list_generation_key(owner_principal_id))
+        async def read(
+            transaction: StateTransaction,
+        ) -> tuple[int, Page[SessionRecord]]:
+            generation = await transaction.get_sequence(
+                self._list_generation_key(owner_principal_id)
+            )
             if snapshot is not None and snapshot != generation:
                 raise AIError(ErrorCode.CURSOR_INVALID)
             after_sort_key, after_key_digest = _decode_record_cursor(cursor)
             records = await transaction.list_records(
                 RecordQuery(
-                    partition_digest=self._partition("session") if scope is None else None,
+                    partition_digest=self._partition("session")
+                    if scope is None
+                    else None,
                     scope_digest=scope,
                     kind="session",
                     after_sort_key=after_sort_key,
@@ -1259,8 +1344,15 @@ class SessionRepositoryImpl(_ResourceRepository[SessionRecord]):
                     limit=limit + 1,
                 )
             )
-            values = tuple([await self._decode(record, SessionRecord) for record in records[:limit]])
-            next_cursor = _record_cursor(records[limit - 1]) if len(records) > limit else None
+            values = tuple(
+                [
+                    await self._decode(record, SessionRecord)
+                    for record in records[:limit]
+                ]
+            )
+            next_cursor = (
+                _record_cursor(records[limit - 1]) if len(records) > limit else None
+            )
             return generation, Page(values, next_cursor)
 
         return await self._store.read(read)
@@ -1287,8 +1379,13 @@ class SessionRepositoryImpl(_ResourceRepository[SessionRecord]):
             if value.revision != expected_revision:
                 raise AIError(ErrorCode.SESSION_REVISION_CONFLICT)
             proposed = next_record
-            if value.active_execution_id is not None and proposed.active_execution_id != value.active_execution_id:
-                proposed = replace(proposed, active_execution_id=value.active_execution_id)
+            if (
+                value.active_execution_id is not None
+                and proposed.active_execution_id != value.active_execution_id
+            ):
+                proposed = replace(
+                    proposed, active_execution_id=value.active_execution_id
+                )
             _, replayed = await _append_operation(transaction, self, operation)
             if replayed:
                 return value, True
@@ -1300,7 +1397,12 @@ class SessionRepositoryImpl(_ResourceRepository[SessionRecord]):
         return await self._store.mutate(mutate)
 
     async def compare_and_swap(
-        self, session_id: str, *, tenant_id: str, expected_revision: int, next_record: SessionRecord
+        self,
+        session_id: str,
+        *,
+        tenant_id: str,
+        expected_revision: int,
+        next_record: SessionRecord,
     ) -> SessionRecord:
         _require_repository_tenant(tenant_id, self._tenant_id)
         _require_tenant(next_record, self._tenant_id)
@@ -1313,8 +1415,13 @@ class SessionRepositoryImpl(_ResourceRepository[SessionRecord]):
             if current.revision != expected_revision:
                 raise AIError(ErrorCode.SESSION_REVISION_CONFLICT)
             proposed = next_record
-            if current.active_execution_id is not None and proposed.active_execution_id != current.active_execution_id:
-                proposed = replace(proposed, active_execution_id=current.active_execution_id)
+            if (
+                current.active_execution_id is not None
+                and proposed.active_execution_id != current.active_execution_id
+            ):
+                proposed = replace(
+                    proposed, active_execution_id=current.active_execution_id
+                )
             await _replace_checked(
                 transaction,
                 _projected_record(self, record, proposed),
@@ -1326,10 +1433,19 @@ class SessionRepositoryImpl(_ResourceRepository[SessionRecord]):
         return await self._store.mutate(mutate)
 
     async def admit_execution(
-        self, session_id: str, *, tenant_id: str, execution_id: str, expected: ConversationCursor | None
+        self,
+        session_id: str,
+        *,
+        tenant_id: str,
+        execution_id: str,
+        expected: ConversationCursor | None,
     ) -> SessionRecord:
         return await self._admission(
-            session_id, tenant_id=tenant_id, execution_id=execution_id, expected=expected, release=False
+            session_id,
+            tenant_id=tenant_id,
+            execution_id=execution_id,
+            expected=expected,
+            release=False,
         )
 
     async def admit_execution_in_transaction(
@@ -1350,9 +1466,15 @@ class SessionRepositoryImpl(_ResourceRepository[SessionRecord]):
             transaction=transaction,
         )
 
-    async def release_execution(self, session_id: str, *, tenant_id: str, execution_id: str) -> SessionRecord:
+    async def release_execution(
+        self, session_id: str, *, tenant_id: str, execution_id: str
+    ) -> SessionRecord:
         return await self._admission(
-            session_id, tenant_id=tenant_id, execution_id=execution_id, expected=None, release=True
+            session_id,
+            tenant_id=tenant_id,
+            execution_id=execution_id,
+            expected=None,
+            release=True,
         )
 
     async def release_execution_in_transaction(
@@ -1396,11 +1518,17 @@ class SessionRepositoryImpl(_ResourceRepository[SessionRecord]):
                     return value
                 next_value = replace(value, active_execution_id=None)
             else:
-                if value.active_execution_id == execution_id and value.continuation == expected:
+                if (
+                    value.active_execution_id == execution_id
+                    and value.continuation == expected
+                ):
                     return value
                 if value.status is not SessionStatus.OPEN:
                     raise AIError(ErrorCode.SESSION_CONFLICT)
-                if value.active_execution_id is not None or value.continuation != expected:
+                if (
+                    value.active_execution_id is not None
+                    or value.continuation != expected
+                ):
                     raise AIError(ErrorCode.SESSION_BUSY)
                 next_value = replace(value, active_execution_id=execution_id)
             candidate = _projected_record(self, current, next_value)
@@ -1414,7 +1542,10 @@ class SessionRepositoryImpl(_ResourceRepository[SessionRecord]):
         except AIError as error:
             if error.code is ErrorCode.STORAGE_CONFLICT and not release:
                 latest = await self.get(session_id, tenant_id=tenant_id)
-                if latest is not None and latest.active_execution_id not in {None, execution_id}:
+                if latest is not None and latest.active_execution_id not in {
+                    None,
+                    execution_id,
+                }:
                     raise AIError(ErrorCode.SESSION_BUSY) from error
             raise
 
@@ -1538,11 +1669,11 @@ class SessionRepositoryImpl(_ResourceRepository[SessionRecord]):
             current,
             continuation=next_cursor,
             history_quality=(
-                current.history_quality
-                if history_quality is None
-                else history_quality
+                current.history_quality if history_quality is None else history_quality
             ),
-            active_execution_id=None if release_execution else current.active_execution_id,
+            active_execution_id=None
+            if release_execution
+            else current.active_execution_id,
             revision=current.revision + 1,
             resource_generation=current.resource_generation + 1,
             updated_at=now,
@@ -1579,14 +1710,23 @@ class SessionRepositoryImpl(_ResourceRepository[SessionRecord]):
 
 
 class IdempotencyRepositoryImpl(_ResourceRepository[IdempotencyRecord]):
-    def __init__(self, store: StateStore, *, namespace: str, tenant_id: str, domain: RuntimeDomain) -> None:
+    def __init__(
+        self,
+        store: StateStore,
+        *,
+        namespace: str,
+        tenant_id: str,
+        domain: RuntimeDomain,
+    ) -> None:
         super().__init__(
             store,
             namespace=namespace,
             tenant_id=tenant_id,
             domain=domain,
             kind="idempotency",
-            resource_kind=ResourceKind.EXECUTION if domain is RuntimeDomain.EXECUTION else ResourceKind.EVALUATION,
+            resource_kind=ResourceKind.EXECUTION
+            if domain is RuntimeDomain.EXECUTION
+            else ResourceKind.EVALUATION,
             value_type=IdempotencyRecord,
             identity_field="idempotency_key_digest",
         )
@@ -1598,7 +1738,9 @@ class IdempotencyRepositoryImpl(_ResourceRepository[IdempotencyRecord]):
         _require_tenant(record, self._tenant_id)
         identity = self._identity_key(record.scope, record.idempotency_key_digest)
         try:
-            await self._insert(self._stored("idempotency", identity, record, state=record.status.value))
+            await self._insert(
+                self._stored("idempotency", identity, record, state=record.status.value)
+            )
             return record
         except AIError as error:
             if error.code is not ErrorCode.STORAGE_CONFLICT:
@@ -1615,7 +1757,9 @@ class IdempotencyRepositoryImpl(_ResourceRepository[IdempotencyRecord]):
         *,
         tenant_id: str,
     ) -> IdempotencyRecord | None:  # type: ignore[override]
-        return await super().get(self._identity_key(scope, idempotency_key_digest), tenant_id=tenant_id)
+        return await super().get(
+            self._identity_key(scope, idempotency_key_digest), tenant_id=tenant_id
+        )
 
     async def list_by_resource(
         self, resource_kind: ResourceKind, resource_id: str, *, tenant_id: str
@@ -1624,7 +1768,9 @@ class IdempotencyRepositoryImpl(_ResourceRepository[IdempotencyRecord]):
             return ()
         records = await self._records(
             self._kind,
-            scope=self._scope("idempotency", "resource", [resource_kind.value, resource_id]),
+            scope=self._scope(
+                "idempotency", "resource", [resource_kind.value, resource_id]
+            ),
         )
         values = [await self._decode(record, self._value_type) for record in records]
         return tuple(values)
@@ -1644,7 +1790,9 @@ class IdempotencyRepositoryImpl(_ResourceRepository[IdempotencyRecord]):
         identity = self._identity_key(scope, idempotency_key_digest)
 
         async def mutate(transaction: StateTransaction) -> IdempotencyRecord:
-            current_record = await transaction.get_record(self._key(self._kind, identity))
+            current_record = await transaction.get_record(
+                self._key(self._kind, identity)
+            )
             if current_record is None:
                 raise AIError(ErrorCode.STORAGE_CONFLICT)
             current = await self._decode(current_record, IdempotencyRecord)
@@ -1673,10 +1821,15 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
             identity_field="execution_id",
         )
         self._idempotency = IdempotencyRepositoryImpl(
-            store, namespace=namespace, tenant_id=tenant_id, domain=RuntimeDomain.EXECUTION
+            store,
+            namespace=namespace,
+            tenant_id=tenant_id,
+            domain=RuntimeDomain.EXECUTION,
         )
 
-    async def create_with_history_head(self, execution: ExecutionRecord) -> ExecutionRecord:
+    async def create_with_history_head(
+        self, execution: ExecutionRecord
+    ) -> ExecutionRecord:
         """Create a recovery execution and its OPEN history head atomically."""
         return await self._store.mutate(
             lambda transaction: self.create_with_history_head_in_transaction(
@@ -1734,25 +1887,37 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
         return execution
 
     async def list_by_session(
-        self, session_id: str, *, tenant_id: str, statuses: frozenset[ExecutionStatus] | None = None
+        self,
+        session_id: str,
+        *,
+        tenant_id: str,
+        statuses: frozenset[ExecutionStatus] | None = None,
     ) -> tuple[ExecutionRecord, ...]:
         if tenant_id != self._tenant_id:
             return ()
         records = await self._records(
             "execution",
             scope=self._scope("execution", "session", session_id),
-            states=None if statuses is None else frozenset(status.value for status in statuses),
+            states=None
+            if statuses is None
+            else frozenset(status.value for status in statuses),
         )
-        return tuple([await self._decode(record, ExecutionRecord) for record in records])
+        return tuple(
+            [await self._decode(record, ExecutionRecord) for record in records]
+        )
 
-    async def list_children(self, execution_id: str, *, tenant_id: str) -> tuple[ExecutionRecord, ...]:
+    async def list_children(
+        self, execution_id: str, *, tenant_id: str
+    ) -> tuple[ExecutionRecord, ...]:
         if tenant_id != self._tenant_id:
             return ()
         records = await self._records(
             "execution",
             parent=self._parent("execution", "execution", execution_id),
         )
-        return tuple([await self._decode(record, ExecutionRecord) for record in records])
+        return tuple(
+            [await self._decode(record, ExecutionRecord) for record in records]
+        )
 
     async def get_in_transaction(
         self,
@@ -1791,13 +1956,18 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         return values[0] if values else None
 
-    async def reserve_start(self, reservation: ExecutionStartReservation) -> ExecutionStartReservationResult:
+    async def reserve_start(
+        self, reservation: ExecutionStartReservation
+    ) -> ExecutionStartReservationResult:
         _require_tenant(reservation.execution, self._tenant_id)
         _require_tenant(reservation.idempotency, self._tenant_id)
 
-        async def mutate(transaction: StateTransaction) -> ExecutionStartReservationResult:
+        async def mutate(
+            transaction: StateTransaction,
+        ) -> ExecutionStartReservationResult:
             identity = self._idempotency._identity_key(
-                reservation.idempotency.scope, reservation.idempotency.idempotency_key_digest
+                reservation.idempotency.scope,
+                reservation.idempotency.idempotency_key_digest,
             )
             id_key = self._idempotency._key("idempotency", identity)
             execution_key = self._key("execution", reservation.execution.execution_id)
@@ -1805,13 +1975,15 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
                 "execution_history_head",
                 reservation.execution.execution_id,
             )
-            records = await transaction.get_records(
-                (id_key, execution_key, head_key)
-            )
+            records = await transaction.get_records((id_key, execution_key, head_key))
             existing_id = records.get(id_key)
             if existing_id is not None:
-                existing_idempotency = await self._idempotency._decode(existing_id, IdempotencyRecord)
-                if not _same_idempotency_identity(existing_idempotency, reservation.idempotency):
+                existing_idempotency = await self._idempotency._decode(
+                    existing_id, IdempotencyRecord
+                )
+                if not _same_idempotency_identity(
+                    existing_idempotency, reservation.idempotency
+                ):
                     raise AIError(ErrorCode.IDEMPOTENCY_CONFLICT)
                 winner_key = self._key("execution", existing_idempotency.resource_id)
                 if winner_key == execution_key:
@@ -1840,7 +2012,9 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
                     "execution start reservation replayed: execution=%s",
                     existing_value.execution_id,
                 )
-                return ExecutionStartReservationResult(existing_value, existing_idempotency, False)
+                return ExecutionStartReservationResult(
+                    existing_value, existing_idempotency, False
+                )
             if execution_key in records or head_key in records:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             head = ExecutionHistoryHeadRecord(
@@ -1871,7 +2045,9 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
                 "execution start reserved: execution=%s",
                 reservation.execution.execution_id,
             )
-            return ExecutionStartReservationResult(reservation.execution, reservation.idempotency, True)
+            return ExecutionStartReservationResult(
+                reservation.execution, reservation.idempotency, True
+            )
 
         return await self._store.mutate(mutate)
 
@@ -2019,7 +2195,12 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
         return next_execution
 
     async def claim_next_agent_run(
-        self, execution_id: str, *, tenant_id: str, expected_revision: int, expected_agent_run_sequence: int
+        self,
+        execution_id: str,
+        *,
+        tenant_id: str,
+        expected_revision: int,
+        expected_agent_run_sequence: int,
     ) -> ExecutionRecord:
         _require_repository_tenant(tenant_id, self._tenant_id)
 
@@ -2153,7 +2334,9 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
         )
         return next_value
 
-    async def mark_start_unknown(self, commit: ExecutionStartUnknownCommit) -> ExecutionRecord:
+    async def mark_start_unknown(
+        self, commit: ExecutionStartUnknownCommit
+    ) -> ExecutionRecord:
         return await self._transition_execution(
             commit.execution_id,
             tenant_id=commit.tenant_id,
@@ -2164,7 +2347,6 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
             payload={},
             updated_at=commit.occurred_at,
         )
-
 
     async def request_cancel(
         self,
@@ -2230,7 +2412,6 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
 
         return await self._store.mutate(mutate)
 
-
     async def _transition_execution(
         self,
         execution_id: str,
@@ -2247,10 +2428,19 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
         transaction: StateTransaction | None = None,
     ) -> ExecutionRecord:
         _require_repository_tenant(tenant_id, self._tenant_id)
-        if any(not isinstance(event.event_type, ExecutionEventType) for event in pending_events):
+        if any(
+            not isinstance(event.event_type, ExecutionEventType)
+            for event in pending_events
+        ):
             raise TypeError("pending execution events must use ExecutionEventType")
         key = self._key("execution", execution_id)
-        stream = stream_digest(self._namespace, self._tenant_id, self._domain.value, "execution", execution_id)
+        stream = stream_digest(
+            self._namespace,
+            self._tenant_id,
+            self._domain.value,
+            "execution",
+            execution_id,
+        )
 
         async def mutate(transaction: StateTransaction) -> ExecutionRecord:
             stored = await transaction.get_record(key)
@@ -2260,7 +2450,8 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
             if (
                 stored_value.revision != expected_revision
                 or stored_value.event_sequence != expected_event_sequence
-                or expected_status is not None and stored_value.status is not expected_status
+                or expected_status is not None
+                and stored_value.status is not expected_status
             ):
                 raise AIError(ErrorCode.STORAGE_CONFLICT)
             event_count = len(pending_events) + 1
@@ -2315,7 +2506,9 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
             "resource",
             [ResourceKind.EXECUTION.value, commit.execution.execution_id],
         )
-        records = await transaction.list_records(RecordQuery(scope_digest=scope, kind="idempotency"))
+        records = await transaction.list_records(
+            RecordQuery(scope_digest=scope, kind="idempotency")
+        )
         if len(records) > 1:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         if not records:
@@ -2363,8 +2556,13 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
             commit.execution.execution_id,
         )
 
-        async def mutate(transaction: StateTransaction) -> ExecutionTerminalCommitResult:
-            if any(not isinstance(event.event_type, ExecutionEventType) for event in pending_events):
+        async def mutate(
+            transaction: StateTransaction,
+        ) -> ExecutionTerminalCommitResult:
+            if any(
+                not isinstance(event.event_type, ExecutionEventType)
+                for event in pending_events
+            ):
                 raise TypeError("pending execution events must use ExecutionEventType")
             record_keys = [key]
             id_key = None
@@ -2526,7 +2724,9 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
             transaction=transaction,
         )
 
-    async def get_result(self, execution_id: str, *, tenant_id: str) -> ResultRecord | None:
+    async def get_result(
+        self, execution_id: str, *, tenant_id: str
+    ) -> ResultRecord | None:
         execution = await self.get(execution_id, tenant_id=tenant_id)
         return None if execution is None else execution.result
 
@@ -2538,8 +2738,12 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
     ) -> ExecutionHistorySealRecord | None:
         _require_repository_tenant(tenant_id, self._tenant_id)
 
-        async def read(transaction: StateTransaction) -> ExecutionHistorySealRecord | None:
-            return await self._get_history_seal_in_transaction(transaction, execution_id)
+        async def read(
+            transaction: StateTransaction,
+        ) -> ExecutionHistorySealRecord | None:
+            return await self._get_history_seal_in_transaction(
+                transaction, execution_id
+            )
 
         return await self._store.read(read)
 
@@ -2707,7 +2911,12 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
 
 class EventRepositoryImpl(_RepositoryBase):
     def __init__(self, store: StateStore, *, namespace: str, tenant_id: str) -> None:
-        super().__init__(store, namespace=namespace, tenant_id=tenant_id, domain=RuntimeDomain.EXECUTION)
+        super().__init__(
+            store,
+            namespace=namespace,
+            tenant_id=tenant_id,
+            domain=RuntimeDomain.EXECUTION,
+        )
 
     async def append_many(
         self,
@@ -2749,7 +2958,9 @@ class EventRepositoryImpl(_RepositoryBase):
         _require_repository_tenant(tenant_id, self._tenant_id)
         if not events:
             return ()
-        if any(not isinstance(event.event_type, ExecutionEventType) for event in events):
+        if any(
+            not isinstance(event.event_type, ExecutionEventType) for event in events
+        ):
             raise TypeError("event repository accepts durable ExecutionEventType only")
         if any(not isinstance(event.payload, Mapping) for event in events):
             raise TypeError("event payload must be a mapping")
@@ -2765,7 +2976,10 @@ class EventRepositoryImpl(_RepositoryBase):
         if current is None:
             raise AIError(ErrorCode.STORAGE_NOT_FOUND)
         execution = await self._decode(current, ExecutionRecord)
-        if expected_sequence is not None and execution.event_sequence != expected_sequence:
+        if (
+            expected_sequence is not None
+            and execution.event_sequence != expected_sequence
+        ):
             raise AIError(ErrorCode.STORAGE_CONFLICT)
         now = await transaction.now()
         first_sequence = execution.event_sequence + 1
@@ -2860,17 +3074,31 @@ class EventRepositoryImpl(_RepositoryBase):
     ) -> Page[ExecutionEventRecord]:
         if tenant_id != self._tenant_id:
             return Page(())
-        stream = stream_digest(self._namespace, self._tenant_id, self._domain.value, "execution", execution_id)
+        stream = stream_digest(
+            self._namespace,
+            self._tenant_id,
+            self._domain.value,
+            "execution",
+            execution_id,
+        )
         values = await self._store.read(
             lambda transaction: transaction.list_facts(
                 FactQuery(stream, after_sequence=after_sequence, limit=limit + 1)
             )
         )
         items = tuple(
-            ExecutionEventRecord(execution_id, tenant_id, value.sequence, ExecutionEventType(value.kind), value.data)
+            ExecutionEventRecord(
+                execution_id,
+                tenant_id,
+                value.sequence,
+                ExecutionEventType(value.kind),
+                value.data,
+            )
             for value in values[:limit]
         )
-        return Page(items, str(items[-1].sequence) if len(values) > limit and items else None)
+        return Page(
+            items, str(items[-1].sequence) if len(values) > limit and items else None
+        )
 
 
 class ApprovalRepositoryImpl(_ResourceRepository[ApprovalRecord]):
@@ -2899,6 +3127,7 @@ class ApprovalRepositoryImpl(_ResourceRepository[ApprovalRecord]):
         decided_at: datetime,
     ) -> ApprovalRecord:
         _require_repository_tenant(tenant_id, self._tenant_id)
+
         async def mutate(transaction: StateTransaction) -> ApprovalRecord:
             record = await transaction.get_record(self._key("approval", approval_id))
             if record is None:
@@ -2908,7 +3137,9 @@ class ApprovalRepositoryImpl(_ResourceRepository[ApprovalRecord]):
                 raise AIError(ErrorCode.APPROVAL_CONFLICT)
             value = replace(
                 current,
-                status=ApprovalStatus.APPROVED if decision is ApprovalDecision.APPROVE else ApprovalStatus.DENIED,
+                status=ApprovalStatus.APPROVED
+                if decision is ApprovalDecision.APPROVE
+                else ApprovalStatus.DENIED,
                 idempotency_key_digest=idempotency_key_digest,
                 decision=decision,
                 decided_by=principal_id,
@@ -2924,7 +3155,9 @@ class ApprovalRepositoryImpl(_ResourceRepository[ApprovalRecord]):
 
         return await self._store.mutate(mutate)
 
-    async def list_pending(self, execution_id: str, *, tenant_id: str) -> tuple[ApprovalRecord, ...]:
+    async def list_pending(
+        self, execution_id: str, *, tenant_id: str
+    ) -> tuple[ApprovalRecord, ...]:
         if tenant_id != self._tenant_id:
             return ()
         records = await self._records(
@@ -2933,6 +3166,7 @@ class ApprovalRepositoryImpl(_ResourceRepository[ApprovalRecord]):
             states=frozenset({ApprovalStatus.PENDING.value}),
         )
         return tuple([await self._decode(record, ApprovalRecord) for record in records])
+
 
 class ExternalCallRepositoryImpl(_ResourceRepository[ExternalCallRecord]):
     def __init__(self, store: StateStore, *, namespace: str, tenant_id: str) -> None:
@@ -2962,6 +3196,7 @@ class ExternalCallRepositoryImpl(_ResourceRepository[ExternalCallRecord]):
         supplied_at: datetime,
     ) -> ExternalCallRecord:
         _require_repository_tenant(tenant_id, self._tenant_id)
+
         async def mutate(transaction: StateTransaction) -> ExternalCallRecord:
             record = await transaction.get_record(self._key("external_call", call_id))
             if record is None:
@@ -2986,7 +3221,9 @@ class ExternalCallRepositoryImpl(_ResourceRepository[ExternalCallRecord]):
 
         return await self._store.mutate(mutate)
 
-    async def list_pending(self, execution_id: str, *, tenant_id: str) -> tuple[ExternalCallRecord, ...]:
+    async def list_pending(
+        self, execution_id: str, *, tenant_id: str
+    ) -> tuple[ExternalCallRecord, ...]:
         if tenant_id != self._tenant_id:
             return ()
         records = await self._records(
@@ -2994,7 +3231,10 @@ class ExternalCallRepositoryImpl(_ResourceRepository[ExternalCallRecord]):
             scope=self._scope("external_call", "execution", execution_id),
             states=frozenset({ExternalCallStatus.PENDING.value}),
         )
-        return tuple([await self._decode(record, ExternalCallRecord) for record in records])
+        return tuple(
+            [await self._decode(record, ExternalCallRecord) for record in records]
+        )
+
 
 class RecoveryCheckpointRepositoryImpl(_ResourceRepository[RecoveryCheckpoint]):
     def __init__(self, store: StateStore, *, namespace: str, tenant_id: str) -> None:
@@ -3012,6 +3252,7 @@ class RecoveryCheckpointRepositoryImpl(_ResourceRepository[RecoveryCheckpoint]):
     async def list(self, *, tenant_id: str) -> tuple[RecoveryCheckpoint, ...]:
         if tenant_id != self._tenant_id:
             return ()
+
         async def read(transaction: StateTransaction) -> tuple[RecoveryCheckpoint, ...]:
             admissions = await transaction.list_records(
                 RecordQuery(
@@ -3025,7 +3266,10 @@ class RecoveryCheckpointRepositoryImpl(_ResourceRepository[RecoveryCheckpoint]):
                     (record, await self._decode(record, RecoveryAdmissionRecord))
                 )
             states = await transaction.get_records(
-                tuple(self._state_key(admission.execution_id) for _, admission in decoded_admissions)
+                tuple(
+                    self._state_key(admission.execution_id)
+                    for _, admission in decoded_admissions
+                )
             )
             values = []
             for admission_record, admission in decoded_admissions:
@@ -3086,7 +3330,9 @@ class RecoveryCheckpointRepositoryImpl(_ResourceRepository[RecoveryCheckpoint]):
                 if checkpoint.state is RecoveryCheckpointState.COMPLETED:
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                 values.append(checkpoint)
-            next_cursor = _record_cursor(selected[-1]) if has_more and selected else None
+            next_cursor = (
+                _record_cursor(selected[-1]) if has_more and selected else None
+            )
             return Page(tuple(values), next_cursor)
 
         return await self._store.read(read)
@@ -3167,6 +3413,7 @@ class RecoveryCheckpointRepositoryImpl(_ResourceRepository[RecoveryCheckpoint]):
         cursor = None
         while True:
             page_cursor = cursor
+
             async def read_page(
                 transaction: StateTransaction,
                 cursor_value: tuple[str, bytes] | None = page_cursor,
@@ -3280,9 +3527,11 @@ class RecoveryCheckpointRepositoryImpl(_ResourceRepository[RecoveryCheckpoint]):
         while True:
             page_cursor = cursor
             states = await self._store.read(
-                lambda transaction, cursor_value=page_cursor: self._read_recovery_state_page(
-                    transaction,
-                    cursor_value,
+                lambda transaction, cursor_value=page_cursor: (
+                    self._read_recovery_state_page(
+                        transaction,
+                        cursor_value,
+                    )
                 )
             )
             if not states:
@@ -3336,8 +3585,7 @@ class RecoveryCheckpointRepositoryImpl(_ResourceRepository[RecoveryCheckpoint]):
         )
         if report.inconsistent_execution_ids:
             _logger.error(
-                "recovery active index validation failed: tenant=%s "
-                "inconsistent=%s",
+                "recovery active index validation failed: tenant=%s inconsistent=%s",
                 self._tenant_id,
                 len(report.inconsistent_execution_ids),
             )
@@ -3472,7 +3720,9 @@ class RecoveryCheckpointRepositoryImpl(_ResourceRepository[RecoveryCheckpoint]):
     def _active_key(self, execution_id: str) -> bytes:
         return self._key("recovery_active", execution_id)
 
-    async def get(self, execution_id: str, *, tenant_id: str) -> RecoveryCheckpoint | None:
+    async def get(
+        self, execution_id: str, *, tenant_id: str
+    ) -> RecoveryCheckpoint | None:
         if tenant_id != self._tenant_id:
             return None
 
@@ -3681,14 +3931,18 @@ class EvaluationRepositoryImpl(_ResourceRepository[EvaluationRecord]):
             identity_field="evaluation_id",
         )
 
-    async def list_by_execution(self, execution_id: str, *, tenant_id: str) -> tuple[EvaluationRecord, ...]:
+    async def list_by_execution(
+        self, execution_id: str, *, tenant_id: str
+    ) -> tuple[EvaluationRecord, ...]:
         if tenant_id != self._tenant_id:
             return ()
         records = await self._records(
             "evaluation",
             scope=self._scope("evaluation", "execution", execution_id),
         )
-        return tuple([await self._decode(record, EvaluationRecord) for record in records])
+        return tuple(
+            [await self._decode(record, EvaluationRecord) for record in records]
+        )
 
 
 class MemoryRepositoryImpl(_ResourceRepository[MemoryRecord]):
@@ -3704,7 +3958,9 @@ class MemoryRepositoryImpl(_ResourceRepository[MemoryRecord]):
             identity_field="memory_id",
         )
 
-    async def put(self, record: MemoryRecord, *, expected_revision: int | None) -> MemoryRecord:
+    async def put(
+        self, record: MemoryRecord, *, expected_revision: int | None
+    ) -> MemoryRecord:
         _require_tenant(record, self._tenant_id)
 
         async def mutate(transaction: StateTransaction) -> MemoryRecord:
@@ -3713,7 +3969,9 @@ class MemoryRepositoryImpl(_ResourceRepository[MemoryRecord]):
             if current is None:
                 if expected_revision not in (None, 0):
                     raise AIError(ErrorCode.STORAGE_CONFLICT)
-                await transaction.insert_record(self._stored("memory", record.memory_id, record))
+                await transaction.insert_record(
+                    self._stored("memory", record.memory_id, record)
+                )
                 return record
             value = await self._decode(current, MemoryRecord)
             if expected_revision != value.revision:
@@ -3728,7 +3986,11 @@ class MemoryRepositoryImpl(_ResourceRepository[MemoryRecord]):
         return await self._store.mutate(mutate)
 
     async def put_with_operation(
-        self, record: MemoryRecord, *, expected_revision: int | None, operation: OperationLedgerInput | None
+        self,
+        record: MemoryRecord,
+        *,
+        expected_revision: int | None,
+        operation: OperationLedgerInput | None,
     ) -> tuple[MemoryRecord | None, bool]:
         _require_tenant(record, self._tenant_id)
         if operation is not None:
@@ -3736,7 +3998,9 @@ class MemoryRepositoryImpl(_ResourceRepository[MemoryRecord]):
         if operation is None:
             return await self.put(record, expected_revision=expected_revision), False
 
-        async def mutate(transaction: StateTransaction) -> tuple[MemoryRecord | None, bool]:
+        async def mutate(
+            transaction: StateTransaction,
+        ) -> tuple[MemoryRecord | None, bool]:
             _, replayed = await _append_operation(transaction, self, operation)
             key = self._key("memory", record.memory_id)
             current = await transaction.get_record(key)
@@ -3747,7 +4011,9 @@ class MemoryRepositoryImpl(_ResourceRepository[MemoryRecord]):
             if current is None:
                 if expected_revision not in (None, 0):
                     raise AIError(ErrorCode.STORAGE_CONFLICT)
-                await transaction.insert_record(self._stored("memory", record.memory_id, record))
+                await transaction.insert_record(
+                    self._stored("memory", record.memory_id, record)
+                )
                 return record, False
             value = await self._decode(current, MemoryRecord)
             if expected_revision != value.revision:
@@ -3762,7 +4028,12 @@ class MemoryRepositoryImpl(_ResourceRepository[MemoryRecord]):
         return await self._store.mutate(mutate)
 
     async def list(
-        self, *, tenant_id: str, memory_scope_digest: str, cursor: str | None, limit: int
+        self,
+        *,
+        tenant_id: str,
+        memory_scope_digest: str,
+        cursor: str | None,
+        limit: int,
     ) -> Page[MemoryRecord]:
         if tenant_id != self._tenant_id:
             return Page(())
@@ -3772,11 +4043,17 @@ class MemoryRepositoryImpl(_ResourceRepository[MemoryRecord]):
             cursor=cursor,
             limit=limit + 1,
         )
-        values = tuple([await self._decode(record, MemoryRecord) for record in records[:limit]])
-        next_cursor = _record_cursor(records[limit - 1]) if len(records) > limit else None
+        values = tuple(
+            [await self._decode(record, MemoryRecord) for record in records[:limit]]
+        )
+        next_cursor = (
+            _record_cursor(records[limit - 1]) if len(records) > limit else None
+        )
         return Page(values, next_cursor)
 
-    async def delete(self, memory_id: str, *, tenant_id: str, expected_revision: int) -> None:
+    async def delete(
+        self, memory_id: str, *, tenant_id: str, expected_revision: int
+    ) -> None:
         if tenant_id != self._tenant_id:
             raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
 
@@ -3797,7 +4074,12 @@ class MemoryRepositoryImpl(_ResourceRepository[MemoryRecord]):
         await self._store.mutate(mutate)
 
     async def delete_with_operation(
-        self, memory_id: str, *, tenant_id: str, expected_revision: int | None, operation: OperationLedgerInput | None
+        self,
+        memory_id: str,
+        *,
+        tenant_id: str,
+        expected_revision: int | None,
+        operation: OperationLedgerInput | None,
     ) -> tuple[bool, bool]:
         if tenant_id != self._tenant_id:
             raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
@@ -3851,12 +4133,16 @@ class ArtifactRepositoryImpl(_ResourceRepository[ArtifactRecord]):
                 if existing == record:
                     return existing
                 raise AIError(ErrorCode.IDEMPOTENCY_CONFLICT)
-            await transaction.insert_record(self._stored("artifact", record.artifact_id, record))
+            await transaction.insert_record(
+                self._stored("artifact", record.artifact_id, record)
+            )
             return record
 
         return await self._store.mutate(mutate)
 
-    async def get_metadata(self, artifact_id: str, *, tenant_id: str) -> ArtifactRecord | None:
+    async def get_metadata(
+        self, artifact_id: str, *, tenant_id: str
+    ) -> ArtifactRecord | None:
         return await self.get(artifact_id, tenant_id=tenant_id)
 
     async def list_by_execution(
@@ -3870,1087 +4156,23 @@ class ArtifactRepositoryImpl(_ResourceRepository[ArtifactRecord]):
             cursor=cursor,
             limit=limit + 1,
         )
-        values = tuple([await self._decode(record, ArtifactRecord) for record in records[:limit]])
-        next_cursor = _record_cursor(records[limit - 1]) if len(records) > limit else None
+        values = tuple(
+            [await self._decode(record, ArtifactRecord) for record in records[:limit]]
+        )
+        next_cursor = (
+            _record_cursor(records[limit - 1]) if len(records) > limit else None
+        )
         return Page(values, next_cursor)
-
-
-def _resolve_task_execution_id(
-    current: str | None,
-    supplied: str | None,
-) -> str | None:
-    if current is None:
-        return supplied
-    if supplied is None or supplied == current:
-        return current
-    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-
-
-class TaskRepositoryImpl(_RepositoryBase):
-    def __init__(self, store: StateStore, *, namespace: str, tenant_id: str) -> None:
-        super().__init__(store, namespace=namespace, tenant_id=tenant_id, domain=RuntimeDomain.TASK)
-
-    def _graph_key(self, graph_id: str) -> bytes:
-        return self._key("task_graph", graph_id)
-
-    def _node_key(self, graph_id: str, node_id: str) -> bytes:
-        return self._key("task_node", [graph_id, node_id])
-
-    def _result_key(self, graph_id: str, node_id: str) -> bytes:
-        return self._key("task_result", [graph_id, node_id])
-
-    def _result_scope(self, graph_id: str) -> bytes:
-        return self._scope("task_result", "graph", graph_id)
-
-    def _result_parent(self, graph_id: str) -> bytes:
-        return self._parent("task_result", "graph", graph_id)
-
-    async def get_header(self, graph_id: str, *, tenant_id: str) -> ResourceRef | None:
-        return (
-            None
-            if await self.get_graph(graph_id, tenant_id=tenant_id) is None
-            else ResourceRef(ResourceKind.TASK_GRAPH, graph_id, tenant_id)
-        )
-
-    async def create_graph(self, graph: TaskGraph, *, tenant_id: str) -> TaskGraphView:
-        if tenant_id != self._tenant_id:
-            raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
-        view = TaskGraphView(graph.graph_id, TaskStatus.PENDING, graph.nodes)
-
-        async def mutate(transaction: StateTransaction) -> TaskGraphView:
-            records = [self._stored("task_graph", graph.graph_id, view, state=view.status.value)]
-            for node in graph.nodes:
-                status = TaskStatus.READY if not node.dependencies else TaskStatus.PENDING
-                node_view = TaskNodeView(
-                    graph.graph_id, node.node_id, node.dependencies, status, None, 0, None, None, None, None
-                )
-                records.append(
-                    self._stored(
-                        "task_node",
-                        [graph.graph_id, node.node_id],
-                        node_view,
-                        parent=self._parent("task_node", "graph", graph.graph_id),
-                        state=status.value,
-                    )
-                )
-            await transaction.insert_records(records)
-            return view
-
-        return await self._store.mutate(mutate)
-
-    async def get_graph(self, graph_id: str, *, tenant_id: str) -> TaskGraphView | None:
-        if tenant_id != self._tenant_id:
-            return None
-        record = await self._record(self._graph_key(graph_id))
-        if record is None:
-            return None
-        graph = await self._decode(record, TaskGraphView)
-        nodes = await self.list_nodes(graph_id, tenant_id=tenant_id)
-        status = (
-            TaskStatus.CANCELLED
-            if graph.status is TaskStatus.CANCELLED
-            else _graph_status(nodes)
-        )
-        return TaskGraphView(graph_id, status, graph.nodes)
-
-    async def snapshot_graph(
-        self,
-        graph_id: str,
-        *,
-        tenant_id: str,
-    ) -> TaskGraphSnapshot | None:
-        if tenant_id != self._tenant_id:
-            return None
-
-        async def read(transaction: StateTransaction) -> TaskGraphSnapshot | None:
-            graph_record = await transaction.get_record(self._graph_key(graph_id))
-            if graph_record is None:
-                return None
-            graph = await self._decode(graph_record, TaskGraphView)
-            records = await transaction.list_records(
-                RecordQuery(
-                    parent_digest=self._parent("task_node", "graph", graph_id),
-                    kind="task_node",
-                )
-            )
-            states = await self._decode_many(records)
-            by_id = {state.node_id: state for state in states}
-            if len(by_id) != len(states):
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            try:
-                ordered = tuple(by_id[node.node_id] for node in graph.nodes)
-            except KeyError as error:
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
-            if len(ordered) != len(states):
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            status = (
-                TaskStatus.CANCELLED
-                if graph.status is TaskStatus.CANCELLED
-                else _graph_status(ordered)
-            )
-            return TaskGraphSnapshot(
-                graph.graph_id,
-                status,
-                graph.nodes,
-                ordered,
-            )
-
-        return await self._store.read(read)
-
-    async def get_results(
-        self,
-        graph_id: str,
-        node_ids: tuple[str, ...],
-        *,
-        tenant_id: str,
-    ) -> Mapping[str, TaskResultRecord]:
-        if tenant_id != self._tenant_id:
-            return {}
-        if not isinstance(node_ids, tuple):
-            raise TypeError("node_ids must be a tuple")
-        if any(not isinstance(node_id, str) or not node_id for node_id in node_ids):
-            raise ValueError("node_ids must contain non-empty strings")
-        if len(set(node_ids)) != len(node_ids):
-            raise ValueError("node_ids must not contain duplicates")
-        if not node_ids:
-            return {}
-        keys = tuple(self._result_key(graph_id, node_id) for node_id in node_ids)
-
-        async def read(transaction: StateTransaction) -> Mapping[str, TaskResultRecord]:
-            records = await transaction.get_records(keys)
-            result: dict[str, TaskResultRecord] = {}
-            for node_id, key in zip(node_ids, keys, strict=True):
-                record = records.get(key)
-                if record is None:
-                    continue
-                if record.kind != "task_result" or record.key_digest != key:
-                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                value = await self._decode(record, TaskResultRecord)
-                if value.graph_id != graph_id or value.node_id != node_id:
-                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                result[node_id] = value
-            return result
-
-        return await self._store.read(read)
-
-    async def reconcile_graph(self, graph_id: str, *, tenant_id: str) -> TaskGraphView:
-        _require_repository_tenant(tenant_id, self._tenant_id)
-        async def mutate(transaction: StateTransaction) -> TaskGraphView:
-            graph_record = await transaction.get_record(self._graph_key(graph_id))
-            if graph_record is None:
-                raise AIError(ErrorCode.STORAGE_NOT_FOUND)
-            graph = await self._decode(graph_record, TaskGraphView)
-            node_records = await transaction.list_records(
-                RecordQuery(
-                    parent_digest=self._parent("task_node", "graph", graph_id),
-                    kind="task_node",
-                )
-            )
-            decoded_nodes = await self._decode_many(node_records)
-            node_records_by_id = {
-                node.node_id: record
-                for node, record in zip(decoded_nodes, node_records, strict=True)
-            }
-            current_nodes = {node.node_id: node for node in decoded_nodes}
-            next_nodes = dict(current_nodes)
-            changed_nodes: list[tuple[TaskNodeView, TaskNodeView]] = []
-            changed = True
-            while changed:
-                changed = False
-                for node in tuple(next_nodes.values()):
-                    if node.status in {
-                        TaskStatus.SUCCEEDED,
-                        TaskStatus.FAILED,
-                        TaskStatus.CANCELLED,
-                        TaskStatus.BLOCKED,
-                    }:
-                        continue
-                    dependencies = tuple(next_nodes[dependency] for dependency in node.dependencies)
-                    if any(
-                        dependency.status in {TaskStatus.FAILED, TaskStatus.BLOCKED, TaskStatus.CANCELLED}
-                        for dependency in dependencies
-                    ):
-                        value = replace(
-                            node,
-                            status=TaskStatus.BLOCKED,
-                            error_code=ErrorCode.TASK_DEPENDENCY_FAILED.value,
-                            error_digest=None,
-                        )
-                    elif node.status is TaskStatus.PENDING and all(
-                        dependency.status is TaskStatus.SUCCEEDED for dependency in dependencies
-                    ):
-                        value = replace(node, status=TaskStatus.READY)
-                    else:
-                        continue
-                    next_nodes[node.node_id] = value
-                    changed_nodes.append((node, value))
-                    changed = True
-            next_status = (
-                TaskStatus.CANCELLED
-                if graph.status is TaskStatus.CANCELLED
-                else _graph_status(tuple(next_nodes.values()))
-            )
-            graph_changed = graph.status is not next_status or graph_record.state != next_status.value
-            if not changed_nodes and not graph_changed:
-                return TaskGraphView(graph.graph_id, next_status, graph.nodes)
-            next_graph = replace(graph, status=next_status)
-            replacements: list[RecordReplacement] = []
-            for current, value in changed_nodes:
-                node_record = node_records_by_id.get(current.node_id)
-                if node_record is None:
-                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                stored_node = await self._decode(node_record, TaskNodeView)
-                if stored_node != current:
-                    raise AIError(ErrorCode.STORAGE_CONFLICT)
-                replacements.append(
-                    RecordReplacement(
-                        _projected_record(self, node_record, value),
-                        node_record.storage_version,
-                    )
-                )
-            if graph_changed:
-                replacements.append(
-                    RecordReplacement(
-                        _task_graph_record(self, graph_record, next_graph),
-                        graph_record.storage_version,
-                    )
-                )
-            await transaction.replace_records(replacements)
-            _logger.info(
-                "task graph reconciled atomically: graph_id=%s changed_nodes=%s",
-                graph_id,
-                len(changed_nodes),
-            )
-            return TaskGraphView(graph.graph_id, next_graph.status, graph.nodes)
-
-        return await self._store.mutate(mutate)
-
-    async def cancel_graph(self, graph_id: str, *, tenant_id: str) -> TaskGraphView:
-        _require_repository_tenant(tenant_id, self._tenant_id)
-        async def mutate(transaction: StateTransaction) -> TaskGraphView:
-            graph_record = await transaction.get_record(self._graph_key(graph_id))
-            if graph_record is None:
-                raise AIError(ErrorCode.STORAGE_NOT_FOUND)
-            graph = await self._decode(graph_record, TaskGraphView)
-            node_records = await transaction.list_records(
-                RecordQuery(
-                    parent_digest=self._parent("task_node", "graph", graph_id),
-                    kind="task_node",
-                )
-            )
-            nodes = await self._decode_many(node_records)
-            node_records_by_id = {
-                node.node_id: record
-                for node, record in zip(nodes, node_records, strict=True)
-            }
-            changed = [
-                (node, replace(node, status=TaskStatus.CANCELLED, owner=None, lease_expires_at=None))
-                for node in nodes
-                if node.status not in {
-                    TaskStatus.SUCCEEDED,
-                    TaskStatus.FAILED,
-                    TaskStatus.BLOCKED,
-                    TaskStatus.CANCELLED,
-                }
-            ]
-            changed_ids = {current.node_id for current, _ in changed}
-            next_nodes = tuple(value for _, value in changed) + tuple(
-                node for node in nodes if node.node_id not in changed_ids
-            )
-            next_status = (
-                TaskStatus.CANCELLED
-                if graph.status is TaskStatus.CANCELLED or changed
-                else _graph_status(next_nodes)
-            )
-            graph_changed = (
-                graph.status is not next_status
-                or graph_record.state != next_status.value
-            )
-            if not changed and not graph_changed:
-                return TaskGraphView(graph.graph_id, next_status, graph.nodes)
-            next_graph = replace(graph, status=next_status)
-            replacements: list[RecordReplacement] = []
-            for current, value in changed:
-                node_record = node_records_by_id.get(current.node_id)
-                if node_record is None:
-                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                replacements.append(
-                    RecordReplacement(
-                        _projected_record(self, node_record, value),
-                        node_record.storage_version,
-                    )
-                )
-            if graph_changed:
-                replacements.append(
-                    RecordReplacement(
-                        _task_graph_record(self, graph_record, next_graph),
-                        graph_record.storage_version,
-                    )
-                )
-            await transaction.replace_records(replacements)
-            _logger.info("task graph cancelled atomically: graph_id=%s changed_nodes=%s", graph_id, len(changed))
-            return TaskGraphView(graph.graph_id, next_graph.status, graph.nodes)
-
-        return await self._store.mutate(mutate)
-
-    async def claim(self, graph_id: str, node_id: str, *, tenant_id: str, owner: str, lease_seconds: int) -> TaskLease:
-        if tenant_id != self._tenant_id:
-            raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
-        validate_lease_owner(owner)
-        validate_lease_seconds(lease_seconds)
-
-        async def mutate(transaction: StateTransaction) -> TaskLease:
-            records = await transaction.get_records(
-                (self._graph_key(graph_id), self._node_key(graph_id, node_id))
-            )
-            graph_record = records.get(self._graph_key(graph_id))
-            record = records.get(self._node_key(graph_id, node_id))
-            if graph_record is None or record is None:
-                raise AIError(ErrorCode.TASK_NOT_READY)
-            graph = await self._decode(graph_record, TaskGraphView)
-            node = await self._decode(record, TaskNodeView)
-            dependency_keys = tuple(
-                self._node_key(graph_id, dependency)
-                for dependency in node.dependencies
-            )
-            dependency_records = await transaction.get_records(dependency_keys)
-            nodes = {
-                dependency: await self._decode(
-                    dependency_records[self._node_key(graph_id, dependency)],
-                    TaskNodeView,
-                )
-                for dependency in node.dependencies
-                if self._node_key(graph_id, dependency) in dependency_records
-            }
-            if graph.graph_id != graph_id or any(
-                dependency not in nodes for dependency in node.dependencies
-            ):
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            now = await transaction.now()
-            expired = node.lease_expires_at is not None and node.lease_expires_at <= now
-            if node.status is TaskStatus.RUNNING and node.owner not in {None, owner} and not expired:
-                raise AIError(ErrorCode.TASK_OWNER_CONFLICT)
-            dependencies_succeeded = all(
-                nodes[dependency].status is TaskStatus.SUCCEEDED
-                for dependency in node.dependencies
-            )
-            if node.status not in {TaskStatus.PENDING, TaskStatus.READY} and not (
-                node.status is TaskStatus.RUNNING and expired
-            ):
-                raise AIError(ErrorCode.TASK_NOT_READY)
-            if node.status in {TaskStatus.PENDING, TaskStatus.READY} and not dependencies_succeeded:
-                raise AIError(ErrorCode.TASK_NOT_READY)
-            fence = node.fence + 1
-            expires = now + timedelta(seconds=lease_seconds)
-            value = replace(node, status=TaskStatus.RUNNING, owner=owner, fence=fence, lease_expires_at=expires)
-            await self._update_node_in_transaction(transaction, node, value)
-            return TaskLease(graph_id, node_id, tenant_id, owner, fence, expires)
-
-        return await self._store.mutate(mutate)
-
-    async def renew(self, lease: TaskLease, *, tenant_id: str, lease_seconds: int) -> TaskLease:
-        _validate_task_lease_scope(lease, tenant_id)
-        if tenant_id != self._tenant_id:
-            raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
-        validate_lease_seconds(lease_seconds)
-
-        async def mutate(transaction: StateTransaction) -> TaskLease:
-            records = await transaction.get_records(
-                (self._graph_key(lease.graph_id), self._node_key(lease.graph_id, lease.node_id))
-            )
-            graph_record = records.get(self._graph_key(lease.graph_id))
-            node_record = records.get(self._node_key(lease.graph_id, lease.node_id))
-            if graph_record is None or node_record is None:
-                raise AIError(ErrorCode.TASK_FENCE_STALE)
-            node = await self._decode(node_record, TaskNodeView)
-            now = await transaction.now()
-            _require_live_task_lease(node, lease, now)
-            expires = now + timedelta(seconds=lease_seconds)
-            if not await transaction.update_record_lease(
-                node_record.key_digest,
-                expected_storage_version=node_record.storage_version,
-                lease_owner=node.owner,
-                lease_fence=node.fence,
-                lease_expires_at=expires,
-            ):
-                raise AIError(ErrorCode.TASK_FENCE_STALE)
-            return replace(lease, lease_expires_at=expires)
-
-        return await self._store.mutate(mutate)
-
-    async def bind_execution(
-        self,
-        lease: TaskLease,
-        *,
-        tenant_id: str,
-        execution_id: str,
-    ) -> TaskNodeView:
-        _validate_task_lease_scope(lease, tenant_id)
-        if tenant_id != self._tenant_id:
-            raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
-        if not isinstance(execution_id, str) or not execution_id.strip():
-            raise ValueError("execution_id must be a non-empty string")
-
-        async def mutate(transaction: StateTransaction) -> TaskNodeView:
-            records = await transaction.get_records(
-                (
-                    self._graph_key(lease.graph_id),
-                    self._node_key(lease.graph_id, lease.node_id),
-                )
-            )
-            graph_record = records.get(self._graph_key(lease.graph_id))
-            node_record = records.get(self._node_key(lease.graph_id, lease.node_id))
-            if graph_record is None or node_record is None:
-                raise AIError(ErrorCode.TASK_FENCE_STALE)
-            node = await self._decode(node_record, TaskNodeView)
-            now = await transaction.now()
-            _require_live_task_lease(node, lease, now)
-            if node.execution_id == execution_id:
-                return node
-            if node.execution_id is not None:
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            value = replace(node, execution_id=execution_id)
-            await self._update_node_in_transaction(transaction, node, value)
-            return value
-
-        return await self._store.mutate(mutate)
-
-    async def complete(
-        self,
-        lease: TaskLease,
-        *,
-        tenant_id: str,
-        execution_id: str | None,
-        result_digest: str,
-        result_payload: StoredPayload | None = None,
-    ) -> TaskTerminalRecord:
-        _validate_task_lease_scope(lease, tenant_id)
-        if tenant_id != self._tenant_id:
-            raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
-        if result_payload is not None and result_payload.digest != result_digest:
-            raise AIError(ErrorCode.TASK_RESULT_CONFLICT)
-
-        async def mutate(transaction: StateTransaction) -> TaskTerminalRecord:
-            result_key = self._result_key(lease.graph_id, lease.node_id)
-            records = await transaction.get_records(
-                (
-                    self._graph_key(lease.graph_id),
-                    self._node_key(lease.graph_id, lease.node_id),
-                    result_key,
-                )
-            )
-            graph_record = records.get(self._graph_key(lease.graph_id))
-            node_record = records.get(self._node_key(lease.graph_id, lease.node_id))
-            if graph_record is None or node_record is None:
-                raise AIError(ErrorCode.TASK_FENCE_STALE)
-            node = await self._decode(node_record, TaskNodeView)
-            now = await transaction.now()
-            _require_live_task_lease(node, lease, now)
-            resolved_execution_id = _resolve_task_execution_id(
-                node.execution_id,
-                execution_id,
-            )
-            if result_payload is not None:
-                current_result_record = records.get(result_key)
-                if current_result_record is None:
-                    result = TaskResultRecord(
-                        lease.graph_id,
-                        lease.node_id,
-                        result_digest,
-                        result_payload,
-                    )
-                    await transaction.insert_record(
-                        self._stored(
-                            "task_result",
-                            [lease.graph_id, lease.node_id],
-                            result,
-                            scope=self._result_scope(lease.graph_id),
-                            parent=self._result_parent(lease.graph_id),
-                        )
-                    )
-                else:
-                    if (
-                        current_result_record.kind != "task_result"
-                        or current_result_record.key_digest != result_key
-                    ):
-                        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                    current_result = await self._decode(
-                        current_result_record,
-                        TaskResultRecord,
-                    )
-                    if (
-                        current_result.graph_id != lease.graph_id
-                        or current_result.node_id != lease.node_id
-                        or current_result.result_digest != result_digest
-                    ):
-                        raise AIError(ErrorCode.TASK_RESULT_CONFLICT)
-            value = replace(
-                node,
-                status=TaskStatus.SUCCEEDED,
-                owner=None,
-                lease_expires_at=None,
-                result_digest=result_digest,
-                error_code=None,
-                error_digest=None,
-                execution_id=resolved_execution_id,
-            )
-            await self._update_node_in_transaction(transaction, node, value)
-            return TaskTerminalRecord(
-                lease.node_id,
-                lease.owner,
-                lease.fence,
-                TaskStatus.SUCCEEDED,
-                result_digest,
-                None,
-                None,
-                execution_id=resolved_execution_id,
-            )
-
-        return await self._store.mutate(mutate)
-
-    async def fail(
-        self,
-        lease: TaskLease,
-        *,
-        tenant_id: str,
-        error_code: str,
-        error_digest: str,
-        execution_id: str | None = None,
-    ) -> TaskTerminalRecord:
-        return await self._finish(
-            lease,
-            tenant_id=tenant_id,
-            status=TaskStatus.FAILED,
-            execution_id=execution_id,
-            result_digest=None,
-            error_code=error_code,
-            error_digest=error_digest,
-        )
-
-    async def _finish(
-        self,
-        lease: TaskLease,
-        *,
-        tenant_id: str,
-        status: TaskStatus,
-        execution_id: str | None,
-        result_digest: str | None,
-        error_code: str | None,
-        error_digest: str | None,
-    ) -> TaskTerminalRecord:
-        _validate_task_lease_scope(lease, tenant_id)
-        if tenant_id != self._tenant_id:
-            raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
-
-        async def mutate(transaction: StateTransaction) -> TaskTerminalRecord:
-            record = await transaction.get_record(self._node_key(lease.graph_id, lease.node_id))
-            if record is None:
-                raise AIError(ErrorCode.TASK_FENCE_STALE)
-            node = await self._decode(record, TaskNodeView)
-            now = await transaction.now()
-            _require_live_task_lease(node, lease, now)
-            resolved_execution_id = _resolve_task_execution_id(
-                node.execution_id,
-                execution_id,
-            )
-            value = replace(
-                node,
-                status=status,
-                owner=None,
-                lease_expires_at=None,
-                result_digest=result_digest,
-                error_code=error_code,
-                error_digest=error_digest,
-                execution_id=resolved_execution_id,
-            )
-            await self._update_node_in_transaction(transaction, node, value)
-            return TaskTerminalRecord(
-                lease.node_id,
-                lease.owner,
-                lease.fence,
-                status,
-                result_digest,
-                error_code,
-                error_digest,
-                execution_id=resolved_execution_id,
-            )
-
-        return await self._store.mutate(mutate)
-
-    async def list_nodes(self, graph_id: str, *, tenant_id: str) -> tuple[TaskNodeView, ...]:
-        if tenant_id != self._tenant_id:
-            return ()
-        records = await self._records("task_node", parent=self._parent("task_node", "graph", graph_id))
-        return await self._decode_many(records)
-
-    async def _decode_many(self, records: tuple[StoredRecord, ...]) -> tuple[TaskNodeView, ...]:
-        return tuple([await self._decode(record, TaskNodeView) for record in records])
-
-    async def _node(self, graph_id: str, node_id: str, tenant_id: str) -> TaskNodeView:
-        _require_repository_tenant(tenant_id, self._tenant_id)
-        record = await self._record(self._node_key(graph_id, node_id))
-        if record is None:
-            raise AIError(ErrorCode.STORAGE_NOT_FOUND)
-        return await self._decode(record, TaskNodeView)
-
-    async def _update_node(self, current: TaskNodeView, value: TaskNodeView) -> None:
-        async def mutate(transaction: StateTransaction) -> None:
-            await self._update_node_in_transaction(transaction, current, value)
-
-        await self._store.mutate(mutate)
-
-    async def _update_node_in_transaction(
-        self,
-        transaction: StateTransaction,
-        current: TaskNodeView,
-        value: TaskNodeView,
-    ) -> None:
-        graph_record = await transaction.get_record(self._graph_key(current.graph_id))
-        if graph_record is None:
-            raise AIError(ErrorCode.STORAGE_NOT_FOUND)
-        graph = await self._decode(graph_record, TaskGraphView)
-        if graph.graph_id != current.graph_id:
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        node_record = await transaction.get_record(
-            self._node_key(current.graph_id, current.node_id)
-        )
-        if node_record is None:
-            raise AIError(ErrorCode.STORAGE_NOT_FOUND)
-        stored_node = await self._decode(node_record, TaskNodeView)
-        if stored_node != current:
-            raise AIError(ErrorCode.STORAGE_CONFLICT)
-        node_candidate = _projected_record(self, node_record, value)
-        await _replace_checked(transaction, node_candidate, node_record.storage_version)
-
-
-class TaskAdmissionRepositoryImpl(_RepositoryBase):
-    def __init__(self, store: StateStore, *, namespace: str, tenant_id: str) -> None:
-        super().__init__(store, namespace=namespace, tenant_id=tenant_id, domain=RuntimeDomain.TASK)
-        self._background_tasks: set[asyncio.Task[object]] = set()
-
-    def _graph_key(self, graph_id: str) -> bytes:
-        return self._key("task_graph", graph_id)
-
-    def _admission_key(self, graph_id: str) -> bytes:
-        return self._key("task_admission", graph_id)
-
-    def _recovery_scope(self) -> bytes:
-        return self._scope("task_graph", "recoverable", "graphs")
-
-    async def admit(self, admission: TaskGraphAdmission, graph: TaskGraph) -> TaskGraphView:
-        launch = admission.bind(graph)
-        if launch.principal.tenant_id != self._tenant_id:
-            raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
-
-        async def operation() -> TaskGraphView:
-            return await self._store.mutate(
-                lambda transaction: self._admit_in_transaction(transaction, admission, graph)
-            )
-
-        async def readback() -> CommitObservation[TaskGraphView]:
-            return await self._store.read(
-                lambda transaction: self._read_admission(transaction, admission, graph)
-            )
-
-        result = await run_durable_commit(operation, readback, background_tasks=self._background_tasks)
-        if result.state is DurableCommitState.COMMITTED and result.value is not None:
-            if result.cancelled:
-                raise asyncio.CancelledError
-            return result.value
-        if result.state is DurableCommitState.PARTIAL_INTEGRITY_ERROR:
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from result.error
-        if result.state is DurableCommitState.NOT_COMMITTED:
-            if result.cancelled:
-                raise asyncio.CancelledError
-            if isinstance(result.error, AIError):
-                raise result.error
-            if result.error is not None:
-                raise result.error
-            raise AIError(ErrorCode.STORAGE_CONFLICT)
-        if result.cancelled:
-            raise asyncio.CancelledError
-        raise AIError(ErrorCode.STORAGE_COMMIT_UNKNOWN) from result.error
-
-    async def list_recoverable_page(
-        self, *, cursor: str | None, limit: int
-    ) -> Page[TaskGraphLaunch]:
-        if limit != 128:
-            raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
-        after_sort_key, after_key_digest = _decode_record_cursor(cursor)
-
-        async def read(transaction: StateTransaction) -> Page[TaskGraphLaunch]:
-            records = await transaction.list_records(
-                RecordQuery(
-                    scope_digest=self._recovery_scope(),
-                    kind="task_graph",
-                    states=frozenset({TaskStatus.PENDING.value, TaskStatus.READY.value, TaskStatus.RUNNING.value}),
-                    after_sort_key=after_sort_key,
-                    after_key_digest=after_key_digest,
-                    limit=limit + 1,
-                )
-            )
-            selected = records[:limit]
-            graph_views = tuple(
-                [await self._decode(record, TaskGraphView) for record in selected]
-            )
-            admission_records = await transaction.get_records(
-                tuple(
-                    self._admission_key(graph_view.graph_id)
-                    for graph_view in graph_views
-                )
-            )
-            launches: list[TaskGraphLaunch] = []
-            for record, graph_view in zip(selected, graph_views, strict=True):
-                admission_record = admission_records.get(
-                    self._admission_key(graph_view.graph_id)
-                )
-                if admission_record is None:
-                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                admission = await self._decode(admission_record, TaskGraphAdmission)
-                if (
-                    record.scope_digest != self._recovery_scope()
-                    or record.key_digest != self._graph_key(graph_view.graph_id)
-                    or record.state != graph_view.status.value
-                    or admission.graph_id != graph_view.graph_id
-                ):
-                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                launches.append(
-                    admission.bind(TaskGraph(graph_view.graph_id, graph_view.nodes))
-                )
-            next_cursor = _record_cursor(selected[-1]) if len(records) > limit and selected else None
-            return Page(tuple(launches), next_cursor)
-
-        return await self._store.read(read)
-
-    async def _admit_in_transaction(
-        self, transaction: StateTransaction, admission: TaskGraphAdmission, graph: TaskGraph
-    ) -> TaskGraphView:
-        operation_key_value = operation_key(
-            self._namespace, self._tenant_id, self._domain.value, admission.operation_id
-        )
-        records = await transaction.get_records(
-            (self._graph_key(graph.graph_id), self._admission_key(graph.graph_id))
-        )
-        graph_record = records.get(self._graph_key(graph.graph_id))
-        admission_record = records.get(self._admission_key(graph.graph_id))
-        stored_operation = await transaction.get_operation(operation_key_value)
-        node_records = await transaction.list_records(
-            RecordQuery(parent_digest=self._parent("task_node", "graph", graph.graph_id), kind="task_node")
-        )
-        if graph_record is None and admission_record is None and stored_operation is None:
-            if node_records:
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            return await self._create_admission(transaction, admission, graph)
-        if stored_operation is None:
-            if graph_record is not None and admission_record is not None:
-                existing, _ = await self._require_committed_admission(
-                    transaction,
-                    graph_record,
-                    admission_record,
-                    node_records,
-                )
-                if existing.operation_id != admission.operation_id:
-                    raise AIError(ErrorCode.STORAGE_CONFLICT)
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        operation = _decode_operation(stored_operation)
-        if operation.request_digest != admission.request_digest:
-            raise AIError(ErrorCode.IDEMPOTENCY_CONFLICT)
-        self._validate_operation_identity(operation, admission)
-        if operation.status in {OperationStatus.FAILED, OperationStatus.CANCELLED}:
-            raise _stored_operation_error(operation)
-        if graph_record is None:
-            if admission_record is not None or node_records:
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            if operation.status not in {
-                OperationStatus.PENDING,
-                OperationStatus.RUNNING,
-                OperationStatus.EFFECT_UNKNOWN,
-            }:
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            view = await self._insert_admission_records(transaction, admission, graph)
-            await self._settle_operation(transaction, stored_operation, operation, graph)
-            _logger.info(
-                "legacy task admission completed from operation: tenant=%s graph=%s",
-                self._tenant_id,
-                graph.graph_id,
-            )
-            return view
-        graph_view = await self._decode(graph_record, TaskGraphView)
-        nodes = await self._decode_task_nodes(node_records)
-        self._validate_graph(graph_view, graph, nodes)
-        if admission_record is not None:
-            existing, view = await self._require_committed_admission(
-                transaction,
-                graph_record,
-                admission_record,
-                node_records,
-                stored_operation=stored_operation,
-            )
-            if existing != admission:
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            return view
-        if operation.status not in {
-            OperationStatus.PENDING,
-            OperationStatus.RUNNING,
-            OperationStatus.EFFECT_UNKNOWN,
-            OperationStatus.SUCCEEDED,
-        }:
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        if operation.status is OperationStatus.SUCCEEDED:
-            self._validate_succeeded_operation(operation, graph)
-        status = _graph_status(nodes)
-        next_graph = TaskGraphView(graph.graph_id, status, graph.nodes)
-        await _replace_checked(
-            transaction,
-            replace(
-                self._stored(
-                    "task_graph", graph.graph_id, next_graph,
-                    scope=self._recovery_scope(), state=status.value,
-                ),
-                storage_version=graph_record.storage_version + 1,
-            ),
-            graph_record.storage_version,
-        )
-        await transaction.insert_record(self._stored("task_admission", graph.graph_id, admission))
-        if operation.status is not OperationStatus.SUCCEEDED:
-            await self._settle_operation(transaction, stored_operation, operation, graph)
-        _logger.info("legacy task graph admission upgraded: tenant=%s graph=%s", self._tenant_id, graph.graph_id)
-        return next_graph
-
-    async def _create_admission(
-        self, transaction: StateTransaction, admission: TaskGraphAdmission, graph: TaskGraph
-    ) -> TaskGraphView:
-        view = await self._insert_admission_records(transaction, admission, graph)
-        now = await transaction.now()
-        operation_input = OperationLedgerInput(
-            admission.operation_id, self._tenant_id, ResourceKind.TASK_GRAPH, graph.graph_id, None,
-            OperationKind.TASK_NODE, OperationStatus.SUCCEEDED, admission.request_digest,
-            graph.graph_id, _task_submit_result_digest(graph), None, True, now, now,
-        )
-        await _append_operation(transaction, self, operation_input)
-        _logger.info("task graph durably admitted: tenant=%s graph=%s", self._tenant_id, graph.graph_id)
-        return view
-
-    async def _insert_admission_records(
-        self,
-        transaction: StateTransaction,
-        admission: TaskGraphAdmission,
-        graph: TaskGraph,
-    ) -> TaskGraphView:
-        status = TaskStatus.SUCCEEDED if not graph.nodes else TaskStatus.PENDING
-        view = TaskGraphView(graph.graph_id, status, graph.nodes)
-        records = [
-            self._stored(
-                "task_graph", graph.graph_id, view,
-                scope=self._recovery_scope(), state=status.value,
-            ),
-            self._stored("task_admission", graph.graph_id, admission),
-        ]
-        for node in graph.nodes:
-            node_status = TaskStatus.READY if not node.dependencies else TaskStatus.PENDING
-            node_view = TaskNodeView(
-                graph.graph_id, node.node_id, node.dependencies, node_status, None, 0, None, None, None, None
-            )
-            records.append(
-                self._stored(
-                    "task_node", [graph.graph_id, node.node_id], node_view,
-                    parent=self._parent("task_node", "graph", graph.graph_id),
-                    state=node_status.value,
-                )
-            )
-        await transaction.insert_records(records)
-        return view
-
-    async def _settle_operation(
-        self,
-        transaction: StateTransaction,
-        stored: StoredOperation,
-        operation: OperationLedgerRecord,
-        graph: TaskGraph,
-    ) -> None:
-        now = await transaction.now()
-        next_operation = replace(
-            operation, status=OperationStatus.SUCCEEDED, result_ref=graph.graph_id,
-            result_digest=_task_submit_result_digest(graph), error_code=None, updated_at=now,
-        )
-        candidate = _stored_from_operation(next_operation, stored)
-        if not await transaction.replace_operation(candidate, expected_state=operation.status.value):
-            raise AIError(ErrorCode.STORAGE_CONFLICT)
-
-    async def _read_admission(
-        self, transaction: StateTransaction, admission: TaskGraphAdmission, graph: TaskGraph
-    ) -> CommitObservation[TaskGraphView]:
-        operation_key_value = operation_key(
-            self._namespace, self._tenant_id, self._domain.value, admission.operation_id
-        )
-        records = await transaction.get_records(
-            (self._graph_key(graph.graph_id), self._admission_key(graph.graph_id))
-        )
-        graph_record = records.get(self._graph_key(graph.graph_id))
-        admission_record = records.get(self._admission_key(graph.graph_id))
-        stored_operation = await transaction.get_operation(operation_key_value)
-        node_records = await transaction.list_records(
-            RecordQuery(parent_digest=self._parent("task_node", "graph", graph.graph_id), kind="task_node")
-        )
-        if graph_record is None and admission_record is None and stored_operation is None and not node_records:
-            return CommitObservation(DurableCommitState.NOT_COMMITTED)
-        try:
-            operation = None if stored_operation is None else _decode_operation(stored_operation)
-            if operation is not None:
-                if operation.request_digest != admission.request_digest:
-                    return CommitObservation(
-                        DurableCommitState.NOT_COMMITTED,
-                        error=AIError(ErrorCode.IDEMPOTENCY_CONFLICT),
-                    )
-                self._validate_operation_identity(operation, admission)
-                if operation.status in {OperationStatus.FAILED, OperationStatus.CANCELLED}:
-                    return CommitObservation(
-                        DurableCommitState.NOT_COMMITTED,
-                        error=_stored_operation_error(operation),
-                    )
-            if stored_operation is None:
-                if graph_record is not None and admission_record is not None:
-                    existing, _ = await self._require_committed_admission(
-                        transaction,
-                        graph_record,
-                        admission_record,
-                        node_records,
-                    )
-                    if existing.operation_id != admission.operation_id:
-                        return CommitObservation(
-                            DurableCommitState.NOT_COMMITTED,
-                            error=AIError(ErrorCode.STORAGE_CONFLICT),
-                        )
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            assert operation is not None
-            if graph_record is None:
-                if admission_record is not None or node_records:
-                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                if operation.status in {
-                    OperationStatus.PENDING,
-                    OperationStatus.RUNNING,
-                    OperationStatus.EFFECT_UNKNOWN,
-                }:
-                    return CommitObservation(DurableCommitState.NOT_COMMITTED)
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            graph_view = await self._decode(graph_record, TaskGraphView)
-            nodes = await self._decode_task_nodes(node_records)
-            self._validate_graph(graph_view, graph, nodes)
-            if admission_record is None:
-                if operation.status not in {
-                    OperationStatus.PENDING,
-                    OperationStatus.RUNNING,
-                    OperationStatus.EFFECT_UNKNOWN,
-                    OperationStatus.SUCCEEDED,
-                }:
-                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                if operation.status is OperationStatus.SUCCEEDED:
-                    self._validate_succeeded_operation(operation, graph)
-                return CommitObservation(DurableCommitState.NOT_COMMITTED)
-            existing, view = await self._require_committed_admission(
-                transaction,
-                graph_record,
-                admission_record,
-                node_records,
-                stored_operation=stored_operation,
-            )
-            if existing != admission:
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            return CommitObservation(DurableCommitState.COMMITTED, view)
-        except (KeyError, TypeError, ValueError) as error:
-            return CommitObservation(
-                DurableCommitState.PARTIAL_INTEGRITY_ERROR,
-                error=AIError(ErrorCode.STORAGE_INTEGRITY_ERROR),
-            )
-        except AIError as error:
-            return CommitObservation(DurableCommitState.PARTIAL_INTEGRITY_ERROR, error=error)
-
-    async def _require_committed_admission(
-        self,
-        transaction: StateTransaction,
-        graph_record: StoredRecord,
-        admission_record: StoredRecord,
-        node_records: tuple[StoredRecord, ...],
-        *,
-        stored_operation: StoredOperation | None = None,
-    ) -> tuple[TaskGraphAdmission, TaskGraphView]:
-        existing = await self._decode(admission_record, TaskGraphAdmission)
-        graph_view = await self._decode(graph_record, TaskGraphView)
-        nodes = await self._decode_task_nodes(node_records)
-        persisted_graph = TaskGraph(graph_view.graph_id, graph_view.nodes)
-        existing.bind(persisted_graph)
-        self._validate_graph(graph_view, persisted_graph, nodes)
-        status = _graph_status(nodes)
-        if (
-            graph_view.status is not status
-            or graph_record.scope_digest != self._recovery_scope()
-            or graph_record.state != status.value
-        ):
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        if stored_operation is None:
-            stored_operation = await transaction.get_operation(
-                operation_key(
-                    self._namespace,
-                    self._tenant_id,
-                    self._domain.value,
-                    existing.operation_id,
-                )
-            )
-        if stored_operation is None:
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        operation = _decode_operation(stored_operation)
-        self._validate_operation_identity(operation, existing)
-        if operation.request_digest != existing.request_digest:
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        self._validate_succeeded_operation(operation, persisted_graph)
-        return existing, TaskGraphView(graph_view.graph_id, status, graph_view.nodes)
-
-    def _validate_succeeded_operation(
-        self,
-        operation: OperationLedgerRecord,
-        graph: TaskGraph,
-    ) -> None:
-        if (
-            operation.status is not OperationStatus.SUCCEEDED
-            or operation.result_ref != graph.graph_id
-            or operation.result_digest != _task_submit_result_digest(graph)
-            or operation.error_code is not None
-        ):
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-
-    def _validate_operation_identity(
-        self, operation: OperationLedgerRecord, admission: TaskGraphAdmission
-    ) -> None:
-        if (
-            operation.operation_id != admission.operation_id
-            or operation.tenant_id != self._tenant_id
-            or operation.resource_kind is not ResourceKind.TASK_GRAPH
-            or operation.resource_id != admission.graph_id
-            or operation.execution_id is not None
-            or operation.operation_kind is not OperationKind.TASK_NODE
-            or not operation.compactable
-        ):
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-
-    def _validate_graph(
-        self, stored: TaskGraphView, graph: TaskGraph, nodes: tuple[TaskNodeView, ...]
-    ) -> None:
-        if stored.graph_id != graph.graph_id or stored.nodes != graph.nodes:
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        expected = {node.node_id: node.dependencies for node in graph.nodes}
-        actual = {node.node_id: node.dependencies for node in nodes}
-        if actual != expected or len(nodes) != len(expected):
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-
-    async def _decode_task_nodes(
-        self, records: tuple[StoredRecord, ...]
-    ) -> tuple[TaskNodeView, ...]:
-        return tuple([await self._decode(record, TaskNodeView) for record in records])
 
 
 class ToolRepositoryImpl(_RepositoryBase):
     def __init__(self, store: StateStore, *, namespace: str, tenant_id: str) -> None:
-        super().__init__(store, namespace=namespace, tenant_id=tenant_id, domain=RuntimeDomain.RECOVERY)
+        super().__init__(
+            store,
+            namespace=namespace,
+            tenant_id=tenant_id,
+            domain=RuntimeDomain.RECOVERY,
+        )
 
     def _tool_key(self, identity: str) -> bytes:
         return self._key("tool_operation", identity)
@@ -5006,14 +4228,22 @@ class ToolRepositoryImpl(_RepositoryBase):
 
         async def mutate(transaction: StateTransaction) -> ToolOperationRecord:
             resolved = await transaction.resolve_aliases(aliases)
-            record_keys = tuple(dict.fromkeys((*resolved.values(), self._tool_key(request.tool_operation_id))))
+            record_keys = tuple(
+                dict.fromkeys(
+                    (*resolved.values(), self._tool_key(request.tool_operation_id))
+                )
+            )
             records = await transaction.get_records(record_keys)
             resolved_keys = tuple(dict.fromkeys(resolved.values()))
             if len(resolved_keys) > 1:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             candidate_key = self._tool_key(request.tool_operation_id)
             candidate_record = records.get(candidate_key)
-            if resolved_keys and candidate_record is not None and candidate_key not in resolved_keys:
+            if (
+                resolved_keys
+                and candidate_record is not None
+                and candidate_key not in resolved_keys
+            ):
                 raise AIError(ErrorCode.IDEMPOTENCY_CONFLICT)
             existing_key = resolved_keys[0] if resolved_keys else candidate_key
             record = records.get(existing_key)
@@ -5042,18 +4272,25 @@ class ToolRepositoryImpl(_RepositoryBase):
                         "tool_operation",
                         request.tool_operation_id,
                         value,
-                        scope=self._scope("tool_operation", "step_run", request.step_run_id),
+                        scope=self._scope(
+                            "tool_operation", "step_run", request.step_run_id
+                        ),
                         state=value.status.value,
                     )
                 )
                 await transaction.insert_aliases(
-                    tuple(StoredAlias(alias, self._tool_key(request.tool_operation_id)) for alias in aliases)
+                    tuple(
+                        StoredAlias(alias, self._tool_key(request.tool_operation_id))
+                        for alias in aliases
+                    )
                 )
                 return value
             current = await self._decode(record, ToolOperationRecord)
             if not _tool_admission_matches(current, request):
                 raise AIError(ErrorCode.IDEMPOTENCY_CONFLICT)
-            missing_aliases = tuple(alias for alias in aliases if resolved.get(alias) is None)
+            missing_aliases = tuple(
+                alias for alias in aliases if resolved.get(alias) is None
+            )
             if missing_aliases:
                 guarded = await transaction.guard_record(
                     record.key_digest,
@@ -5063,12 +4300,20 @@ class ToolRepositoryImpl(_RepositoryBase):
                     raise AIError(ErrorCode.STORAGE_CONFLICT)
                 record = guarded
                 await transaction.insert_aliases(
-                    tuple(StoredAlias(alias, record.key_digest) for alias in missing_aliases)
+                    tuple(
+                        StoredAlias(alias, record.key_digest)
+                        for alias in missing_aliases
+                    )
                 )
-            now = await transaction.now() if current.status in {
-                ToolOperationStatus.PENDING,
-                ToolOperationStatus.CLAIMED,
-            } else None
+            now = (
+                await transaction.now()
+                if current.status
+                in {
+                    ToolOperationStatus.PENDING,
+                    ToolOperationStatus.CLAIMED,
+                }
+                else None
+            )
             if current.status in {
                 ToolOperationStatus.COMPLETED,
                 ToolOperationStatus.FAILED,
@@ -5082,19 +4327,27 @@ class ToolRepositoryImpl(_RepositoryBase):
                 return current
             if now is None:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            expired = current.lease_expires_at is not None and current.lease_expires_at <= now
+            expired = (
+                current.lease_expires_at is not None and current.lease_expires_at <= now
+            )
             if current.status is ToolOperationStatus.CLAIMED and not expired:
                 if current.owner == request.owner:
                     return current
                 raise AIError(ErrorCode.TOOL_OPERATION_CONFLICT)
-            if current.status is ToolOperationStatus.CLAIMED and not current.replay_safe:
+            if (
+                current.status is ToolOperationStatus.CLAIMED
+                and not current.replay_safe
+            ):
                 value = replace(
                     current,
                     status=ToolOperationStatus.EFFECT_UNKNOWN,
                     lease_expires_at=None,
                     updated_at=now,
                 )
-            elif current.status in {ToolOperationStatus.PENDING, ToolOperationStatus.CLAIMED}:
+            elif current.status in {
+                ToolOperationStatus.PENDING,
+                ToolOperationStatus.CLAIMED,
+            }:
                 value = replace(
                     current,
                     status=ToolOperationStatus.CLAIMED,
@@ -5141,7 +4394,9 @@ class ToolRepositoryImpl(_RepositoryBase):
                         )
                         if guarded is None:
                             raise AIError(ErrorCode.STORAGE_CONFLICT)
-                        await transaction.insert_aliases((StoredAlias(replay_alias, existing_key),))
+                        await transaction.insert_aliases(
+                            (StoredAlias(replay_alias, existing_key),)
+                        )
                     return existing
                 stored = self._stored(
                     "tool_operation",
@@ -5158,11 +4413,15 @@ class ToolRepositoryImpl(_RepositoryBase):
 
         return await self._retry_storage_conflict(attempt)
 
-    async def get_operation(self, tool_operation_id: str, *, tenant_id: str) -> ToolOperationRecord | None:
+    async def get_operation(
+        self, tool_operation_id: str, *, tenant_id: str
+    ) -> ToolOperationRecord | None:
         if tenant_id != self._tenant_id:
             return None
         record = await self._record(self._tool_key(tool_operation_id))
-        return None if record is None else await self._decode(record, ToolOperationRecord)
+        return (
+            None if record is None else await self._decode(record, ToolOperationRecord)
+        )
 
     async def has_by_step_run(
         self,
@@ -5190,7 +4449,9 @@ class ToolRepositoryImpl(_RepositoryBase):
             return frozenset()
         if not isinstance(step_run_id, str) or not step_run_id:
             raise ValueError("step_run_id must be a non-empty string")
-        if not isinstance(tool_call_ids, Sequence) or isinstance(tool_call_ids, (str, bytes)):
+        if not isinstance(tool_call_ids, Sequence) or isinstance(
+            tool_call_ids, (str, bytes)
+        ):
             raise TypeError("tool_call_ids must be a sequence")
         ordered = tuple(dict.fromkeys(tool_call_ids))
         if any(not isinstance(value, str) or not value for value in ordered):
@@ -5210,9 +4471,9 @@ class ToolRepositoryImpl(_RepositoryBase):
 
         async def read(transaction: StateTransaction) -> frozenset[str]:
             resolved = await transaction.resolve_aliases(aliases)
-            record_keys = tuple(dict.fromkeys(
-                key for key in resolved.values() if key is not None
-            ))
+            record_keys = tuple(
+                dict.fromkeys(key for key in resolved.values() if key is not None)
+            )
             records = await transaction.get_records(record_keys) if record_keys else {}
             decoded: dict[bytes, ToolOperationRecord] = {}
             present: set[str] = set()
@@ -5227,7 +4488,10 @@ class ToolRepositoryImpl(_RepositoryBase):
                 if value is None:
                     value = await self._decode(stored, ToolOperationRecord)
                     decoded[key] = value
-                if value.tenant_id != self._tenant_id or value.tool_call_id != tool_call_id:
+                if (
+                    value.tenant_id != self._tenant_id
+                    or value.tool_call_id != tool_call_id
+                ):
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                 present.add(tool_call_id)
             return frozenset(present)
@@ -5250,12 +4514,17 @@ class ToolRepositoryImpl(_RepositoryBase):
             "tool_call",
             [step_run_id, tool_call_id],
         )
+
         async def read(transaction: StateTransaction) -> ToolOperationRecord | None:
             key = await transaction.resolve_alias(replay_alias)
             if key is None:
                 return None
             stored = await transaction.get_record(key)
-            return None if stored is None else await self._decode(stored, ToolOperationRecord)
+            return (
+                None
+                if stored is None
+                else await self._decode(stored, ToolOperationRecord)
+            )
 
         return await self._store.read(read)
 
@@ -5281,19 +4550,30 @@ class ToolRepositoryImpl(_RepositoryBase):
                 }:
                     raise AIError(ErrorCode.TOOL_OPERATION_CONFLICT)
                 now = await transaction.now()
-                expired = current.lease_expires_at is not None and current.lease_expires_at <= now
+                expired = (
+                    current.lease_expires_at is not None
+                    and current.lease_expires_at <= now
+                )
                 if current.status is ToolOperationStatus.CLAIMED and not expired:
                     raise AIError(ErrorCode.TOOL_OPERATION_CONFLICT)
-                if current.status is ToolOperationStatus.CLAIMED and not current.replay_safe:
+                if (
+                    current.status is ToolOperationStatus.CLAIMED
+                    and not current.replay_safe
+                ):
                     unknown = replace(
                         current,
                         status=ToolOperationStatus.EFFECT_UNKNOWN,
                         lease_expires_at=None,
                         updated_at=now,
                     )
-                    await self._replace_tool_in_transaction(transaction, record, unknown)
+                    await self._replace_tool_in_transaction(
+                        transaction, record, unknown
+                    )
                     return unknown
-                if current.status is not ToolOperationStatus.PENDING and current.status is not ToolOperationStatus.CLAIMED:
+                if (
+                    current.status is not ToolOperationStatus.PENDING
+                    and current.status is not ToolOperationStatus.CLAIMED
+                ):
                     raise AIError(ErrorCode.TOOL_OPERATION_CONFLICT)
                 value = replace(
                     current,
@@ -5314,7 +4594,13 @@ class ToolRepositoryImpl(_RepositoryBase):
         return await self._retry_storage_conflict(attempt)
 
     async def renew(
-        self, tool_operation_id: str, *, tenant_id: str, owner: str, fence: int, lease_seconds: int
+        self,
+        tool_operation_id: str,
+        *,
+        tenant_id: str,
+        owner: str,
+        fence: int,
+        lease_seconds: int,
     ) -> ToolOperationRecord:
         if tenant_id != self._tenant_id:
             raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
@@ -5371,10 +4657,18 @@ class ToolRepositoryImpl(_RepositoryBase):
         return await self._retry_storage_conflict(attempt)
 
     async def fail(
-        self, tool_operation_id: str, *, tenant_id: str, owner: str, fence: int, error_code: str
+        self,
+        tool_operation_id: str,
+        *,
+        tenant_id: str,
+        owner: str,
+        fence: int,
+        error_code: str,
     ) -> ToolOperationRecord:
         async def attempt() -> ToolOperationRecord:
-            def value(current: ToolOperationRecord, now: datetime) -> ToolOperationRecord:
+            def value(
+                current: ToolOperationRecord, now: datetime
+            ) -> ToolOperationRecord:
                 return replace(
                     current,
                     status=ToolOperationStatus.FAILED,
@@ -5447,7 +4741,11 @@ class ToolRepositoryImpl(_RepositoryBase):
                 current = await self._decode(record, ToolOperationRecord)
                 now = await transaction.now()
                 if current.status is ToolOperationStatus.EFFECT_UNKNOWN:
-                    if current.owner == owner and current.fence == fence and current.error_code == error_code:
+                    if (
+                        current.owner == owner
+                        and current.fence == fence
+                        and current.error_code == error_code
+                    ):
                         return current
                     raise AIError(ErrorCode.TOOL_OPERATION_CONFLICT)
                 _require_live_tool_lease(current, owner=owner, fence=fence, now=now)
@@ -5596,11 +4894,15 @@ def build_repository_bundle(
 ) -> dict[str, _RepositoryBase]:
     """Build the one semantic repository implementation for a domain."""
     values: dict[str, _RepositoryBase] = {
-        "operations": OperationLedgerRepository(store, namespace=namespace, tenant_id=tenant_id, domain=domain)
+        "operations": OperationLedgerRepository(
+            store, namespace=namespace, tenant_id=tenant_id, domain=domain
+        )
     }
     if domain is RuntimeDomain.CONVERSATION:
         values.update(
-            sessions=SessionRepositoryImpl(store, namespace=namespace, tenant_id=tenant_id),
+            sessions=SessionRepositoryImpl(
+                store, namespace=namespace, tenant_id=tenant_id
+            ),
             histories=ConversationHistoryRepositoryImpl(
                 store,
                 namespace=namespace,
@@ -5609,29 +4911,42 @@ def build_repository_bundle(
         )
     elif domain is RuntimeDomain.EXECUTION:
         values.update(
-            executions=ExecutionRepositoryImpl(store, namespace=namespace, tenant_id=tenant_id),
+            executions=ExecutionRepositoryImpl(
+                store, namespace=namespace, tenant_id=tenant_id
+            ),
             events=EventRepositoryImpl(store, namespace=namespace, tenant_id=tenant_id),
-            idempotency=IdempotencyRepositoryImpl(store, namespace=namespace, tenant_id=tenant_id, domain=domain),
+            idempotency=IdempotencyRepositoryImpl(
+                store, namespace=namespace, tenant_id=tenant_id, domain=domain
+            ),
         )
     elif domain is RuntimeDomain.MEMORY:
-        values["records"] = MemoryRepositoryImpl(store, namespace=namespace, tenant_id=tenant_id)
+        values["records"] = MemoryRepositoryImpl(
+            store, namespace=namespace, tenant_id=tenant_id
+        )
     elif domain is RuntimeDomain.ARTIFACT:
-        values["records"] = ArtifactRepositoryImpl(store, namespace=namespace, tenant_id=tenant_id)
-    elif domain is RuntimeDomain.TASK:
-        values["tasks"] = TaskRepositoryImpl(store, namespace=namespace, tenant_id=tenant_id)
-        values["admissions"] = TaskAdmissionRepositoryImpl(
+        values["records"] = ArtifactRepositoryImpl(
             store, namespace=namespace, tenant_id=tenant_id
         )
     elif domain is RuntimeDomain.EVALUATION:
         values.update(
-            records=EvaluationRepositoryImpl(store, namespace=namespace, tenant_id=tenant_id),
-            idempotency=IdempotencyRepositoryImpl(store, namespace=namespace, tenant_id=tenant_id, domain=domain),
+            records=EvaluationRepositoryImpl(
+                store, namespace=namespace, tenant_id=tenant_id
+            ),
+            idempotency=IdempotencyRepositoryImpl(
+                store, namespace=namespace, tenant_id=tenant_id, domain=domain
+            ),
         )
     elif domain is RuntimeDomain.RECOVERY:
         values.update(
-            approvals=ApprovalRepositoryImpl(store, namespace=namespace, tenant_id=tenant_id),
-            external_calls=ExternalCallRepositoryImpl(store, namespace=namespace, tenant_id=tenant_id),
-            checkpoints=RecoveryCheckpointRepositoryImpl(store, namespace=namespace, tenant_id=tenant_id),
+            approvals=ApprovalRepositoryImpl(
+                store, namespace=namespace, tenant_id=tenant_id
+            ),
+            external_calls=ExternalCallRepositoryImpl(
+                store, namespace=namespace, tenant_id=tenant_id
+            ),
+            checkpoints=RecoveryCheckpointRepositoryImpl(
+                store, namespace=namespace, tenant_id=tenant_id
+            ),
             tools=ToolRepositoryImpl(store, namespace=namespace, tenant_id=tenant_id),
         )
     return values
@@ -5711,18 +5026,24 @@ def _empty_conversation_transcript_head(
 
 def _domain_data(value: object) -> dict[str, object]:
     payload = _encode_persisted_domain(value)
-    if isinstance(value, (TaskNodeView, ToolOperationRecord)) and isinstance(payload, Mapping):
+    if isinstance(value, (TaskNodeView, ToolOperationRecord)) and isinstance(
+        payload, Mapping
+    ):
         fields = payload.get("fields")
         if isinstance(fields, Mapping):
             payload = dict(payload)
             payload["fields"] = {
-                key: item for key, item in fields.items() if key not in {"owner", "fence", "lease_expires_at"}
+                key: item
+                for key, item in fields.items()
+                if key not in {"owner", "fence", "lease_expires_at"}
             }
     return encode_envelope({"type": wire_type_id(value), "payload": payload})
 
 
 def _restore_lease_fields(payload: object, target: type[ValueT]) -> object:
-    if target not in {TaskNodeView, ToolOperationRecord} or not isinstance(payload, Mapping):
+    if target not in {TaskNodeView, ToolOperationRecord} or not isinstance(
+        payload, Mapping
+    ):
         return payload
     fields = payload.get("fields")
     if not isinstance(fields, Mapping):
@@ -5780,7 +5101,15 @@ def _record_state(value: object) -> str | None:
 
 def _domain_revision(value: object) -> int:
     if isinstance(
-        value, (SessionRecord, ExecutionRecord, IdempotencyRecord, MemoryRecord, EvaluationRecord, RecoveryCheckpoint)
+        value,
+        (
+            SessionRecord,
+            ExecutionRecord,
+            IdempotencyRecord,
+            MemoryRecord,
+            EvaluationRecord,
+            RecoveryCheckpoint,
+        ),
     ):
         return value.revision
     return 0
@@ -5804,8 +5133,12 @@ def _status_value(value: object) -> str | None:
     return None
 
 
-async def _replace_checked(transaction: StateTransaction, candidate: StoredRecord, expected: int) -> None:
-    if not await transaction.replace_record(candidate, expected_storage_version=expected):
+async def _replace_checked(
+    transaction: StateTransaction, candidate: StoredRecord, expected: int
+) -> None:
+    if not await transaction.replace_record(
+        candidate, expected_storage_version=expected
+    ):
         raise AIError(ErrorCode.STORAGE_CONFLICT)
 
 
@@ -5822,7 +5155,9 @@ def _projected_record(
         else:
             value.resolved_agent_id()
     identity = _canonical_record_identity(current.kind, value)
-    projected = repository._stored(current.kind, identity, value, state=_record_state(value))
+    projected = repository._stored(
+        current.kind, identity, value, state=_record_state(value)
+    )
     return replace(projected, storage_version=current.storage_version + 1)
 
 
@@ -5842,9 +5177,16 @@ def _event_payload(value: object) -> Mapping[str, JsonValue]:
 
 
 async def _append_operation(
-    transaction: StateTransaction, repository: _RepositoryBase, value: OperationLedgerInput
+    transaction: StateTransaction,
+    repository: _RepositoryBase,
+    value: OperationLedgerInput,
 ) -> tuple[OperationLedgerRecord, bool]:
-    key = operation_key(repository._namespace, repository._tenant_id, repository._domain.value, value.operation_id)
+    key = operation_key(
+        repository._namespace,
+        repository._tenant_id,
+        repository._domain.value,
+        value.operation_id,
+    )
     existing = await transaction.get_operation(key)
     if existing is not None:
         current = _decode_operation(existing)
@@ -5868,7 +5210,14 @@ async def _append_operation(
         )
     )
     await transaction.insert_operation(
-        StoredOperation(key, stream, sequence, value.status.value, value.compactable, _domain_data(value))
+        StoredOperation(
+            key,
+            stream,
+            sequence,
+            value.status.value,
+            value.compactable,
+            _domain_data(value),
+        )
     )
     return _operation_record(value, sequence), False
 
@@ -5878,7 +5227,9 @@ def _decode_operation(value: StoredOperation) -> OperationLedgerRecord:
     return _operation_record(candidate, value.sequence)  # type: ignore[arg-type]
 
 
-def _operation_record(value: OperationLedgerInput, sequence: int) -> OperationLedgerRecord:
+def _operation_record(
+    value: OperationLedgerInput, sequence: int
+) -> OperationLedgerRecord:
     return OperationLedgerRecord(
         value.operation_id,
         value.tenant_id,
@@ -5898,7 +5249,9 @@ def _operation_record(value: OperationLedgerInput, sequence: int) -> OperationLe
     )
 
 
-def _stored_from_operation(value: OperationLedgerRecord, current: StoredOperation) -> StoredOperation:
+def _stored_from_operation(
+    value: OperationLedgerRecord, current: StoredOperation
+) -> StoredOperation:
     candidate = OperationLedgerInput(
         value.operation_id,
         value.tenant_id,
@@ -5915,10 +5268,17 @@ def _stored_from_operation(value: OperationLedgerRecord, current: StoredOperatio
         value.created_at,
         value.updated_at,
     )
-    return replace(current, state=value.status.value, compactable=value.compactable, data=_domain_data(candidate))
+    return replace(
+        current,
+        state=value.status.value,
+        compactable=value.compactable,
+        data=_domain_data(candidate),
+    )
 
 
-def _operation_matches(current: OperationLedgerRecord, candidate: OperationLedgerInput) -> bool:
+def _operation_matches(
+    current: OperationLedgerRecord, candidate: OperationLedgerInput
+) -> bool:
     return operation_replay_matches(current, candidate)
 
 
@@ -5929,7 +5289,9 @@ def _same_idempotency(left: IdempotencyRecord, right: IdempotencyRecord) -> bool
     )
 
 
-def _same_idempotency_identity(left: IdempotencyRecord, right: IdempotencyRecord) -> bool:
+def _same_idempotency_identity(
+    left: IdempotencyRecord, right: IdempotencyRecord
+) -> bool:
     """Compare only the immutable request identity, never a candidate resource id."""
     return (
         left.tenant_id == right.tenant_id
@@ -5954,7 +5316,9 @@ def _tool_replay_matches(left: ToolOperationRecord, right: ToolOperationRecord) 
     )
 
 
-def _tool_admission_matches(left: ToolOperationRecord, right: ToolOperationAdmission) -> bool:
+def _tool_admission_matches(
+    left: ToolOperationRecord, right: ToolOperationAdmission
+) -> bool:
     return (
         left.tenant_id == right.tenant_id
         and left.tool_operation_id == right.tool_operation_id
@@ -6012,22 +5376,6 @@ def _recovery_state_record(value: RecoveryCheckpoint) -> RecoveryStateRecord:
     )
 
 
-def _require_live_task_lease(node: TaskNodeView, lease: TaskLease, now: datetime) -> None:
-    if (
-        node.status is not TaskStatus.RUNNING
-        or node.owner != lease.owner
-        or node.fence != lease.fence
-        or node.lease_expires_at is None
-        or node.lease_expires_at <= now
-    ):
-        raise AIError(ErrorCode.TASK_FENCE_STALE)
-
-
-def _validate_task_lease_scope(lease: TaskLease, tenant_id: str) -> None:
-    if lease.tenant_id != tenant_id:
-        raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
-
-
 def _require_live_tool_lease(
     current: ToolOperationRecord,
     *,
@@ -6043,47 +5391,6 @@ def _require_live_tool_lease(
         or current.lease_expires_at <= now
     ):
         raise AIError(ErrorCode.TOOL_OPERATION_CONFLICT)
-
-
-def _task_graph_record(
-    repository: _RepositoryBase, current: StoredRecord, value: TaskGraphView
-) -> StoredRecord:
-    return replace(
-        repository._stored(
-            "task_graph", value.graph_id, value,
-            scope=current.scope_digest, state=value.status.value,
-        ),
-        storage_version=current.storage_version + 1,
-    )
-
-
-def _task_submit_result_digest(graph: TaskGraph) -> str:
-    status = TaskStatus.SUCCEEDED if not graph.nodes else TaskStatus.PENDING
-    return canonical_sha256({"graph_id": graph.graph_id, "status": status.value})
-
-
-def _stored_operation_error(operation: OperationLedgerRecord) -> AIError:
-    if operation.error_code is None:
-        return AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-    try:
-        return AIError(ErrorCode(operation.error_code))
-    except ValueError as error:
-        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
-
-
-def _graph_status(nodes: "tuple[TaskNodeView, ...]") -> TaskStatus:
-    statuses = {node.status for node in nodes}
-    if not statuses or statuses <= {TaskStatus.SUCCEEDED}:
-        return TaskStatus.SUCCEEDED
-    if TaskStatus.FAILED in statuses:
-        return TaskStatus.FAILED
-    if TaskStatus.BLOCKED in statuses:
-        return TaskStatus.BLOCKED
-    if statuses <= {TaskStatus.CANCELLED, TaskStatus.SUCCEEDED}:
-        return TaskStatus.CANCELLED
-    if TaskStatus.RUNNING in statuses:
-        return TaskStatus.RUNNING
-    return TaskStatus.PENDING
 
 
 def _record_cursor(record: StoredRecord) -> str:
@@ -6105,8 +5412,24 @@ def _decode_record_cursor(cursor: str | None) -> tuple[str | None, bytes | None]
         if not sort_key or len(key_digest) != 32:
             raise ValueError("cursor identity")
         return sort_key, key_digest
-    except (TypeError, ValueError, KeyError, UnicodeError, json.JSONDecodeError) as error:
+    except (
+        TypeError,
+        ValueError,
+        KeyError,
+        UnicodeError,
+        json.JSONDecodeError,
+    ) as error:
         raise AIError(ErrorCode.REQUEST_FIELD_INVALID) from error
+
+
+RepositoryBase = _RepositoryBase
+append_operation = _append_operation
+decode_operation = _decode_operation
+decode_record_cursor = _decode_record_cursor
+projected_record = _projected_record
+record_cursor = _record_cursor
+replace_checked = _replace_checked
+require_repository_tenant = _require_repository_tenant
 
 
 __all__ = [
@@ -6121,8 +5444,14 @@ __all__ = [
     "OperationLedgerRepository",
     "RecoveryCheckpointRepositoryImpl",
     "SessionRepositoryImpl",
-    "TaskAdmissionRepositoryImpl",
-    "TaskRepositoryImpl",
     "ToolRepositoryImpl",
+    "RepositoryBase",
+    "append_operation",
     "build_repository_bundle",
+    "decode_operation",
+    "decode_record_cursor",
+    "projected_record",
+    "record_cursor",
+    "replace_checked",
+    "require_repository_tenant",
 ]
