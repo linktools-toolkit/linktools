@@ -3,7 +3,9 @@
 """Workspace tool semantics and Sandbox-backed runtime adaptation."""
 
 import asyncio
+import sys
 from collections.abc import Sequence
+from contextlib import AsyncExitStack
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
@@ -88,13 +90,36 @@ class _LocalSandboxSession:
         )
         self._shell_context: "PydanticRunContext[RunContext[object]] | None" = None
         self._shell_tools: "dict[str, ToolsetTool[RunContext[object]]]" = {}
+        self._stack: AsyncExitStack | None = None
 
     async def _bind_run(
         self,
         ctx: "PydanticRunContext[RunContext[object]]",
     ) -> None:
-        self._shell_context = ctx
-        self._shell_tools = await self._shell.get_tools(ctx)
+        stack = AsyncExitStack()
+        try:
+            filesystem = cast(
+                "FileSystemToolset[RunContext[object]]",
+                await self._filesystem.for_run(ctx),
+            )
+            self._filesystem = cast(
+                "FileSystemToolset[RunContext[object]]",
+                await stack.enter_async_context(filesystem),
+            )
+            shell = cast(
+                "ShellToolset[RunContext[object]]",
+                await self._shell.for_run(ctx),
+            )
+            self._shell = cast(
+                "ShellToolset[RunContext[object]]",
+                await stack.enter_async_context(shell),
+            )
+            self._shell_context = ctx
+            self._shell_tools = await self._shell.get_tools(ctx)
+        except BaseException:
+            await stack.__aexit__(*sys.exc_info())
+            raise
+        self._stack = stack
 
     async def _call_shell(self, name: str, args: dict[str, Any]) -> str:
         ctx = cast(
@@ -193,7 +218,12 @@ class _LocalSandboxSession:
         return await self._call_shell("stop_command", {"command_id": command_id})
 
     async def close(self) -> None:
-        await self._shell.__aexit__(None, None, None)
+        stack = self._stack
+        self._stack = None
+        if stack is None:
+            await self._shell.__aexit__(None, None, None)
+            return
+        await stack.aclose()
 
 
 class _WorkspaceToolSurface:
@@ -446,6 +476,11 @@ class _WorkspaceSandboxToolset(FunctionToolset[RunContext[object]]):
         try:
             await asyncio.shield(close_task)
         except asyncio.CancelledError:
+            if close_task.cancelled():
+                if primary_error is None:
+                    raise
+                _logger.exception("workspace sandbox cleanup failed after run failure")
+                return None
             try:
                 await close_task
             except BaseException:  # noqa: BLE001
