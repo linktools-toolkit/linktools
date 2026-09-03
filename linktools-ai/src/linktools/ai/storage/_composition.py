@@ -373,10 +373,12 @@ class StorageOverlay(Generic[KeyT, ValueT, InfoT]):
         misses = [key for key in misses if key in state.entries and not _is_deleted(state.entries[key])]
         loaded = await self._load_origins(misses, state)
         raced: set[int] = set()
+        missing_origins: list[KeyT] = []
         for key in misses:
             raw = loaded.get(key)
             if raw is None:
                 raced.add(state.owners[key])
+                missing_origins.append(key)
                 continue
             info = state.entries[key]
             value = raw
@@ -394,20 +396,19 @@ class StorageOverlay(Generic[KeyT, ValueT, InfoT]):
             if not retried:
                 refreshed = await self._state()
                 return await self._get_many_from_state(keys, refreshed, retried=True)
-            for key in misses:
-                if state.owners.get(key) in raced:
-                    _logger.error(
-                        "storage owner mismatch after batch refresh: key=%s",
-                        key,
-                        extra={"error_code": ErrorCode.STORAGE_OWNER_MISMATCH.value},
-                    )
-                    raise AIError(
-                        ErrorCode.STORAGE_INTEGRITY_ERROR,
-                        "storage metadata and origin disagree",
-                        safe_details={
-                            "storage_key_digest": canonical_sha256(str(key)),
-                        },
-                    )
+            for key in missing_origins:
+                _logger.error(
+                    "storage owner mismatch after batch refresh: key=%s",
+                    key,
+                    extra={"error_code": ErrorCode.STORAGE_OWNER_MISMATCH.value},
+                )
+                raise AIError(
+                    ErrorCode.STORAGE_INTEGRITY_ERROR,
+                    "storage metadata and origin disagree",
+                    safe_details={
+                        "storage_key_digest": canonical_sha256(str(key)),
+                    },
+                )
         return values
 
     async def _read_cache_value(
