@@ -202,7 +202,9 @@ async def test_cache_conversion_failure_falls_back_to_origin() -> None:
 
     assert await storage.get(key) == b"value"
     assert backend.reads == 1
-    assert await cache.get(cache_key) == b"value"
+    cached = await cache.get(cache_key)
+    assert cached is not None
+    assert adapter.from_cache(cached) == b"value"
 
 
 @pytest.mark.asyncio
@@ -214,7 +216,7 @@ async def test_cached_validator_failure_falls_back_then_origin_failure_surfaces(
     assert info is not None
     adapter = AssetCacheAdapter()
     cache = InMemoryContentCache(max_bytes=1024)
-    await cache.put(adapter.cache_key(key, info), b"value")
+    await cache.put(adapter.cache_key(key, info), adapter.to_cache(b"value"))
     failure = _ValidatorFailure("validator failure")
     validator = _Validator(failure)
     storage = StorageOverlay(
