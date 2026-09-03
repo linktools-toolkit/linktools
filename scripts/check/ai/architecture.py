@@ -157,7 +157,7 @@ def _validate_exports(modules: Mapping[str, _ModuleInfo]) -> tuple[str, ...]:
 def _validate_runtime_cycles(inventory: _Inventory) -> tuple[str, ...]:
     errors: list[str] = []
     for component in _strongly_connected_components(inventory.runtime_edges):
-        if len(component) > 1:
+        if _is_cycle(component, inventory.runtime_edges):
             errors.append(f"runtime module cycle: {' -> '.join(sorted(component))}")
 
     owner_edges: dict[str, set[str]] = {}
@@ -173,9 +173,18 @@ def _validate_runtime_cycles(inventory: _Inventory) -> tuple[str, ...]:
                 owner_edges.setdefault(target_owner, set())
     frozen = {owner: frozenset(targets) for owner, targets in owner_edges.items()}
     for component in _strongly_connected_components(frozen):
-        if len(component) > 1:
+        if _is_cycle(component, frozen):
             errors.append(f"runtime owner cycle: {' -> '.join(sorted(component))}")
     return tuple(errors)
+
+
+def _is_cycle(
+    component: tuple[str, ...],
+    graph: Mapping[str, frozenset[str]],
+) -> bool:
+    return len(component) > 1 or (
+        len(component) == 1 and component[0] in graph.get(component[0], frozenset())
+    )
 
 
 def _validate_cross_owner_access(
@@ -203,9 +212,10 @@ def _validate_cross_owner_access(
                 errors.extend(_check_module_boundary(source, source_owner, base))
                 for alias in node.names:
                     if alias.name == "*":
-                        if _owner(base) != source_owner:
+                        if _owner(base) != source_owner and inventory.modules[base].exports is None:
                             errors.append(
-                                f"{source.name}: cross-owner star import from {base} is not public"
+                                f"{source.name}: cross-owner star import from {base} "
+                                "requires static __all__"
                             )
                         continue
                     errors.extend(
@@ -289,22 +299,21 @@ def _check_symbol_boundary(
 
 
 def _parse_all(tree: ast.Module) -> tuple[tuple[str, ...] | None, str | None]:
-    assignments: list[ast.AST] = []
+    top_level: list[ast.AST] = []
     for node in tree.body:
-        if isinstance(node, ast.Assign) and any(
-            isinstance(target, ast.Name) and target.id == "__all__" for target in node.targets
-        ):
-            assignments.append(node.value)
-        elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name) and node.target.id == "__all__":
-            if node.value is not None:
-                assignments.append(node.value)
-        elif isinstance(node, ast.AugAssign) and isinstance(node.target, ast.Name) and node.target.id == "__all__":
+        value = _all_assignment_value(node)
+        if value is not None:
+            top_level.append(value)
+        elif _writes_all(node):
             return None, "__all__ must be one static string sequence"
-    if not assignments:
+        if _nested_module_all_write(node):
+            return None, "__all__ must be one static string sequence"
+
+    if not top_level:
         return None, None
-    if len(assignments) != 1:
+    if len(top_level) != 1:
         return None, "__all__ must be assigned exactly once"
-    value = assignments[0]
+    value = top_level[0]
     if not isinstance(value, (ast.List, ast.Tuple)):
         return None, "__all__ must be a static list or tuple of strings"
     exports: list[str] = []
@@ -313,6 +322,44 @@ def _parse_all(tree: ast.Module) -> tuple[tuple[str, ...] | None, str | None]:
             return None, "__all__ must contain only string literals"
         exports.append(item.value)
     return tuple(exports), None
+
+
+def _nested_module_all_write(node: ast.AST) -> bool:
+    if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda)):
+        return False
+    for child in ast.iter_child_nodes(node):
+        if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda)):
+            continue
+        if _writes_all(child) or _nested_module_all_write(child):
+            return True
+    return False
+
+
+def _all_assignment_value(node: ast.AST) -> ast.AST | None:
+    if isinstance(node, ast.Assign) and any(
+        isinstance(target, ast.Name) and target.id == "__all__" for target in node.targets
+    ):
+        return node.value
+    if (
+        isinstance(node, ast.AnnAssign)
+        and isinstance(node.target, ast.Name)
+        and node.target.id == "__all__"
+    ):
+        return node.value
+    return None
+
+
+def _writes_all(node: ast.AST) -> bool:
+    if isinstance(node, ast.Assign):
+        return any(
+            isinstance(target, ast.Name) and target.id == "__all__"
+            for target in node.targets
+        )
+    if isinstance(node, ast.AnnAssign):
+        return isinstance(node.target, ast.Name) and node.target.id == "__all__"
+    if isinstance(node, ast.AugAssign):
+        return isinstance(node.target, ast.Name) and node.target.id == "__all__"
+    return False
 
 
 def _bindings(tree: ast.Module) -> frozenset[str]:
