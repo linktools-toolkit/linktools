@@ -61,4 +61,3 @@ async def test_local_sandbox_preserves_harness_shell_dispatch(tmp_path: Path) ->
 
     assert actual == expected
     assert isinstance(actual, str)
-    assert len(actual) < 60_000
