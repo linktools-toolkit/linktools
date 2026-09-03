@@ -5,14 +5,14 @@
 import asyncio
 from collections.abc import Sequence
 from pathlib import Path
-from typing import Any, cast
+from typing import TYPE_CHECKING, Any, cast
 
 from linktools.core import environ
-from pydantic_ai import RunContext as PydanticRunContext, Tool
+from pydantic_ai import Tool
 from pydantic_ai.capabilities import AbstractCapability, Toolset
-from pydantic_ai.toolsets import FunctionToolset, ToolsetTool
-from pydantic_ai_harness.filesystem import FileSystem, FileSystemToolset
-from pydantic_ai_harness.shell import LLM_API_KEY_ENV_PATTERNS, Shell, ShellToolset
+from pydantic_ai.toolsets import FunctionToolset
+from pydantic_ai_harness.filesystem import FileSystem
+from pydantic_ai_harness.shell import LLM_API_KEY_ENV_PATTERNS, Shell
 
 from ..workspace import Sandbox, SandboxSession, Workspace
 from ._context import RunContext
@@ -21,6 +21,12 @@ from ._group import (
     capability_fingerprint,
     contribution_semantic_contract,
 )
+
+if TYPE_CHECKING:
+    from pydantic_ai import RunContext as PydanticRunContext
+    from pydantic_ai.toolsets import ToolsetTool
+    from pydantic_ai_harness.filesystem import FileSystemToolset
+    from pydantic_ai_harness.shell import ShellToolset
 
 WORKSPACE_FILESYSTEM_TOOL_NAMES = (
     "create_directory",
