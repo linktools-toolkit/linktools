@@ -1240,10 +1240,10 @@ def _repository_instruction_lookup_target(root: Path, target: str) -> str:
     try:
         _logical_target_scope(root, lookup_target)
     except (OSError, ValueError) as error:
-        raise ToolFailed(
+        raise ModelRetry(
             _format_model_tool_error(
-                _MODEL_FAILED_PREFIX,
-                "workspace path is invalid or outside the workspace; use a path within the workspace root",
+                _MODEL_RETRY_PREFIX,
+                "workspace path is invalid or outside the workspace; use a path within the workspace root and retry",
             )
         ) from error
     return lookup_target
