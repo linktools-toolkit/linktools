@@ -29,9 +29,20 @@ class ModelRegistry:
         model: str,
         base_url: "str | None" = None,
         api_key: "str | None" = None,
+        timeout: "int | float | None" = None,
+        max_retries: "int | None" = None,
+        max_tokens: "int | None" = None,
     ) -> "ModelRegistry":
         registry = cls()
-        registry.register_openai("default", model=model, base_url=base_url, api_key=api_key)
+        registry.register_openai(
+            "default",
+            model=model,
+            base_url=base_url,
+            api_key=api_key,
+            timeout=timeout,
+            max_retries=max_retries,
+            max_tokens=max_tokens,
+        )
         return registry
 
     def register(self, binding: ModelBinding) -> None:
@@ -49,8 +60,21 @@ class ModelRegistry:
         model: str,
         base_url: "str | None" = None,
         api_key: "str | None" = None,
+        timeout: "int | float | None" = None,
+        max_retries: "int | None" = None,
+        max_tokens: "int | None" = None,
     ) -> None:
-        self.register(_OpenAIModelBinding(route_id, model, base_url, api_key))
+        self.register(
+            _OpenAIModelBinding(
+                route_id=route_id,
+                model=model,
+                base_url=base_url,
+                api_key=api_key,
+                timeout=timeout,
+                max_retries=max_retries,
+                max_tokens=max_tokens,
+            )
+        )
 
     def remove(self, route_id: str) -> None:
         with self._lock:
