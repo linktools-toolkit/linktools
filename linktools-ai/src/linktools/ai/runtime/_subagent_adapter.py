@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 """Pydantic AI adapter for the vendor-neutral Subagent capability."""
 
+import json
 from collections.abc import Awaitable, Callable
 from typing import cast
 
@@ -19,6 +20,7 @@ _MODEL_FAILURE_ERRORS = frozenset(
     {
         ErrorCode.CAPABILITY_RESOLUTION_INVALID,
         ErrorCode.REQUEST_FIELD_INVALID,
+        ErrorCode.TOOL_EXECUTION_FAILED,
     }
 )
 
@@ -71,13 +73,29 @@ class _PydanticSubagentCapability(AbstractCapability[RunContext[object]]):
             except AIError as error:
                 if error.code not in _MODEL_FAILURE_ERRORS:
                     raise
-                raise ToolFailed("requested subagent or task is invalid") from error
+                raise ToolFailed(_subagent_failure_message(error)) from error
 
         return toolset
 
     @classmethod
     def get_serialization_name(cls) -> "str | None":
         return None
+
+
+def _subagent_failure_message(error: AIError) -> str:
+    if error.code is ErrorCode.CAPABILITY_RESOLUTION_INVALID:
+        subagent_id = error.safe_details.get("subagent_id")
+        if isinstance(subagent_id, str) and subagent_id:
+            return f"subagent {subagent_id!r} is not available; call list_subagents and choose an available subagent"
+        return "requested subagent is not available; call list_subagents and choose an available subagent"
+    if error.code is ErrorCode.TOOL_EXECUTION_FAILED:
+        return "subagent execution failed: " + json.dumps(
+            dict(error.safe_details),
+            ensure_ascii=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        )
+    return "requested subagent or task is invalid"
 
 
 __all__ = ["_PydanticSubagentCapability"]
