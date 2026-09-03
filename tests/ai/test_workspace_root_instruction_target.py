@@ -6,7 +6,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-from pydantic_ai.exceptions import ToolFailed
+from pydantic_ai.exceptions import ModelRetry
 from pydantic_ai.messages import ModelRequest, ModelResponse, ToolCallPart, ToolReturnPart
 from pydantic_ai.tools import ToolDefinition
 
@@ -111,7 +111,7 @@ async def test_invalid_instruction_target_is_returned_to_model_without_resolver_
     )
     args = {"path": path}
 
-    with pytest.raises(ToolFailed) as raised:
+    with pytest.raises(ModelRetry) as raised:
         await gate.before_tool_execute(
             SimpleNamespace(tool_call_approved=False),  # type: ignore[arg-type]
             call=ToolCallPart(
@@ -124,8 +124,8 @@ async def test_invalid_instruction_target_is_returned_to_model_without_resolver_
         )
 
     assert raised.value.message == (
-        "TOOL_EXECUTION_FAILED: workspace path is invalid or outside the workspace; "
-        "use a path within the workspace root"
+        "TOOL_RETRY_REQUIRED: workspace path is invalid or outside the workspace; "
+        "use a path within the workspace root and retry"
     )
     assert resolver.calls == []
     assert args == {"path": path}
