@@ -382,12 +382,6 @@ class DefaultTaskService(TaskApi):
             AuthorizationAction.TASK_READ,
             header,
         )
-        latest = await self._persistence.tasks.latest_event(
-            graph_id,
-            tenant_id=tenant_id,
-        )
-        if latest is None:
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         page = await self._persistence.tasks.list_events(
             graph_id,
             tenant_id=tenant_id,
@@ -399,6 +393,13 @@ class DefaultTaskService(TaskApi):
             not page.items or page.items[0].event_type.value != "GRAPH_ADMITTED"
         ):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        if after_sequence > 0 and not page.items:
+            latest = await self._persistence.tasks.latest_event(
+                graph_id,
+                tenant_id=tenant_id,
+            )
+            if latest is None:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         return page
 
     def stream_graph_events(
@@ -424,7 +425,6 @@ class DefaultTaskService(TaskApi):
         _validate_event_window(after_sequence, _TASK_EVENT_READ_LIMIT)
         tenant_id = principal.tenant_id
         cursor = after_sequence
-        terminal_seen = False
         pending_wait_error: AIError | None = None
         header = await self._persistence.tasks.get_header(
             graph_id,
@@ -437,18 +437,6 @@ class DefaultTaskService(TaskApi):
             AuthorizationAction.TASK_READ,
             header,
         )
-        latest = await self._persistence.tasks.latest_event(
-            graph_id,
-            tenant_id=tenant_id,
-        )
-        if latest is None:
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        if (
-            latest.node_id is None
-            and _terminal(latest.status)
-            and latest.sequence <= cursor
-        ):
-            return
         while True:
             generation = self._local_activity_generation(
                 graph_id,
@@ -469,17 +457,10 @@ class DefaultTaskService(TaskApi):
                 pending_wait_error = None
                 for event in page.items:
                     cursor = event.sequence
-                    if event.node_id is None and _terminal(event.status):
-                        terminal_seen = True
                     yield event
-                if terminal_seen:
-                    await self._settle_terminal_event_observation(
-                        graph_id,
-                        tenant_id=tenant_id,
-                    )
+                    if event.node_id is None and _terminal(event.status):
+                        return
                 continue
-            if terminal_seen:
-                return
             latest = await self._persistence.tasks.latest_event(
                 graph_id,
                 tenant_id=tenant_id,
@@ -534,27 +515,6 @@ class DefaultTaskService(TaskApi):
             tenant_id=tenant_id,
             after_generation=after_generation,
         )
-
-    async def _settle_terminal_event_observation(
-        self,
-        graph_id: str,
-        *,
-        tenant_id: str,
-    ) -> None:
-        waiter = self._local_waiter
-        while waiter is not None and waiter.owns_graph(graph_id, tenant_id=tenant_id):
-            generation = waiter.graph_activity_generation(
-                graph_id,
-                tenant_id=tenant_id,
-            )
-            try:
-                await waiter.wait_graph_activity(
-                    graph_id,
-                    tenant_id=tenant_id,
-                    after_generation=generation,
-                )
-            except AIError:
-                return
 
     async def wait_graph(
         self,
