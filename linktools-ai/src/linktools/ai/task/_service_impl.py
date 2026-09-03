@@ -422,6 +422,7 @@ class DefaultTaskService(TaskApi):
         principal: Principal,
         after_sequence: int,
     ) -> AsyncIterator[TaskEvent]:
+        _validate_event_window(after_sequence, _TASK_EVENT_READ_LIMIT)
         tenant_id = principal.tenant_id
         header = await self._persistence.tasks.get_header(
             graph_id,
@@ -448,7 +449,6 @@ class DefaultTaskService(TaskApi):
         tenant_id: str,
         after_sequence: int,
     ) -> AsyncIterator[TaskEvent]:
-        _validate_event_window(after_sequence, _TASK_EVENT_READ_LIMIT)
         cursor = after_sequence
         pending_wait_error: AIError | None = None
         while True:
