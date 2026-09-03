@@ -9,7 +9,12 @@ import pytest
 from linktools.ai.agent import AgentCompiler
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.model import ModelRegistry
-from linktools.ai.model._openai import _RetryingOpenAIProvider, _raise_retryable_status, _retry_error_result
+from linktools.ai.model._openai import (
+    _AsyncClientTransport,
+    _RetryingOpenAIProvider,
+    _raise_retryable_status,
+    _retry_error_result,
+)
 from linktools.ai.spec import AgentSpec
 from pydantic_ai.models.openai import OpenAIChatModel
 from pydantic_ai.providers.openai import OpenAIProvider
@@ -174,6 +179,23 @@ async def test_openai_retry_provider_owns_client_and_preserves_default_timeout()
     assert second_client.is_closed
 
 
+@pytest.mark.asyncio
+async def test_retryable_error_body_is_buffered_before_transport_closes_response() -> None:
+    async def handler(request: httpx2.Request) -> httpx2.Response:
+        return httpx2.Response(429, request=request, json={"error": "rate limited"})
+
+    client = httpx2.AsyncClient(transport=httpx2.MockTransport(handler))
+    transport = _AsyncClientTransport(client)
+    try:
+        response = await transport.handle_async_request(
+            httpx2.Request("POST", "https://example.test/v1/chat/completions")
+        )
+        assert response.is_stream_consumed
+        assert response.json() == {"error": "rate limited"}
+    finally:
+        await transport.aclose()
+
+
 @pytest.mark.parametrize(
     "kwargs",
     [
@@ -212,6 +234,16 @@ def test_non_retryable_http_statuses_pass_through(status_code: int) -> None:
     response = httpx2.Response(status_code, request=request)
 
     _raise_retryable_status(response)
+
+
+def test_openai_retry_header_overrides_default_status_policy() -> None:
+    request = httpx2.Request("POST", "https://example.test/v1/chat/completions")
+    disabled = httpx2.Response(503, request=request, headers={"x-should-retry": "false"})
+    enabled = httpx2.Response(400, request=request, headers={"x-should-retry": "true"})
+
+    _raise_retryable_status(disabled)
+    with pytest.raises(httpx2.HTTPStatusError):
+        _raise_retryable_status(enabled)
 
 
 def test_exhausted_http_retry_returns_last_response() -> None:
