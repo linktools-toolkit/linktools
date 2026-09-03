@@ -252,5 +252,5 @@ async def test_repeated_workspace_failures_do_not_consume_tool_retry_budget(
     result = await agent.run("read the missing files", run_id="run")
 
     assert result.output == "continued after tool failures"
-    assert result.usage.tool_calls == 2
+    assert result.usage.requests == 3
     assert bridge.transitions == ["begin", "fail", "begin", "fail"]
