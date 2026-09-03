@@ -8,15 +8,17 @@ Package instructions for `linktools-ai`. Repository-wide rules in [../AGENTS.md]
 
 ### Architecture
 
-- Use public package APIs across boundaries. Do not import another package's private modules/members or use reflection to bypass an interface.
+- Use public package APIs across boundaries. LinkTools package/module exported symbols are defined by static `__all__`; symbols not exported there are not public across owner boundaries. Do not import another package's private modules/members or use reflection to bypass an interface.
 - Runtime dependencies must remain acyclic; annotation-only back-references belong under `TYPE_CHECKING`.
 - Keep lower-level infrastructure independent from higher-level composition and SDK semantics. Do not introduce duplicate abstractions that compete for the same ownership.
 - Keep vendor-specific behavior out of vendor-neutral core abstractions.
+- Architecture and release gates encode long-lived invariants only. Do not freeze current package names, module depth, class names, or layout as policy.
+- Build/release tooling must not become a second owner of Runtime semantic truth.
 
 ### Persistence and concurrency
 
 - Runtime startup must not implicitly create or migrate database schemas; schema provisioning is an explicit deployment/migration operation.
-- Persisted or replayed data is a versioned contract. Compatibility must be based on explicit semantics, not accidental byte-for-byte output of dependencies.
+- Persisted or replayed data is a versioned contract. Compatibility must be based on explicit LinkTools semantics, not incidental dependency serialization or schema.
 - Persistence protocols must remain evolvable and backward-compatible. Additive or non-semantic changes must not invalidate previously persisted data or make the storage system unreadable; incompatible changes require an explicit version boundary and a defined compatibility or migration path.
 - Stable hashes and idempotency identities must remain stable when non-semantic optional/default fields change; include codec/version/provenance when they change semantics.
 - Durable contracts must stay minimal. Persist stable references for dependencies intentionally resolved at use time; persist dependency semantics only when exact replay of an already-established durable fact requires them. Do not copy, embed, or recursively snapshot referenced configuration for convenience or speculative future recovery.
@@ -58,13 +60,12 @@ These describe the current architecture and may evolve; they are not rules by th
 | `asset` | Raw Asset keys, metadata, `AssetStore`, backends |
 | `spec` | Agent/Skill/MCP declarations and codecs |
 | `model` | Model routes, credentials, registries, materialization |
-| `observe` | Vendor-neutral run context, middleware, traces, snapshots |
+| `observe` | Execution observation scope, middleware, snapshots |
 | `capability` | Capability composition, loaders, Skill/MCP/workspace projection |
 | `task` | Task graph, DAG, lease, launcher contracts |
 | `agent` | Agent compilation, definitions, output contracts, execution binding |
 | `runtime` | Composition root, execution, persistence contracts, service APIs |
 | `workspace` | Workspace identity, paths, policy, configuration, sandbox contracts |
-| `adapter` | External provider, identity, transport adapters |
 | `migrate` | Explicit database schema provisioning |
 
 Repository-level checks under `scripts/check/ai` are release tooling, not another runtime architecture layer.
@@ -76,4 +77,4 @@ python manage.py install --editable
 python manage.py check linktools-ai
 ```
 
-Run the project gate after changing architecture boundaries, public exports, persistence contracts, schema definitions, or release evidence. Durable-codec verification currently uses frozen old-version/golden fixtures and should cover public ingress paths, not only same-version encode/decode.
+Run the project gate after changing architecture boundaries, public exports, persistence contracts, or schema definitions. Durable-codec verification uses frozen old-version/golden fixtures and should cover public ingress paths, not only same-version encode/decode.
