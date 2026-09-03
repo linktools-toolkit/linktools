@@ -6,13 +6,15 @@ import unicodedata
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
 
 import yaml as _yaml
 
 from ..core import JsonValue, Principal, PrincipalKind, canonical_sha256, normalize_json_value
 from ..errors import AIError, ErrorCode
-from ._sandbox import Sandbox
+
+if TYPE_CHECKING:
+    from ._sandbox import Sandbox
 
 _STORAGE_DIR_NAME = ".linktools"
 
