@@ -3,6 +3,7 @@
 
 """Workspace capability projection and materialization contracts."""
 
+import asyncio
 from pathlib import Path
 
 import pytest
@@ -112,6 +113,46 @@ class _RecordingSandbox:
         return session
 
 
+class _FixedSandbox:
+    def __init__(self, session: _RecordingSession) -> None:
+        self.session = session
+        self.opens = 0
+
+    async def open(self) -> SandboxSession:
+        self.opens += 1
+        return self.session
+
+
+class _FailingCloseSession(_RecordingSession):
+    async def close(self) -> None:
+        self.closed += 1
+        raise RuntimeError("close failed")
+
+
+class _BlockingCloseSession(_RecordingSession):
+    def __init__(self) -> None:
+        super().__init__()
+        self.close_started = asyncio.Event()
+        self.close_release = asyncio.Event()
+
+    async def close(self) -> None:
+        self.closed += 1
+        self.close_started.set()
+        await self.close_release.wait()
+
+
+def _semantic_contract(tool: object) -> dict[str, object]:
+    definition = tool.tool_def  # type: ignore[attr-defined]
+    return {
+        "version": 1,
+        "description": definition.description,
+        "parameters": definition.parameters_json_schema,
+        "return_schema": definition.return_schema,
+        "strict": definition.strict,
+        "metadata": definition.metadata,
+    }
+
+
 def test_workspace_tool_contributions_are_stable_and_classified(tmp_path: Path) -> None:
     workspace = Workspace.load(tmp_path)
     contributions = workspace_tool_contributions(workspace)
@@ -133,6 +174,21 @@ def test_workspace_tool_contributions_are_stable_and_classified(tmp_path: Path) 
     )
 
 
+def test_workspace_tool_declarations_do_not_depend_on_sandbox_selection(tmp_path: Path) -> None:
+    sandbox = _RecordingSandbox()
+    workspaces = (
+        Workspace.load(tmp_path),
+        Workspace.load(tmp_path, sandbox=sandbox),
+        Workspace.load(tmp_path, sandbox=DisabledSandbox()),
+    )
+    projected = tuple(
+        tuple((item.id, item.fingerprint, item.semantic_contract) for item in workspace_tool_contributions(workspace))
+        for workspace in workspaces
+    )
+    assert projected[0] == projected[1] == projected[2]
+    assert sandbox.sessions == []
+
+
 def test_workspace_capabilities_materialize_one_sandbox_group(tmp_path: Path) -> None:
     workspace = Workspace.load(tmp_path)
 
@@ -145,29 +201,134 @@ def test_workspace_capabilities_materialize_one_sandbox_group(tmp_path: Path) ->
     assert workspace_capabilities(workspace, ()) == ()
 
 
+def test_workspace_capabilities_with_no_selected_tools_do_not_open_sandbox(tmp_path: Path) -> None:
+    sandbox = _RecordingSandbox()
+    assert workspace_capabilities(Workspace.load(tmp_path, sandbox=sandbox), ()) == ()
+    assert sandbox.sessions == []
+
+
 def test_workspace_capabilities_reject_unknown_tool_names(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="unknown workspace tools"):
         workspace_capabilities(Workspace.load(tmp_path), ("missing_tool",))
 
 
 @pytest.mark.asyncio
-async def test_workspace_sandbox_provisions_once_per_run_and_closes_once(tmp_path: Path) -> None:
+async def test_workspace_runtime_tool_semantics_match_durable_contributions(tmp_path: Path) -> None:
     sandbox = _RecordingSandbox()
     workspace = Workspace.load(tmp_path, sandbox=sandbox)
-    capability = workspace_capabilities(workspace, ("read_file", "run_command"))[0]
+    contributions = workspace_tool_contributions(workspace)
+    expected = {item.id: item.semantic_contract for item in contributions}
+    capability = workspace_capabilities(
+        workspace,
+        (*WORKSPACE_FILESYSTEM_TOOL_NAMES, *WORKSPACE_SHELL_TOOL_NAMES),
+    )[0]
+    toolset = capability.toolset  # type: ignore[attr-defined]
+    run_toolset = await toolset.for_run(None)  # type: ignore[arg-type]
+
+    assert {
+        name: _semantic_contract(tool)
+        for name, tool in run_toolset.tools.items()  # type: ignore[attr-defined]
+    } == expected
+    await run_toolset.__aexit__(None, None, None)
+
+
+@pytest.mark.asyncio
+async def test_workspace_sandbox_provisions_distinct_sessions_per_run(tmp_path: Path) -> None:
+    sandbox = _RecordingSandbox()
+    workspace = Workspace.load(tmp_path, sandbox=sandbox)
+    capability = workspace_capabilities(
+        workspace,
+        ("read_file", "start_command", "check_command", "stop_command"),
+    )[0]
     toolset = capability.toolset  # type: ignore[attr-defined]
 
-    first = await toolset.for_run(None)  # type: ignore[arg-type]
-    second = await toolset.for_run(None)  # type: ignore[arg-type]
+    first, second = await asyncio.gather(
+        toolset.for_run(None),  # type: ignore[arg-type]
+        toolset.for_run(None),  # type: ignore[arg-type]
+    )
 
     assert len(sandbox.sessions) == 2
     assert sandbox.sessions[0] is not sandbox.sessions[1]
-    assert set(first.tools) == {"read_file", "run_command"}  # type: ignore[attr-defined]
     await first.tools["read_file"].function("sample.txt")  # type: ignore[attr-defined]
-    assert sandbox.sessions[0].calls == [("read_file", ("sample.txt",), {"offset": 0, "limit": None})]
+    await first.tools["start_command"].function("echo one")  # type: ignore[attr-defined]
+    await first.tools["check_command"].function("command")  # type: ignore[attr-defined]
+    await first.tools["stop_command"].function("command")  # type: ignore[attr-defined]
+    assert [name for name, _, _ in sandbox.sessions[0].calls] == [
+        "read_file",
+        "start_command",
+        "check_command",
+        "stop_command",
+    ]
+    assert sandbox.sessions[1].calls == []
     await first.__aexit__(None, None, None)
     await second.__aexit__(None, None, None)
     assert [session.closed for session in sandbox.sessions] == [1, 1]
+
+
+@pytest.mark.asyncio
+async def test_custom_sandbox_does_not_fallback_to_host_filesystem(tmp_path: Path) -> None:
+    sandbox = _RecordingSandbox()
+    workspace = Workspace.load(tmp_path, sandbox=sandbox)
+    capability = workspace_capabilities(workspace, ("write_file",))[0]
+    toolset = capability.toolset  # type: ignore[attr-defined]
+    run_toolset = await toolset.for_run(None)  # type: ignore[arg-type]
+
+    await run_toolset.tools["write_file"].function("host.txt", "content")  # type: ignore[attr-defined]
+    assert not (tmp_path / "host.txt").exists()
+    assert sandbox.sessions[0].calls == [
+        ("write_file", ("host.txt", "content"), {"expected_hash": None})
+    ]
+    await run_toolset.__aexit__(None, None, None)
+
+
+@pytest.mark.asyncio
+async def test_workspace_sandbox_close_failure_propagates_without_primary_error(tmp_path: Path) -> None:
+    session = _FailingCloseSession()
+    sandbox = _FixedSandbox(session)
+    capability = workspace_capabilities(
+        Workspace.load(tmp_path, sandbox=sandbox),
+        ("read_file",),
+    )[0]
+    run_toolset = await capability.toolset.for_run(None)  # type: ignore[attr-defined,arg-type]
+
+    with pytest.raises(RuntimeError, match="close failed"):
+        await run_toolset.__aexit__(None, None, None)
+    assert session.closed == 1
+
+
+@pytest.mark.asyncio
+async def test_workspace_sandbox_close_failure_does_not_replace_primary_error(tmp_path: Path) -> None:
+    session = _FailingCloseSession()
+    sandbox = _FixedSandbox(session)
+    capability = workspace_capabilities(
+        Workspace.load(tmp_path, sandbox=sandbox),
+        ("read_file",),
+    )[0]
+    run_toolset = await capability.toolset.for_run(None)  # type: ignore[attr-defined,arg-type]
+    primary = RuntimeError("primary")
+
+    assert await run_toolset.__aexit__(RuntimeError, primary, None) is None
+    assert session.closed == 1
+
+
+@pytest.mark.asyncio
+async def test_workspace_sandbox_close_is_completed_during_cancellation(tmp_path: Path) -> None:
+    session = _BlockingCloseSession()
+    sandbox = _FixedSandbox(session)
+    capability = workspace_capabilities(
+        Workspace.load(tmp_path, sandbox=sandbox),
+        ("read_file",),
+    )[0]
+    run_toolset = await capability.toolset.for_run(None)  # type: ignore[attr-defined,arg-type]
+    closing = asyncio.create_task(run_toolset.__aexit__(None, None, None))
+    await session.close_started.wait()
+
+    closing.cancel()
+    await asyncio.sleep(0)
+    session.close_release.set()
+    with pytest.raises(asyncio.CancelledError):
+        await closing
+    assert session.closed == 1
 
 
 @pytest.mark.asyncio
