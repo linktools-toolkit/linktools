@@ -6,47 +6,103 @@ from typing import Any
 
 import httpx2
 import pytest
+from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.model import ModelRegistry
-from linktools.ai.model._openai import _raise_retryable_status, _retry_error_result
+from linktools.ai.model._openai import _RetryingOpenAIProvider, _raise_retryable_status, _retry_error_result
 from pydantic_ai.models.openai import OpenAIChatModel
 from pydantic_ai.providers.openai import OpenAIProvider
 from tenacity import RetryCallState, Retrying
 
 
-def test_openai_route_settings_do_not_change_durable_identity() -> None:
-    legacy = ModelRegistry.openai(
+def test_openai_operational_settings_do_not_change_durable_identity() -> None:
+    first = ModelRegistry.openai(
         model="gpt-test",
-        base_url="https://legacy.example/v1",
-        api_key="legacy-key",
+        base_url="https://first.example/v1",
+        api_key="first-key",
+        timeout=30,
+        max_retries=1,
+        max_tokens=2048,
+        context_window=8192,
     ).snapshot().resolve("default")
-    registry = ModelRegistry.openai(
+    second = ModelRegistry.openai(
         model="openai:gpt-test",
-        base_url="https://current.example/v1",
-        api_key="current-key",
-        timeout_seconds=60,
+        base_url="https://second.example/v1",
+        api_key="second-key",
+        timeout=60,
         max_retries=3,
-        retry_delay_seconds=1,
-        max_output_tokens=8192,
-        context_window_tokens=128000,
-    )
-    configured = registry.snapshot().resolve("default")
+        retry_delay=1,
+        max_tokens=2048,
+        context_window=8192,
+    ).snapshot().resolve("default")
 
-    assert dict(configured.semantic_payload) == dict(legacy.semantic_payload)
-    assert configured.fingerprint == legacy.fingerprint
-    assert registry.snapshot().restore(
+    assert dict(first.semantic_payload) == dict(second.semantic_payload)
+    assert first.fingerprint == second.fingerprint
+
+
+def test_openai_semantic_settings_change_durable_identity() -> None:
+    legacy = ModelRegistry.openai(model="gpt-test").snapshot().resolve("default")
+    configured = ModelRegistry.openai(
+        model="gpt-test",
+        max_tokens=2048,
+        context_window=8192,
+    ).snapshot().resolve("default")
+
+    assert dict(legacy.semantic_payload)["settings"] == {}
+    assert dict(configured.semantic_payload)["settings"] == {
+        "max_tokens": 2048,
+        "context_window": 8192,
+    }
+    assert legacy.fingerprint != configured.fingerprint
+
+
+def test_legacy_model_binding_restores_with_current_semantic_settings() -> None:
+    legacy = ModelRegistry.openai(model="gpt-test").snapshot().resolve("default")
+    registry = ModelRegistry.openai(
+        model="gpt-test",
+        api_key="test-key",
+        max_tokens=2048,
+        context_window=8192,
+    )
+
+    restored = registry.snapshot().restore(
         dict(legacy.semantic_payload),
         route_id="default",
-    ) is configured
+    )
+
+    assert dict(restored.semantic_payload) == dict(legacy.semantic_payload)
+    assert restored.fingerprint == legacy.fingerprint
+    model = restored.materialize()
+    assert model.settings == {"max_tokens": 2048}
+    assert model.profile.get("context_window") == 8192
+
+
+def test_new_model_binding_requires_exact_semantic_settings() -> None:
+    historical = ModelRegistry.openai(
+        model="gpt-test",
+        max_tokens=1024,
+    ).snapshot().resolve("default")
+    registry = ModelRegistry.openai(
+        model="gpt-test",
+        max_tokens=2048,
+    )
+
+    with pytest.raises(AIError) as raised:
+        registry.snapshot().restore(
+            dict(historical.semantic_payload),
+            route_id="default",
+        )
+
+    assert raised.value.code is ErrorCode.MODEL_CONNECTION_NOT_FOUND
 
 
 def test_openai_route_materializes_model_settings_and_profile() -> None:
     binding = ModelRegistry.openai(
         model="gpt-test",
         api_key="test-key",
-        timeout_seconds=30,
+        timeout=30,
         max_retries=1,
-        max_output_tokens=2048,
-        context_window_tokens=8192,
+        max_tokens=2048,
+        context_window=8192,
     ).snapshot().resolve("default")
 
     model = binding.materialize()
@@ -59,37 +115,51 @@ def test_openai_route_materializes_model_settings_and_profile() -> None:
     assert provider.client.max_retries == 1
 
 
-def test_openai_retry_delay_disables_sdk_retry_layer() -> None:
+@pytest.mark.asyncio
+async def test_openai_retry_provider_owns_client_and_preserves_default_timeout() -> None:
     binding = ModelRegistry.openai(
         model="gpt-test",
         api_key="test-key",
         max_retries=2,
-        retry_delay_seconds=0,
+        retry_delay=0,
     ).snapshot().resolve("default")
-
     model = binding.materialize()
-
     provider = model.provider
-    assert isinstance(provider, OpenAIProvider)
+
+    assert isinstance(provider, _RetryingOpenAIProvider)
+    first_client = provider._http_client
     assert provider.client.max_retries == 0
+    assert first_client.timeout.connect == 5
+    assert first_client.timeout.read == 600
+    assert not first_client.is_closed
+
+    async with model:
+        assert not first_client.is_closed
+    assert first_client.is_closed
+
+    async with model:
+        second_client = provider._http_client
+        assert second_client is not first_client
+        assert not second_client.is_closed
+    assert second_client.is_closed
 
 
 @pytest.mark.parametrize(
     "kwargs",
     [
-        {"timeout_seconds": 0},
-        {"timeout_seconds": float("inf")},
-        {"timeout_seconds": True},
+        {"timeout": 0},
+        {"timeout": float("inf")},
+        {"timeout": True},
         {"max_retries": -1},
         {"max_retries": True},
-        {"retry_delay_seconds": -0.1, "max_retries": 1},
-        {"retry_delay_seconds": float("nan"), "max_retries": 1},
-        {"retry_delay_seconds": 1},
-        {"max_output_tokens": 0},
-        {"max_output_tokens": True},
-        {"context_window_tokens": 0},
-        {"context_window_tokens": True},
-        {"max_output_tokens": 8193, "context_window_tokens": 8192},
+        {"retry_delay": -0.1, "max_retries": 1},
+        {"retry_delay": float("nan"), "max_retries": 1},
+        {"retry_delay": 1},
+        {"max_tokens": 0},
+        {"max_tokens": True},
+        {"context_window": 0},
+        {"context_window": True},
+        {"max_tokens": 8193, "context_window": 8192},
     ],
 )
 def test_openai_route_rejects_invalid_settings(kwargs: dict[str, Any]) -> None:
