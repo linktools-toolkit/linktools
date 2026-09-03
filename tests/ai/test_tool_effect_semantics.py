@@ -138,6 +138,38 @@ async def _capability(
     return capability, bridge, store, context, call, definition
 
 
+async def _effect_free_capability() -> tuple[
+    _RuntimeStepPersistence,
+    _Bridge,
+    _StepStore,
+    RunContext[None],
+    ToolCallPart,
+    ToolDefinition,
+]:
+    bridge = _Bridge(True)
+    store = _StepStore()
+    capability = _RuntimeStepPersistence(
+        tool_operations=bridge,
+        store=store,
+        agent_name="agent",
+        run_id="run",
+        trusted_tool_classes=(("read_file", "filesystem.read"),),
+    )
+    context = _context()
+    call = ToolCallPart("read_file", {"path": "missing"}, tool_call_id="call")
+    definition = ToolDefinition(
+        name="read_file",
+        capability_id="workspace-filesystem",
+    )
+    await capability.before_tool_execute(
+        context,
+        call=call,
+        tool_def=definition,
+        args={"path": "missing"},
+    )
+    return capability, bridge, store, context, call, definition
+
+
 async def test_custom_before_hook_rejection_does_not_start_durable_effect() -> None:
     capability, bridge, store, context, call, definition = await _capability(True)
 
@@ -286,6 +318,87 @@ async def test_replay_safe_handler_failure_reports_tool_effect_unknown() -> None
     assert not capability._calls
 
 
+async def test_effect_free_handler_failure_is_model_visible() -> None:
+    capability, bridge, store, context, call, definition = await _effect_free_capability()
+
+    async def handler(_args: dict[str, Any]) -> None:
+        raise RuntimeError("host detail must stay internal")
+
+    with pytest.raises(ToolFailed) as raised:
+        await capability.wrap_tool_execute(
+            context,
+            call=call,
+            tool_def=definition,
+            args={"path": "missing"},
+            handler=handler,
+        )
+
+    assert raised.value.message == (
+        "TOOL_EXECUTION_FAILED: tool execution failed; adapt and continue"
+    )
+    assert "host detail" not in raised.value.message
+    assert bridge.calls == ["begin", "fail"]
+    assert [effect.status for effect in store.effects] == ["started", "failed"]
+    assert not capability._calls
+
+
+async def test_effect_free_handler_validation_failure_is_not_model_retry() -> None:
+    capability, bridge, store, context, call, definition = await _effect_free_capability()
+
+    class Payload(BaseModel):
+        value: int
+
+    async def handler(_args: dict[str, Any]) -> None:
+        Payload.model_validate({"value": {"invalid": True}})
+
+    with pytest.raises(ToolFailed) as raised:
+        await capability.wrap_tool_execute(
+            context,
+            call=call,
+            tool_def=definition,
+            args={"path": "missing"},
+            handler=handler,
+        )
+
+    assert raised.value.message == (
+        "TOOL_EXECUTION_FAILED: tool execution failed; adapt and continue"
+    )
+    assert bridge.calls == ["begin", "fail"]
+    assert [effect.status for effect in store.effects] == ["started", "failed"]
+    assert not capability._calls
+
+
+async def test_effect_free_ai_error_remains_runtime_failure() -> None:
+    capability, bridge, store, context, call, definition = await _effect_free_capability()
+    failure = AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+
+    async def handler(_args: dict[str, Any]) -> None:
+        raise failure
+
+    with pytest.raises(AIError) as raised:
+        await capability.wrap_tool_execute(
+            context,
+            call=call,
+            tool_def=definition,
+            args={"path": "missing"},
+            handler=handler,
+        )
+    assert raised.value is failure
+
+    with pytest.raises(AIError) as propagated:
+        await capability.on_tool_execute_error(
+            context,
+            call=call,
+            tool_def=definition,
+            args={"path": "missing"},
+            error=failure,
+        )
+    assert propagated.value is failure
+    assert bridge.calls == ["begin"]
+    assert [effect.status for effect in store.effects] == ["started"]
+    assert not capability._calls
+
+
 async def test_model_retry_is_prefixed_for_model_feedback() -> None:
     capability, bridge, store, context, call, definition = await _capability(True)
 
@@ -386,7 +499,7 @@ async def test_tool_retry_error_is_prefixed_for_model_feedback() -> None:
     assert not capability._calls
 
 
-async def test_validation_error_is_prefixed_for_replay_safe_tool() -> None:
+async def test_validation_error_inside_replay_safe_effect_uses_recovery_path() -> None:
     capability, bridge, store, context, call, definition = await _capability(True)
 
     class Payload(BaseModel):
@@ -395,7 +508,7 @@ async def test_validation_error_is_prefixed_for_replay_safe_tool() -> None:
     async def handler(_args: dict[str, Any]) -> None:
         Payload.model_validate({"value": {"invalid": True}})
 
-    with pytest.raises(ModelRetry) as raised:
+    with pytest.raises(AIError) as raised:
         await capability.wrap_tool_execute(
             context,
             call=call,
@@ -404,10 +517,19 @@ async def test_validation_error_is_prefixed_for_replay_safe_tool() -> None:
             handler=handler,
         )
 
-    assert raised.value.message.startswith("TOOL_RETRY_REQUIRED: [")
-    assert '"type":"int_type"' in raised.value.message
-    assert bridge.calls == ["begin", "fail"]
-    assert [effect.status for effect in store.effects] == ["started", "failed"]
+    assert raised.value.code is ErrorCode.TOOL_EFFECT_UNKNOWN
+    assert raised.value.safe_details == {"phase": "tool_effect_replay"}
+    with pytest.raises(AIError) as propagated:
+        await capability.on_tool_execute_error(
+            context,
+            call=call,
+            tool_def=definition,
+            args={},
+            error=raised.value,
+        )
+    assert propagated.value is raised.value
+    assert bridge.calls == ["begin"]
+    assert [effect.status for effect in store.effects] == ["started"]
     assert not capability._calls
 
 
