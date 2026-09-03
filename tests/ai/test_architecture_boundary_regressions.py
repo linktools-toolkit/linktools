@@ -70,6 +70,29 @@ def test_external_import_linktools_attribute_path_is_scanned(tmp_path: Path) -> 
     assert any("cross-owner non-exported symbol access" in error for error in errors)
 
 
+def test_external_parent_package_alias_is_resolved(tmp_path: Path) -> None:
+    source_root = _source_tree(
+        tmp_path,
+        {
+            "a/__init__.py": "Public = object()\nHidden = object()\n__all__ = ['Public']\n",
+        },
+    )
+    external = tmp_path / "external" / "linktools"
+    consumer = external / "commands" / "ai.py"
+    consumer.parent.mkdir(parents=True)
+    consumer.write_text(
+        "import linktools as lt\nvalue = lt.ai.a.Hidden\n",
+        encoding="utf-8",
+    )
+
+    errors = ArchitecturePolicyChecker().check(
+        source_root,
+        external_roots=(external,),
+    ).errors
+
+    assert any("cross-owner non-exported symbol access" in error for error in errors)
+
+
 def test_all_direct_mutations_are_not_static_export_contracts(tmp_path: Path) -> None:
     variants = (
         "__all__ = ['Public']\n__all__.append('Hidden')\n",
