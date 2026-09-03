@@ -56,7 +56,7 @@ def test_runtime_tool_selection_honors_wildcard_for_ordinary_memory_tools() -> N
 
 def test_planning_gate_requires_framework_filesystem_provenance() -> None:
     classes = (("read_file", "filesystem.read"),)
-    trusted = ToolDefinition(name="read_file", capability_id="workspace-filesystem")
+    trusted = ToolDefinition(name="read_file", capability_id="workspace-sandbox")
     fake = ToolDefinition(name="read_file", capability_id="custom-filesystem")
     explicit_custom = ToolDefinition(
         name="custom_read",
