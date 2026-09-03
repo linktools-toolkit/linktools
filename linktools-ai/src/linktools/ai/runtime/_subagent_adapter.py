@@ -86,9 +86,12 @@ class _PydanticSubagentCapability(AbstractCapability[RunContext[object]]):
 def _subagent_retry_message(error: AIError) -> str:
     if error.code is ErrorCode.CAPABILITY_RESOLUTION_INVALID:
         subagent_id = error.safe_details.get("subagent_id")
-        if isinstance(subagent_id, str) and subagent_id:
-            return f"subagent {subagent_id!r} is not available; call list_subagents and choose an available subagent"
-        return "requested subagent is not available; call list_subagents and choose an available subagent"
+        target = (
+            f"subagent {subagent_id!r}"
+            if isinstance(subagent_id, str) and subagent_id
+            else "requested subagent"
+        )
+        return f"{target} is not available; call list_subagents and choose an available subagent"
     return "requested subagent or task is invalid"
 
 
