@@ -1,0 +1,122 @@
+name: Temporary prune AI tool failure changes
+
+on:
+  push:
+    branches:
+      - fix/ai-tool-failure-semantics
+
+permissions:
+  contents: write
+
+jobs:
+  prune:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: fix/ai-tool-failure-semantics
+          fetch-depth: 0
+
+      - name: Prune unnecessary tool failure changes
+        shell: bash
+        run: |
+          git fetch origin master
+          python - <<'PY'
+          from pathlib import Path
+          import re
+          import subprocess
+
+          def master_file(path: str) -> str:
+              return subprocess.check_output(
+                  ["git", "show", f"origin/master:{path}"],
+                  text=True,
+              )
+
+          def replace_once(text: str, old: str, new: str, label: str) -> str:
+              count = text.count(old)
+              if count != 1:
+                  raise RuntimeError(f"{label}: expected one match, found {count}")
+              return text.replace(old, new, 1)
+
+          # Keep Harness filesystem semantics untouched for now.
+          for path in (
+              "linktools-ai/src/linktools/ai/capability/_workspace.py",
+              "tests/ai/test_tool_effect_harness_regression.py",
+          ):
+              Path(path).write_text(master_file(path), encoding="utf-8")
+
+          # Rebuild Runtime changes from master and keep only the minimal semantic delta.
+          runtime_path = "linktools-ai/src/linktools/ai/runtime/_capabilities.py"
+          runtime = master_file(runtime_path)
+          runtime = replace_once(
+              runtime,
+              '''        except Exception as error:\n            if not state.handler_entered or state.policy.effect_free:\n                raise\n            if state.policy.replay_safe:\n''',
+              '''        except Exception as error:\n            if not state.handler_entered or state.policy.effect_free:\n                raise\n            if isinstance(error, AIError):\n                if state.policy.replay_safe:\n                    state.preserve_started = True\n                else:\n                    await self._mark_unknown(state, error)\n                raise\n            if state.policy.replay_safe:\n''',
+              "runtime effectful AIError bypass",
+          )
+          runtime = replace_once(
+              runtime,
+              '''    if isinstance(error, ToolFailedError):\n        return ToolFailed(\n            _format_model_tool_error(\n                _MODEL_FAILED_PREFIX,\n                _model_tool_error_content(\n                    error.tool_failed.content,\n                    "adapt and continue",\n                ),\n            )\n        )\n    return error\n''',
+              '''    if isinstance(error, ToolFailedError):\n        return ToolFailed(\n            _format_model_tool_error(\n                _MODEL_FAILED_PREFIX,\n                _model_tool_error_content(\n                    error.tool_failed.content,\n                    "adapt and continue",\n                ),\n            )\n        )\n    if isinstance(error, AIError) and error.code is not ErrorCode.TOOL_EXECUTION_FAILED:\n        return error\n    if isinstance(error, Exception):\n        return ToolFailed(\n            _format_model_tool_error(\n                _MODEL_FAILED_PREFIX,\n                "tool execution failed; adapt and continue",\n            )\n        )\n    return error\n''',
+              "runtime model tool error fallback",
+          )
+          Path(runtime_path).write_text(runtime, encoding="utf-8")
+
+          # Keep only tests for behavior introduced by this PR.
+          test_path = "tests/ai/test_tool_effect_semantics.py"
+          test = master_file(test_path)
+          test = replace_once(
+              test,
+              '''async def _capability(\n    replay_safe: bool,\n    *,\n    begin_error: BaseException | None = None,\n    fail_error: BaseException | None = None,\n) -> tuple[_RuntimeStepPersistence, _Bridge, _StepStore, RunContext[None], ToolCallPart, ToolDefinition]:\n''',
+              '''async def _capability(\n    replay_safe: bool,\n    *,\n    begin_error: BaseException | None = None,\n    fail_error: BaseException | None = None,\n    effect_free: bool = False,\n) -> tuple[_RuntimeStepPersistence, _Bridge, _StepStore, RunContext[None], ToolCallPart, ToolDefinition]:\n''',
+              "test capability signature",
+          )
+          test = replace_once(
+              test,
+              '''    store = _StepStore()\n    capability = _RuntimeStepPersistence(\n        tool_operations=bridge,\n        store=store,\n        agent_name="agent",\n        run_id="run",\n    )\n    context = _context()\n    call = ToolCallPart("tool", {}, tool_call_id="call")\n    definition = ToolDefinition(name="tool", metadata={"linktools.ai.replay_safe": replay_safe})\n''',
+              '''    store = _StepStore()\n    trusted_tool_classes = (("tool", "filesystem.read"),) if effect_free else ()\n    capability = _RuntimeStepPersistence(\n        tool_operations=bridge,\n        store=store,\n        agent_name="agent",\n        run_id="run",\n        trusted_tool_classes=trusted_tool_classes,\n    )\n    context = _context()\n    call = ToolCallPart("tool", {}, tool_call_id="call")\n    definition = ToolDefinition(\n        name="tool",\n        capability_id="workspace-filesystem" if effect_free else None,\n        metadata={"linktools.ai.replay_safe": replay_safe},\n    )\n''',
+              "test effect-free setup",
+          )
+          marker = '''async def test_model_retry_is_prefixed_for_model_feedback() -> None:\n'''
+          added = '''async def test_effect_free_handler_failure_is_model_visible() -> None:\n    capability, bridge, store, context, call, definition = await _capability(\n        True,\n        effect_free=True,\n    )\n\n    async def handler(_args: dict[str, Any]) -> None:\n        raise RuntimeError("host detail must stay internal")\n\n    with pytest.raises(RuntimeError) as execution:\n        await capability.wrap_tool_execute(\n            context,\n            call=call,\n            tool_def=definition,\n            args={},\n            handler=handler,\n        )\n\n    with pytest.raises(ToolFailed) as raised:\n        await capability.on_tool_execute_error(\n            context,\n            call=call,\n            tool_def=definition,\n            args={},\n            error=execution.value,\n        )\n\n    assert raised.value.message == (\n        "TOOL_EXECUTION_FAILED: tool execution failed; adapt and continue"\n    )\n    assert "host detail" not in raised.value.message\n    assert bridge.calls == ["begin", "fail"]\n    assert [effect.status for effect in store.effects] == ["started", "failed"]\n    assert not capability._calls\n\n\nasync def test_effect_free_ai_error_remains_runtime_failure() -> None:\n    capability, bridge, store, context, call, definition = await _capability(\n        True,\n        effect_free=True,\n    )\n    failure = AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)\n\n    async def handler(_args: dict[str, Any]) -> None:\n        raise failure\n\n    with pytest.raises(AIError) as execution:\n        await capability.wrap_tool_execute(\n            context,\n            call=call,\n            tool_def=definition,\n            args={},\n            handler=handler,\n        )\n    assert execution.value is failure\n\n    with pytest.raises(AIError) as propagated:\n        await capability.on_tool_execute_error(\n            context,\n            call=call,\n            tool_def=definition,\n            args={},\n            error=failure,\n        )\n    assert propagated.value is failure\n    assert bridge.calls == ["begin", "fail"]\n    assert [effect.status for effect in store.effects] == ["started", "failed"]\n    assert not capability._calls\n\n\n@pytest.mark.parametrize("replay_safe", (True, False))\nasync def test_effectful_ai_error_remains_runtime_failure(replay_safe: bool) -> None:\n    capability, bridge, store, context, call, definition = await _capability(replay_safe)\n    failure = AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)\n\n    async def handler(_args: dict[str, Any]) -> None:\n        raise failure\n\n    with pytest.raises(AIError) as execution:\n        await capability.wrap_tool_execute(\n            context,\n            call=call,\n            tool_def=definition,\n            args={},\n            handler=handler,\n        )\n    assert execution.value is failure\n\n    with pytest.raises(AIError) as propagated:\n        await capability.on_tool_execute_error(\n            context,\n            call=call,\n            tool_def=definition,\n            args={},\n            error=failure,\n        )\n    assert propagated.value is failure\n    assert bridge.calls == (["begin"] if replay_safe else ["begin", "unknown"])\n    assert [effect.status for effect in store.effects] == ["started"]\n    assert not capability._calls\n\n\n'''
+          test = replace_once(test, marker, added + marker, "test insertion")
+          Path(test_path).write_text(test, encoding="utf-8")
+
+          # Keep the existing retry regression and add only the changed Skill resource behavior.
+          skill_test_path = "tests/ai/test_skill_retry_semantics.py"
+          skill_test = master_file(skill_test_path)
+          skill_test = skill_test.replace(
+              "from pydantic_ai.exceptions import ModelRetry\n",
+              "from pydantic_ai.exceptions import ModelRetry, ToolFailed\n",
+              1,
+          )
+          skill_test += '''\n\nasync def test_missing_skill_resource_is_tool_failure() -> None:\n    capability = _PydanticSkillCapability(\n        SkillCapability(\n            (SkillDefinition(SkillSpec("known", content="instructions")),),\n            SkillSourceRegistry(),\n        )\n    )\n    toolset = capability.get_toolset()\n    context = _context()\n    tools = await toolset.get_tools(context)\n\n    with pytest.raises(ToolFailed, match="skill resource not found"):\n        await toolset.call_tool(\n            "load_skill",\n            {"skill_id": "known", "path": "missing.txt"},\n            context,\n            tools["load_skill"],\n        )\n'''
+          Path(skill_test_path).write_text(skill_test, encoding="utf-8")
+
+          # Keep focused Subagent tests without re-testing unchanged ModelRetry behavior.
+          subagent_test = Path("tests/ai/test_subagent_tool_failure_semantics.py")
+          subagent_test.write_text('''#!/usr/bin/env python3\n# -*- coding: utf-8 -*-\n"""Subagent child failures remain typed through the model adapter."""\n\nimport json\nfrom types import SimpleNamespace\nfrom unittest.mock import AsyncMock\n\nimport pytest\nfrom linktools.ai.capability import SubagentCapability\nfrom linktools.ai.core import ExecutionStatus, Principal, UsageMetrics\nfrom linktools.ai.errors import AIError, ErrorCode\nfrom linktools.ai.runtime._subagent import SubagentDispatcher\nfrom linktools.ai.runtime._subagent_adapter import _PydanticSubagentCapability\nfrom linktools.ai.runtime.service_api import ExecutionHandle, ExecutionResult\nfrom linktools.ai.spec import SubagentRef\nfrom pydantic_ai.exceptions import ToolFailed\nfrom pydantic_ai.models.test import TestModel\nfrom pydantic_ai.tools import RunContext\nfrom pydantic_ai.usage import RunUsage\n\npytestmark = pytest.mark.asyncio\n\n\n@pytest.mark.parametrize(\n    ("status", "error_code"),\n    (\n        (ExecutionStatus.FAILED, ErrorCode.MODEL_TIMEOUT.value),\n        (ExecutionStatus.CANCELLED, ErrorCode.EXECUTION_CANCELLED.value),\n    ),\n)\nasync def test_terminal_child_becomes_typed_tool_failure(\n    status: ExecutionStatus,\n    error_code: str,\n) -> None:\n    result = ExecutionResult(\n        "child-execution",\n        status,\n        None,\n        None,\n        UsageMetrics(),\n        error_code,\n        {"phase": "agent_execution"},\n    )\n    execution = SimpleNamespace(\n        replay_subagent=AsyncMock(return_value=ExecutionHandle(result.execution_id)),\n        wait=AsyncMock(return_value=result),\n    )\n    dispatcher = SubagentDispatcher(\n        None,  # type: ignore[arg-type]\n        None,  # type: ignore[arg-type]\n        execution,  # type: ignore[arg-type]\n    )\n\n    with pytest.raises(AIError) as raised:\n        await dispatcher.dispatch(\n            parent_execution_id="parent",\n            root_execution_id="root",\n            memory_scope=None,\n            principal=Principal("principal", "tenant", "service"),\n            ref=SubagentRef("agent", "child"),\n            mode="run",\n            user_prompt="do work",\n            invocation_id="call",\n        )\n\n    assert raised.value.code is ErrorCode.TOOL_EXECUTION_FAILED\n    assert raised.value.safe_details == {\n        "phase": "subagent_execution",\n        "subagent_id": "child",\n        "execution_id": "child-execution",\n        "status": status.value,\n        "safe_error_details": {"phase": "agent_execution"},\n        "error_code": error_code,\n    }\n\n\nasync def test_subagent_adapter_returns_child_failure_to_parent_model() -> None:\n    details = {\n        "phase": "subagent_execution",\n        "subagent_id": "child",\n        "execution_id": "child-execution",\n        "status": "failed",\n        "error_code": ErrorCode.MODEL_TIMEOUT.value,\n        "safe_error_details": {"phase": "agent_execution"},\n    }\n\n    async def delegate(\n        ref: SubagentRef,\n        task: str,\n        *,\n        invocation_id: str,\n    ) -> "dict[str, object]":\n        del ref, task, invocation_id\n        raise AIError(ErrorCode.TOOL_EXECUTION_FAILED, safe_details=details)\n\n    capability = _PydanticSubagentCapability(\n        SubagentCapability((SubagentRef("agent", "child"),), delegate)  # type: ignore[arg-type]\n    )\n    toolset = capability.get_toolset()\n    context = RunContext(\n        deps=None,\n        model=TestModel(),\n        usage=RunUsage(),\n        run_id="run",\n        tool_call_id="call",\n        tool_name="delegate_task",\n    )\n    tools = await toolset.get_tools(context)\n\n    with pytest.raises(ToolFailed) as raised:\n        await toolset.call_tool(\n            "delegate_task",\n            {"subagent_id": "child", "task": "do work"},\n            context,\n            tools["delegate_task"],\n        )\n\n    assert raised.value.message == "subagent execution failed: " + json.dumps(\n        details,\n        ensure_ascii=False,\n        separators=(",", ":"),\n        sort_keys=True,\n    )\n''', encoding="utf-8")
+          PY
+
+          python -m py_compile \
+            linktools-ai/src/linktools/ai/runtime/_capabilities.py \
+            linktools-ai/src/linktools/ai/runtime/_skill_adapter.py \
+            linktools-ai/src/linktools/ai/runtime/_subagent.py \
+            linktools-ai/src/linktools/ai/runtime/_subagent_adapter.py \
+            tests/ai/test_tool_effect_semantics.py \
+            tests/ai/test_skill_retry_semantics.py \
+            tests/ai/test_subagent_tool_failure_semantics.py
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add \
+            linktools-ai/src/linktools/ai/capability/_workspace.py \
+            linktools-ai/src/linktools/ai/runtime/_capabilities.py \
+            tests/ai/test_tool_effect_harness_regression.py \
+            tests/ai/test_tool_effect_semantics.py \
+            tests/ai/test_skill_retry_semantics.py \
+            tests/ai/test_subagent_tool_failure_semantics.py
+          if ! git diff --cached --quiet; then
+            git commit -m "refactor(ai): prune tool failure adaptation"
+            git push origin HEAD:fix/ai-tool-failure-semantics
+          fi
