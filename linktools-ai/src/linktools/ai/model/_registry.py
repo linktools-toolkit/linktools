@@ -29,7 +29,7 @@ class ModelRegistry:
         model: str,
         base_url: "str | None" = None,
         api_key: "str | None" = None,
-        timeout: "float | None" = None,
+        timeout: "int | float | None" = None,
         max_retries: "int | None" = None,
         max_tokens: "int | None" = None,
     ) -> "ModelRegistry":
@@ -60,7 +60,7 @@ class ModelRegistry:
         model: str,
         base_url: "str | None" = None,
         api_key: "str | None" = None,
-        timeout: "float | None" = None,
+        timeout: "int | float | None" = None,
         max_retries: "int | None" = None,
         max_tokens: "int | None" = None,
     ) -> None:
