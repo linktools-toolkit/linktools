@@ -11,7 +11,6 @@ from pydantic_ai import ModelSettings
 from pydantic_ai.exceptions import UserError
 from pydantic_ai.models import Model
 from pydantic_ai.models.openai import OpenAIChatModel
-from pydantic_ai.profiles import ModelProfile
 from pydantic_ai.providers.openai import OpenAIProvider
 
 from ..core import JsonValue, canonical_sha256
@@ -29,7 +28,6 @@ class _OpenAIModelBinding:
     timeout: "float | None" = None
     max_retries: "int | None" = None
     max_tokens: "int | None" = None
-    context_window: "int | None" = None
 
     def __post_init__(self) -> None:
         model = self.model.strip().removeprefix("openai:")
@@ -42,9 +40,6 @@ class _OpenAIModelBinding:
         _validate_positive_number("timeout", self.timeout)
         _validate_non_negative_integer("max_retries", self.max_retries)
         _validate_positive_integer("max_tokens", self.max_tokens)
-        _validate_positive_integer("context_window", self.context_window)
-        if self.max_tokens is not None and self.context_window is not None and self.max_tokens > self.context_window:
-            raise ValueError("max_tokens cannot exceed context_window")
 
     @property
     def provider(self) -> str:
@@ -59,8 +54,6 @@ class _OpenAIModelBinding:
         settings: dict[str, JsonValue] = {}
         if self.max_tokens is not None:
             settings["max_tokens"] = self.max_tokens
-        if self.context_window is not None:
-            settings["context_window"] = self.context_window
         return {
             "version": 1,
             "provider": self.provider,
@@ -84,15 +77,10 @@ class _OpenAIModelBinding:
             if self.max_tokens is not None:
                 settings["max_tokens"] = self.max_tokens
 
-            profile: ModelProfile | None = None
-            if self.context_window is not None:
-                profile = {"context_window": self.context_window}
-
             model = OpenAIChatModel(
                 self.model,
                 provider=provider,
                 settings=settings or None,
-                profile=profile,
             )
         except UserError as error:
             raise AIError(
