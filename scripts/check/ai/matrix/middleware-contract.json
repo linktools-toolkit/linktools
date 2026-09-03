@@ -1,6 +1,0 @@
-{
-  "owner": "observe.middleware",
-  "stages": ["before_run", "before_model", "after_model", "before_tool", "after_tool", "on_error", "after_run"],
-  "ordering": {"before": "registration order", "after": "reverse registration order", "error": "reverse registration order and observational failures are logged"},
-  "failure": {"mutating": "MIDDLEWARE_FAILED", "observational": "warning and continue", "cancelled": "propagate"}
-}
