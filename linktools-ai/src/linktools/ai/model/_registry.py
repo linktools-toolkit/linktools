@@ -32,7 +32,6 @@ class ModelRegistry:
         timeout: "float | None" = None,
         max_retries: "int | None" = None,
         max_tokens: "int | None" = None,
-        context_window: "int | None" = None,
     ) -> "ModelRegistry":
         registry = cls()
         registry.register_openai(
@@ -43,7 +42,6 @@ class ModelRegistry:
             timeout=timeout,
             max_retries=max_retries,
             max_tokens=max_tokens,
-            context_window=context_window,
         )
         return registry
 
@@ -65,7 +63,6 @@ class ModelRegistry:
         timeout: "float | None" = None,
         max_retries: "int | None" = None,
         max_tokens: "int | None" = None,
-        context_window: "int | None" = None,
     ) -> None:
         self.register(
             _OpenAIModelBinding(
@@ -76,7 +73,6 @@ class ModelRegistry:
                 timeout=timeout,
                 max_retries=max_retries,
                 max_tokens=max_tokens,
-                context_window=context_window,
             )
         )
 
