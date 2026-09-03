@@ -386,12 +386,11 @@ def _writes_all(node: ast.AST) -> bool:
     if isinstance(node, ast.Delete):
         return any(_targets_all(target) for target in node.targets)
     if (
-        isinstance(node, ast.Expr)
-        and isinstance(node.value, ast.Call)
-        and isinstance(node.value.func, ast.Attribute)
-        and isinstance(node.value.func.value, ast.Name)
-        and node.value.func.value.id == "__all__"
-        and node.value.func.attr in _ALL_MUTATING_METHODS
+        isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and isinstance(node.func.value, ast.Name)
+        and node.func.value.id == "__all__"
+        and node.func.attr in _ALL_MUTATING_METHODS
     ):
         return True
     return False
