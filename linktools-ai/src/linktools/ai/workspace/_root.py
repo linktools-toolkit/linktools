@@ -12,6 +12,7 @@ import yaml as _yaml
 
 from ..core import JsonValue, Principal, PrincipalKind, canonical_sha256, normalize_json_value
 from ..errors import AIError, ErrorCode
+from ._sandbox import Sandbox
 
 _STORAGE_DIR_NAME = ".linktools"
 
@@ -157,6 +158,7 @@ class Workspace:
     config: "dict[str, JsonValue]"
     workspace_id: str
     policy: WorkspacePolicy = field(default_factory=WorkspacePolicy)
+    sandbox: "Sandbox | None" = field(default=None, repr=False, compare=False)
 
     @property
     def storage_root(self) -> Path:
@@ -169,6 +171,7 @@ class Workspace:
         *,
         root: "str | Path | None" = None,
         policy: "WorkspacePolicy | None" = None,
+        sandbox: "Sandbox | None" = None,
     ) -> "Workspace":
         selected_policy = _select_policy(policy)
         candidate = (
@@ -182,12 +185,13 @@ class Workspace:
             for parent in (candidate, *candidate.parents):
                 config_file = parent / _STORAGE_DIR_NAME / "config.yaml"
                 if config_file.exists():
-                    return cls._build(parent, config_file, selected_policy)
+                    return cls._build(parent, config_file, selected_policy, sandbox)
         config_file = candidate / _STORAGE_DIR_NAME / "config.yaml"
         return cls._build(
             candidate,
             config_file if config_file.exists() else None,
             selected_policy,
+            sandbox,
         )
 
     @classmethod
@@ -196,6 +200,7 @@ class Workspace:
         root: "str | Path",
         *,
         policy: "WorkspacePolicy | None" = None,
+        sandbox: "Sandbox | None" = None,
     ) -> "Workspace":
         candidate = Path(root).expanduser().resolve()
         config_file = candidate / _STORAGE_DIR_NAME / "config.yaml"
@@ -203,6 +208,7 @@ class Workspace:
             candidate,
             config_file if config_file.exists() else None,
             _select_policy(policy),
+            sandbox,
         )
 
     @classmethod
@@ -211,6 +217,7 @@ class Workspace:
         root: Path,
         config_file: "Path | None",
         policy: WorkspacePolicy,
+        sandbox: "Sandbox | None",
     ) -> "Workspace":
         normalized_root = _normalized_root(root)
         return cls(
@@ -218,6 +225,7 @@ class Workspace:
             config=load_config(config_file) if config_file else {},
             workspace_id=canonical_sha256(["workspace", normalized_root]),
             policy=policy,
+            sandbox=sandbox,
         )
 
 
