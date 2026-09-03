@@ -187,6 +187,17 @@ class _RetryingOpenAIProvider(Provider[AsyncOpenAI]):
         return http_client, provider
 
 
+class _AsyncClientTransport(httpx2.AsyncBaseTransport):
+    def __init__(self, client: httpx2.AsyncClient) -> None:
+        self._client = client
+
+    async def handle_async_request(self, request: httpx2.Request) -> httpx2.Response:
+        return await self._client.send(request, stream=True)
+
+    async def aclose(self) -> None:
+        await self._client.aclose()
+
+
 def _openai_provider(
     *,
     base_url: "str | None",
@@ -210,6 +221,8 @@ def _openai_provider(
 
 
 def _retry_http_client(*, max_retries: int, retry_delay: float) -> httpx2.AsyncClient:
+    timeout = httpx2.Timeout(timeout=DEFAULT_HTTP_TIMEOUT, connect=5)
+    network_client = httpx2.AsyncClient(timeout=timeout)
     transport = AsyncHTTPX2TenacityTransport(
         config=RetryConfig(
             retry=retry_if_exception_type((httpx2.HTTPStatusError, httpx2.TransportError)),
@@ -217,11 +230,12 @@ def _retry_http_client(*, max_retries: int, retry_delay: float) -> httpx2.AsyncC
             stop=stop_after_attempt(max_retries + 1),
             retry_error_callback=_retry_error_result,
         ),
+        wrapped=_AsyncClientTransport(network_client),
         validate_response=_raise_retryable_status,
     )
     return httpx2.AsyncClient(
         transport=transport,
-        timeout=httpx2.Timeout(timeout=DEFAULT_HTTP_TIMEOUT, connect=5),
+        timeout=timeout,
     )
 
 
