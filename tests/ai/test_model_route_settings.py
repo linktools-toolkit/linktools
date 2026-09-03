@@ -7,9 +7,10 @@ from typing import Any
 import httpx2
 import pytest
 from linktools.ai.model import ModelRegistry
-from linktools.ai.model._openai import _raise_retryable_status
+from linktools.ai.model._openai import _raise_retryable_status, _retry_error_result
 from pydantic_ai.models.openai import OpenAIChatModel
 from pydantic_ai.providers.openai import OpenAIProvider
+from tenacity import RetryCallState, Retrying
 
 
 def test_openai_route_settings_do_not_change_durable_identity() -> None:
@@ -111,3 +112,31 @@ def test_non_retryable_http_statuses_pass_through(status_code: int) -> None:
     response = httpx2.Response(status_code, request=request)
 
     _raise_retryable_status(response)
+
+
+def test_exhausted_http_retry_returns_last_response() -> None:
+    request = httpx2.Request("POST", "https://example.test/v1/chat/completions")
+    response = httpx2.Response(429, request=request)
+    error = httpx2.HTTPStatusError(
+        "rate limited",
+        request=request,
+        response=response,
+    )
+
+    assert _retry_error_result(_failed_retry_state(error)) is response
+
+
+def test_exhausted_transport_retry_reraises_last_error() -> None:
+    request = httpx2.Request("POST", "https://example.test/v1/chat/completions")
+    error = httpx2.ConnectError("connection failed", request=request)
+
+    with pytest.raises(httpx2.ConnectError) as raised:
+        _retry_error_result(_failed_retry_state(error))
+
+    assert raised.value is error
+
+
+def _failed_retry_state(error: BaseException) -> RetryCallState:
+    state = RetryCallState(Retrying(), fn=None, args=(), kwargs={})
+    state.set_exception((type(error), error, None))
+    return state
