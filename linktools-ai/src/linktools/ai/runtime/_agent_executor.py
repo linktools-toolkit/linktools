@@ -118,7 +118,7 @@ _logger = environ.get_logger("ai.runtime.agent_executor")
 _RUNTIME_RESERVED_TOOL_NAMES = frozenset(
     (*SKILL_TOOL_NAMES, *MEMORY_TOOL_NAMES, *PLANNING_TOOL_NAMES, *SUBAGENT_TOOL_NAMES)
 )
-_WORKSPACE_CAPABILITY_IDS = frozenset({"workspace-filesystem", "workspace-shell"})
+_WORKSPACE_CAPABILITY_IDS = frozenset({"workspace-sandbox"})
 _MAX_TOOL_RETRIES = sys.maxsize
 
 
