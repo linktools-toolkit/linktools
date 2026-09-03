@@ -118,7 +118,6 @@ async def _capability(
     *,
     begin_error: BaseException | None = None,
     fail_error: BaseException | None = None,
-    effect_free: bool = False,
 ) -> tuple[_RuntimeStepPersistence, _Bridge, _StepStore, RunContext[None], ToolCallPart, ToolDefinition]:
     bridge = _Bridge(
         replay_safe,
@@ -126,22 +125,15 @@ async def _capability(
         fail_error=fail_error,
     )
     store = _StepStore()
-    tool_name = "read_file" if effect_free else "tool"
-    trusted_tool_classes = ((tool_name, "filesystem.read"),) if effect_free else ()
     capability = _RuntimeStepPersistence(
         tool_operations=bridge,
         store=store,
         agent_name="agent",
         run_id="run",
-        trusted_tool_classes=trusted_tool_classes,
     )
     context = _context()
-    call = ToolCallPart(tool_name, {}, tool_call_id="call")
-    definition = ToolDefinition(
-        name=tool_name,
-        capability_id="workspace-filesystem" if effect_free else None,
-        metadata={"linktools.ai.replay_safe": replay_safe},
-    )
+    call = ToolCallPart("tool", {}, tool_call_id="call")
+    definition = ToolDefinition(name="tool", metadata={"linktools.ai.replay_safe": replay_safe})
     await capability.before_tool_execute(context, call=call, tool_def=definition, args={})
     return capability, bridge, store, context, call, definition
 
@@ -291,76 +283,6 @@ async def test_replay_safe_handler_failure_reports_tool_effect_unknown() -> None
     assert propagated.value is raised.value
     assert bridge.calls == ["begin"]
     assert [effect.status for effect in store.effects] == ["started"]
-    assert not capability._calls
-
-
-async def test_effect_free_handler_failure_is_model_visible() -> None:
-    capability, bridge, store, context, call, definition = await _capability(
-        True,
-        effect_free=True,
-    )
-
-    async def handler(_args: dict[str, Any]) -> None:
-        raise RuntimeError("host detail must stay internal")
-
-    with pytest.raises(RuntimeError) as execution:
-        await capability.wrap_tool_execute(
-            context,
-            call=call,
-            tool_def=definition,
-            args={},
-            handler=handler,
-        )
-
-    with pytest.raises(ToolFailed) as raised:
-        await capability.on_tool_execute_error(
-            context,
-            call=call,
-            tool_def=definition,
-            args={},
-            error=execution.value,
-        )
-
-    assert raised.value.message == (
-        "TOOL_EXECUTION_FAILED: tool execution failed; adapt and continue"
-    )
-    assert "host detail" not in raised.value.message
-    assert bridge.calls == ["begin", "fail"]
-    assert [effect.status for effect in store.effects] == ["started", "failed"]
-    assert not capability._calls
-
-
-async def test_effect_free_ai_error_remains_runtime_failure() -> None:
-    capability, bridge, store, context, call, definition = await _capability(
-        True,
-        effect_free=True,
-    )
-    failure = AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-
-    async def handler(_args: dict[str, Any]) -> None:
-        raise failure
-
-    with pytest.raises(AIError) as execution:
-        await capability.wrap_tool_execute(
-            context,
-            call=call,
-            tool_def=definition,
-            args={},
-            handler=handler,
-        )
-    assert execution.value is failure
-
-    with pytest.raises(AIError) as propagated:
-        await capability.on_tool_execute_error(
-            context,
-            call=call,
-            tool_def=definition,
-            args={},
-            error=failure,
-        )
-    assert propagated.value is failure
-    assert bridge.calls == ["begin", "fail"]
-    assert [effect.status for effect in store.effects] == ["started", "failed"]
     assert not capability._calls
 
 

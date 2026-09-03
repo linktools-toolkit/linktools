@@ -1572,15 +1572,6 @@ def _model_tool_error(
                 ),
             )
         )
-    if isinstance(error, AIError) and error.code is not ErrorCode.TOOL_EXECUTION_FAILED:
-        return error
-    if isinstance(error, Exception):
-        return ToolFailed(
-            _format_model_tool_error(
-                _MODEL_FAILED_PREFIX,
-                "tool execution failed; adapt and continue",
-            )
-        )
     return error
 
 
