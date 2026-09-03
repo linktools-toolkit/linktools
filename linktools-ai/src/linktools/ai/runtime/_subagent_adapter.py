@@ -8,7 +8,7 @@ from typing import cast
 
 from pydantic import JsonValue as PydanticJsonValue
 from pydantic_ai.capabilities import AbstractCapability
-from pydantic_ai.exceptions import ToolFailed
+from pydantic_ai.exceptions import ModelRetry, ToolFailed
 from pydantic_ai.tools import RunContext as PydanticRunContext
 from pydantic_ai.toolsets import FunctionToolset
 
@@ -16,11 +16,10 @@ from ..capability import RunContext, SubagentCapability
 from ..errors import AIError, ErrorCode
 
 _SUBAGENT_CAPABILITY_ID = "linktools-subagent"
-_MODEL_FAILURE_ERRORS = frozenset(
+_MODEL_RETRY_ERRORS = frozenset(
     {
         ErrorCode.CAPABILITY_RESOLUTION_INVALID,
         ErrorCode.REQUEST_FIELD_INVALID,
-        ErrorCode.TOOL_EXECUTION_FAILED,
     }
 )
 
@@ -71,9 +70,11 @@ class _PydanticSubagentCapability(AbstractCapability[RunContext[object]]):
                     ),
                 )
             except AIError as error:
-                if error.code not in _MODEL_FAILURE_ERRORS:
-                    raise
-                raise ToolFailed(_subagent_failure_message(error)) from error
+                if error.code in _MODEL_RETRY_ERRORS:
+                    raise ModelRetry(_subagent_retry_message(error)) from error
+                if error.code is ErrorCode.TOOL_EXECUTION_FAILED:
+                    raise ToolFailed(_subagent_failure_message(error)) from error
+                raise
 
         return toolset
 
@@ -82,20 +83,22 @@ class _PydanticSubagentCapability(AbstractCapability[RunContext[object]]):
         return None
 
 
-def _subagent_failure_message(error: AIError) -> str:
+def _subagent_retry_message(error: AIError) -> str:
     if error.code is ErrorCode.CAPABILITY_RESOLUTION_INVALID:
         subagent_id = error.safe_details.get("subagent_id")
         if isinstance(subagent_id, str) and subagent_id:
             return f"subagent {subagent_id!r} is not available; call list_subagents and choose an available subagent"
         return "requested subagent is not available; call list_subagents and choose an available subagent"
-    if error.code is ErrorCode.TOOL_EXECUTION_FAILED:
-        return "subagent execution failed: " + json.dumps(
-            dict(error.safe_details),
-            ensure_ascii=False,
-            separators=(",", ":"),
-            sort_keys=True,
-        )
     return "requested subagent or task is invalid"
+
+
+def _subagent_failure_message(error: AIError) -> str:
+    return "subagent execution failed: " + json.dumps(
+        dict(error.safe_details),
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    )
 
 
 __all__ = ["_PydanticSubagentCapability"]

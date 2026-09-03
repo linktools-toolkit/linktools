@@ -342,32 +342,6 @@ async def test_effect_free_handler_failure_is_model_visible() -> None:
     assert not capability._calls
 
 
-async def test_effect_free_handler_validation_failure_is_not_model_retry() -> None:
-    capability, bridge, store, context, call, definition = await _effect_free_capability()
-
-    class Payload(BaseModel):
-        value: int
-
-    async def handler(_args: dict[str, Any]) -> None:
-        Payload.model_validate({"value": {"invalid": True}})
-
-    with pytest.raises(ToolFailed) as raised:
-        await capability.wrap_tool_execute(
-            context,
-            call=call,
-            tool_def=definition,
-            args={"path": "missing"},
-            handler=handler,
-        )
-
-    assert raised.value.message == (
-        "TOOL_EXECUTION_FAILED: tool execution failed; adapt and continue"
-    )
-    assert bridge.calls == ["begin", "fail"]
-    assert [effect.status for effect in store.effects] == ["started", "failed"]
-    assert not capability._calls
-
-
 async def test_effect_free_ai_error_remains_runtime_failure() -> None:
     capability, bridge, store, context, call, definition = await _effect_free_capability()
     failure = AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -499,7 +473,7 @@ async def test_tool_retry_error_is_prefixed_for_model_feedback() -> None:
     assert not capability._calls
 
 
-async def test_validation_error_inside_replay_safe_effect_uses_recovery_path() -> None:
+async def test_validation_error_is_prefixed_for_replay_safe_tool() -> None:
     capability, bridge, store, context, call, definition = await _capability(True)
 
     class Payload(BaseModel):
@@ -508,7 +482,7 @@ async def test_validation_error_inside_replay_safe_effect_uses_recovery_path() -
     async def handler(_args: dict[str, Any]) -> None:
         Payload.model_validate({"value": {"invalid": True}})
 
-    with pytest.raises(AIError) as raised:
+    with pytest.raises(ModelRetry) as raised:
         await capability.wrap_tool_execute(
             context,
             call=call,
@@ -517,19 +491,10 @@ async def test_validation_error_inside_replay_safe_effect_uses_recovery_path() -
             handler=handler,
         )
 
-    assert raised.value.code is ErrorCode.TOOL_EFFECT_UNKNOWN
-    assert raised.value.safe_details == {"phase": "tool_effect_replay"}
-    with pytest.raises(AIError) as propagated:
-        await capability.on_tool_execute_error(
-            context,
-            call=call,
-            tool_def=definition,
-            args={},
-            error=raised.value,
-        )
-    assert propagated.value is raised.value
-    assert bridge.calls == ["begin"]
-    assert [effect.status for effect in store.effects] == ["started"]
+    assert raised.value.message.startswith("TOOL_RETRY_REQUIRED: [")
+    assert '"type":"int_type"' in raised.value.message
+    assert bridge.calls == ["begin", "fail"]
+    assert [effect.status for effect in store.effects] == ["started", "failed"]
     assert not capability._calls
 
 

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Subagent failures remain child truth while becoming parent tool failures."""
+"""Subagent retries stay model-correctable while child failures remain typed."""
 
 import pytest
 from linktools.ai.capability import SubagentCapability
@@ -10,7 +10,7 @@ from linktools.ai.runtime._subagent import SubagentDispatcher
 from linktools.ai.runtime._subagent_adapter import _PydanticSubagentCapability
 from linktools.ai.runtime.service_api import ExecutionHandle, ExecutionResult
 from linktools.ai.spec import SubagentRef
-from pydantic_ai.exceptions import ToolFailed
+from pydantic_ai.exceptions import ModelRetry, ToolFailed
 from pydantic_ai.models.test import TestModel
 from pydantic_ai.tools import RunContext
 from pydantic_ai.usage import RunUsage
@@ -52,11 +52,11 @@ class _TerminalExecution:
 
 
 def _dispatcher(result: ExecutionResult) -> SubagentDispatcher:
-    dispatcher = object.__new__(SubagentDispatcher)
-    dispatcher._execution = _TerminalExecution(result)
-    dispatcher._background_failures = {}
-    dispatcher._detached_tasks = set()
-    return dispatcher
+    return SubagentDispatcher(
+        None,  # type: ignore[arg-type]
+        None,  # type: ignore[arg-type]
+        _TerminalExecution(result),  # type: ignore[arg-type]
+    )
 
 
 async def _dispatch(result: ExecutionResult) -> "dict[str, object]":
@@ -72,14 +72,24 @@ async def _dispatch(result: ExecutionResult) -> "dict[str, object]":
     )
 
 
-async def test_failed_child_becomes_typed_tool_failure() -> None:
+@pytest.mark.parametrize(
+    ("status", "error_code"),
+    (
+        (ExecutionStatus.FAILED, ErrorCode.MODEL_TIMEOUT.value),
+        (ExecutionStatus.CANCELLED, ErrorCode.EXECUTION_CANCELLED.value),
+    ),
+)
+async def test_terminal_child_becomes_typed_tool_failure(
+    status: ExecutionStatus,
+    error_code: str,
+) -> None:
     result = ExecutionResult(
         "child-execution",
-        ExecutionStatus.FAILED,
+        status,
         None,
         None,
         UsageMetrics(),
-        ErrorCode.MODEL_TIMEOUT.value,
+        error_code,
         {"phase": "agent_execution"},
     )
 
@@ -87,32 +97,11 @@ async def test_failed_child_becomes_typed_tool_failure() -> None:
         await _dispatch(result)
 
     assert raised.value.code is ErrorCode.TOOL_EXECUTION_FAILED
-    assert raised.value.safe_details == {
-        "phase": "subagent_execution",
-        "subagent_id": "child",
-        "execution_id": "child-execution",
-        "status": "FAILED",
-        "error_code": ErrorCode.MODEL_TIMEOUT.value,
-        "safe_error_details": {"phase": "agent_execution"},
-    }
-
-
-async def test_cancelled_child_becomes_typed_tool_failure() -> None:
-    result = ExecutionResult(
-        "child-execution",
-        ExecutionStatus.CANCELLED,
-        None,
-        None,
-        UsageMetrics(),
-        ErrorCode.EXECUTION_CANCELLED.value,
-    )
-
-    with pytest.raises(AIError) as raised:
-        await _dispatch(result)
-
-    assert raised.value.code is ErrorCode.TOOL_EXECUTION_FAILED
-    assert raised.value.safe_details["status"] == "CANCELLED"
-    assert raised.value.safe_details["error_code"] == ErrorCode.EXECUTION_CANCELLED.value
+    assert raised.value.safe_details["phase"] == "subagent_execution"
+    assert raised.value.safe_details["subagent_id"] == "child"
+    assert raised.value.safe_details["execution_id"] == "child-execution"
+    assert raised.value.safe_details["status"] == status.value
+    assert raised.value.safe_details["error_code"] == error_code
 
 
 async def test_subagent_adapter_returns_child_failure_to_parent_model() -> None:
@@ -161,7 +150,7 @@ async def test_subagent_adapter_returns_child_failure_to_parent_model() -> None:
     assert ErrorCode.MODEL_TIMEOUT.value in raised.value.message
 
 
-async def test_unknown_subagent_is_tool_failure_not_retry() -> None:
+async def test_unknown_subagent_is_model_retry() -> None:
     async def delegate(
         ref: SubagentRef,
         task: str,
@@ -185,7 +174,7 @@ async def test_unknown_subagent_is_tool_failure_not_retry() -> None:
     )
     tools = await toolset.get_tools(context)
 
-    with pytest.raises(ToolFailed) as raised:
+    with pytest.raises(ModelRetry) as raised:
         await toolset.call_tool(
             "delegate_task",
             {"subagent_id": "missing", "task": "do work"},
