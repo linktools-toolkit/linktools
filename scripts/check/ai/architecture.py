@@ -197,6 +197,9 @@ def _validate_cross_owner_access(
         for node in _runtime_imports(source.tree):
             if isinstance(node, ast.Import):
                 for alias in node.names:
+                    if alias.name == "linktools":
+                        aliases[alias.asname or "linktools"] = "linktools"
+                        continue
                     if alias.name not in known:
                         continue
                     target = alias.name
