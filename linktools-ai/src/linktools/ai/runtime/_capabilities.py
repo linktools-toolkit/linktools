@@ -549,7 +549,29 @@ class _RuntimeStepPersistence(StepPersistence[None]):
             self._calls.pop(key, None)
             raise
         except Exception as error:
-            if not state.handler_entered or isinstance(error, AIError):
+            if not state.handler_entered:
+                raise
+            if isinstance(error, AIError):
+                if state.policy.effect_free:
+                    try:
+                        await self._fail_known_effect(
+                            ctx,
+                            call=call,
+                            tool_def=tool_def,
+                            args=args,
+                            error=error,
+                            state=state,
+                        )
+                    except BaseException as raised:
+                        if state.operation_terminalized and _bypasses_tool_error_hook(raised):
+                            keep_call_state = False
+                            self._calls.pop(key, None)
+                        raise
+                    raise AssertionError("runtime failure effect hook must raise")
+                if state.policy.replay_safe:
+                    state.preserve_started = True
+                    raise
+                await self._mark_unknown(state, error)
                 raise
             if state.policy.effect_free:
                 try:
@@ -670,6 +692,21 @@ class _RuntimeStepPersistence(StepPersistence[None]):
                     state=state,
                 )
             if isinstance(error, AIError):
+                if not state.handler_entered:
+                    raise error
+                if state.policy.effect_free:
+                    return await self._fail_known_effect(
+                        ctx,
+                        call=call,
+                        tool_def=tool_def,
+                        args=args,
+                        error=error,
+                        state=state,
+                    )
+                if state.policy.replay_safe:
+                    state.preserve_started = True
+                    raise error
+                await self._mark_unknown(state, error)
                 raise error
             if state.handler_entered and not state.policy.effect_free:
                 if state.policy.replay_safe:
