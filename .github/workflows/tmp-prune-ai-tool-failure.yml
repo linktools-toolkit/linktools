@@ -1,0 +1,67 @@
+name: Temporary prune AI tool failure changes
+
+on:
+  push:
+    branches:
+      - fix/ai-tool-failure-semantics
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: fix/ai-tool-failure-semantics
+      - name: Correct effect-free test identity
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          path = Path('tests/ai/test_tool_effect_semantics.py')
+          text = path.read_text(encoding='utf-8')
+          old = '''    trusted_tool_classes = (("tool", "filesystem.read"),) if effect_free else ()
+    capability = _RuntimeStepPersistence(
+        tool_operations=bridge,
+        store=store,
+        agent_name="agent",
+        run_id="run",
+        trusted_tool_classes=trusted_tool_classes,
+    )
+    context = _context()
+    call = ToolCallPart("tool", {}, tool_call_id="call")
+    definition = ToolDefinition(
+        name="tool",
+        capability_id="workspace-filesystem" if effect_free else None,
+        metadata={"linktools.ai.replay_safe": replay_safe},
+    )
+'''
+          new = '''    tool_name = "read_file" if effect_free else "tool"
+    trusted_tool_classes = ((tool_name, "filesystem.read"),) if effect_free else ()
+    capability = _RuntimeStepPersistence(
+        tool_operations=bridge,
+        store=store,
+        agent_name="agent",
+        run_id="run",
+        trusted_tool_classes=trusted_tool_classes,
+    )
+    context = _context()
+    call = ToolCallPart(tool_name, {}, tool_call_id="call")
+    definition = ToolDefinition(
+        name=tool_name,
+        capability_id="workspace-filesystem" if effect_free else None,
+        metadata={"linktools.ai.replay_safe": replay_safe},
+    )
+'''
+          if text.count(old) != 1:
+              raise SystemExit('expected test helper block not found exactly once')
+          path.write_text(text.replace(old, new, 1), encoding='utf-8')
+          PY
+          python -m py_compile tests/ai/test_tool_effect_semantics.py
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add tests/ai/test_tool_effect_semantics.py
+          git commit -m "test(ai): use trusted effect-free tool identity"
+          git push origin HEAD:fix/ai-tool-failure-semantics
