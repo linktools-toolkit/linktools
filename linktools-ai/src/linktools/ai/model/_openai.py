@@ -25,7 +25,7 @@ class _OpenAIModelBinding:
     model: str
     base_url: "str | None" = None
     api_key: "str | None" = field(default=None, repr=False, compare=False)
-    timeout: "float | None" = None
+    timeout: "int | float | None" = None
     max_retries: "int | None" = None
     max_tokens: "int | None" = None
 
@@ -100,10 +100,15 @@ class _OpenAIModelBinding:
         return model
 
 
-def _validate_positive_number(name: str, value: "float | None") -> None:
+def _validate_positive_number(name: str, value: "int | float | None") -> None:
     if value is None:
         return
-    if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or value <= 0:
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, (int, float))
+        or (isinstance(value, float) and not math.isfinite(value))
+        or value <= 0
+    ):
         raise ValueError(f"{name} must be a finite positive number")
 
 
