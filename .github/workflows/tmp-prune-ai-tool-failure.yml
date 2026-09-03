@@ -22,39 +22,41 @@ jobs:
           from pathlib import Path
           path = Path('tests/ai/test_tool_effect_semantics.py')
           text = path.read_text(encoding='utf-8')
-          old = '''    trusted_tool_classes = (("tool", "filesystem.read"),) if effect_free else ()
-    capability = _RuntimeStepPersistence(
-        tool_operations=bridge,
-        store=store,
-        agent_name="agent",
-        run_id="run",
-        trusted_tool_classes=trusted_tool_classes,
-    )
-    context = _context()
-    call = ToolCallPart("tool", {}, tool_call_id="call")
-    definition = ToolDefinition(
-        name="tool",
-        capability_id="workspace-filesystem" if effect_free else None,
-        metadata={"linktools.ai.replay_safe": replay_safe},
-    )
-'''
-          new = '''    tool_name = "read_file" if effect_free else "tool"
-    trusted_tool_classes = ((tool_name, "filesystem.read"),) if effect_free else ()
-    capability = _RuntimeStepPersistence(
-        tool_operations=bridge,
-        store=store,
-        agent_name="agent",
-        run_id="run",
-        trusted_tool_classes=trusted_tool_classes,
-    )
-    context = _context()
-    call = ToolCallPart(tool_name, {}, tool_call_id="call")
-    definition = ToolDefinition(
-        name=tool_name,
-        capability_id="workspace-filesystem" if effect_free else None,
-        metadata={"linktools.ai.replay_safe": replay_safe},
-    )
-'''
+          old = (
+              '    trusted_tool_classes = (("tool", "filesystem.read"),) if effect_free else ()\n'
+              '    capability = _RuntimeStepPersistence(\n'
+              '        tool_operations=bridge,\n'
+              '        store=store,\n'
+              '        agent_name="agent",\n'
+              '        run_id="run",\n'
+              '        trusted_tool_classes=trusted_tool_classes,\n'
+              '    )\n'
+              '    context = _context()\n'
+              '    call = ToolCallPart("tool", {}, tool_call_id="call")\n'
+              '    definition = ToolDefinition(\n'
+              '        name="tool",\n'
+              '        capability_id="workspace-filesystem" if effect_free else None,\n'
+              '        metadata={"linktools.ai.replay_safe": replay_safe},\n'
+              '    )\n'
+          )
+          new = (
+              '    tool_name = "read_file" if effect_free else "tool"\n'
+              '    trusted_tool_classes = ((tool_name, "filesystem.read"),) if effect_free else ()\n'
+              '    capability = _RuntimeStepPersistence(\n'
+              '        tool_operations=bridge,\n'
+              '        store=store,\n'
+              '        agent_name="agent",\n'
+              '        run_id="run",\n'
+              '        trusted_tool_classes=trusted_tool_classes,\n'
+              '    )\n'
+              '    context = _context()\n'
+              '    call = ToolCallPart(tool_name, {}, tool_call_id="call")\n'
+              '    definition = ToolDefinition(\n'
+              '        name=tool_name,\n'
+              '        capability_id="workspace-filesystem" if effect_free else None,\n'
+              '        metadata={"linktools.ai.replay_safe": replay_safe},\n'
+              '    )\n'
+          )
           if text.count(old) != 1:
               raise SystemExit('expected test helper block not found exactly once')
           path.write_text(text.replace(old, new, 1), encoding='utf-8')
