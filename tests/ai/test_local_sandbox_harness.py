@@ -33,12 +33,14 @@ async def test_local_sandbox_preserves_harness_shell_dispatch(tmp_path: Path) ->
     )
     args = {"command": command, "timeout_seconds": None}
 
-    harness = Shell[None](
+    harness_base = Shell[None](
         cwd=tmp_path,
         denied_env_patterns=LLM_API_KEY_ENV_PATTERNS,
     ).get_toolset()
-    harness_tools = await harness.get_tools(context)
+    harness = await harness_base.for_run(context)
+    await harness.__aenter__()
     try:
+        harness_tools = await harness.get_tools(context)
         expected = await harness.call_tool(
             "run_command",
             args,
