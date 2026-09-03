@@ -210,7 +210,7 @@ class _MissingToolOperationBridge:
         raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
 
 
-@dataclass(kw_only=True)
+@dataclass(kw_only=True, eq=False)
 class _RuntimeStepPersistence(StepPersistence[None]):
     tool_operations: ToolOperationBridge = field(repr=False, compare=False)
     plan_mode: bool = False
