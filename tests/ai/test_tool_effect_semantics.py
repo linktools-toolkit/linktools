@@ -126,7 +126,8 @@ async def _capability(
         fail_error=fail_error,
     )
     store = _StepStore()
-    trusted_tool_classes = (("tool", "filesystem.read"),) if effect_free else ()
+    tool_name = "read_file" if effect_free else "tool"
+    trusted_tool_classes = ((tool_name, "filesystem.read"),) if effect_free else ()
     capability = _RuntimeStepPersistence(
         tool_operations=bridge,
         store=store,
@@ -135,9 +136,9 @@ async def _capability(
         trusted_tool_classes=trusted_tool_classes,
     )
     context = _context()
-    call = ToolCallPart("tool", {}, tool_call_id="call")
+    call = ToolCallPart(tool_name, {}, tool_call_id="call")
     definition = ToolDefinition(
-        name="tool",
+        name=tool_name,
         capability_id="workspace-filesystem" if effect_free else None,
         metadata={"linktools.ai.replay_safe": replay_safe},
     )
