@@ -27,6 +27,31 @@ class _AllowAuthorization:
         del args, kwargs
 
 
+class _OwnedWaiter:
+    def owns_graph(self, graph_id: str, *, tenant_id: str) -> bool:
+        del graph_id, tenant_id
+        return True
+
+    def graph_activity_generation(
+        self,
+        graph_id: str,
+        *,
+        tenant_id: str,
+    ) -> int:
+        del graph_id, tenant_id
+        return 1
+
+    async def wait_graph_activity(
+        self,
+        graph_id: str,
+        *,
+        tenant_id: str,
+        after_generation: "int | None" = None,
+    ) -> None:
+        del graph_id, tenant_id, after_generation
+        raise AssertionError("terminal event observation must not wait for local activity")
+
+
 def _request(graph: TaskGraph) -> TaskGraphRequest:
     return TaskGraphRequest(
         graph,
@@ -309,7 +334,55 @@ async def test_idempotent_admission_projection_repair_emits_graph_change() -> No
 
 
 @pytest.mark.asyncio
-async def test_terminal_event_stream_replays_from_durable_sequence() -> None:
+async def test_task_event_page_reads_latest_only_for_empty_cursor_page(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    state = RuntimeState.in_memory()
+    await state.initialize(namespace="task-event-page-reads", tenant_id="tenant")
+    try:
+        repository = state.task.tasks
+        graph = TaskGraph("event-page-reads", (TaskNode("node"),))
+        await admit_graph(state, graph)
+        service = DefaultTaskService(
+            SimpleNamespace(tasks=repository),
+            _AllowAuthorization(),
+        )
+        latest_event = repository.latest_event
+        latest_calls = 0
+
+        async def _counted_latest_event(
+            graph_id: str,
+            *,
+            tenant_id: str,
+        ):
+            nonlocal latest_calls
+            latest_calls += 1
+            return await latest_event(graph_id, tenant_id=tenant_id)
+
+        monkeypatch.setattr(repository, "latest_event", _counted_latest_event)
+
+        first = await service.list_graph_events(
+            graph.graph_id,
+            principal=Principal("tester", "tenant"),
+        )
+        assert [event.sequence for event in first.items] == [1]
+        assert latest_calls == 0
+
+        tail = await service.list_graph_events(
+            graph.graph_id,
+            principal=Principal("tester", "tenant"),
+            after_sequence=first.items[-1].sequence,
+        )
+        assert tail.items == ()
+        assert latest_calls == 1
+    finally:
+        await state.close()
+
+
+@pytest.mark.asyncio
+async def test_terminal_event_stream_replays_from_durable_sequence(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     state = RuntimeState.in_memory()
     await state.initialize(namespace="task-event-terminal-stream", tenant_id="tenant")
     stream = None
@@ -340,9 +413,42 @@ async def test_terminal_event_stream_replays_from_durable_sequence() -> None:
         assert durable.items[-1].status is TaskStatus.SUCCEEDED
         assert durable.items[-1].event_type is TaskEventType.GRAPH_CHANGED
 
+        list_events = repository.list_events
+        latest_event = repository.latest_event
+        list_calls = 0
+        latest_calls = 0
+
+        async def _counted_list_events(
+            graph_id: str,
+            *,
+            tenant_id: str,
+            after_sequence: int,
+            limit: int,
+        ):
+            nonlocal list_calls
+            list_calls += 1
+            return await list_events(
+                graph_id,
+                tenant_id=tenant_id,
+                after_sequence=after_sequence,
+                limit=limit,
+            )
+
+        async def _counted_latest_event(
+            graph_id: str,
+            *,
+            tenant_id: str,
+        ):
+            nonlocal latest_calls
+            latest_calls += 1
+            return await latest_event(graph_id, tenant_id=tenant_id)
+
+        monkeypatch.setattr(repository, "list_events", _counted_list_events)
+        monkeypatch.setattr(repository, "latest_event", _counted_latest_event)
         service = DefaultTaskService(
             SimpleNamespace(tasks=repository),
             _AllowAuthorization(),
+            local_waiter=_OwnedWaiter(),
         )
         stream = service.stream_graph_events(
             graph.graph_id,
@@ -355,6 +461,8 @@ async def test_terminal_event_stream_replays_from_durable_sequence() -> None:
         assert [event.sequence for event in replayed] == list(
             range(3, durable.items[-1].sequence + 1)
         )
+        assert list_calls == 1
+        assert latest_calls == 0
     finally:
         if stream is not None:
             await stream.aclose()
