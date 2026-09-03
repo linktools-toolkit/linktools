@@ -25,8 +25,6 @@ async def test_runtime_step_persistence_for_run_preserves_config_and_resets_stat
     )
     calls = persistence._calls
     persistence._last_observed_step_index = 7
-    persistence._event_sequence = 3
-    persistence._snapshot_sequence = 4
 
     ctx = cast(RunContext[None], SimpleNamespace(run_id="ignored"))
     materialized = await persistence.for_run(ctx)
@@ -40,5 +38,3 @@ async def test_runtime_step_persistence_for_run_preserves_config_and_resets_stat
     assert materialized._calls == {}
     assert materialized._calls is not calls
     assert materialized._last_observed_step_index is None
-    assert materialized._event_sequence == 0
-    assert materialized._snapshot_sequence == 0
