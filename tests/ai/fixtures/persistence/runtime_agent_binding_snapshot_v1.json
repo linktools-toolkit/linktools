@@ -1,0 +1,45 @@
+{
+  "version": 1,
+  "agent_spec": {
+    "version": 1,
+    "id": "runtime-persistence-v1",
+    "model": "default",
+    "system_prompt": "",
+    "instructions": [],
+    "allow_tools": [
+      "*"
+    ],
+    "allow_skills": [
+      "*"
+    ],
+    "allow_subagents": [
+      "*"
+    ],
+    "usage_limits": null,
+    "planning": false,
+    "thinking": false
+  },
+  "model": {
+    "route_id": "default",
+    "model_identity": "fixture:model"
+  },
+  "selected": [],
+  "subagents": [],
+  "output_mode": "text",
+  "output_schema": {
+    "additionalProperties": false,
+    "description": "Canonical Runtime representation of plain assistant text.",
+    "properties": {
+      "text": {
+        "title": "Text",
+        "type": "string"
+      }
+    },
+    "required": [
+      "text"
+    ],
+    "title": "AssistantTextOutput",
+    "type": "object"
+  },
+  "binding_digest": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+}
