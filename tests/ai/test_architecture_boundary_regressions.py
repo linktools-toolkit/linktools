@@ -108,3 +108,19 @@ def test_all_direct_mutations_are_not_static_export_contracts(tmp_path: Path) ->
         )
         errors = ArchitecturePolicyChecker().check(root).errors
         assert any("__all__ must be one static string sequence" in error for error in errors)
+
+
+def test_all_readonly_methods_do_not_invalidate_static_contract(tmp_path: Path) -> None:
+    root = _source_tree(
+        tmp_path,
+        {
+            "a/__init__.py": (
+                "Public = object()\n"
+                "__all__ = ['Public']\n"
+                "count = __all__.count('Public')\n"
+                "position = __all__.index('Public')\n"
+            ),
+        },
+    )
+
+    assert ArchitecturePolicyChecker().check(root).passed
