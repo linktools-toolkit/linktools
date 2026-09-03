@@ -5,10 +5,10 @@
 import asyncio
 from collections.abc import Sequence
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from linktools.core import environ
-from pydantic_ai import Tool
+from pydantic_ai import RunContext as PydanticRunContext, Tool
 from pydantic_ai.capabilities import AbstractCapability, Toolset
 from pydantic_ai.toolsets import FunctionToolset
 from pydantic_ai_harness.filesystem import FileSystem, FileSystemToolset
@@ -61,15 +61,17 @@ class _LocalSandbox:
 
 class _LocalSandboxSession:
     def __init__(self, root: Path) -> None:
-        filesystem = FileSystem[RunContext[object]](root_dir=root).get_toolset()
-        shell = Shell[RunContext[object]](
-            cwd=root,
-            denied_env_patterns=LLM_API_KEY_ENV_PATTERNS,
-        ).get_toolset()
-        if not isinstance(filesystem, FileSystemToolset) or not isinstance(shell, ShellToolset):
-            raise TypeError("Harness workspace toolset contract is invalid")
-        self._filesystem = filesystem
-        self._shell = shell
+        self._filesystem = cast(
+            "FileSystemToolset[RunContext[object]]",
+            FileSystem[RunContext[object]](root_dir=root).get_toolset(),
+        )
+        self._shell = cast(
+            "ShellToolset[RunContext[object]]",
+            Shell[RunContext[object]](
+                cwd=root,
+                denied_env_patterns=LLM_API_KEY_ENV_PATTERNS,
+            ).get_toolset(),
+        )
 
     async def read_file(
         self,
@@ -386,7 +388,7 @@ class _WorkspaceSandboxToolset(FunctionToolset[RunContext[object]]):
 
     async def for_run(
         self,
-        ctx: "Any",
+        ctx: "PydanticRunContext[RunContext[object]]",
     ) -> "_WorkspaceSandboxToolset":
         del ctx
         session = await self._sandbox.open()
