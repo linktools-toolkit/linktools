@@ -1,0 +1,43 @@
+name: Temporary max tool retries
+on:
+  push:
+    branches:
+      - fix/ai-tool-failure-semantics
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: fix/ai-tool-failure-semantics
+      - name: Raise tool retry budget
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          path = Path('linktools-ai/src/linktools/ai/runtime/_agent_executor.py')
+          text = path.read_text()
+          text = text.replace('import asyncio\n', 'import asyncio\nimport sys\n', 1)
+          marker = '_WORKSPACE_CAPABILITY_IDS = frozenset({"workspace-filesystem", "workspace-shell"})\n'
+          if text.count(marker) != 1:
+              raise SystemExit('unexpected workspace capability marker')
+          text = text.replace(marker, marker + '_MAX_TOOL_RETRIES = sys.maxsize\n', 1)
+          old = '            output_type=output_type,\n            deps_type=RunContext,\n            tools=tuple(business_tools),\n'
+          new = '            output_type=output_type,\n            deps_type=RunContext,\n            retries={"tools": _MAX_TOOL_RETRIES},\n            tools=tuple(business_tools),\n'
+          if text.count(old) != 1:
+              raise SystemExit('unexpected agent constructor block')
+          text = text.replace(old, new, 1)
+          path.write_text(text)
+          PY
+      - name: Commit change
+        shell: bash
+        run: |
+          git config user.name "ice-black-tea"
+          git config user.email "30665081+ice-black-tea@users.noreply.github.com"
+          git add linktools-ai/src/linktools/ai/runtime/_agent_executor.py
+          git diff --cached --check
+          git commit -m "fix(ai): maximize model tool retries"
+          git push origin HEAD:fix/ai-tool-failure-semantics
