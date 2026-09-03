@@ -7,10 +7,12 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import cast
 
-from linktools.ai.agent import AgentBindingSnapshot, SemanticPin, bind_output, restore_output
-from linktools.ai.capability import workspace_tool_contributions
+import pytest
+from linktools.ai.agent import AgentBindingSnapshot, AgentCompiler, SemanticPin, bind_output, restore_output
+from linktools.ai.capability import workspace_capabilities, workspace_tool_contributions
 from linktools.ai.core import IdempotencyStatus, JsonValue, OperationStatus, canonical_json_bytes
 from linktools.ai.errors import AIError, ErrorCode
+from linktools.ai.model import ModelRegistry
 from linktools.ai.runtime._message import decode_model_messages, encode_model_messages
 from linktools.ai.runtime.state import _codec as runtime_codec
 from linktools.ai.runtime.state._contracts import (
@@ -20,7 +22,7 @@ from linktools.ai.runtime.state._contracts import (
 )
 from linktools.ai.spec import AgentSpec
 from linktools.ai.task import TaskNode
-from linktools.ai.workspace import Workspace
+from linktools.ai.workspace import DisabledSandbox, Workspace
 from pydantic_ai.messages import ModelRequest, UserPromptPart
 
 _FIXTURE_DIR = Path(__file__).parent / "fixtures" / "persistence"
@@ -206,3 +208,43 @@ def test_workspace_tool_pin_excludes_runtime_capability_provenance(tmp_path: Pat
     payload = pin.to_payload()
     assert set(payload) == {"kind", "id", "contract_version", "contract"}
     assert "capability_id" not in cast(Mapping[str, object], payload["contract"])
+
+
+@pytest.mark.asyncio
+async def test_workspace_tool_binding_restores_before_disabled_sandbox_materialization(
+    tmp_path: Path,
+) -> None:
+    workspace = Workspace.load(tmp_path, sandbox=DisabledSandbox())
+    candidates = workspace_tool_contributions(workspace)
+    spec = AgentSpec(
+        "workspace-persistence-v1",
+        model="default",
+        allow_tools=("read_file",),
+        allow_skills=(),
+        allow_subagents=(),
+    )
+    models = ModelRegistry.openai(model="gpt-test").snapshot()
+    compiler = AgentCompiler(
+        model_resolver=models,
+        candidates=candidates,
+        agents={spec.id: spec},
+    )
+    binding = compiler.bind(compiler.compile(spec))
+    baseline = cast(Mapping[str, object], _load_json("workspace_tool_semantics_v1.json"))
+    assert len(binding.snapshot.selected) == 1
+    pin = binding.snapshot.selected[0]
+    assert pin.kind == "tool"
+    assert pin.id == "read_file"
+    assert dict(pin.contract) == baseline["read_file"]
+
+    restored = AgentCompiler(
+        model_resolver=models,
+        candidates=candidates,
+        agents={spec.id: spec},
+    ).restore(binding.snapshot)
+    assert restored.snapshot == binding.snapshot
+    selected = tuple(candidate.id for candidate in restored.definition.selected_tools)
+    capability = workspace_capabilities(workspace, selected)[0]
+    with pytest.raises(AIError) as raised:
+        await capability.toolset.for_run(None)  # type: ignore[attr-defined,arg-type]
+    assert raised.value.code is ErrorCode.SANDBOX_UNAVAILABLE
