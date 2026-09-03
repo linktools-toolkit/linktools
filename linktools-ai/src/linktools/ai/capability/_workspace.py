@@ -10,7 +10,7 @@ from typing import Any, cast
 from linktools.core import environ
 from pydantic_ai import RunContext as PydanticRunContext, Tool
 from pydantic_ai.capabilities import AbstractCapability, Toolset
-from pydantic_ai.toolsets import FunctionToolset
+from pydantic_ai.toolsets import FunctionToolset, ToolsetTool
 from pydantic_ai_harness.filesystem import FileSystem, FileSystemToolset
 from pydantic_ai_harness.shell import LLM_API_KEY_ENV_PATTERNS, Shell, ShellToolset
 
@@ -58,6 +58,14 @@ class _LocalSandbox:
     async def open(self) -> SandboxSession:
         return _LocalSandboxSession(self._root)
 
+    async def _open_for_run(
+        self,
+        ctx: "PydanticRunContext[RunContext[object]]",
+    ) -> SandboxSession:
+        session = _LocalSandboxSession(self._root)
+        await session._bind_run(ctx)
+        return session
+
 
 class _LocalSandboxSession:
     def __init__(self, root: Path) -> None:
@@ -72,6 +80,28 @@ class _LocalSandboxSession:
                 denied_env_patterns=LLM_API_KEY_ENV_PATTERNS,
             ).get_toolset(),
         )
+        self._shell_context: "PydanticRunContext[RunContext[object]] | None" = None
+        self._shell_tools: "dict[str, ToolsetTool[RunContext[object]]]" = {}
+
+    async def _bind_run(
+        self,
+        ctx: "PydanticRunContext[RunContext[object]]",
+    ) -> None:
+        self._shell_context = ctx
+        self._shell_tools = await self._shell.get_tools(ctx)
+
+    async def _call_shell(self, name: str, args: dict[str, Any]) -> str:
+        ctx = cast(
+            "PydanticRunContext[RunContext[object]]",
+            self._shell_context,
+        )
+        result = await self._shell.call_tool(
+            name,
+            args,
+            ctx,
+            self._shell_tools[name],
+        )
+        return cast(str, result)
 
     async def read_file(
         self,
@@ -142,16 +172,19 @@ class _LocalSandboxSession:
         *,
         timeout_seconds: "float | None" = None,
     ) -> str:
-        return await self._shell.run_command(command, timeout_seconds=timeout_seconds)
+        return await self._call_shell(
+            "run_command",
+            {"command": command, "timeout_seconds": timeout_seconds},
+        )
 
     async def start_command(self, command: str) -> str:
-        return await self._shell.start_command(command)
+        return await self._call_shell("start_command", {"command": command})
 
     async def check_command(self, command_id: str) -> str:
-        return await self._shell.check_command(command_id)
+        return await self._call_shell("check_command", {"command_id": command_id})
 
     async def stop_command(self, command_id: str) -> str:
-        return await self._shell.stop_command(command_id)
+        return await self._call_shell("stop_command", {"command_id": command_id})
 
     async def close(self) -> None:
         await self._shell.__aexit__(None, None, None)
@@ -388,8 +421,11 @@ class _WorkspaceSandboxToolset(FunctionToolset[RunContext[object]]):
         self,
         ctx: "PydanticRunContext[RunContext[object]]",
     ) -> "_WorkspaceSandboxToolset":
-        del ctx
-        session = await self._sandbox.open()
+        session = (
+            await self._sandbox._open_for_run(ctx)
+            if isinstance(self._sandbox, _LocalSandbox)
+            else await self._sandbox.open()
+        )
         return _WorkspaceSandboxToolset(
             self._sandbox,
             self._selected_tool_names,
