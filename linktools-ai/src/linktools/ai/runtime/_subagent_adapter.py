@@ -2,7 +2,6 @@
 # -*- coding: utf-8 -*-
 """Pydantic AI adapter for the vendor-neutral Subagent capability."""
 
-import json
 from collections.abc import Awaitable, Callable
 from typing import cast
 
@@ -71,7 +70,7 @@ class _PydanticSubagentCapability(AbstractCapability[RunContext[object]]):
                 )
             except AIError as error:
                 if error.code is ErrorCode.TOOL_EXECUTION_FAILED:
-                    raise ToolFailed(_subagent_failure_message(error)) from error
+                    raise ToolFailed("subagent execution failed; adapt and continue") from error
                 if error.code not in _MODEL_CORRECTABLE_ERRORS:
                     raise
                 raise ModelRetry("requested subagent or task is invalid") from error
@@ -81,15 +80,6 @@ class _PydanticSubagentCapability(AbstractCapability[RunContext[object]]):
     @classmethod
     def get_serialization_name(cls) -> "str | None":
         return None
-
-
-def _subagent_failure_message(error: AIError) -> str:
-    return "subagent execution failed: " + json.dumps(
-        dict(error.safe_details),
-        ensure_ascii=False,
-        separators=(",", ":"),
-        sort_keys=True,
-    )
 
 
 __all__ = ["_PydanticSubagentCapability"]
