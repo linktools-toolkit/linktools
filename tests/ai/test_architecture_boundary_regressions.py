@@ -97,6 +97,7 @@ def test_all_direct_mutations_are_not_static_export_contracts(tmp_path: Path) ->
     variants = (
         "__all__ = ['Public']\n__all__.append('Hidden')\n",
         "__all__ = ['Public']\n__all__.clear()\n",
+        "__all__ = ['Public']\nremoved = __all__.pop()\n",
         "__all__ = ['Public']\n__all__[0] = 'Hidden'\n",
         "__all__ = ['Public']\ndel __all__\n",
     )
