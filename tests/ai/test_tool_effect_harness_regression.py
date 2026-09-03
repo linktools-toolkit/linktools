@@ -1,21 +1,22 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Integration regression for Harness model-correctable filesystem failures."""
+"""Integration regressions for workspace filesystem failure semantics."""
 
 from pathlib import Path
 from typing import Any
 
 import pytest
+from linktools.ai.capability import workspace_capabilities
 from linktools.ai.runtime._capabilities import (
     ToolOperationDecision,
     _RuntimeStepPersistence,
 )
-from pydantic_ai.exceptions import ModelRetry
+from linktools.ai.workspace import Workspace
+from pydantic_ai.exceptions import ToolFailed
 from pydantic_ai.messages import ToolCallPart
 from pydantic_ai.models.test import TestModel
 from pydantic_ai.tools import RunContext, ToolDefinition
 from pydantic_ai.usage import RunUsage
-from pydantic_ai_harness.filesystem import FileSystem
 from pydantic_ai_harness.step_persistence import InMemoryStepStore
 
 pytestmark = pytest.mark.asyncio
@@ -66,9 +67,18 @@ def _context() -> RunContext[None]:
     )
 
 
-async def test_missing_harness_file_is_failed_retry_not_unknown(tmp_path: Path) -> None:
-    filesystem = FileSystem(root_dir=tmp_path, id="workspace-filesystem")
-    toolset = filesystem.get_toolset()
+async def _workspace_toolset(
+    tmp_path: Path,
+    tool_name: str,
+) -> Any:
+    capabilities = workspace_capabilities(Workspace.load(tmp_path), (tool_name,))
+    toolset = capabilities[0].get_toolset()
+    assert toolset is not None
+    return toolset
+
+
+async def test_missing_workspace_file_is_failed_result_not_retry(tmp_path: Path) -> None:
+    toolset = await _workspace_toolset(tmp_path, "read_file")
     bridge = _Bridge(True)
     store = InMemoryStepStore()
     capability = _RuntimeStepPersistence(
@@ -105,7 +115,7 @@ async def test_missing_harness_file_is_failed_retry_not_unknown(tmp_path: Path) 
             tools["read_file"],
         )
 
-    with pytest.raises(ModelRetry):
+    with pytest.raises(ToolFailed, match="TOOL_EXECUTION_FAILED"):
         await capability.wrap_tool_execute(
             context,
             call=call,
@@ -120,9 +130,8 @@ async def test_missing_harness_file_is_failed_retry_not_unknown(tmp_path: Path) 
     assert effect.status == "failed"
 
 
-async def test_missing_write_parent_is_failed_retry_not_unknown(tmp_path: Path) -> None:
-    filesystem = FileSystem(root_dir=tmp_path, id="workspace-filesystem")
-    toolset = filesystem.get_toolset()
+async def test_missing_write_parent_is_failed_result_not_unknown(tmp_path: Path) -> None:
+    toolset = await _workspace_toolset(tmp_path, "write_file")
     bridge = _Bridge(False)
     store = InMemoryStepStore()
     capability = _RuntimeStepPersistence(
@@ -155,7 +164,7 @@ async def test_missing_write_parent_is_failed_retry_not_unknown(tmp_path: Path) 
             tools["write_file"],
         )
 
-    with pytest.raises(ModelRetry):
+    with pytest.raises(ToolFailed, match="TOOL_EXECUTION_FAILED"):
         await capability.wrap_tool_execute(
             context,
             call=call,
