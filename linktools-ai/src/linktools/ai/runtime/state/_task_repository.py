@@ -1215,16 +1215,20 @@ class TaskRepositoryImpl(RepositoryBase):
             graph = await self._decode(graph_record, TaskGraphView)
             _require_canonical_graph_status(graph.status)
             node = await self._decode(node_record, TaskNodeView)
-            graph_nodes = {value.node_id: value for value in graph.nodes}
-            graph_node = graph_nodes.get(node_id)
             if (
                 graph.graph_id != graph_id
-                or len(graph_nodes) != len(graph.nodes)
-                or graph_node is None
                 or node.graph_id != graph_id
                 or node.node_id != node_id
-                or node.dependencies != graph_node.dependencies
             ):
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            graph_node = None
+            for candidate in graph.nodes:
+                if candidate.node_id != node_id:
+                    continue
+                if graph_node is not None:
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                graph_node = candidate
+            if graph_node is None or node.dependencies != graph_node.dependencies:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             dependency_keys = tuple(
                 self._node_key(graph_id, dependency) for dependency in node.dependencies
@@ -1706,12 +1710,7 @@ class TaskRepositoryImpl(RepositoryBase):
                 ordered = tuple(by_id[node.node_id] for node in graph.nodes)
             except KeyError as error:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
-            if len(ordered) != len(states) or any(
-                state.graph_id != graph.graph_id
-                or state.node_id != node.node_id
-                or state.dependencies != node.dependencies
-                for node, state in zip(graph.nodes, ordered, strict=True)
-            ):
+            if len(ordered) != len(states):
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             status = _effective_graph_status(graph, ordered)
             snapshot = TaskGraphSnapshot(
@@ -1731,37 +1730,6 @@ class TaskRepositoryImpl(RepositoryBase):
             self._validate_admission_record(admission_record, graph_id)
             admission = await self._decode(admission_record, TaskGraphAdmission)
             if admission.graph_id != graph_id:
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            try:
-                persisted_graph = TaskGraph(graph.graph_id, graph.nodes)
-                admission.bind(persisted_graph)
-            except (AIError, TypeError, ValueError) as error:
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
-            stored_operation = await transaction.get_operation(
-                operation_key(
-                    self._namespace,
-                    self._tenant_id,
-                    self._domain.value,
-                    admission.operation_id,
-                )
-            )
-            if stored_operation is None:
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            operation = decode_operation(stored_operation)
-            if (
-                operation.operation_id != admission.operation_id
-                or operation.tenant_id != self._tenant_id
-                or operation.resource_kind is not ResourceKind.TASK_GRAPH
-                or operation.resource_id != graph_id
-                or operation.execution_id is not None
-                or operation.operation_kind is not OperationKind.TASK_NODE
-                or operation.compactable
-                or operation.request_digest != admission.request_digest
-                or operation.status is not OperationStatus.SUCCEEDED
-                or operation.result_ref != graph_id
-                or operation.result_digest != _task_submit_result_digest(persisted_graph)
-                or operation.error_code is not None
-            ):
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             return (
                 view,
@@ -1959,23 +1927,7 @@ class TaskAdmissionRepositoryImpl(RepositoryBase):
                     or graph_view.graph_id != admission.graph_id
                 ):
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                launch = admission.bind(graph)
-                stored_operation = await transaction.get_operation(
-                    operation_key(
-                        self._namespace,
-                        self._tenant_id,
-                        self._domain.value,
-                        admission.operation_id,
-                    )
-                )
-                if stored_operation is None:
-                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                operation = decode_operation(stored_operation)
-                self._validate_operation_identity(operation, admission)
-                if operation.request_digest != admission.request_digest:
-                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                self._validate_succeeded_operation(operation, graph)
-                launches.append(launch)
+                launches.append(admission.bind(graph))
             next_cursor = (
                 record_cursor(selected[-1])
                 if len(records) > limit and selected

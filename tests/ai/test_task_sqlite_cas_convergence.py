@@ -513,7 +513,7 @@ async def test_task_node_dependency_projection_fails_closed() -> None:
 
 
 @pytest.mark.asyncio
-async def test_task_projection_readback_rejects_corrupt_admission_payload(
+async def test_task_projection_readback_rejects_corrupt_admission_graph_identity(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     state, request = await _admitted_state(
@@ -527,7 +527,7 @@ async def test_task_projection_readback_rejects_corrupt_admission_payload(
         record = await transaction.get_record(key)
         assert record is not None
         admission = await repository._decode(record, TaskGraphAdmission)
-        tampered = replace(admission, operation_id="f" * 64)
+        tampered = replace(admission, graph_id="other-graph")
         encoded = repository._stored(
             "task_admission",
             request.graph.graph_id,

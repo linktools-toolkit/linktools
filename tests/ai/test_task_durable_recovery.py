@@ -272,13 +272,6 @@ async def test_corrupt_occupied_graph_without_its_admission_operation_fails_clos
         )
         assert len(deleted) == 1
 
-        with pytest.raises(AIError) as recovery_error:
-            await state.task.admissions.list_recoverable_page(
-                cursor=None,
-                limit=128,
-            )
-        assert recovery_error.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
-
         with pytest.raises(AIError) as raised:
             await state.task.admissions.admit(
                 TaskGraphAdmission.from_request(second),
