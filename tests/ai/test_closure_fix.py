@@ -159,10 +159,10 @@ async def test_tool_operation_admission_uses_runtime_step_and_binding_digest() -
 @pytest.mark.parametrize(
     ("name", "capability_id", "tool_class", "replay_safe", "effect_free"),
     [
-        ("read_file", "workspace-filesystem", "filesystem.read", True, True),
-        ("write_file", "workspace-filesystem", "filesystem.write", False, False),
-        ("check_command", "workspace-shell", "shell", True, True),
-        ("run_command", "workspace-shell", "shell", False, False),
+        ("read_file", "workspace-sandbox", "filesystem.read", True, True),
+        ("write_file", "workspace-sandbox", "filesystem.write", False, False),
+        ("check_command", "workspace-sandbox", "shell", True, True),
+        ("run_command", "workspace-sandbox", "shell", False, False),
         ("read_memory", "linktools-memory", "memory.read", True, True),
         ("write_memory", "linktools-memory", "memory.write", True, False),
         ("list_skills", "linktools-skill", "control", True, True),
