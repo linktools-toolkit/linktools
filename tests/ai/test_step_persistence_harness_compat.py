@@ -18,7 +18,6 @@ async def test_runtime_step_persistence_for_run_preserves_config_and_resets_stat
     pause_sink = pauses.append
     persistence = _RuntimeStepPersistence(
         tool_operations=bridge,
-        run_id="run",
         plan_mode=True,
         background_tasks=background_tasks,
         deferred_pause_sink=pause_sink,
@@ -26,11 +25,12 @@ async def test_runtime_step_persistence_for_run_preserves_config_and_resets_stat
     calls = persistence._calls
     persistence._last_observed_step_index = 7
 
-    ctx = cast(RunContext[None], SimpleNamespace(run_id="ignored"))
+    ctx = cast(RunContext[None], SimpleNamespace(run_id="run"))
     materialized = await persistence.for_run(ctx)
 
     assert isinstance(materialized, _RuntimeStepPersistence)
     assert materialized is not persistence
+    assert materialized.run_id == "run"
     assert materialized.tool_operations is bridge
     assert materialized.plan_mode is True
     assert materialized.background_tasks is background_tasks
