@@ -8,6 +8,22 @@ from dataclasses import dataclass
 from pathlib import Path
 
 _AI_ROOT = "linktools.ai"
+_ALL_MUTATING_METHODS = frozenset(
+    {
+        "__delitem__",
+        "__iadd__",
+        "__imul__",
+        "__setitem__",
+        "append",
+        "clear",
+        "extend",
+        "insert",
+        "pop",
+        "remove",
+        "reverse",
+        "sort",
+    }
+)
 
 
 @dataclass(frozen=True)
@@ -375,6 +391,7 @@ def _writes_all(node: ast.AST) -> bool:
         and isinstance(node.value.func, ast.Attribute)
         and isinstance(node.value.func.value, ast.Name)
         and node.value.func.value.id == "__all__"
+        and node.value.func.attr in _ALL_MUTATING_METHODS
     ):
         return True
     return False
