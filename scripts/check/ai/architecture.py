@@ -90,8 +90,6 @@ def _build_external_modules(root: Path) -> list[_ModuleInfo]:
             source = path.read_text(encoding="utf-8")
         except OSError:
             continue
-        if "linktools.ai" not in source:
-            continue
         try:
             tree = ast.parse(source, filename=str(path))
         except SyntaxError:
@@ -207,7 +205,17 @@ def _validate_cross_owner_access(
                     errors.extend(_check_module_boundary(source, source_owner, target))
             else:
                 base = _resolve_from_module(source.name, source.path.name == "__init__.py", node)
-                if base is None or not base.startswith(_AI_ROOT) or base not in known:
+                if base is None:
+                    continue
+                if not base.startswith(_AI_ROOT) or base not in known:
+                    for alias in node.names:
+                        if alias.name == "*":
+                            continue
+                        child = f"{base}.{alias.name}"
+                        if child not in known:
+                            continue
+                        errors.extend(_check_module_boundary(source, source_owner, child))
+                        aliases[alias.asname or alias.name] = child
                     continue
                 errors.extend(_check_module_boundary(source, source_owner, base))
                 for alias in node.names:
@@ -351,14 +359,29 @@ def _all_assignment_value(node: ast.AST) -> ast.AST | None:
 
 def _writes_all(node: ast.AST) -> bool:
     if isinstance(node, ast.Assign):
-        return any(
-            isinstance(target, ast.Name) and target.id == "__all__"
-            for target in node.targets
-        )
+        return any(_targets_all(target) for target in node.targets)
     if isinstance(node, ast.AnnAssign):
-        return isinstance(node.target, ast.Name) and node.target.id == "__all__"
+        return _targets_all(node.target)
     if isinstance(node, ast.AugAssign):
-        return isinstance(node.target, ast.Name) and node.target.id == "__all__"
+        return _targets_all(node.target)
+    if isinstance(node, ast.Delete):
+        return any(_targets_all(target) for target in node.targets)
+    if (
+        isinstance(node, ast.Expr)
+        and isinstance(node.value, ast.Call)
+        and isinstance(node.value.func, ast.Attribute)
+        and isinstance(node.value.func.value, ast.Name)
+        and node.value.func.value.id == "__all__"
+    ):
+        return True
+    return False
+
+
+def _targets_all(target: ast.AST) -> bool:
+    if isinstance(target, ast.Name):
+        return target.id == "__all__"
+    if isinstance(target, ast.Subscript):
+        return isinstance(target.value, ast.Name) and target.value.id == "__all__"
     return False
 
 
