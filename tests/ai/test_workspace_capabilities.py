@@ -5,18 +5,32 @@
 
 import asyncio
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from linktools.ai.capability import (
     WORKSPACE_FILESYSTEM_READ_TOOL_NAMES,
     WORKSPACE_FILESYSTEM_TOOL_NAMES,
     WORKSPACE_SHELL_TOOL_NAMES,
+    CapabilityGroup,
     workspace_capabilities,
     workspace_tool_class,
     workspace_tool_contributions,
 )
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.workspace import DisabledSandbox, SandboxSession, Workspace
+from linktools.ai.runtime._capabilities import _WorkspaceToolGate
+from linktools.ai.workspace import (
+    DisabledSandbox,
+    RepositoryInstructions,
+    SandboxSession,
+    ToolPermissionRule,
+    Workspace,
+    WorkspacePolicy,
+    WorkspaceToolPermissionPolicy,
+)
+from pydantic_ai.capabilities import AbstractCapability
+from pydantic_ai.exceptions import ApprovalRequired, ToolFailed
+from pydantic_ai.tools import ToolDefinition
 
 
 class _RecordingSession:
@@ -141,6 +155,21 @@ class _BlockingCloseSession(_RecordingSession):
         await self.close_release.wait()
 
 
+class _UnusedResolver:
+    async def resolve(
+        self,
+        target: str,
+        *,
+        exclude_sources: frozenset[str] = frozenset(),
+    ) -> RepositoryInstructions:
+        del target, exclude_sources
+        return RepositoryInstructions(())
+
+
+class _SpoofedSandboxCapability(AbstractCapability[object]):
+    id = "workspace-sandbox"
+
+
 def _semantic_contract(tool: object) -> dict[str, object]:
     definition = tool.tool_def  # type: ignore[attr-defined]
     return {
@@ -212,6 +241,13 @@ def test_workspace_capabilities_reject_unknown_tool_names(tmp_path: Path) -> Non
         workspace_capabilities(Workspace.load(tmp_path), ("missing_tool",))
 
 
+def test_workspace_sandbox_capability_id_is_reserved() -> None:
+    group = CapabilityGroup[object]("custom")
+    with pytest.raises(AIError) as raised:
+        group.capability(_SpoofedSandboxCapability())
+    assert raised.value.code is ErrorCode.CAPABILITY_RESOLUTION_INVALID
+
+
 @pytest.mark.asyncio
 async def test_workspace_runtime_tool_semantics_match_durable_contributions(tmp_path: Path) -> None:
     sandbox = _RecordingSandbox()
@@ -263,6 +299,46 @@ async def test_workspace_sandbox_provisions_distinct_sessions_per_run(tmp_path: 
     await first.__aexit__(None, None, None)
     await second.__aexit__(None, None, None)
     assert [session.closed for session in sandbox.sessions] == [1, 1]
+
+
+@pytest.mark.parametrize(
+    ("decision", "expected_error"),
+    (("deny", ToolFailed), ("ask", ApprovalRequired)),
+)
+@pytest.mark.asyncio
+async def test_permission_rejection_has_no_sandbox_operation_side_effect(
+    tmp_path: Path,
+    decision: str,
+    expected_error: type[BaseException],
+) -> None:
+    sandbox = _RecordingSandbox()
+    workspace = Workspace.load(tmp_path, sandbox=sandbox)
+    capability = workspace_capabilities(workspace, ("read_file",))[0]
+    run_toolset = await capability.toolset.for_run(None)  # type: ignore[attr-defined,arg-type]
+    gate = _WorkspaceToolGate(
+        execution_id="execution",
+        workspace_root=workspace.root,
+        repository_instruction_history=(),
+        repository_instruction_marker_authority=frozenset(),
+        repository_instructions=None,
+        instruction_resolver=_UnusedResolver(),  # type: ignore[arg-type]
+        policy=WorkspacePolicy(
+            tool_permissions=WorkspaceToolPermissionPolicy(
+                (ToolPermissionRule(decision, tool_name="read_file"),)  # type: ignore[arg-type]
+            )
+        ),
+        trusted_tool_classes=(("read_file", "filesystem.read"),),
+    )
+
+    with pytest.raises(expected_error):
+        await gate.before_tool_execute(
+            SimpleNamespace(tool_call_approved=False),  # type: ignore[arg-type]
+            call=object(),  # type: ignore[arg-type]
+            tool_def=ToolDefinition(name="read_file", capability_id="workspace-sandbox"),
+            args={"path": "sample.txt"},
+        )
+    assert sandbox.sessions[0].calls == []
+    await run_toolset.__aexit__(None, None, None)
 
 
 @pytest.mark.asyncio
