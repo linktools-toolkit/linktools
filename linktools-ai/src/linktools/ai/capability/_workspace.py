@@ -3,13 +3,9 @@
 """Harness workspace capability adaptation and stable tool projection."""
 
 from collections.abc import Sequence
-from typing import Any
 
 from pydantic_ai import Tool
 from pydantic_ai.capabilities import AbstractCapability, Toolset
-from pydantic_ai.exceptions import ModelRetry, ToolFailed
-from pydantic_ai.tools import RunContext as PydanticRunContext
-from pydantic_ai.toolsets import ToolsetTool, WrapperToolset
 from pydantic_ai_harness.filesystem import FileSystem
 from pydantic_ai_harness.shell import LLM_API_KEY_ENV_PATTERNS, Shell
 
@@ -45,20 +41,6 @@ WORKSPACE_SHELL_TOOL_NAMES = (
     "stop_command",
 )
 _WORKSPACE_METADATA_KEY = "linktools.ai.workspace_tool_class"
-
-
-class _WorkspaceFileSystemToolset(WrapperToolset[RunContext[object]]):
-    async def call_tool(
-        self,
-        name: str,
-        tool_args: dict[str, Any],
-        ctx: PydanticRunContext[RunContext[object]],
-        tool: ToolsetTool[RunContext[object]],
-    ) -> Any:
-        try:
-            return await super().call_tool(name, tool_args, ctx, tool)
-        except ModelRetry as error:
-            raise ToolFailed(error.message) from error
 
 
 def workspace_tool_contributions(
@@ -109,9 +91,9 @@ def workspace_capabilities(
     values: list[AbstractCapability[RunContext[object]]] = []
     filesystem_names = selected.intersection(WORKSPACE_FILESYSTEM_TOOL_NAMES)
     if filesystem_names:
-        toolset = _WorkspaceFileSystemToolset(
-            FileSystem[RunContext[object]](root_dir=workspace.root).get_toolset()
-        ).filtered(
+        toolset = FileSystem[RunContext[object]](
+            root_dir=workspace.root
+        ).get_toolset().filtered(
             lambda _ctx, definition: definition.name in filesystem_names
         )
         values.append(Toolset(toolset, id="workspace-filesystem"))

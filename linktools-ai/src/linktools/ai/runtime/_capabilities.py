@@ -84,7 +84,6 @@ _MODEL_TOOL_ERROR_MAX_CHARS = 4096
 _MODEL_TOOL_ERROR_HEAD_CHARS = 1024
 _MODEL_TOOL_ERROR_TRUNCATION_MARKER = "...[truncated]..."
 _MODEL_EFFECT_UNKNOWN_MESSAGE = "TOOL_EFFECT_UNKNOWN: verify side effects before retry"
-_MODEL_EXECUTION_FAILED_MESSAGE = "tool execution failed; adapt and continue"
 _MODEL_RETRY_PREFIX = "TOOL_RETRY_REQUIRED"
 _MODEL_FAILED_PREFIX = "TOOL_EXECUTION_FAILED"
 _REPOSITORY_MARKER_HEADER = "[linktools.repository-instructions.v1]"
@@ -526,46 +525,14 @@ class _RuntimeStepPersistence(StepPersistence[None]):
             self._calls.pop(key, None)
             raise
         except Exception as error:
-            if not state.handler_entered:
+            if not state.handler_entered or state.policy.effect_free:
                 raise
             if isinstance(error, AIError):
-                if state.policy.effect_free:
-                    try:
-                        await self._fail_known_effect(
-                            ctx,
-                            call=call,
-                            tool_def=tool_def,
-                            args=args,
-                            error=error,
-                            state=state,
-                        )
-                    except BaseException as raised:
-                        if state.operation_terminalized and _bypasses_tool_error_hook(raised):
-                            keep_call_state = False
-                            self._calls.pop(key, None)
-                        raise
-                    raise AssertionError("runtime failure effect hook must raise")
                 if state.policy.replay_safe:
                     state.preserve_started = True
-                    raise
-                await self._mark_unknown(state, error)
+                else:
+                    await self._mark_unknown(state, error)
                 raise
-            if state.policy.effect_free:
-                try:
-                    await self._fail_unclassified_effect(
-                        ctx,
-                        call=call,
-                        tool_def=tool_def,
-                        args=args,
-                        error=error,
-                        state=state,
-                    )
-                except BaseException as raised:
-                    if state.operation_terminalized and _bypasses_tool_error_hook(raised):
-                        keep_call_state = False
-                        self._calls.pop(key, None)
-                    raise
-                raise AssertionError("tool failure effect hook must raise")
             if state.policy.replay_safe:
                 state.preserve_started = True
                 raise AIError(
@@ -649,16 +616,6 @@ class _RuntimeStepPersistence(StepPersistence[None]):
                     error=error,
                     state=state,
                 )
-            if (
-                isinstance(error, AIError)
-                and state.handler_entered
-                and not state.policy.effect_free
-            ):
-                if state.policy.replay_safe:
-                    state.preserve_started = True
-                else:
-                    await self._mark_unknown(state, error)
-                raise error
             if state.handler_entered and not state.policy.effect_free:
                 if state.policy.replay_safe:
                     state.preserve_started = True
@@ -668,7 +625,14 @@ class _RuntimeStepPersistence(StepPersistence[None]):
                     ) from error
                 await self._mark_unknown(state, error)
                 raise ToolFailed(_MODEL_EFFECT_UNKNOWN_MESSAGE) from error
-            return await self._fail_unclassified_effect(
+            state.preserve_started = True
+            cancelled = await self.tool_operations.fail(state.decision, error)
+            state.operation_terminalized = True
+            state.preserve_started = False
+            if cancelled:
+                self._calls.pop(key, None)
+                raise asyncio.CancelledError
+            return await self._record_failed_effect(
                 ctx,
                 call=call,
                 tool_def=tool_def,
@@ -761,37 +725,6 @@ class _RuntimeStepPersistence(StepPersistence[None]):
             state=state,
         )
 
-    async def _fail_unclassified_effect(
-        self,
-        ctx: "RunContext[None]",
-        *,
-        call: ToolCallPart,
-        tool_def: ToolDefinition,
-        args: dict[str, Any],
-        error: Exception,
-        state: _ToolCallState,
-    ) -> Any:
-        state.preserve_started = True
-        cancelled = await self.tool_operations.fail(state.decision, error)
-        state.operation_terminalized = True
-        state.preserve_started = False
-        if cancelled:
-            raise asyncio.CancelledError
-        _logger.debug(
-            "tool execution marked failed: run=%s tool=%s call=%s",
-            self.run_id or ctx.run_id,
-            tool_def.name,
-            call.tool_call_id,
-        )
-        return await self._record_failed_effect(
-            ctx,
-            call=call,
-            tool_def=tool_def,
-            args=args,
-            error=error,
-            state=state,
-        )
-
     async def _record_failed_effect(
         self,
         ctx: "RunContext[None]",
@@ -815,11 +748,7 @@ class _RuntimeStepPersistence(StepPersistence[None]):
         except BaseException as raised:
             state.effect_terminalized = True
             if raised is error:
-                model_error = _model_tool_error(
-                    error,
-                    call=call,
-                    tool_def=tool_def,
-                )
+                model_error = _model_tool_error(error, call=call, tool_def=tool_def)
                 if model_error is not error:
                     raise model_error from error
             raise
@@ -1643,20 +1572,13 @@ def _model_tool_error(
                 ),
             )
         )
-    if isinstance(error, AIError):
-        if error.code is ErrorCode.TOOL_EXECUTION_FAILED:
-            return ToolFailed(
-                _format_model_tool_error(
-                    _MODEL_FAILED_PREFIX,
-                    _MODEL_EXECUTION_FAILED_MESSAGE,
-                )
-            )
+    if isinstance(error, AIError) and error.code is not ErrorCode.TOOL_EXECUTION_FAILED:
         return error
     if isinstance(error, Exception):
         return ToolFailed(
             _format_model_tool_error(
                 _MODEL_FAILED_PREFIX,
-                _MODEL_EXECUTION_FAILED_MESSAGE,
+                "tool execution failed; adapt and continue",
             )
         )
     return error

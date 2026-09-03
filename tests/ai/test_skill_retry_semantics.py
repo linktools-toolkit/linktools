@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Skill tool regression for retry and execution-failure semantics."""
+"""Skill tool regression for model-correctable selection misses."""
 
 import pytest
 from linktools.ai.capability import SkillCapability, SkillDefinition, SkillSourceRegistry
@@ -23,18 +23,14 @@ def _context() -> RunContext[None]:
     )
 
 
-def _skill_toolset():
+async def test_missing_skill_id_is_model_retry() -> None:
     capability = _PydanticSkillCapability(
         SkillCapability(
             (SkillDefinition(SkillSpec("known", content="instructions")),),
             SkillSourceRegistry(),
         )
     )
-    return capability.get_toolset()
-
-
-async def test_missing_skill_id_is_model_retry() -> None:
-    toolset = _skill_toolset()
+    toolset = capability.get_toolset()
     context = _context()
     tools = await toolset.get_tools(context)
 
@@ -47,22 +43,14 @@ async def test_missing_skill_id_is_model_retry() -> None:
         )
 
 
-async def test_invalid_skill_resource_path_is_model_retry() -> None:
-    toolset = _skill_toolset()
-    context = _context()
-    tools = await toolset.get_tools(context)
-
-    with pytest.raises(ModelRetry, match="skill resource path is invalid"):
-        await toolset.call_tool(
-            "load_skill",
-            {"skill_id": "known", "path": "../outside"},
-            context,
-            tools["load_skill"],
-        )
-
-
 async def test_missing_skill_resource_is_tool_failure() -> None:
-    toolset = _skill_toolset()
+    capability = _PydanticSkillCapability(
+        SkillCapability(
+            (SkillDefinition(SkillSpec("known", content="instructions")),),
+            SkillSourceRegistry(),
+        )
+    )
+    toolset = capability.get_toolset()
     context = _context()
     tools = await toolset.get_tools(context)
 

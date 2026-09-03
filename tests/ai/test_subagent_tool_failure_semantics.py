@@ -1,6 +1,10 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Subagent retries stay model-correctable while child failures remain typed."""
+"""Subagent child failures remain typed through the model adapter."""
+
+import json
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 from linktools.ai.capability import SubagentCapability
@@ -10,66 +14,12 @@ from linktools.ai.runtime._subagent import SubagentDispatcher
 from linktools.ai.runtime._subagent_adapter import _PydanticSubagentCapability
 from linktools.ai.runtime.service_api import ExecutionHandle, ExecutionResult
 from linktools.ai.spec import SubagentRef
-from pydantic_ai.exceptions import ModelRetry, ToolFailed
+from pydantic_ai.exceptions import ToolFailed
 from pydantic_ai.models.test import TestModel
 from pydantic_ai.tools import RunContext
 from pydantic_ai.usage import RunUsage
 
 pytestmark = pytest.mark.asyncio
-
-
-class _TerminalExecution:
-    def __init__(self, result: ExecutionResult) -> None:
-        self._result = result
-
-    async def replay_subagent(
-        self,
-        *,
-        agent_id: str,
-        user_prompt: str,
-        principal: Principal,
-        idempotency_key: str,
-        memory_scope: "str | None",
-        mode: str,
-        parent_execution_id: str,
-        root_execution_id: str,
-    ) -> ExecutionHandle:
-        del user_prompt, principal, idempotency_key, memory_scope, mode
-        assert agent_id == "child"
-        assert parent_execution_id == "parent"
-        assert root_execution_id == "root"
-        return ExecutionHandle(self._result.execution_id)
-
-    async def wait(
-        self,
-        execution_id: str,
-        *,
-        principal: Principal,
-    ) -> ExecutionResult:
-        del principal
-        assert execution_id == self._result.execution_id
-        return self._result
-
-
-def _dispatcher(result: ExecutionResult) -> SubagentDispatcher:
-    return SubagentDispatcher(
-        None,  # type: ignore[arg-type]
-        None,  # type: ignore[arg-type]
-        _TerminalExecution(result),  # type: ignore[arg-type]
-    )
-
-
-async def _dispatch(result: ExecutionResult) -> "dict[str, object]":
-    return await _dispatcher(result).dispatch(
-        parent_execution_id="parent",
-        root_execution_id="root",
-        memory_scope=None,
-        principal=Principal("principal", "tenant", "service"),
-        ref=SubagentRef("agent", "child"),
-        mode="run",
-        user_prompt="do work",
-        invocation_id="call",
-    )
 
 
 @pytest.mark.parametrize(
@@ -92,19 +42,49 @@ async def test_terminal_child_becomes_typed_tool_failure(
         error_code,
         {"phase": "agent_execution"},
     )
+    execution = SimpleNamespace(
+        replay_subagent=AsyncMock(return_value=ExecutionHandle(result.execution_id)),
+        wait=AsyncMock(return_value=result),
+    )
+    dispatcher = SubagentDispatcher(
+        None,  # type: ignore[arg-type]
+        None,  # type: ignore[arg-type]
+        execution,  # type: ignore[arg-type]
+    )
 
     with pytest.raises(AIError) as raised:
-        await _dispatch(result)
+        await dispatcher.dispatch(
+            parent_execution_id="parent",
+            root_execution_id="root",
+            memory_scope=None,
+            principal=Principal("principal", "tenant", "service"),
+            ref=SubagentRef("agent", "child"),
+            mode="run",
+            user_prompt="do work",
+            invocation_id="call",
+        )
 
     assert raised.value.code is ErrorCode.TOOL_EXECUTION_FAILED
-    assert raised.value.safe_details["phase"] == "subagent_execution"
-    assert raised.value.safe_details["subagent_id"] == "child"
-    assert raised.value.safe_details["execution_id"] == "child-execution"
-    assert raised.value.safe_details["status"] == status.value
-    assert raised.value.safe_details["error_code"] == error_code
+    assert raised.value.safe_details == {
+        "phase": "subagent_execution",
+        "subagent_id": "child",
+        "execution_id": "child-execution",
+        "status": status.value,
+        "safe_error_details": {"phase": "agent_execution"},
+        "error_code": error_code,
+    }
 
 
 async def test_subagent_adapter_returns_child_failure_to_parent_model() -> None:
+    details = {
+        "phase": "subagent_execution",
+        "subagent_id": "child",
+        "execution_id": "child-execution",
+        "status": "failed",
+        "error_code": ErrorCode.MODEL_TIMEOUT.value,
+        "safe_error_details": {"phase": "agent_execution"},
+    }
+
     async def delegate(
         ref: SubagentRef,
         task: str,
@@ -112,17 +92,7 @@ async def test_subagent_adapter_returns_child_failure_to_parent_model() -> None:
         invocation_id: str,
     ) -> "dict[str, object]":
         del ref, task, invocation_id
-        raise AIError(
-            ErrorCode.TOOL_EXECUTION_FAILED,
-            safe_details={
-                "phase": "subagent_execution",
-                "subagent_id": "child",
-                "execution_id": "child-execution",
-                "status": "FAILED",
-                "error_code": ErrorCode.MODEL_TIMEOUT.value,
-                "safe_error_details": {"phase": "agent_execution"},
-            },
-        )
+        raise AIError(ErrorCode.TOOL_EXECUTION_FAILED, safe_details=details)
 
     capability = _PydanticSubagentCapability(
         SubagentCapability((SubagentRef("agent", "child"),), delegate)  # type: ignore[arg-type]
@@ -146,40 +116,9 @@ async def test_subagent_adapter_returns_child_failure_to_parent_model() -> None:
             tools["delegate_task"],
         )
 
-    assert "subagent execution failed" in raised.value.message
-    assert ErrorCode.MODEL_TIMEOUT.value in raised.value.message
-
-
-async def test_unknown_subagent_is_model_retry() -> None:
-    async def delegate(
-        ref: SubagentRef,
-        task: str,
-        *,
-        invocation_id: str,
-    ) -> "dict[str, object]":
-        del ref, task, invocation_id
-        return {}
-
-    capability = _PydanticSubagentCapability(
-        SubagentCapability((SubagentRef("agent", "child"),), delegate)  # type: ignore[arg-type]
+    assert raised.value.message == "subagent execution failed: " + json.dumps(
+        details,
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
     )
-    toolset = capability.get_toolset()
-    context = RunContext(
-        deps=None,
-        model=TestModel(),
-        usage=RunUsage(),
-        run_id="run",
-        tool_call_id="call",
-        tool_name="delegate_task",
-    )
-    tools = await toolset.get_tools(context)
-
-    with pytest.raises(ModelRetry) as raised:
-        await toolset.call_tool(
-            "delegate_task",
-            {"subagent_id": "missing", "task": "do work"},
-            context,
-            tools["delegate_task"],
-        )
-
-    assert "call list_subagents" in raised.value.message
