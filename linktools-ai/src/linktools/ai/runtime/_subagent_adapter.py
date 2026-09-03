@@ -7,7 +7,7 @@ from typing import cast
 
 from pydantic import JsonValue as PydanticJsonValue
 from pydantic_ai.capabilities import AbstractCapability
-from pydantic_ai.exceptions import ModelRetry
+from pydantic_ai.exceptions import ToolFailed
 from pydantic_ai.tools import RunContext as PydanticRunContext
 from pydantic_ai.toolsets import FunctionToolset
 
@@ -15,7 +15,7 @@ from ..capability import RunContext, SubagentCapability
 from ..errors import AIError, ErrorCode
 
 _SUBAGENT_CAPABILITY_ID = "linktools-subagent"
-_MODEL_CORRECTABLE_ERRORS = frozenset(
+_MODEL_FAILURE_ERRORS = frozenset(
     {
         ErrorCode.CAPABILITY_RESOLUTION_INVALID,
         ErrorCode.REQUEST_FIELD_INVALID,
@@ -69,9 +69,9 @@ class _PydanticSubagentCapability(AbstractCapability[RunContext[object]]):
                     ),
                 )
             except AIError as error:
-                if error.code not in _MODEL_CORRECTABLE_ERRORS:
+                if error.code not in _MODEL_FAILURE_ERRORS:
                     raise
-                raise ModelRetry("requested subagent or task is invalid") from error
+                raise ToolFailed("requested subagent or task is invalid") from error
 
         return toolset
 
