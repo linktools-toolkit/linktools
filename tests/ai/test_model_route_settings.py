@@ -6,9 +6,11 @@ from typing import Any
 
 import httpx2
 import pytest
+from linktools.ai.agent import AgentCompiler
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.model import ModelRegistry
 from linktools.ai.model._openai import _RetryingOpenAIProvider, _raise_retryable_status, _retry_error_result
+from linktools.ai.spec import AgentSpec
 from pydantic_ai.models.openai import OpenAIChatModel
 from pydantic_ai.providers.openai import OpenAIProvider
 from tenacity import RetryCallState, Retrying
@@ -72,6 +74,34 @@ def test_legacy_model_binding_restores_with_current_semantic_settings() -> None:
     assert dict(restored.semantic_payload) == dict(legacy.semantic_payload)
     assert restored.fingerprint == legacy.fingerprint
     model = restored.materialize()
+    assert model.settings == {"max_tokens": 2048}
+    assert model.profile.get("context_window") == 8192
+
+
+def test_legacy_agent_binding_restores_with_current_model_settings() -> None:
+    spec = AgentSpec("agent")
+    legacy_compiler = AgentCompiler(
+        model_resolver=ModelRegistry.openai(model="gpt-test").snapshot(),
+        candidates=(),
+        agents={"agent": spec},
+    )
+    legacy_binding = legacy_compiler.bind(legacy_compiler.compile(spec))
+    current_compiler = AgentCompiler(
+        model_resolver=ModelRegistry.openai(
+            model="gpt-test",
+            api_key="test-key",
+            max_tokens=2048,
+            context_window=8192,
+        ).snapshot(),
+        candidates=(),
+        agents={"agent": spec},
+    )
+
+    restored = current_compiler.restore(legacy_binding.snapshot)
+
+    assert restored.digest == legacy_binding.digest
+    assert restored.snapshot == legacy_binding.snapshot
+    model = restored.definition.model.materialize()
     assert model.settings == {"max_tokens": 2048}
     assert model.profile.get("context_window") == 8192
 
