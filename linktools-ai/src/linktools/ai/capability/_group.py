@@ -60,6 +60,8 @@ _RESERVED_TOOL_NAMES = frozenset(
 )
 _RESERVED_CAPABILITY_IDS = frozenset(
     {
+        "workspace-filesystem",
+        "workspace-shell",
         "workspace-sandbox",
         "linktools-skill",
         "linktools-memory",
