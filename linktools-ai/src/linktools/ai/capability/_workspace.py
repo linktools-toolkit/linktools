@@ -162,9 +162,7 @@ class _WorkspaceToolSurface:
         self._session = session
 
     def _require_session(self) -> SandboxSession:
-        if self._session is None:
-            raise RuntimeError("workspace tool surface is not bound to a SandboxSession")
-        return self._session
+        return cast(SandboxSession, self._session)
 
     async def read_file(
         self,
