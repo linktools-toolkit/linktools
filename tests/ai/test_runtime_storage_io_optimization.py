@@ -3,18 +3,26 @@
 """Focused I/O invariants for Runtime storage optimization."""
 
 import hashlib
-from collections.abc import Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import replace
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import TypeVar
 
 import pytest
+from linktools.ai.core import ApprovalStatus
 from linktools.ai.migrate import provision_database
 from linktools.ai.runtime import RuntimeState
-from linktools.ai.runtime.state import FactQuery, RuntimeDomain
+from linktools.ai.runtime.state import FactQuery, RuntimeDomain, SqlStateStore
+from linktools.ai.runtime.state._approval_repository import (
+    ApprovalAdmissionRepositoryImpl,
+)
 from linktools.ai.runtime.state._contracts import (
+    ApprovalRecord,
     ContextProjection,
     LoadedModelContext,
+    TranscriptHeadRecord,
+    TranscriptSeekDimension,
 )
 from linktools.ai.runtime.state._history import TranscriptRepository
 from linktools.ai.runtime.state._readmodel import (
@@ -25,6 +33,7 @@ from linktools.ai.runtime.state._readmodel import (
 from linktools.ai.runtime.state._store import StateStore, StateTransaction
 from linktools.ai.storage import FilesystemObjectStore, SqlObjectStore
 from linktools.ai.storage import _object as object_module
+from sqlalchemy import event
 from sqlalchemy.ext.asyncio import create_async_engine
 
 pytestmark = pytest.mark.asyncio
@@ -32,7 +41,7 @@ pytestmark = pytest.mark.asyncio
 ResultT = TypeVar("ResultT")
 
 
-async def _chunks(value: bytes):
+async def _chunks(value: bytes) -> AsyncIterator[bytes]:
     yield value
 
 
@@ -67,9 +76,23 @@ async def test_filesystem_object_store_syncs_payload_before_publish(
         events.append("sync")
         original_sync(path)
 
-    def publish(*args, **kwargs):
+    def publish(
+        temporary: Path,
+        destination: Path,
+        metadata: Path,
+        key: str,
+        size: int,
+        digest: str,
+    ) -> bool:
         events.append("publish")
-        return original_publish(*args, **kwargs)
+        return original_publish(
+            temporary,
+            destination,
+            metadata,
+            key,
+            size,
+            digest,
+        )
 
     monkeypatch.setattr(object_module, "_sync_file", sync)
     monkeypatch.setattr(object_module, "_publish_filesystem_object", publish)
@@ -172,7 +195,7 @@ async def test_message_spans_pass_observed_head_to_seek(
     head = replace(repository.empty_head("run"), message_count=1)
     head_reads = 0
 
-    async def get_head(owner_id: str):
+    async def get_head(owner_id: str) -> TranscriptHeadRecord | None:
         nonlocal head_reads
         assert owner_id == "run"
         head_reads += 1
@@ -181,11 +204,14 @@ async def test_message_spans_pass_observed_head_to_seek(
     async def stop_at_seek(
         owner_id: str,
         view_index: int,
-        **kwargs,
+        *,
+        dimension: TranscriptSeekDimension = TranscriptSeekDimension.MESSAGE,
+        observed_head: TranscriptHeadRecord | None = None,
     ) -> int | None:
         assert owner_id == "run"
         assert view_index == 0
-        assert kwargs["observed_head"] is head
+        assert dimension is TranscriptSeekDimension.MESSAGE
+        assert observed_head is head
         raise RuntimeError("seek-observed")
 
     monkeypatch.setattr(repository, "get_head", get_head)
@@ -195,6 +221,76 @@ async def test_message_spans_pass_observed_head_to_seek(
         await repository.load_message_spans("run", ((0, 1),))
 
     assert head_reads == 1
+
+
+async def test_approval_cancel_batches_known_record_sql(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "approvals.db"
+    engine = create_async_engine(f"sqlite+aiosqlite:///{path}")
+    await provision_database(engine)
+    store = SqlStateStore(engine)
+    await store.initialize()
+    repository = ApprovalAdmissionRepositoryImpl(
+        store,
+        namespace="io-approval",
+        tenant_id="tenant",
+    )
+    now = datetime.now(timezone.utc)
+    approval_ids = ("approval-a", "approval-b", "approval-c")
+    for approval_id in approval_ids:
+        await repository.create(
+            ApprovalRecord(
+                approval_id=approval_id,
+                execution_id="execution",
+                tenant_id="tenant",
+                operation_id=f"operation-{approval_id}",
+                status=ApprovalStatus.PENDING,
+                idempotency_key_digest=None,
+                decision=None,
+                decided_by=None,
+                decision_digest=None,
+                created_at=now,
+                decided_at=None,
+            )
+        )
+
+    statements: list[str] = []
+
+    def capture_sql(
+        _connection: object,
+        _cursor: object,
+        statement: str,
+        _parameters: object,
+        _context: object,
+        _executemany: bool,
+    ) -> None:
+        statements.append(statement)
+
+    event.listen(engine.sync_engine, "before_cursor_execute", capture_sql)
+    try:
+        cancelled = await store.mutate(
+            lambda transaction: repository.cancel_pending_in_transaction(
+                transaction,
+                approval_ids,
+                execution_id="execution",
+                tenant_id="tenant",
+                decided_at=now,
+            )
+        )
+        assert tuple(value.approval_id for value in cancelled) == approval_ids
+        assert all(value.status is ApprovalStatus.CANCELLED for value in cancelled)
+        record_sql = [
+            statement.upper()
+            for statement in statements
+            if "AI_STATE_RECORDS" in statement.upper()
+        ]
+        assert sum(statement.lstrip().startswith("SELECT") for statement in record_sql) == 1
+        assert sum(statement.lstrip().startswith("UPDATE") for statement in record_sql) == 1
+    finally:
+        event.remove(engine.sync_engine, "before_cursor_execute", capture_sql)
+        await store.close()
+        await engine.dispose()
 
 
 async def test_execution_read_model_batches_streams_by_ordinal() -> None:
