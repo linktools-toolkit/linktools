@@ -8,7 +8,7 @@ from collections.abc import Mapping
 from datetime import datetime
 from typing import Any
 
-from ..core import canonical_sha256
+from ..core import canonical_sha256, validate_observation_payload
 from ..errors import AIError, ErrorCode
 from ._model import (
     MetricAggregation,
@@ -92,12 +92,14 @@ def observation_payload(observation: Observation) -> dict[str, object]:
 
 
 def observation_envelope(namespace: str, observation: Observation) -> dict[str, object]:
-    return {
+    envelope: dict[str, Any] = {
         "type": "ObservationEnvelope",
         "version": 1,
         "namespace": namespace,
         "observation": observation_payload(observation),
     }
+    validate_observation_payload(envelope)
+    return envelope
 
 
 def observation_digest(namespace: str, observation_id: str) -> str:
