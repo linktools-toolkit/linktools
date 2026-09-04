@@ -40,7 +40,7 @@ from ..errors import AIError, ErrorCode
 from ..model import ModelRegistry
 
 if TYPE_CHECKING:
-    from ..observe import Middleware
+    from ..observe import Metrics
     from ..task import TaskResultRecord
 from ..task import (
     TaskGraph,
@@ -180,7 +180,7 @@ class Runtime(Generic[AppT]):
         models: "ModelRegistry | None" = None,
         state: "RuntimeState | None" = None,
         capabilities: "Sequence[CapabilityGroup[None]]" = (),
-        middleware: "Sequence[Middleware]" = (),
+        metrics: "Metrics | None" = None,
     ) -> "AbstractAsyncContextManager[Runtime[None]]": ...
 
     @classmethod
@@ -194,7 +194,7 @@ class Runtime(Generic[AppT]):
         models: "ModelRegistry | None" = None,
         state: "RuntimeState | None" = None,
         capabilities: "Sequence[CapabilityGroup[AppT]]" = (),
-        middleware: "Sequence[Middleware]" = (),
+        metrics: "Metrics | None" = None,
     ) -> "AbstractAsyncContextManager[Runtime[AppT]]": ...
 
     @classmethod
@@ -207,7 +207,7 @@ class Runtime(Generic[AppT]):
         models: "ModelRegistry | None" = None,
         state: "RuntimeState | None" = None,
         capabilities: "Sequence[CapabilityGroup[object]]" = (),
-        middleware: "Sequence[Middleware]" = (),
+        metrics: "Metrics | None" = None,
     ) -> "AbstractAsyncContextManager[Runtime[object]]":
         return _open_runtime(
             workspace,
@@ -216,7 +216,7 @@ class Runtime(Generic[AppT]):
             models=models,
             state=state,
             capabilities=capabilities,
-            middleware=middleware,
+            metrics=metrics,
         )
 
     @property
@@ -842,7 +842,7 @@ async def _open_runtime(
     models: "ModelRegistry | None",
     state: "RuntimeState | None",
     capabilities: "Sequence[CapabilityGroup[object]]",
-    middleware: "Sequence[Middleware]",
+    metrics: "Metrics | None",
 ):
     from ._factory import compose_runtime_components
 
@@ -853,7 +853,7 @@ async def _open_runtime(
         models=models,
         state=state,
         capabilities=capabilities,
-        middleware=middleware,
+        metrics=metrics,
     )
     try:
         runtime = Runtime(
