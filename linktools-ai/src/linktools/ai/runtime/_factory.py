@@ -10,7 +10,7 @@ from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
 from functools import partial
 from pathlib import Path
-from typing import TYPE_CHECKING, TypeVar, cast
+from typing import TypeVar, cast
 
 from linktools.core import environ
 from pydantic_ai_harness.memory import SearchableMemoryStore
@@ -38,7 +38,7 @@ from ..core import (
 )
 from ..errors import AIError, ErrorCode
 from ..model import ModelRegistry
-from ..observe import Metrics, MiddlewarePipeline
+from ..observe import Metrics
 from ..spec import AgentSpec, AgentSpecCodec
 from ..storage import ObjectStore, PayloadPolicy, StorageOverlay
 from ..task import LocalTaskGraphLauncher, TaskNodeHandler
@@ -472,7 +472,7 @@ async def _build_local_components(
     executor = AgentExecutor(
         skill_sources,
         instruction_resolver=instruction_resolver,
-        middleware=MiddlewarePipeline(()),
+        metrics=metric_buffer,
     )
 
     def build_memory_store(
