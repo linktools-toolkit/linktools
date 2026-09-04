@@ -1035,9 +1035,22 @@ class SessionRepositoryImpl(_ResourceRepository[SessionRecord]):
                 is None
             ):
                 raise AIError(ErrorCode.STORAGE_CONFLICT)
-            source_history_stored = await transaction.get_record(
-                self._key("conversation_history", source.history_id)
+            child_history_id = target.history_id
+            if child_history_id is None:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            source_history_key = self._key("conversation_history", source.history_id)
+            target_key = self._key("session", target.session_id)
+            child_history_key = self._key("conversation_history", child_history_id)
+            source_head_key = self._key("transcript_head", source.history_id)
+            related = await transaction.get_records(
+                (
+                    source_history_key,
+                    target_key,
+                    child_history_key,
+                    source_head_key,
+                )
             )
+            source_history_stored = related.get(source_history_key)
             if source_history_stored is None:
                 raise AIError(ErrorCode.SESSION_HISTORY_UNAVAILABLE)
             source_history = await self._decode_history(source_history_stored)
@@ -1046,23 +1059,21 @@ class SessionRepositoryImpl(_ResourceRepository[SessionRecord]):
                 or source_history.tenant_id != self._tenant_id
             ):
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            target_stored = await transaction.get_record(
-                self._key("session", target.session_id)
-            )
-            child_history_id = target.history_id
-            if child_history_id is None:
+            target_stored = related.get(target_key)
+            child_stored = related.get(child_history_key)
+            source_head_stored = related.get(source_head_key)
+            if source_head_stored is None:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            child_stored = await transaction.get_record(
-                self._key("conversation_history", child_history_id)
+            source_head = _decode_enveloped_domain(
+                source_head_stored.data,
+                TranscriptHeadRecord,
             )
+            local_messages = source_head.message_count
+            local_items = source_head.session_history_item_count
             histories = ConversationHistoryRepositoryImpl(
                 self._store,
                 namespace=self._namespace,
                 tenant_id=self._tenant_id,
-            )
-            local_messages, local_items = await histories.local_head_in_transaction(
-                transaction,
-                source.history_id,
             )
             prefix_head = source_history.prefix_index_head_id
             if local_messages > 0 or local_items > 0:
@@ -1111,42 +1122,6 @@ class SessionRepositoryImpl(_ResourceRepository[SessionRecord]):
             )
             if target_stored is not None or child_stored is not None:
                 raise AIError(ErrorCode.STORAGE_CONFLICT)
-            await transaction.insert_record(
-                self._stored(
-                    "session",
-                    expected_target.session_id,
-                    expected_target,
-                    scope=self._scope(
-                        "session",
-                        "owner",
-                        expected_target.owner_principal_id,
-                    ),
-                    state=expected_target.status.value,
-                )
-            )
-            await transaction.insert_record(
-                self._stored(
-                    "conversation_history",
-                    child.history_id,
-                    child,
-                )
-            )
-            await transaction.insert_record(
-                self._stored(
-                    "transcript_head",
-                    child.history_id,
-                    _empty_conversation_transcript_head(child.history_id),
-                )
-            )
-            source_head_stored = await transaction.get_record(
-                self._key("transcript_head", source.history_id)
-            )
-            if source_head_stored is None:
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            source_head = _decode_enveloped_domain(
-                source_head_stored.data,
-                TranscriptHeadRecord,
-            )
             fork_result = SessionForkResultRecord(
                 operation.operation_id,
                 source.session_id,
@@ -1166,11 +1141,34 @@ class SessionRepositoryImpl(_ResourceRepository[SessionRecord]):
             )
             if not fork_result.result_digest:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            await transaction.insert_record(
-                self._stored(
-                    "session_fork_result",
-                    operation.operation_id,
-                    fork_result,
+            await transaction.insert_records(
+                (
+                    self._stored(
+                        "session",
+                        expected_target.session_id,
+                        expected_target,
+                        scope=self._scope(
+                            "session",
+                            "owner",
+                            expected_target.owner_principal_id,
+                        ),
+                        state=expected_target.status.value,
+                    ),
+                    self._stored(
+                        "conversation_history",
+                        child.history_id,
+                        child,
+                    ),
+                    self._stored(
+                        "transcript_head",
+                        child.history_id,
+                        _empty_conversation_transcript_head(child.history_id),
+                    ),
+                    self._stored(
+                        "session_fork_result",
+                        operation.operation_id,
+                        fork_result,
+                    ),
                 )
             )
             await self._bump_list_generation(
@@ -1213,15 +1211,13 @@ class SessionRepositoryImpl(_ResourceRepository[SessionRecord]):
             or operation.result_digest != result.result_digest
         ):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        target_stored = await transaction.get_record(
-            self._key("session", result.target_session_id)
-        )
-        child_stored = await transaction.get_record(
-            self._key("conversation_history", result.target_history_id)
-        )
-        head_stored = await transaction.get_record(
-            self._key("transcript_head", result.target_history_id)
-        )
+        target_key = self._key("session", result.target_session_id)
+        child_key = self._key("conversation_history", result.target_history_id)
+        head_key = self._key("transcript_head", result.target_history_id)
+        related = await transaction.get_records((target_key, child_key, head_key))
+        target_stored = related.get(target_key)
+        child_stored = related.get(child_key)
+        head_stored = related.get(head_key)
         if target_stored is None or child_stored is None or head_stored is None:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         existing_target = await self._decode(target_stored, SessionRecord)
@@ -1284,9 +1280,6 @@ class SessionRepositoryImpl(_ResourceRepository[SessionRecord]):
         )
 
         async def read(transaction: StateTransaction) -> tuple[SessionRecord, ...]:
-            await transaction.get_sequence(
-                self._list_generation_key(owner_principal_id)
-            )
             records = await transaction.list_records(
                 RecordQuery(
                     partition_digest=self._partition("session")

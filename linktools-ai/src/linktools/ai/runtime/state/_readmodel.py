@@ -493,9 +493,6 @@ class ExecutionReadModelRepository:
                 )
                 for stream_name, data in chunks
             )
-            if facts:
-                await transaction.insert_facts(facts)
-
             if complete:
                 next_value = ExecutionReadModelRecord(
                     build.execution_id,
@@ -529,6 +526,8 @@ class ExecutionReadModelRepository:
                 expected_storage_version=current.storage_version,
             ):
                 raise AIError(ErrorCode.STORAGE_CONFLICT)
+            if facts:
+                await transaction.insert_facts(facts)
 
         await self._store.mutate(mutate)
 
