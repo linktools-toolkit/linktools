@@ -1058,8 +1058,6 @@ def classify_sql_error(error: BaseException) -> SqlErrorKind:
         return SqlErrorKind.RETRYABLE_TRANSACTION
     if _read_mysql_errno(original) in {1205, 1213}:
         return SqlErrorKind.RETRYABLE_TRANSACTION
-    if _retryable_message_fallback(original):
-        return SqlErrorKind.RETRYABLE_TRANSACTION
     return SqlErrorKind.DATABASE
 
 
@@ -1132,24 +1130,6 @@ def _read_mysql_errno(error: BaseException) -> "int | None":
         return int(value)
     except (TypeError, ValueError):
         return None
-
-
-def _retryable_message_fallback(error: BaseException) -> bool:
-    values = [str(error).lower()]
-    values.extend(str(value).lower() for value in error.args)
-    message = " ".join(values)
-    return any(
-        marker in message
-        for marker in (
-            "database is locked",
-            "database is busy",
-            "could not serialize access",
-            "serialization failure",
-            "deadlock detected",
-            "deadlock found",
-            "lock wait timeout exceeded",
-        )
-    )
 
 
 def _classify_error(error: BaseException, unique_markers: "tuple[str, ...]") -> IntegrityViolationKind:

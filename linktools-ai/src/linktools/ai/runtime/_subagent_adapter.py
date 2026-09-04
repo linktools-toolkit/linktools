@@ -25,8 +25,6 @@ _MODEL_CORRECTABLE_ERRORS = frozenset(
 
 class _PydanticSubagentCapability(AbstractCapability[RunContext[object]]):
     def __init__(self, capability: SubagentCapability) -> None:
-        if not isinstance(capability, SubagentCapability):
-            raise TypeError("capability must be SubagentCapability")
         self.id = _SUBAGENT_CAPABILITY_ID
         self._capability = capability
 

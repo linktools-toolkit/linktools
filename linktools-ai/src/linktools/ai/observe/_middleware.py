@@ -9,19 +9,19 @@ from typing import Protocol
 from linktools.core import environ
 
 from ..errors import AIError, ErrorCode
-from ._scope import RunContext
+from ._scope import ObservationContext
 
 
 class Middleware(Protocol):
     mutating: bool
 
-    async def before_run(self, context: RunContext) -> None: ...
-    async def before_model(self, context: RunContext) -> None: ...
-    async def after_model(self, context: RunContext) -> None: ...
-    async def before_tool(self, context: RunContext) -> None: ...
-    async def after_tool(self, context: RunContext) -> None: ...
-    async def on_error(self, context: RunContext, error: BaseException) -> None: ...
-    async def after_run(self, context: RunContext) -> None: ...
+    async def before_run(self, context: ObservationContext) -> None: ...
+    async def before_model(self, context: ObservationContext) -> None: ...
+    async def after_model(self, context: ObservationContext) -> None: ...
+    async def before_tool(self, context: ObservationContext) -> None: ...
+    async def after_tool(self, context: ObservationContext) -> None: ...
+    async def on_error(self, context: ObservationContext, error: BaseException) -> None: ...
+    async def after_run(self, context: ObservationContext) -> None: ...
 
 
 class MiddlewarePipeline:
@@ -35,22 +35,22 @@ class MiddlewarePipeline:
 
         return canonical_sha256([type(item).__qualname__ for item in self._middleware])
 
-    async def before_run(self, context: RunContext) -> None:
+    async def before_run(self, context: ObservationContext) -> None:
         await self._run_before(context, "before_run")
 
-    async def before_model(self, context: RunContext) -> None:
+    async def before_model(self, context: ObservationContext) -> None:
         await self._run_before(context, "before_model")
 
-    async def after_model(self, context: RunContext) -> None:
+    async def after_model(self, context: ObservationContext) -> None:
         await self._run_after(context, "after_model")
 
-    async def before_tool(self, context: RunContext) -> None:
+    async def before_tool(self, context: ObservationContext) -> None:
         await self._run_before(context, "before_tool")
 
-    async def after_tool(self, context: RunContext) -> None:
+    async def after_tool(self, context: ObservationContext) -> None:
         await self._run_after(context, "after_tool")
 
-    async def on_error(self, context: RunContext, error: BaseException) -> None:
+    async def on_error(self, context: ObservationContext, error: BaseException) -> None:
         for middleware in reversed(self._middleware):
             try:
                 await middleware.on_error(context, error)
@@ -59,10 +59,10 @@ class MiddlewarePipeline:
             except Exception as failure:  # noqa: BLE001
                 self._handle_failure(middleware, "on_error", failure)
 
-    async def after_run(self, context: RunContext) -> None:
+    async def after_run(self, context: ObservationContext) -> None:
         await self._run_after(context, "after_run")
 
-    async def _run_before(self, context: RunContext, stage: str) -> None:
+    async def _run_before(self, context: ObservationContext, stage: str) -> None:
         for middleware in self._middleware:
             try:
                 await self._dispatch(middleware, stage, context)
@@ -74,7 +74,7 @@ class MiddlewarePipeline:
                     stage,
                 )
 
-    async def _run_after(self, context: RunContext, stage: str) -> None:
+    async def _run_after(self, context: ObservationContext, stage: str) -> None:
         for middleware in reversed(self._middleware):
             try:
                 await self._dispatch(middleware, stage, context)
@@ -94,7 +94,12 @@ class MiddlewarePipeline:
             stage,
         )
 
-    async def _dispatch(self, middleware: Middleware, stage: str, context: RunContext) -> None:
+    async def _dispatch(
+        self,
+        middleware: Middleware,
+        stage: str,
+        context: ObservationContext,
+    ) -> None:
         if stage == "before_run":
             await middleware.before_run(context)
         elif stage == "before_model":
@@ -109,5 +114,6 @@ class MiddlewarePipeline:
             await middleware.after_run(context)
         else:
             raise ValueError(f"unsupported middleware stage: {stage}")
+
 
 __all__ = ["Middleware", "MiddlewarePipeline"]

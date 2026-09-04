@@ -5,10 +5,13 @@
 from collections.abc import Mapping
 from pathlib import Path
 
+import linktools.ai as ai
+import linktools.ai.observe as observe
 import pytest
+from linktools.ai.capability import RunContext as CapabilityRunContext
 from linktools.ai.core import JsonValue
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.observe import MiddlewarePipeline, RunContext
+from linktools.ai.observe import MiddlewarePipeline, ObservationContext
 from linktools.ai.runtime import Runtime
 from linktools.ai.runtime._capabilities import _ObservationalMiddlewareCapability
 from linktools.ai.spec import AgentSpec, AgentSpecCodec
@@ -51,7 +54,7 @@ class _RecordingMiddleware:
     def __init__(
         self,
         name: str,
-        events: list[tuple[str, str, RunContext]],
+        events: list[tuple[str, str, ObservationContext]],
         *,
         mutating: bool = False,
     ) -> None:
@@ -59,48 +62,55 @@ class _RecordingMiddleware:
         self.events = events
         self.mutating = mutating
 
-    def _record(self, stage: str, context: RunContext) -> None:
+    def _record(self, stage: str, context: ObservationContext) -> None:
         self.events.append((self.name, stage, context))
 
-    async def before_run(self, context: RunContext) -> None:
+    async def before_run(self, context: ObservationContext) -> None:
         self._record("before_run", context)
 
-    async def before_model(self, context: RunContext) -> None:
+    async def before_model(self, context: ObservationContext) -> None:
         self._record("before_model", context)
 
-    async def after_model(self, context: RunContext) -> None:
+    async def after_model(self, context: ObservationContext) -> None:
         self._record("after_model", context)
 
-    async def before_tool(self, context: RunContext) -> None:
+    async def before_tool(self, context: ObservationContext) -> None:
         self._record("before_tool", context)
 
-    async def after_tool(self, context: RunContext) -> None:
+    async def after_tool(self, context: ObservationContext) -> None:
         self._record("after_tool", context)
 
-    async def on_error(self, context: RunContext, error: BaseException) -> None:
+    async def on_error(self, context: ObservationContext, error: BaseException) -> None:
         del error
         self._record("on_error", context)
 
-    async def after_run(self, context: RunContext) -> None:
+    async def after_run(self, context: ObservationContext) -> None:
         self._record("after_run", context)
 
 
 class _FailingObservationalMiddleware(_RecordingMiddleware):
-    async def before_model(self, context: RunContext) -> None:
+    async def before_model(self, context: ObservationContext) -> None:
         self._record("before_model", context)
         raise RuntimeError("observational failure")
 
 
 @pytest.fixture
-def observed_context() -> RunContext:
-    return RunContext("tenant", "principal", "execution", None, "run", "agent")
+def observed_context() -> ObservationContext:
+    return ObservationContext("tenant", "principal", "execution", None, "run", "agent")
+
+
+def test_observation_context_public_surface_is_unambiguous() -> None:
+    assert ai.RunContext is CapabilityRunContext
+    assert observe.ObservationContext is ObservationContext
+    assert "RunContext" not in observe.__all__
+    assert not hasattr(observe, "RunContext")
 
 
 @pytest.mark.asyncio
 async def test_middleware_pipeline_before_forward_after_reverse_order(
-    observed_context: RunContext,
+    observed_context: ObservationContext,
 ) -> None:
-    events: list[tuple[str, str, RunContext]] = []
+    events: list[tuple[str, str, ObservationContext]] = []
     pipeline = MiddlewarePipeline(
         (_RecordingMiddleware("a", events), _RecordingMiddleware("b", events))
     )
@@ -130,9 +140,9 @@ async def test_middleware_pipeline_before_forward_after_reverse_order(
 
 @pytest.mark.asyncio
 async def test_middleware_on_error_runs_once_in_reverse_order(
-    observed_context: RunContext,
+    observed_context: ObservationContext,
 ) -> None:
-    events: list[tuple[str, str, RunContext]] = []
+    events: list[tuple[str, str, ObservationContext]] = []
     pipeline = MiddlewarePipeline(
         (_RecordingMiddleware("a", events), _RecordingMiddleware("b", events))
     )
@@ -146,9 +156,9 @@ async def test_middleware_on_error_runs_once_in_reverse_order(
 
 @pytest.mark.asyncio
 async def test_observational_failure_is_ignored_and_pipeline_continues(
-    observed_context: RunContext,
+    observed_context: ObservationContext,
 ) -> None:
-    events: list[tuple[str, str, RunContext]] = []
+    events: list[tuple[str, str, ObservationContext]] = []
     pipeline = MiddlewarePipeline(
         (
             _FailingObservationalMiddleware("bad", events),
@@ -164,9 +174,9 @@ async def test_observational_failure_is_ignored_and_pipeline_continues(
 
 @pytest.mark.asyncio
 async def test_observational_capability_maps_public_hooks_exactly(
-    observed_context: RunContext,
+    observed_context: ObservationContext,
 ) -> None:
-    events: list[tuple[str, str, RunContext]] = []
+    events: list[tuple[str, str, ObservationContext]] = []
     capability = _ObservationalMiddlewareCapability(
         MiddlewarePipeline((_RecordingMiddleware("m", events),)),
         observed_context,
@@ -209,9 +219,9 @@ async def test_observational_capability_maps_public_hooks_exactly(
 
 @pytest.mark.asyncio
 async def test_observational_capability_on_run_error_re_raises_original(
-    observed_context: RunContext,
+    observed_context: ObservationContext,
 ) -> None:
-    events: list[tuple[str, str, RunContext]] = []
+    events: list[tuple[str, str, ObservationContext]] = []
     capability = _ObservationalMiddlewareCapability(
         MiddlewarePipeline((_RecordingMiddleware("m", events),)),
         observed_context,
@@ -225,7 +235,7 @@ async def test_observational_capability_on_run_error_re_raises_original(
 
 @pytest.mark.asyncio
 async def test_runtime_open_rejects_mutating_middleware(tmp_path: Path) -> None:
-    events: list[tuple[str, str, RunContext]] = []
+    events: list[tuple[str, str, ObservationContext]] = []
     middleware = _RecordingMiddleware("mutating", events, mutating=True)
     with pytest.raises(AIError) as error:
         async with Runtime.open(
@@ -245,7 +255,7 @@ async def test_runtime_middleware_context_distinguishes_session_runs(tmp_path: P
     agent_path.write_bytes(
         AgentSpecCodec().encode(AgentSpec("default", model="default", allow_tools=()))
     )
-    events: list[tuple[str, str, RunContext]] = []
+    events: list[tuple[str, str, ObservationContext]] = []
     middleware = _RecordingMiddleware("m", events)
 
     async with Runtime.open(

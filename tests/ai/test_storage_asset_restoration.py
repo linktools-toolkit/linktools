@@ -79,11 +79,14 @@ def test_sql_error_classification_is_owned_by_storage() -> None:
 
     integrity = IntegrityError("insert", {}, RuntimeError("unique constraint failed"))
     locked = OperationalError("update", {}, RuntimeError("database is locked"))
+    deadlock = OperationalError("update", {}, RuntimeError("deadlock found"))
     unavailable = OperationalError("select", {}, RuntimeError("connection refused"))
     assert classify_sql_error(integrity) is SqlErrorKind.INTEGRITY
     assert not is_retryable_sql_transaction(integrity)
-    assert classify_sql_error(locked) is SqlErrorKind.RETRYABLE_TRANSACTION
-    assert is_retryable_sql_transaction(locked)
+    assert classify_sql_error(locked) is SqlErrorKind.DATABASE
+    assert not is_retryable_sql_transaction(locked)
+    assert classify_sql_error(deadlock) is SqlErrorKind.DATABASE
+    assert not is_retryable_sql_transaction(deadlock)
     assert classify_sql_error(unavailable) is SqlErrorKind.DATABASE
     assert not is_retryable_sql_transaction(unavailable)
     assert classify_sql_error(RuntimeError("application failure")) is SqlErrorKind.UNKNOWN
@@ -99,12 +102,20 @@ def test_sql_error_classification_reads_structured_driver_codes() -> None:
     class PostgreSQLSerializationFailure(Exception):
         sqlstate = "40001"
 
+    class PostgreSQLDeadlock(Exception):
+        sqlstate = "40P01"
+
+    class MySQLLockTimeout(Exception):
+        errno = 1205
+
     class MySQLDeadlock(Exception):
         errno = 1213
 
     for original in (
         SQLiteBusySnapshot("busy snapshot"),
         PostgreSQLSerializationFailure("serialization failure"),
+        PostgreSQLDeadlock("deadlock"),
+        MySQLLockTimeout("lock wait timeout"),
         MySQLDeadlock("deadlock"),
     ):
         error = OperationalError("update", {}, original)

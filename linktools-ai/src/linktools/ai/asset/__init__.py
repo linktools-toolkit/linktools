@@ -2,13 +2,7 @@
 # -*- coding: utf-8 -*-
 """Raw Asset byte storage and backend contracts."""
 
-from ..errors import (
-    AssetConflictError,
-    AssetError,
-    AssetNotFoundError,
-    AssetParseError,
-    InvalidAssetError,
-)
+from ..errors import AssetError
 from ._backend import InMemoryAssetBackend
 from ._config import StrictConfigReader, resolved_name
 from ._directory import (
@@ -26,20 +20,16 @@ from ._store import AssetCacheAdapter, AssetStore
 __all__ = [
     "AssetBackend",
     "AssetCacheAdapter",
-    "AssetConflictError",
     "AssetError",
     "AssetInfo",
     "AssetKey",
-    "AssetNotFoundError",
     "AssetObjectKeyFactory",
-    "AssetParseError",
     "AssetPathAdapter",
     "AssetRoot",
     "AssetStore",
     "DirectoryAssetBackend",
     "FilesystemAssetBackend",
     "InMemoryAssetBackend",
-    "InvalidAssetError",
     "PrefixAssetPathAdapter",
     "SqlAssetBackend",
     "StrictConfigReader",

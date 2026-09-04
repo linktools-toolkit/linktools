@@ -86,7 +86,7 @@ async def test_missing_harness_file_is_failed_retry_not_unknown(tmp_path: Path) 
     )
     definition = ToolDefinition(
         name="read_file",
-        capability_id="workspace-filesystem",
+        capability_id="workspace-sandbox",
     )
     args = {"path": "missing.json"}
     await capability.before_tool_execute(
@@ -137,7 +137,7 @@ async def test_missing_write_parent_is_failed_retry_not_unknown(tmp_path: Path) 
     call = ToolCallPart("write_file", args, tool_call_id="call")
     definition = ToolDefinition(
         name="write_file",
-        capability_id="workspace-filesystem",
+        capability_id="workspace-sandbox",
     )
     await capability.before_tool_execute(
         context,

@@ -17,7 +17,7 @@ from ._root import (
     WorkspaceToolPermissionPolicy,
     trusted_workspace_principal,
 )
-from ._sandbox import DisabledSandbox, Sandbox
+from ._sandbox import DisabledSandbox, Sandbox, SandboxSession
 
 __all__ = [
     "DisabledSandbox",
@@ -28,6 +28,7 @@ __all__ = [
     "RepositoryInstructionResolver",
     "RepositoryInstructions",
     "Sandbox",
+    "SandboxSession",
     "ToolPermissionRule",
     "Workspace",
     "WorkspacePolicy",

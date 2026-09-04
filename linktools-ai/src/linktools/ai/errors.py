@@ -214,6 +214,7 @@ class ErrorCode(str, Enum):
     REDACTION_FAILED = "REDACTION_FAILED"
     MCP_RESPONSE_TOO_LARGE = "MCP_RESPONSE_TOO_LARGE"
     LOCAL_SHELL_PLATFORM_UNSUPPORTED = "LOCAL_SHELL_PLATFORM_UNSUPPORTED"
+    WORKSPACE_CONFIG_INVALID = "WORKSPACE_CONFIG_INVALID"
 
 
 @dataclass(frozen=True, slots=True)
@@ -327,16 +328,6 @@ class StorageError(AIError):
         super().__init__(code, message)
 
 
-class StorageConflictError(StorageError):
-    def __init__(self, message: str) -> None:
-        super().__init__(message, ErrorCode.STORAGE_CONFLICT)
-
-
-class StorageCorruptionError(StorageError):
-    def __init__(self, message: str) -> None:
-        super().__init__(message, ErrorCode.STORAGE_INTEGRITY_ERROR)
-
-
 class InvalidStoragePathError(StorageError):
     def __init__(self, message: str) -> None:
         super().__init__(message, ErrorCode.STORAGE_PATH_INVALID)
@@ -347,38 +338,12 @@ class AssetError(AIError):
         super().__init__(code, message)
 
 
-class AssetConflictError(AssetError):
-    def __init__(self, message: str) -> None:
-        super().__init__(message, ErrorCode.STORAGE_CONFLICT)
-
-
-class AssetNotFoundError(AssetError):
-    def __init__(self, message: str) -> None:
-        super().__init__(message, ErrorCode.ASSET_NOT_FOUND)
-
-
-class AssetParseError(AssetError):
-    def __init__(self, message: str) -> None:
-        super().__init__(message, ErrorCode.OUTPUT_CONTRACT_INVALID)
-
-
-class InvalidAssetError(AssetError):
-    def __init__(self, message: str) -> None:
-        super().__init__(message, ErrorCode.OUTPUT_CONTRACT_INVALID)
-
-
 __all__ = [
     "AIError",
-    "AssetConflictError",
     "AssetError",
-    "AssetNotFoundError",
-    "AssetParseError",
     "ErrorCode",
     "ErrorDiagnostics",
-    "InvalidAssetError",
     "InvalidStoragePathError",
     "SafeError",
-    "StorageConflictError",
-    "StorageCorruptionError",
     "StorageError",
 ]

@@ -118,7 +118,7 @@ _logger = environ.get_logger("ai.runtime.agent_executor")
 _RUNTIME_RESERVED_TOOL_NAMES = frozenset(
     (*SKILL_TOOL_NAMES, *MEMORY_TOOL_NAMES, *PLANNING_TOOL_NAMES, *SUBAGENT_TOOL_NAMES)
 )
-_WORKSPACE_CAPABILITY_IDS = frozenset({"workspace-filesystem", "workspace-shell"})
+_WORKSPACE_CAPABILITY_IDS = frozenset({"workspace-sandbox"})
 _MAX_TOOL_RETRIES = sys.maxsize
 
 
@@ -538,9 +538,7 @@ def _trusted_tool_classes_for_definition(
 ) -> tuple[tuple[str, str], ...]:
     trusted: dict[str, str] = {}
     for candidate in definition.selected_tools:
-        tool = candidate.value
-        if not isinstance(tool, Tool):
-            raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
+        tool = cast(Tool, candidate.value)
         tool_class = workspace_tool_class(tool)
         if tool_class is not None:
             trusted[candidate.id] = tool_class
@@ -576,11 +574,9 @@ async def _materialize_agent(
     business_tools: list[Tool[RunContext[object]]] = []
     workspace_names: list[str] = []
     for candidate in definition.selected_tools:
-        tool = candidate.value
-        if not isinstance(tool, Tool):
-            raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
+        tool = cast("Tool[RunContext[object]]", candidate.value)
         if workspace_tool_class(tool) is None:
-            business_tools.append(cast("Tool[RunContext[object]]", tool))
+            business_tools.append(tool)
         else:
             workspace_names.append(candidate.id)
 

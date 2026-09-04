@@ -31,8 +31,6 @@ _MODEL_FAILURE_ERRORS = frozenset(
 
 class _PydanticSkillCapability(AbstractCapability[RunContext[object]]):
     def __init__(self, capability: SkillCapability) -> None:
-        if not isinstance(capability, SkillCapability):
-            raise TypeError("capability must be SkillCapability")
         self.id = _SKILL_CAPABILITY_ID
         self._capability = capability
 

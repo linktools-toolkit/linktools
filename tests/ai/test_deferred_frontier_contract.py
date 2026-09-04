@@ -191,7 +191,7 @@ async def test_ask_gate_defers_before_runtime_operation_or_harness_effect(tmp_pa
     call = _approval_call()
     definition = ToolDefinition(
         name="read_file",
-        capability_id="workspace-filesystem",
+        capability_id="workspace-sandbox",
         metadata={"linktools.ai.replay_safe": True},
     )
     with pytest.raises(ApprovalRequired):

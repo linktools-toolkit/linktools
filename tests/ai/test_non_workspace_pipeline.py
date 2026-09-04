@@ -3,7 +3,6 @@
 """Current public workspace and authorization contracts."""
 
 import json
-import sys
 from pathlib import Path
 
 import pytest
@@ -26,19 +25,10 @@ from linktools.ai.workspace import DisabledSandbox
 
 
 @pytest.mark.asyncio
-async def test_disabled_sandbox_is_fail_closed_without_side_effects(tmp_path: Path) -> None:
-    sandbox = DisabledSandbox()
-    target = tmp_path / "should-not-exist"
-    command = f'{sys.executable} -c "from pathlib import Path; Path({str(target)!r}).write_text(\'created\')"'
-    for operation in (
-        sandbox.read_file(str(target)),
-        sandbox.write_file(str(target), "content"),
-        sandbox.run(command),
-    ):
-        with pytest.raises(AIError) as error:
-            await operation
-        assert error.value.code is ErrorCode.SANDBOX_UNAVAILABLE
-    assert not target.exists()
+async def test_disabled_sandbox_is_fail_closed() -> None:
+    with pytest.raises(AIError) as error:
+        await DisabledSandbox().open()
+    assert error.value.code is ErrorCode.SANDBOX_UNAVAILABLE
 
 
 @pytest.mark.asyncio

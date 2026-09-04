@@ -61,7 +61,7 @@ from ..capability import (
 )
 from ..core import JsonValue, canonical_json_bytes, normalize_json_value
 from ..errors import AIError, ErrorCode
-from ..observe import MiddlewarePipeline, RunContext as ObservedRunContext
+from ..observe import MiddlewarePipeline, ObservationContext
 from ..workspace import (
     RepositoryInstructionDocument,
     RepositoryInstructionResolver,
@@ -113,8 +113,7 @@ _TRUSTED_TOOL_CLASSES = frozenset(
         "memory.write",
     }
 )
-_WORKSPACE_FILESYSTEM_CAPABILITY_ID = "workspace-filesystem"
-_WORKSPACE_SHELL_CAPABILITY_ID = "workspace-shell"
+_WORKSPACE_SANDBOX_CAPABILITY_ID = "workspace-sandbox"
 _SKILL_CAPABILITY_ID = "linktools-skill"
 _MEMORY_CAPABILITY_ID = "linktools-memory"
 _PLANNING_CAPABILITY_ID = "linktools-planning"
@@ -317,7 +316,6 @@ class _RuntimeStepPersistence(StepPersistence[None]):
                 ErrorCode.CAPABILITY_POLICY_CONFLICT,
                 safe_details={"tool_name": tool_def.name, "mode": "plan"},
             )
-        # Effect admission starts only after every before-hook has settled.
         return args
 
     async def wrap_tool_execute(
@@ -794,12 +792,12 @@ class _ObservationalMiddlewareCapability(AbstractCapability[None]):
     def __init__(
         self,
         pipeline: MiddlewarePipeline,
-        context: ObservedRunContext,
+        context: ObservationContext,
     ) -> None:
         if not isinstance(pipeline, MiddlewarePipeline):
             raise TypeError("pipeline must be MiddlewarePipeline")
-        if not isinstance(context, ObservedRunContext):
-            raise TypeError("context must be observe.RunContext")
+        if not isinstance(context, ObservationContext):
+            raise TypeError("context must be observe.ObservationContext")
         self._pipeline = pipeline
         self._context = context
 
@@ -1449,9 +1447,9 @@ def _trusted_tool_capability(name: str, tool_class: str) -> "str | None":
         is_read = name in WORKSPACE_FILESYSTEM_READ_TOOL_NAMES
         if is_read != (tool_class == "filesystem.read"):
             return None
-        return _WORKSPACE_FILESYSTEM_CAPABILITY_ID
+        return _WORKSPACE_SANDBOX_CAPABILITY_ID
     if tool_class == "shell":
-        return _WORKSPACE_SHELL_CAPABILITY_ID if name in WORKSPACE_SHELL_TOOL_NAMES else None
+        return _WORKSPACE_SANDBOX_CAPABILITY_ID if name in WORKSPACE_SHELL_TOOL_NAMES else None
     if tool_class in {"memory.read", "memory.write"}:
         if name not in MEMORY_TOOL_NAMES:
             return None

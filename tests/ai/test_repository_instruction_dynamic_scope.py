@@ -272,7 +272,7 @@ async def test_instruction_aware_filesystem_tools_are_sequential() -> None:
         instruction_aware=True,
     )
     tools = [
-        ToolDefinition(name=name, capability_id="workspace-filesystem") for name in names
+        ToolDefinition(name=name, capability_id="workspace-sandbox") for name in names
     ]
     prepared = await presentation._prepare_final_tools(None, tools)  # type: ignore[arg-type]
     assert [tool.name for tool in prepared] == list(names)

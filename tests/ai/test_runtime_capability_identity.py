@@ -108,6 +108,7 @@ def test_deferred_generic_capability_is_rejected_by_v1_always_on_contract() -> N
     [
         "workspace-filesystem",
         "workspace-shell",
+        "workspace-sandbox",
         "linktools-skill",
         "linktools-memory",
         "linktools-planning",

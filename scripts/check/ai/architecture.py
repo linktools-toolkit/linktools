@@ -1,614 +1,552 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-
-"""Static package, module, and ownership gates for the AI source tree."""
+"""Long-lived architecture invariants for LinkTools AI production code."""
 
 import ast
-import json
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
-from typing import cast
 
-from linktools.ai.core import JsonValue
-
-from .cohesion import check_files
-from .names import check_names
-
-
-def module_name(path: Path, source_root: Path) -> str:
-    """Return the import name represented by a source file."""
-    relative = path.relative_to(source_root).with_suffix("")
-    parts = relative.parts
-    if parts == ("__init__",):
-        return "linktools.ai"
-    if parts[-1] == "__init__":
-        parts = parts[:-1]
-    return "linktools.ai." + ".".join(parts)
-
-
-def _resolve(module: str, level: int, current: str, *, current_is_package: bool) -> str:
-    if level == 0:
-        return module
-    package = current if current_is_package else current.rsplit(".", 1)[0]
-    parts = package.split(".")
-    if level > len(parts):
-        return module
-    base = parts[: len(parts) - level + 1]
-    return ".".join((*base, module)) if module else ".".join(base)
-
-
-def _scc(graph: "dict[str, set[str]]") -> "tuple[tuple[str, ...], ...]":
-    index = 0
-    stack: list[str] = []
-    on_stack: set[str] = set()
-    indexes: dict[str, int] = {}
-    low: dict[str, int] = {}
-    result: list[tuple[str, ...]] = []
-
-    def visit(node: str) -> None:
-        nonlocal index
-        indexes[node] = low[node] = index
-        index += 1
-        stack.append(node)
-        on_stack.add(node)
-        for target in graph.get(node, ()):
-            if target not in indexes:
-                visit(target)
-                low[node] = min(low[node], low[target])
-            elif target in on_stack:
-                low[node] = min(low[node], indexes[target])
-        if low[node] != indexes[node]:
-            return
-        component: list[str] = []
-        while True:
-            target = stack.pop()
-            on_stack.remove(target)
-            component.append(target)
-            if target == node:
-                break
-        if len(component) > 1 or component[0] in graph.get(component[0], set()):
-            result.append(tuple(sorted(component)))
-
-    for node in graph:
-        if node not in indexes:
-            visit(node)
-    return tuple(sorted(result))
-
-
-def _internal_target(target: str, modules: "dict[str, Path]") -> "str | None":
-    if target in modules:
-        return target
-    package = target.rsplit(".", 1)[0]
-    return package if package in modules else None
-
-
-def _module_package(module: str, modules: "dict[str, Path]") -> str:
-    relative = module.removeprefix("linktools.ai").strip(".")
-    if not relative:
-        return ""
-    parts = relative.split(".")
-    path = modules.get(module)
-    if path is not None and path.name == "__init__.py":
-        return parts[0]
-    return parts[0] if len(parts) > 1 else ""
-
-
-def _import_targets(
-    node: ast.ImportFrom, current: str, path: Path, modules: "dict[str, Path]"
-) -> "tuple[str, ...]":
-    if node.level == 0 and node.module and node.module.startswith("linktools.ai"):
-        return (f"absolute:{path}:{node.lineno}",)
-    base = _resolve(
-        node.module or "",
-        node.level,
-        current,
-        current_is_package=path.name == "__init__.py",
-    )
-    if node.module:
-        return (base,)
-    candidates = tuple(f"{base}.{item.name}" for item in node.names if item.name != "*")
-    return candidates or (base,)
-
-
-def _dynamic_import_aliases(tree: ast.AST) -> "tuple[set[str], set[str]]":
-    importlib_module_aliases: set[str] = set()
-    import_module_aliases: set[str] = set()
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Import):
-            for alias in node.names:
-                if alias.name == "importlib":
-                    importlib_module_aliases.add(alias.asname or "importlib")
-        elif isinstance(node, ast.ImportFrom) and node.module == "importlib":
-            for alias in node.names:
-                if alias.name == "import_module":
-                    import_module_aliases.add(alias.asname or "import_module")
-    return importlib_module_aliases, import_module_aliases
-
-
-def _is_dynamic_import_call(
-    node: ast.Call,
-    importlib_module_aliases: set[str],
-    import_module_aliases: set[str],
-) -> bool:
-    if isinstance(node.func, ast.Name):
-        return node.func.id == "__import__" or node.func.id in import_module_aliases
-    return (
-        isinstance(node.func, ast.Attribute)
-        and node.func.attr == "import_module"
-        and isinstance(node.func.value, ast.Name)
-        and node.func.value.id in importlib_module_aliases
-    )
-
-
-def _is_type_checking_import(node: ast.AST, checking_lines: "set[int]") -> bool:
-    return node.lineno in checking_lines
-
-
-def build_report(source_root: "str | Path") -> "dict[str, JsonValue]":
-    """Build a deterministic import graph from source files only."""
-    root = Path(source_root)
-    modules = {
-        module_name(path, root): path
-        for path in root.rglob("*.py")
-        if "__pycache__" not in path.parts
+_AI_ROOT = "linktools.ai"
+_ALL_MUTATING_METHODS = frozenset(
+    {
+        "__delitem__",
+        "__iadd__",
+        "__imul__",
+        "__setitem__",
+        "append",
+        "clear",
+        "extend",
+        "insert",
+        "pop",
+        "remove",
+        "reverse",
+        "sort",
     }
-    runtime: dict[str, set[str]] = {name: set() for name in modules}
-    type_checking: dict[str, set[str]] = {name: set() for name in modules}
-    package_runtime: dict[str, set[str]] = {}
-    dynamic_imports: list[str] = []
-    reexports: dict[str, list[str]] = {}
-    forbidden_calls = {"eval", "exec", "getattr", "import_module"}
-    for name, path in modules.items():
-        tree = ast.parse(path.read_text(encoding="utf-8"), str(path))
-        importlib_module_aliases, import_module_aliases = _dynamic_import_aliases(tree)
-        if path.name == "__init__.py":
-            reexports[name] = sorted(
-                target
-                for node in tree.body
-                if isinstance(node, ast.ImportFrom)
-                for target in _import_targets(node, name, path, modules)
-                if not target.startswith("absolute:")
-            )
-        checking_lines: set[int] = set()
-        for checking_block in ast.walk(tree):
-            if (
-                isinstance(checking_block, ast.If)
-                and isinstance(checking_block.test, ast.Name)
-                and checking_block.test.id == "TYPE_CHECKING"
-            ):
-                checking_lines.update(
-                    child.lineno
-                    for statement in checking_block.body
-                    for child in ast.walk(statement)
-                    if isinstance(child, (ast.Import, ast.ImportFrom))
-                )
-        relative = path.relative_to(root).parts
-        source_package = relative[0] if len(relative) > 1 else ""
-        if source_package:
-            package_runtime.setdefault(source_package, set())
-        for node in ast.walk(tree):
-            targets: tuple[str, ...] = ()
-            if isinstance(node, ast.Import):
-                targets = tuple(alias.name for alias in node.names)
-            elif isinstance(node, ast.ImportFrom):
-                targets = _import_targets(node, name, path, modules)
-                if any(target.startswith("absolute:") for target in targets):
-                    dynamic_imports.extend(
-                        target.removeprefix("absolute:") for target in targets
-                    )
-                    continue
-            for target in targets:
-                resolved = _internal_target(target, modules)
-                if resolved is None:
-                    continue
-                target_graph = (
-                    type_checking
-                    if _is_type_checking_import(node, checking_lines)
-                    else runtime
-                )
-                target_graph[name].add(resolved)
-                target_package = _module_package(resolved, modules)
-                if (
-                    source_package
-                    and target_package
-                    and target_package != source_package
-                ):
-                    package_runtime[source_package].add(target_package)
-            if isinstance(node, ast.Call) and _is_dynamic_import_call(
-                node,
-                importlib_module_aliases,
-                import_module_aliases,
-            ):
-                function_name = (
-                    node.func.id
-                    if isinstance(node.func, ast.Name)
-                    else f"{ast.unparse(node.func.value)}.{node.func.attr}"
-                )
-                dynamic_imports.append(f"{path}:{node.lineno}:{function_name}")
-            elif (
-                isinstance(node, ast.Call)
-                and isinstance(node.func, ast.Name)
-                and node.func.id in forbidden_calls
-            ):
-                dynamic_imports.append(f"{path}:{node.lineno}:{node.func.id}")
-            if isinstance(node, ast.Attribute) and node.attr in {
-                "__dict__",
-                "__getattr__",
-            }:
-                dynamic_imports.append(f"{path}:{node.lineno}:{node.attr}")
-    return {
-        "modules": sorted(modules),
-        "runtime": {key: sorted(value) for key, value in sorted(runtime.items())},
-        "type_checking": {
-            key: sorted(value) for key, value in sorted(type_checking.items())
-        },
-        "dependency": {
-            key: sorted(runtime[key] | type_checking[key]) for key in sorted(modules)
-        },
-        "package_runtime": {
-            key: sorted(value) for key, value in sorted(package_runtime.items())
-        },
-        "scc": [list(component) for component in _scc(runtime)],
-        "dependency_scc": [list(component) for component in _scc(runtime)],
-        "package_scc": [list(component) for component in _scc(package_runtime)],
-        "dynamic_imports": sorted(dynamic_imports),
-        "reexports": reexports,
-    }
+)
 
 
-def _source_packages(root: Path) -> "tuple[str, ...]":
-    return tuple(
-        sorted(
-            path.name
-            for path in root.iterdir()
-            if path.is_dir() and any(path.glob("*.py"))
-        )
-    )
-
-
-def _layout_errors(
-    root: Path, expected_packages: "tuple[str, ...]", public_modules: "set[str]"
-) -> "list[str]":
-    errors: list[str] = []
-    actual = _source_packages(root)
-    packages = expected_packages
-    missing = sorted(set(expected_packages) - set(actual))
-    unexpected = sorted(set(actual) - set(expected_packages))
-    errors.extend(f"missing target package: {package}" for package in missing)
-    errors.extend(f"unexpected target package: {package}" for package in unexpected)
-    for path in root.rglob("*.py"):
-        if "__pycache__" in path.parts:
-            continue
-        relative = path.relative_to(root).parts
-        if path.name == "__init__.py":
-            continue
-        if len(relative) == 1:
-            module = path.relative_to(root).with_suffix("").as_posix().replace("/", ".")
-            if module not in public_modules:
-                errors.append(f"module outside package: {path}")
-            continue
-        if not relative or relative[0] not in packages:
-            errors.append(f"module outside package: {path}")
-        elif (
-            relative[0] == "runtime"
-            and len(relative) == 3
-            and relative[1] == "state"
-        ):
-            continue
-        elif len(relative) != 2:
-            errors.append(f"invalid module depth: {path}")
-    for package in packages:
-        init = root / package / "__init__.py"
-        if not init.is_file():
-            errors.append(f"missing package init: {init}")
-    return errors
-
-
-def _public_module_errors(root: Path, public_modules: "set[str]") -> "list[str]":
-    errors: list[str] = []
-    actual_modules: set[str] = set()
-    for path in root.rglob("*.py"):
-        if "__pycache__" in path.parts or path.name == "__init__.py":
-            continue
-        module = path.relative_to(root).with_suffix("").as_posix().replace("/", ".")
-        actual_modules.add(module)
-        if path.stem.startswith("_"):
-            if module in public_modules:
-                errors.append(f"private module listed as public: {module}")
-        elif module not in public_modules:
-            errors.append(f"unclassified public module: {module}")
-    for module in sorted(public_modules - actual_modules):
-        errors.append(f"stale public module policy entry: {module}")
-    for module in sorted(public_modules):
-        if module.rsplit(".", 1)[-1].startswith("_"):
-            errors.append(f"private module listed as public: {module}")
-    return errors
-
-
-def _private_import_errors(
-    source_roots: "tuple[tuple[Path, str], ...]",
-) -> "list[str]":
-    errors: list[str] = []
-    for root, prefix in source_roots:
-        if not root.is_dir():
-            continue
-        for path in root.rglob("*.py"):
-            if "__pycache__" in path.parts:
-                continue
-            relative = path.relative_to(root).with_suffix("")
-            current = f"{prefix}." + ".".join(relative.parts)
-            current_is_package = path.name == "__init__.py"
-            if current_is_package:
-                current = current.rsplit(".__init__", 1)[0]
-            tree = ast.parse(path.read_text(encoding="utf-8"), str(path))
-            importlib_module_aliases, import_module_aliases = _dynamic_import_aliases(
-                tree
-            )
-            for node in ast.walk(tree):
-                targets: list[tuple[str, int]] = []
-                if isinstance(node, ast.Import):
-                    targets.extend((alias.name, node.lineno) for alias in node.names)
-                elif isinstance(node, ast.ImportFrom):
-                    base = _resolve(
-                        node.module or "",
-                        node.level,
-                        current,
-                        current_is_package=current_is_package,
-                    )
-                    targets.append((base, node.lineno))
-                    targets.extend(
-                        (f"{base}.{alias.name}", node.lineno)
-                        for alias in node.names
-                        if alias.name.startswith("_")
-                    )
-                if (
-                    isinstance(node, ast.Call)
-                    and _is_dynamic_import_call(
-                        node,
-                        importlib_module_aliases,
-                        import_module_aliases,
-                    )
-                    and node.args
-                    and isinstance(node.args[0], ast.Constant)
-                    and isinstance(node.args[0].value, str)
-                ):
-                    targets.append((node.args[0].value, node.lineno))
-                for target, lineno in targets:
-                    if not _is_supported_source_module(target):
-                        continue
-                    source_owner = _owner_package(current)
-                    target_owner = _owner_package(target)
-                    owner_parts = target_owner.split(".")
-                    target_parts = target.split(".")
-                    private_path = any(
-                        part.startswith("_")
-                        for part in target_parts[len(owner_parts) :]
-                    )
-                    if source_owner != target_owner and private_path:
-                        errors.append(
-                            f"private cross-package import: {path}:{lineno}: "
-                            f"{current} -> {target}"
-                        )
-    return errors
-
-
-def _owner_package(module: str) -> str:
-    if module == "linktools.ai":
-        return "linktools.ai"
-    if module.startswith("linktools.ai."):
-        parts = module.split(".")
-        return ".".join(parts[:3])
-    if module == "linktools.commands.ai" or module.startswith("linktools.commands.ai."):
-        return "linktools.commands.ai"
-    return module
-
-
-def _is_supported_source_module(module: str) -> bool:
-    return module in {"linktools.ai", "linktools.commands.ai"} or module.startswith(
-        ("linktools.ai.", "linktools.commands.ai.")
-    )
-
-
-def _init_errors(root: Path) -> "list[str]":
-    errors: list[str] = []
-    for path in root.rglob("__init__.py"):
-        if "__pycache__" in path.parts:
-            continue
-        tree = ast.parse(path.read_text(encoding="utf-8"), str(path))
-        for node in tree.body:
-            if (
-                isinstance(node, ast.Expr)
-                and isinstance(node.value, ast.Constant)
-                and isinstance(node.value.value, str)
-            ):
-                continue
-            if isinstance(node, (ast.Import, ast.ImportFrom)):
-                continue
-            if isinstance(node, ast.Assign) and any(
-                isinstance(target, ast.Name) and target.id == "__all__"
-                for target in node.targets
-            ):
-                continue
-            errors.append(f"non-static package init: {path}:{node.lineno}")
-    return errors
-
-
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True)
 class ArchitectureCheckResult:
-    passed: bool
-    errors: "tuple[str, ...]"
-    report: "dict[str, JsonValue]"
+    errors: tuple[str, ...]
+
+    @property
+    def passed(self) -> bool:
+        return not self.errors
+
+
+@dataclass(frozen=True)
+class _ModuleInfo:
+    name: str
+    path: Path
+    tree: ast.Module
+    exports: tuple[str, ...] | None
+    bindings: frozenset[str]
+
+
+@dataclass(frozen=True)
+class _Inventory:
+    modules: Mapping[str, _ModuleInfo]
+    runtime_edges: Mapping[str, frozenset[str]]
 
 
 class ArchitecturePolicyChecker:
-    """Run the package, graph, naming, and ownership gates."""
+    """Check runtime acyclicity and LinkTools-owned public/private boundaries."""
 
-    def check(self, source_root: "str | Path") -> ArchitectureCheckResult:
-        root = Path(source_root)
-        report = build_report(root)
-        package_root = root.parents[2]
-        repository_root = package_root.parent
-        commands_root = package_root / "src" / "linktools" / "commands" / "ai"
-        source_roots = (
-            (root, "linktools.ai"),
-            (commands_root, "linktools.commands.ai"),
-        )
-        policy_path = (
-            repository_root
-            / "scripts"
-            / "check"
-            / "ai"
-            / "matrix"
-            / "linktools-ai-package-policy.json"
-        )
-        policy: dict[str, JsonValue] = {}
-        policy_errors: list[str] = []
-        if not policy_path.is_file():
-            policy_errors.append(f"missing architecture policy: {policy_path}")
+    def check(
+        self,
+        source_root: str | Path,
+        *,
+        external_roots: Iterable[str | Path] = (),
+    ) -> ArchitectureCheckResult:
+        root = Path(source_root).resolve()
+        modules, parse_errors = _build_modules(root)
+        errors = list(parse_errors)
+        inventory = _build_inventory(modules)
+        errors.extend(_validate_exports(inventory.modules))
+        errors.extend(_validate_runtime_cycles(inventory))
+        errors.extend(_validate_cross_owner_access(inventory, inventory.modules.values()))
+
+        external_modules: list[_ModuleInfo] = []
+        for external_root in external_roots:
+            external_modules.extend(_build_external_modules(Path(external_root).resolve()))
+        errors.extend(_validate_cross_owner_access(inventory, external_modules))
+        return ArchitectureCheckResult(tuple(sorted(set(errors))))
+
+
+def _build_modules(root: Path) -> tuple[dict[str, _ModuleInfo], tuple[str, ...]]:
+    modules: dict[str, _ModuleInfo] = {}
+    errors: list[str] = []
+    for path in sorted(root.rglob("*.py")):
+        relative = path.relative_to(root)
+        parts = list(relative.parts)
+        if parts[-1] == "__init__.py":
+            parts = parts[:-1]
         else:
-            try:
-                loaded = json.loads(policy_path.read_text(encoding="utf-8"))
-            except (OSError, json.JSONDecodeError) as error:
-                policy_errors.append(
-                    f"invalid architecture policy: {policy_path}: {error}"
-                )
+            parts[-1] = parts[-1][:-3]
+        name = ".".join([_AI_ROOT, *parts]) if parts else _AI_ROOT
+        try:
+            tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        except (OSError, SyntaxError) as error:
+            errors.append(f"cannot parse {path}: {error}")
+            continue
+        exports, export_error = _parse_all(tree)
+        if export_error is not None:
+            errors.append(f"{name}: {export_error}")
+        modules[name] = _ModuleInfo(name, path, tree, exports, _bindings(tree))
+    return modules, tuple(errors)
+
+
+def _build_external_modules(root: Path) -> list[_ModuleInfo]:
+    modules: list[_ModuleInfo] = []
+    if not root.is_dir():
+        return modules
+    for path in sorted(root.rglob("*.py")):
+        try:
+            source = path.read_text(encoding="utf-8")
+        except OSError:
+            continue
+        try:
+            tree = ast.parse(source, filename=str(path))
+        except SyntaxError:
+            continue
+        relative = path.relative_to(root)
+        parts = list(relative.parts)
+        if parts[-1] == "__init__.py":
+            parts = parts[:-1]
+        else:
+            parts[-1] = parts[-1][:-3]
+        name = ".".join(["linktools", *parts]) if parts else "linktools"
+        modules.append(_ModuleInfo(name, path, tree, None, frozenset()))
+    return modules
+
+
+def _build_inventory(modules: Mapping[str, _ModuleInfo]) -> _Inventory:
+    known = frozenset(modules)
+    edges: dict[str, frozenset[str]] = {}
+    for name, module in modules.items():
+        targets: set[str] = set()
+        for node in _runtime_imports(module.tree):
+            if isinstance(node, ast.Import):
+                for alias in node.names:
+                    if alias.name in known:
+                        targets.add(alias.name)
             else:
-                if not isinstance(loaded, dict):
-                    policy_errors.append(
-                        f"architecture policy must be an object: {policy_path}"
-                    )
-                else:
-                    policy = cast("dict[str, JsonValue]", loaded)
-        packages_value = policy.get("top_level_packages", [])
-        expected_packages = (
-            tuple(item for item in packages_value if isinstance(item, str))
-            if isinstance(packages_value, list)
-            else ()
-        )
-        public_modules_value = policy.get("public_modules", [])
-        public_modules = (
-            {item for item in public_modules_value if isinstance(item, str)}
-            if isinstance(public_modules_value, list)
-            else set()
-        )
-        errors = [
-            *policy_errors,
-            *_layout_errors(root, expected_packages, public_modules),
-            *_init_errors(root),
-            *check_names(root),
-            *check_files(root),
-        ]
-        errors.extend(_public_module_errors(root, public_modules))
-        if "private_imports" in policy:
-            errors.append("private_imports policy is forbidden")
-        errors.extend(_private_import_errors(source_roots))
-        errors.extend(
-            f"runtime SCC: {component}"
-            for component in report["scc"]
-            if isinstance(component, list)
-        )
-        errors.extend(
-            f"dependency SCC: {component}"
-            for component in report["dependency_scc"]
-            if isinstance(component, list)
-        )
-        errors.extend(
-            f"package SCC: {component}"
-            for component in report["package_scc"]
-            if isinstance(component, list)
-        )
-        errors.extend(
-            f"forbidden import or reflection: {item}"
-            for item in report["dynamic_imports"]
-            if isinstance(item, str)
-        )
-        dependencies = policy.get("dependencies", {})
-        dependency_map = (
-            cast("dict[str, JsonValue]", dependencies)
-            if isinstance(dependencies, dict)
-            else {}
-        )
-        package_runtime = report["package_runtime"]
-        if isinstance(package_runtime, dict):
-            for source_package, targets in package_runtime.items():
-                allowed_value = dependency_map.get(source_package, [])
-                allowed = (
-                    {item for item in allowed_value if isinstance(item, str)}
-                    if isinstance(allowed_value, list)
-                    else set()
-                )
-                if isinstance(targets, list):
-                    errors.extend(
-                        f"dependency policy: {source_package} -> {target}"
-                        for target in targets
-                        if isinstance(target, str) and target not in allowed
-                    )
-        module_dependencies = policy.get("module_dependencies", {})
-        if isinstance(module_dependencies, dict):
-            runtime_graph = report["runtime"]
-            if isinstance(runtime_graph, dict):
-                modules = (
-                    set(report["modules"])
-                    if isinstance(report.get("modules"), list)
-                    else set()
-                )
-                module_paths = {
-                    module_name(path, root): path
-                    for path in root.rglob("*.py")
-                    if "__pycache__" not in path.parts
-                }
-                for source_module, allowed_value in module_dependencies.items():
-                    if not isinstance(source_module, str):
+                base = _resolve_from_module(name, module.path.name == "__init__.py", node)
+                if base is None:
+                    continue
+                if base in known:
+                    targets.add(base)
+                for alias in node.names:
+                    child = f"{base}.{alias.name}"
+                    if child in known:
+                        targets.add(child)
+        edges[name] = frozenset(targets)
+    return _Inventory(modules, edges)
+
+
+def _validate_exports(modules: Mapping[str, _ModuleInfo]) -> tuple[str, ...]:
+    errors: list[str] = []
+    for module in modules.values():
+        if module.exports is None:
+            continue
+        seen: set[str] = set()
+        duplicates: set[str] = set()
+        for name in module.exports:
+            if name in seen:
+                duplicates.add(name)
+            seen.add(name)
+        if duplicates:
+            errors.append(
+                f"{module.name}: duplicate __all__ exports: {', '.join(sorted(duplicates))}"
+            )
+        missing = sorted(set(module.exports) - module.bindings)
+        if missing:
+            errors.append(
+                f"{module.name}: __all__ exports unbound names: {', '.join(missing)}"
+            )
+    return tuple(errors)
+
+
+def _validate_runtime_cycles(inventory: _Inventory) -> tuple[str, ...]:
+    errors: list[str] = []
+    for component in _strongly_connected_components(inventory.runtime_edges):
+        if _is_cycle(component, inventory.runtime_edges):
+            errors.append(f"runtime module cycle: {' -> '.join(sorted(component))}")
+
+    owner_edges: dict[str, set[str]] = {}
+    for source, targets in inventory.runtime_edges.items():
+        source_owner = _owner(source)
+        if source_owner in {None, "__root__"}:
+            continue
+        owner_edges.setdefault(source_owner, set())
+        for target in targets:
+            target_owner = _owner(target)
+            if target_owner not in {None, "__root__"} and target_owner != source_owner:
+                owner_edges[source_owner].add(target_owner)
+                owner_edges.setdefault(target_owner, set())
+    frozen = {owner: frozenset(targets) for owner, targets in owner_edges.items()}
+    for component in _strongly_connected_components(frozen):
+        if _is_cycle(component, frozen):
+            errors.append(f"runtime owner cycle: {' -> '.join(sorted(component))}")
+    return tuple(errors)
+
+
+def _is_cycle(
+    component: tuple[str, ...],
+    graph: Mapping[str, frozenset[str]],
+) -> bool:
+    return len(component) > 1 or (
+        len(component) == 1 and component[0] in graph.get(component[0], frozenset())
+    )
+
+
+def _validate_cross_owner_access(
+    inventory: _Inventory,
+    sources: Iterable[_ModuleInfo],
+) -> tuple[str, ...]:
+    errors: list[str] = []
+    known = frozenset(inventory.modules)
+    for source in sources:
+        source_owner = _owner(source.name)
+        aliases: dict[str, str] = {}
+        for node in _runtime_imports(source.tree):
+            if isinstance(node, ast.Import):
+                for alias in node.names:
+                    if alias.name == "linktools":
+                        aliases[alias.asname or "linktools"] = "linktools"
                         continue
-                    normalized_source = (
-                        source_module
-                        if source_module.startswith("linktools.ai.")
-                        else f"linktools.ai.{source_module}"
-                    )
-                    if normalized_source not in modules:
-                        errors.append(
-                            f"stale module dependency policy: {source_module}"
-                        )
+                    if alias.name not in known:
                         continue
-                    allowed = (
-                        {item for item in allowed_value if isinstance(item, str)}
-                        if isinstance(allowed_value, list)
-                        else set()
-                    )
-                    targets = runtime_graph.get(normalized_source, [])
-                    if not isinstance(targets, list):
-                        continue
-                    for target in targets:
-                        if not isinstance(target, str):
+                    target = alias.name
+                    bound = alias.asname or alias.name.split(".", 1)[0]
+                    aliases[bound] = target if alias.asname else alias.name.split(".", 1)[0]
+                    errors.extend(_check_module_boundary(source, source_owner, target))
+            else:
+                base = _resolve_from_module(source.name, source.path.name == "__init__.py", node)
+                if base is None:
+                    continue
+                if not base.startswith(_AI_ROOT) or base not in known:
+                    for alias in node.names:
+                        if alias.name == "*":
                             continue
-                        target_package = _module_package(target, module_paths)
-                        source_package = _module_package(
-                            normalized_source, module_paths
-                        )
-                        if (
-                            target_package
-                            and target_package != source_package
-                            and target_package not in allowed
-                        ):
+                        child = f"{base}.{alias.name}"
+                        if child not in known:
+                            continue
+                        errors.extend(_check_module_boundary(source, source_owner, child))
+                        aliases[alias.asname or alias.name] = child
+                    continue
+                errors.extend(_check_module_boundary(source, source_owner, base))
+                for alias in node.names:
+                    if alias.name == "*":
+                        if _owner(base) != source_owner and inventory.modules[base].exports is None:
                             errors.append(
-                                f"module dependency policy: {normalized_source} -> {target}"
+                                f"{source.name}: cross-owner star import from {base} "
+                                "requires static __all__"
                             )
-        forbidden_nodes = {"Spec" + "Store", "__getattr__"}
-        for path in root.rglob("*.py"):
-            if "__pycache__" in path.parts:
+                        continue
+                    errors.extend(
+                        _check_symbol_boundary(
+                            inventory,
+                            source,
+                            source_owner,
+                            base,
+                            alias.name,
+                        )
+                    )
+                    child = f"{base}.{alias.name}"
+                    if child in known:
+                        errors.extend(_check_module_boundary(source, source_owner, child))
+                        aliases[alias.asname or alias.name] = child
+                    else:
+                        aliases[alias.asname or alias.name] = f"{base}.{alias.name}"
+
+        for node in ast.walk(source.tree):
+            if not isinstance(node, ast.Attribute):
                 continue
-            tree = ast.parse(path.read_text(encoding="utf-8"), str(path))
-            for node in ast.walk(tree):
-                if isinstance(node, ast.Name) and node.id in forbidden_nodes:
-                    errors.append(f"forbidden symbol: {path}:{node.lineno}:{node.id}")
-                elif isinstance(node, ast.Attribute) and node.attr in forbidden_nodes:
-                    errors.append(f"forbidden symbol: {path}:{node.lineno}:{node.attr}")
-        return ArchitectureCheckResult(not errors, tuple(dict.fromkeys(errors)), report)
+            chain = _attribute_chain(node)
+            if chain is None:
+                continue
+            root, parts = chain[0], chain[1:]
+            if root in aliases:
+                base = aliases[root]
+                full = ".".join([base, *parts])
+            else:
+                full = ".".join(chain)
+            module_name, symbol = _module_and_symbol(full, known)
+            if module_name is None or symbol is None:
+                continue
+            errors.extend(
+                _check_symbol_boundary(
+                    inventory,
+                    source,
+                    source_owner,
+                    module_name,
+                    symbol,
+                )
+            )
+    return tuple(errors)
 
 
-__all__ = [
-    "ArchitectureCheckResult",
-    "ArchitecturePolicyChecker",
-    "build_report",
-    "module_name",
-]
+def _check_module_boundary(
+    source: _ModuleInfo,
+    source_owner: str | None,
+    target: str,
+) -> tuple[str, ...]:
+    target_owner = _owner(target)
+    if target_owner is None or target_owner == source_owner:
+        return ()
+    relative = target[len(_AI_ROOT) + 1 :] if target != _AI_ROOT else ""
+    parts = relative.split(".") if relative else []
+    if any(part.startswith("_") for part in parts):
+        return (f"{source.name}: cross-owner private module access: {target}",)
+    return ()
+
+
+def _check_symbol_boundary(
+    inventory: _Inventory,
+    source: _ModuleInfo,
+    source_owner: str | None,
+    target_module: str,
+    symbol: str,
+) -> tuple[str, ...]:
+    target_owner = _owner(target_module)
+    if target_owner is None or target_owner == source_owner:
+        return ()
+    module_errors = _check_module_boundary(source, source_owner, target_module)
+    if module_errors:
+        return module_errors
+    module = inventory.modules[target_module]
+    if symbol.startswith("_"):
+        return (f"{source.name}: cross-owner private symbol access: {target_module}.{symbol}",)
+    exports = module.exports or ()
+    if symbol not in exports:
+        return (f"{source.name}: cross-owner non-exported symbol access: {target_module}.{symbol}",)
+    return ()
+
+
+def _parse_all(tree: ast.Module) -> tuple[tuple[str, ...] | None, str | None]:
+    top_level: list[ast.AST] = []
+    for node in tree.body:
+        value = _all_assignment_value(node)
+        if value is not None:
+            top_level.append(value)
+        elif _writes_all(node):
+            return None, "__all__ must be one static string sequence"
+        if _nested_module_all_write(node):
+            return None, "__all__ must be one static string sequence"
+
+    if not top_level:
+        return None, None
+    if len(top_level) != 1:
+        return None, "__all__ must be assigned exactly once"
+    value = top_level[0]
+    if not isinstance(value, (ast.List, ast.Tuple)):
+        return None, "__all__ must be a static list or tuple of strings"
+    exports: list[str] = []
+    for item in value.elts:
+        if not isinstance(item, ast.Constant) or not isinstance(item.value, str):
+            return None, "__all__ must contain only string literals"
+        exports.append(item.value)
+    return tuple(exports), None
+
+
+def _nested_module_all_write(node: ast.AST) -> bool:
+    if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda)):
+        return False
+    for child in ast.iter_child_nodes(node):
+        if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda)):
+            continue
+        if _writes_all(child) or _nested_module_all_write(child):
+            return True
+    return False
+
+
+def _all_assignment_value(node: ast.AST) -> ast.AST | None:
+    if isinstance(node, ast.Assign) and any(
+        isinstance(target, ast.Name) and target.id == "__all__" for target in node.targets
+    ):
+        return node.value
+    if (
+        isinstance(node, ast.AnnAssign)
+        and isinstance(node.target, ast.Name)
+        and node.target.id == "__all__"
+    ):
+        return node.value
+    return None
+
+
+def _writes_all(node: ast.AST) -> bool:
+    if isinstance(node, ast.Assign):
+        return any(_targets_all(target) for target in node.targets)
+    if isinstance(node, ast.AnnAssign):
+        return _targets_all(node.target)
+    if isinstance(node, ast.AugAssign):
+        return _targets_all(node.target)
+    if isinstance(node, ast.Delete):
+        return any(_targets_all(target) for target in node.targets)
+    if (
+        isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and isinstance(node.func.value, ast.Name)
+        and node.func.value.id == "__all__"
+        and node.func.attr in _ALL_MUTATING_METHODS
+    ):
+        return True
+    return False
+
+
+def _targets_all(target: ast.AST) -> bool:
+    if isinstance(target, ast.Name):
+        return target.id == "__all__"
+    if isinstance(target, ast.Subscript):
+        return isinstance(target.value, ast.Name) and target.value.id == "__all__"
+    return False
+
+
+def _bindings(tree: ast.Module) -> frozenset[str]:
+    names: set[str] = set()
+    for node in tree.body:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            names.add(node.name)
+        elif isinstance(node, ast.Import):
+            for alias in node.names:
+                names.add(alias.asname or alias.name.split(".", 1)[0])
+        elif isinstance(node, ast.ImportFrom):
+            for alias in node.names:
+                if alias.name != "*":
+                    names.add(alias.asname or alias.name)
+        elif isinstance(node, (ast.Assign, ast.AnnAssign)):
+            targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+            for target in targets:
+                names.update(_target_names(target))
+    return frozenset(names)
+
+
+def _target_names(target: ast.AST) -> set[str]:
+    if isinstance(target, ast.Name):
+        return {target.id}
+    if isinstance(target, (ast.Tuple, ast.List)):
+        result: set[str] = set()
+        for item in target.elts:
+            result.update(_target_names(item))
+        return result
+    return set()
+
+
+def _runtime_imports(tree: ast.Module) -> tuple[ast.Import | ast.ImportFrom, ...]:
+    result: list[ast.Import | ast.ImportFrom] = []
+
+    def visit(node: ast.AST, type_checking: bool = False) -> None:
+        if isinstance(node, ast.If) and _is_type_checking_test(node.test):
+            for child in node.body:
+                visit(child, True)
+            for child in node.orelse:
+                visit(child, type_checking)
+            return
+        if not type_checking and isinstance(node, (ast.Import, ast.ImportFrom)):
+            result.append(node)
+        for child in ast.iter_child_nodes(node):
+            visit(child, type_checking)
+
+    visit(tree)
+    return tuple(result)
+
+
+def _is_type_checking_test(node: ast.AST) -> bool:
+    return isinstance(node, ast.Name) and node.id == "TYPE_CHECKING" or (
+        isinstance(node, ast.Attribute)
+        and isinstance(node.value, ast.Name)
+        and node.value.id == "typing"
+        and node.attr == "TYPE_CHECKING"
+    )
+
+
+def _resolve_from_module(current: str, is_package: bool, node: ast.ImportFrom) -> str | None:
+    if node.level == 0:
+        return node.module
+    package = current if is_package else current.rsplit(".", 1)[0]
+    parts = package.split(".")
+    up = node.level - 1
+    if up > len(parts):
+        return None
+    base = parts[: len(parts) - up]
+    if node.module:
+        base.extend(node.module.split("."))
+    return ".".join(base)
+
+
+def _module_and_symbol(full: str, known: frozenset[str]) -> tuple[str | None, str | None]:
+    parts = full.split(".")
+    for index in range(len(parts) - 1, 0, -1):
+        module = ".".join(parts[:index])
+        if module in known:
+            return module, parts[index]
+    return None, None
+
+
+def _attribute_chain(node: ast.Attribute) -> tuple[str, ...] | None:
+    parts: list[str] = [node.attr]
+    current: ast.AST = node.value
+    while isinstance(current, ast.Attribute):
+        parts.append(current.attr)
+        current = current.value
+    if not isinstance(current, ast.Name):
+        return None
+    parts.append(current.id)
+    return tuple(reversed(parts))
+
+
+def _owner(module: str) -> str | None:
+    if module == _AI_ROOT:
+        return "__root__"
+    prefix = _AI_ROOT + "."
+    if not module.startswith(prefix):
+        return None
+    return module[len(prefix) :].split(".", 1)[0]
+
+
+def _strongly_connected_components(
+    graph: Mapping[str, frozenset[str]],
+) -> tuple[tuple[str, ...], ...]:
+    index = 0
+    stack: list[str] = []
+    indices: dict[str, int] = {}
+    lowlinks: dict[str, int] = {}
+    on_stack: set[str] = set()
+    components: list[tuple[str, ...]] = []
+
+    def visit(node: str) -> None:
+        nonlocal index
+        indices[node] = index
+        lowlinks[node] = index
+        index += 1
+        stack.append(node)
+        on_stack.add(node)
+        for target in graph.get(node, frozenset()):
+            if target not in indices:
+                visit(target)
+                lowlinks[node] = min(lowlinks[node], lowlinks[target])
+            elif target in on_stack:
+                lowlinks[node] = min(lowlinks[node], indices[target])
+        if lowlinks[node] != indices[node]:
+            return
+        component: list[str] = []
+        while True:
+            item = stack.pop()
+            on_stack.remove(item)
+            component.append(item)
+            if item == node:
+                break
+        components.append(tuple(component))
+
+    nodes = set(graph)
+    for targets in graph.values():
+        nodes.update(targets)
+    for node in sorted(nodes):
+        if node not in indices:
+            visit(node)
+    return tuple(components)
+
+
+__all__ = ["ArchitectureCheckResult", "ArchitecturePolicyChecker"]

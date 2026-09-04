@@ -6,15 +6,15 @@ import unicodedata
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Literal, cast
+from typing import TYPE_CHECKING, Literal
 
-try:
-    import yaml as _yaml
-except ImportError:
-    _yaml = None
+import yaml as _yaml
 
-from ..core import JsonValue, Principal, PrincipalKind, canonical_sha256
+from ..core import JsonValue, Principal, PrincipalKind, canonical_sha256, normalize_json_value
 from ..errors import AIError, ErrorCode
+
+if TYPE_CHECKING:
+    from ._sandbox import Sandbox
 
 _STORAGE_DIR_NAME = ".linktools"
 
@@ -160,6 +160,7 @@ class Workspace:
     config: "dict[str, JsonValue]"
     workspace_id: str
     policy: WorkspacePolicy = field(default_factory=WorkspacePolicy)
+    sandbox: "Sandbox | None" = field(default=None, repr=False, compare=False)
 
     @property
     def storage_root(self) -> Path:
@@ -172,6 +173,7 @@ class Workspace:
         *,
         root: "str | Path | None" = None,
         policy: "WorkspacePolicy | None" = None,
+        sandbox: "Sandbox | None" = None,
     ) -> "Workspace":
         selected_policy = _select_policy(policy)
         candidate = (
@@ -185,12 +187,13 @@ class Workspace:
             for parent in (candidate, *candidate.parents):
                 config_file = parent / _STORAGE_DIR_NAME / "config.yaml"
                 if config_file.exists():
-                    return cls._build(parent, config_file, selected_policy)
+                    return cls._build(parent, config_file, selected_policy, sandbox)
         config_file = candidate / _STORAGE_DIR_NAME / "config.yaml"
         return cls._build(
             candidate,
             config_file if config_file.exists() else None,
             selected_policy,
+            sandbox,
         )
 
     @classmethod
@@ -199,6 +202,7 @@ class Workspace:
         root: "str | Path",
         *,
         policy: "WorkspacePolicy | None" = None,
+        sandbox: "Sandbox | None" = None,
     ) -> "Workspace":
         candidate = Path(root).expanduser().resolve()
         config_file = candidate / _STORAGE_DIR_NAME / "config.yaml"
@@ -206,6 +210,7 @@ class Workspace:
             candidate,
             config_file if config_file.exists() else None,
             _select_policy(policy),
+            sandbox,
         )
 
     @classmethod
@@ -214,6 +219,7 @@ class Workspace:
         root: Path,
         config_file: "Path | None",
         policy: WorkspacePolicy,
+        sandbox: "Sandbox | None",
     ) -> "Workspace":
         normalized_root = _normalized_root(root)
         return cls(
@@ -221,6 +227,7 @@ class Workspace:
             config=load_config(config_file) if config_file else {},
             workspace_id=canonical_sha256(["workspace", normalized_root]),
             policy=policy,
+            sandbox=sandbox,
         )
 
 
@@ -234,10 +241,18 @@ def trusted_workspace_principal(
 
 
 def load_config(path: Path) -> "dict[str, JsonValue]":
-    if not path.exists() or _yaml is None:
+    if not path.exists():
         return {}
-    value = _yaml.safe_load(path.read_text(encoding="utf-8"))
-    return cast("dict[str, JsonValue]", value) if isinstance(value, dict) else {}
+    try:
+        raw = _yaml.safe_load(path.read_text(encoding="utf-8"))
+        if raw is None:
+            return {}
+        value = normalize_json_value(raw)
+        if not isinstance(value, dict):
+            raise TypeError("workspace config root must be a mapping")
+        return value
+    except (_yaml.YAMLError, TypeError, ValueError) as error:
+        raise AIError(ErrorCode.WORKSPACE_CONFIG_INVALID) from error
 
 
 def _select_policy(policy: "WorkspacePolicy | None") -> WorkspacePolicy:

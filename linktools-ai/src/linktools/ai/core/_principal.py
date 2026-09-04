@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Principal lookup boundary."""
+"""Principal authorization boundary."""
 
 from dataclasses import dataclass
 from enum import Enum
-from typing import Protocol, runtime_checkable
+from typing import Protocol
 
 from ..errors import AIError, ErrorCode
 from ._validation import validate_principal_id, validate_resource_id, validate_tenant_id
@@ -111,9 +111,4 @@ class TenantAuthorizationPolicy:
             raise AIError(ErrorCode.AUTHORIZATION_DENIED)
 
 
-@runtime_checkable
-class PrincipalProvider(Protocol):
-    async def current(self) -> Principal: ...
-
-
-__all__ = ["AuthorizationAction", "AuthorizationPolicy", "PrincipalProvider", "ResourceRef", "TenantAuthorizationPolicy", "service_principal"]
+__all__ = ["AuthorizationAction", "AuthorizationPolicy", "ResourceRef", "TenantAuthorizationPolicy", "service_principal"]

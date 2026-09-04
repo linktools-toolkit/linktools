@@ -62,6 +62,7 @@ _RESERVED_CAPABILITY_IDS = frozenset(
     {
         "workspace-filesystem",
         "workspace-shell",
+        "workspace-sandbox",
         "linktools-skill",
         "linktools-memory",
         "linktools-planning",
