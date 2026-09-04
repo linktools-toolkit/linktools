@@ -17,6 +17,7 @@ from ._planner import DefaultTaskService, RuntimeTaskNodeRunner
 from ._runtime_history import RuntimeHistory
 from ._runtime_service import Runtime
 from ._session import DefaultSessionService
+from ._snapshot import RunSnapshot, snapshot_digest
 from .service_api import (
     ApprovalCreateRequest,
     ApprovalDecisionRequest,
@@ -136,6 +137,7 @@ __all__ = [
     "ResumeSessionRequest",
     "RetryExecutionRequest",
     "RunEvaluationRequest",
+    "RunSnapshot",
     "Runtime",
     "RuntimeDomain",
     "RuntimeHistory",
@@ -156,5 +158,6 @@ __all__ = [
     "UpdateSessionRequest",
     "put_runtime_object",
     "read_runtime_object",
+    "snapshot_digest",
     "user_prompt_transport",
 ]
