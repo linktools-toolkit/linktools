@@ -6,7 +6,7 @@ from __future__ import annotations
 
 import asyncio
 from datetime import datetime, timezone
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 from ..errors import AIError, ErrorCode
 from ..storage import (
@@ -34,8 +34,12 @@ from ._codec import (
 from ._model import MetricDefinition, Observation
 
 if TYPE_CHECKING:
+    from collections.abc import Mapping
+
     from sqlalchemy import MetaData
     from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
+
+    from ..storage import SqlValue
 
 
 def build_metrics_sql_metadata(*, metadata: "MetaData | None" = None) -> "MetaData":
@@ -170,8 +174,7 @@ class SqlMetricStore:
         namespace: str,
         definition: MetricDefinition,
     ) -> None:
-        from sqlalchemy import insert
-        from sqlalchemy.exc import IntegrityError
+        from sqlalchemy import select
 
         await self._initialize()
         namespace_key = namespace_digest(namespace)
@@ -185,21 +188,43 @@ class SqlMetricStore:
             "payload_json": definition_envelope(namespace, definition),
         }
 
-        async def insert_one(session: "AsyncSession") -> None:
-            await session.execute(insert(self._definitions).values(**values))
-
-        try:
-            await self._context.run_mutation(insert_one, domain="metrics.definition")
-            return
-        except IntegrityError:
-            current = await self.get_definition(
-                namespace, definition.name, definition.revision
+        async def write_and_read(session: "AsyncSession") -> Mapping[str, object]:
+            await self._context.dialect.insert_ignore_conflict(
+                session,
+                table=self._definitions,
+                values=cast("Mapping[str, SqlValue]", values),
+                index_elements=("namespace_digest", "metric_name", "revision"),
             )
-            if (
-                current is None
-                or definition_semantic_digest(current) != semantic_digest
-            ):
-                raise AIError(ErrorCode.STORAGE_CONFLICT)
+            row = (
+                await session.execute(
+                    select(self._definitions).where(
+                        self._definitions.c.namespace_digest == namespace_key,
+                        self._definitions.c.metric_name == definition.name,
+                        self._definitions.c.revision == definition.revision,
+                    )
+                )
+            ).mappings().first()
+            if row is None:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            return row
+
+        row = await self._context.run_mutation(
+            write_and_read,
+            domain="metrics.definition",
+        )
+        stored = decode_definition_envelope(
+            row["payload_json"], expected_namespace=namespace
+        )
+        if (
+            row["namespace_digest"] != namespace_key
+            or row["metric_name"] != definition.name
+            or row["revision"] != definition.revision
+            or row["observation_kind"] != stored.observation_kind
+            or definition_semantic_digest(stored) != row["definition_digest"]
+        ):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        if str(row["definition_digest"]) != semantic_digest:
+            raise AIError(ErrorCode.STORAGE_CONFLICT)
 
     async def get_definition(
         self,
@@ -231,7 +256,8 @@ class SqlMetricStore:
             row["payload_json"], expected_namespace=namespace
         )
         if (
-            definition.name != row["metric_name"]
+            row["namespace_digest"] != namespace_key
+            or definition.name != row["metric_name"]
             or definition.revision != row["revision"]
             or definition.observation_kind != row["observation_kind"]
             or definition_semantic_digest(definition) != row["definition_digest"]
@@ -244,8 +270,7 @@ class SqlMetricStore:
         namespace: str,
         observations: tuple[Observation, ...],
     ) -> None:
-        from sqlalchemy import insert, select
-        from sqlalchemy.exc import IntegrityError
+        from sqlalchemy import select
 
         await self._initialize()
         collapsed: dict[str, tuple[str, Observation]] = {}
@@ -259,52 +284,45 @@ class SqlMetricStore:
         if not collapsed:
             return
         namespace_key = namespace_digest(namespace)
+        rows = [
+            {
+                "namespace_digest": namespace_key,
+                "observation_digest": identity,
+                "payload_digest": payload,
+                "kind": observation.kind,
+                "occurred_at": observation.occurred_at,
+                "payload_json": observation_envelope(namespace, observation),
+            }
+            for identity, (payload, observation) in collapsed.items()
+        ]
+        identities = tuple(collapsed)
 
-        for _ in range(4):
-            identities = tuple(collapsed)
-            async with self._context.sessions() as session:
-                rows = (
-                    await session.execute(
-                        select(
-                            self._observations.c.observation_digest,
-                            self._observations.c.payload_digest,
-                        ).where(
-                            self._observations.c.observation_digest.in_(identities)
-                        )
-                    )
-                ).all()
-            existing = {str(row[0]): str(row[1]) for row in rows}
-            for identity, payload in existing.items():
-                if collapsed[identity][0] != payload:
-                    raise AIError(ErrorCode.STORAGE_CONFLICT)
-            missing = [identity for identity in identities if identity not in existing]
-            if not missing:
-                return
-            values = [
-                {
-                    "namespace_digest": namespace_key,
-                    "observation_digest": identity,
-                    "payload_digest": collapsed[identity][0],
-                    "kind": collapsed[identity][1].kind,
-                    "occurred_at": collapsed[identity][1].occurred_at,
-                    "payload_json": observation_envelope(
-                        namespace, collapsed[identity][1]
-                    ),
-                }
-                for identity in missing
-            ]
-
-            async def insert_batch(session: "AsyncSession") -> None:
-                await session.execute(insert(self._observations), values)
-
-            try:
-                await self._context.run_mutation(
-                    insert_batch, domain="metrics.observation"
+        async def write_and_read(session: "AsyncSession") -> dict[str, str]:
+            await self._context.dialect.insert_ignore_conflict_many(
+                session,
+                table=self._observations,
+                rows=cast("list[Mapping[str, SqlValue]]", rows),
+                index_elements=("observation_digest",),
+            )
+            result = (
+                await session.execute(
+                    select(
+                        self._observations.c.observation_digest,
+                        self._observations.c.payload_digest,
+                    ).where(self._observations.c.observation_digest.in_(identities))
                 )
-                return
-            except IntegrityError:
-                continue
-        raise AIError(ErrorCode.STORAGE_CONFLICT)
+            ).all()
+            return {str(row[0]): str(row[1]) for row in result}
+
+        existing = await self._context.run_mutation(
+            write_and_read,
+            domain="metrics.observation",
+        )
+        if len(existing) != len(collapsed):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        for identity, (payload, _) in collapsed.items():
+            if existing.get(identity) != payload:
+                raise AIError(ErrorCode.STORAGE_CONFLICT)
 
     async def scan_observations(
         self,
