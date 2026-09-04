@@ -38,10 +38,7 @@ from ..core import (
 )
 from ..errors import AIError, ErrorCode
 from ..model import ModelRegistry
-from ..observe import MiddlewarePipeline
-
-if TYPE_CHECKING:
-    from ..observe import Middleware
+from ..observe import Metrics, MiddlewarePipeline
 from ..spec import AgentSpec, AgentSpecCodec
 from ..storage import ObjectStore, PayloadPolicy, StorageOverlay
 from ..task import LocalTaskGraphLauncher, TaskNodeHandler
@@ -56,6 +53,7 @@ from ._execution import DefaultExecutionService
 from ._history import StepExecutionHistoryReader, StepSessionHistoryReader
 from ._local import LocalExecutionBackend
 from ._memory import RuntimeMemoryStore
+from ._metrics import _MetricExecutionTerminalCommitter, _RuntimeMetricBuffer
 from ._object import RuntimeObjectKeyFactory
 from ._planner import DefaultTaskService, RuntimeTaskNodeRunner
 from ._session import DefaultSessionService
@@ -101,26 +99,14 @@ async def compose_runtime_components(
     models: "ModelRegistry | None" = None,
     state: "RuntimeState | None" = None,
     capabilities: "Sequence[CapabilityGroup[AppT]]" = (),
-    middleware: "Sequence[Middleware]" = (),
+    metrics: "Metrics | None" = None,
 ) -> _RuntimeComponents:
     """Freeze declarations and build Runtime-private services without constructing Runtime."""
     if not isinstance(workspace, Workspace):
         raise TypeError("workspace must be Workspace")
     workspace.policy.validate()
-    if isinstance(middleware, (str, bytes, bytearray)) or not isinstance(middleware, Sequence):
-        raise TypeError("middleware must be a sequence")
-    middleware_values = tuple(middleware)
-    for item in middleware_values:
-        try:
-            mutating = item.mutating
-        except AttributeError as error:
-            raise TypeError(
-                "middleware must define a bool mutating attribute"
-            ) from error
-        if not isinstance(mutating, bool):
-            raise TypeError("middleware mutating attribute must be bool")
-        if mutating:
-            raise AIError(ErrorCode.CAPABILITY_POLICY_CONFLICT)
+    if metrics is not None and not isinstance(metrics, Metrics):
+        raise TypeError("metrics must be Metrics")
     groups = tuple(capabilities)
     if any(not isinstance(group, CapabilityGroup) for group in groups):
         raise TypeError("capabilities must contain CapabilityGroup values")
@@ -278,7 +264,7 @@ async def compose_runtime_components(
             object_key_factory=object_key_factory,
             payload_policy=payload_policy,
             session_execution_ready=session_execution_ready,
-            middleware=middleware_values,
+            metrics=metrics,
             owned_workspace_close=owned_workspace_close,
         )
     except BaseException:
@@ -461,12 +447,13 @@ async def _build_local_components(
     object_key_factory: RuntimeObjectKeyFactory,
     payload_policy: PayloadPolicy,
     session_execution_ready: bool,
-    middleware: "Sequence[Middleware]",
+    metrics: "Metrics | None",
     owned_workspace_close: "Callable[[], Awaitable[None]] | None" = None,
 ) -> _RuntimeComponents:
     if not state.ready:
         raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
     _require_state_identity(state, namespace=namespace, tenant_id=tenant_id)
+    metric_buffer = None if metrics is None else _RuntimeMetricBuffer(metrics)
     execution = DefaultExecutionService(
         state.execution,
         state.object_store(RuntimeDomain.EXECUTION),
@@ -482,11 +469,10 @@ async def _build_local_components(
         session_execution_ready=session_execution_ready,
     )
     dispatcher = SubagentDispatcher(catalog, compiler, execution)
-    middleware_pipeline = MiddlewarePipeline(middleware)
     executor = AgentExecutor(
         skill_sources,
         instruction_resolver=instruction_resolver,
-        middleware=middleware_pipeline,
+        middleware=MiddlewarePipeline(()),
     )
 
     def build_memory_store(
@@ -562,7 +548,15 @@ async def _build_local_components(
         )
         execution.bind_backend(backend)
         execution.bind_local_waiter(backend)
-        execution.bind_terminal_committer(backend)
+        execution.bind_terminal_committer(
+            backend
+            if metric_buffer is None
+            else _MetricExecutionTerminalCommitter(
+                backend,
+                metric_buffer,
+                source_namespace=namespace,
+            )
+        )
         execution.bind_terminal_verifier(backend.verify_terminal_projection)
         execution.bind_subagent_cancellation(dispatcher)
         session = DefaultSessionService(
@@ -639,8 +633,10 @@ async def _build_local_components(
             task_launcher.shutdown,
             execution.preflight_close,
             backend.close,
-            state.close,
         ]
+        if metric_buffer is not None:
+            close_actions.append(metric_buffer.close)
+        close_actions.append(state.close)
         if owned_workspace_close is not None:
             close_actions.append(owned_workspace_close)
         coordinator = _RuntimeCloseCoordinator(tuple(close_actions))
@@ -653,6 +649,8 @@ async def _build_local_components(
             await task_launcher.shutdown()
         if backend is not None:
             await backend.close()
+        if metric_buffer is not None:
+            await metric_buffer.close()
         raise
     return _RuntimeComponents(
         catalog=catalog,
