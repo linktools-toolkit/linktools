@@ -8,13 +8,17 @@ import asyncio
 from collections.abc import Callable, Mapping
 from datetime import datetime, timezone
 from time import monotonic
-from typing import TypeVar
+from typing import Protocol
 
 from linktools.core import environ
 
 from ..core import canonical_sha256
 from ..errors import AIError
 from ..observe import MetricMeasurement, MetricRecorder, Metrics, Observation
+from .state._contracts import (
+    ExecutionTerminalCommit,
+    ExecutionTerminalCommitResult,
+)
 
 _logger = environ.get_logger("ai.runtime.metrics")
 _QUEUE_CAPACITY = 1024
@@ -22,7 +26,6 @@ _BATCH_SIZE = 64
 _WRITE_TIMEOUT_SECONDS = 2.0
 _CLOSE_DEADLINE_SECONDS = 5.0
 _WARNING_INTERVAL_SECONDS = 30.0
-T = TypeVar("T")
 
 
 class _RuntimeMetricBuffer(MetricRecorder):
@@ -182,6 +185,77 @@ class _RuntimeMetricBuffer(MetricRecorder):
         except BaseException:
             self._write_failures += 1
             self._warn("runtime metric writer failed")
+
+
+class _ExecutionTerminalCommitter(Protocol):
+    async def commit_terminal_checkpoint(
+        self,
+        commit: ExecutionTerminalCommit,
+        *,
+        session_id: str | None,
+    ) -> ExecutionTerminalCommitResult: ...
+
+
+class _MetricExecutionTerminalCommitter:
+    """Project durable terminal truth into best-effort execution observations."""
+
+    def __init__(
+        self,
+        delegate: _ExecutionTerminalCommitter,
+        recorder: MetricRecorder,
+        *,
+        source_namespace: str,
+    ) -> None:
+        self._delegate = delegate
+        self._recorder = recorder
+        self._source_namespace = source_namespace
+
+    async def commit_terminal_checkpoint(
+        self,
+        commit: ExecutionTerminalCommit,
+        *,
+        session_id: str | None,
+    ) -> ExecutionTerminalCommitResult:
+        result = await self._delegate.commit_terminal_checkpoint(
+            commit,
+            session_id=session_id,
+        )
+        execution = result.execution
+        usage = result.result.usage
+        _try_record(
+            self._recorder,
+            lambda: _observation(
+                observation_id=_stable_observation_id(
+                    self._source_namespace,
+                    execution.tenant_id,
+                    execution.execution_id,
+                    "terminal",
+                ),
+                kind="linktools.execution.terminal",
+                source_namespace=self._source_namespace,
+                tenant_id=execution.tenant_id,
+                status=execution.status.value,
+                error_code=execution.error_code,
+                correlation={
+                    "execution_id": execution.execution_id,
+                    **(
+                        {"session_id": session_id}
+                        if session_id is not None
+                        else {}
+                    ),
+                },
+                dimensions={
+                    "agent_id": execution.binding.agent_spec.id,
+                    "mode": execution.mode,
+                },
+                measurements=(
+                    _measurement("input_tokens", usage.input_tokens),
+                    _measurement("output_tokens", usage.output_tokens),
+                ),
+                occurred_at=result.result.created_at,
+            ),
+        )
+        return result
 
 
 def _stable_observation_id(*parts: str) -> str:
