@@ -323,6 +323,7 @@ class FilesystemObjectStore:
             size, digest = await _spool_file(chunks, name, expected_size)
             if digest != expected_digest or size != expected_size:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            await asyncio.to_thread(_sync_file, name)
             destination, metadata = self._paths(key)
 
             async def publish() -> None:
@@ -949,7 +950,7 @@ async def _spool_file(chunks: AsyncIterator[bytes], path: Path, expected_size: i
         if buffer:
             value = bytes(buffer)
             await asyncio.to_thread(handle.write, value)
-        await asyncio.to_thread(_flush_file, handle)
+        await asyncio.to_thread(handle.flush)
     finally:
         await asyncio.to_thread(handle.close)
     return size, digest.hexdigest()
@@ -961,9 +962,9 @@ def _create_temp_file(root: Path) -> Path:
     return Path(name)
 
 
-def _flush_file(handle: BinaryIO) -> None:
-    handle.flush()
-    os.fsync(handle.fileno())
+def _sync_file(path: Path) -> None:
+    with path.open("rb") as handle:
+        os.fsync(handle.fileno())
 
 
 def _stat_filesystem_object(metadata: Path, destination: Path, key: str) -> ObjectStat | None:

@@ -418,21 +418,46 @@ class ExecutionReadModelRepository:
         owner: str,
         fence: int,
     ) -> None:
-        for stream_name, values in (
+        streams = (
             ("trace", build.trace_items),
             ("history", build.history_items),
             ("transcript", build.transcript_items),
-        ):
-            for start in range(0, len(values), _CHUNK_SIZE):
-                await self._write_chunk(
-                    build.execution_id,
+        )
+        chunk_count = max(
+            ((len(values) + _CHUNK_SIZE - 1) // _CHUNK_SIZE for _, values in streams),
+            default=0,
+        )
+        if chunk_count == 0:
+            await self._write_ordinal(build, (), owner, fence, complete=True)
+            return
+        for ordinal in range(chunk_count):
+            start = ordinal * _CHUNK_SIZE
+            prepared = tuple(
+                (
                     stream_name,
-                    values[start : start + _CHUNK_SIZE],
-                    owner,
-                    fence,
+                    {"items": [dict(item) for item in values[start : start + _CHUNK_SIZE]]},
                 )
+                for stream_name, values in streams
+                if start < len(values)
+            )
+            await self._write_ordinal(
+                build,
+                prepared,
+                owner,
+                fence,
+                complete=ordinal == chunk_count - 1,
+            )
 
-        async def complete(transaction: StateTransaction) -> None:
+    async def _write_ordinal(
+        self,
+        build: ExecutionReadModelBuild,
+        chunks: Sequence[tuple[str, Mapping[str, JsonValue]]],
+        owner: str,
+        fence: int,
+        *,
+        complete: bool,
+    ) -> None:
+        async def mutate(transaction: StateTransaction) -> None:
             key = self._record_key(build.execution_id)
             current = await transaction.get_record(key)
             if current is None:
@@ -446,81 +471,63 @@ class ExecutionReadModelRepository:
                 or current.lease_fence != fence
             ):
                 raise AIError(ErrorCode.STORAGE_CONFLICT)
-            complete_value = ExecutionReadModelRecord(
-                build.execution_id,
-                build.tenant_id,
-                build.source_digest,
-                _MODEL_VERSION,
-                ExecutionReadModelStatus.COMPLETE,
-                len(build.trace_items),
-                len(build.history_items),
-                len(build.transcript_items),
-                value.revision + 1,
+
+            sequence_keys = {
+                self._sequence_key(build.execution_id, stream_name): 1
+                for stream_name, _data in chunks
+            }
+            high_waters = (
+                await transaction.reserve_sequences(sequence_keys)
+                if sequence_keys
+                else {}
             )
-            candidate = self._stored_record(
-                complete_value,
-                storage_version=current.storage_version + 1,
-                lease_owner=None,
-                lease_fence=fence,
-                expires=None,
+            facts = tuple(
+                StoredFact(
+                    self._stream(build.execution_id, stream_name),
+                    high_waters[self._sequence_key(build.execution_id, stream_name)],
+                    key,
+                    f"execution_read_{stream_name}",
+                    None,
+                    None,
+                    data,
+                )
+                for stream_name, data in chunks
             )
+            if complete:
+                next_value = ExecutionReadModelRecord(
+                    build.execution_id,
+                    build.tenant_id,
+                    build.source_digest,
+                    _MODEL_VERSION,
+                    ExecutionReadModelStatus.COMPLETE,
+                    len(build.trace_items),
+                    len(build.history_items),
+                    len(build.transcript_items),
+                    value.revision + 1,
+                )
+                candidate = self._stored_record(
+                    next_value,
+                    storage_version=current.storage_version + 1,
+                    lease_owner=None,
+                    lease_fence=fence,
+                    expires=None,
+                )
+            else:
+                now = await transaction.now()
+                candidate = self._stored_record(
+                    value,
+                    storage_version=current.storage_version + 1,
+                    lease_owner=owner,
+                    lease_fence=fence,
+                    expires=now,
+                )
             if not await transaction.replace_record(
                 candidate,
                 expected_storage_version=current.storage_version,
             ):
                 raise AIError(ErrorCode.STORAGE_CONFLICT)
-
-        await self._store.mutate(complete)
-
-    async def _write_chunk(
-        self,
-        execution_id: str,
-        stream_name: str,
-        values: Sequence[Mapping[str, JsonValue]],
-        owner: str,
-        fence: int,
-    ) -> None:
-        async def mutate(transaction: StateTransaction) -> None:
-            key = self._record_key(execution_id)
-            current = await transaction.get_record(key)
-            if current is None:
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            self._validate_stored_record(current, execution_id)
-            value = self._decode_record(current)
-            self._validate_owner(value, execution_id)
-            now = await transaction.now()
-            if (
-                value.status is not ExecutionReadModelStatus.BUILDING
-                or current.lease_owner != owner
-                or current.lease_fence != fence
-            ):
-                raise AIError(ErrorCode.STORAGE_CONFLICT)
-            renewed = self._stored_record(
-                value,
-                storage_version=current.storage_version + 1,
-                lease_owner=owner,
-                lease_fence=fence,
-                expires=now,
-            )
-            if not await transaction.replace_record(
-                renewed,
-                expected_storage_version=current.storage_version,
-            ):
-                raise AIError(ErrorCode.STORAGE_CONFLICT)
-            sequence = await transaction.next_sequence(
-                self._sequence_key(execution_id, stream_name)
-            )
-            await transaction.insert_fact(
-                StoredFact(
-                    self._stream(execution_id, stream_name),
-                    sequence,
-                    key,
-                    f"execution_read_{stream_name}",
-                    None,
-                    None,
-                    {"items": [dict(item) for item in values]},
-                )
-            )
+            if facts:
+                await transaction.insert_facts(facts)
 
         await self._store.mutate(mutate)
 

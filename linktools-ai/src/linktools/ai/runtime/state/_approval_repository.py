@@ -20,7 +20,7 @@ from ...errors import AIError, ErrorCode
 from ._contracts import ApprovalRecord
 from ._durability import CommitObservation, DurableCommitState, run_durable_commit
 from ._repositories import ApprovalRepositoryImpl, OperationLedgerRepository
-from ._store import StateStore, StateTransaction, operation_key, sequence_key
+from ._store import RecordReplacement, StateStore, StateTransaction, sequence_key
 
 
 class ApprovalAdmissionRepositoryImpl(
@@ -172,17 +172,28 @@ class ApprovalAdmissionRepositoryImpl(
             raise ValueError("approval_ids must contain non-empty strings")
         if not isinstance(decided_at, datetime) or decided_at.tzinfo is None:
             raise ValueError("decided_at must be timezone-aware")
+
+        keys = tuple(self._key("approval", approval_id) for approval_id in ordered)
+        stored_records = await transaction.get_records(keys)
         result: list[ApprovalRecord] = []
-        for approval_id in ordered:
-            stored = await transaction.get_record(self._key("approval", approval_id))
+        replacements: list[RecordReplacement] = []
+        for approval_id, key in zip(ordered, keys, strict=True):
+            stored = stored_records.get(key)
             if stored is None:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             current = await self._decode(stored, ApprovalRecord)
             if current.tenant_id != tenant_id or current.execution_id != execution_id:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            if current.status is ApprovalStatus.PENDING:
-                value = replace(current, status=ApprovalStatus.CANCELLED, decided_at=decided_at)
-                if not await transaction.replace_record(
+            if current.status is not ApprovalStatus.PENDING:
+                result.append(current)
+                continue
+            value = replace(
+                current,
+                status=ApprovalStatus.CANCELLED,
+                decided_at=decided_at,
+            )
+            replacements.append(
+                RecordReplacement(
                     replace(
                         self._stored(
                             "approval",
@@ -192,12 +203,12 @@ class ApprovalAdmissionRepositoryImpl(
                         ),
                         storage_version=stored.storage_version + 1,
                     ),
-                    expected_storage_version=stored.storage_version,
-                ):
-                    raise AIError(ErrorCode.STORAGE_CONFLICT)
-                result.append(value)
-            else:
-                result.append(current)
+                    stored.storage_version,
+                )
+            )
+            result.append(value)
+        if replacements:
+            await transaction.replace_records(tuple(replacements))
         return tuple(result)
 
     async def _read_create(
@@ -206,34 +217,21 @@ class ApprovalAdmissionRepositoryImpl(
         record: ApprovalRecord,
         operation: OperationLedgerInput,
     ) -> CommitObservation[tuple[ApprovalRecord, bool]]:
-        stored_operation = await transaction.get_operation(
-            operation_key(
-                self._namespace,
-                self._tenant_id,
-                self._domain.value,
-                operation.operation_id,
-            )
-        )
-        stored_approval = await transaction.get_record(
-            self._key("approval", record.approval_id)
-        )
-        if stored_operation is None and stored_approval is None:
-            return CommitObservation(DurableCommitState.NOT_COMMITTED)
-        if stored_operation is None:
-            return CommitObservation(
-                DurableCommitState.NOT_COMMITTED,
-                error=AIError(ErrorCode.APPROVAL_CONFLICT),
-            )
         operation_record = await OperationLedgerRepository.get_in_transaction(
             self,
             transaction,
             operation.operation_id,
             tenant_id=record.tenant_id,
         )
+        stored_approval = await transaction.get_record(
+            self._key("approval", record.approval_id)
+        )
+        if operation_record is None and stored_approval is None:
+            return CommitObservation(DurableCommitState.NOT_COMMITTED)
         if operation_record is None:
             return CommitObservation(
-                DurableCommitState.PARTIAL_INTEGRITY_ERROR,
-                error=AIError(ErrorCode.STORAGE_INTEGRITY_ERROR),
+                DurableCommitState.NOT_COMMITTED,
+                error=AIError(ErrorCode.APPROVAL_CONFLICT),
             )
         if not operation_replay_matches(operation_record, operation):
             return CommitObservation(
