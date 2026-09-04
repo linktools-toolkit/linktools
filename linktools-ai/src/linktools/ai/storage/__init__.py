@@ -102,7 +102,6 @@ from ._lock import (
     Lease,
     ProcessLeaseCoordinator,
 )
-from ._metrics import StorageMetrics
 from ._names import TABLE_PREFIX, namespace_digest, storage_name
 from ._object import (
     FilesystemObjectStore,
@@ -176,7 +175,6 @@ __all__ = [
     "StorageLayer",
     "StorageLocation",
     "StorageMetadataReader",
-    "StorageMetrics",
     "StorageOperation",
     "StorageOverlay",
     "StorageOwnedInfo",
