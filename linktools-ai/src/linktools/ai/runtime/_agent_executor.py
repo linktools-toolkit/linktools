@@ -6,9 +6,11 @@ from __future__ import annotations
 
 import asyncio
 import sys
+import uuid
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
+from time import monotonic_ns
 from typing import TYPE_CHECKING, Any, Protocol, cast
 
 from linktools.core import environ
@@ -92,7 +94,8 @@ from ..core import (
     normalize_json_value,
 )
 from ..errors import AIError, ErrorCode, ErrorDiagnostics
-from ..observe import MiddlewarePipeline, context_for
+from ..observe import MetricMeasurement, MetricRecorder, Observation
+
 if TYPE_CHECKING:
     from ..workspace import RepositoryInstructionResolver, RepositoryInstructions
 from ._capabilities import (
@@ -101,7 +104,6 @@ from ._capabilities import (
     PLANNING_TOOL_NAMES,
     SUBAGENT_TOOL_NAMES,
     ToolOperationBridge,
-    _ObservationalMiddlewareCapability,
     _WorkspaceToolGate,
     _tool_effect_policy,
     compose_platform_capabilities,
@@ -111,6 +113,7 @@ from ._capabilities import (
     tool_name_allowed,
 )
 from ._input import _RuntimeUserPrompt, _restore_user_prompt
+from ._metric_capability import _RuntimeMetricCapability
 from ._skill_adapter import _PydanticSkillCapability
 from ._subagent_adapter import _PydanticSubagentCapability
 
@@ -222,15 +225,13 @@ class AgentExecutor:
         skill_sources: SkillSourceRegistry,
         *,
         instruction_resolver: RepositoryInstructionResolver,
-        middleware: MiddlewarePipeline,
+        metrics: MetricRecorder | None = None,
     ) -> None:
         if not isinstance(skill_sources, SkillSourceRegistry):
             raise TypeError("skill_sources must be SkillSourceRegistry")
-        if not isinstance(middleware, MiddlewarePipeline):
-            raise TypeError("middleware must be MiddlewarePipeline")
         self._skill_sources = skill_sources
         self._instruction_resolver = instruction_resolver
-        self._middleware = middleware
+        self._metrics = metrics
         self._detached_tasks: set[asyncio.Task[Any]] = set()
 
     @classmethod
@@ -309,6 +310,8 @@ class AgentExecutor:
         )
         result: AgentExecutionOutcome | None = None
         primary_error: BaseException | None = None
+        metric_started = monotonic_ns() if self._metrics is not None else None
+        metric_id = uuid.uuid4().hex if self._metrics is not None else None
         try:
             try:
                 result = await self._execute(scope, run_usage=run_usage, usage_limits=usage_limits)
@@ -324,6 +327,13 @@ class AgentExecutor:
                 primary_error = mapped
                 raise mapped from error
         finally:
+            self._record_agent_run(
+                scope,
+                metric_id=metric_id,
+                metric_started=metric_started,
+                result=result,
+                primary_error=primary_error,
+            )
             if scope.usage_sink is not None:
                 usage = result.usage if result is not None else _usage_metrics(run_usage)
                 if isinstance(primary_error, asyncio.CancelledError):
@@ -343,6 +353,65 @@ class AgentExecutor:
                             scope.step_run_id,
                             exc_info=False,
                         )
+
+    def _record_agent_run(
+        self,
+        scope: _RunScope,
+        *,
+        metric_id: str | None,
+        metric_started: int | None,
+        result: AgentExecutionOutcome | None,
+        primary_error: BaseException | None,
+    ) -> None:
+        if self._metrics is None or metric_id is None or metric_started is None:
+            return
+        if isinstance(primary_error, asyncio.CancelledError):
+            status = "CANCELLED"
+            error_code = None
+        elif primary_error is not None:
+            status = "FAILED"
+            error_code = (
+                primary_error.code.value if isinstance(primary_error, AIError) else ErrorCode.INTERNAL_ERROR.value
+            )
+        elif isinstance(result, AgentExecutionPaused):
+            status = "PAUSED"
+            error_code = None
+        else:
+            status = "SUCCEEDED"
+            error_code = None
+        correlation: dict[str, str | int] = {
+            "execution_id": scope.context.execution_id,
+            "step_run_id": scope.step_run_id,
+        }
+        if scope.context.session_id is not None:
+            correlation["session_id"] = scope.context.session_id
+        try:
+            self._metrics.try_record(
+                Observation(
+                    version=1,
+                    observation_id=metric_id,
+                    kind="linktools.agent.run",
+                    occurred_at=datetime.now(timezone.utc),
+                    source_namespace=scope.context.workspace.workspace_id,
+                    tenant_id=scope.context.principal.tenant_id,
+                    status=status,
+                    error_code=error_code,
+                    correlation=correlation,
+                    dimensions={
+                        "agent_id": scope.binding.definition.spec.id,
+                        "mode": scope.mode,
+                    },
+                    measurements=(
+                        MetricMeasurement(
+                            "latency_ns",
+                            1,
+                            monotonic_ns() - metric_started,
+                        ),
+                    ),
+                )
+            )
+        except (AIError, TypeError, ValueError):
+            return
 
     def _detach_task(
         self,
@@ -412,17 +481,26 @@ class AgentExecutor:
             policy=scope.context.workspace.policy,
             trusted_tool_classes=trusted_tool_classes,
         )
-        middleware = _ObservationalMiddlewareCapability(
-            self._middleware,
-            context_for(
-                scope.context.principal,
-                scope.context.execution_id,
-                scope.context.session_id,
-                scope.step_run_id,
-                definition.spec.id,
-            ),
+        runtime_capabilities: tuple[AbstractCapability[object], ...] = ()
+        if self._metrics is not None:
+            runtime_capabilities = (
+                _RuntimeMetricCapability(
+                    self._metrics,
+                    source_namespace=scope.context.workspace.workspace_id,
+                    tenant_id=scope.context.principal.tenant_id,
+                    execution_id=scope.context.execution_id,
+                    session_id=scope.context.session_id,
+                    step_run_id=scope.step_run_id,
+                    agent_id=definition.spec.id,
+                    provider=definition.model.provider,
+                    model_identity=definition.model.model_identity,
+                    route_id=definition.model.route_id,
+                ),
+            )
+        capabilities = cast(
+            "tuple[AbstractCapability[RunContext[object]], ...]",
+            (presentation, gate, *runtime_capabilities, *capabilities),
         )
-        capabilities = (presentation, gate, middleware, *capabilities)
         if scope.replace_history_system_prompt:
             capabilities = (*capabilities, ReinjectSystemPrompt(replace_existing=True))
         _logger.debug(
