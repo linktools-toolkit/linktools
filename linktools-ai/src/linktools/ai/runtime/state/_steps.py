@@ -1041,6 +1041,7 @@ class StateStepArchive(StepStore):
                 owner_id,
                 suffix_start,
                 head.message_count,
+                observed_head=head,
             )
         )
         working_messages = list(suffix_messages)
