@@ -981,7 +981,10 @@ class TranscriptRepository:
         require_no_run_history_lock("TranscriptRepository.load_session_model_context")
         projection = await self.load_projection(history_id)
         if projection is not None:
-            return await self.load_model_context(history_id)
+            return await self._load_model_context_from_projection(
+                history_id,
+                projection,
+            )
         head = await self.get_head(history_id)
         if head is None:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -1144,7 +1147,11 @@ class TranscriptRepository:
                     window_start = index
                     window_end = index + 1
             windows.append((window_start, window_end))
-            loaded = await source.load_message_spans(owner_id, windows)
+            loaded = await source.load_message_spans(
+                owner_id,
+                windows,
+                observed_head=head,
+            )
             mapping: dict[int, ModelMessage] = {}
             for (start, end), messages in zip(windows, loaded, strict=True):
                 if len(messages) != end - start:
@@ -1176,6 +1183,13 @@ class TranscriptRepository:
             if head.message_count:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             return LoadedModelContext(())
+        return await self._load_model_context_from_projection(owner_id, projection)
+
+    async def _load_model_context_from_projection(
+        self,
+        owner_id: str,
+        projection: ContextProjection,
+    ) -> LoadedModelContext:
         span_refs: list[tuple[TranscriptSpanRef, tuple[TranscriptMessageRef, ...]]] = []
         refs: list[TranscriptMessageRef] = []
         for item in projection.items:
@@ -1214,22 +1228,30 @@ class TranscriptRepository:
         owner_id: str,
         start: int,
         end: int,
+        *,
+        observed_head: TranscriptHeadRecord | None = None,
     ) -> tuple[ModelMessage, ...]:
-        return (await self.load_message_spans(owner_id, ((start, end),)))[0]
+        return (
+            await self.load_message_spans(
+                owner_id,
+                ((start, end),),
+                observed_head=observed_head,
+            )
+        )[0]
 
     async def load_message_spans(
         self,
         owner_id: str,
         windows: Sequence[tuple[int, int]],
+        *,
+        observed_head: TranscriptHeadRecord | None = None,
     ) -> tuple[tuple[ModelMessage, ...], ...]:
         require_no_run_history_lock("TranscriptRepository.load_message_spans")
         if not windows:
             return ()
         if any(start < 0 or end < start for start, end in windows):
             raise AIError(ErrorCode.STORAGE_CONFLICT)
-        head = await self.get_head(owner_id)
-        if head is None:
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        head = await self._resolve_observed_head(owner_id, observed_head)
         if any(end > head.message_count for _start, end in windows):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         if all(start == end for start, end in windows):
@@ -1237,7 +1259,11 @@ class TranscriptRepository:
         values: list[list[ModelMessage]] = [[] for _ in windows]
         stop_at = max(end for _, end in windows)
         read_from = min(start for start, _ in windows)
-        after_sequence = await self._seek_fact_sequence(owner_id, read_from)
+        after_sequence = await self._seek_fact_sequence(
+            owner_id,
+            read_from,
+            observed_head=head,
+        )
         while True:
             facts = await self._store.read(
                 lambda transaction, sequence=after_sequence: transaction.list_facts(
@@ -1283,12 +1309,11 @@ class TranscriptRepository:
         view_index: int,
         *,
         dimension: TranscriptSeekDimension = TranscriptSeekDimension.MESSAGE,
+        observed_head: TranscriptHeadRecord | None = None,
     ) -> int | None:
         if view_index < 0:
             raise AIError(ErrorCode.STORAGE_CONFLICT)
-        head = await self.get_head(owner_id)
-        if head is None:
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        head = await self._resolve_observed_head(owner_id, observed_head)
         version = {
             TranscriptSeekDimension.MESSAGE: 1,
             TranscriptSeekDimension.SESSION_HISTORY_ITEM: head.session_history_view_version,
@@ -1308,6 +1333,22 @@ class TranscriptRepository:
         if seek.block_start != block or seek.dimension is not dimension:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         return seek.fact_sequence - 1 if seek.fact_sequence > 0 else None
+
+    async def _resolve_observed_head(
+        self,
+        owner_id: str,
+        observed_head: TranscriptHeadRecord | None,
+    ) -> TranscriptHeadRecord:
+        head = observed_head
+        if head is None:
+            head = await self.get_head(owner_id)
+        if (
+            head is None
+            or head.owner_domain is not self._owner_domain
+            or head.owner_id != owner_id
+        ):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        return head
 
     def _validate_spans(
         self,
@@ -1498,9 +1539,13 @@ class TranscriptRepository:
             owner_id,
             start,
             dimension=dimension,
+            observed_head=head,
         )
-        expected_item_index = (
-            await self._seek_item_start(owner_id, start, dimension=dimension)
+        expected_item_index = await self._seek_item_start(
+            owner_id,
+            start,
+            dimension=dimension,
+            observed_head=head,
         )
         emitted = 0
         while True:
@@ -1547,11 +1592,10 @@ class TranscriptRepository:
         view_index: int,
         *,
         dimension: TranscriptSeekDimension,
+        observed_head: TranscriptHeadRecord | None = None,
     ) -> int:
         block = (view_index // _TRANSCRIPT_SEEK_BLOCK) * _TRANSCRIPT_SEEK_BLOCK
-        head = await self.get_head(owner_id)
-        if head is None:
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        head = await self._resolve_observed_head(owner_id, observed_head)
         version = {
             TranscriptSeekDimension.SESSION_HISTORY_ITEM: head.session_history_view_version,
             TranscriptSeekDimension.EXECUTION_TRANSCRIPT_ITEM: (
