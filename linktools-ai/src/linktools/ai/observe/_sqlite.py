@@ -6,7 +6,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -40,6 +40,14 @@ def _load_json(value: object) -> object:
         return json.loads(value)
     except json.JSONDecodeError as exc:
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from exc
+
+
+def _database_datetime(value: datetime) -> str:
+    return (
+        value.astimezone(timezone.utc)
+        .replace(tzinfo=None)
+        .isoformat(sep=" ", timespec="microseconds")
+    )
 
 
 class SQLiteMetricStore:
@@ -238,7 +246,7 @@ class SQLiteMetricStore:
                         identity,
                         payload_digest,
                         observation.kind,
-                        observation.occurred_at.isoformat(),
+                        _database_datetime(observation.occurred_at),
                         _json(observation_envelope(namespace, observation)),
                     )
                     for identity, (payload_digest, observation) in collapsed.items()
@@ -291,8 +299,8 @@ class SQLiteMetricStore:
                 (
                     namespace_digest(namespace),
                     kind,
-                    start.isoformat(),
-                    end.isoformat(),
+                    _database_datetime(start),
+                    _database_datetime(end),
                     limit,
                 ),
             )
@@ -311,7 +319,7 @@ class SQLiteMetricStore:
             if (
                 row["namespace_digest"] != namespace_key
                 or row["kind"] != observation.kind
-                or row["occurred_at"] != observation.occurred_at.isoformat()
+                or row["occurred_at"] != _database_datetime(observation.occurred_at)
                 or row["observation_digest"]
                 != observation_digest(namespace, observation.observation_id)
                 or row["payload_digest"]
@@ -328,7 +336,7 @@ class SQLiteMetricStore:
                 DELETE FROM ai_metric_observations
                 WHERE namespace_digest = ? AND occurred_at < ?
                 """,
-                (namespace_digest(namespace), before.isoformat()),
+                (namespace_digest(namespace), _database_datetime(before)),
             )
             return int(cursor.rowcount)
 
