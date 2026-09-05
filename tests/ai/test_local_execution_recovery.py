@@ -100,11 +100,6 @@ class _ExecutionState:
         self.executions = _Executions(record)
 
 
-class _Metrics:
-    def count(self, metric: str, **labels: str) -> None:
-        del metric, labels
-
-
 class _StartCommands:
     def __init__(self, execution: ExecutionRecord) -> None:
         self.execution = execution
@@ -144,7 +139,7 @@ def _backend() -> LocalExecutionBackend:
     backend._repository_instruction_provenance = {}
     backend._checkpoint_tasks = set()
     backend._execution_durable_tasks = {}
-    backend._metrics = _Metrics()
+    backend._metric_recorder = None
     return backend
 
 
