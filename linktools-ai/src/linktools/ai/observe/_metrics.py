@@ -165,7 +165,12 @@ class Metrics:
             )
             if total_bytes > _MAX_RECORD_BATCH_CANONICAL_BYTES:
                 raise AIError(ErrorCode.OBSERVATION_PAYLOAD_TOO_LARGE)
-        await self._store.put_observations(self._namespace, batch)
+        try:
+            await self._store.put_observations(self._namespace, batch)
+        except AIError as error:
+            if error.code is not ErrorCode.STORAGE_COMMIT_UNKNOWN:
+                raise
+            await self._store.put_observations(self._namespace, batch)
 
     async def query(self, query: MetricQuery) -> MetricQueryResult:
         if not isinstance(query, MetricQuery):
