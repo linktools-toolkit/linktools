@@ -53,11 +53,7 @@ from ._execution import DefaultExecutionService
 from ._history import StepExecutionHistoryReader, StepSessionHistoryReader
 from ._local import LocalExecutionBackend
 from ._memory import RuntimeMemoryStore
-from ._metrics import (
-    _MetricExecutionTerminalCommitter,
-    _MetricTaskRepository,
-    _RuntimeMetricBuffer,
-)
+from ._metrics import _MetricExecutionTerminalCommitter, _RuntimeMetricBuffer
 from ._object import RuntimeObjectKeyFactory
 from ._planner import DefaultTaskService, RuntimeTaskNodeRunner
 from ._session import DefaultSessionService
@@ -458,6 +454,7 @@ async def _build_local_components(
         raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
     _require_state_identity(state, namespace=namespace, tenant_id=tenant_id)
     metric_buffer = None if metrics is None else _RuntimeMetricBuffer(metrics)
+    metric_source_namespace = None if metric_buffer is None else namespace
     execution = DefaultExecutionService(
         state.execution,
         state.object_store(RuntimeDomain.EXECUTION),
@@ -584,19 +581,12 @@ async def _build_local_components(
             payload_policy=payload_policy,
             handlers=task_handlers,
         )
-        task_repository = (
-            state.task.tasks
-            if metric_buffer is None
-            else _MetricTaskRepository(
-                state.task.tasks,
-                metric_buffer,
-                source_namespace=namespace,
-            )
-        )
         task_launcher = LocalTaskGraphLauncher(
-            task_repository,
+            state.task.tasks,
             task_runner,
             owner=f"runtime:{tenant_id}:{uuid.uuid4().hex}",
+            metric_recorder=metric_buffer,
+            metric_source_namespace=metric_source_namespace,
         )
         task = DefaultTaskService(
             state.task,
@@ -604,6 +594,8 @@ async def _build_local_components(
             task_launcher,
             local_waiter=task_launcher,
             preflight=task_runner,
+            metric_recorder=metric_buffer,
+            metric_source_namespace=metric_source_namespace,
         )
         evaluation = DefaultEvaluationService(
             state.evaluation,
