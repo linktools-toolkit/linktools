@@ -278,6 +278,8 @@ class _TaskNodeRunControlImpl:
 class LocalTaskGraphLauncher:
     """Run admitted TaskGraphs locally while durable state remains authoritative."""
 
+    _metric_projector: _TaskMetricProjector | None = None
+
     def __init__(
         self,
         repository: _TaskRepository,
