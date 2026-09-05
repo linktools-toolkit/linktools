@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING
 from linktools.core import environ
 
 from ..asset import build_asset_sql_metadata
-from ..observe._sql import build_metrics_sql_metadata
+from ..observe import build_metrics_sql_metadata
 from ..runtime.state import (
     RuntimeDomain,
     build_runtime_sql_metadata,
