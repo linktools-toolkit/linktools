@@ -46,6 +46,9 @@ class _RuntimeMetricBuffer(MetricRecorder):
         )
 
     def try_record(self, observation: Observation) -> bool:
+        if not isinstance(observation, Observation):
+            self._drop("runtime metric observation invalid")
+            return False
         if not self._accepting:
             self._drop("runtime metric buffer closed")
             return False
@@ -100,6 +103,7 @@ class _RuntimeMetricBuffer(MetricRecorder):
                 self._queue.task_done()
                 return
             batch = [first]
+            stop_after_batch = False
             while len(batch) < _BATCH_SIZE:
                 try:
                     item = self._queue.get_nowait()
@@ -107,14 +111,16 @@ class _RuntimeMetricBuffer(MetricRecorder):
                     break
                 if item is None:
                     self._queue.task_done()
-                    await self._write(tuple(batch))
-                    for _ in batch:
-                        self._queue.task_done()
-                    return
+                    stop_after_batch = True
+                    break
                 batch.append(item)
-            await self._write(tuple(batch))
-            for _ in batch:
-                self._queue.task_done()
+            try:
+                await self._write(tuple(batch))
+            finally:
+                for _ in batch:
+                    self._queue.task_done()
+            if stop_after_batch:
+                return
 
     async def _write(self, batch: tuple[Observation, ...]) -> None:
         for attempt in range(_WRITE_ATTEMPTS):
