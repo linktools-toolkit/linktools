@@ -274,6 +274,7 @@ class RuntimeState:
         except asyncio.CancelledError:
             pass
         except BaseException:  # noqa: BLE001
+            # A later close() resumes from _close_cursor and retries the failed action.
             pass
 
     async def _run_close_actions(self) -> None:
