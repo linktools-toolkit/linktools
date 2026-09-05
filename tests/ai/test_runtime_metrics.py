@@ -380,6 +380,7 @@ class _CommitUnknownTaskRepository:
         self.status = TaskStatus.READY
         self.fence = 0
         self.complete_calls = 0
+        self.list_event_calls = 0
         self.terminal_time = datetime(2026, 9, 5, 3, 0, tzinfo=timezone.utc)
         self.events = [
             TaskEvent(
@@ -452,6 +453,7 @@ class _CommitUnknownTaskRepository:
         assert graph_id == "graph"
         assert tenant_id == "tenant"
         assert limit == 1000
+        self.list_event_calls += 1
         items = tuple(
             event for event in self.events if event.sequence > after_sequence
         )[:limit]
@@ -601,6 +603,7 @@ async def test_task_commit_unknown_readback_projects_durable_terminal_event() ->
     await launcher.shutdown()
 
     assert repository.complete_calls == 1
+    assert repository.list_event_calls == 1
     attempts = [
         observation
         for observation in recorder.observations
