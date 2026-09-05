@@ -127,6 +127,7 @@ def _backend() -> LocalExecutionBackend:
     backend._accepting = True
     backend._recovery_enabled = False
     backend._tenant_id = "tenant"
+    backend._namespace = "test"
     backend._tasks = {}
     backend._captured_usage = {}
     backend._worker_failures = {}
