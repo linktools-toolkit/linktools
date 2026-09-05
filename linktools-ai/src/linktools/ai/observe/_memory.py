@@ -7,6 +7,7 @@ from __future__ import annotations
 import asyncio
 from datetime import datetime
 
+from ..core import Page
 from ..errors import AIError, ErrorCode
 from ._codec import (
     definition_semantic_digest,
@@ -14,6 +15,7 @@ from ._codec import (
     observation_payload_digest,
 )
 from ._model import MetricDefinition, Observation
+from ._store import _parse_scan_cursor, _scan_cursor
 
 
 class InMemoryMetricStore:
@@ -28,27 +30,34 @@ class InMemoryMetricStore:
         self,
         namespace: str,
         definition: MetricDefinition,
-    ) -> None:
+    ) -> MetricDefinition:
         key = (namespace, definition.name, definition.revision)
         digest = definition_semantic_digest(definition)
         async with self._lock:
             current = self._definitions.get(key)
             if current is None:
                 self._definitions[key] = (digest, definition)
-                return
+                return definition
             if current[0] != digest:
                 raise AIError(ErrorCode.STORAGE_CONFLICT)
+            return current[1]
 
     async def get_definition(
         self,
         namespace: str,
         name: str,
-        revision: int | None,
+        revision: int,
     ) -> MetricDefinition | None:
         async with self._lock:
-            if revision is not None:
-                current = self._definitions.get((namespace, name, revision))
-                return current[1] if current is not None else None
+            current = self._definitions.get((namespace, name, revision))
+            return current[1] if current is not None else None
+
+    async def latest_definition(
+        self,
+        namespace: str,
+        name: str,
+    ) -> MetricDefinition | None:
+        async with self._lock:
             candidates = [
                 value[1]
                 for key, value in self._definitions.items()
@@ -83,12 +92,16 @@ class InMemoryMetricStore:
     async def scan_observations(
         self,
         namespace: str,
-        *,
         kind: str,
         start: datetime,
         end: datetime,
+        *,
+        cursor: str | None,
         limit: int,
-    ) -> tuple[Observation, ...]:
+    ) -> Page[Observation]:
+        if isinstance(limit, bool) or not isinstance(limit, int) or limit < 1:
+            raise AIError(ErrorCode.PAGE_LIMIT_INVALID)
+        after = None if cursor is None else _parse_scan_cursor(cursor)
         async with self._lock:
             values = [
                 value[2]
@@ -103,9 +116,29 @@ class InMemoryMetricStore:
                 observation_digest(namespace, item.observation_id),
             )
         )
-        return tuple(values[:limit])
+        if after is not None:
+            values = [
+                item
+                for item in values
+                if (
+                    item.occurred_at,
+                    observation_digest(namespace, item.observation_id),
+                )
+                > after
+            ]
+        selected = tuple(values[: limit + 1])
+        has_more = len(selected) > limit
+        items = selected[:limit]
+        next_cursor = None
+        if has_more and items:
+            last = items[-1]
+            next_cursor = _scan_cursor(
+                last.occurred_at,
+                observation_digest(namespace, last.observation_id),
+            )
+        return Page(items, next_cursor)
 
-    async def prune(self, namespace: str, *, before: datetime) -> int:
+    async def prune_observations(self, namespace: str, *, before: datetime) -> int:
         async with self._lock:
             keys = [
                 key
