@@ -214,6 +214,86 @@ async def test_sqlite_metrics_require_explicit_provisioning(tmp_path: Path) -> N
         await engine.dispose()
 
 
+@pytest.mark.asyncio
+async def test_sql_metric_batch_conflict_rolls_back_new_rows(tmp_path: Path) -> None:
+    path = tmp_path / "metrics-sql.db"
+    engine = create_async_engine(f"sqlite+aiosqlite:///{path}")
+    metrics = Metrics.sql(engine, namespace="metrics-sql-atomic")
+    definition = MetricDefinition(
+        name="app.atomic.count",
+        revision=1,
+        observation_kind="app.atomic",
+        source=MetricSource.observation_count(),
+        metric_type=MetricType.COUNTER,
+        unit="1",
+        default_aggregation=MetricAggregation.SUM,
+        query_fields=("status",),
+    )
+    occurred_at = datetime(2026, 9, 5, 1, 30, tzinfo=timezone.utc)
+    existing = Observation(
+        version=1,
+        observation_id="existing",
+        kind="app.atomic",
+        occurred_at=occurred_at,
+        source_namespace="workspace",
+        tenant_id="tenant",
+        status="SUCCEEDED",
+        error_code=None,
+        correlation={},
+        dimensions={},
+        measurements=(),
+    )
+    conflicting = Observation(
+        version=1,
+        observation_id="existing",
+        kind="app.atomic",
+        occurred_at=occurred_at,
+        source_namespace="workspace",
+        tenant_id="tenant",
+        status="FAILED",
+        error_code="TEST_FAILURE",
+        correlation={},
+        dimensions={},
+        measurements=(),
+    )
+    new = Observation(
+        version=1,
+        observation_id="new",
+        kind="app.atomic",
+        occurred_at=occurred_at,
+        source_namespace="workspace",
+        tenant_id="tenant",
+        status="SUCCEEDED",
+        error_code=None,
+        correlation={},
+        dimensions={},
+        measurements=(),
+    )
+
+    try:
+        await provision_metrics_database(engine)
+        await metrics.define(definition)
+        await metrics.record_observations((existing,))
+        with pytest.raises(AIError) as raised:
+            await metrics.record_observations((conflicting, new))
+        assert raised.value.code is ErrorCode.STORAGE_CONFLICT
+
+        result = await metrics.query(
+            MetricQuery(
+                "app.atomic.count",
+                MetricWindow.between(
+                    occurred_at - timedelta(seconds=1),
+                    occurred_at + timedelta(seconds=1),
+                ),
+            )
+        )
+        assert len(result.points) == 1
+        assert result.points[0].value == 1
+        assert result.points[0].sample_count == 1
+    finally:
+        await engine.dispose()
+
+
 def test_observation_rejects_boolean_version() -> None:
     with pytest.raises(AIError) as raised:
         Observation(
