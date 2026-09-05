@@ -13,7 +13,7 @@ from time import monotonic
 from linktools.core import environ
 
 from ..core import canonical_sha256
-from ..errors import AIError, ErrorCode
+from ..errors import ErrorCode
 from ..observe import MetricMeasurement, MetricRecorder, Metrics, Observation
 from ._execution import _ExecutionTerminalCommitter
 from .state._contracts import ExecutionTerminalCommit, ExecutionTerminalCommitResult
@@ -380,7 +380,7 @@ def _try_record(
         return False
     try:
         return recorder.try_record(factory())
-    except (AIError, TypeError, ValueError):
+    except Exception:
         _logger.exception("runtime metric observation rejected")
         return False
 
