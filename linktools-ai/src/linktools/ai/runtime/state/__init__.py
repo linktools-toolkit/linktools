@@ -134,7 +134,6 @@ from ._store import (
     RecordScanCursor,
     StateGroupTransaction,
     StateLockOrderError,
-    StateStepArchive,
     StateStorageGroup,
     StateStore,
     StateTransaction,
