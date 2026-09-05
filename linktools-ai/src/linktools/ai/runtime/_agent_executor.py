@@ -113,9 +113,10 @@ from ._capabilities import (
     tool_name_allowed,
 )
 from ._input import _RuntimeUserPrompt, _restore_user_prompt
-from ._metric_capability import _RuntimeMetricCapability
+from ._metric_capability import _RuntimeModelMetricCapability
 from ._skill_adapter import _PydanticSkillCapability
 from ._subagent_adapter import _PydanticSubagentCapability
+from ._tool_metrics import _ToolMetricContext
 
 _logger = environ.get_logger("ai.runtime.agent_executor")
 _RUNTIME_RESERVED_TOOL_NAMES = frozenset(
@@ -397,10 +398,7 @@ class AgentExecutor:
                     status=status,
                     error_code=error_code,
                     correlation=correlation,
-                    dimensions={
-                        "agent_id": scope.binding.definition.spec.id,
-                        "mode": scope.mode,
-                    },
+                    dimensions={"agent_id": scope.binding.definition.spec.id},
                     measurements=(
                         MetricMeasurement(
                             "latency_ns",
@@ -461,6 +459,7 @@ class AgentExecutor:
             model=model,
             skill_sources=self._skill_sources,
             deferred_pause_sink=capture_deferred_step,
+            metrics=self._metrics,
         )
         presentation = _ToolPresentation(
             definition.ordinary_tool_policy,
@@ -484,7 +483,7 @@ class AgentExecutor:
         runtime_capabilities: tuple[AbstractCapability[object], ...] = ()
         if self._metrics is not None:
             runtime_capabilities = (
-                _RuntimeMetricCapability(
+                _RuntimeModelMetricCapability(
                     self._metrics,
                     source_namespace=scope.context.workspace.workspace_id,
                     tenant_id=scope.context.principal.tenant_id,
@@ -641,6 +640,7 @@ async def _materialize_agent(
     model: Model,
     skill_sources: SkillSourceRegistry,
     deferred_pause_sink: Callable[[int], None],
+    metrics: MetricRecorder | None,
 ) -> tuple[
     PydanticAgent[RunContext[object], object],
     tuple[AbstractCapability[RunContext[object]], ...],
@@ -713,6 +713,19 @@ async def _materialize_agent(
                 ),
             )
         )
+    tool_metrics = (
+        None
+        if metrics is None
+        else _ToolMetricContext(
+            metrics,
+            source_namespace=scope.context.workspace.workspace_id,
+            tenant_id=scope.context.principal.tenant_id,
+            execution_id=scope.context.execution_id,
+            session_id=scope.context.session_id,
+            step_run_id=scope.step_run_id,
+            agent_id=definition.spec.id,
+        )
+    )
     platform = await compose_platform_capabilities(
         agent_name=definition.spec.id,
         conversation_id=scope.conversation_id,
@@ -732,6 +745,7 @@ async def _materialize_agent(
         background_tasks=scope.background_tasks,
         plan_store_resolver=scope.plan_store_resolver,
         deferred_pause_sink=deferred_pause_sink,
+        tool_metrics=tool_metrics,
     )
     platform = tuple(
         _RuntimePersistenceBoundary(capability)
