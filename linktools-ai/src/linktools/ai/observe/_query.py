@@ -8,23 +8,28 @@ import math
 from collections import defaultdict
 from datetime import datetime
 
+from ..core import canonical_json_bytes
 from ..errors import AIError, ErrorCode
-from ._codec import observation_digest
+from ._codec import observation_digest, observation_envelope
 from ._model import (
     MetricAggregation,
     MetricDefinition,
+    MetricPoint,
     MetricQuery,
-    MetricQueryPoint,
     MetricQueryResult,
     MetricSourceKind,
     Observation,
+    validate_metric_value,
 )
 from ._store import MetricStore
 
+_SCAN_PAGE_SIZE = 512
 _MAX_SCANNED_OBSERVATIONS = 100_000
+_MAX_SCANNED_CANONICAL_BYTES = 64 * 1024 * 1024
 _MAX_EXTRACTED_SAMPLES = 100_000
-_MAX_GROUPS = 1_000
-_MAX_BUCKETS = 10_000
+_MAX_GROUPS = 256
+_MAX_BUCKETS = 2_048
+_MAX_RESULT_POINTS = 16_384
 
 
 def _facet(observation: Observation, field: str) -> str | None:
@@ -60,6 +65,19 @@ def _sample(
         ):
             return measurement.value
     return None
+
+
+def _validated_sample(
+    definition: MetricDefinition,
+    observation: Observation,
+) -> int | float | None:
+    sample = _sample(definition, observation)
+    if sample is None:
+        return None
+    try:
+        return validate_metric_value(definition.metric_type, sample)
+    except AIError as error:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
 
 
 def _empty_value(aggregation: MetricAggregation) -> int | float | None:
@@ -109,9 +127,9 @@ async def execute_query(
     definition: MetricDefinition,
     query: MetricQuery,
 ) -> MetricQueryResult:
-    aggregation = query.aggregation or definition.default_aggregation
     from ._model import _ALLOWED_AGGREGATIONS
 
+    aggregation = query.aggregation or definition.default_aggregation
     if aggregation not in _ALLOWED_AGGREGATIONS[definition.metric_type]:
         raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
     if aggregation is MetricAggregation.PERCENTILE and query.percentile is None:
@@ -125,21 +143,14 @@ async def execute_query(
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
 
     start, end = query.window.resolve()
+    window_delta = end - start
     bucket_count = 1
     if query.bucket is not None:
-        bucket_count = math.ceil((end - start) / query.bucket)
+        if query.bucket > window_delta:
+            raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+        bucket_count = math.ceil(window_delta / query.bucket)
         if bucket_count > _MAX_BUCKETS:
             raise AIError(ErrorCode.METRIC_QUERY_LIMIT_EXCEEDED)
-
-    observations = await store.scan_observations(
-        namespace,
-        kind=definition.observation_kind,
-        start=start,
-        end=end,
-        limit=_MAX_SCANNED_OBSERVATIONS + 1,
-    )
-    if len(observations) > _MAX_SCANNED_OBSERVATIONS:
-        raise AIError(ErrorCode.METRIC_QUERY_LIMIT_EXCEEDED)
 
     groups: dict[
         tuple[str | None, ...],
@@ -150,76 +161,121 @@ async def execute_query(
         list[tuple[int | float, datetime, str]],
     ] = defaultdict(list)
     actual_groups: set[tuple[str | None, ...]] = set()
-    sample_count = 0
+    scanned_count = 0
+    scanned_bytes = 0
+    extracted_count = 0
+    cursor: str | None = None
 
-    for observation in observations:
-        if any(
-            _facet(observation, key) != value
-            for key, value in query.filters.items()
-        ):
-            continue
-        sample = _sample(definition, observation)
-        if sample is None:
-            continue
-        group = tuple(_facet(observation, field) for field in query.group_by)
-        if query.group_by:
-            actual_groups.add(group)
-            if len(actual_groups) > _MAX_GROUPS:
-                raise AIError(ErrorCode.METRIC_QUERY_LIMIT_EXCEEDED)
-        sample_count += 1
-        if sample_count > _MAX_EXTRACTED_SAMPLES:
-            raise AIError(ErrorCode.METRIC_QUERY_LIMIT_EXCEEDED)
-        item = (
-            sample,
-            observation.occurred_at,
-            observation_digest(namespace, observation.observation_id),
+    while True:
+        page = await store.scan_observations(
+            namespace,
+            definition.observation_kind,
+            start,
+            end,
+            cursor=cursor,
+            limit=_SCAN_PAGE_SIZE,
         )
-        if query.bucket is None:
-            groups[group].append(item)
-        else:
-            index = int((observation.occurred_at - start) // query.bucket)
-            if 0 <= index < bucket_count:
-                bucket_groups[(group, index)].append(item)
+        if len(page.items) > _SCAN_PAGE_SIZE:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        if not page.items and page.next_cursor is not None:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+
+        for observation in page.items:
+            scanned_count += 1
+            if scanned_count > _MAX_SCANNED_OBSERVATIONS:
+                raise AIError(ErrorCode.METRIC_QUERY_LIMIT_EXCEEDED)
+            scanned_bytes += len(
+                canonical_json_bytes(observation_envelope(namespace, observation))
+            )
+            if scanned_bytes > _MAX_SCANNED_CANONICAL_BYTES:
+                raise AIError(ErrorCode.METRIC_QUERY_LIMIT_EXCEEDED)
+
+            if any(
+                _facet(observation, key) != value
+                for key, value in query.filters.items()
+            ):
+                continue
+            sample = _validated_sample(definition, observation)
+            if sample is None:
+                continue
+            extracted_count += 1
+            if extracted_count > _MAX_EXTRACTED_SAMPLES:
+                raise AIError(ErrorCode.METRIC_QUERY_LIMIT_EXCEEDED)
+
+            group = tuple(_facet(observation, field) for field in query.group_by)
+            if query.group_by:
+                actual_groups.add(group)
+                if len(actual_groups) > _MAX_GROUPS:
+                    raise AIError(ErrorCode.METRIC_QUERY_LIMIT_EXCEEDED)
+
+            item = (
+                sample,
+                observation.occurred_at,
+                observation_digest(namespace, observation.observation_id),
+            )
+            if query.bucket is None:
+                groups[group].append(item)
+            else:
+                index = int((observation.occurred_at - start) // query.bucket)
+                if 0 <= index < bucket_count:
+                    bucket_groups[(group, index)].append(item)
+
+        next_cursor = page.next_cursor
+        if next_cursor is None:
+            break
+        if next_cursor == cursor:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        cursor = next_cursor
 
     result_unit = (
-        f"{definition.unit}/s"
+        "1"
+        if aggregation is MetricAggregation.COUNT
+        else f"{definition.unit}/s"
         if aggregation is MetricAggregation.RATE
         else definition.unit
     )
-    points: list[MetricQueryPoint] = []
+    points: list[MetricPoint] = []
+
+    result_groups = (
+        sorted(actual_groups, key=_group_sort_key) if query.group_by else [()]
+    )
+    if query.bucket is not None:
+        expected_points = len(result_groups) * bucket_count
+    else:
+        expected_points = len(result_groups)
+    if expected_points > _MAX_RESULT_POINTS:
+        raise AIError(ErrorCode.METRIC_QUERY_LIMIT_EXCEEDED)
 
     if query.bucket is None:
-        result_groups = (
-            sorted(actual_groups, key=_group_sort_key) if query.group_by else [()]
-        )
         if not query.group_by and () not in groups:
             groups[()] = []
         for group in result_groups:
             samples = groups.get(group, [])
             points.append(
-                MetricQueryPoint(
-                    dimensions=dict(zip(query.group_by, group)),
+                MetricPoint(
+                    dimensions=tuple(zip(query.group_by, group, strict=True)),
+                    bucket_start=None,
+                    bucket_end=None,
                     value=_aggregate(
                         aggregation,
                         samples,
                         percentile=query.percentile,
-                        seconds=(end - start).total_seconds(),
+                        seconds=window_delta.total_seconds(),
                     ),
                     sample_count=len(samples),
                 )
             )
     else:
-        result_groups = (
-            sorted(actual_groups, key=_group_sort_key) if query.group_by else [()]
-        )
         for group in result_groups:
             for index in range(bucket_count):
                 bucket_start = start + query.bucket * index
                 bucket_end = min(end, bucket_start + query.bucket)
                 samples = bucket_groups.get((group, index), [])
                 points.append(
-                    MetricQueryPoint(
-                        dimensions=dict(zip(query.group_by, group)),
+                    MetricPoint(
+                        dimensions=tuple(zip(query.group_by, group, strict=True)),
+                        bucket_start=bucket_start,
+                        bucket_end=bucket_end,
                         value=_aggregate(
                             aggregation,
                             samples,
@@ -227,8 +283,6 @@ async def execute_query(
                             seconds=(bucket_end - bucket_start).total_seconds(),
                         ),
                         sample_count=len(samples),
-                        bucket_start=bucket_start,
-                        bucket_end=bucket_end,
                     )
                 )
 
