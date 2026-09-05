@@ -27,7 +27,7 @@ from ._graph import (
     TaskNodeView,
     TaskResultRecord,
 )
-from ._metrics import record_task_event
+from ._metrics import _TaskMetricProjector
 
 _logger = environ.get_logger("ai.task.local")
 _HEARTBEAT_SECONDS = 30.0
@@ -149,6 +149,13 @@ class _TaskRepository(Protocol):
         limit: int,
     ) -> Page[TaskEvent]: ...
 
+    async def latest_event(
+        self,
+        graph_id: str,
+        *,
+        tenant_id: str,
+    ) -> TaskEvent | None: ...
+
     async def claim(
         self,
         graph_id: str,
@@ -205,7 +212,6 @@ class _GraphRun:
     task: "asyncio.Task[None] | None" = None
     condition: asyncio.Condition = field(default_factory=asyncio.Condition)
     generation: int = 0
-    metric_event_sequence: int = 0
     failure: "AIError | None" = None
     closed: bool = False
 
@@ -292,8 +298,15 @@ class LocalTaskGraphLauncher:
         self._repository = repository
         self._runner = runner
         self._owner = owner
-        self._metric_recorder = metric_recorder
-        self._metric_source_namespace = metric_source_namespace
+        self._metric_projector = (
+            None
+            if metric_recorder is None or metric_source_namespace is None
+            else _TaskMetricProjector(
+                repository,
+                metric_recorder,
+                source_namespace=metric_source_namespace,
+            )
+        )
         self._graphs: dict[tuple[str, str], _GraphRun] = {}
         self._lock = asyncio.Lock()
         self._accepting = True
@@ -336,19 +349,6 @@ class LocalTaskGraphLauncher:
         if view is None:
             raise AIError(ErrorCode.STORAGE_NOT_FOUND)
         states = await self._repository.list_nodes(graph_id, tenant_id=tenant_id)
-        async with self._lock:
-            active_run = self._graphs.get(key)
-            metric_sequence = (
-                0 if active_run is None else active_run.metric_event_sequence
-            )
-        metric_sequence = await self._observe_metric_events(
-            graph_id,
-            tenant_id=tenant_id,
-            nodes=view.nodes,
-            after_sequence=metric_sequence,
-        )
-        if active_run is not None:
-            active_run.metric_event_sequence = metric_sequence
         static = {node.node_id: node for node in view.nodes}
         cleanup_error: BaseException | None = None
         for state in states:
@@ -385,6 +385,8 @@ class LocalTaskGraphLauncher:
             await asyncio.gather(task, return_exceptions=True)
         if run is not None:
             await self._notify(run)
+        if self._metric_projector is not None and view.status in _TERMINAL:
+            self._metric_projector.trigger(graph_id, tenant_id=tenant_id)
         if cleanup_error is not None:
             if isinstance(cleanup_error, AIError):
                 raise cleanup_error
@@ -428,6 +430,8 @@ class LocalTaskGraphLauncher:
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
         await self._drain_runner_background()
+        if self._metric_projector is not None:
+            await self._metric_projector.close()
         async with self._lock:
             self._graphs.clear()
 
@@ -508,23 +512,15 @@ class LocalTaskGraphLauncher:
                     observed_fingerprint = fingerprint
                     await self._notify(run)
                 if view.status in _TERMINAL:
-                    run.metric_event_sequence = await self._observe_metric_events(
-                        request.graph.graph_id,
-                        tenant_id=tenant_id,
-                        nodes=request.graph.nodes,
-                        after_sequence=run.metric_event_sequence,
-                    )
+                    if self._metric_projector is not None:
+                        self._metric_projector.trigger(
+                            request.graph.graph_id,
+                            tenant_id=tenant_id,
+                        )
                     if view.status in {TaskStatus.FAILED, TaskStatus.BLOCKED}:
                         await self._cancel_terminal_effects(run, states)
                     return
-                reaped = _reap_inflight(inflight)
-                if reaped:
-                    run.metric_event_sequence = await self._observe_metric_events(
-                        request.graph.graph_id,
-                        tenant_id=tenant_id,
-                        nodes=request.graph.nodes,
-                        after_sequence=run.metric_event_sequence,
-                    )
+                _reap_inflight(inflight)
                 persisted = {
                     state.node_id
                     for state in states
@@ -600,46 +596,6 @@ class LocalTaskGraphLauncher:
                 async with self._lock:
                     if self._graphs.get(key) is run:
                         self._graphs.pop(key, None)
-
-    async def _observe_metric_events(
-        self,
-        graph_id: str,
-        *,
-        tenant_id: str,
-        nodes: tuple[TaskNode, ...],
-        after_sequence: int,
-    ) -> int:
-        if self._metric_recorder is None or self._metric_source_namespace is None:
-            return after_sequence
-        cursor = after_sequence
-        static = {node.node_id: node for node in nodes}
-        try:
-            while True:
-                page = await self._repository.list_events(
-                    graph_id,
-                    tenant_id=tenant_id,
-                    after_sequence=cursor,
-                    limit=1000,
-                )
-                for event in page.items:
-                    cursor = event.sequence
-                    record_task_event(
-                        self._metric_recorder,
-                        source_namespace=self._metric_source_namespace,
-                        tenant_id=tenant_id,
-                        event=event,
-                        nodes=static,
-                    )
-                if page.next_cursor is None or not page.items:
-                    return cursor
-        except Exception as error:
-            _logger.warning(
-                "task metric event projection skipped: graph=%s after_sequence=%s error=%s",
-                graph_id,
-                cursor,
-                type(error).__name__,
-            )
-            return cursor
 
     async def _cancel_terminal_effects(
         self,
