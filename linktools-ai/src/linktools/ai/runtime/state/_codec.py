@@ -421,6 +421,26 @@ def _encode_v1_execution_record(
     return encoded
 
 
+def _encode_v1_task_graph_admission(
+    value: object,
+    codec: "_VersionCodec",
+    persisted: bool,
+) -> Mapping[str, JsonValue]:
+    if not isinstance(value, TaskGraphAdmission):
+        raise TypeError("V1 task_graph_admission encoder received the wrong type")
+    encoded = {
+        field.name: _encode_domain(
+            attrgetter(field.name)(value),
+            codec,
+            persisted=persisted,
+        )
+        for field in fields(value)
+    }
+    if not value.context:
+        encoded.pop("context", None)
+    return encoded
+
+
 def _encode_v1_recovery_terminal_outcome(
     value: object,
     codec: "_VersionCodec",
@@ -435,6 +455,7 @@ _V1_DATACLASS_ENCODERS: Mapping[str, DataclassEncoder] = MappingProxyType(
     {
         "execution_record": _encode_v1_execution_record,
         "recovery_terminal_outcome": _encode_v1_recovery_terminal_outcome,
+        "task_graph_admission": _encode_v1_task_graph_admission,
         "task_node": _encode_v1_task_node,
         "task_result": _encode_v1_task_result,
     }
@@ -1763,6 +1784,7 @@ def _validate_v1_codec_definition() -> None:
     custom_encoders = {
         "execution_record",
         "recovery_terminal_outcome",
+        "task_graph_admission",
         "task_node",
         "task_result",
     }
