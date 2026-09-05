@@ -142,6 +142,24 @@ async def test_sqlite_metrics_require_explicit_provisioning(tmp_path: Path) -> N
         await engine.dispose()
 
 
+def test_observation_rejects_boolean_version() -> None:
+    with pytest.raises(AIError) as raised:
+        Observation(
+            version=True,  # type: ignore[arg-type]
+            observation_id="observation",
+            kind="app.request",
+            occurred_at=datetime(2026, 9, 5, tzinfo=timezone.utc),
+            source_namespace="workspace",
+            tenant_id="tenant",
+            status="SUCCEEDED",
+            error_code=None,
+            correlation={},
+            dimensions={},
+            measurements=(),
+        )
+    assert raised.value.code is ErrorCode.REQUEST_FIELD_INVALID
+
+
 def test_metric_codec_rejects_invalid_persisted_types() -> None:
     definition_payload = definition_envelope("metrics-codec", _latency_definition())
     definition_data = cast(
