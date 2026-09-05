@@ -37,10 +37,11 @@ class _RecordingRunner:
         *,
         graph_id: str,
         principal: Principal,
+        context: Mapping[str, str | int],
         dependency_results: Mapping[str, TaskDependencyResult],
         control: TaskNodeRunControl,
     ) -> TaskNodeRunResult:
-        del node, graph_id, principal, dependency_results, control
+        del node, graph_id, principal, context, dependency_results, control
         raise AssertionError(
             "runner must not start during explicit remote cancellation"
         )
@@ -51,9 +52,10 @@ class _RecordingRunner:
         *,
         graph_id: str,
         principal: Principal,
+        context: Mapping[str, str | int],
         dependency_results: Mapping[str, TaskDependencyResult],
     ) -> None:
-        del graph_id, principal, dependency_results
+        del graph_id, principal, context, dependency_results
         self.cancelled_nodes.append(node.node_id)
 
 
@@ -68,10 +70,11 @@ class _BlockingRunner:
         *,
         graph_id: str,
         principal: Principal,
+        context: Mapping[str, str | int],
         dependency_results: Mapping[str, TaskDependencyResult],
         control: TaskNodeRunControl,
     ) -> TaskNodeRunResult:
-        del node, graph_id, principal, dependency_results, control
+        del node, graph_id, principal, context, dependency_results, control
         self.entered.set()
         try:
             await asyncio.Event().wait()
@@ -86,9 +89,10 @@ class _BlockingRunner:
         *,
         graph_id: str,
         principal: Principal,
+        context: Mapping[str, str | int],
         dependency_results: Mapping[str, TaskDependencyResult],
     ) -> None:
-        del node, graph_id, principal, dependency_results
+        del node, graph_id, principal, context, dependency_results
 
 
 class _AllowAuthorization:
@@ -337,10 +341,11 @@ async def test_inflight_node_does_not_suppress_expired_foreign_lease_reclaim(
             *,
             graph_id: str,
             principal: Principal,
+            context: Mapping[str, str | int],
             dependency_results: Mapping[str, TaskDependencyResult],
             control: TaskNodeRunControl,
         ) -> TaskNodeRunResult:
-            del graph_id, principal, dependency_results, control
+            del graph_id, principal, context, dependency_results, control
             if node.node_id == "foreign":
                 self.foreign_reclaimed.set()
                 return TaskNodeRunResult("a" * 64)
@@ -358,9 +363,10 @@ async def test_inflight_node_does_not_suppress_expired_foreign_lease_reclaim(
             *,
             graph_id: str,
             principal: Principal,
+            context: Mapping[str, str | int],
             dependency_results: Mapping[str, TaskDependencyResult],
         ) -> None:
-            del node, graph_id, principal, dependency_results
+            del node, graph_id, principal, context, dependency_results
 
     state = RuntimeState.in_memory()
     await state.initialize(
