@@ -26,7 +26,7 @@ from ..core import (
     idempotency_key_digest as compute_idempotency_key_digest,
 )
 from ..errors import AIError, ErrorCode
-from ..observe import RunSnapshot
+from ._snapshot import RunSnapshot
 from .service_api import (
     CompareEvaluationRequest,
     EvaluationComparison,
