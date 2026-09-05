@@ -370,6 +370,7 @@ class DefaultSessionService:
                 mode=request.mode,
                 planning=request.planning,
                 thinking=request.thinking,
+                context=request.context,
             )
             try:
                 return await self._execution.run_for_session(
