@@ -13,7 +13,6 @@ from linktools.ai.core import Principal, TaskStatus
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.runtime import RuntimeState
 from linktools.ai.task import (
-    CancelGraphRequest,
     LocalTaskGraphLauncher,
     TaskDependencyResult,
     TaskGraph,
@@ -186,13 +185,14 @@ async def test_explicit_cancel_cleans_running_node_without_local_scheduler_owner
         )
         runner = _RecordingRunner()
         launcher = LocalTaskGraphLauncher(repository, runner, owner="local-worker")
-        principal = trusted_workspace_principal("tenant")
         await repository.cancel_graph(graph.graph_id, tenant_id="tenant")
-
-        view = await launcher.cancel(
-            graph.graph_id,
-            CancelGraphRequest(principal, "remote-cancel-request-0001"),
+        launch = TaskGraphLaunch(
+            graph,
+            Principal("task-test", "tenant"),
+            TaskGraphLimits(),
         )
+
+        view = await launcher.cancel(launch)
 
         assert view.status is TaskStatus.CANCELLED
         assert runner.cancelled_nodes == ["node"]
