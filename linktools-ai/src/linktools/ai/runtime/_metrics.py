@@ -9,7 +9,6 @@ import uuid
 from collections.abc import Callable, Mapping
 from datetime import datetime, timezone
 from time import monotonic
-from typing import Protocol
 
 from linktools.core import environ
 
@@ -25,7 +24,12 @@ from ..task import (
     TaskResultRecord,
     TaskTerminalRecord,
 )
-from .state import ExecutionTerminalCommit, ExecutionTerminalCommitResult, TaskRepository
+from ._execution import _ExecutionTerminalCommitter
+from .state._contracts import (
+    ExecutionTerminalCommit,
+    ExecutionTerminalCommitResult,
+    TaskRepository,
+)
 
 _logger = environ.get_logger("ai.runtime.metrics")
 _QUEUE_CAPACITY = 1024
@@ -47,8 +51,6 @@ class _RuntimeMetricBuffer(MetricRecorder):
     """Bound one Runtime's automatic observations without owning the Metrics store."""
 
     def __init__(self, metrics: Metrics) -> None:
-        if not isinstance(metrics, Metrics):
-            raise TypeError("metrics must be Metrics")
         self._metrics = metrics
         self._queue: asyncio.Queue[Observation | None] = asyncio.Queue(
             maxsize=_QUEUE_CAPACITY
@@ -64,8 +66,8 @@ class _RuntimeMetricBuffer(MetricRecorder):
         )
 
     def try_record(self, observation: Observation) -> bool:
-        if not self._accepting or not isinstance(observation, Observation):
-            self._drop("invalid or closed metric observation")
+        if not self._accepting:
+            self._drop("runtime metric buffer closed")
             return False
         try:
             self._queue.put_nowait(observation)
@@ -197,15 +199,6 @@ class _RuntimeMetricBuffer(MetricRecorder):
         except BaseException:
             self._write_failures += 1
             self._warn("runtime metric writer failed")
-
-
-class _ExecutionTerminalCommitter(Protocol):
-    async def commit_terminal_checkpoint(
-        self,
-        commit: ExecutionTerminalCommit,
-        *,
-        session_id: str | None,
-    ) -> ExecutionTerminalCommitResult: ...
 
 
 class _MetricExecutionTerminalCommitter:
@@ -389,7 +382,12 @@ class _MetricTaskRepository:
                 view.graph_id,
                 tenant_id=tenant_id,
             )
-        except Exception:
+        except Exception as error:
+            _logger.warning(
+                "task graph metric projection skipped: graph=%s error=%s",
+                view.graph_id,
+                type(error).__name__,
+            )
             event = None
         if (
             event is not None
@@ -587,7 +585,7 @@ def _try_record(
     try:
         return recorder.try_record(factory())
     except (AIError, TypeError, ValueError):
-        _logger.warning("runtime metric observation rejected", exc_info=False)
+        _logger.exception("runtime metric observation rejected")
         return False
 
 
