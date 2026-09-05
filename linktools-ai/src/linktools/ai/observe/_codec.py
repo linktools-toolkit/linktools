@@ -125,6 +125,36 @@ def _mapping(value: object, *, field: str) -> Mapping[str, Any]:
     return value
 
 
+def _text(value: object, *, field: str) -> str:
+    if not isinstance(value, str):
+        raise TypeError(f"{field} must be a string")
+    return value
+
+
+def _optional_text(value: object, *, field: str) -> str | None:
+    if value is None:
+        return None
+    return _text(value, field=field)
+
+
+def _integer(value: object, *, field: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise TypeError(f"{field} must be an integer")
+    return value
+
+
+def _optional_integer(value: object, *, field: str) -> int | None:
+    if value is None:
+        return None
+    return _integer(value, field=field)
+
+
+def _text_tuple(value: object, *, field: str) -> tuple[str, ...]:
+    if not isinstance(value, list):
+        raise TypeError(f"{field} must be a list")
+    return tuple(_text(item, field=field) for item in value)
+
+
 def decode_definition_envelope(
     payload: object, *, expected_namespace: str
 ) -> MetricDefinition:
@@ -140,39 +170,43 @@ def decode_definition_envelope(
     source_data = _mapping(data.get("source"), field="metric source")
     try:
         source = MetricSource(
-            kind=MetricSourceKind(str(source_data["kind"])),
-            measurement_name=(
-                str(source_data["measurement_name"])
-                if source_data.get("measurement_name") is not None
-                else None
+            kind=MetricSourceKind(_text(source_data["kind"], field="source kind")),
+            measurement_name=_optional_text(
+                source_data.get("measurement_name"),
+                field="measurement_name",
             ),
-            measurement_revision=(
-                int(source_data["measurement_revision"])
-                if source_data.get("measurement_revision") is not None
-                else None
+            measurement_revision=_optional_integer(
+                source_data.get("measurement_revision"),
+                field="measurement_revision",
             ),
-            indicator_field=(
-                str(source_data["indicator_field"])
-                if source_data.get("indicator_field") is not None
-                else None
+            indicator_field=_optional_text(
+                source_data.get("indicator_field"),
+                field="indicator_field",
             ),
-            indicator_values=tuple(
-                str(item) for item in source_data.get("indicator_values", ())
+            indicator_values=_text_tuple(
+                source_data.get("indicator_values", []),
+                field="indicator_values",
             ),
         )
         return MetricDefinition(
-            name=str(data["name"]),
-            revision=int(data["revision"]),
-            observation_kind=str(data["observation_kind"]),
+            name=_text(data["name"], field="name"),
+            revision=_integer(data["revision"], field="revision"),
+            observation_kind=_text(
+                data["observation_kind"], field="observation_kind"
+            ),
             source=source,
-            metric_type=MetricType(str(data["metric_type"])),
-            unit=str(data["unit"]),
-            default_aggregation=MetricAggregation(str(data["default_aggregation"])),
-            query_fields=tuple(str(item) for item in data.get("query_fields", ())),
-            description=(
-                str(data["description"])
-                if data.get("description") is not None
-                else None
+            metric_type=MetricType(
+                _text(data["metric_type"], field="metric_type")
+            ),
+            unit=_text(data["unit"], field="unit"),
+            default_aggregation=MetricAggregation(
+                _text(data["default_aggregation"], field="default_aggregation")
+            ),
+            query_fields=_text_tuple(
+                data.get("query_fields", []), field="query_fields"
+            ),
+            description=_optional_text(
+                data.get("description"), field="description"
             ),
         )
     except AIError as exc:
@@ -196,10 +230,12 @@ def decode_observation_envelope(
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     data = _mapping(root.get("observation"), field="observation")
     try:
-        occurred_at = datetime.fromisoformat(str(data["occurred_at"]))
+        occurred_at = datetime.fromisoformat(
+            _text(data["occurred_at"], field="occurred_at")
+        )
         correlation_data = _mapping(data.get("correlation", {}), field="correlation")
         dimensions_data = _mapping(data.get("dimensions", {}), field="dimensions")
-        raw_measurements = data.get("measurements", ())
+        raw_measurements = data.get("measurements", [])
         if not isinstance(raw_measurements, list):
             raise TypeError("measurements must be a list")
         measurements = []
@@ -207,36 +243,36 @@ def decode_observation_envelope(
             item = _mapping(raw, field="measurement")
             measurements.append(
                 MetricMeasurement(
-                    name=str(item["name"]),
-                    revision=int(item["revision"]),
+                    name=_text(item["name"], field="measurement name"),
+                    revision=_integer(
+                        item["revision"], field="measurement revision"
+                    ),
                     value=item["value"],
                 )
             )
         correlation: dict[str, str | int] = {}
         for key, value in correlation_data.items():
+            if not isinstance(key, str):
+                raise TypeError("invalid correlation key")
             if isinstance(value, bool) or not isinstance(value, (str, int)):
                 raise TypeError("invalid correlation value")
-            correlation[str(key)] = value
-        dimensions = {str(key): str(value) for key, value in dimensions_data.items()}
+            correlation[key] = value
+        dimensions: dict[str, str] = {}
+        for key, value in dimensions_data.items():
+            if not isinstance(key, str) or not isinstance(value, str):
+                raise TypeError("invalid dimension value")
+            dimensions[key] = value
         return Observation(
-            version=int(data["version"]),
-            observation_id=str(data["observation_id"]),
-            kind=str(data["kind"]),
+            version=_integer(data["version"], field="version"),
+            observation_id=_text(data["observation_id"], field="observation_id"),
+            kind=_text(data["kind"], field="kind"),
             occurred_at=occurred_at,
-            source_namespace=(
-                str(data["source_namespace"])
-                if data.get("source_namespace") is not None
-                else None
+            source_namespace=_optional_text(
+                data.get("source_namespace"), field="source_namespace"
             ),
-            tenant_id=(
-                str(data["tenant_id"]) if data.get("tenant_id") is not None else None
-            ),
-            status=str(data["status"]) if data.get("status") is not None else None,
-            error_code=(
-                str(data["error_code"])
-                if data.get("error_code") is not None
-                else None
-            ),
+            tenant_id=_optional_text(data.get("tenant_id"), field="tenant_id"),
+            status=_optional_text(data.get("status"), field="status"),
+            error_code=_optional_text(data.get("error_code"), field="error_code"),
             correlation=correlation,
             dimensions=dimensions,
             measurements=tuple(measurements),
