@@ -28,7 +28,6 @@ from ..core import (
     validate_user_prompt,
 )
 from ..errors import AIError, ErrorCode, ErrorDiagnostics
-from ..observe import RunSnapshot
 from ..storage import ObjectRef
 from ..task import (
     CancelGraphRequest,
@@ -39,6 +38,7 @@ from ..task import (
     TaskGraphSnapshot,
     TaskGraphView,
 )
+from ._snapshot import RunSnapshot
 
 
 @dataclass(frozen=True, slots=True)
