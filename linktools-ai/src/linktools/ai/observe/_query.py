@@ -158,14 +158,14 @@ async def execute_query(
             for key, value in query.filters.items()
         ):
             continue
+        sample = _sample(definition, observation)
+        if sample is None:
+            continue
         group = tuple(_facet(observation, field) for field in query.group_by)
         if query.group_by:
             actual_groups.add(group)
             if len(actual_groups) > _MAX_GROUPS:
                 raise AIError(ErrorCode.METRIC_QUERY_LIMIT_EXCEEDED)
-        sample = _sample(definition, observation)
-        if sample is None:
-            continue
         sample_count += 1
         if sample_count > _MAX_EXTRACTED_SAMPLES:
             raise AIError(ErrorCode.METRIC_QUERY_LIMIT_EXCEEDED)
