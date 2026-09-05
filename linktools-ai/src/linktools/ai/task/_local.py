@@ -11,7 +11,15 @@ from typing import Protocol, runtime_checkable
 
 from linktools.core import environ
 
-from ..core import JsonValue, Page, Principal, TaskStatus, canonical_sha256, validate_lease_owner
+from ..core import (
+    JsonValue,
+    Page,
+    Principal,
+    RunContextData,
+    TaskStatus,
+    canonical_sha256,
+    validate_lease_owner,
+)
 from ..errors import AIError, ErrorCode
 from ..observe import MetricRecorder
 from ..storage import StoredPayload
@@ -99,6 +107,7 @@ class TaskNodeRunner(Protocol):
         *,
         graph_id: str,
         principal: Principal,
+        context: RunContextData,
         dependency_results: "Mapping[str, TaskDependencyResult]",
         control: TaskNodeRunControl,
     ) -> TaskNodeRunResult: ...
@@ -109,6 +118,7 @@ class TaskNodeRunner(Protocol):
         *,
         graph_id: str,
         principal: Principal,
+        context: RunContextData,
         dependency_results: "Mapping[str, TaskDependencyResult]",
     ) -> None: ...
 
@@ -347,6 +357,9 @@ class LocalTaskGraphLauncher:
     ) -> TaskGraphView:
         tenant_id = request.principal.tenant_id
         key = (tenant_id, graph_id)
+        async with self._lock:
+            active_run = self._graphs.get(key)
+        context = {} if active_run is None else active_run.request.context
         view = await self._repository.get_graph(graph_id, tenant_id=tenant_id)
         if view is None:
             raise AIError(ErrorCode.STORAGE_NOT_FOUND)
@@ -366,6 +379,7 @@ class LocalTaskGraphLauncher:
                     node,
                     graph_id=graph_id,
                     principal=request.principal,
+                    context=context,
                     dependency_results=await self._dependency_results(
                         graph_id, node, tenant_id=tenant_id
                     ),
@@ -617,6 +631,7 @@ class LocalTaskGraphLauncher:
                 node,
                 graph_id=request.graph.graph_id,
                 principal=request.principal,
+                context=request.context,
                 dependency_results=await self._dependency_results(
                     request.graph.graph_id,
                     node,
@@ -683,6 +698,7 @@ class LocalTaskGraphLauncher:
                 node,
                 graph_id=graph_id,
                 principal=request.principal,
+                context=request.context,
                 dependency_results=dependency_results,
                 control=control,
             ),
