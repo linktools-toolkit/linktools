@@ -2,25 +2,21 @@
 # -*- coding: utf-8 -*-
 """Runtime automatic Metrics producer and fail-open regressions."""
 
+from __future__ import annotations
+
 import asyncio
 from collections.abc import Mapping
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any
 
 import pytest
 from linktools.ai.core import ExecutionStatus, JsonValue, Page, Principal, TaskStatus
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.observe import (
-    MetricQuery,
-    MetricWindow,
-    Metrics,
-    Observation,
-)
+from linktools.ai.observe import MetricQuery, MetricWindow, Metrics, Observation
 from linktools.ai.observe._memory import InMemoryMetricStore
 from linktools.ai.runtime import Runtime
 from linktools.ai.runtime import _metrics as runtime_metrics
-from linktools.ai.runtime._metric_capability import _RuntimeMetricCapability
+from linktools.ai.runtime._metric_capability import _RuntimeModelMetricCapability
 from linktools.ai.spec import AgentSpec, AgentSpecCodec
 from linktools.ai.task import (
     LocalTaskGraphLauncher,
@@ -35,11 +31,8 @@ from linktools.ai.task import (
     TaskNodeRunResult,
     TaskNodeView,
 )
-from linktools.ai.task._metrics import record_task_event
 from linktools.ai.workspace import Workspace
-from pydantic_ai.messages import ToolCallPart
 from pydantic_ai.models.test import TestModel
-from pydantic_ai.tools import ToolDefinition
 
 
 class _TextModelBinding:
@@ -54,7 +47,7 @@ class _TextModelBinding:
 
 
 class _TextModels:
-    def snapshot(self) -> "_TextModels":
+    def snapshot(self) -> _TextModels:
         return self
 
     def resolve(self, route_id: str) -> _TextModelBinding:
@@ -86,7 +79,7 @@ class _CaptureRecorder:
 
 
 class _FailingMetricStore:
-    async def put_definition(self, namespace: str, definition: object) -> None:
+    async def put_definition(self, namespace: str, definition: object) -> object:
         del namespace, definition
         raise AssertionError("automatic producers do not define metrics")
 
@@ -94,9 +87,13 @@ class _FailingMetricStore:
         self,
         namespace: str,
         name: str,
-        revision: int | None,
+        revision: int,
     ) -> None:
         del namespace, name, revision
+        raise AssertionError("automatic producers do not read definitions")
+
+    async def latest_definition(self, namespace: str, name: str) -> None:
+        del namespace, name
         raise AssertionError("automatic producers do not read definitions")
 
     async def put_observations(
@@ -109,13 +106,18 @@ class _FailingMetricStore:
 
     async def scan_observations(
         self,
-        *args: object,
-        **kwargs: object,
-    ) -> tuple[Observation, ...]:
-        del args, kwargs
-        return ()
+        namespace: str,
+        kind: str,
+        start: datetime,
+        end: datetime,
+        *,
+        cursor: str | None,
+        limit: int,
+    ) -> Page[Observation]:
+        del namespace, kind, start, end, cursor, limit
+        return Page(())
 
-    async def prune(self, namespace: str, *, before: datetime) -> int:
+    async def prune_observations(self, namespace: str, *, before: datetime) -> int:
         del namespace, before
         return 0
 
@@ -156,9 +158,7 @@ def _write_default_agent(root: Path) -> None:
     path = root / ".linktools" / "agents" / "default"
     path.parent.mkdir(parents=True)
     path.write_bytes(
-        AgentSpecCodec().encode(
-            AgentSpec("default", model="default", allow_tools=())
-        )
+        AgentSpecCodec().encode(AgentSpec("default", model="default", allow_tools=()))
     )
 
 
@@ -206,21 +206,22 @@ async def test_runtime_projects_model_agent_and_execution_metrics(tmp_path: Path
         assert query.points[0].value == 1
         assert query.points[0].sample_count == 1
 
-    observations = []
+    observations: list[Observation] = []
     for kind in (
         "linktools.model.request",
         "linktools.agent.run",
         "linktools.execution.terminal",
     ):
-        observations.extend(
-            await store.scan_observations(
-                "runtime-metrics",
-                kind=kind,
-                start=start,
-                end=end,
-                limit=100,
-            )
+        page = await store.scan_observations(
+            "runtime-metrics",
+            kind=kind,
+            start=start,
+            end=end,
+            cursor=None,
+            limit=100,
         )
+        assert page.next_cursor is None
+        observations.extend(page.items)
     assert len(observations) == 3
     assert secret not in repr(observations)
 
@@ -230,7 +231,7 @@ async def test_runtime_metrics_backend_failure_does_not_change_execution_result(
     tmp_path: Path,
 ) -> None:
     _write_default_agent(tmp_path)
-    metrics = Metrics.from_store(_FailingMetricStore(), namespace="runtime-fail-open")
+    metrics = Metrics.from_store(_FailingMetricStore(), namespace="runtime-fail-open")  # type: ignore[arg-type]
 
     async with Runtime.open(
         Workspace.load(tmp_path),
@@ -248,7 +249,7 @@ async def test_runtime_metric_buffer_is_bounded_and_close_is_fail_open(
     monkeypatch.setattr(runtime_metrics, "_QUEUE_CAPACITY", 1)
     store = _BlockingMetricStore()
     buffer = runtime_metrics._RuntimeMetricBuffer(
-        Metrics.from_store(store, namespace="buffer")
+        Metrics.from_store(store, namespace="buffer")  # type: ignore[arg-type]
     )
 
     assert buffer.try_record(_observation("first")) is True
@@ -263,10 +264,10 @@ async def test_runtime_metric_buffer_is_bounded_and_close_is_fail_open(
 
 
 @pytest.mark.asyncio
-async def test_runtime_metric_buffer_retries_commit_unknown_with_same_observation() -> None:
+async def test_runtime_metric_buffer_commit_unknown_uses_facade_exact_replay() -> None:
     store = _CommitUnknownOnceMetricStore()
     buffer = runtime_metrics._RuntimeMetricBuffer(
-        Metrics.from_store(store, namespace="buffer-retry")
+        Metrics.from_store(store, namespace="buffer-retry")  # type: ignore[arg-type]
     )
     observation = _observation("retry-stable")
 
@@ -274,13 +275,14 @@ async def test_runtime_metric_buffer_retries_commit_unknown_with_same_observatio
     await buffer.close()
 
     assert len(store.batches) == 2
-    assert store.batches[0] == store.batches[1] == (observation,)
+    assert store.batches[0] is store.batches[1]
+    assert store.batches[0] == (observation,)
 
 
 @pytest.mark.asyncio
-async def test_model_and_tool_producers_do_not_capture_payload_or_exception_text() -> None:
+async def test_model_metric_does_not_capture_prompt_or_exception_text() -> None:
     recorder = _CaptureRecorder()
-    capability = _RuntimeMetricCapability(
+    capability = _RuntimeModelMetricCapability(
         recorder,
         source_namespace="workspace",
         tenant_id="tenant",
@@ -304,74 +306,11 @@ async def test_model_and_tool_producers_do_not_capture_payload_or_exception_text
             handler=model_handler,  # type: ignore[arg-type]
         )
 
-    call = ToolCallPart(
-        "dangerous_tool",
-        {"token": secret},
-        tool_call_id="call-1",
-    )
-
-    async def tool_handler(_args: dict[str, Any]) -> object:
-        raise RuntimeError(f"tool failed with {secret}")
-
-    with pytest.raises(RuntimeError):
-        await capability.wrap_tool_execute(  # type: ignore[arg-type]
-            None,
-            call=call,
-            tool_def=ToolDefinition(name="dangerous_tool"),
-            args={"token": secret},
-            handler=tool_handler,
-        )
-
-    assert [item.kind for item in recorder.observations] == [
-        "linktools.model.request",
-        "linktools.tool.execution",
-    ]
-    assert recorder.observations[0].error_code == ErrorCode.MODEL_API_ERROR.value
-    assert (
-        recorder.observations[1].error_code
-        == ErrorCode.TOOL_EXECUTION_FAILED.value
-    )
-    assert secret not in repr(recorder.observations)
-
-
-def test_task_attempt_observation_replay_uses_durable_event_identity_and_time() -> None:
-    occurred_at = datetime(2026, 9, 5, 2, 0, tzinfo=timezone.utc)
-    event = TaskEvent(
-        version=1,
-        graph_id="graph",
-        sequence=3,
-        event_type=TaskEventType.NODE_CHANGED,
-        occurred_at=occurred_at,
-        status=TaskStatus.SUCCEEDED,
-        previous_status=TaskStatus.RUNNING,
-        node_id="node",
-        fence=7,
-        execution_id="execution",
-        result_digest="a" * 64,
-    )
-    recorder = _CaptureRecorder()
-    nodes = {"node": TaskNode("node", input={"type": "agent"})}
-
-    for _ in range(2):
-        record_task_event(
-            recorder,
-            source_namespace="workspace",
-            tenant_id="tenant",
-            event=event,
-            nodes=nodes,
-        )
-
-    assert len(recorder.observations) == 2
-    first, second = recorder.observations
-    assert first == second
-    assert first.occurred_at == occurred_at
-    assert first.correlation == {
-        "graph_id": "graph",
-        "node_id": "node",
-        "fence": 7,
-        "execution_id": "execution",
-    }
-    assert first.dimensions == {"task_type": "agent"}
+    assert len(recorder.observations) == 1
+    observation = recorder.observations[0]
+    assert observation.kind == "linktools.model.request"
+    assert observation.error_code == ErrorCode.MODEL_API_ERROR.value
+    assert secret not in repr(observation)
 
 
 class _CommitUnknownTaskRepository:
@@ -452,12 +391,23 @@ class _CommitUnknownTaskRepository:
     ) -> Page[TaskEvent]:
         assert graph_id == "graph"
         assert tenant_id == "tenant"
-        assert limit == 1000
+        assert limit in {1, 1000}
         self.list_event_calls += 1
-        items = tuple(
+        selected = tuple(
             event for event in self.events if event.sequence > after_sequence
-        )[:limit]
-        return Page(items)
+        )
+        items = selected[:limit]
+        return Page(items, "more" if len(selected) > limit else None)
+
+    async def latest_event(
+        self,
+        graph_id: str,
+        *,
+        tenant_id: str,
+    ) -> TaskEvent | None:
+        assert graph_id == "graph"
+        assert tenant_id == "tenant"
+        return self.events[-1] if self.events else None
 
     async def claim(
         self,
@@ -515,6 +465,7 @@ class _CommitUnknownTaskRepository:
         tenant_id: str,
         execution_id: str,
     ) -> TaskNodeView:
+        del lease, tenant_id, execution_id
         raise AssertionError("runner does not bind execution before completion")
 
     async def complete(
@@ -562,9 +513,11 @@ class _CommitUnknownTaskRepository:
         raise AIError(ErrorCode.STORAGE_COMMIT_UNKNOWN)
 
     async def fail(self, *args: object, **kwargs: object) -> None:
+        del args, kwargs
         raise AssertionError("runner succeeds")
 
     async def cancel_graph(self, graph_id: str, *, tenant_id: str) -> TaskGraphView:
+        del graph_id, tenant_id
         raise AssertionError("graph is not cancelled")
 
 
@@ -574,11 +527,12 @@ class _SuccessfulTaskRunner:
         return TaskNodeRunResult("a" * 64, execution_id="execution")
 
     async def cancel(self, *args: object, **kwargs: object) -> None:
+        del args, kwargs
         raise AssertionError("successful graph does not cancel node effects")
 
 
 @pytest.mark.asyncio
-async def test_task_commit_unknown_readback_projects_durable_terminal_event() -> None:
+async def test_task_commit_unknown_readback_projects_durable_terminal_history() -> None:
     node = TaskNode("node", input={"type": "agent"})
     repository = _CommitUnknownTaskRepository(node)
     recorder = _CaptureRecorder()
@@ -603,24 +557,26 @@ async def test_task_commit_unknown_readback_projects_durable_terminal_event() ->
     await launcher.shutdown()
 
     assert repository.complete_calls == 1
-    assert repository.list_event_calls == 1
-    attempts = [
+    assert repository.list_event_calls == 2
+    attempts = tuple(
         observation
         for observation in recorder.observations
         if observation.kind == "linktools.task.node.attempt"
-    ]
-    graph_terminals = [
+    )
+    graph_terminals = tuple(
         observation
         for observation in recorder.observations
         if observation.kind == "linktools.task.graph.terminal"
-    ]
+    )
     assert len(attempts) == 1
     assert attempts[0].occurred_at == repository.terminal_time
-    assert attempts[0].correlation == {
+    assert dict(attempts[0].correlation) == {
+        "execution_id": "execution",
+        "fence": 1,
         "graph_id": "graph",
         "node_id": "node",
-        "fence": 1,
-        "execution_id": "execution",
     }
+    assert attempts[0].measurements[0].value == 2_000_000_000
     assert len(graph_terminals) == 1
     assert graph_terminals[0].status == TaskStatus.SUCCEEDED.value
+    assert graph_terminals[0].measurements[0].value == 4_000_000_000
