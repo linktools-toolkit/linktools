@@ -16,16 +16,21 @@ from openai import (
     APIStatusError as OpenAIAPIStatusError,
     APITimeoutError as OpenAIAPITimeoutError,
 )
+from pydantic import ValidationError
 from pydantic_ai.capabilities import AbstractCapability, WrapModelRequestHandler
 from pydantic_ai.exceptions import (
+    ConcurrencyLimitExceeded,
     ContentFilterError,
     ModelAPIError,
     ModelHTTPError,
+    RunCancelled,
     UnexpectedModelBehavior,
+    UserError,
 )
 from pydantic_ai.messages import ModelResponse
 from pydantic_ai.models import ModelRequestContext
 from pydantic_ai.tools import RunContext
+from pydantic_ai.usage import UsageLimitExceeded
 
 from ..errors import AIError, ErrorCode
 from ..observe import MetricMeasurement, MetricRecorder, Observation
@@ -158,6 +163,12 @@ def _provider_usage_measurements(
 def _model_error_code(error: Exception) -> str:
     if isinstance(error, AIError):
         return error.code.value
+    if isinstance(error, UsageLimitExceeded):
+        return ErrorCode.EXECUTION_USAGE_LIMIT_EXCEEDED.value
+    if isinstance(error, RunCancelled):
+        return ErrorCode.EXECUTION_CANCELLED.value
+    if isinstance(error, ConcurrencyLimitExceeded):
+        return ErrorCode.EXECUTION_CONCURRENCY_LIMIT_EXCEEDED.value
     if isinstance(error, ContentFilterError):
         return ErrorCode.MODEL_CONTENT_FILTERED.value
     if isinstance(error, ModelHTTPError):
@@ -172,7 +183,11 @@ def _model_error_code(error: Exception) -> str:
         return ErrorCode.MODEL_API_ERROR.value
     if isinstance(error, UnexpectedModelBehavior):
         return ErrorCode.MODEL_RESPONSE_INVALID.value
-    return ErrorCode.MODEL_API_ERROR.value
+    if isinstance(error, ValidationError):
+        return ErrorCode.OUTPUT_VALIDATION_FAILED.value
+    if isinstance(error, UserError):
+        return ErrorCode.INTERNAL_ERROR.value
+    return ErrorCode.INTERNAL_ERROR.value
 
 
 def _http_error_code(status_code: int) -> ErrorCode:
