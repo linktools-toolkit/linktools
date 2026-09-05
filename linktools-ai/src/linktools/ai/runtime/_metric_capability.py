@@ -233,18 +233,15 @@ def _provider_usage_measurements(
 ) -> tuple[MetricMeasurement, ...]:
     usage = response.usage
     values = (
-        usage.input_tokens,
-        usage.output_tokens,
-        usage.cache_read_tokens,
-        usage.cache_write_tokens,
+        ("input_tokens", usage.input_tokens),
+        ("output_tokens", usage.output_tokens),
+        ("cache_read_tokens", usage.cache_read_tokens),
+        ("cache_write_tokens", usage.cache_write_tokens),
     )
-    if not any(values) and not usage.details:
-        return ()
-    return (
-        MetricMeasurement("input_tokens", 1, usage.input_tokens),
-        MetricMeasurement("output_tokens", 1, usage.output_tokens),
-        MetricMeasurement("cache_read_tokens", 1, usage.cache_read_tokens),
-        MetricMeasurement("cache_write_tokens", 1, usage.cache_write_tokens),
+    return tuple(
+        MetricMeasurement(name, 1, value)
+        for name, value in values
+        if value != 0 or name in usage.details
     )
 
 
