@@ -41,7 +41,7 @@ from ._graph import (
     TaskNodeResult,
     TaskNodeView,
 )
-from ._metrics import record_task_event
+from ._metrics import _TaskMetricProjector
 from ._service import TaskApi, TaskGraphLauncher
 
 _logger = environ.get_logger("ai.task.service")
@@ -199,8 +199,15 @@ class DefaultTaskService(TaskApi):
         self._launcher = launcher
         self._local_waiter = local_waiter
         self._preflight = preflight
-        self._metric_recorder = metric_recorder
-        self._metric_source_namespace = metric_source_namespace
+        self._metric_projector = (
+            None
+            if metric_recorder is None or metric_source_namespace is None
+            else _TaskMetricProjector(
+                persistence.tasks,
+                metric_recorder,
+                source_namespace=metric_source_namespace,
+            )
+        )
         self._detached_finalizers: set[asyncio.Task[object]] = set()
         self._detached_finalizer_failure: AIError | None = None
 
@@ -591,6 +598,7 @@ class DefaultTaskService(TaskApi):
             )
             if snapshot is None or not _terminal(snapshot.status):
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            await self._observe_metric_history(snapshot, tenant_id=tenant_id)
             return _snapshot_result(snapshot)
 
         try:
@@ -1042,40 +1050,12 @@ class DefaultTaskService(TaskApi):
 
     async def _observe_metric_history(
         self,
-        view: TaskGraphView,
+        view: TaskGraphView | TaskGraphSnapshot,
         *,
         tenant_id: str,
     ) -> None:
-        if self._metric_recorder is None or self._metric_source_namespace is None:
-            return
-        cursor = 0
-        static = {node.node_id: node for node in view.nodes}
-        try:
-            while True:
-                page = await self._persistence.tasks.list_events(
-                    view.graph_id,
-                    tenant_id=tenant_id,
-                    after_sequence=cursor,
-                    limit=1000,
-                )
-                for event in page.items:
-                    cursor = event.sequence
-                    record_task_event(
-                        self._metric_recorder,
-                        source_namespace=self._metric_source_namespace,
-                        tenant_id=tenant_id,
-                        event=event,
-                        nodes=static,
-                    )
-                if page.next_cursor is None or not page.items:
-                    return
-        except Exception as error:
-            _logger.warning(
-                "task metric history projection skipped: graph=%s after_sequence=%s error=%s",
-                view.graph_id,
-                cursor,
-                type(error).__name__,
-            )
+        if self._metric_projector is not None:
+            self._metric_projector.trigger(view.graph_id, tenant_id=tenant_id)
 
     async def _result(
         self,
@@ -1134,6 +1114,10 @@ class DefaultTaskService(TaskApi):
                 *(asyncio.shield(task) for task in pending),
                 return_exceptions=True,
             )
+
+    async def drain_metric_projector(self) -> None:
+        if self._metric_projector is not None:
+            await self._metric_projector.close()
 
     async def preflight_close(self) -> None:
         pending = tuple(task for task in self._detached_finalizers if not task.done())
