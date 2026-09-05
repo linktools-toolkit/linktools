@@ -18,7 +18,6 @@ from ..core import (
     RunContextData,
     TaskStatus,
     canonical_sha256,
-    normalize_run_context,
     validate_lease_owner,
 )
 from ..errors import AIError, ErrorCode
@@ -26,7 +25,6 @@ from ..observe import MetricRecorder
 from ..storage import StoredPayload
 from ._event import TaskEvent
 from ._graph import (
-    CancelGraphRequest,
     TaskDependencyResult,
     TaskGraphHandle,
     TaskGraphLaunch,
@@ -351,25 +349,21 @@ class LocalTaskGraphLauncher:
             f"local:{key[0]}:{key[1]}",
         )
 
-    async def cancel(
-        self,
-        graph_id: str,
-        request: CancelGraphRequest,
-        *,
-        context: RunContextData,
-    ) -> TaskGraphView:
-        tenant_id = request.principal.tenant_id
-        context = normalize_run_context(context)
+    async def cancel(self, launch: TaskGraphLaunch) -> TaskGraphView:
+        graph_id = launch.graph.graph_id
+        tenant_id = launch.principal.tenant_id
         key = (tenant_id, graph_id)
         async with self._lock:
             active_run = self._graphs.get(key)
-        if active_run is not None and active_run.request.context != context:
+        if active_run is not None and active_run.request != launch:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         view = await self._repository.get_graph(graph_id, tenant_id=tenant_id)
         if view is None:
             raise AIError(ErrorCode.STORAGE_NOT_FOUND)
+        if view.nodes != launch.graph.nodes:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         states = await self._repository.list_nodes(graph_id, tenant_id=tenant_id)
-        static = {node.node_id: node for node in view.nodes}
+        static = {node.node_id: node for node in launch.graph.nodes}
         cleanup_error: BaseException | None = None
         for state in states:
             if state.status is not TaskStatus.CANCELLED or state.fence < 1:
@@ -383,8 +377,8 @@ class LocalTaskGraphLauncher:
                 await self._runner.cancel(
                     node,
                     graph_id=graph_id,
-                    principal=request.principal,
-                    context=context,
+                    principal=launch.principal,
+                    context=launch.context,
                     dependency_results=await self._dependency_results(
                         graph_id, node, tenant_id=tenant_id
                     ),
