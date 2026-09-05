@@ -415,7 +415,10 @@ def _encode_v1_execution_record(
 ) -> Mapping[str, JsonValue]:
     if not isinstance(value, ExecutionRecord):
         raise TypeError("V1 execution_record encoder received the wrong type")
-    return _encode_v1_optional_error_diagnostics(value, codec, persisted)
+    encoded = dict(_encode_v1_optional_error_diagnostics(value, codec, persisted))
+    if not value.context:
+        encoded.pop("context", None)
+    return encoded
 
 
 def _encode_v1_recovery_terminal_outcome(
