@@ -6,7 +6,7 @@ from __future__ import annotations
 
 import asyncio
 import uuid
-from collections.abc import Callable, Mapping
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from time import monotonic_ns
@@ -40,7 +40,7 @@ class _ToolMetricContext:
         call: ToolCallPart,
         tool_def: ToolDefinition,
         args: dict[str, Any],
-        handler: Callable[[dict[str, Any]], Any],
+        handler: Callable[[dict[str, Any]], Awaitable[Any]],
         suppress_cancel: Callable[[], bool],
     ) -> Any:
         attempt_id = uuid.uuid4().hex
