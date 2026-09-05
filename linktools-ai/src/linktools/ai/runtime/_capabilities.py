@@ -66,6 +66,7 @@ from ..workspace import (
     RepositoryInstructions,
     WorkspacePolicy,
 )
+from ._tool_metrics import _ToolMetricContext
 
 _logger = environ.get_logger("ai.runtime.capabilities")
 
@@ -146,6 +147,7 @@ class _ToolCallState:
     preserve_started: bool = False
     cached_failure: bool = False
     effect_terminalized: bool = False
+    suppress_cancel_metric: bool = False
     heartbeat_task: "asyncio.Task[None] | None" = None
 
 
@@ -219,6 +221,11 @@ class _RuntimeStepPersistence(StepPersistence[None]):
         compare=False,
     )
     deferred_pause_sink: "Callable[[int], None] | None" = field(
+        default=None,
+        repr=False,
+        compare=False,
+    )
+    tool_metrics: "_ToolMetricContext | None" = field(
         default=None,
         repr=False,
         compare=False,
@@ -377,7 +384,15 @@ class _RuntimeStepPersistence(StepPersistence[None]):
 
         async def tracked_handler(validated_args: dict[str, Any]) -> Any:
             state.handler_entered = True
-            return await handler(validated_args)
+            if self.tool_metrics is None:
+                return await handler(validated_args)
+            return await self.tool_metrics.execute(
+                call=call,
+                tool_def=tool_def,
+                args=validated_args,
+                handler=handler,
+                suppress_cancel=lambda: state.suppress_cancel_metric,
+            )
 
         handler_task = asyncio.create_task(
             super().wrap_tool_execute(
@@ -405,6 +420,7 @@ class _RuntimeStepPersistence(StepPersistence[None]):
                 state.heartbeat_observed = True
                 heartbeat_error = heartbeat_task.exception()
                 if heartbeat_error is not None:
+                    state.suppress_cancel_metric = True
                     handler_task.cancel()
                     self._detach_task(handler_task, "tool handler after heartbeat loss")
                     handler_detached = True
@@ -509,6 +525,8 @@ class _RuntimeStepPersistence(StepPersistence[None]):
             )
             raise AssertionError("dynamic deferred failure hook must raise")
         except asyncio.CancelledError as error:
+            if not state.handler_observed:
+                state.suppress_cancel_metric = True
             if state.operation_terminalized:
                 state.preserve_started = False
                 keep_call_state = False
@@ -542,6 +560,7 @@ class _RuntimeStepPersistence(StepPersistence[None]):
             await self._stop_heartbeat(state)
             if not handler_detached:
                 if not handler_task.done():
+                    state.suppress_cancel_metric = True
                     handler_task.cancel()
                     self._detach_task(handler_task, "tool handler cleanup")
                 elif not state.handler_observed:
@@ -1149,6 +1168,7 @@ async def compose_platform_capabilities(
     background_tasks: "set[asyncio.Task[object]]",
     plan_store_resolver: "Callable[[RunContext[None]], PlanStore] | None",
     deferred_pause_sink: "Callable[[int], None] | None" = None,
+    tool_metrics: "_ToolMetricContext | None" = None,
 ) -> "tuple[AbstractCapability[None], ...]":
     _validate_compaction_target(context_target_tokens)
     _validate_trusted_tool_classes(trusted_tool_classes)
@@ -1172,6 +1192,7 @@ async def compose_platform_capabilities(
             trusted_mcp_selectors=trusted_mcp_selectors,
             background_tasks=background_tasks,
             deferred_pause_sink=deferred_pause_sink,
+            tool_metrics=tool_metrics,
         )
     )
     selected = frozenset(runtime_tool_names)
