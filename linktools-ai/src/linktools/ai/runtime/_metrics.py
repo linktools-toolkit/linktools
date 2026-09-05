@@ -63,6 +63,7 @@ class _RuntimeMetricBuffer(MetricRecorder):
     async def close(self) -> None:
         if not self._accepting and self._writer.done():
             self._consume_writer()
+            self._drop_remaining("runtime metric close cleanup")
             return
         self._accepting = False
         started = monotonic()
@@ -86,6 +87,7 @@ class _RuntimeMetricBuffer(MetricRecorder):
                 self._writer.cancel()
                 await self._consume_cancelled_writer()
         self._consume_writer()
+        self._drop_remaining("runtime metric close cleanup")
         if self._dropped or self._write_failures:
             _logger.warning(
                 "runtime metrics closed with loss: accepted=%s dropped=%s write_failures=%s",
