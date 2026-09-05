@@ -6,7 +6,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
-from linktools.ai.migrate import provision_metrics_database
+from linktools.ai.migrate import provision_metrics_database, provision_metrics_sqlite
 from linktools.ai.observe import (
     MetricAggregation,
     MetricDefinition,
@@ -69,3 +69,42 @@ async def test_sqlite_and_sql_backends_share_one_metric_dataset(tmp_path: Path) 
             assert result.points[0].sample_count == 2
     finally:
         await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_path_level_sqlite_provisioning_supports_metrics_convenience(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "standalone-metrics.db"
+    await provision_metrics_sqlite(path)
+    metrics = Metrics.sqlite(path, namespace="standalone")
+    definition = MetricDefinition(
+        name="business.sqlite",
+        revision=1,
+        observation_kind="business.sqlite.sample",
+        source=MetricSource.measurement("value"),
+        metric_type=MetricType.COUNTER,
+        unit="1",
+        default_aggregation=MetricAggregation.SUM,
+    )
+    occurred_at = datetime(2026, 9, 5, 5, 0, tzinfo=timezone.utc)
+
+    await metrics.define(definition)
+    await metrics.record(
+        definition.name,
+        3,
+        observation_id="standalone",
+        occurred_at=occurred_at,
+    )
+    result = await metrics.query(
+        MetricQuery(
+            definition.name,
+            MetricWindow.between(
+                occurred_at - timedelta(seconds=1),
+                occurred_at + timedelta(seconds=1),
+            ),
+        )
+    )
+
+    assert result.points[0].value == 3
+    assert result.points[0].sample_count == 1
