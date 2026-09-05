@@ -12,6 +12,7 @@ from linktools.ai.migrate import build_sql_schema_metadata, provision_metrics_da
 from linktools.ai.observe import (
     MetricAggregation,
     MetricDefinition,
+    MetricMeasurement,
     MetricQuery,
     MetricSource,
     MetricType,
@@ -101,6 +102,59 @@ async def test_metrics_record_is_idempotent_and_query_is_definition_driven() -> 
             dimensions={"route": "alpha"},
         )
     assert raised.value.code is ErrorCode.STORAGE_CONFLICT
+
+
+@pytest.mark.asyncio
+async def test_measurement_query_skips_groups_without_matching_sample() -> None:
+    metrics = Metrics.in_memory(namespace="metrics-missing-sample")
+    await metrics.define(_latency_definition())
+    occurred_at = datetime(2026, 9, 5, 0, 0, tzinfo=timezone.utc)
+    await metrics.record_observations(
+        (
+            Observation(
+                version=1,
+                observation_id="missing",
+                kind="app.request",
+                occurred_at=occurred_at,
+                source_namespace="workspace",
+                tenant_id="tenant",
+                status="SUCCEEDED",
+                error_code=None,
+                correlation={},
+                dimensions={"route": "missing"},
+                measurements=(),
+            ),
+            Observation(
+                version=1,
+                observation_id="present",
+                kind="app.request",
+                occurred_at=occurred_at,
+                source_namespace="workspace",
+                tenant_id="tenant",
+                status="SUCCEEDED",
+                error_code=None,
+                correlation={},
+                dimensions={"route": "present"},
+                measurements=(MetricMeasurement("latency_ms", 1, 25),),
+            ),
+        )
+    )
+
+    result = await metrics.query(
+        MetricQuery(
+            "app.request.latency",
+            MetricWindow.between(
+                occurred_at - timedelta(seconds=1),
+                occurred_at + timedelta(seconds=1),
+            ),
+            group_by=("route",),
+        )
+    )
+
+    assert [
+        (point.dimensions["route"], point.value, point.sample_count)
+        for point in result.points
+    ] == [("present", 25.0, 1)]
 
 
 @pytest.mark.asyncio
