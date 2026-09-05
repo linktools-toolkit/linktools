@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Protocol, cast
 
@@ -256,7 +257,7 @@ class _TaskMetricProjector:
         if latency is None:
             return
         self._safe_record(
-            Observation(
+            lambda: Observation(
                 version=1,
                 observation_id=canonical_sha256(
                     {
@@ -299,7 +300,7 @@ class _TaskMetricProjector:
         if attempt.execution_id is not None:
             correlation["execution_id"] = attempt.execution_id
         self._safe_record(
-            Observation(
+            lambda: Observation(
                 version=1,
                 observation_id=canonical_sha256(
                     {
@@ -323,9 +324,9 @@ class _TaskMetricProjector:
             )
         )
 
-    def _safe_record(self, observation: Observation) -> None:
+    def _safe_record(self, factory: Callable[[], Observation]) -> None:
         try:
-            self._recorder.try_record(observation)
+            self._recorder.try_record(factory())
         except Exception:
             _logger.exception("task metric observation rejected")
 
