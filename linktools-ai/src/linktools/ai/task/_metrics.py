@@ -252,10 +252,9 @@ class _TaskMetricProjector:
         *,
         tenant_id: str,
     ) -> None:
-        measurements: tuple[MetricMeasurement, ...] = ()
         latency = _latency_ns(admission, terminal)
-        if latency is not None:
-            measurements = (MetricMeasurement("latency_ns", 1, latency),)
+        if latency is None:
+            return
         self._safe_record(
             Observation(
                 version=1,
@@ -272,10 +271,10 @@ class _TaskMetricProjector:
                 source_namespace=self._source_namespace,
                 tenant_id=tenant_id,
                 status=terminal.status.value,
-                error_code=None,
+                error_code=terminal.error_code,
                 correlation={"graph_id": terminal.graph_id},
                 dimensions={},
-                measurements=measurements,
+                measurements=(MetricMeasurement("latency_ns", 1, latency),),
             )
         )
 
@@ -289,6 +288,9 @@ class _TaskMetricProjector:
         tenant_id: str,
     ) -> None:
         terminal = cast(TaskEvent, attempt.terminal)
+        latency = _latency_ns(attempt.start, terminal)
+        if latency is None:
+            return
         correlation: dict[str, str | int] = {
             "graph_id": graph_id,
             "node_id": node_id,
@@ -296,10 +298,6 @@ class _TaskMetricProjector:
         }
         if attempt.execution_id is not None:
             correlation["execution_id"] = attempt.execution_id
-        measurements: tuple[MetricMeasurement, ...] = ()
-        latency = _latency_ns(attempt.start, terminal)
-        if latency is not None:
-            measurements = (MetricMeasurement("latency_ns", 1, latency),)
         self._safe_record(
             Observation(
                 version=1,
@@ -321,7 +319,7 @@ class _TaskMetricProjector:
                 error_code=terminal.error_code,
                 correlation=correlation,
                 dimensions={},
-                measurements=measurements,
+                measurements=(MetricMeasurement("latency_ns", 1, latency),),
             )
         )
 
