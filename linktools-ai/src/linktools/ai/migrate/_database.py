@@ -33,6 +33,8 @@ def build_sql_schema_metadata() -> "MetaData":
     build_object_sql_metadata(metadata=metadata)
     build_asset_sql_metadata(metadata=metadata)
     build_metrics_sql_metadata(metadata=metadata)
+    if len(metadata.tables) != 12:
+        raise RuntimeError("complete SQL schema must contain exactly 12 tables")
     return metadata
 
 
