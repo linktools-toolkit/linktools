@@ -162,6 +162,13 @@ class _TaskAdmissionPersistence(Protocol):
         self, admission: TaskGraphAdmission, graph: TaskGraph
     ) -> TaskGraphView: ...
 
+    async def get(
+        self,
+        graph_id: str,
+        *,
+        tenant_id: str,
+    ) -> TaskGraphAdmission | None: ...
+
     async def list_recoverable_page(
         self,
         *,
@@ -813,7 +820,7 @@ class DefaultTaskService(TaskApi):
             in {OperationStatus.RUNNING, OperationStatus.EFFECT_UNKNOWN}
         ) and view.status is TaskStatus.CANCELLED:
             try:
-                await self._cleanup_cancelled_graph(graph_id, request)
+                await self._cleanup_cancelled_graph(view, request)
             except BaseException as error:  # noqa: BLE001
                 await self._raise_cancel_cleanup_error(
                     operation,
@@ -873,7 +880,7 @@ class DefaultTaskService(TaskApi):
         if _terminal(view.status):
             if view.status is TaskStatus.CANCELLED:
                 try:
-                    await self._cleanup_cancelled_graph(graph_id, request)
+                    await self._cleanup_cancelled_graph(view, request)
                 except BaseException as cleanup_error:  # noqa: BLE001
                     await self._raise_cancel_cleanup_error(
                         operation,
@@ -923,13 +930,23 @@ class DefaultTaskService(TaskApi):
 
     async def _cleanup_cancelled_graph(
         self,
-        graph_id: str,
+        view: TaskGraphView,
         request: CancelGraphRequest,
     ) -> None:
         if self._launcher is None:
             return
+        tenant_id = request.principal.tenant_id
+        admission = await self._persistence.admissions.get(
+            view.graph_id,
+            tenant_id=tenant_id,
+        )
+        if admission is None:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         try:
-            await self._launcher.cancel(graph_id, request)
+            launch = admission.bind(TaskGraph(view.graph_id, view.nodes))
+            if launch.principal.tenant_id != tenant_id:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            await self._launcher.cancel(launch)
         except asyncio.CancelledError:
             raise
         except AIError:
@@ -937,7 +954,10 @@ class DefaultTaskService(TaskApi):
         except BaseException as error:  # noqa: BLE001
             raise AIError(
                 ErrorCode.INTERNAL_ERROR,
-                safe_details={"phase": "task_cancel_cleanup", "graph_id": graph_id},
+                safe_details={
+                    "phase": "task_cancel_cleanup",
+                    "graph_id": view.graph_id,
+                },
             ) from error
 
     async def _record_success(
