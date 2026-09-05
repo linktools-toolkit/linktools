@@ -31,10 +31,8 @@ def _source_payload(source: MetricSource) -> dict[str, object]:
     }
 
 
-def _definition_payload(
-    definition: MetricDefinition, *, include_description: bool
-) -> dict[str, object]:
-    payload: dict[str, object] = {
+def _definition_payload(definition: MetricDefinition) -> dict[str, object]:
+    return {
         "name": definition.name,
         "revision": definition.revision,
         "observation_kind": definition.observation_kind,
@@ -44,23 +42,19 @@ def _definition_payload(
         "default_aggregation": definition.default_aggregation.value,
         "query_fields": list(definition.query_fields),
     }
-    if include_description:
-        payload["description"] = definition.description
-    return payload
 
 
 def definition_semantic_digest(definition: MetricDefinition) -> str:
-    return canonical_sha256(_definition_payload(definition, include_description=False))
+    return canonical_sha256(_definition_payload(definition))
 
 
 def definition_envelope(
     namespace: str, definition: MetricDefinition
 ) -> dict[str, object]:
     return {
-        "type": "MetricDefinitionEnvelope",
         "version": 1,
         "namespace": namespace,
-        "definition": _definition_payload(definition, include_description=True),
+        "definition": _definition_payload(definition),
     }
 
 
@@ -89,7 +83,6 @@ def observation_payload(observation: Observation) -> dict[str, object]:
 
 def observation_envelope(namespace: str, observation: Observation) -> dict[str, object]:
     envelope: dict[str, Any] = {
-        "type": "ObservationEnvelope",
         "version": 1,
         "namespace": namespace,
         "observation": observation_payload(observation),
@@ -162,8 +155,6 @@ def decode_definition_envelope(
     payload: object, *, expected_namespace: str
 ) -> MetricDefinition:
     root = _mapping(payload, field="definition envelope")
-    if root.get("type") != "MetricDefinitionEnvelope":
-        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     _validate_envelope_version(root.get("version"))
     if root.get("namespace") != expected_namespace:
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -206,24 +197,19 @@ def decode_definition_envelope(
             query_fields=_text_tuple(
                 data.get("query_fields", []), field="query_fields"
             ),
-            description=_optional_text(
-                data.get("description"), field="description"
-            ),
         )
-    except AIError as exc:
-        if exc.code is ErrorCode.STORAGE_VERSION_UNSUPPORTED:
+    except AIError as error:
+        if error.code is ErrorCode.STORAGE_VERSION_UNSUPPORTED:
             raise
-        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from exc
-    except (KeyError, TypeError, ValueError) as exc:
-        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from exc
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
+    except (KeyError, TypeError, ValueError) as error:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
 
 
 def decode_observation_envelope(
     payload: object, *, expected_namespace: str
 ) -> Observation:
     root = _mapping(payload, field="observation envelope")
-    if root.get("type") != "ObservationEnvelope":
-        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     _validate_envelope_version(root.get("version"))
     if root.get("namespace") != expected_namespace:
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -276,12 +262,12 @@ def decode_observation_envelope(
             dimensions=dimensions,
             measurements=tuple(measurements),
         )
-    except AIError as exc:
-        if exc.code is ErrorCode.STORAGE_VERSION_UNSUPPORTED:
+    except AIError as error:
+        if error.code is ErrorCode.STORAGE_VERSION_UNSUPPORTED:
             raise
-        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from exc
-    except (KeyError, TypeError, ValueError) as exc:
-        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from exc
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
+    except (KeyError, TypeError, ValueError) as error:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
 
 
 __all__: list[str] = []
