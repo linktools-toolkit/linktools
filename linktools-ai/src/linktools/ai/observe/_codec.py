@@ -155,15 +155,20 @@ def _text_tuple(value: object, *, field: str) -> tuple[str, ...]:
     return tuple(_text(item, field=field) for item in value)
 
 
+def _validate_envelope_version(value: object) -> None:
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    if value != 1:
+        raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
+
+
 def decode_definition_envelope(
     payload: object, *, expected_namespace: str
 ) -> MetricDefinition:
     root = _mapping(payload, field="definition envelope")
     if root.get("type") != "MetricDefinitionEnvelope":
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-    version = root.get("version")
-    if version != 1:
-        raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
+    _validate_envelope_version(root.get("version"))
     if root.get("namespace") != expected_namespace:
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     data = _mapping(root.get("definition"), field="definition")
@@ -223,9 +228,7 @@ def decode_observation_envelope(
     root = _mapping(payload, field="observation envelope")
     if root.get("type") != "ObservationEnvelope":
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-    version = root.get("version")
-    if version != 1:
-        raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
+    _validate_envelope_version(root.get("version"))
     if root.get("namespace") != expected_namespace:
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     data = _mapping(root.get("observation"), field="observation")
