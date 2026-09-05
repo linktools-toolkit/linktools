@@ -11,6 +11,7 @@ from linktools.ai.observe import (
     MetricAggregation,
     MetricDefinition,
     MetricQuery,
+    Metrics,
     MetricSource,
     MetricSourceKind,
     MetricType,
@@ -130,3 +131,40 @@ def test_observation_rejects_non_contract_collection_shapes() -> None:
             measurements=(),
         )
     )
+
+
+@pytest.mark.asyncio
+async def test_metric_record_rejects_explicit_empty_observation_id() -> None:
+    metrics = Metrics.in_memory(namespace="contract")
+    await metrics.define(
+        MetricDefinition(
+            name="business.record.id",
+            revision=1,
+            observation_kind="business.record.id.sample",
+            source=MetricSource.measurement("value"),
+            metric_type=MetricType.GAUGE,
+            unit="1",
+            default_aggregation=MetricAggregation.MEAN,
+        )
+    )
+
+    with pytest.raises(AIError) as raised:
+        await metrics.record("business.record.id", 1, observation_id="")
+
+    assert raised.value.code is ErrorCode.REQUEST_FIELD_INVALID
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("revision", (True, 0, -1))
+async def test_metric_record_rejects_invalid_revision(revision: object) -> None:
+    metrics = Metrics.in_memory(namespace="contract")
+
+    with pytest.raises(AIError) as raised:
+        await metrics.record(
+            "business.record.revision",
+            1,
+            revision=revision,  # type: ignore[arg-type]
+        )
+
+    assert raised.value.code is ErrorCode.REQUEST_FIELD_INVALID
+    assert raised.value.safe_details == {"field": "revision"}
