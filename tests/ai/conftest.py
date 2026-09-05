@@ -15,6 +15,15 @@ def _raise_timeout(signum: int, frame: FrameType | None) -> None:
     raise KeyboardInterrupt("diagnostic per-test timeout")
 
 
+@pytest.fixture(autouse=True)
+def _local_execution_backend_optional_recorder(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from linktools.ai.runtime._local import LocalExecutionBackend
+
+    monkeypatch.setattr(LocalExecutionBackend, "_metric_recorder", None, raising=False)
+
+
 @pytest.hookimpl(hookwrapper=True)
 def pytest_runtest_protocol(
     item: pytest.Item,
