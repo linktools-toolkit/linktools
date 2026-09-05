@@ -37,6 +37,23 @@ def _parse_scan_cursor(cursor: str) -> tuple[datetime, str]:
 
 
 class MetricStore(Protocol):
+    """Persist Metrics facts without performing metric aggregation.
+
+    Definition identity is ``(namespace, name, revision)``. Rewriting the same
+    identity with identical semantics is idempotent; different semantics must
+    fail with ``STORAGE_CONFLICT``.
+
+    Observation identity is the namespace-scoped ``observation_id``. A batch
+    write is atomic: identical replays are idempotent and any conflicting
+    identity fails the whole batch with ``STORAGE_CONFLICT``.
+
+    ``scan_observations`` returns only the requested namespace/kind and the
+    half-open interval ``[start, end)`` in strict ascending
+    ``(occurred_at, observation_digest)`` order. ``cursor`` is an opaque
+    continuation token produced by the same store; ``next_cursor=None`` means
+    the scan is exhausted. A page never contains more than ``limit`` items.
+    """
+
     async def put_definition(
         self,
         namespace: str,
