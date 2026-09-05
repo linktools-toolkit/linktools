@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from linktools.ai.core import ExecutionStatus, JsonValue, TaskStatus
+from linktools.ai.core import ExecutionStatus, JsonValue, Page, Principal, TaskStatus
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.observe import (
     MetricQuery,
@@ -22,7 +22,20 @@ from linktools.ai.runtime import Runtime
 from linktools.ai.runtime import _metrics as runtime_metrics
 from linktools.ai.runtime._metric_capability import _RuntimeMetricCapability
 from linktools.ai.spec import AgentSpec, AgentSpecCodec
-from linktools.ai.task import TaskLease, TaskTerminalRecord
+from linktools.ai.task import (
+    LocalTaskGraphLauncher,
+    TaskEvent,
+    TaskEventType,
+    TaskGraph,
+    TaskGraphLaunch,
+    TaskGraphLimits,
+    TaskGraphView,
+    TaskLease,
+    TaskNode,
+    TaskNodeRunResult,
+    TaskNodeView,
+)
+from linktools.ai.task._metrics import record_task_event
 from linktools.ai.workspace import Workspace
 from pydantic_ai.messages import ToolCallPart
 from pydantic_ai.models.test import TestModel
@@ -122,6 +135,21 @@ class _BlockingMetricStore(_FailingMetricStore):
         self.entered.set()
         await self.release.wait()
         self.batches.append(observations)
+
+
+class _CommitUnknownOnceMetricStore(_FailingMetricStore):
+    def __init__(self) -> None:
+        self.batches: list[tuple[Observation, ...]] = []
+
+    async def put_observations(
+        self,
+        namespace: str,
+        observations: tuple[Observation, ...],
+    ) -> None:
+        del namespace
+        self.batches.append(observations)
+        if len(self.batches) == 1:
+            raise AIError(ErrorCode.STORAGE_COMMIT_UNKNOWN)
 
 
 def _write_default_agent(root: Path) -> None:
@@ -235,6 +263,21 @@ async def test_runtime_metric_buffer_is_bounded_and_close_is_fail_open(
 
 
 @pytest.mark.asyncio
+async def test_runtime_metric_buffer_retries_commit_unknown_with_same_observation() -> None:
+    store = _CommitUnknownOnceMetricStore()
+    buffer = runtime_metrics._RuntimeMetricBuffer(
+        Metrics.from_store(store, namespace="buffer-retry")
+    )
+    observation = _observation("retry-stable")
+
+    assert buffer.try_record(observation) is True
+    await buffer.close()
+
+    assert len(store.batches) == 2
+    assert store.batches[0] == store.batches[1] == (observation,)
+
+
+@pytest.mark.asyncio
 async def test_model_and_tool_producers_do_not_capture_payload_or_exception_text() -> None:
     recorder = _CaptureRecorder()
     capability = _RuntimeMetricCapability(
@@ -291,56 +334,290 @@ async def test_model_and_tool_producers_do_not_capture_payload_or_exception_text
     assert secret not in repr(recorder.observations)
 
 
-@pytest.mark.asyncio
-async def test_task_attempt_observation_identity_is_stable_for_same_fence() -> None:
-    completed_at = datetime(2026, 9, 5, 2, 0, tzinfo=timezone.utc)
-    terminal = TaskTerminalRecord(
-        "node",
-        "worker",
-        7,
-        TaskStatus.SUCCEEDED,
-        "a" * 64,
-        None,
-        None,
-        completed_at=completed_at,
-        execution_id="execution",
-    )
-
-    class Delegate:
-        async def complete(self, *args: object, **kwargs: object) -> TaskTerminalRecord:
-            del args, kwargs
-            return terminal
-
-    recorder = _CaptureRecorder()
-    repository = runtime_metrics._MetricTaskRepository(
-        Delegate(),  # type: ignore[arg-type]
-        recorder,
-        source_namespace="workspace",
-    )
-    lease = TaskLease(
+def test_task_attempt_observation_replay_uses_durable_event_identity_and_time() -> None:
+    occurred_at = datetime(2026, 9, 5, 2, 0, tzinfo=timezone.utc)
+    event = TaskEvent(
+        version=1,
         graph_id="graph",
+        sequence=3,
+        event_type=TaskEventType.NODE_CHANGED,
+        occurred_at=occurred_at,
+        status=TaskStatus.SUCCEEDED,
+        previous_status=TaskStatus.RUNNING,
         node_id="node",
-        tenant_id="tenant",
-        owner="worker",
         fence=7,
-        lease_expires_at=datetime.now(timezone.utc) + timedelta(minutes=1),
+        execution_id="execution",
+        result_digest="a" * 64,
     )
+    recorder = _CaptureRecorder()
+    nodes = {"node": TaskNode("node", input={"type": "agent"})}
 
     for _ in range(2):
-        await repository.complete(
-            lease,
+        record_task_event(
+            recorder,
+            source_namespace="workspace",
             tenant_id="tenant",
-            execution_id="execution",
-            result_digest="a" * 64,
+            event=event,
+            nodes=nodes,
         )
 
     assert len(recorder.observations) == 2
     first, second = recorder.observations
-    assert first.observation_id == second.observation_id
-    assert first.occurred_at == second.occurred_at == completed_at
+    assert first == second
+    assert first.occurred_at == occurred_at
     assert first.correlation == {
         "graph_id": "graph",
         "node_id": "node",
         "fence": 7,
         "execution_id": "execution",
     }
+    assert first.dimensions == {"task_type": "agent"}
+
+
+class _CommitUnknownTaskRepository:
+    def __init__(self, node: TaskNode) -> None:
+        self.node = node
+        self.status = TaskStatus.READY
+        self.fence = 0
+        self.complete_calls = 0
+        self.terminal_time = datetime(2026, 9, 5, 3, 0, tzinfo=timezone.utc)
+        self.events = [
+            TaskEvent(
+                version=1,
+                graph_id="graph",
+                sequence=1,
+                event_type=TaskEventType.GRAPH_ADMITTED,
+                occurred_at=self.terminal_time - timedelta(seconds=3),
+                status=TaskStatus.PENDING,
+            )
+        ]
+
+    async def reconcile_graph(self, graph_id: str, *, tenant_id: str) -> TaskGraphView:
+        assert graph_id == "graph"
+        assert tenant_id == "tenant"
+        graph_status = (
+            TaskStatus.SUCCEEDED
+            if self.status is TaskStatus.SUCCEEDED
+            else TaskStatus.PENDING
+        )
+        return TaskGraphView("graph", graph_status, (self.node,))
+
+    async def get_graph(self, graph_id: str, *, tenant_id: str) -> TaskGraphView:
+        return await self.reconcile_graph(graph_id, tenant_id=tenant_id)
+
+    async def list_nodes(
+        self,
+        graph_id: str,
+        *,
+        tenant_id: str,
+    ) -> tuple[TaskNodeView, ...]:
+        assert graph_id == "graph"
+        assert tenant_id == "tenant"
+        return (
+            TaskNodeView(
+                "graph",
+                "node",
+                (),
+                self.status,
+                None,
+                self.fence,
+                None,
+                "a" * 64 if self.status is TaskStatus.SUCCEEDED else None,
+                None,
+                None,
+                "execution" if self.status is TaskStatus.SUCCEEDED else None,
+            ),
+        )
+
+    async def get_results(
+        self,
+        graph_id: str,
+        node_ids: tuple[str, ...],
+        *,
+        tenant_id: str,
+    ) -> dict[str, object]:
+        assert graph_id == "graph"
+        assert node_ids == ("node",)
+        assert tenant_id == "tenant"
+        return {}
+
+    async def list_events(
+        self,
+        graph_id: str,
+        *,
+        tenant_id: str,
+        after_sequence: int,
+        limit: int,
+    ) -> Page[TaskEvent]:
+        assert graph_id == "graph"
+        assert tenant_id == "tenant"
+        assert limit == 1000
+        items = tuple(
+            event for event in self.events if event.sequence > after_sequence
+        )[:limit]
+        return Page(items)
+
+    async def claim(
+        self,
+        graph_id: str,
+        node_id: str,
+        *,
+        tenant_id: str,
+        owner: str,
+        lease_seconds: int,
+    ) -> TaskLease:
+        assert graph_id == "graph"
+        assert node_id == "node"
+        assert tenant_id == "tenant"
+        assert lease_seconds > 0
+        self.status = TaskStatus.RUNNING
+        self.fence = 1
+        self.events.append(
+            TaskEvent(
+                version=1,
+                graph_id="graph",
+                sequence=2,
+                event_type=TaskEventType.NODE_CHANGED,
+                occurred_at=self.terminal_time - timedelta(seconds=2),
+                status=TaskStatus.RUNNING,
+                previous_status=TaskStatus.READY,
+                node_id="node",
+                owner=owner,
+                fence=1,
+            )
+        )
+        return TaskLease(
+            "graph",
+            "node",
+            "tenant",
+            owner,
+            1,
+            datetime.now(timezone.utc) + timedelta(minutes=1),
+        )
+
+    async def renew(
+        self,
+        lease: TaskLease,
+        *,
+        tenant_id: str,
+        lease_seconds: int,
+    ) -> TaskLease:
+        assert tenant_id == "tenant"
+        assert lease_seconds > 0
+        return lease
+
+    async def bind_execution(
+        self,
+        lease: TaskLease,
+        *,
+        tenant_id: str,
+        execution_id: str,
+    ) -> TaskNodeView:
+        raise AssertionError("runner does not bind execution before completion")
+
+    async def complete(
+        self,
+        lease: TaskLease,
+        *,
+        tenant_id: str,
+        execution_id: str | None,
+        result_digest: str,
+        result_payload: object = None,
+    ) -> None:
+        assert lease.fence == 1
+        assert tenant_id == "tenant"
+        assert execution_id == "execution"
+        assert result_digest == "a" * 64
+        assert result_payload is None
+        self.complete_calls += 1
+        self.status = TaskStatus.SUCCEEDED
+        self.events.extend(
+            (
+                TaskEvent(
+                    version=1,
+                    graph_id="graph",
+                    sequence=3,
+                    event_type=TaskEventType.NODE_CHANGED,
+                    occurred_at=self.terminal_time,
+                    status=TaskStatus.SUCCEEDED,
+                    previous_status=TaskStatus.RUNNING,
+                    node_id="node",
+                    fence=1,
+                    execution_id="execution",
+                    result_digest="a" * 64,
+                ),
+                TaskEvent(
+                    version=1,
+                    graph_id="graph",
+                    sequence=4,
+                    event_type=TaskEventType.GRAPH_CHANGED,
+                    occurred_at=self.terminal_time + timedelta(seconds=1),
+                    status=TaskStatus.SUCCEEDED,
+                    previous_status=TaskStatus.PENDING,
+                ),
+            )
+        )
+        raise AIError(ErrorCode.STORAGE_COMMIT_UNKNOWN)
+
+    async def fail(self, *args: object, **kwargs: object) -> None:
+        raise AssertionError("runner succeeds")
+
+    async def cancel_graph(self, graph_id: str, *, tenant_id: str) -> TaskGraphView:
+        raise AssertionError("graph is not cancelled")
+
+
+class _SuccessfulTaskRunner:
+    async def run(self, *args: object, **kwargs: object) -> TaskNodeRunResult:
+        del args, kwargs
+        return TaskNodeRunResult("a" * 64, execution_id="execution")
+
+    async def cancel(self, *args: object, **kwargs: object) -> None:
+        raise AssertionError("successful graph does not cancel node effects")
+
+
+@pytest.mark.asyncio
+async def test_task_commit_unknown_readback_projects_durable_terminal_event() -> None:
+    node = TaskNode("node", input={"type": "agent"})
+    repository = _CommitUnknownTaskRepository(node)
+    recorder = _CaptureRecorder()
+    launcher = LocalTaskGraphLauncher(
+        repository,  # type: ignore[arg-type]
+        _SuccessfulTaskRunner(),  # type: ignore[arg-type]
+        owner="worker",
+        metric_recorder=recorder,
+        metric_source_namespace="workspace",
+    )
+    launch = TaskGraphLaunch(
+        TaskGraph("graph", (node,)),
+        Principal("owner", "tenant"),
+        TaskGraphLimits(),
+    )
+
+    await launcher.start(launch)
+    for _ in range(100):
+        if not launcher.owns_graph("graph", tenant_id="tenant"):
+            break
+        await asyncio.sleep(0)
+    await launcher.shutdown()
+
+    assert repository.complete_calls == 1
+    attempts = [
+        observation
+        for observation in recorder.observations
+        if observation.kind == "linktools.task.node.attempt"
+    ]
+    graph_terminals = [
+        observation
+        for observation in recorder.observations
+        if observation.kind == "linktools.task.graph.terminal"
+    ]
+    assert len(attempts) == 1
+    assert attempts[0].occurred_at == repository.terminal_time
+    assert attempts[0].correlation == {
+        "graph_id": "graph",
+        "node_id": "node",
+        "fence": 1,
+        "execution_id": "execution",
+    }
+    assert len(graph_terminals) == 1
+    assert graph_terminals[0].status == TaskStatus.SUCCEEDED.value
