@@ -9,20 +9,20 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from linktools.ai.core import ExecutionStatus, JsonValue
+from linktools.ai.core import ExecutionStatus, JsonValue, TaskStatus
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.observe import (
-    InMemoryMetricStore,
     MetricQuery,
     MetricWindow,
     Metrics,
     Observation,
 )
+from linktools.ai.observe._memory import InMemoryMetricStore
 from linktools.ai.runtime import Runtime
 from linktools.ai.runtime import _metrics as runtime_metrics
 from linktools.ai.runtime._metric_capability import _RuntimeMetricCapability
 from linktools.ai.spec import AgentSpec, AgentSpecCodec
-from linktools.ai.task import TaskLease
+from linktools.ai.task import TaskLease, TaskTerminalRecord
 from linktools.ai.workspace import Workspace
 from pydantic_ai.messages import ToolCallPart
 from pydantic_ai.models.test import TestModel
@@ -293,10 +293,23 @@ async def test_model_and_tool_producers_do_not_capture_payload_or_exception_text
 
 @pytest.mark.asyncio
 async def test_task_attempt_observation_identity_is_stable_for_same_fence() -> None:
+    completed_at = datetime(2026, 9, 5, 2, 0, tzinfo=timezone.utc)
+    terminal = TaskTerminalRecord(
+        "node",
+        "worker",
+        7,
+        TaskStatus.SUCCEEDED,
+        "a" * 64,
+        None,
+        None,
+        completed_at=completed_at,
+        execution_id="execution",
+    )
+
     class Delegate:
-        async def complete(self, *args: object, **kwargs: object) -> object:
+        async def complete(self, *args: object, **kwargs: object) -> TaskTerminalRecord:
             del args, kwargs
-            return object()
+            return terminal
 
     recorder = _CaptureRecorder()
     repository = runtime_metrics._MetricTaskRepository(
@@ -324,6 +337,7 @@ async def test_task_attempt_observation_identity_is_stable_for_same_fence() -> N
     assert len(recorder.observations) == 2
     first, second = recorder.observations
     assert first.observation_id == second.observation_id
+    assert first.occurred_at == second.occurred_at == completed_at
     assert first.correlation == {
         "graph_id": "graph",
         "node_id": "node",
