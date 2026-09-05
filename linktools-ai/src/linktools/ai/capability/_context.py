@@ -3,10 +3,16 @@
 """Pure per-run application context exposed to LinkTools tools."""
 
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Generic, TypeVar
 
-from ..core import ImmutableJsonMapping, JsonValue, Principal
+from ..core import (
+    ImmutableJsonMapping,
+    JsonValue,
+    Principal,
+    RunContextData,
+    normalize_run_context,
+)
 from ..workspace import Workspace
 
 AppT = TypeVar("AppT")
@@ -20,6 +26,7 @@ class RunContext(Generic[AppT]):
     session_id: "str | None"
     execution_id: str
     session_metadata: Mapping[str, JsonValue]
+    context: RunContextData = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if not isinstance(self.principal, Principal):
@@ -37,6 +44,7 @@ class RunContext(Generic[AppT]):
             "session_metadata",
             ImmutableJsonMapping(dict(self.session_metadata)),
         )
+        object.__setattr__(self, "context", normalize_run_context(self.context))
 
 
 __all__ = ["RunContext"]
