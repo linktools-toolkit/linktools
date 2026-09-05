@@ -24,6 +24,7 @@ from linktools.ai.observe._codec import (
     decode_definition_envelope,
     decode_observation_envelope,
     definition_envelope,
+    definition_semantic_digest,
     observation_envelope,
 )
 from sqlalchemy.ext.asyncio import create_async_engine
@@ -56,8 +57,7 @@ async def test_metrics_record_is_idempotent_and_query_is_definition_driven() -> 
         status="SUCCEEDED",
         dimensions={"route": "alpha"},
     )
-    assert first.observation_id == "request-a"
-    assert first.measurements == (MetricMeasurement("latency_ms", 1, 10),)
+    assert first == "request-a"
     await metrics.record(
         "app.request.latency",
         30,
@@ -180,7 +180,7 @@ async def test_metrics_record_observations_accepts_sequences() -> None:
 
 
 @pytest.mark.asyncio
-async def test_metrics_reserve_linktools_metric_and_observation_names() -> None:
+async def test_metrics_reserve_names_but_allow_builtin_observation_derivation() -> None:
     metrics = Metrics.in_memory(namespace="metrics-reserved")
     with pytest.raises(AIError) as metric_error:
         await metrics.define(
@@ -196,19 +196,89 @@ async def test_metrics_reserve_linktools_metric_and_observation_names() -> None:
         )
     assert metric_error.value.code is ErrorCode.REQUEST_FIELD_INVALID
 
-    with pytest.raises(AIError) as kind_error:
-        await metrics.define(
-            MetricDefinition(
-                name="business.invalid",
-                revision=1,
-                observation_kind="linktools.model.request",
-                source=MetricSource.measurement("value"),
-                metric_type=MetricType.GAUGE,
-                unit="1",
-                default_aggregation=MetricAggregation.MEAN,
-            )
+    derived = MetricDefinition(
+        name="business.model.latency",
+        revision=1,
+        observation_kind="linktools.model.request",
+        source=MetricSource.measurement("latency_ns"),
+        metric_type=MetricType.DISTRIBUTION,
+        unit="ns",
+        default_aggregation=MetricAggregation.MEAN,
+        query_fields=("status", "agent_id"),
+    )
+    await metrics.define(derived)
+    occurred_at = datetime(2026, 9, 5, 0, 30, tzinfo=timezone.utc)
+    await metrics.record_observations(
+        (
+            Observation(
+                version=1,
+                observation_id="model-attempt",
+                kind="linktools.model.request",
+                occurred_at=occurred_at,
+                source_namespace="workspace",
+                tenant_id="tenant",
+                status="SUCCEEDED",
+                error_code=None,
+                correlation={"execution_id": "execution"},
+                dimensions={"agent_id": "default"},
+                measurements=(MetricMeasurement("latency_ns", 1, 25),),
+            ),
         )
-    assert kind_error.value.code is ErrorCode.REQUEST_FIELD_INVALID
+    )
+    result = await metrics.query(
+        MetricQuery(
+            derived.name,
+            MetricWindow.between(
+                occurred_at - timedelta(seconds=1),
+                occurred_at + timedelta(seconds=1),
+            ),
+            filters={"status": "SUCCEEDED"},
+            group_by=("agent_id",),
+        )
+    )
+    assert len(result.points) == 1
+    assert result.points[0].value == 25
+    assert result.points[0].sample_count == 1
+
+    with pytest.raises(AIError) as record_error:
+        await metrics.record(
+            derived.name,
+            30,
+            observation_id="forbidden-write",
+            occurred_at=occurred_at,
+        )
+    assert record_error.value.code is ErrorCode.REQUEST_FIELD_INVALID
+    assert record_error.value.safe_details == {"field": "observation_kind"}
+
+
+@pytest.mark.asyncio
+async def test_definition_identity_ignores_query_field_order() -> None:
+    metrics = Metrics.in_memory(namespace="metrics-definition-order")
+    first = MetricDefinition(
+        name="business.ordered",
+        revision=1,
+        observation_kind="business.ordered.sample",
+        source=MetricSource.measurement("value"),
+        metric_type=MetricType.GAUGE,
+        unit="1",
+        default_aggregation=MetricAggregation.MEAN,
+        query_fields=("status", "route"),
+    )
+    reordered = MetricDefinition(
+        name=first.name,
+        revision=first.revision,
+        observation_kind=first.observation_kind,
+        source=first.source,
+        metric_type=first.metric_type,
+        unit=first.unit,
+        default_aggregation=first.default_aggregation,
+        query_fields=("route", "status"),
+    )
+
+    assert definition_semantic_digest(first) == definition_semantic_digest(reordered)
+    stored = await metrics.define(first)
+    replay = await metrics.define(reordered)
+    assert replay == stored
 
 
 @pytest.mark.asyncio
