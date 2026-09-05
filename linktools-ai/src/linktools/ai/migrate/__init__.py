@@ -7,6 +7,7 @@ from ._database import (
     provision_asset_database,
     provision_database,
     provision_metrics_database,
+    provision_metrics_sqlite,
     provision_runtime_database,
 )
 
@@ -15,5 +16,6 @@ __all__ = [
     "provision_asset_database",
     "provision_database",
     "provision_metrics_database",
+    "provision_metrics_sqlite",
     "provision_runtime_database",
 ]
