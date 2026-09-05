@@ -13,7 +13,7 @@ from time import monotonic
 from linktools.core import environ
 
 from ..core import JsonValue, TaskStatus, canonical_sha256
-from ..errors import AIError
+from ..errors import AIError, ErrorCode
 from ..observe import MetricMeasurement, MetricRecorder, Metrics, Observation
 from ..storage import StoredPayload
 from ..task import (
@@ -35,6 +35,7 @@ _logger = environ.get_logger("ai.runtime.metrics")
 _QUEUE_CAPACITY = 1024
 _BATCH_SIZE = 64
 _WRITE_TIMEOUT_SECONDS = 2.0
+_WRITE_ATTEMPTS = 2
 _CLOSE_DEADLINE_SECONDS = 5.0
 _WARNING_INTERVAL_SECONDS = 30.0
 _TASK_TERMINAL = frozenset(
@@ -137,17 +138,30 @@ class _RuntimeMetricBuffer(MetricRecorder):
                 self._queue.task_done()
 
     async def _write(self, batch: tuple[Observation, ...]) -> None:
-        try:
-            await asyncio.wait_for(
-                self._metrics.record_observations(batch),
-                timeout=_WRITE_TIMEOUT_SECONDS,
-            )
-        except asyncio.CancelledError:
-            raise
-        except BaseException:
-            self._write_failures += 1
-            self._dropped += len(batch)
-            self._warn("runtime metric batch write failed")
+        for attempt in range(_WRITE_ATTEMPTS):
+            try:
+                await asyncio.wait_for(
+                    self._metrics.record_observations(batch),
+                    timeout=_WRITE_TIMEOUT_SECONDS,
+                )
+                return
+            except asyncio.CancelledError:
+                raise
+            except (TimeoutError, asyncio.TimeoutError):
+                if attempt + 1 < _WRITE_ATTEMPTS:
+                    continue
+            except AIError as error:
+                if attempt + 1 < _WRITE_ATTEMPTS and (
+                    error.retryable
+                    or error.code is ErrorCode.STORAGE_COMMIT_UNKNOWN
+                ):
+                    continue
+            except Exception:
+                pass
+            break
+        self._write_failures += 1
+        self._dropped += len(batch)
+        self._warn("runtime metric batch write failed")
 
     def _drop(self, message: str) -> None:
         self._dropped += 1
