@@ -43,10 +43,11 @@ class _BlockingRunner:
         *,
         graph_id: str,
         principal: Principal,
+        context: Mapping[str, str | int],
         dependency_results: Mapping[str, TaskDependencyResult],
         control: TaskNodeRunControl,
     ) -> TaskNodeRunResult:
-        del node, graph_id, principal, dependency_results, control
+        del node, graph_id, principal, context, dependency_results, control
         self.entered.set()
         try:
             await self.release.wait()
@@ -61,9 +62,10 @@ class _BlockingRunner:
         *,
         graph_id: str,
         principal: Principal,
+        context: Mapping[str, str | int],
         dependency_results: Mapping[str, TaskDependencyResult],
     ) -> None:
-        del node, graph_id, principal, dependency_results
+        del node, graph_id, principal, context, dependency_results
 
 
 @pytest.mark.asyncio
