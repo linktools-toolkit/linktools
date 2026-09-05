@@ -11,9 +11,11 @@ from typing import Protocol, runtime_checkable
 
 from linktools.core import environ
 
-from ..core import JsonValue, Principal, TaskStatus, canonical_sha256, validate_lease_owner
+from ..core import JsonValue, Page, Principal, TaskStatus, canonical_sha256, validate_lease_owner
 from ..errors import AIError, ErrorCode
+from ..observe import MetricRecorder
 from ..storage import StoredPayload
+from ._event import TaskEvent
 from ._graph import (
     CancelGraphRequest,
     TaskDependencyResult,
@@ -25,6 +27,7 @@ from ._graph import (
     TaskNodeView,
     TaskResultRecord,
 )
+from ._metrics import record_task_event
 
 _logger = environ.get_logger("ai.task.local")
 _HEARTBEAT_SECONDS = 30.0
@@ -137,6 +140,15 @@ class _TaskRepository(Protocol):
         tenant_id: str,
     ) -> "Mapping[str, TaskResultRecord]": ...
 
+    async def list_events(
+        self,
+        graph_id: str,
+        *,
+        tenant_id: str,
+        after_sequence: int,
+        limit: int,
+    ) -> Page[TaskEvent]: ...
+
     async def claim(
         self,
         graph_id: str,
@@ -193,6 +205,7 @@ class _GraphRun:
     task: "asyncio.Task[None] | None" = None
     condition: asyncio.Condition = field(default_factory=asyncio.Condition)
     generation: int = 0
+    metric_event_sequence: int = 0
     failure: "AIError | None" = None
     closed: bool = False
 
@@ -265,14 +278,22 @@ class LocalTaskGraphLauncher:
         runner: TaskNodeRunner,
         *,
         owner: str,
+        metric_recorder: MetricRecorder | None = None,
+        metric_source_namespace: str | None = None,
     ) -> None:
         try:
             validate_lease_owner(owner)
         except AIError as error:
             raise ValueError("task launcher lease owner is invalid") from error
+        if (metric_recorder is None) != (metric_source_namespace is None):
+            raise ValueError(
+                "task metric recorder and source namespace must be configured together"
+            )
         self._repository = repository
         self._runner = runner
         self._owner = owner
+        self._metric_recorder = metric_recorder
+        self._metric_source_namespace = metric_source_namespace
         self._graphs: dict[tuple[str, str], _GraphRun] = {}
         self._lock = asyncio.Lock()
         self._accepting = True
@@ -315,6 +336,19 @@ class LocalTaskGraphLauncher:
         if view is None:
             raise AIError(ErrorCode.STORAGE_NOT_FOUND)
         states = await self._repository.list_nodes(graph_id, tenant_id=tenant_id)
+        async with self._lock:
+            active_run = self._graphs.get(key)
+            metric_sequence = (
+                0 if active_run is None else active_run.metric_event_sequence
+            )
+        metric_sequence = await self._observe_metric_events(
+            graph_id,
+            tenant_id=tenant_id,
+            nodes=view.nodes,
+            after_sequence=metric_sequence,
+        )
+        if active_run is not None:
+            active_run.metric_event_sequence = metric_sequence
         static = {node.node_id: node for node in view.nodes}
         cleanup_error: BaseException | None = None
         for state in states:
@@ -468,6 +502,12 @@ class LocalTaskGraphLauncher:
                     request.graph.graph_id,
                     tenant_id=tenant_id,
                 )
+                run.metric_event_sequence = await self._observe_metric_events(
+                    request.graph.graph_id,
+                    tenant_id=tenant_id,
+                    nodes=request.graph.nodes,
+                    after_sequence=run.metric_event_sequence,
+                )
                 now = datetime.now(timezone.utc)
                 fingerprint = _scheduler_observation_fingerprint(view, states, now)
                 if fingerprint != observed_fingerprint:
@@ -553,6 +593,46 @@ class LocalTaskGraphLauncher:
                 async with self._lock:
                     if self._graphs.get(key) is run:
                         self._graphs.pop(key, None)
+
+    async def _observe_metric_events(
+        self,
+        graph_id: str,
+        *,
+        tenant_id: str,
+        nodes: tuple[TaskNode, ...],
+        after_sequence: int,
+    ) -> int:
+        if self._metric_recorder is None or self._metric_source_namespace is None:
+            return after_sequence
+        cursor = after_sequence
+        static = {node.node_id: node for node in nodes}
+        try:
+            while True:
+                page = await self._repository.list_events(
+                    graph_id,
+                    tenant_id=tenant_id,
+                    after_sequence=cursor,
+                    limit=1000,
+                )
+                for event in page.items:
+                    cursor = event.sequence
+                    record_task_event(
+                        self._metric_recorder,
+                        source_namespace=self._metric_source_namespace,
+                        tenant_id=tenant_id,
+                        event=event,
+                        nodes=static,
+                    )
+                if page.next_cursor is None or not page.items:
+                    return cursor
+        except Exception as error:
+            _logger.warning(
+                "task metric event projection skipped: graph=%s after_sequence=%s error=%s",
+                graph_id,
+                cursor,
+                type(error).__name__,
+            )
+            return cursor
 
     async def _cancel_terminal_effects(
         self,
