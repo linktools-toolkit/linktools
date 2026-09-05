@@ -240,6 +240,8 @@ class Observation:
     measurements: tuple[MetricMeasurement, ...]
 
     def __post_init__(self) -> None:
+        if isinstance(self.version, bool) or not isinstance(self.version, int):
+            raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
         if self.version != 1:
             raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
         validate_resource_id(self.observation_id)
