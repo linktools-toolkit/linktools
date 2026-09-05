@@ -48,7 +48,7 @@ async def test_metrics_record_is_idempotent_and_query_is_definition_driven() -> 
     await metrics.define(_latency_definition())
     occurred_at = datetime(2026, 9, 5, 0, 0, tzinfo=timezone.utc)
 
-    await metrics.record(
+    first = await metrics.record(
         "app.request.latency",
         10,
         observation_id="request-a",
@@ -56,6 +56,8 @@ async def test_metrics_record_is_idempotent_and_query_is_definition_driven() -> 
         status="SUCCEEDED",
         dimensions={"route": "alpha"},
     )
+    assert first.observation_id == "request-a"
+    assert first.measurements == (MetricMeasurement("latency_ms", 1, 10),)
     await metrics.record(
         "app.request.latency",
         30,
@@ -64,7 +66,7 @@ async def test_metrics_record_is_idempotent_and_query_is_definition_driven() -> 
         status="SUCCEEDED",
         dimensions={"route": "beta"},
     )
-    await metrics.record(
+    replay = await metrics.record(
         "app.request.latency",
         10,
         observation_id="request-a",
@@ -72,6 +74,7 @@ async def test_metrics_record_is_idempotent_and_query_is_definition_driven() -> 
         status="SUCCEEDED",
         dimensions={"route": "alpha"},
     )
+    assert replay == first
 
     result = await metrics.query(
         MetricQuery(
@@ -85,7 +88,7 @@ async def test_metrics_record_is_idempotent_and_query_is_definition_driven() -> 
         )
     )
     assert [
-        (point.dimensions["route"], point.value, point.sample_count)
+        (dict(point.dimensions)["route"], point.value, point.sample_count)
         for point in result.points
     ] == [
         ("alpha", 10.0, 1),
@@ -152,7 +155,7 @@ async def test_measurement_query_skips_groups_without_matching_sample() -> None:
     )
 
     assert [
-        (point.dimensions["route"], point.value, point.sample_count)
+        (dict(point.dimensions)["route"], point.value, point.sample_count)
         for point in result.points
     ] == [("present", 25.0, 1)]
 
@@ -174,6 +177,38 @@ async def test_metrics_record_observations_accepts_sequences() -> None:
         measurements=(),
     )
     await metrics.record_observations([observation])
+
+
+@pytest.mark.asyncio
+async def test_metrics_reserve_linktools_metric_and_observation_names() -> None:
+    metrics = Metrics.in_memory(namespace="metrics-reserved")
+    with pytest.raises(AIError) as metric_error:
+        await metrics.define(
+            MetricDefinition(
+                name="linktools.custom.invalid",
+                revision=1,
+                observation_kind="business.sample",
+                source=MetricSource.measurement("value"),
+                metric_type=MetricType.GAUGE,
+                unit="1",
+                default_aggregation=MetricAggregation.MEAN,
+            )
+        )
+    assert metric_error.value.code is ErrorCode.REQUEST_FIELD_INVALID
+
+    with pytest.raises(AIError) as kind_error:
+        await metrics.define(
+            MetricDefinition(
+                name="business.invalid",
+                revision=1,
+                observation_kind="linktools.model.request",
+                source=MetricSource.measurement("value"),
+                metric_type=MetricType.GAUGE,
+                unit="1",
+                default_aggregation=MetricAggregation.MEAN,
+            )
+        )
+    assert kind_error.value.code is ErrorCode.REQUEST_FIELD_INVALID
 
 
 @pytest.mark.asyncio
