@@ -10,8 +10,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from ..core import validate_persistence_namespace
+from ..core import canonical_json_bytes, validate_persistence_namespace
 from ..errors import AIError, ErrorCode
+from ._codec import observation_envelope
 from ._memory import InMemoryMetricStore
 from ._model import (
     MetricAggregation,
@@ -36,6 +37,8 @@ _CANONICAL_QUERY_FIELDS = frozenset(
     {"source_namespace", "tenant_id", "status", "error_code"}
 )
 _RESERVED_PREFIX = "linktools."
+_MAX_RECORD_BATCH = 256
+_MAX_RECORD_BATCH_CANONICAL_BYTES = 16 * 1024 * 1024
 
 
 class Metrics:
@@ -67,7 +70,7 @@ class Metrics:
     def from_store(cls, store: MetricStore, *, namespace: str = "default") -> Metrics:
         return cls(store, namespace=namespace)
 
-    async def define(self, definition: MetricDefinition) -> None:
+    async def define(self, definition: MetricDefinition) -> MetricDefinition:
         if not isinstance(definition, MetricDefinition):
             raise TypeError("definition must be MetricDefinition")
         if definition.name.startswith(_RESERVED_PREFIX):
@@ -75,7 +78,7 @@ class Metrics:
                 ErrorCode.REQUEST_FIELD_INVALID,
                 safe_details={"field": "metric"},
             )
-        await self._store.put_definition(self._namespace, definition)
+        return await self._store.put_definition(self._namespace, definition)
 
     async def record(
         self,
@@ -92,6 +95,11 @@ class Metrics:
         dimensions: Mapping[str, str] | None = None,
         correlation: Mapping[str, str | int] | None = None,
     ) -> str:
+        if not isinstance(metric, str) or metric.startswith(_RESERVED_PREFIX):
+            raise AIError(
+                ErrorCode.REQUEST_FIELD_INVALID,
+                safe_details={"field": "metric"},
+            )
         definition = await self._resolve_definition(metric, revision)
         source = definition.source
         if source.kind is not MetricSourceKind.MEASUREMENT:
@@ -141,7 +149,23 @@ class Metrics:
         self,
         observations: Sequence[Observation],
     ) -> None:
-        await self._store.put_observations(self._namespace, tuple(observations))
+        if not isinstance(observations, Sequence) or isinstance(
+            observations, (str, bytes, bytearray)
+        ):
+            raise TypeError("observations must be a sequence")
+        batch = tuple(observations)
+        if len(batch) > _MAX_RECORD_BATCH:
+            raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+        total_bytes = 0
+        for observation in batch:
+            if not isinstance(observation, Observation):
+                raise TypeError("observations must contain Observation values")
+            total_bytes += len(
+                canonical_json_bytes(observation_envelope(self._namespace, observation))
+            )
+            if total_bytes > _MAX_RECORD_BATCH_CANONICAL_BYTES:
+                raise AIError(ErrorCode.OBSERVATION_PAYLOAD_TOO_LARGE)
+        await self._store.put_observations(self._namespace, batch)
 
     async def query(self, query: MetricQuery) -> MetricQueryResult:
         if not isinstance(query, MetricQuery):
@@ -155,7 +179,7 @@ class Metrics:
                 ErrorCode.REQUEST_FIELD_INVALID,
                 safe_details={"field": "before"},
             )
-        return await self._store.prune(
+        return await self._store.prune_observations(
             self._namespace,
             before=before.astimezone(timezone.utc),
         )
@@ -169,10 +193,14 @@ class Metrics:
         if built_in is not None:
             if revision is None or revision == built_in.revision:
                 return built_in
-            raise AIError(ErrorCode.STORAGE_NOT_FOUND, safe_details={"metric": name})
-        definition = await self._store.get_definition(self._namespace, name, revision)
+            raise AIError(ErrorCode.METRIC_NOT_FOUND, safe_details={"metric": name})
+        definition = (
+            await self._store.latest_definition(self._namespace, name)
+            if revision is None
+            else await self._store.get_definition(self._namespace, name, revision)
+        )
         if definition is None:
-            raise AIError(ErrorCode.STORAGE_NOT_FOUND, safe_details={"metric": name})
+            raise AIError(ErrorCode.METRIC_NOT_FOUND, safe_details={"metric": name})
         return definition
 
 
@@ -242,9 +270,9 @@ def _ratio(
 _CANONICAL = ("source_namespace", "tenant_id", "status", "error_code")
 _MODEL_FIELDS = (*_CANONICAL, "agent_id", "provider", "model_identity", "route_id")
 _TOOL_FIELDS = (*_CANONICAL, "agent_id", "tool_name")
-_AGENT_FIELDS = (*_CANONICAL, "agent_id", "mode")
-_EXECUTION_FIELDS = (*_CANONICAL, "agent_id", "mode")
-_TASK_ATTEMPT_FIELDS = (*_CANONICAL, "task_type")
+_AGENT_FIELDS = (*_CANONICAL, "agent_id")
+_EXECUTION_FIELDS = (*_CANONICAL, "agent_id", "lineage_kind")
+_TASK_ATTEMPT_FIELDS = _CANONICAL
 _TASK_GRAPH_FIELDS = _CANONICAL
 _STORAGE_FIELDS = (*_CANONICAL, "domain", "target")
 
@@ -272,12 +300,40 @@ _BUILTIN_DEFINITIONS = (
         ("MODEL_RATE_LIMITED",),
         _MODEL_FIELDS,
     ),
-    _token("linktools.model.input_tokens", "input_tokens", "linktools.model.request", _MODEL_FIELDS),
-    _token("linktools.model.output_tokens", "output_tokens", "linktools.model.request", _MODEL_FIELDS),
-    _token("linktools.model.cache_read_tokens", "cache_read_tokens", "linktools.model.request", _MODEL_FIELDS),
-    _token("linktools.model.cache_write_tokens", "cache_write_tokens", "linktools.model.request", _MODEL_FIELDS),
-    _count("linktools.tool.execution.count", "linktools.tool.execution", _TOOL_FIELDS),
-    _latency("linktools.tool.execution.latency", "linktools.tool.execution", _TOOL_FIELDS),
+    _token(
+        "linktools.model.input_tokens",
+        "input_tokens",
+        "linktools.model.request",
+        _MODEL_FIELDS,
+    ),
+    _token(
+        "linktools.model.output_tokens",
+        "output_tokens",
+        "linktools.model.request",
+        _MODEL_FIELDS,
+    ),
+    _token(
+        "linktools.model.cache_read_tokens",
+        "cache_read_tokens",
+        "linktools.model.request",
+        _MODEL_FIELDS,
+    ),
+    _token(
+        "linktools.model.cache_write_tokens",
+        "cache_write_tokens",
+        "linktools.model.request",
+        _MODEL_FIELDS,
+    ),
+    _count(
+        "linktools.tool.execution.count",
+        "linktools.tool.execution",
+        _TOOL_FIELDS,
+    ),
+    _latency(
+        "linktools.tool.execution.latency",
+        "linktools.tool.execution",
+        _TOOL_FIELDS,
+    ),
     _ratio(
         "linktools.tool.execution.failure_ratio",
         "linktools.tool.execution",
@@ -294,7 +350,11 @@ _BUILTIN_DEFINITIONS = (
         ("FAILED",),
         _AGENT_FIELDS,
     ),
-    _count("linktools.execution.count", "linktools.execution.terminal", _EXECUTION_FIELDS),
+    _count(
+        "linktools.execution.count",
+        "linktools.execution.terminal",
+        _EXECUTION_FIELDS,
+    ),
     _ratio(
         "linktools.execution.failure_ratio",
         "linktools.execution.terminal",
@@ -309,22 +369,50 @@ _BUILTIN_DEFINITIONS = (
         ("CANCELLED",),
         _EXECUTION_FIELDS,
     ),
-    _token("linktools.execution.input_tokens", "input_tokens", "linktools.execution.terminal", _EXECUTION_FIELDS),
-    _token("linktools.execution.output_tokens", "output_tokens", "linktools.execution.terminal", _EXECUTION_FIELDS),
-    _count("linktools.task.node.attempt.count", "linktools.task.node.attempt", _TASK_ATTEMPT_FIELDS),
+    _token(
+        "linktools.execution.input_tokens",
+        "input_tokens",
+        "linktools.execution.terminal",
+        _EXECUTION_FIELDS,
+    ),
+    _token(
+        "linktools.execution.output_tokens",
+        "output_tokens",
+        "linktools.execution.terminal",
+        _EXECUTION_FIELDS,
+    ),
+    _count(
+        "linktools.task.node.attempt.count",
+        "linktools.task.node.attempt",
+        _TASK_ATTEMPT_FIELDS,
+    ),
+    _latency(
+        "linktools.task.node.attempt.latency",
+        "linktools.task.node.attempt",
+        _TASK_ATTEMPT_FIELDS,
+    ),
     _ratio(
         "linktools.task.node.attempt.failure_ratio",
         "linktools.task.node.attempt",
         "status",
-        ("FAILED",),
+        ("FAILED", "BLOCKED"),
         _TASK_ATTEMPT_FIELDS,
     ),
-    _count("linktools.task.graph.count", "linktools.task.graph.terminal", _TASK_GRAPH_FIELDS),
+    _count(
+        "linktools.task.graph.count",
+        "linktools.task.graph.terminal",
+        _TASK_GRAPH_FIELDS,
+    ),
+    _latency(
+        "linktools.task.graph.latency",
+        "linktools.task.graph.terminal",
+        _TASK_GRAPH_FIELDS,
+    ),
     _ratio(
         "linktools.task.graph.failure_ratio",
         "linktools.task.graph.terminal",
         "status",
-        ("FAILED",),
+        ("FAILED", "BLOCKED"),
         _TASK_GRAPH_FIELDS,
     ),
     _ratio(
@@ -334,8 +422,16 @@ _BUILTIN_DEFINITIONS = (
         ("CANCELLED",),
         _TASK_GRAPH_FIELDS,
     ),
-    _count("linktools.storage.operation.count", "linktools.storage.operation", _STORAGE_FIELDS),
-    _latency("linktools.storage.operation.latency", "linktools.storage.operation", _STORAGE_FIELDS),
+    _count(
+        "linktools.storage.operation.count",
+        "linktools.storage.operation",
+        _STORAGE_FIELDS,
+    ),
+    _latency(
+        "linktools.storage.operation.latency",
+        "linktools.storage.operation",
+        _STORAGE_FIELDS,
+    ),
     _ratio(
         "linktools.storage.operation.failure_ratio",
         "linktools.storage.operation",
