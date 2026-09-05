@@ -56,11 +56,10 @@ async def test_metric_buffer_close_deadline_cancels_writer_and_settles_queue(
 ) -> None:
     monkeypatch.setattr(runtime_metrics, "_WRITE_TIMEOUT_SECONDS", 10.0)
     monkeypatch.setattr(runtime_metrics, "_CLOSE_DEADLINE_SECONDS", 0.05)
+    store = _NeverCompletesStore()
     buffer = runtime_metrics._RuntimeMetricBuffer(
-        Metrics.from_store(_NeverCompletesStore(), namespace="deadline")
+        Metrics.from_store(store, namespace="deadline")
     )
-    store = buffer._metrics._store  # type: ignore[attr-defined]
-    assert isinstance(store, _NeverCompletesStore)
     observation = Observation(
         version=1,
         observation_id="deadline-observation",
@@ -75,11 +74,14 @@ async def test_metric_buffer_close_deadline_cancels_writer_and_settles_queue(
         measurements=(),
     )
 
+    assert buffer._writer is None  # type: ignore[attr-defined]
     assert buffer.try_record(observation) is True
+    writer = buffer._writer  # type: ignore[attr-defined]
+    assert writer is not None
     await asyncio.wait_for(store.entered.wait(), timeout=1)
     await asyncio.wait_for(buffer.close(), timeout=1)
 
-    assert buffer._writer.done()  # type: ignore[attr-defined]
+    assert writer.done()
     await asyncio.wait_for(buffer._queue.join(), timeout=0.1)  # type: ignore[attr-defined]
 
 
@@ -88,9 +90,10 @@ def test_metric_buffer_rejects_invalid_shape_without_raising() -> None:
 
     async def exercise() -> None:
         buffer = runtime_metrics._RuntimeMetricBuffer(metrics)
-        try:
-            assert buffer.try_record(object()) is False  # type: ignore[arg-type]
-        finally:
-            await buffer.close()
+        assert buffer._writer is None  # type: ignore[attr-defined]
+        assert buffer.try_record(object()) is False  # type: ignore[arg-type]
+        assert buffer._writer is None  # type: ignore[attr-defined]
+        await buffer.close()
+        assert buffer._writer is None  # type: ignore[attr-defined]
 
     asyncio.run(exercise())
