@@ -94,12 +94,12 @@ def _required_text(value: object, *, name: str, maximum: int) -> str:
     ):
         raise AIError(ErrorCode.REQUEST_FIELD_INVALID, safe_details={"field": name})
     try:
-        size = len(value.encode("utf-8"))
+        value.encode("utf-8")
     except UnicodeEncodeError as error:
         raise AIError(
             ErrorCode.REQUEST_FIELD_INVALID, safe_details={"field": name}
         ) from error
-    if size > maximum:
+    if len(value) > maximum:
         raise AIError(ErrorCode.REQUEST_FIELD_INVALID, safe_details={"field": name})
     return value
 
@@ -123,6 +123,17 @@ def _finite_number(value: object, *, name: str) -> int | float:
     if isinstance(value, float) and not math.isfinite(value):
         raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
     return value
+
+
+def _string_tuple(
+    value: object,
+    *,
+    name: str,
+    maximum: int,
+) -> tuple[str, ...]:
+    if not isinstance(value, tuple):
+        raise AIError(ErrorCode.REQUEST_FIELD_INVALID, safe_details={"field": name})
+    return tuple(_required_text(item, name=name, maximum=maximum) for item in value)
 
 
 def validate_metric_value(metric_type: MetricType, value: object) -> int | float:
@@ -169,21 +180,14 @@ class MetricSource:
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
         if self.indicator_field not in {"status", "error_code"}:
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
-        if not self.indicator_values:
-            raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
-        values = tuple(
-            sorted(
-                {
-                    _required_text(
-                        item,
-                        name="indicator value",
-                        maximum=_DIMENSION_VALUE_MAX,
-                    )
-                    for item in self.indicator_values
-                }
-            )
+        values = _string_tuple(
+            self.indicator_values,
+            name="indicator value",
+            maximum=_DIMENSION_VALUE_MAX,
         )
-        object.__setattr__(self, "indicator_values", values)
+        if not values:
+            raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+        object.__setattr__(self, "indicator_values", tuple(sorted(set(values))))
 
     @classmethod
     def observation_count(cls) -> MetricSource:
@@ -255,6 +259,8 @@ class Observation:
             value = getattr(self, name)
             if value is not None:
                 _required_text(value, name=name, maximum=_DIMENSION_VALUE_MAX)
+        if not isinstance(self.correlation, Mapping):
+            raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
         correlation = dict(self.correlation)
         if len(correlation) > _CORRELATIONS_MAX:
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
@@ -266,6 +272,8 @@ class Observation:
                 _required_text(
                     value, name="correlation value", maximum=_DIMENSION_VALUE_MAX
                 )
+        if not isinstance(self.dimensions, Mapping):
+            raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
         dimensions = dict(self.dimensions)
         if len(dimensions) > _DIMENSIONS_MAX:
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
@@ -276,15 +284,18 @@ class Observation:
             )
             if key in _CANONICAL_QUERY_FIELDS:
                 raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
-        measurements = tuple(self.measurements)
-        if len(measurements) > _MEASUREMENTS_MAX:
+        if not isinstance(self.measurements, tuple):
+            raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+        measurements = self.measurements
+        if len(measurements) > _MEASUREMENTS_MAX or any(
+            not isinstance(item, MetricMeasurement) for item in measurements
+        ):
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
         identities = [(item.name, item.revision) for item in measurements]
         if len(set(identities)) != len(identities):
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
         object.__setattr__(self, "correlation", MappingProxyType(correlation))
         object.__setattr__(self, "dimensions", MappingProxyType(dimensions))
-        object.__setattr__(self, "measurements", measurements)
 
 
 @dataclass(frozen=True, slots=True)
@@ -317,7 +328,12 @@ class MetricDefinition:
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
         if self.default_aggregation not in _ALLOWED_AGGREGATIONS[self.metric_type]:
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
-        fields = tuple(sorted(set(self.query_fields)))
+        fields = _string_tuple(
+            self.query_fields,
+            name="query field",
+            maximum=_FIELD_MAX,
+        )
+        fields = tuple(sorted(set(fields)))
         for field in fields:
             _identifier(field, name="query field", maximum=_FIELD_MAX)
         if self.description is not None and (
@@ -355,7 +371,10 @@ class MetricWindow:
             object.__setattr__(self, "start", start)
             object.__setattr__(self, "end", end)
         else:
-            if self.recent_delta is None or self.recent_delta <= timedelta(0):
+            if (
+                not isinstance(self.recent_delta, timedelta)
+                or self.recent_delta <= timedelta(0)
+            ):
                 raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
 
     @classmethod
@@ -366,6 +385,9 @@ class MetricWindow:
         hours: int = 0,
         days: int = 0,
     ) -> MetricWindow:
+        for value in (minutes, hours, days):
+            if isinstance(value, bool) or not isinstance(value, int):
+                raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
         return cls(recent_delta=timedelta(minutes=minutes, hours=hours, days=days))
 
     @classmethod
@@ -415,16 +437,24 @@ class MetricQuery:
                 raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
         elif self.percentile is not None:
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+        if not isinstance(self.filters, Mapping):
+            raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
         filters = dict(self.filters)
         for key, value in filters.items():
             _identifier(key, name="filter key", maximum=_FIELD_MAX)
             _required_text(value, name="filter value", maximum=_DIMENSION_VALUE_MAX)
-        groups = tuple(self.group_by)
+        groups = _string_tuple(
+            self.group_by,
+            name="group field",
+            maximum=_FIELD_MAX,
+        )
         if len(groups) != len(set(groups)):
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
         for field in groups:
             _identifier(field, name="group field", maximum=_FIELD_MAX)
-        if self.bucket is not None and self.bucket <= timedelta(0):
+        if self.bucket is not None and (
+            not isinstance(self.bucket, timedelta) or self.bucket <= timedelta(0)
+        ):
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
         object.__setattr__(self, "filters", MappingProxyType(filters))
         object.__setattr__(self, "group_by", groups)
@@ -439,7 +469,13 @@ class MetricQueryPoint:
     bucket_end: datetime | None = None
 
     def __post_init__(self) -> None:
-        if self.sample_count < 0:
+        if not isinstance(self.dimensions, Mapping):
+            raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+        if (
+            isinstance(self.sample_count, bool)
+            or not isinstance(self.sample_count, int)
+            or self.sample_count < 0
+        ):
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
         object.__setattr__(self, "dimensions", MappingProxyType(dict(self.dimensions)))
 
