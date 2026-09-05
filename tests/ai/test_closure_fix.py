@@ -253,7 +253,7 @@ class _TaskRepository:
 
     async def get_graph(self, graph_id: str, *, tenant_id: str) -> TaskGraphView:
         del graph_id, tenant_id
-        return TaskGraphView("graph", self.status, ())
+        return TaskGraphView("graph", self.status, (TaskNode("node"),))
 
     async def list_nodes(self, graph_id: str, *, tenant_id: str) -> tuple[object, ...]:
         del graph_id, tenant_id
