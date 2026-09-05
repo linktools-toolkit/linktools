@@ -2,7 +2,6 @@
 # -*- coding: utf-8 -*-
 """Metrics observation contracts and persistence boundary."""
 
-from ._memory import InMemoryMetricStore
 from ._metrics import Metrics
 from ._model import (
     MetricAggregation,
@@ -18,12 +17,10 @@ from ._model import (
     MetricWindow,
     Observation,
 )
-from ._sql import SqlMetricStore, build_metrics_sql_metadata, provision_metrics_database
-from ._sqlite import SQLiteMetricStore
+from ._sql import build_metrics_sql_metadata
 from ._store import MetricStore
 
 __all__ = [
-    "InMemoryMetricStore",
     "MetricAggregation",
     "MetricDefinition",
     "MetricMeasurement",
@@ -38,8 +35,5 @@ __all__ = [
     "MetricWindow",
     "Metrics",
     "Observation",
-    "SQLiteMetricStore",
-    "SqlMetricStore",
     "build_metrics_sql_metadata",
-    "provision_metrics_database",
 ]
