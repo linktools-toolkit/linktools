@@ -2,7 +2,8 @@
 # -*- coding: utf-8 -*-
 """Metric public contract shape and character-limit regressions."""
 
-from datetime import datetime, timedelta, timezone
+from collections.abc import Callable
+from datetime import datetime, timezone
 
 import pytest
 from linktools.ai.errors import AIError, ErrorCode
@@ -18,9 +19,9 @@ from linktools.ai.observe import (
 )
 
 
-def _assert_invalid(factory: object) -> None:
+def _assert_invalid(factory: Callable[[], object]) -> None:
     with pytest.raises(AIError) as raised:
-        factory()  # type: ignore[operator]
+        factory()
     assert raised.value.code is ErrorCode.REQUEST_FIELD_INVALID
 
 
