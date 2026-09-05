@@ -10,6 +10,7 @@ import pytest
 from linktools.ai.observe import Observation
 from linktools.ai.runtime._capabilities import ToolOperationDecision, _RuntimeStepPersistence
 from linktools.ai.runtime._tool_metrics import _ToolMetricContext
+from pydantic_ai.exceptions import SkipToolExecution
 from pydantic_ai.messages import ToolCallPart
 from pydantic_ai.models.test import TestModel
 from pydantic_ai.tools import RunContext, ToolDefinition
@@ -195,3 +196,32 @@ async def test_actual_tool_handler_emits_one_execution_metric() -> None:
     assert len(observation.measurements) == 1
     assert observation.measurements[0].name == "latency_ns"
     assert observation.measurements[0].value >= 0
+
+
+async def test_skip_tool_execution_emits_success_metric_and_durable_completion() -> None:
+    recorder = _Recorder()
+    capability, bridge, context, call, definition = await _capability(
+        ToolOperationDecision("operation", "owner", 1, True),
+        recorder,
+    )
+    skipped = {"skipped": True}
+
+    async def handler(_args: dict[str, Any]) -> object:
+        raise SkipToolExecution(skipped)
+
+    with pytest.raises(SkipToolExecution) as raised:
+        await capability.wrap_tool_execute(
+            context,
+            call=call,
+            tool_def=definition,
+            args={},
+            handler=handler,
+        )
+
+    assert raised.value.result == skipped
+    assert bridge.calls == ["begin", "complete"]
+    assert len(recorder.observations) == 1
+    observation = recorder.observations[0]
+    assert observation.kind == "linktools.tool.execution"
+    assert observation.status == "SUCCEEDED"
+    assert observation.error_code is None
