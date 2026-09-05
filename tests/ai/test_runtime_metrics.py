@@ -309,7 +309,7 @@ async def test_model_metric_does_not_capture_prompt_or_exception_text() -> None:
     assert len(recorder.observations) == 1
     observation = recorder.observations[0]
     assert observation.kind == "linktools.model.request"
-    assert observation.error_code == ErrorCode.MODEL_API_ERROR.value
+    assert observation.error_code == ErrorCode.INTERNAL_ERROR.value
     assert secret not in repr(observation)
 
 
