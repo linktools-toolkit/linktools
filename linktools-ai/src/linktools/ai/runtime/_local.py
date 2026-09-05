@@ -9,7 +9,7 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
-from time import monotonic
+from time import monotonic_ns
 from typing import Protocol, TypeVar, cast
 
 from linktools.core import environ
@@ -67,15 +67,16 @@ from ..core import (
     validate_tenant_id,
 )
 from ..errors import AIError, ErrorCode, ErrorDiagnostics
+from ..observe import MetricRecorder
 from ..storage import (
     ObjectStore,
     PayloadPolicy,
-    StorageMetrics,
     StoredPayload,
     payload_fits_inline,
 )
 from ._event import ExecutionDelta, LiveExecutionEventBroker
 from ._execution import CancelEffectOutcome, ExecutionStartIdentity
+from ._metrics import _record_execution_terminal, _record_storage_operation
 from ._object import RuntimeObjectKeyFactory, put_runtime_object, read_runtime_object
 from ._tool import RuntimeToolOperationBridge, _ToolOperationRuntimeRepository
 from .service_api import ExecutionRequest, ToolApprovalContext
@@ -250,7 +251,6 @@ class LocalExecutionBackend:
         recovery: RecoveryState,
         execution_objects: ObjectStore,
         recovery_objects: ObjectStore,
-        metrics: StorageMetrics,
         namespace: str,
         steps: StepStore,
         executor: AgentExecutor,
@@ -270,13 +270,14 @@ class LocalExecutionBackend:
         payload_policy: "PayloadPolicy | None" = None,
         execution_objects_durable: bool = True,
         tool_operations: "_ToolOperationRuntimeRepository | None" = None,
+        metric_recorder: "MetricRecorder | None" = None,
     ) -> None:
         self._conversation = conversation
         self._execution = execution_state
         self._recovery = recovery
         self._execution_objects = execution_objects
         self._recovery_objects = recovery_objects
-        self._metrics = metrics
+        self._metric_recorder = metric_recorder
         self._namespace = namespace
         self._steps = steps
         self._executor = executor
@@ -721,7 +722,14 @@ class LocalExecutionBackend:
             session_id=execution.session_id,
             expected_cursor=expected,
         )
-        self._metrics.count("execution.start.checkpoint", domain="execution", target="runtime")
+        _record_storage_operation(
+            self._metric_recorder,
+            source_namespace=self._namespace,
+            tenant_id=execution.tenant_id,
+            domain="execution",
+            target="runtime",
+            status="SUCCEEDED",
+        )
         _logger.info("execution start checkpoint committed: execution=%s", execution.execution_id)
         return started
 
@@ -3382,7 +3390,9 @@ class LocalExecutionBackend:
             recovery_relaunch_ids = set()
         exact_recovery_context = execution_id in recovery_relaunch_ids
         recovery_relaunch_ids.discard(execution_id)
-        operation_started_at = monotonic()
+        operation_started_at = (
+            None if self._metric_recorder is None else monotonic_ns()
+        )
         operation_result = "failure"
         claimed_from_admitted = False
         try:
@@ -3872,7 +3882,23 @@ class LocalExecutionBackend:
             )
             raise
         finally:
-            self._metrics.operation("execution", "runtime", operation_result, operation_started_at)
+            _record_storage_operation(
+                self._metric_recorder,
+                source_namespace=self._namespace,
+                tenant_id=original.tenant_id,
+                domain="execution",
+                target="runtime",
+                status={
+                    "success": "SUCCEEDED",
+                    "failure": "FAILED",
+                    "cancelled": "CANCELLED",
+                }[operation_result],
+                latency_ns=(
+                    None
+                    if operation_started_at is None
+                    else max(0, monotonic_ns() - operation_started_at)
+                ),
+            )
 
     async def _finish_checkpoint(self, checkpoint: RecoveryCheckpoint) -> None:
         if checkpoint.state is RecoveryCheckpointState.COMPLETED:
@@ -4801,6 +4827,12 @@ class LocalExecutionBackend:
                         terminal_plan=plan,
                     )
                     durable_commit = True
+                    _record_execution_terminal(
+                        self._metric_recorder,
+                        source_namespace=self._namespace,
+                        result=committed,
+                        session_id=current.session_id,
+                    )
                     self._confirm_committed_events(
                         current.execution_id,
                         pending_count=pending_count,
