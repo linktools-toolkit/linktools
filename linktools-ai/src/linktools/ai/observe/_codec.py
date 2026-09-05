@@ -44,8 +44,19 @@ def _definition_payload(definition: MetricDefinition) -> dict[str, object]:
     }
 
 
+def _definition_semantic_payload(definition: MetricDefinition) -> dict[str, object]:
+    payload = _definition_payload(definition)
+    payload["query_fields"] = sorted(definition.query_fields)
+    return payload
+
+
 def definition_semantic_digest(definition: MetricDefinition) -> str:
-    return canonical_sha256(_definition_payload(definition))
+    return canonical_sha256(
+        {
+            "version": 1,
+            "definition": _definition_semantic_payload(definition),
+        }
+    )
 
 
 def definition_envelope(
