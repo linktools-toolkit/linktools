@@ -128,7 +128,8 @@ class SQLiteMetricStore:
             )
             cursor = await connection.execute(
                 """
-                SELECT definition_digest, payload_json
+                SELECT namespace_digest, metric_name, revision, definition_digest,
+                       observation_kind, payload_json
                 FROM ai_metric_definitions
                 WHERE namespace_digest = ? AND metric_name = ? AND revision = ?
                 """,
@@ -136,7 +137,21 @@ class SQLiteMetricStore:
             )
             row = await cursor.fetchone()
             await cursor.close()
-            if row is None or str(row["definition_digest"]) != semantic_digest:
+            if row is None:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            stored = decode_definition_envelope(
+                _load_json(row["payload_json"]),
+                expected_namespace=namespace,
+            )
+            if (
+                row["namespace_digest"] != namespace_key
+                or row["metric_name"] != definition.name
+                or row["revision"] != definition.revision
+                or row["observation_kind"] != stored.observation_kind
+                or definition_semantic_digest(stored) != row["definition_digest"]
+            ):
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            if str(row["definition_digest"]) != semantic_digest:
                 raise AIError(ErrorCode.STORAGE_CONFLICT)
 
         await self._mutate(mutate)
