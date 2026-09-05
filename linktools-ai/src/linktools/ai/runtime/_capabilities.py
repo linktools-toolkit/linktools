@@ -10,14 +10,13 @@ import os
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, NoReturn, Protocol
+from typing import Any, Protocol
 
 from linktools.core import environ
 from pydantic import ValidationError
 from pydantic_ai.capabilities import (
     AbstractCapability,
     AgentNode,
-    CapabilityOrdering,
     NodeResult,
     WrapToolExecuteHandler,
 )
@@ -61,7 +60,6 @@ from ..capability import (
 )
 from ..core import JsonValue, canonical_json_bytes, normalize_json_value
 from ..errors import AIError, ErrorCode
-from ..observe import MiddlewarePipeline, ObservationContext
 from ..workspace import (
     RepositoryInstructionDocument,
     RepositoryInstructionResolver,
@@ -788,89 +786,6 @@ class _RuntimeStepPersistence(StepPersistence[None]):
         return self._effective_run_id(ctx), call.tool_call_id
 
 
-class _ObservationalMiddlewareCapability(AbstractCapability[None]):
-    def __init__(
-        self,
-        pipeline: MiddlewarePipeline,
-        context: ObservationContext,
-    ) -> None:
-        if not isinstance(pipeline, MiddlewarePipeline):
-            raise TypeError("pipeline must be MiddlewarePipeline")
-        if not isinstance(context, ObservationContext):
-            raise TypeError("context must be observe.ObservationContext")
-        self._pipeline = pipeline
-        self._context = context
-
-    async def before_run(self, ctx: RunContext[None]) -> None:
-        del ctx
-        await self._pipeline.before_run(self._context)
-
-    async def before_model_request(
-        self,
-        ctx: RunContext[None],
-        request_context: ModelRequestContext,
-    ) -> ModelRequestContext:
-        del ctx
-        await self._pipeline.before_model(self._context)
-        return request_context
-
-    async def after_model_request(
-        self,
-        ctx: RunContext[None],
-        *,
-        request_context: ModelRequestContext,
-        response: ModelResponse,
-    ) -> ModelResponse:
-        del ctx, request_context
-        await self._pipeline.after_model(self._context)
-        return response
-
-    async def before_tool_execute(
-        self,
-        ctx: RunContext[None],
-        *,
-        call: ToolCallPart,
-        tool_def: ToolDefinition,
-        args: dict[str, Any],
-    ) -> dict[str, Any]:
-        del ctx, call, tool_def
-        await self._pipeline.before_tool(self._context)
-        return args
-
-    async def after_tool_execute(
-        self,
-        ctx: RunContext[None],
-        *,
-        call: ToolCallPart,
-        tool_def: ToolDefinition,
-        args: dict[str, Any],
-        result: Any,
-    ) -> Any:
-        del ctx, call, tool_def, args
-        await self._pipeline.after_tool(self._context)
-        return result
-
-    async def on_run_error(
-        self,
-        ctx: RunContext[None],
-        *,
-        error: BaseException,
-    ) -> NoReturn:
-        del ctx
-        await self._pipeline.on_error(self._context, error)
-        raise error
-
-    async def after_run(
-        self,
-        ctx: RunContext[None],
-        *,
-        result: AgentRunResult[Any],
-    ) -> AgentRunResult[Any]:
-        del ctx
-        await self._pipeline.after_run(self._context)
-        return result
-
-
 class _WorkspaceToolGate(AbstractCapability[None]):
     def __init__(
         self,
@@ -924,9 +839,6 @@ class _WorkspaceToolGate(AbstractCapability[None]):
         if self._repository_instructions_enabled:
             self._restore_exposure_map(repository_instruction_history)
             self._validate_active_limits()
-
-    def get_ordering(self) -> CapabilityOrdering:
-        return CapabilityOrdering(wraps=(_ObservationalMiddlewareCapability,))
 
     def get_instructions(self) -> Callable[[RunContext[None]], str]:
         def active_repository_instructions(_ctx: RunContext[None]) -> str:
