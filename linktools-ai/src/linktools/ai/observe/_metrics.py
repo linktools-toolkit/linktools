@@ -78,6 +78,11 @@ class Metrics:
                 ErrorCode.REQUEST_FIELD_INVALID,
                 safe_details={"field": "metric"},
             )
+        if definition.observation_kind.startswith(_RESERVED_PREFIX):
+            raise AIError(
+                ErrorCode.REQUEST_FIELD_INVALID,
+                safe_details={"field": "observation_kind"},
+            )
         return await self._store.put_definition(self._namespace, definition)
 
     async def record(
@@ -94,7 +99,7 @@ class Metrics:
         error_code: str | None = None,
         dimensions: Mapping[str, str] | None = None,
         correlation: Mapping[str, str | int] | None = None,
-    ) -> str:
+    ) -> Observation:
         if not isinstance(metric, str) or metric.startswith(_RESERVED_PREFIX):
             raise AIError(
                 ErrorCode.REQUEST_FIELD_INVALID,
@@ -122,10 +127,9 @@ class Metrics:
         if source.measurement_name is None or source.measurement_revision is None:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         sample = validate_metric_value(definition.metric_type, value)
-        resolved_id = observation_id or uuid.uuid4().hex
         observation = Observation(
             version=1,
-            observation_id=resolved_id,
+            observation_id=observation_id or uuid.uuid4().hex,
             kind=definition.observation_kind,
             occurred_at=occurred_at or datetime.now(timezone.utc),
             source_namespace=source_namespace,
@@ -143,7 +147,7 @@ class Metrics:
             ),
         )
         await self.record_observations((observation,))
-        return resolved_id
+        return observation
 
     async def record_observations(
         self,
