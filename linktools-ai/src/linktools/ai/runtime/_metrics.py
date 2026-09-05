@@ -40,10 +40,7 @@ class _RuntimeMetricBuffer(MetricRecorder):
         self._dropped = 0
         self._write_failures = 0
         self._last_warning_at = 0.0
-        self._writer = asyncio.create_task(
-            self._run(),
-            name="linktools-runtime-metrics",
-        )
+        self._writer: asyncio.Task[None] | None = None
 
     def try_record(self, observation: Observation) -> bool:
         if not isinstance(observation, Observation):
@@ -51,6 +48,8 @@ class _RuntimeMetricBuffer(MetricRecorder):
             return False
         if not self._accepting:
             self._drop("runtime metric buffer closed")
+            return False
+        if not self._start_writer():
             return False
         try:
             self._queue.put_nowait(observation)
@@ -60,12 +59,26 @@ class _RuntimeMetricBuffer(MetricRecorder):
         self._accepted += 1
         return True
 
+    def _start_writer(self) -> bool:
+        if self._writer is not None:
+            return True
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            self._drop("runtime metric writer requires a running event loop")
+            return False
+        self._writer = loop.create_task(
+            self._run(),
+            name="linktools-runtime-metrics",
+        )
+        return True
+
     async def close(self) -> None:
-        if not self._accepting and self._writer.done():
-            self._consume_writer()
-            self._drop_remaining("runtime metric close cleanup")
-            return
         self._accepting = False
+        writer = self._writer
+        if writer is None:
+            self._log_close()
+            return
         started = monotonic()
         try:
             await asyncio.wait_for(
@@ -75,19 +88,22 @@ class _RuntimeMetricBuffer(MetricRecorder):
         except (TimeoutError, asyncio.TimeoutError):
             self._drop_remaining("runtime metric close deadline exceeded")
         remaining = max(0.0, _CLOSE_DEADLINE_SECONDS - (monotonic() - started))
-        if not self._writer.done():
+        if not writer.done():
             try:
                 self._queue.put_nowait(None)
             except asyncio.QueueFull:
                 self._drop_remaining("runtime metric close queue remained full")
                 self._queue.put_nowait(None)
             try:
-                await asyncio.wait_for(asyncio.shield(self._writer), timeout=remaining)
+                await asyncio.wait_for(asyncio.shield(writer), timeout=remaining)
             except (TimeoutError, asyncio.TimeoutError):
-                self._writer.cancel()
-                await self._consume_cancelled_writer()
-        self._consume_writer()
+                writer.cancel()
+                await self._consume_cancelled_writer(writer)
+        self._consume_writer(writer)
         self._drop_remaining("runtime metric close cleanup")
+        self._log_close()
+
+    def _log_close(self) -> None:
         if self._dropped or self._write_failures:
             _logger.warning(
                 "runtime metrics closed with loss: accepted=%s dropped=%s write_failures=%s",
@@ -181,20 +197,20 @@ class _RuntimeMetricBuffer(MetricRecorder):
             self._write_failures,
         )
 
-    async def _consume_cancelled_writer(self) -> None:
+    async def _consume_cancelled_writer(self, writer: asyncio.Task[None]) -> None:
         try:
-            await self._writer
+            await writer
         except asyncio.CancelledError:
             pass
         except BaseException:
             self._write_failures += 1
             self._warn("runtime metric writer failed during cancellation")
 
-    def _consume_writer(self) -> None:
-        if not self._writer.done():
+    def _consume_writer(self, writer: asyncio.Task[None]) -> None:
+        if not writer.done():
             return
         try:
-            self._writer.result()
+            writer.result()
         except asyncio.CancelledError:
             pass
         except BaseException:
