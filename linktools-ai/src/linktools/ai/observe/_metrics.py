@@ -78,11 +78,6 @@ class Metrics:
                 ErrorCode.REQUEST_FIELD_INVALID,
                 safe_details={"field": "metric"},
             )
-        if definition.observation_kind.startswith(_RESERVED_PREFIX):
-            raise AIError(
-                ErrorCode.REQUEST_FIELD_INVALID,
-                safe_details={"field": "observation_kind"},
-            )
         return await self._store.put_definition(self._namespace, definition)
 
     async def record(
@@ -99,7 +94,7 @@ class Metrics:
         error_code: str | None = None,
         dimensions: Mapping[str, str] | None = None,
         correlation: Mapping[str, str | int] | None = None,
-    ) -> Observation:
+    ) -> str:
         if not isinstance(metric, str) or metric.startswith(_RESERVED_PREFIX):
             raise AIError(
                 ErrorCode.REQUEST_FIELD_INVALID,
@@ -158,7 +153,7 @@ class Metrics:
             ),
         )
         await self.record_observations((observation,))
-        return observation
+        return observation.observation_id
 
     async def record_observations(
         self,
