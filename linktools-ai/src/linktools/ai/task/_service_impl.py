@@ -27,6 +27,7 @@ from ..core import (
     principal_identity_payload,
 )
 from ..errors import AIError, ErrorCode
+from ..observe import MetricRecorder
 from ._event import TaskEvent
 from ._graph import (
     CancelGraphRequest,
@@ -40,6 +41,7 @@ from ._graph import (
     TaskNodeResult,
     TaskNodeView,
 )
+from ._metrics import record_task_event
 from ._service import TaskApi, TaskGraphLauncher
 
 _logger = environ.get_logger("ai.task.service")
@@ -185,12 +187,20 @@ class DefaultTaskService(TaskApi):
         *,
         local_waiter: "_LocalTaskWaiter | None" = None,
         preflight: "_TaskGraphPreflight | None" = None,
+        metric_recorder: MetricRecorder | None = None,
+        metric_source_namespace: str | None = None,
     ) -> None:
+        if (metric_recorder is None) != (metric_source_namespace is None):
+            raise ValueError(
+                "task metric recorder and source namespace must be configured together"
+            )
         self._persistence = persistence
         self._authorization = authorization
         self._launcher = launcher
         self._local_waiter = local_waiter
         self._preflight = preflight
+        self._metric_recorder = metric_recorder
+        self._metric_source_namespace = metric_source_namespace
         self._detached_finalizers: set[asyncio.Task[object]] = set()
         self._detached_finalizer_failure: AIError | None = None
 
@@ -214,7 +224,9 @@ class DefaultTaskService(TaskApi):
             self._preflight.validate_request(request.graph)
         admission = TaskGraphAdmission.from_request(request)
         view = await self._persistence.admissions.admit(admission, request.graph)
-        if not _terminal(view.status):
+        if _terminal(view.status):
+            await self._observe_metric_history(view, tenant_id=tenant_id)
+        else:
             await self._arm_graph(admission.bind(request.graph))
         return await self._result(view, tenant_id)
 
@@ -290,6 +302,10 @@ class DefaultTaskService(TaskApi):
                     tenant_id=launch.principal.tenant_id,
                 )
                 if _terminal(view.status):
+                    await self._observe_metric_history(
+                        view,
+                        tenant_id=launch.principal.tenant_id,
+                    )
                     continue
                 await self._arm_graph(launch)
                 recovered += 1
@@ -809,6 +825,7 @@ class DefaultTaskService(TaskApi):
             )
             if current.status is not OperationStatus.SUCCEEDED:
                 raise AIError(ErrorCode.STORAGE_CONFLICT)
+        await self._observe_metric_history(view, tenant_id=tenant_id)
         _logger.info(
             "task graph cancel settled: tenant=%s graph=%s status=%s",
             tenant_id,
@@ -864,6 +881,7 @@ class DefaultTaskService(TaskApi):
             )
             if current.status is not OperationStatus.SUCCEEDED:
                 raise AIError(ErrorCode.STORAGE_CONFLICT)
+            await self._observe_metric_history(view, tenant_id=tenant_id)
             return view
         if isinstance(error, AIError):
             await self._record_failure(
@@ -1021,6 +1039,43 @@ class DefaultTaskService(TaskApi):
             }:
                 return current
             raise
+
+    async def _observe_metric_history(
+        self,
+        view: TaskGraphView,
+        *,
+        tenant_id: str,
+    ) -> None:
+        if self._metric_recorder is None or self._metric_source_namespace is None:
+            return
+        cursor = 0
+        static = {node.node_id: node for node in view.nodes}
+        try:
+            while True:
+                page = await self._persistence.tasks.list_events(
+                    view.graph_id,
+                    tenant_id=tenant_id,
+                    after_sequence=cursor,
+                    limit=1000,
+                )
+                for event in page.items:
+                    cursor = event.sequence
+                    record_task_event(
+                        self._metric_recorder,
+                        source_namespace=self._metric_source_namespace,
+                        tenant_id=tenant_id,
+                        event=event,
+                        nodes=static,
+                    )
+                if page.next_cursor is None or not page.items:
+                    return
+        except Exception as error:
+            _logger.warning(
+                "task metric history projection skipped: graph=%s after_sequence=%s error=%s",
+                view.graph_id,
+                cursor,
+                type(error).__name__,
+            )
 
     async def _result(
         self,
