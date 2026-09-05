@@ -99,7 +99,7 @@ class _RuntimeMetricBuffer(MetricRecorder):
                 self._queue.join(),
                 timeout=_CLOSE_DEADLINE_SECONDS,
             )
-        except (TimeoutError, asyncio.TimeoutError):
+        except asyncio.TimeoutError:
             self._drop_remaining("runtime metric close deadline exceeded")
         remaining = max(0.0, _CLOSE_DEADLINE_SECONDS - (monotonic() - started))
         if not writer.done():
@@ -110,7 +110,7 @@ class _RuntimeMetricBuffer(MetricRecorder):
                 self._queue.put_nowait(None)
             try:
                 await asyncio.wait_for(asyncio.shield(writer), timeout=remaining)
-            except (TimeoutError, asyncio.TimeoutError):
+            except asyncio.TimeoutError:
                 writer.cancel()
                 await self._consume_cancelled_writer(writer)
         self._consume_writer(writer)
@@ -143,7 +143,7 @@ class _RuntimeMetricBuffer(MetricRecorder):
                     break
                 try:
                     item = await asyncio.wait_for(self._queue.get(), timeout=remaining)
-                except (TimeoutError, asyncio.TimeoutError):
+                except asyncio.TimeoutError:
                     break
                 if item is None:
                     self._queue.task_done()
@@ -167,7 +167,7 @@ class _RuntimeMetricBuffer(MetricRecorder):
             return
         except asyncio.CancelledError:
             raise
-        except (TimeoutError, asyncio.TimeoutError, Exception):
+        except Exception:
             self._write_failures += 1
             self._dropped += len(batch)
             self._warn("runtime metric batch write failed")
