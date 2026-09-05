@@ -17,7 +17,12 @@ from openai import (
     APITimeoutError as OpenAIAPITimeoutError,
 )
 from pydantic_ai.capabilities import AbstractCapability, WrapModelRequestHandler
-from pydantic_ai.exceptions import ModelAPIError, ModelHTTPError, UnexpectedModelBehavior
+from pydantic_ai.exceptions import (
+    ContentFilterError,
+    ModelAPIError,
+    ModelHTTPError,
+    UnexpectedModelBehavior,
+)
 from pydantic_ai.messages import ModelResponse
 from pydantic_ai.models import ModelRequestContext
 from pydantic_ai.tools import RunContext
@@ -153,6 +158,8 @@ def _provider_usage_measurements(
 def _model_error_code(error: Exception) -> str:
     if isinstance(error, AIError):
         return error.code.value
+    if isinstance(error, ContentFilterError):
+        return ErrorCode.MODEL_CONTENT_FILTERED.value
     if isinstance(error, ModelHTTPError):
         return _http_error_code(error.status_code).value
     if isinstance(error, OpenAIAPITimeoutError):
