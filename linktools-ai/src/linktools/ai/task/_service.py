@@ -5,7 +5,7 @@
 from collections.abc import AsyncIterator
 from typing import Protocol
 
-from ..core import Page, Principal, RunContextData
+from ..core import Page, Principal
 from ._event import TaskEvent
 from ._graph import (
     CancelGraphRequest,
@@ -81,13 +81,7 @@ class TaskApi(TaskQueryApi, Protocol):
 class TaskGraphLauncher(Protocol):
     async def start(self, launch: TaskGraphLaunch) -> TaskGraphHandle: ...
 
-    async def cancel(
-        self,
-        graph_id: str,
-        request: CancelGraphRequest,
-        *,
-        context: RunContextData,
-    ) -> TaskGraphView: ...
+    async def cancel(self, launch: TaskGraphLaunch) -> TaskGraphView: ...
 
 
 __all__ = ["TaskApi", "TaskGraphLauncher", "TaskQueryApi"]
