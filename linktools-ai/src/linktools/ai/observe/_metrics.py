@@ -105,6 +105,15 @@ class Metrics:
                 ErrorCode.REQUEST_FIELD_INVALID,
                 safe_details={"field": "metric"},
             )
+        if revision is not None and (
+            isinstance(revision, bool)
+            or not isinstance(revision, int)
+            or revision < 1
+        ):
+            raise AIError(
+                ErrorCode.REQUEST_FIELD_INVALID,
+                safe_details={"field": "revision"},
+            )
         definition = await self._resolve_definition(metric, revision)
         source = definition.source
         if source.kind is not MetricSourceKind.MEASUREMENT:
@@ -129,7 +138,9 @@ class Metrics:
         sample = validate_metric_value(definition.metric_type, value)
         observation = Observation(
             version=1,
-            observation_id=observation_id or uuid.uuid4().hex,
+            observation_id=(
+                uuid.uuid4().hex if observation_id is None else observation_id
+            ),
             kind=definition.observation_kind,
             occurred_at=occurred_at or datetime.now(timezone.utc),
             source_namespace=source_namespace,
