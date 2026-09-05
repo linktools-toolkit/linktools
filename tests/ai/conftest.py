@@ -19,10 +19,28 @@ def _raise_timeout(signum: int, frame: FrameType | None) -> None:
 def _local_execution_backend_optional_recorder(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from linktools.ai.runtime._local import LocalExecutionBackend
+    from linktools.ai.runtime import _local as runtime_local
 
-    monkeypatch.setattr(LocalExecutionBackend, "_metric_recorder", None, raising=False)
-    monkeypatch.setattr(LocalExecutionBackend, "_namespace", "test", raising=False)
+    original_record_terminal = runtime_local._record_execution_terminal
+
+    def record_terminal(recorder: object, **kwargs: object) -> None:
+        if recorder is None:
+            return
+        original_record_terminal(recorder, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(
+        runtime_local.LocalExecutionBackend,
+        "_metric_recorder",
+        None,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        runtime_local.LocalExecutionBackend,
+        "_namespace",
+        "test",
+        raising=False,
+    )
+    monkeypatch.setattr(runtime_local, "_record_execution_terminal", record_terminal)
 
 
 @pytest.hookimpl(hookwrapper=True)
