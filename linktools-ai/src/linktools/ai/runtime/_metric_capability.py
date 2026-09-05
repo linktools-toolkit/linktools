@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Pydantic-specific automatic Model and Tool metric producers."""
+"""Pydantic-specific automatic Model metric producer."""
 
 from __future__ import annotations
 
 import asyncio
 import uuid
 from collections.abc import Mapping
+from datetime import datetime, timezone
 from time import monotonic_ns
-from typing import Any
 
 from openai import (
     APIConnectionError as OpenAIAPIConnectionError,
@@ -16,23 +16,18 @@ from openai import (
     APIStatusError as OpenAIAPIStatusError,
     APITimeoutError as OpenAIAPITimeoutError,
 )
-from pydantic_ai.capabilities import (
-    AbstractCapability,
-    CapabilityOrdering,
-    WrapModelRequestHandler,
-    WrapToolExecuteHandler,
-)
+from pydantic_ai.capabilities import AbstractCapability, WrapModelRequestHandler
 from pydantic_ai.exceptions import ModelAPIError, ModelHTTPError, UnexpectedModelBehavior
-from pydantic_ai.messages import ModelResponse, ToolCallPart
+from pydantic_ai.messages import ModelResponse
 from pydantic_ai.models import ModelRequestContext
-from pydantic_ai.tools import RunContext, ToolDefinition
+from pydantic_ai.tools import RunContext
 
 from ..errors import AIError, ErrorCode
 from ..observe import MetricMeasurement, MetricRecorder, Observation
 
 
-class _RuntimeMetricCapability(AbstractCapability[None]):
-    """Observe actual provider and tool handler attempts without mutating semantics."""
+class _RuntimeModelMetricCapability(AbstractCapability[None]):
+    """Observe actual model request attempts without mutating semantics."""
 
     def __init__(
         self,
@@ -58,9 +53,6 @@ class _RuntimeMetricCapability(AbstractCapability[None]):
         self._provider = provider
         self._model_identity = model_identity
         self._route_id = route_id
-
-    def get_ordering(self) -> CapabilityOrdering:
-        return CapabilityOrdering(position="innermost")
 
     async def wrap_model_request(
         self,
@@ -101,51 +93,6 @@ class _RuntimeMetricCapability(AbstractCapability[None]):
         )
         return response
 
-    async def wrap_tool_execute(
-        self,
-        ctx: RunContext[None],
-        *,
-        call: ToolCallPart,
-        tool_def: ToolDefinition,
-        args: dict[str, Any],
-        handler: WrapToolExecuteHandler,
-    ) -> Any:
-        del ctx, tool_def
-        attempt_id = uuid.uuid4().hex
-        started = monotonic_ns()
-        try:
-            result = await handler(args)
-        except asyncio.CancelledError:
-            self._record_tool(
-                attempt_id,
-                call,
-                started,
-                status="CANCELLED",
-                error_code=None,
-            )
-            raise
-        except Exception as error:
-            self._record_tool(
-                attempt_id,
-                call,
-                started,
-                status="FAILED",
-                error_code=(
-                    error.code.value
-                    if isinstance(error, AIError)
-                    else ErrorCode.TOOL_EXECUTION_FAILED.value
-                ),
-            )
-            raise
-        self._record_tool(
-            attempt_id,
-            call,
-            started,
-            status="SUCCEEDED",
-            error_code=None,
-        )
-        return result
-
     def _record_model(
         self,
         attempt_id: str,
@@ -155,12 +102,12 @@ class _RuntimeMetricCapability(AbstractCapability[None]):
         error_code: str | None,
         measurements: tuple[MetricMeasurement, ...],
     ) -> None:
-        self._try_record(
-            Observation(
+        try:
+            observation = Observation(
                 version=1,
                 observation_id=attempt_id,
                 kind="linktools.model.request",
-                occurred_at=_utc_now(),
+                occurred_at=datetime.now(timezone.utc),
                 source_namespace=self._source_namespace,
                 tenant_id=self._tenant_id,
                 status=status,
@@ -177,40 +124,9 @@ class _RuntimeMetricCapability(AbstractCapability[None]):
                     *measurements,
                 ),
             )
-        )
-
-    def _record_tool(
-        self,
-        attempt_id: str,
-        call: ToolCallPart,
-        started: int,
-        *,
-        status: str,
-        error_code: str | None,
-    ) -> None:
-        self._try_record(
-            Observation(
-                version=1,
-                observation_id=attempt_id,
-                kind="linktools.tool.execution",
-                occurred_at=_utc_now(),
-                source_namespace=self._source_namespace,
-                tenant_id=self._tenant_id,
-                status=status,
-                error_code=error_code,
-                correlation={
-                    **self._correlation(),
-                    "tool_call_id": call.tool_call_id,
-                },
-                dimensions={
-                    "agent_id": self._agent_id,
-                    "tool_name": call.tool_name,
-                },
-                measurements=(
-                    MetricMeasurement("latency_ns", 1, monotonic_ns() - started),
-                ),
-            )
-        )
+            self._recorder.try_record(observation)
+        except Exception:
+            return
 
     def _correlation(self) -> Mapping[str, str | int]:
         values: dict[str, str | int] = {
@@ -221,27 +137,16 @@ class _RuntimeMetricCapability(AbstractCapability[None]):
             values["session_id"] = self._session_id
         return values
 
-    def _try_record(self, observation: Observation) -> None:
-        try:
-            self._recorder.try_record(observation)
-        except (AIError, TypeError, ValueError):
-            return
-
 
 def _provider_usage_measurements(
     response: ModelResponse,
 ) -> tuple[MetricMeasurement, ...]:
     usage = response.usage
-    values = (
-        ("input_tokens", usage.input_tokens),
-        ("output_tokens", usage.output_tokens),
-        ("cache_read_tokens", usage.cache_read_tokens),
-        ("cache_write_tokens", usage.cache_write_tokens),
-    )
-    return tuple(
-        MetricMeasurement(name, 1, value)
-        for name, value in values
-        if value != 0 or name in usage.details
+    return (
+        MetricMeasurement("input_tokens", 1, usage.input_tokens),
+        MetricMeasurement("output_tokens", 1, usage.output_tokens),
+        MetricMeasurement("cache_read_tokens", 1, usage.cache_read_tokens),
+        MetricMeasurement("cache_write_tokens", 1, usage.cache_write_tokens),
     )
 
 
@@ -273,12 +178,6 @@ def _http_error_code(status_code: int) -> ErrorCode:
     if 400 <= status_code < 500:
         return ErrorCode.MODEL_REQUEST_REJECTED
     return ErrorCode.MODEL_API_ERROR
-
-
-def _utc_now():
-    from datetime import datetime, timezone
-
-    return datetime.now(timezone.utc)
 
 
 __all__: list[str] = []
