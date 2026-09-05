@@ -12,8 +12,10 @@ from ..core import (
     ImmutableJsonMapping,
     JsonValue,
     Principal,
+    RunContextData,
     canonical_sha256,
     normalize_json_value,
+    normalize_run_context,
 )
 from ._graph import TaskNode
 
@@ -54,6 +56,7 @@ class TaskNodeContext(Generic[AppT]):
     input: Mapping[str, JsonValue]
     dependencies: Mapping[str, TaskDependency]
     idempotency_key: str
+    context: RunContextData = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if not isinstance(self.graph_id, str) or not self.graph_id.strip():
@@ -77,6 +80,7 @@ class TaskNodeContext(Generic[AppT]):
             raise ValueError("task dependency mapping is invalid")
         object.__setattr__(self, "input", ImmutableJsonMapping(normalized_input))
         object.__setattr__(self, "dependencies", MappingProxyType(dependencies))
+        object.__setattr__(self, "context", normalize_run_context(self.context))
 
 
 @runtime_checkable

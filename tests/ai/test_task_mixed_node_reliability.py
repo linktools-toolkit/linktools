@@ -213,10 +213,11 @@ class _BindingRunner:
         *,
         graph_id: str,
         principal: object,
+        context: object,
         dependency_results: object,
         control: TaskNodeRunControl,
     ) -> TaskNodeRunResult:
-        del node, graph_id, principal, dependency_results
+        del node, graph_id, principal, context, dependency_results
         self.control = control
         self.entered.set()
         await self.release.wait()
@@ -229,9 +230,10 @@ class _BindingRunner:
         *,
         graph_id: str,
         principal: object,
+        context: object,
         dependency_results: object,
     ) -> None:
-        del node, graph_id, principal, dependency_results
+        del node, graph_id, principal, context, dependency_results
 
 
 @pytest.mark.asyncio

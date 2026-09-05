@@ -2,6 +2,12 @@
 # -*- coding: utf-8 -*-
 """Pure core values and errors."""
 
+from ._context import (
+    RunContextData,
+    RunContextValue,
+    merge_run_context,
+    normalize_run_context,
+)
 from ._discovery import DEFAULT_DISCOVERY_POLICY
 from ._ids import (
     canonical_identity_digest,
@@ -119,6 +125,8 @@ __all__ = [
     "RedactionPolicy",
     "ResourceKind",
     "ResourceRef",
+    "RunContextData",
+    "RunContextValue",
     "SessionStatus",
     "StopReason",
     "StructuredRedactor",
@@ -132,11 +140,13 @@ __all__ = [
     "canonical_json_bytes",
     "canonical_sha256",
     "canonical_string_tuple",
-    "normalize_execution_mode",
-    "normalize_thinking",
     "deterministic_id",
     "idempotency_key_digest",
+    "merge_run_context",
+    "normalize_execution_mode",
     "normalize_json_value",
+    "normalize_run_context",
+    "normalize_thinking",
     "operation_cas_immutable_matches",
     "operation_replay_matches",
     "principal_identity_payload",

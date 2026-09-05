@@ -109,10 +109,11 @@ async def _digest_run(
     *,
     graph_id: str,
     principal: Principal,
+    context: Mapping[str, str | int],
     dependency_results: Mapping[str, TaskDependencyResult],
     control: TaskNodeRunControl,
 ) -> TaskNodeRunResult:
-    del self, principal, dependency_results, control
+    del self, principal, context, dependency_results, control
     await asyncio.sleep(0)
     payload = StoredPayload.inline_json({"graph_id": graph_id, "node_id": node.node_id})
     return TaskNodeRunResult(payload.digest, result_payload=payload)
@@ -124,9 +125,10 @@ async def _noop_cancel(
     *,
     graph_id: str,
     principal: Principal,
+    context: Mapping[str, str | int],
     dependency_results: Mapping[str, TaskDependencyResult],
 ) -> None:
-    del self, node, graph_id, principal, dependency_results
+    del self, node, graph_id, principal, context, dependency_results
 
 
 @pytest.mark.asyncio
@@ -203,10 +205,11 @@ async def test_sqlite_public_runtime_task_failure_blocks_dependency(
         *,
         graph_id: str,
         principal: Principal,
+        context: Mapping[str, str | int],
         dependency_results: Mapping[str, TaskDependencyResult],
         control: TaskNodeRunControl,
     ) -> TaskNodeRunResult:
-        del self, principal, dependency_results, control
+        del self, principal, context, dependency_results, control
         if node.node_id == "fail":
             raise AIError(ErrorCode.TASK_NODE_FAILED)
         payload = StoredPayload.inline_json(
@@ -265,10 +268,11 @@ async def test_sqlite_public_runtime_task_wait_timeout_and_cancel(
         *,
         graph_id: str,
         principal: Principal,
+        context: Mapping[str, str | int],
         dependency_results: Mapping[str, TaskDependencyResult],
         control: TaskNodeRunControl,
     ) -> TaskNodeRunResult:
-        del self, node, graph_id, principal, dependency_results, control
+        del self, node, graph_id, principal, context, dependency_results, control
         started.set()
         await asyncio.Event().wait()
         raise AssertionError("blocked task unexpectedly completed")

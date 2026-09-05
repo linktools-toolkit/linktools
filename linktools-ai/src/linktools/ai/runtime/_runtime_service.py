@@ -24,10 +24,13 @@ from ..core import (
     JsonValue,
     Principal,
     PrincipalKind,
+    RunContextData,
     SessionStatus,
     TaskStatus,
     ThinkingValue,
+    merge_run_context,
     normalize_execution_mode,
+    normalize_run_context,
     normalize_thinking,
     validate_agent_id,
     validate_idempotency_key,
@@ -40,7 +43,7 @@ from ..errors import AIError, ErrorCode
 from ..model import ModelRegistry
 
 if TYPE_CHECKING:
-    from ..observe import Middleware
+    from ..observe import Metrics
     from ..task import TaskResultRecord
 from ..task import (
     TaskGraph,
@@ -106,6 +109,23 @@ class _TaskNodeRuntimePort(Protocol):
     async def read_result_record(self, record: "TaskResultRecord") -> JsonValue: ...
 
 
+def _portable_context(value: "Mapping[str, object] | None") -> RunContextData:
+    try:
+        return normalize_run_context(value)
+    except (TypeError, ValueError) as error:
+        raise AIError(ErrorCode.REQUEST_FIELD_INVALID) from error
+
+
+def _merge_portable_context(
+    base: Mapping[str, object],
+    overlay: "Mapping[str, object] | None",
+) -> RunContextData:
+    try:
+        return merge_run_context(base, overlay)
+    except (TypeError, ValueError) as error:
+        raise AIError(ErrorCode.REQUEST_FIELD_INVALID) from error
+
+
 class Runtime(Generic[AppT]):
     """Frozen Runtime composition and service graph."""
 
@@ -124,6 +144,7 @@ class Runtime(Generic[AppT]):
         workspace: Workspace,
         app: AppT,
         tenant_id: str = "default",
+        context: "Mapping[str, object] | None" = None,
         close_callback: "Callable[[], Awaitable[None]] | None" = None,
         local_coordinator: "_LocalRuntimeCoordinatorPort | None" = None,
         task_node_runtime: "_TaskNodeRuntimePort | None" = None,
@@ -156,6 +177,7 @@ class Runtime(Generic[AppT]):
         self._workspace = workspace
         self._app = app
         self._tenant_id = validate_tenant_id(tenant_id)
+        self._context = _portable_context(context)
         self._default_principal = Principal(
             principal_id="runtime",
             tenant_id=self._tenant_id,
@@ -180,7 +202,8 @@ class Runtime(Generic[AppT]):
         models: "ModelRegistry | None" = None,
         state: "RuntimeState | None" = None,
         capabilities: "Sequence[CapabilityGroup[None]]" = (),
-        middleware: "Sequence[Middleware]" = (),
+        context: "Mapping[str, object] | None" = None,
+        metrics: "Metrics | None" = None,
     ) -> "AbstractAsyncContextManager[Runtime[None]]": ...
 
     @classmethod
@@ -194,7 +217,8 @@ class Runtime(Generic[AppT]):
         models: "ModelRegistry | None" = None,
         state: "RuntimeState | None" = None,
         capabilities: "Sequence[CapabilityGroup[AppT]]" = (),
-        middleware: "Sequence[Middleware]" = (),
+        context: "Mapping[str, object] | None" = None,
+        metrics: "Metrics | None" = None,
     ) -> "AbstractAsyncContextManager[Runtime[AppT]]": ...
 
     @classmethod
@@ -207,7 +231,8 @@ class Runtime(Generic[AppT]):
         models: "ModelRegistry | None" = None,
         state: "RuntimeState | None" = None,
         capabilities: "Sequence[CapabilityGroup[object]]" = (),
-        middleware: "Sequence[Middleware]" = (),
+        context: "Mapping[str, object] | None" = None,
+        metrics: "Metrics | None" = None,
     ) -> "AbstractAsyncContextManager[Runtime[object]]":
         return _open_runtime(
             workspace,
@@ -216,7 +241,8 @@ class Runtime(Generic[AppT]):
             models=models,
             state=state,
             capabilities=capabilities,
-            middleware=middleware,
+            context=context,
+            metrics=metrics,
         )
 
     @property
@@ -234,6 +260,10 @@ class Runtime(Generic[AppT]):
     @property
     def app(self) -> AppT:
         return self._app
+
+    @property
+    def context(self) -> RunContextData:
+        return self._context
 
     def agent(self, agent_id: str = "default") -> "Agent[AppT]":
         """Resolve one frozen root Agent by id."""
@@ -289,9 +319,11 @@ class Runtime(Generic[AppT]):
         mode: ExecutionMode,
         planning: "bool | None",
         thinking: "ThinkingValue | None",
+        context: "Mapping[str, object] | None" = None,
     ) -> "Execution[AppT]":
         self._ensure_open()
         resolved_principal = self._resolve_principal(principal)
+        effective_context = _merge_portable_context(self._context, context)
         validate_user_prompt(str(user_prompt))
         definition = self._catalog.definition(agent_digest)
         resolved_mode, resolved_planning, resolved_thinking = _execution_policy(
@@ -312,6 +344,7 @@ class Runtime(Generic[AppT]):
             mode=resolved_mode,
             planning=resolved_planning,
             thinking=resolved_thinking,
+            context=effective_context,
         )
         if session_id is None:
             handle = await self.execution.run(binding.digest, request)
@@ -328,6 +361,7 @@ class Runtime(Generic[AppT]):
                 mode=request.mode,
                 planning=request.planning,
                 thinking=request.thinking,
+                context=effective_context,
             )
             handle = await self.session.resume(
                 definition.spec.id,
@@ -375,6 +409,7 @@ class Runtime(Generic[AppT]):
         *,
         principal: Principal,
         idempotency_key: "str | None",
+        context: "Mapping[str, object] | None" = None,
     ) -> "Execution[AppT]":
         self._ensure_open()
         request = RetryExecutionRequest(
@@ -382,6 +417,7 @@ class Runtime(Generic[AppT]):
             user_prompt.codec,
             principal,
             idempotency_key or secrets.token_urlsafe(32),
+            _merge_portable_context(self._context, context),
         )
         handle = await self.execution.retry(binding_digest, execution_id, request)
         return Execution(self, handle.execution_id, binding_digest, principal)
@@ -394,6 +430,7 @@ class Runtime(Generic[AppT]):
         *,
         principal: Principal,
         idempotency_key: "str | None",
+        context: "Mapping[str, object] | None" = None,
     ) -> "Execution[AppT]":
         self._ensure_open()
         request = ForkExecutionRequest(
@@ -401,6 +438,7 @@ class Runtime(Generic[AppT]):
             user_prompt.codec,
             principal,
             idempotency_key or secrets.token_urlsafe(32),
+            _merge_portable_context(self._context, context),
         )
         handle = await self.execution.fork(binding_digest, execution_id, request)
         return Execution(self, handle.execution_id, binding_digest, principal)
@@ -588,12 +626,14 @@ class Runtime(Generic[AppT]):
         principal: "Principal | None" = None,
         idempotency_key: str,
         limits: "TaskGraphLimits | None" = None,
+        context: "Mapping[str, object] | None" = None,
     ) -> TaskGraphResult:
         request = await self._admit_graph(
             graph,
             principal=principal,
             idempotency_key=idempotency_key,
             limits=limits,
+            context=context,
         )
         return await self.task.run_graph(request)
 
@@ -605,12 +645,14 @@ class Runtime(Generic[AppT]):
         idempotency_key: str,
         limits: "TaskGraphLimits | None" = None,
         timeout_seconds: "float | None" = None,
+        context: "Mapping[str, object] | None" = None,
     ) -> TaskGraphResult:
         request = await self._admit_graph(
             graph,
             principal=principal,
             idempotency_key=idempotency_key,
             limits=limits,
+            context=context,
         )
         return await self.task.run_graph_and_wait(
             request,
@@ -676,9 +718,11 @@ class Runtime(Generic[AppT]):
         principal: "Principal | None",
         idempotency_key: str,
         limits: "TaskGraphLimits | None",
+        context: "Mapping[str, object] | None" = None,
     ) -> TaskGraphRequest:
         self._ensure_open()
         resolved_principal = self._resolve_principal(principal)
+        effective_context = _merge_portable_context(self._context, context)
         selected_limits = limits or TaskGraphLimits()
         validate_idempotency_key(idempotency_key)
         graph.validate_limits(selected_limits)
@@ -699,6 +743,7 @@ class Runtime(Generic[AppT]):
             resolved_principal,
             idempotency_key,
             selected_limits,
+            effective_context,
         )
 
     async def _ensure_session(
@@ -842,7 +887,8 @@ async def _open_runtime(
     models: "ModelRegistry | None",
     state: "RuntimeState | None",
     capabilities: "Sequence[CapabilityGroup[object]]",
-    middleware: "Sequence[Middleware]",
+    context: "Mapping[str, object] | None",
+    metrics: "Metrics | None",
 ):
     from ._factory import compose_runtime_components
 
@@ -853,7 +899,7 @@ async def _open_runtime(
         models=models,
         state=state,
         capabilities=capabilities,
-        middleware=middleware,
+        metrics=metrics,
     )
     try:
         runtime = Runtime(
@@ -869,6 +915,7 @@ async def _open_runtime(
             workspace=workspace,
             app=app,
             tenant_id=components.tenant_id,
+            context=context,
             close_callback=components.close_callback,
             local_coordinator=components.local_coordinator,
             task_node_runtime=components.task_node_runtime,

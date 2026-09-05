@@ -11,11 +11,20 @@ from typing import Protocol, runtime_checkable
 
 from linktools.core import environ
 
-from ..core import JsonValue, Principal, TaskStatus, canonical_sha256, validate_lease_owner
+from ..core import (
+    JsonValue,
+    Page,
+    Principal,
+    RunContextData,
+    TaskStatus,
+    canonical_sha256,
+    validate_lease_owner,
+)
 from ..errors import AIError, ErrorCode
+from ..observe import MetricRecorder
 from ..storage import StoredPayload
+from ._event import TaskEvent
 from ._graph import (
-    CancelGraphRequest,
     TaskDependencyResult,
     TaskGraphHandle,
     TaskGraphLaunch,
@@ -25,6 +34,7 @@ from ._graph import (
     TaskNodeView,
     TaskResultRecord,
 )
+from ._metrics import _TaskMetricProjector
 
 _logger = environ.get_logger("ai.task.local")
 _HEARTBEAT_SECONDS = 30.0
@@ -96,6 +106,7 @@ class TaskNodeRunner(Protocol):
         *,
         graph_id: str,
         principal: Principal,
+        context: RunContextData,
         dependency_results: "Mapping[str, TaskDependencyResult]",
         control: TaskNodeRunControl,
     ) -> TaskNodeRunResult: ...
@@ -106,6 +117,7 @@ class TaskNodeRunner(Protocol):
         *,
         graph_id: str,
         principal: Principal,
+        context: RunContextData,
         dependency_results: "Mapping[str, TaskDependencyResult]",
     ) -> None: ...
 
@@ -136,6 +148,22 @@ class _TaskRepository(Protocol):
         *,
         tenant_id: str,
     ) -> "Mapping[str, TaskResultRecord]": ...
+
+    async def list_events(
+        self,
+        graph_id: str,
+        *,
+        tenant_id: str,
+        after_sequence: int,
+        limit: int,
+    ) -> Page[TaskEvent]: ...
+
+    async def latest_event(
+        self,
+        graph_id: str,
+        *,
+        tenant_id: str,
+    ) -> TaskEvent | None: ...
 
     async def claim(
         self,
@@ -259,20 +287,37 @@ class _TaskNodeRunControlImpl:
 class LocalTaskGraphLauncher:
     """Run admitted TaskGraphs locally while durable state remains authoritative."""
 
+    _metric_projector: _TaskMetricProjector | None = None
+
     def __init__(
         self,
         repository: _TaskRepository,
         runner: TaskNodeRunner,
         *,
         owner: str,
+        metric_recorder: MetricRecorder | None = None,
+        metric_source_namespace: str | None = None,
     ) -> None:
         try:
             validate_lease_owner(owner)
         except AIError as error:
             raise ValueError("task launcher lease owner is invalid") from error
+        if (metric_recorder is None) != (metric_source_namespace is None):
+            raise ValueError(
+                "task metric recorder and source namespace must be configured together"
+            )
         self._repository = repository
         self._runner = runner
         self._owner = owner
+        self._metric_projector = (
+            None
+            if metric_recorder is None or metric_source_namespace is None
+            else _TaskMetricProjector(
+                repository,
+                metric_recorder,
+                source_namespace=metric_source_namespace,
+            )
+        )
         self._graphs: dict[tuple[str, str], _GraphRun] = {}
         self._lock = asyncio.Lock()
         self._accepting = True
@@ -304,18 +349,21 @@ class LocalTaskGraphLauncher:
             f"local:{key[0]}:{key[1]}",
         )
 
-    async def cancel(
-        self,
-        graph_id: str,
-        request: CancelGraphRequest,
-    ) -> TaskGraphView:
-        tenant_id = request.principal.tenant_id
+    async def cancel(self, launch: TaskGraphLaunch) -> TaskGraphView:
+        graph_id = launch.graph.graph_id
+        tenant_id = launch.principal.tenant_id
         key = (tenant_id, graph_id)
+        async with self._lock:
+            active_run = self._graphs.get(key)
+        if active_run is not None and active_run.request != launch:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         view = await self._repository.get_graph(graph_id, tenant_id=tenant_id)
         if view is None:
             raise AIError(ErrorCode.STORAGE_NOT_FOUND)
+        if view.nodes != launch.graph.nodes:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         states = await self._repository.list_nodes(graph_id, tenant_id=tenant_id)
-        static = {node.node_id: node for node in view.nodes}
+        static = {node.node_id: node for node in launch.graph.nodes}
         cleanup_error: BaseException | None = None
         for state in states:
             if state.status is not TaskStatus.CANCELLED or state.fence < 1:
@@ -329,7 +377,8 @@ class LocalTaskGraphLauncher:
                 await self._runner.cancel(
                     node,
                     graph_id=graph_id,
-                    principal=request.principal,
+                    principal=launch.principal,
+                    context=launch.context,
                     dependency_results=await self._dependency_results(
                         graph_id, node, tenant_id=tenant_id
                     ),
@@ -351,6 +400,8 @@ class LocalTaskGraphLauncher:
             await asyncio.gather(task, return_exceptions=True)
         if run is not None:
             await self._notify(run)
+        if self._metric_projector is not None and view.status in _TERMINAL:
+            self._metric_projector.trigger(graph_id, tenant_id=tenant_id)
         if cleanup_error is not None:
             if isinstance(cleanup_error, AIError):
                 raise cleanup_error
@@ -394,6 +445,8 @@ class LocalTaskGraphLauncher:
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
         await self._drain_runner_background()
+        if self._metric_projector is not None:
+            await self._metric_projector.close()
         async with self._lock:
             self._graphs.clear()
 
@@ -474,6 +527,11 @@ class LocalTaskGraphLauncher:
                     observed_fingerprint = fingerprint
                     await self._notify(run)
                 if view.status in _TERMINAL:
+                    if self._metric_projector is not None:
+                        self._metric_projector.trigger(
+                            request.graph.graph_id,
+                            tenant_id=tenant_id,
+                        )
                     if view.status in {TaskStatus.FAILED, TaskStatus.BLOCKED}:
                         await self._cancel_terminal_effects(run, states)
                     return
@@ -572,6 +630,7 @@ class LocalTaskGraphLauncher:
                 node,
                 graph_id=request.graph.graph_id,
                 principal=request.principal,
+                context=request.context,
                 dependency_results=await self._dependency_results(
                     request.graph.graph_id,
                     node,
@@ -638,6 +697,7 @@ class LocalTaskGraphLauncher:
                 node,
                 graph_id=graph_id,
                 principal=request.principal,
+                context=request.context,
                 dependency_results=dependency_results,
                 control=control,
             ),
@@ -969,12 +1029,15 @@ def _runnable(node: TaskNodeView, now: datetime) -> bool:
     )
 
 
-def _reap_inflight(inflight: dict[str, _InflightNode]) -> None:
+def _reap_inflight(inflight: dict[str, _InflightNode]) -> bool:
+    reaped = False
     for node_id, state in tuple(inflight.items()):
         if not state.task.done():
             continue
         inflight.pop(node_id, None)
         state.task.result()
+        reaped = True
+    return reaped
 
 
 __all__ = [

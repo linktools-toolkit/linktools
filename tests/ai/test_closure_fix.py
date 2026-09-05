@@ -19,7 +19,7 @@ from linktools.ai.runtime._capabilities import (
 from linktools.ai.runtime._tool import RuntimeToolOperationBridge, ToolOperationRecord
 from linktools.ai.runtime.state import ToolOperationAdmission
 from linktools.ai.storage import PayloadPolicy, StoredPayload
-from linktools.ai.task._graph import CancelGraphRequest, TaskGraph, TaskGraphRequest, TaskGraphView, TaskNode
+from linktools.ai.task._graph import TaskGraph, TaskGraphLaunch, TaskGraphRequest, TaskGraphView, TaskNode
 from linktools.ai.task._local import LocalTaskGraphLauncher, TaskNodeRunResult
 from pydantic_ai.exceptions import ModelRetry
 from pydantic_ai.messages import ToolCallPart
@@ -253,7 +253,7 @@ class _TaskRepository:
 
     async def get_graph(self, graph_id: str, *, tenant_id: str) -> TaskGraphView:
         del graph_id, tenant_id
-        return TaskGraphView("graph", self.status, ())
+        return TaskGraphView("graph", self.status, (TaskNode("node"),))
 
     async def list_nodes(self, graph_id: str, *, tenant_id: str) -> tuple[object, ...]:
         del graph_id, tenant_id
@@ -345,12 +345,11 @@ async def test_launcher_cancel_clears_retained_failure() -> None:
     repository = _TaskRepository()
     repository.failure = RuntimeError("scheduler failure")
     launcher = LocalTaskGraphLauncher(repository, _TaskRunner(), owner="launcher")
-    await launcher.start(_task_request())
+    request = _task_request()
+    launch = TaskGraphLaunch(request.graph, request.principal, request.limits, request.context)
+    await launcher.start(launch)
     await asyncio.sleep(0)
     await asyncio.sleep(0)
-    await launcher.cancel(
-        "graph",
-        CancelGraphRequest(Principal("user", "tenant"), "cancel-request"),
-    )
+    await launcher.cancel(launch)
     assert not launcher._graphs
     await launcher.shutdown()

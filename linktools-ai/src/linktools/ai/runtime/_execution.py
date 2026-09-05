@@ -366,6 +366,8 @@ class DefaultExecutionService:
         binding: AgentBinding,
         request: ExecutionRequest,
     ) -> None:
+        if dict(execution.context) != dict(request.context):
+            raise AIError(ErrorCode.IDEMPOTENCY_CONFLICT)
         if (
             execution.binding_digest != binding.digest
             or execution.planning is not request.planning
@@ -641,6 +643,7 @@ class DefaultExecutionService:
             mode=mode,
             planning=execution.planning,
             thinking=execution.thinking,
+            context=execution.context,
         )
         return await self.start_subagent(
             execution.binding_digest,
@@ -728,6 +731,23 @@ class DefaultExecutionService:
         if request.idempotency_key is None:
             raise AIError(ErrorCode.IDEMPOTENCY_KEY_INVALID)
         binding = self._binding(binding_digest)
+        parent: ExecutionRecord | None = None
+        if lineage_kind is ExecutionLineageKind.SUBAGENT:
+            if parent_execution_id is None:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            parent = await self._state.executions.get(
+                parent_execution_id,
+                tenant_id=request.principal.tenant_id,
+            )
+            if (
+                parent is None
+                or parent.root_execution_id
+                != (root_execution_id or parent.root_execution_id)
+            ):
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            if request.context and dict(request.context) != dict(parent.context):
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            request = replace(request, context=parent.context)
         conversation_run_id = conversation_step_run_id
         session = None
         if session_id is not None and source_execution_id is None:
@@ -813,16 +833,7 @@ class DefaultExecutionService:
         repository_instructions = None
         if self._instruction_resolver is not None:
             if lineage_kind is ExecutionLineageKind.SUBAGENT:
-                if parent_execution_id is None:
-                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                parent = await self._state.executions.get(
-                    parent_execution_id,
-                    tenant_id=request.principal.tenant_id,
-                )
-                if (
-                    parent is None
-                    or parent.root_execution_id != (root_execution_id or parent.root_execution_id)
-                ):
+                if parent is None:
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                 repository_instructions = parent.repository_instructions
                 if repository_instructions is None:
@@ -876,6 +887,7 @@ class DefaultExecutionService:
             thinking=request.thinking,
             binding=binding.snapshot,
             repository_instructions=repository_instructions,
+            context=request.context,
         )
         reservation = await self._state.executions.reserve_start(
             ExecutionStartReservation(
@@ -1381,6 +1393,7 @@ class DefaultExecutionService:
             mode=previous.mode,
             planning=previous.planning,
             thinking=previous.thinking,
+            context=request.context,
         )
         return await self._start(
             binding_digest,
@@ -1411,6 +1424,7 @@ class DefaultExecutionService:
             mode=previous.mode,
             planning=previous.planning,
             thinking=previous.thinking,
+            context=request.context,
         )
         return await self._start(
             binding_digest,

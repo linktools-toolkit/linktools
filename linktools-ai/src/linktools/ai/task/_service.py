@@ -81,11 +81,7 @@ class TaskApi(TaskQueryApi, Protocol):
 class TaskGraphLauncher(Protocol):
     async def start(self, launch: TaskGraphLaunch) -> TaskGraphHandle: ...
 
-    async def cancel(
-        self,
-        graph_id: str,
-        request: CancelGraphRequest,
-    ) -> TaskGraphView: ...
+    async def cancel(self, launch: TaskGraphLaunch) -> TaskGraphView: ...
 
 
 __all__ = ["TaskApi", "TaskGraphLauncher", "TaskQueryApi"]

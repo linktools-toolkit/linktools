@@ -10,7 +10,7 @@ from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
 from functools import partial
 from pathlib import Path
-from typing import TYPE_CHECKING, TypeVar, cast
+from typing import TypeVar, cast
 
 from linktools.core import environ
 from pydantic_ai_harness.memory import SearchableMemoryStore
@@ -38,10 +38,7 @@ from ..core import (
 )
 from ..errors import AIError, ErrorCode
 from ..model import ModelRegistry
-from ..observe import MiddlewarePipeline
-
-if TYPE_CHECKING:
-    from ..observe import Middleware
+from ..observe import Metrics
 from ..spec import AgentSpec, AgentSpecCodec
 from ..storage import ObjectStore, PayloadPolicy, StorageOverlay
 from ..task import LocalTaskGraphLauncher, TaskNodeHandler
@@ -56,6 +53,7 @@ from ._execution import DefaultExecutionService
 from ._history import StepExecutionHistoryReader, StepSessionHistoryReader
 from ._local import LocalExecutionBackend
 from ._memory import RuntimeMemoryStore
+from ._metrics import _MetricExecutionTerminalCommitter, _RuntimeMetricBuffer
 from ._object import RuntimeObjectKeyFactory
 from ._planner import DefaultTaskService, RuntimeTaskNodeRunner
 from ._session import DefaultSessionService
@@ -101,26 +99,14 @@ async def compose_runtime_components(
     models: "ModelRegistry | None" = None,
     state: "RuntimeState | None" = None,
     capabilities: "Sequence[CapabilityGroup[AppT]]" = (),
-    middleware: "Sequence[Middleware]" = (),
+    metrics: "Metrics | None" = None,
 ) -> _RuntimeComponents:
     """Freeze declarations and build Runtime-private services without constructing Runtime."""
     if not isinstance(workspace, Workspace):
         raise TypeError("workspace must be Workspace")
     workspace.policy.validate()
-    if isinstance(middleware, (str, bytes, bytearray)) or not isinstance(middleware, Sequence):
-        raise TypeError("middleware must be a sequence")
-    middleware_values = tuple(middleware)
-    for item in middleware_values:
-        try:
-            mutating = item.mutating
-        except AttributeError as error:
-            raise TypeError(
-                "middleware must define a bool mutating attribute"
-            ) from error
-        if not isinstance(mutating, bool):
-            raise TypeError("middleware mutating attribute must be bool")
-        if mutating:
-            raise AIError(ErrorCode.CAPABILITY_POLICY_CONFLICT)
+    if metrics is not None and not isinstance(metrics, Metrics):
+        raise TypeError("metrics must be Metrics")
     groups = tuple(capabilities)
     if any(not isinstance(group, CapabilityGroup) for group in groups):
         raise TypeError("capabilities must contain CapabilityGroup values")
@@ -278,7 +264,7 @@ async def compose_runtime_components(
             object_key_factory=object_key_factory,
             payload_policy=payload_policy,
             session_execution_ready=session_execution_ready,
-            middleware=middleware_values,
+            metrics=metrics,
             owned_workspace_close=owned_workspace_close,
         )
     except BaseException:
@@ -461,12 +447,14 @@ async def _build_local_components(
     object_key_factory: RuntimeObjectKeyFactory,
     payload_policy: PayloadPolicy,
     session_execution_ready: bool,
-    middleware: "Sequence[Middleware]",
+    metrics: "Metrics | None",
     owned_workspace_close: "Callable[[], Awaitable[None]] | None" = None,
 ) -> _RuntimeComponents:
     if not state.ready:
         raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
     _require_state_identity(state, namespace=namespace, tenant_id=tenant_id)
+    metric_buffer = None if metrics is None else _RuntimeMetricBuffer(metrics)
+    metric_source_namespace = None if metric_buffer is None else namespace
     execution = DefaultExecutionService(
         state.execution,
         state.object_store(RuntimeDomain.EXECUTION),
@@ -482,11 +470,10 @@ async def _build_local_components(
         session_execution_ready=session_execution_ready,
     )
     dispatcher = SubagentDispatcher(catalog, compiler, execution)
-    middleware_pipeline = MiddlewarePipeline(middleware)
     executor = AgentExecutor(
         skill_sources,
         instruction_resolver=instruction_resolver,
-        middleware=middleware_pipeline,
+        metrics=metric_buffer,
     )
 
     def build_memory_store(
@@ -516,6 +503,7 @@ async def _build_local_components(
 
     backend: LocalExecutionBackend | None = None
     task_launcher: LocalTaskGraphLauncher | None = None
+    task_service: DefaultTaskService | None = None
     live_broker = LiveExecutionEventBroker()
     try:
         backend = LocalExecutionBackend(
@@ -524,7 +512,6 @@ async def _build_local_components(
             state.recovery,
             state.object_store(RuntimeDomain.EXECUTION),
             state.object_store(RuntimeDomain.RECOVERY),
-            state.metrics,
             namespace,
             state.steps,
             executor,
@@ -556,13 +543,22 @@ async def _build_local_components(
                 is RuntimeRetentionMode.DURABLE
             ),
             tool_operations=state.recovery.tools,
+            metric_recorder=metric_buffer,
         )
         state.retention.bind_execution_runtime_release(
             backend.release_runtime_execution
         )
         execution.bind_backend(backend)
         execution.bind_local_waiter(backend)
-        execution.bind_terminal_committer(backend)
+        execution.bind_terminal_committer(
+            backend
+            if metric_buffer is None
+            else _MetricExecutionTerminalCommitter(
+                backend,
+                metric_buffer,
+                source_namespace=namespace,
+            )
+        )
         execution.bind_terminal_verifier(backend.verify_terminal_projection)
         execution.bind_subagent_cancellation(dispatcher)
         session = DefaultSessionService(
@@ -590,13 +586,17 @@ async def _build_local_components(
             state.task.tasks,
             task_runner,
             owner=f"runtime:{tenant_id}:{uuid.uuid4().hex}",
+            metric_recorder=metric_buffer,
+            metric_source_namespace=metric_source_namespace,
         )
-        task = DefaultTaskService(
+        task_service = DefaultTaskService(
             state.task,
             authorization,
             task_launcher,
             local_waiter=task_launcher,
             preflight=task_runner,
+            metric_recorder=metric_buffer,
+            metric_source_namespace=metric_source_namespace,
         )
         evaluation = DefaultEvaluationService(
             state.evaluation,
@@ -634,32 +634,39 @@ async def _build_local_components(
         )
         local_coordinator = _LocalRuntimeCoordinator(execution, event)
         close_actions: list[Callable[[], Awaitable[None]]] = [
-            task.drain_owned_finalizers,
-            task.preflight_close,
+            task_service.drain_owned_finalizers,
+            task_service.preflight_close,
             task_launcher.shutdown,
+            task_service.drain_metric_projector,
             execution.preflight_close,
             backend.close,
-            state.close,
         ]
+        if metric_buffer is not None:
+            close_actions.append(metric_buffer.close)
+        close_actions.append(state.close)
         if owned_workspace_close is not None:
             close_actions.append(owned_workspace_close)
         coordinator = _RuntimeCloseCoordinator(tuple(close_actions))
         await _restore_recovery_bindings(catalog, compiler, state, tenant_id=tenant_id)
         if RuntimeDomain.RECOVERY in state.plan.durable_domains:
             await backend.reconcile()
-        await task.recover_pending()
+        await task_service.recover_pending()
     except BaseException:
         if task_launcher is not None:
             await task_launcher.shutdown()
+        if task_service is not None:
+            await task_service.drain_metric_projector()
         if backend is not None:
             await backend.close()
+        if metric_buffer is not None:
+            await metric_buffer.close()
         raise
     return _RuntimeComponents(
         catalog=catalog,
         compiler=compiler,
         execution=execution,
         session=session,
-        task=task,
+        task=task_service,
         evaluation=evaluation,
         approval=approval,
         event=event,

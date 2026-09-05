@@ -10,7 +10,7 @@ from typing import TYPE_CHECKING
 
 from ...core import canonical_sha256, validate_persistence_namespace
 from ...errors import AIError, ErrorCode
-from ...storage import ObjectStore, StorageMetrics
+from ...storage import ObjectStore
 from ._contracts import (
     ArtifactState,
     ConversationState,
@@ -76,7 +76,6 @@ class RuntimeState:
         self._steps: RuntimeStepStore | None = None
         self._retention: RuntimeRetentionController | None = None
         self._maintenance: RuntimeStorageMaintenance | None = None
-        self._metrics: StorageMetrics | None = None
         self._handoff_contract_digest: str | None = None
 
     @classmethod
@@ -212,10 +211,6 @@ class RuntimeState:
     def maintenance(self) -> "RuntimeStorageMaintenance":
         return self._require_state(self._maintenance)
 
-    @property
-    def metrics(self) -> StorageMetrics:
-        return self._require_state(self._metrics)
-
     async def initialize(self, *, namespace: str, tenant_id: str) -> None:
         async with self._lock:
             if self._lifecycle is not _RuntimeStateLifecycle.NEW:
@@ -306,7 +301,6 @@ class RuntimeState:
         self._steps = value.steps
         self._retention = value.retention
         self._maintenance = value.maintenance
-        self._metrics = value.metrics
         self._close_actions = value.close_actions
         self._namespace = namespace
         self._tenant_id = tenant_id

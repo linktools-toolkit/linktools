@@ -27,6 +27,7 @@ from ..core import (
     principal_identity_payload,
 )
 from ..errors import AIError, ErrorCode
+from ..observe import MetricRecorder
 from ._event import TaskEvent
 from ._graph import (
     CancelGraphRequest,
@@ -40,6 +41,7 @@ from ._graph import (
     TaskNodeResult,
     TaskNodeView,
 )
+from ._metrics import _TaskMetricProjector
 from ._service import TaskApi, TaskGraphLauncher
 
 _logger = environ.get_logger("ai.task.service")
@@ -160,6 +162,13 @@ class _TaskAdmissionPersistence(Protocol):
         self, admission: TaskGraphAdmission, graph: TaskGraph
     ) -> TaskGraphView: ...
 
+    async def get(
+        self,
+        graph_id: str,
+        *,
+        tenant_id: str,
+    ) -> TaskGraphAdmission | None: ...
+
     async def list_recoverable_page(
         self,
         *,
@@ -185,12 +194,27 @@ class DefaultTaskService(TaskApi):
         *,
         local_waiter: "_LocalTaskWaiter | None" = None,
         preflight: "_TaskGraphPreflight | None" = None,
+        metric_recorder: MetricRecorder | None = None,
+        metric_source_namespace: str | None = None,
     ) -> None:
+        if (metric_recorder is None) != (metric_source_namespace is None):
+            raise ValueError(
+                "task metric recorder and source namespace must be configured together"
+            )
         self._persistence = persistence
         self._authorization = authorization
         self._launcher = launcher
         self._local_waiter = local_waiter
         self._preflight = preflight
+        self._metric_projector = (
+            None
+            if metric_recorder is None or metric_source_namespace is None
+            else _TaskMetricProjector(
+                persistence.tasks,
+                metric_recorder,
+                source_namespace=metric_source_namespace,
+            )
+        )
         self._detached_finalizers: set[asyncio.Task[object]] = set()
         self._detached_finalizer_failure: AIError | None = None
 
@@ -214,7 +238,9 @@ class DefaultTaskService(TaskApi):
             self._preflight.validate_request(request.graph)
         admission = TaskGraphAdmission.from_request(request)
         view = await self._persistence.admissions.admit(admission, request.graph)
-        if not _terminal(view.status):
+        if _terminal(view.status):
+            await self._observe_metric_history(view, tenant_id=tenant_id)
+        else:
             await self._arm_graph(admission.bind(request.graph))
         return await self._result(view, tenant_id)
 
@@ -290,6 +316,10 @@ class DefaultTaskService(TaskApi):
                     tenant_id=launch.principal.tenant_id,
                 )
                 if _terminal(view.status):
+                    await self._observe_metric_history(
+                        view,
+                        tenant_id=launch.principal.tenant_id,
+                    )
                     continue
                 await self._arm_graph(launch)
                 recovered += 1
@@ -575,6 +605,7 @@ class DefaultTaskService(TaskApi):
             )
             if snapshot is None or not _terminal(snapshot.status):
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            await self._observe_metric_history(snapshot, tenant_id=tenant_id)
             return _snapshot_result(snapshot)
 
         try:
@@ -789,7 +820,7 @@ class DefaultTaskService(TaskApi):
             in {OperationStatus.RUNNING, OperationStatus.EFFECT_UNKNOWN}
         ) and view.status is TaskStatus.CANCELLED:
             try:
-                await self._cleanup_cancelled_graph(graph_id, request)
+                await self._cleanup_cancelled_graph(view, request)
             except BaseException as error:  # noqa: BLE001
                 await self._raise_cancel_cleanup_error(
                     operation,
@@ -809,6 +840,7 @@ class DefaultTaskService(TaskApi):
             )
             if current.status is not OperationStatus.SUCCEEDED:
                 raise AIError(ErrorCode.STORAGE_CONFLICT)
+        await self._observe_metric_history(view, tenant_id=tenant_id)
         _logger.info(
             "task graph cancel settled: tenant=%s graph=%s status=%s",
             tenant_id,
@@ -848,7 +880,7 @@ class DefaultTaskService(TaskApi):
         if _terminal(view.status):
             if view.status is TaskStatus.CANCELLED:
                 try:
-                    await self._cleanup_cancelled_graph(graph_id, request)
+                    await self._cleanup_cancelled_graph(view, request)
                 except BaseException as cleanup_error:  # noqa: BLE001
                     await self._raise_cancel_cleanup_error(
                         operation,
@@ -864,6 +896,7 @@ class DefaultTaskService(TaskApi):
             )
             if current.status is not OperationStatus.SUCCEEDED:
                 raise AIError(ErrorCode.STORAGE_CONFLICT)
+            await self._observe_metric_history(view, tenant_id=tenant_id)
             return view
         if isinstance(error, AIError):
             await self._record_failure(
@@ -897,13 +930,23 @@ class DefaultTaskService(TaskApi):
 
     async def _cleanup_cancelled_graph(
         self,
-        graph_id: str,
+        view: TaskGraphView,
         request: CancelGraphRequest,
     ) -> None:
         if self._launcher is None:
             return
+        tenant_id = request.principal.tenant_id
+        admission = await self._persistence.admissions.get(
+            view.graph_id,
+            tenant_id=tenant_id,
+        )
+        if admission is None:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         try:
-            await self._launcher.cancel(graph_id, request)
+            launch = admission.bind(TaskGraph(view.graph_id, view.nodes))
+            if launch.principal.tenant_id != tenant_id:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            await self._launcher.cancel(launch)
         except asyncio.CancelledError:
             raise
         except AIError:
@@ -911,7 +954,10 @@ class DefaultTaskService(TaskApi):
         except BaseException as error:  # noqa: BLE001
             raise AIError(
                 ErrorCode.INTERNAL_ERROR,
-                safe_details={"phase": "task_cancel_cleanup", "graph_id": graph_id},
+                safe_details={
+                    "phase": "task_cancel_cleanup",
+                    "graph_id": view.graph_id,
+                },
             ) from error
 
     async def _record_success(
@@ -1022,6 +1068,15 @@ class DefaultTaskService(TaskApi):
                 return current
             raise
 
+    async def _observe_metric_history(
+        self,
+        view: TaskGraphView | TaskGraphSnapshot,
+        *,
+        tenant_id: str,
+    ) -> None:
+        if self._metric_projector is not None:
+            self._metric_projector.trigger(view.graph_id, tenant_id=tenant_id)
+
     async def _result(
         self,
         view: TaskGraphView,
@@ -1079,6 +1134,10 @@ class DefaultTaskService(TaskApi):
                 *(asyncio.shield(task) for task in pending),
                 return_exceptions=True,
             )
+
+    async def drain_metric_projector(self) -> None:
+        if self._metric_projector is not None:
+            await self._metric_projector.close()
 
     async def preflight_close(self) -> None:
         pending = tuple(task for task in self._detached_finalizers if not task.done())

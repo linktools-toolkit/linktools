@@ -145,6 +145,20 @@ def _task_submit_result_digest(graph: TaskGraph) -> str:
     return canonical_sha256({"graph_id": graph.graph_id, "status": status.value})
 
 
+def _same_task_admission_contract(
+    left: TaskGraphAdmission,
+    right: TaskGraphAdmission,
+) -> bool:
+    return (
+        left.version == right.version
+        and left.graph_id == right.graph_id
+        and left.principal == right.principal
+        and left.limits == right.limits
+        and left.operation_id == right.operation_id
+        and left.request_digest == right.request_digest
+    )
+
+
 def _require_canonical_graph_status(status: TaskStatus) -> None:
     if status is TaskStatus.READY:
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -1874,6 +1888,62 @@ class TaskAdmissionRepositoryImpl(RepositoryBase):
             raise asyncio.CancelledError
         raise AIError(ErrorCode.STORAGE_COMMIT_UNKNOWN) from result.error
 
+    async def get(
+        self,
+        graph_id: str,
+        *,
+        tenant_id: str,
+    ) -> TaskGraphAdmission | None:
+        if tenant_id != self._tenant_id:
+            return None
+
+        async def read(transaction: StateTransaction) -> TaskGraphAdmission | None:
+            graph_key = self._graph_key(graph_id)
+            admission_key = self._admission_key(graph_id)
+            records = await transaction.get_records((graph_key, admission_key))
+            graph_record = records.get(graph_key)
+            admission_record = records.get(admission_key)
+            if graph_record is None and admission_record is None:
+                return None
+            if graph_record is None or admission_record is None:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            self._validate_graph_record(graph_record, graph_id)
+            self._validate_admission_record(admission_record, graph_id)
+            admission = await self._decode(admission_record, TaskGraphAdmission)
+            if (
+                admission.graph_id != graph_id
+                or admission.principal.tenant_id != tenant_id
+            ):
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            stored_operation = await transaction.get_operation(
+                operation_key(
+                    self._namespace,
+                    self._tenant_id,
+                    self._domain.value,
+                    admission.operation_id,
+                )
+            )
+            node_records = await transaction.list_records(
+                RecordQuery(
+                    parent_digest=self._parent("task_node", "graph", graph_id),
+                    kind="task_node",
+                )
+            )
+            if stored_operation is None:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            existing, _ = await self._require_committed_admission(
+                transaction,
+                graph_record,
+                admission_record,
+                node_records,
+                stored_operation=stored_operation,
+            )
+            if existing != admission:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            return admission
+
+        return await self.state_store.read(read)
+
     async def list_recoverable_page(
         self,
         *,
@@ -1992,6 +2062,8 @@ class TaskAdmissionRepositoryImpl(RepositoryBase):
             stored_operation=stored_operation,
         )
         if existing != admission:
+            if _same_task_admission_contract(existing, admission):
+                raise AIError(ErrorCode.IDEMPOTENCY_CONFLICT)
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         return await self._repair_aggregate_projection(
             transaction,
@@ -2163,6 +2235,11 @@ class TaskAdmissionRepositoryImpl(RepositoryBase):
                 stored_operation=stored_operation,
             )
             if existing != admission:
+                if _same_task_admission_contract(existing, admission):
+                    return CommitObservation(
+                        DurableCommitState.NOT_COMMITTED,
+                        error=AIError(ErrorCode.IDEMPOTENCY_CONFLICT),
+                    )
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             return CommitObservation(DurableCommitState.COMMITTED, view)
         except (KeyError, TypeError, ValueError):

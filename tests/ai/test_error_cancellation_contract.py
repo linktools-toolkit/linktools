@@ -157,6 +157,7 @@ async def test_task_runner_cancellation_does_not_business_cancel_running_executi
             SimpleNamespace(node_id="node"),
             graph_id="graph",
             principal=trusted_workspace_principal("tenant"),
+            context={},
             dependencies={},
             control=control,
         )
@@ -217,6 +218,7 @@ async def test_task_runner_binds_execution_that_finishes_launch_after_caller_can
             SimpleNamespace(node_id="node"),
             graph_id="graph",
             principal=trusted_workspace_principal("tenant"),
+            context={},
             dependencies={},
             control=control,
         )
@@ -270,6 +272,7 @@ async def test_task_runner_start_unknown_after_caller_cancel_blocks_shutdown() -
             SimpleNamespace(node_id="node"),
             graph_id="graph",
             principal=trusted_workspace_principal("tenant"),
+            context={},
             dependencies={},
             control=Control(),
         )
@@ -471,6 +474,7 @@ async def test_task_heartbeat_loss_waits_for_cancellation_resistant_runner(
         request=SimpleNamespace(
             principal=trusted_workspace_principal("tenant"),
             graph=SimpleNamespace(graph_id="graph"),
+            context={},
         ),
         condition=asyncio.Condition(),
         generation=0,
