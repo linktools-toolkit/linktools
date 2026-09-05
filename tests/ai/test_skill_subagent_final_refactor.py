@@ -716,6 +716,7 @@ async def test_execution_service_replays_subagent_from_persisted_child_binding()
         root_execution_id="root-execution",
         planning=True,
         thinking="high",
+        context={},
     )
     service._state = SimpleNamespace(
         idempotency=SimpleNamespace(get=AsyncMock(return_value=persisted)),
