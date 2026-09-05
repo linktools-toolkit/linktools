@@ -26,11 +26,6 @@ Repository-wide instructions for coding agents.
 - Keep files, classes, and packages cohesive. Behavior that belongs to a class stays on the class; prefer `classmethod` over `staticmethod` when class ownership matters.
 - `_`-prefixed modules are private and re-exported through the package surface. Externally addressed modules (entry points, dotted paths, directory scanning) remain public.
 - Runtime dependencies must remain acyclic at module and package level; `TYPE_CHECKING`-only references are allowed.
-- Prefer the smallest cohesive design that fully satisfies current, confirmed requirements. Do not add abstraction layers, duplicate Protocols, adapters, extension points, compatibility shims, generic frameworks, background machinery, or speculative hooks for hypothetical future use.
-- Keep one clear owner for each semantic contract. Reuse an existing public contract when another component needs the same boundary; do not create a parallel abstraction merely to avoid depending on the real owner.
-- Validate inputs at trust, persistence, and public API boundaries. Inside an established invariant boundary, do not add defensive `getattr`/`hasattr`, reflection, default fallbacks, silent coercion, or exception swallowing to make impossible or invalid states continue.
-- Retries, fallbacks, and broad exception isolation require a defined failure model and recovery/isolation purpose. They must be bounded where applicable and must not hide programming errors, contract violations, or caller cancellation.
-- Tests must not use broad autouse monkeypatches, compatibility defaults, or global behavior replacement to conceal invalid production state. Construct valid test objects or test the explicit failure contract instead.
 
 ### Logging and comments
 
