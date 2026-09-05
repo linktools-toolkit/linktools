@@ -5,7 +5,7 @@
 from __future__ import annotations
 
 import uuid
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -137,10 +137,11 @@ class Metrics:
         await self.record_observations((observation,))
         return resolved_id
 
-    async def record_observations(self, observations: tuple[Observation, ...]) -> None:
-        if not isinstance(observations, tuple):
-            raise TypeError("observations must be a tuple")
-        await self._store.put_observations(self._namespace, observations)
+    async def record_observations(
+        self,
+        observations: Sequence[Observation],
+    ) -> None:
+        await self._store.put_observations(self._namespace, tuple(observations))
 
     async def query(self, query: MetricQuery) -> MetricQueryResult:
         if not isinstance(query, MetricQuery):
