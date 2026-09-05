@@ -626,12 +626,14 @@ class Runtime(Generic[AppT]):
         principal: "Principal | None" = None,
         idempotency_key: str,
         limits: "TaskGraphLimits | None" = None,
+        context: "Mapping[str, object] | None" = None,
     ) -> TaskGraphResult:
         request = await self._admit_graph(
             graph,
             principal=principal,
             idempotency_key=idempotency_key,
             limits=limits,
+            context=context,
         )
         return await self.task.run_graph(request)
 
@@ -643,12 +645,14 @@ class Runtime(Generic[AppT]):
         idempotency_key: str,
         limits: "TaskGraphLimits | None" = None,
         timeout_seconds: "float | None" = None,
+        context: "Mapping[str, object] | None" = None,
     ) -> TaskGraphResult:
         request = await self._admit_graph(
             graph,
             principal=principal,
             idempotency_key=idempotency_key,
             limits=limits,
+            context=context,
         )
         return await self.task.run_graph_and_wait(
             request,
@@ -714,9 +718,11 @@ class Runtime(Generic[AppT]):
         principal: "Principal | None",
         idempotency_key: str,
         limits: "TaskGraphLimits | None",
+        context: "Mapping[str, object] | None" = None,
     ) -> TaskGraphRequest:
         self._ensure_open()
         resolved_principal = self._resolve_principal(principal)
+        effective_context = _merge_portable_context(self._context, context)
         selected_limits = limits or TaskGraphLimits()
         validate_idempotency_key(idempotency_key)
         graph.validate_limits(selected_limits)
@@ -737,6 +743,7 @@ class Runtime(Generic[AppT]):
             resolved_principal,
             idempotency_key,
             selected_limits,
+            effective_context,
         )
 
     async def _ensure_session(
