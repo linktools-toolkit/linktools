@@ -503,6 +503,7 @@ async def _build_local_components(
 
     backend: LocalExecutionBackend | None = None
     task_launcher: LocalTaskGraphLauncher | None = None
+    task_service: DefaultTaskService | None = None
     live_broker = LiveExecutionEventBroker()
     try:
         backend = LocalExecutionBackend(
@@ -588,7 +589,7 @@ async def _build_local_components(
             metric_recorder=metric_buffer,
             metric_source_namespace=metric_source_namespace,
         )
-        task = DefaultTaskService(
+        task_service = DefaultTaskService(
             state.task,
             authorization,
             task_launcher,
@@ -633,9 +634,10 @@ async def _build_local_components(
         )
         local_coordinator = _LocalRuntimeCoordinator(execution, event)
         close_actions: list[Callable[[], Awaitable[None]]] = [
-            task.drain_owned_finalizers,
-            task.preflight_close,
+            task_service.drain_owned_finalizers,
+            task_service.preflight_close,
             task_launcher.shutdown,
+            task_service.drain_metric_projector,
             execution.preflight_close,
             backend.close,
         ]
@@ -648,10 +650,12 @@ async def _build_local_components(
         await _restore_recovery_bindings(catalog, compiler, state, tenant_id=tenant_id)
         if RuntimeDomain.RECOVERY in state.plan.durable_domains:
             await backend.reconcile()
-        await task.recover_pending()
+        await task_service.recover_pending()
     except BaseException:
         if task_launcher is not None:
             await task_launcher.shutdown()
+        if task_service is not None:
+            await task_service.drain_metric_projector()
         if backend is not None:
             await backend.close()
         if metric_buffer is not None:
@@ -662,7 +666,7 @@ async def _build_local_components(
         compiler=compiler,
         execution=execution,
         session=session,
-        task=task,
+        task=task_service,
         evaluation=evaluation,
         approval=approval,
         event=event,
