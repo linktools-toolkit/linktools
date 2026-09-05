@@ -18,6 +18,7 @@ from ..core import (
     RunContextData,
     TaskStatus,
     canonical_sha256,
+    normalize_run_context,
     validate_lease_owner,
 )
 from ..errors import AIError, ErrorCode
@@ -354,12 +355,16 @@ class LocalTaskGraphLauncher:
         self,
         graph_id: str,
         request: CancelGraphRequest,
+        *,
+        context: RunContextData,
     ) -> TaskGraphView:
         tenant_id = request.principal.tenant_id
+        context = normalize_run_context(context)
         key = (tenant_id, graph_id)
         async with self._lock:
             active_run = self._graphs.get(key)
-        context = {} if active_run is None else active_run.request.context
+        if active_run is not None and active_run.request.context != context:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         view = await self._repository.get_graph(graph_id, tenant_id=tenant_id)
         if view is None:
             raise AIError(ErrorCode.STORAGE_NOT_FOUND)
