@@ -64,10 +64,6 @@ def definition_envelope(
     }
 
 
-def definition_envelope_digest(namespace: str, definition: MetricDefinition) -> str:
-    return canonical_sha256(definition_envelope(namespace, definition))
-
-
 def observation_payload(observation: Observation) -> dict[str, object]:
     return {
         "version": observation.version,
