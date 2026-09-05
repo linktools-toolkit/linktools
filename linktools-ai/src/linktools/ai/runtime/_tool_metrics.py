@@ -14,7 +14,13 @@ from typing import Any
 
 from linktools.core import environ
 from pydantic import ValidationError
-from pydantic_ai.exceptions import ModelRetry, ToolFailed, ToolFailedError, ToolRetryError
+from pydantic_ai.exceptions import (
+    ModelRetry,
+    SkipToolExecution,
+    ToolFailed,
+    ToolFailedError,
+    ToolRetryError,
+)
 from pydantic_ai.messages import ToolCallPart
 from pydantic_ai.tools import ToolDefinition
 
@@ -57,6 +63,16 @@ class _ToolMetricContext:
                     status="CANCELLED",
                     error_code=None,
                 )
+            raise
+        except SkipToolExecution:
+            self._record(
+                attempt_id,
+                call=call,
+                tool_def=tool_def,
+                started=started,
+                status="SUCCEEDED",
+                error_code=None,
+            )
             raise
         except Exception as error:
             self._record(
