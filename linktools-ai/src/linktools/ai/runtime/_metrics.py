@@ -20,10 +20,10 @@ from .state._contracts import ExecutionTerminalCommit, ExecutionTerminalCommitRe
 
 _logger = environ.get_logger("ai.runtime.metrics")
 _QUEUE_CAPACITY = 1024
-_BATCH_SIZE = 64
-_WRITE_TIMEOUT_SECONDS = 2.0
-_WRITE_ATTEMPTS = 2
-_CLOSE_DEADLINE_SECONDS = 5.0
+_BATCH_SIZE = 128
+_FLUSH_INTERVAL_SECONDS = 0.1
+_WRITE_TIMEOUT_SECONDS = 5.0
+_CLOSE_DEADLINE_SECONDS = 10.0
 _WARNING_INTERVAL_SECONDS = 30.0
 
 
@@ -74,6 +74,20 @@ class _RuntimeMetricBuffer(MetricRecorder):
         return True
 
     async def close(self) -> None:
+        """Stop accepting, best-effort drain, and never fail Runtime shutdown."""
+        try:
+            await self._close_impl()
+        except BaseException:  # noqa: BLE001
+            _logger.exception("runtime metric close failed open")
+            self._accepting = False
+            writer = self._writer
+            if writer is not None and not writer.done():
+                writer.cancel()
+                await asyncio.gather(writer, return_exceptions=True)
+            self._drop_remaining("runtime metric close failed")
+            self._log_close()
+
+    async def _close_impl(self) -> None:
         self._accepting = False
         writer = self._writer
         if writer is None:
@@ -122,10 +136,14 @@ class _RuntimeMetricBuffer(MetricRecorder):
                 return
             batch = [first]
             stop_after_batch = False
+            deadline = asyncio.get_running_loop().time() + _FLUSH_INTERVAL_SECONDS
             while len(batch) < _BATCH_SIZE:
+                remaining = deadline - asyncio.get_running_loop().time()
+                if remaining <= 0:
+                    break
                 try:
-                    item = self._queue.get_nowait()
-                except asyncio.QueueEmpty:
+                    item = await asyncio.wait_for(self._queue.get(), timeout=remaining)
+                except (TimeoutError, asyncio.TimeoutError):
                     break
                 if item is None:
                     self._queue.task_done()
@@ -141,30 +159,18 @@ class _RuntimeMetricBuffer(MetricRecorder):
                 return
 
     async def _write(self, batch: tuple[Observation, ...]) -> None:
-        for attempt in range(_WRITE_ATTEMPTS):
-            try:
-                await asyncio.wait_for(
-                    self._metrics.record_observations(batch),
-                    timeout=_WRITE_TIMEOUT_SECONDS,
-                )
-                return
-            except asyncio.CancelledError:
-                raise
-            except (TimeoutError, asyncio.TimeoutError):
-                if attempt + 1 < _WRITE_ATTEMPTS:
-                    continue
-            except AIError as error:
-                if attempt + 1 < _WRITE_ATTEMPTS and (
-                    error.retryable
-                    or error.code is ErrorCode.STORAGE_COMMIT_UNKNOWN
-                ):
-                    continue
-            except Exception:
-                pass
-            break
-        self._write_failures += 1
-        self._dropped += len(batch)
-        self._warn("runtime metric batch write failed")
+        try:
+            await asyncio.wait_for(
+                self._metrics.record_observations(batch),
+                timeout=_WRITE_TIMEOUT_SECONDS,
+            )
+            return
+        except asyncio.CancelledError:
+            raise
+        except (TimeoutError, asyncio.TimeoutError, Exception):
+            self._write_failures += 1
+            self._dropped += len(batch)
+            self._warn("runtime metric batch write failed")
 
     def _drop(self, message: str) -> None:
         self._dropped += 1
@@ -265,14 +271,18 @@ def _record_execution_terminal(
     correlation: dict[str, str | int] = {"execution_id": execution.execution_id}
     if session_id is not None:
         correlation["session_id"] = session_id
+    if execution.parent_execution_id is not None:
+        correlation["parent_execution_id"] = execution.parent_execution_id
+    if execution.root_execution_id is not None:
+        correlation["root_execution_id"] = execution.root_execution_id
     _try_record(
         recorder,
         lambda: _observation(
             observation_id=_stable_observation_id(
+                "linktools.execution.terminal.v1",
                 source_namespace,
                 execution.tenant_id,
                 execution.execution_id,
-                "terminal",
             ),
             kind="linktools.execution.terminal",
             source_namespace=source_namespace,
@@ -282,7 +292,7 @@ def _record_execution_terminal(
             correlation=correlation,
             dimensions={
                 "agent_id": execution.binding.agent_spec.id,
-                "mode": execution.mode,
+                "lineage_kind": execution.lineage_kind.value,
             },
             measurements=(
                 _measurement("input_tokens", usage.input_tokens),
