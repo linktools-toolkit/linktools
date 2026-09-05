@@ -53,7 +53,11 @@ from ._execution import DefaultExecutionService
 from ._history import StepExecutionHistoryReader, StepSessionHistoryReader
 from ._local import LocalExecutionBackend
 from ._memory import RuntimeMemoryStore
-from ._metrics import _MetricExecutionTerminalCommitter, _RuntimeMetricBuffer
+from ._metrics import (
+    _MetricExecutionTerminalCommitter,
+    _MetricTaskRepository,
+    _RuntimeMetricBuffer,
+)
 from ._object import RuntimeObjectKeyFactory
 from ._planner import DefaultTaskService, RuntimeTaskNodeRunner
 from ._session import DefaultSessionService
@@ -510,7 +514,6 @@ async def _build_local_components(
             state.recovery,
             state.object_store(RuntimeDomain.EXECUTION),
             state.object_store(RuntimeDomain.RECOVERY),
-            state.metrics,
             namespace,
             state.steps,
             executor,
@@ -542,6 +545,7 @@ async def _build_local_components(
                 is RuntimeRetentionMode.DURABLE
             ),
             tool_operations=state.recovery.tools,
+            metric_recorder=metric_buffer,
         )
         state.retention.bind_execution_runtime_release(
             backend.release_runtime_execution
@@ -580,8 +584,17 @@ async def _build_local_components(
             payload_policy=payload_policy,
             handlers=task_handlers,
         )
+        task_repository = (
+            state.task.tasks
+            if metric_buffer is None
+            else _MetricTaskRepository(
+                state.task.tasks,
+                metric_buffer,
+                source_namespace=namespace,
+            )
+        )
         task_launcher = LocalTaskGraphLauncher(
-            state.task.tasks,
+            task_repository,
             task_runner,
             owner=f"runtime:{tenant_id}:{uuid.uuid4().hex}",
         )
