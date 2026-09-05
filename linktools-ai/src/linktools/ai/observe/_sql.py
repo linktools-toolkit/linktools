@@ -284,7 +284,7 @@ class SqlMetricStore:
         ]
         identities = tuple(collapsed)
 
-        async def write_and_read(session: "AsyncSession") -> dict[str, str]:
+        async def write_and_validate(session: "AsyncSession") -> None:
             await self._context.dialect.insert_ignore_conflict_many(
                 session,
                 table=self._observations,
@@ -299,17 +299,17 @@ class SqlMetricStore:
                     ).where(self._observations.c.observation_digest.in_(identities))
                 )
             ).all()
-            return {str(row[0]): str(row[1]) for row in result}
+            existing = {str(row[0]): str(row[1]) for row in result}
+            if len(existing) != len(collapsed):
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            for identity, (payload, _) in collapsed.items():
+                if existing.get(identity) != payload:
+                    raise AIError(ErrorCode.STORAGE_CONFLICT)
 
-        existing = await self._context.run_mutation(
-            write_and_read,
+        await self._context.run_mutation(
+            write_and_validate,
             domain="metrics.observation",
         )
-        if len(existing) != len(collapsed):
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        for identity, (payload, _) in collapsed.items():
-            if existing.get(identity) != payload:
-                raise AIError(ErrorCode.STORAGE_CONFLICT)
 
     async def scan_observations(
         self,
