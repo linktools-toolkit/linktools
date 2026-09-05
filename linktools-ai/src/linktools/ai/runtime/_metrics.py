@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import asyncio
+import uuid
 from collections.abc import Callable, Mapping
 from datetime import datetime, timezone
 from time import monotonic
@@ -111,10 +112,7 @@ class _RuntimeMetricBuffer(MetricRecorder):
                 self._write_failures,
             )
         else:
-            _logger.debug(
-                "runtime metrics closed: accepted=%s",
-                self._accepted,
-            )
+            _logger.debug("runtime metrics closed: accepted=%s", self._accepted)
 
     async def _run(self) -> None:
         while True:
@@ -214,7 +212,7 @@ class _ExecutionTerminalCommitter(Protocol):
 
 
 class _MetricExecutionTerminalCommitter:
-    """Project durable terminal truth into best-effort execution observations."""
+    """Project service-owned durable terminal checkpoints into Metrics."""
 
     def __init__(
         self,
@@ -237,40 +235,11 @@ class _MetricExecutionTerminalCommitter:
             commit,
             session_id=session_id,
         )
-        execution = result.execution
-        usage = result.result.usage
-        _try_record(
+        _record_execution_terminal(
             self._recorder,
-            lambda: _observation(
-                observation_id=_stable_observation_id(
-                    self._source_namespace,
-                    execution.tenant_id,
-                    execution.execution_id,
-                    "terminal",
-                ),
-                kind="linktools.execution.terminal",
-                source_namespace=self._source_namespace,
-                tenant_id=execution.tenant_id,
-                status=execution.status.value,
-                error_code=execution.error_code,
-                correlation={
-                    "execution_id": execution.execution_id,
-                    **(
-                        {"session_id": session_id}
-                        if session_id is not None
-                        else {}
-                    ),
-                },
-                dimensions={
-                    "agent_id": execution.binding.agent_spec.id,
-                    "mode": execution.mode,
-                },
-                measurements=(
-                    _measurement("input_tokens", usage.input_tokens),
-                    _measurement("output_tokens", usage.output_tokens),
-                ),
-                occurred_at=result.result.created_at,
-            ),
+            source_namespace=self._source_namespace,
+            result=result,
+            session_id=session_id,
         )
         return result
 
@@ -598,6 +567,77 @@ class _MetricTaskRepository:
                 dimensions={} if task_type is None else {"task_type": task_type},
             ),
         )
+
+
+def _record_execution_terminal(
+    recorder: MetricRecorder | None,
+    *,
+    source_namespace: str,
+    result: ExecutionTerminalCommitResult,
+    session_id: str | None,
+) -> None:
+    execution = result.execution
+    usage = result.result.usage
+    correlation: dict[str, str | int] = {"execution_id": execution.execution_id}
+    if session_id is not None:
+        correlation["session_id"] = session_id
+    _try_record(
+        recorder,
+        lambda: _observation(
+            observation_id=_stable_observation_id(
+                source_namespace,
+                execution.tenant_id,
+                execution.execution_id,
+                "terminal",
+            ),
+            kind="linktools.execution.terminal",
+            source_namespace=source_namespace,
+            tenant_id=execution.tenant_id,
+            status=execution.status.value,
+            error_code=execution.error_code,
+            correlation=correlation,
+            dimensions={
+                "agent_id": execution.binding.agent_spec.id,
+                "mode": execution.mode,
+            },
+            measurements=(
+                _measurement("input_tokens", usage.input_tokens),
+                _measurement("output_tokens", usage.output_tokens),
+            ),
+            occurred_at=result.result.created_at,
+        ),
+    )
+
+
+def _record_storage_operation(
+    recorder: MetricRecorder | None,
+    *,
+    source_namespace: str,
+    tenant_id: str,
+    domain: str,
+    target: str,
+    status: str,
+    error_code: str | None = None,
+    latency_ns: int | None = None,
+) -> None:
+    measurements = (
+        ()
+        if latency_ns is None
+        else (_measurement("latency_ns", latency_ns),)
+    )
+    _try_record(
+        recorder,
+        lambda: _observation(
+            observation_id=uuid.uuid4().hex,
+            kind="linktools.storage.operation",
+            source_namespace=source_namespace,
+            tenant_id=tenant_id,
+            status=status,
+            error_code=error_code,
+            dimensions={"domain": domain, "target": target},
+            measurements=measurements,
+        ),
+    )
 
 
 def _task_type(node: TaskNode) -> str | None:
