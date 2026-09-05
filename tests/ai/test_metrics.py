@@ -8,7 +8,7 @@ from typing import cast
 
 import pytest
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.migrate import build_sql_schema_metadata
+from linktools.ai.migrate import build_sql_schema_metadata, provision_metrics_database
 from linktools.ai.observe import (
     MetricAggregation,
     MetricDefinition,
@@ -18,7 +18,6 @@ from linktools.ai.observe import (
     MetricWindow,
     Metrics,
     Observation,
-    provision_metrics_database,
 )
 from linktools.ai.observe._codec import (
     decode_definition_envelope,
@@ -102,6 +101,25 @@ async def test_metrics_record_is_idempotent_and_query_is_definition_driven() -> 
             dimensions={"route": "alpha"},
         )
     assert raised.value.code is ErrorCode.STORAGE_CONFLICT
+
+
+@pytest.mark.asyncio
+async def test_metrics_record_observations_accepts_sequences() -> None:
+    metrics = Metrics.in_memory(namespace="metrics-sequence")
+    observation = Observation(
+        version=1,
+        observation_id="sequence",
+        kind="app.sequence",
+        occurred_at=datetime(2026, 9, 5, tzinfo=timezone.utc),
+        source_namespace="workspace",
+        tenant_id="tenant",
+        status="SUCCEEDED",
+        error_code=None,
+        correlation={},
+        dimensions={},
+        measurements=(),
+    )
+    await metrics.record_observations([observation])
 
 
 @pytest.mark.asyncio
