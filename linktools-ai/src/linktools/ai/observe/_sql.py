@@ -4,7 +4,6 @@
 
 from __future__ import annotations
 
-import asyncio
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, cast
 
@@ -12,7 +11,6 @@ from ..errors import AIError, ErrorCode
 from ..storage import (
     create_sql_storage_context,
     namespace_digest,
-    provision_sql,
     sql_audit_columns,
     sql_audit_indexes,
     sql_id_column,
@@ -148,26 +146,15 @@ def build_metrics_sql_metadata(*, metadata: "MetaData | None" = None) -> "MetaDa
     return target
 
 
-async def provision_metrics_database(engine: "AsyncEngine") -> None:
-    await provision_sql(engine, build_metrics_sql_metadata())
-
-
 class SqlMetricStore:
     def __init__(self, engine: "AsyncEngine") -> None:
         self._metadata = build_metrics_sql_metadata()
         self._definitions = self._metadata.tables["ai_metric_definitions"]
         self._observations = self._metadata.tables["ai_metric_observations"]
         self._context = create_sql_storage_context(engine)
-        self._initialized = False
-        self._initialize_lock = asyncio.Lock()
 
     async def _initialize(self) -> None:
-        if self._initialized:
-            return
-        async with self._initialize_lock:
-            if not self._initialized:
-                await self._context.initialize(metadata=self._metadata)
-                self._initialized = True
+        await self._context.initialize(metadata=self._metadata)
 
     async def put_definition(
         self,
@@ -401,5 +388,4 @@ def _utc_database_datetime(value: datetime) -> datetime:
 __all__ = [
     "SqlMetricStore",
     "build_metrics_sql_metadata",
-    "provision_metrics_database",
 ]
