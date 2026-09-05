@@ -22,6 +22,7 @@ def _local_execution_backend_optional_recorder(
     from linktools.ai.runtime._local import LocalExecutionBackend
 
     monkeypatch.setattr(LocalExecutionBackend, "_metric_recorder", None, raising=False)
+    monkeypatch.setattr(LocalExecutionBackend, "_namespace", "test", raising=False)
 
 
 @pytest.hookimpl(hookwrapper=True)
