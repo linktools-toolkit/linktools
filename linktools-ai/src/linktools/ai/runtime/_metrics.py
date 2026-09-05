@@ -17,11 +17,15 @@ from ..core import JsonValue, TaskStatus, canonical_sha256
 from ..errors import AIError
 from ..observe import MetricMeasurement, MetricRecorder, Metrics, Observation
 from ..storage import StoredPayload
-from ..task import TaskGraphView, TaskLease, TaskNode, TaskNodeView, TaskResultRecord
-from .state._contracts import (
-    ExecutionTerminalCommit,
-    ExecutionTerminalCommitResult,
+from ..task import (
+    TaskGraphView,
+    TaskLease,
+    TaskNode,
+    TaskNodeView,
+    TaskResultRecord,
+    TaskTerminalRecord,
 )
+from .state import ExecutionTerminalCommit, ExecutionTerminalCommitResult, TaskRepository
 
 _logger = environ.get_logger("ai.runtime.metrics")
 _QUEUE_CAPACITY = 1024
@@ -34,13 +38,6 @@ _TASK_TERMINAL = frozenset(
         TaskStatus.SUCCEEDED,
         TaskStatus.FAILED,
         TaskStatus.BLOCKED,
-        TaskStatus.CANCELLED,
-    }
-)
-_TASK_ATTEMPT_TERMINAL = frozenset(
-    {
-        TaskStatus.SUCCEEDED,
-        TaskStatus.FAILED,
         TaskStatus.CANCELLED,
     }
 )
@@ -244,86 +241,12 @@ class _MetricExecutionTerminalCommitter:
         return result
 
 
-class _TaskRepository(Protocol):
-    async def reconcile_graph(self, graph_id: str, *, tenant_id: str) -> TaskGraphView: ...
-
-    async def get_graph(
-        self,
-        graph_id: str,
-        *,
-        tenant_id: str,
-    ) -> TaskGraphView | None: ...
-
-    async def list_nodes(
-        self,
-        graph_id: str,
-        *,
-        tenant_id: str,
-    ) -> tuple[TaskNodeView, ...]: ...
-
-    async def get_results(
-        self,
-        graph_id: str,
-        node_ids: tuple[str, ...],
-        *,
-        tenant_id: str,
-    ) -> Mapping[str, TaskResultRecord]: ...
-
-    async def claim(
-        self,
-        graph_id: str,
-        node_id: str,
-        *,
-        tenant_id: str,
-        owner: str,
-        lease_seconds: int,
-    ) -> TaskLease: ...
-
-    async def renew(
-        self,
-        lease: TaskLease,
-        *,
-        tenant_id: str,
-        lease_seconds: int,
-    ) -> TaskLease: ...
-
-    async def bind_execution(
-        self,
-        lease: TaskLease,
-        *,
-        tenant_id: str,
-        execution_id: str,
-    ) -> TaskNodeView: ...
-
-    async def complete(
-        self,
-        lease: TaskLease,
-        *,
-        tenant_id: str,
-        execution_id: str | None,
-        result_digest: str,
-        result_payload: StoredPayload | None = None,
-    ) -> object: ...
-
-    async def fail(
-        self,
-        lease: TaskLease,
-        *,
-        tenant_id: str,
-        error_code: str,
-        error_digest: str,
-        execution_id: str | None = None,
-    ) -> object: ...
-
-    async def cancel_graph(self, graph_id: str, *, tenant_id: str) -> TaskGraphView: ...
-
-
 class _MetricTaskRepository:
-    """Project Task durable terminal operations without changing repository semantics."""
+    """Project Task terminal mutations without observing ordinary reads."""
 
     def __init__(
         self,
-        delegate: _TaskRepository,
+        delegate: TaskRepository,
         recorder: MetricRecorder,
         *,
         source_namespace: str,
@@ -335,7 +258,7 @@ class _MetricTaskRepository:
 
     async def reconcile_graph(self, graph_id: str, *, tenant_id: str) -> TaskGraphView:
         view = await self._delegate.reconcile_graph(graph_id, tenant_id=tenant_id)
-        self._observe_graph(view, tenant_id=tenant_id)
+        await self._observe_graph(view, tenant_id=tenant_id)
         return view
 
     async def get_graph(
@@ -344,10 +267,7 @@ class _MetricTaskRepository:
         *,
         tenant_id: str,
     ) -> TaskGraphView | None:
-        view = await self._delegate.get_graph(graph_id, tenant_id=tenant_id)
-        if view is not None:
-            self._observe_graph(view, tenant_id=tenant_id)
-        return view
+        return await self._delegate.get_graph(graph_id, tenant_id=tenant_id)
 
     async def list_nodes(
         self,
@@ -355,10 +275,7 @@ class _MetricTaskRepository:
         *,
         tenant_id: str,
     ) -> tuple[TaskNodeView, ...]:
-        states = await self._delegate.list_nodes(graph_id, tenant_id=tenant_id)
-        for state in states:
-            self._record_attempt_state(state, tenant_id=tenant_id)
-        return states
+        return await self._delegate.list_nodes(graph_id, tenant_id=tenant_id)
 
     async def get_results(
         self,
@@ -424,22 +341,16 @@ class _MetricTaskRepository:
         execution_id: str | None,
         result_digest: str,
         result_payload: StoredPayload | None = None,
-    ) -> object:
-        result = await self._delegate.complete(
+    ) -> TaskTerminalRecord:
+        terminal = await self._delegate.complete(
             lease,
             tenant_id=tenant_id,
             execution_id=execution_id,
             result_digest=result_digest,
             result_payload=result_payload,
         )
-        self._record_attempt(
-            lease,
-            tenant_id=tenant_id,
-            status=TaskStatus.SUCCEEDED,
-            error_code=None,
-            execution_id=execution_id,
-        )
-        return result
+        self._record_attempt(lease, terminal, tenant_id=tenant_id)
+        return terminal
 
     async def fail(
         self,
@@ -449,122 +360,102 @@ class _MetricTaskRepository:
         error_code: str,
         error_digest: str,
         execution_id: str | None = None,
-    ) -> object:
-        result = await self._delegate.fail(
+    ) -> TaskTerminalRecord:
+        terminal = await self._delegate.fail(
             lease,
             tenant_id=tenant_id,
             error_code=error_code,
             error_digest=error_digest,
             execution_id=execution_id,
         )
-        self._record_attempt(
-            lease,
-            tenant_id=tenant_id,
-            status=TaskStatus.FAILED,
-            error_code=error_code,
-            execution_id=execution_id,
-        )
-        return result
+        self._record_attempt(lease, terminal, tenant_id=tenant_id)
+        return terminal
 
     async def cancel_graph(self, graph_id: str, *, tenant_id: str) -> TaskGraphView:
         view = await self._delegate.cancel_graph(graph_id, tenant_id=tenant_id)
-        self._observe_graph(view, tenant_id=tenant_id)
+        await self._observe_graph(view, tenant_id=tenant_id)
         return view
 
-    def _observe_graph(self, view: TaskGraphView, *, tenant_id: str) -> None:
+    async def _observe_graph(self, view: TaskGraphView, *, tenant_id: str) -> None:
+        graph_key = (tenant_id, view.graph_id)
         for node in view.nodes:
             task_type = _task_type(node)
             if task_type is not None:
-                self._task_types[(tenant_id, view.graph_id, node.node_id)] = task_type
+                self._task_types[(*graph_key, node.node_id)] = task_type
         if view.status not in _TASK_TERMINAL:
             return
-        _try_record(
-            self._recorder,
-            lambda: _observation(
-                observation_id=_stable_observation_id(
-                    self._source_namespace,
-                    tenant_id,
-                    view.graph_id,
-                    "terminal",
-                ),
-                kind="linktools.task.graph.terminal",
-                source_namespace=self._source_namespace,
+        try:
+            event = await self._delegate.latest_event(
+                view.graph_id,
                 tenant_id=tenant_id,
-                status=view.status.value,
-                error_code=None,
-                correlation={"graph_id": view.graph_id},
-            ),
-        )
-
-    def _record_attempt_state(self, state: TaskNodeView, *, tenant_id: str) -> None:
-        if state.status not in _TASK_ATTEMPT_TERMINAL or state.fence < 1:
-            return
-        self._record_attempt_values(
-            graph_id=state.graph_id,
-            node_id=state.node_id,
-            fence=state.fence,
-            tenant_id=tenant_id,
-            status=state.status,
-            error_code=state.error_code,
-            execution_id=state.execution_id,
-        )
+            )
+        except Exception:
+            event = None
+        if (
+            event is not None
+            and event.graph_id == view.graph_id
+            and event.status is view.status
+            and event.node_id is None
+        ):
+            _try_record(
+                self._recorder,
+                lambda: _observation(
+                    observation_id=_stable_observation_id(
+                        self._source_namespace,
+                        tenant_id,
+                        view.graph_id,
+                        str(event.sequence),
+                        "terminal",
+                    ),
+                    kind="linktools.task.graph.terminal",
+                    source_namespace=self._source_namespace,
+                    tenant_id=tenant_id,
+                    status=view.status.value,
+                    error_code=None,
+                    correlation={"graph_id": view.graph_id},
+                    occurred_at=event.occurred_at,
+                ),
+            )
+        for key in tuple(self._task_types):
+            if key[:2] == graph_key:
+                self._task_types.pop(key, None)
 
     def _record_attempt(
         self,
         lease: TaskLease,
+        terminal: TaskTerminalRecord,
         *,
         tenant_id: str,
-        status: TaskStatus,
-        error_code: str | None,
-        execution_id: str | None,
-    ) -> None:
-        self._record_attempt_values(
-            graph_id=lease.graph_id,
-            node_id=lease.node_id,
-            fence=lease.fence,
-            tenant_id=tenant_id,
-            status=status,
-            error_code=error_code,
-            execution_id=execution_id,
-        )
-
-    def _record_attempt_values(
-        self,
-        *,
-        graph_id: str,
-        node_id: str,
-        fence: int,
-        tenant_id: str,
-        status: TaskStatus,
-        error_code: str | None,
-        execution_id: str | None,
     ) -> None:
         correlation: dict[str, str | int] = {
-            "graph_id": graph_id,
-            "node_id": node_id,
-            "fence": fence,
+            "graph_id": lease.graph_id,
+            "node_id": terminal.node_id,
+            "fence": terminal.fence,
         }
-        if execution_id is not None:
-            correlation["execution_id"] = execution_id
-        task_type = self._task_types.get((tenant_id, graph_id, node_id))
+        if terminal.execution_id is not None:
+            correlation["execution_id"] = terminal.execution_id
+        task_type = self._task_types.get(
+            (tenant_id, lease.graph_id, terminal.node_id)
+        )
         _try_record(
             self._recorder,
             lambda: _observation(
                 observation_id=_stable_observation_id(
                     self._source_namespace,
                     tenant_id,
-                    graph_id,
-                    node_id,
-                    str(fence),
+                    lease.graph_id,
+                    terminal.node_id,
+                    str(terminal.fence),
                     "attempt",
                 ),
                 kind="linktools.task.node.attempt",
                 source_namespace=self._source_namespace,
                 tenant_id=tenant_id,
-                status=status.value,
-                error_code=error_code,
+                status=terminal.status.value,
+                error_code=terminal.error_code,
                 correlation=correlation,
                 dimensions={} if task_type is None else {"task_type": task_type},
+                occurred_at=terminal.completed_at,
             ),
         )
 
@@ -576,6 +467,8 @@ def _record_execution_terminal(
     result: ExecutionTerminalCommitResult,
     session_id: str | None,
 ) -> None:
+    if recorder is None:
+        return
     execution = result.execution
     usage = result.result.usage
     correlation: dict[str, str | int] = {"execution_id": execution.execution_id}
@@ -620,6 +513,8 @@ def _record_storage_operation(
     error_code: str | None = None,
     latency_ns: int | None = None,
 ) -> None:
+    if recorder is None:
+        return
     measurements = (
         ()
         if latency_ns is None
