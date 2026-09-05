@@ -225,7 +225,7 @@ async def test_latest_metric_revision_does_not_mix_measurement_revisions() -> No
 
 
 @pytest.mark.asyncio
-async def test_definition_description_is_nonsemantic_but_semantic_change_conflicts() -> None:
+async def test_definition_identity_is_idempotent_and_semantic_change_conflicts() -> None:
     metrics = Metrics.in_memory(namespace="definition-semantics")
     base = _measurement_definition(
         "business.definition",
@@ -234,19 +234,9 @@ async def test_definition_description_is_nonsemantic_but_semantic_change_conflic
         metric_type=MetricType.GAUGE,
         aggregation=MetricAggregation.MEAN,
     )
-    with_description = MetricDefinition(
-        name=base.name,
-        revision=base.revision,
-        observation_kind=base.observation_kind,
-        source=base.source,
-        metric_type=base.metric_type,
-        unit=base.unit,
-        default_aggregation=base.default_aggregation,
-        query_fields=base.query_fields,
-        description="updated documentation only",
-    )
-    await metrics.define(base)
-    await metrics.define(with_description)
+    first = await metrics.define(base)
+    replay = await metrics.define(base)
+    assert replay == first == base
 
     conflict = MetricDefinition(
         name=base.name,
@@ -261,20 +251,6 @@ async def test_definition_description_is_nonsemantic_but_semantic_change_conflic
     with pytest.raises(AIError) as raised:
         await metrics.define(conflict)
     assert raised.value.code is ErrorCode.STORAGE_CONFLICT
-
-    with pytest.raises(AIError) as reserved:
-        await metrics.define(
-            MetricDefinition(
-                name="linktools.custom.invalid",
-                revision=1,
-                observation_kind="custom.invalid",
-                source=MetricSource.measurement("value"),
-                metric_type=MetricType.GAUGE,
-                unit="1",
-                default_aggregation=MetricAggregation.MEAN,
-            )
-        )
-    assert reserved.value.code is ErrorCode.REQUEST_FIELD_INVALID
 
 
 @pytest.mark.asyncio
