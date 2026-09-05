@@ -177,6 +177,7 @@ class ErrorCode(str, Enum):
     EXTERNAL_RESULT_TOO_LARGE = "EXTERNAL_RESULT_TOO_LARGE"
     TOOL_ARGUMENTS_TOO_LARGE = "TOOL_ARGUMENTS_TOO_LARGE"
     OBSERVATION_PAYLOAD_TOO_LARGE = "OBSERVATION_PAYLOAD_TOO_LARGE"
+    METRIC_NOT_FOUND = "METRIC_NOT_FOUND"
     METRIC_QUERY_LIMIT_EXCEEDED = "METRIC_QUERY_LIMIT_EXCEEDED"
     PAGE_LIMIT_INVALID = "PAGE_LIMIT_INVALID"
     IDEMPOTENCY_KEY_INVALID = "IDEMPOTENCY_KEY_INVALID"
@@ -224,126 +225,50 @@ class ErrorDiagnostics:
     cause_digest: str
 
     def __post_init__(self) -> None:
-        if (
-            not isinstance(self.exception_type, str)
-            or not self.exception_type
-            or len(self.exception_type) > _DIAGNOSTIC_EXCEPTION_TYPE_MAX_LENGTH
-        ):
-            raise ValueError("diagnostic exception type is invalid")
-        if (
-            not isinstance(self.exception_message, str)
-            or len(self.exception_message) > _DIAGNOSTIC_EXCEPTION_MESSAGE_MAX_LENGTH
-        ):
-            raise ValueError("diagnostic exception message is invalid")
+        if not isinstance(self.exception_type, str) or not self.exception_type:
+            raise ValueError("diagnostic exception type is required")
+        if len(self.exception_type) > _DIAGNOSTIC_EXCEPTION_TYPE_MAX_LENGTH:
+            raise ValueError("diagnostic exception type is too long")
+        if not isinstance(self.exception_message, str):
+            raise TypeError("diagnostic exception message must be a string")
+        if len(self.exception_message) > _DIAGNOSTIC_EXCEPTION_MESSAGE_MAX_LENGTH:
+            raise ValueError("diagnostic exception message is too long")
         if not _is_sha256(self.cause_digest):
-            raise ValueError("diagnostic cause digest must be lowercase SHA-256")
+            raise ValueError("diagnostic cause digest must be SHA-256")
 
     @classmethod
     def from_exception(cls, error: BaseException) -> "ErrorDiagnostics":
-        exception_type = type(error).__name__
-        try:
-            exception_message = str(error)
-        except BaseException:
-            exception_message = ""
-        return cls(
-            exception_type[:_DIAGNOSTIC_EXCEPTION_TYPE_MAX_LENGTH],
-            exception_message[:_DIAGNOSTIC_EXCEPTION_MESSAGE_MAX_LENGTH],
-            _cause_digest(
-                {
-                    "exception_message": exception_message,
-                    "exception_type": exception_type,
-                }
-            ),
+        exception_type = f"{error.__class__.__module__}.{error.__class__.__qualname__}"
+        exception_type = exception_type[:_DIAGNOSTIC_EXCEPTION_TYPE_MAX_LENGTH]
+        exception_message = str(error)[:_DIAGNOSTIC_EXCEPTION_MESSAGE_MAX_LENGTH]
+        cause_digest = _cause_digest(
+            {
+                "exception_type": exception_type,
+                "exception_message": exception_message,
+            }
         )
-
-
-@dataclass(frozen=True, slots=True)
-class SafeError:
-    code: str
-    category: str
-    retryable: bool
-    operation_id: str
-    safe_details: "Mapping[str, _SafeJsonValue]"
-    cause_digest: str
+        return cls(exception_type, exception_message, cause_digest)
 
 
 class AIError(Error):
-    """An error with a stable machine-readable code."""
-
     def __init__(
         self,
         code: ErrorCode,
-        message: str = "",
+        message: "str | None" = None,
         *,
-        category: "str | None" = None,
-        retryable: "bool | None" = None,
-        operation_id: "str | None" = None,
         safe_details: "Mapping[str, _SafeJsonValue] | None" = None,
         diagnostics: "ErrorDiagnostics | None" = None,
+        category: "str | None" = None,
+        retryable: bool = False,
+        operation_id: "str | None" = None,
     ) -> None:
-        super().__init__(message or code.value)
-        if diagnostics is not None and not isinstance(diagnostics, ErrorDiagnostics):
-            raise TypeError("error diagnostics are invalid")
         self.code = code
-        self.category = category or code.value.split("_", 1)[0]
-        self.retryable = (
-            code
-            in {
-                ErrorCode.RUNTIME_DEPENDENCY_NOT_READY,
-                ErrorCode.SERVICE_NOT_READY,
-                ErrorCode.STORAGE_CACHE_CORRUPT,
-                ErrorCode.STORAGE_OWNER_MISMATCH,
-                ErrorCode.STORAGE_UNAVAILABLE,
-                ErrorCode.STORAGE_DEPENDENCY_NOT_READY,
-                ErrorCode.SESSION_ACTIVE_EXECUTIONS,
-                ErrorCode.SESSION_CLEANUP_REQUIRED,
-                ErrorCode.MODEL_RATE_LIMITED,
-                ErrorCode.MODEL_TIMEOUT,
-                ErrorCode.MODEL_UNAVAILABLE,
-                ErrorCode.EXECUTION_CONCURRENCY_LIMIT_EXCEEDED,
-                ErrorCode.EXECUTION_NOT_READY,
-                ErrorCode.EXECUTION_WAIT_TIMEOUT,
-                ErrorCode.TASK_WAIT_TIMEOUT,
-            }
-            if retryable is None
-            else retryable
-        )
-        self.operation_id = operation_id
         self.safe_details = _safe_json_mapping(safe_details)
         self.diagnostics = diagnostics
-
-    def to_safe_error(self, *, operation_id: str) -> SafeError:
-        return SafeError(
-            self.code.value,
-            self.category,
-            self.retryable,
-            operation_id,
-            self.safe_details,
-            _cause_digest({"type": type(self).__name__, "code": self.code.value}),
-        )
+        self.category = category
+        self.retryable = retryable
+        self.operation_id = operation_id
+        super().__init__(message or code.value)
 
 
-class StorageError(AIError):
-    def __init__(self, message: str, code: ErrorCode = ErrorCode.STORAGE_UNAVAILABLE) -> None:
-        super().__init__(code, message)
-
-
-class InvalidStoragePathError(StorageError):
-    def __init__(self, message: str) -> None:
-        super().__init__(message, ErrorCode.STORAGE_PATH_INVALID)
-
-
-class AssetError(AIError):
-    def __init__(self, message: str, code: ErrorCode = ErrorCode.STORAGE_UNAVAILABLE) -> None:
-        super().__init__(code, message)
-
-
-__all__ = [
-    "AIError",
-    "AssetError",
-    "ErrorCode",
-    "ErrorDiagnostics",
-    "InvalidStoragePathError",
-    "SafeError",
-    "StorageError",
-]
+__all__ = ["AIError", "ErrorCode", "ErrorDiagnostics"]
