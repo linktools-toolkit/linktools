@@ -33,15 +33,14 @@ def build_sql_schema_metadata() -> "MetaData":
     build_object_sql_metadata(metadata=metadata)
     build_asset_sql_metadata(metadata=metadata)
     build_metrics_sql_metadata(metadata=metadata)
-    if len(metadata.tables) != 12:
-        raise RuntimeError("complete SQL schema must contain exactly 12 tables")
     return metadata
 
 
 async def provision_database(engine: "AsyncEngine") -> None:
     """Provision the complete schema from the explicit migration boundary."""
-    await provision_sql(engine, build_sql_schema_metadata())
-    _logger.info("complete SQL schema provisioned: tables=12")
+    metadata = build_sql_schema_metadata()
+    await provision_sql(engine, metadata)
+    _logger.info("complete SQL schema provisioned: tables=%s", len(metadata.tables))
 
 
 async def provision_runtime_database(
@@ -82,9 +81,14 @@ async def provision_asset_database(engine: "AsyncEngine") -> None:
     await provision_sql(engine, metadata)
 
 
+async def provision_metrics_database(engine: "AsyncEngine") -> None:
+    await provision_sql(engine, build_metrics_sql_metadata())
+
+
 __all__ = [
     "build_sql_schema_metadata",
     "provision_asset_database",
     "provision_database",
+    "provision_metrics_database",
     "provision_runtime_database",
 ]
