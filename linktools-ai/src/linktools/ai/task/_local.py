@@ -502,22 +502,29 @@ class LocalTaskGraphLauncher:
                     request.graph.graph_id,
                     tenant_id=tenant_id,
                 )
-                run.metric_event_sequence = await self._observe_metric_events(
-                    request.graph.graph_id,
-                    tenant_id=tenant_id,
-                    nodes=request.graph.nodes,
-                    after_sequence=run.metric_event_sequence,
-                )
                 now = datetime.now(timezone.utc)
                 fingerprint = _scheduler_observation_fingerprint(view, states, now)
                 if fingerprint != observed_fingerprint:
                     observed_fingerprint = fingerprint
                     await self._notify(run)
                 if view.status in _TERMINAL:
+                    run.metric_event_sequence = await self._observe_metric_events(
+                        request.graph.graph_id,
+                        tenant_id=tenant_id,
+                        nodes=request.graph.nodes,
+                        after_sequence=run.metric_event_sequence,
+                    )
                     if view.status in {TaskStatus.FAILED, TaskStatus.BLOCKED}:
                         await self._cancel_terminal_effects(run, states)
                     return
-                _reap_inflight(inflight)
+                reaped = _reap_inflight(inflight)
+                if reaped:
+                    run.metric_event_sequence = await self._observe_metric_events(
+                        request.graph.graph_id,
+                        tenant_id=tenant_id,
+                        nodes=request.graph.nodes,
+                        after_sequence=run.metric_event_sequence,
+                    )
                 persisted = {
                     state.node_id
                     for state in states
@@ -1049,12 +1056,15 @@ def _runnable(node: TaskNodeView, now: datetime) -> bool:
     )
 
 
-def _reap_inflight(inflight: dict[str, _InflightNode]) -> None:
+def _reap_inflight(inflight: dict[str, _InflightNode]) -> bool:
+    reaped = False
     for node_id, state in tuple(inflight.items()):
         if not state.task.done():
             continue
         inflight.pop(node_id, None)
         state.task.result()
+        reaped = True
+    return reaped
 
 
 __all__ = [
