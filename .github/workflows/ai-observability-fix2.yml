@@ -1,0 +1,100 @@
+name: AI observability review fixes v2
+
+on:
+  push:
+    branches:
+      - feat/ai-metrics-observability
+
+permissions:
+  contents: write
+
+env:
+  PIP_DISABLE_PIP_VERSION_CHECK: "1"
+  PYTHONUNBUFFERED: "1"
+
+jobs:
+  fix:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: feat/ai-metrics-observability
+          fetch-depth: 0
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.10'
+      - name: Apply corrected P2 patch
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import textwrap
+
+          catalog = Path("linktools-ai/src/linktools/ai/observe/_metrics.py")
+          if "linktools.storage.operation.count" not in catalog.read_text():
+              print("P2 source changes already applied")
+          else:
+              workflow = Path(".github/workflows/ai-observability-fix.yml").read_text()
+              marker = "          python - <<'PY'\n"
+              start = workflow.index(marker) + len(marker)
+              end = workflow.index("\n          PY", start)
+              script = textwrap.dedent(workflow[start:end])
+
+              old = "text = re.sub(r'^\\s*operation_result = .*\\n', '', text, flags=re.MULTILINE)"
+              if old not in script:
+                  raise SystemExit("operation-result cleanup hook missing")
+              replacement = '''text = text.replace(
+          """            if current is not None and current.status in {
+              ExecutionStatus.SUCCEEDED,
+              ExecutionStatus.FAILED,
+              ExecutionStatus.CANCELLED,
+              ExecutionStatus.CANCELLING,
+          }:
+              operation_result = _execution_operation_result(current.status)
+          if execution_id in self._worker_shutdown_set():
+              operation_result = "cancelled"
+  """,
+          "",
+      )
+      text = re.sub(r'^\\s*operation_result = .*\\n', '', text, flags=re.MULTILINE)'''
+              script = script.replace(old, replacement, 1)
+              test_name = "async def test_trigger_deduplicates_successful_projection() -> None:"
+              if test_name not in script:
+                  raise SystemExit("projector dedup test hook missing")
+              script = script.replace(
+                  test_name,
+                  "@pytest.mark.asyncio\\nasync def test_trigger_deduplicates_successful_projection() -> None:",
+                  1,
+              )
+              exec(compile(script, "<p2-review-fix>", "exec"), {})
+          PY
+      - name: Install tooling
+        run: |
+          python -m pip install --quiet --upgrade pip
+          python -m pip install --quiet -U -r requirements.txt
+          python manage.py install --editable --quiet
+      - name: Run focused tests
+        run: |
+          python -m pytest -q \
+            tests/ai/test_runtime_metrics.py \
+            tests/ai/test_task_metric_projector.py \
+            tests/ai/test_metrics_sqlite_interop.py \
+            tests/ai/test_metrics_sqlite_validation.py \
+            tests/ai/test_metrics.py \
+            tests/ai/test_observability_closure.py \
+            tests/ai/test_runtime_metric_attempt_identity.py \
+            tests/ai/test_task_context_durability.py
+      - name: Run linktools-ai gate
+        run: python manage.py check linktools-ai
+      - name: Commit validated P2 fixes
+        shell: bash
+        run: |
+          if git diff --quiet -- linktools-ai tests/ai; then
+            echo "No source changes to commit"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add linktools-ai tests/ai
+          git commit -m "fix(ai): tighten metrics ownership and I/O"
+          git push origin HEAD:feat/ai-metrics-observability
