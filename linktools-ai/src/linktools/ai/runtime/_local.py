@@ -3747,7 +3747,6 @@ class LocalExecutionBackend:
                         step_run_id=run_id,
                         segment_sequence=current.agent_run_sequence,
                         history_id=history_id,
-                        memory_scope=current.memory_scope,
                         memory_store=memory,
                         plan_store_resolver=lambda _ctx: plan_store,
                         mode=current.mode,

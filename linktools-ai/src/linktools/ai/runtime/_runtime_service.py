@@ -668,7 +668,7 @@ class Runtime(Generic[AppT]):
             principal=principal,
             idempotency_key=idempotency_key,
             limits=limits,
-            context=context,
+            correlation=correlation,
         )
         return await self.task.run_graph(request)
 
@@ -687,7 +687,7 @@ class Runtime(Generic[AppT]):
             principal=principal,
             idempotency_key=idempotency_key,
             limits=limits,
-            context=context,
+            correlation=correlation,
         )
         return await self.task.run_graph_and_wait(
             request,
