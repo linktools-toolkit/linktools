@@ -6,6 +6,7 @@ from ..errors import ErrorDiagnostics
 from ._agent import Agent, Execution, Session
 from ._approval import DefaultApprovalService
 from ._artifact import DefaultArtifactService
+from ._context import RuntimeContext
 from ._evaluation import DefaultEvaluationService
 from ._event import DefaultEventService, ExecutionDelta, LiveExecutionEventBroker
 from ._execution import DefaultExecutionService
@@ -139,6 +140,7 @@ __all__ = [
     "RunEvaluationRequest",
     "RunSnapshot",
     "Runtime",
+    "RuntimeContext",
     "RuntimeDomain",
     "RuntimeHistory",
     "RuntimeObjectKeyFactory",
