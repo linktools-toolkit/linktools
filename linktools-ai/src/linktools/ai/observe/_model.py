@@ -8,7 +8,7 @@ import math
 import re
 import unicodedata
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from enum import Enum
 from types import MappingProxyType
@@ -432,8 +432,8 @@ class MetricQuery:
     revision: int | None = None
     aggregation: MetricAggregation | None = None
     percentile: float | None = None
-    filters: Mapping[str, str] = MappingProxyType({})
-    correlation_filters: Mapping[str, str | int] = MappingProxyType({})
+    filters: Mapping[str, str] = field(default_factory=dict)
+    correlation_filters: Mapping[str, str | int] = field(default_factory=dict)
     group_by: tuple[str, ...] = ()
     bucket: timedelta | None = None
 
