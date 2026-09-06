@@ -34,7 +34,7 @@ from pydantic_ai.exceptions import (
 from pydantic_ai.messages import ModelResponse
 from pydantic_ai.models import ModelRequestContext
 from pydantic_ai.run import AgentRunResult
-from pydantic_ai.tools import AgentContext as PydanticRunContext
+from pydantic_ai.tools import RunContext as PydanticRunContext
 from pydantic_ai.usage import UsageLimitExceeded
 
 from ..capability import AgentContext

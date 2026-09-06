@@ -8,7 +8,7 @@ from typing import cast
 from pydantic import JsonValue as PydanticJsonValue
 from pydantic_ai.capabilities import AbstractCapability
 from pydantic_ai.exceptions import ModelRetry, ToolFailed
-from pydantic_ai.tools import AgentContext as PydanticRunContext
+from pydantic_ai.tools import RunContext as PydanticRunContext
 from pydantic_ai.toolsets import FunctionToolset
 
 from ..capability import AgentContext, SubagentCapability

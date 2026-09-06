@@ -25,7 +25,7 @@ from ._group import (
 )
 
 if TYPE_CHECKING:
-    from pydantic_ai import AgentContext as PydanticRunContext
+    from pydantic_ai import RunContext as PydanticRunContext
     from pydantic_ai.toolsets import ToolsetTool
     from pydantic_ai_harness.filesystem import FileSystemToolset
     from pydantic_ai_harness.shell import ShellToolset

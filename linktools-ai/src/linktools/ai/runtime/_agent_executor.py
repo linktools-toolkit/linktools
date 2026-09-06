@@ -57,7 +57,7 @@ from pydantic_ai.models import Model
 from pydantic_ai.tools import (
     DeferredToolRequests,
     DeferredToolResults,
-    AgentContext as PydanticRunContext,
+    RunContext as PydanticRunContext,
     ToolDefinition,
 )
 from pydantic_ai.toolsets import AbstractToolset, PreparedToolset
