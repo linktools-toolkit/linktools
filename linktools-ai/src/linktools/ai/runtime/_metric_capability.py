@@ -45,6 +45,7 @@ from ._metrics import (
     _bind_metric_agent_usage,
     _bind_metric_execution_context,
     _metric_correlation,
+    _model_observation_id,
 )
 
 
@@ -75,6 +76,7 @@ class _RuntimeModelMetricCapability(AbstractCapability[RunContext[object]]):
         self._provider = provider
         self._model_identity = model_identity
         self._route_id = route_id
+        self._attempts: dict[int, int] = {}
 
     async def before_run(
         self,
@@ -117,9 +119,21 @@ class _RuntimeModelMetricCapability(AbstractCapability[RunContext[object]]):
         request_context: ModelRequestContext,
         handler: WrapModelRequestHandler,
     ) -> ModelResponse:
-        attempt_id = uuid.uuid4().hex
-        started = monotonic_ns()
         run_context = None if ctx is None else ctx.deps
+        if ctx is None:
+            attempt_id = uuid.uuid4().hex
+        else:
+            attempt_index = self._attempts.get(ctx.run_step, 0) + 1
+            self._attempts[ctx.run_step] = attempt_index
+            attempt_id = _model_observation_id(
+                self._source_namespace,
+                self._tenant_id,
+                self._execution_id,
+                self._step_run_id,
+                ctx.run_step,
+                attempt_index,
+            )
+        started = monotonic_ns()
         try:
             response = await handler(request_context)
         except asyncio.CancelledError:

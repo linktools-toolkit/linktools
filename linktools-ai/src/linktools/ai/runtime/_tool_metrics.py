@@ -5,7 +5,6 @@
 from __future__ import annotations
 
 import asyncio
-import uuid
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -26,6 +25,7 @@ from pydantic_ai.tools import ToolDefinition
 
 from ..errors import AIError, ErrorCode
 from ..observe import MetricMeasurement, MetricRecorder, Observation
+from ._metrics import _tool_observation_id
 
 _logger = environ.get_logger("ai.runtime.tool_metrics")
 
@@ -49,7 +49,13 @@ class _ToolMetricContext:
         handler: Callable[[dict[str, Any]], Awaitable[Any]],
         suppress_cancel: Callable[[], bool],
     ) -> Any:
-        attempt_id = uuid.uuid4().hex
+        attempt_id = _tool_observation_id(
+            self.source_namespace,
+            self.tenant_id,
+            self.execution_id,
+            self.step_run_id,
+            call.tool_call_id,
+        )
         started = monotonic_ns()
         try:
             result = await handler(args)

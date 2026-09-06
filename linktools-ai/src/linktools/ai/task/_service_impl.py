@@ -213,6 +213,7 @@ class DefaultTaskService(TaskApi):
                 persistence.tasks,
                 metric_recorder,
                 source_namespace=metric_source_namespace,
+                admissions=persistence.admissions,
             )
         )
         self._detached_finalizers: set[asyncio.Task[object]] = set()

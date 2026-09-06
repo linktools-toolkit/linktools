@@ -56,6 +56,11 @@ from ..workspace import Workspace
 from ._agent import Agent, Execution, Session
 from ._context import RuntimeContext
 from ._input import UserPromptTransport
+from ._metrics import (
+    RuntimeMetricFlushResult,
+    RuntimeMetricStatus,
+    _disabled_metric_status,
+)
 from .service_api import (
     ApprovalService,
     ArtifactService,
@@ -110,6 +115,16 @@ class _TaskNodeRuntimePort(Protocol):
     async def read_result_record(self, record: "TaskResultRecord") -> JsonValue: ...
 
 
+class _RuntimeMetricControl(Protocol):
+    def status(self) -> RuntimeMetricStatus: ...
+
+    async def flush(
+        self,
+        *,
+        timeout_seconds: float = 5.0,
+    ) -> RuntimeMetricFlushResult: ...
+
+
 def _portable_context(value: "Mapping[str, object] | None") -> RunContextData:
     try:
         return normalize_run_context(value)
@@ -148,6 +163,7 @@ class Runtime(Generic[AppT]):
         close_callback: "Callable[[], Awaitable[None]] | None" = None,
         local_coordinator: "_LocalRuntimeCoordinatorPort | None" = None,
         task_node_runtime: "_TaskNodeRuntimePort | None" = None,
+        metric_control: "_RuntimeMetricControl | None" = None,
     ) -> None:
         if any(
             value is None
@@ -187,6 +203,7 @@ class Runtime(Generic[AppT]):
         self._close_callback = close_callback
         self._local_coordinator = local_coordinator
         self._task_node_runtime = task_node_runtime
+        self._metric_control = metric_control
         self._closed = False
         self._closing = False
         self._close_lock = asyncio.Lock()
@@ -268,6 +285,21 @@ class Runtime(Generic[AppT]):
     @property
     def context(self) -> RunContextData:
         return self._runtime_context.values
+
+    def metric_status(self) -> RuntimeMetricStatus:
+        control = self._metric_control
+        return _disabled_metric_status() if control is None else control.status()
+
+    async def flush_metrics(
+        self,
+        *,
+        timeout_seconds: float = 5.0,
+    ) -> RuntimeMetricFlushResult:
+        self._ensure_open()
+        control = self._metric_control
+        if control is None:
+            return RuntimeMetricFlushResult(True, _disabled_metric_status())
+        return await control.flush(timeout_seconds=timeout_seconds)
 
     def agent(self, agent_id: str = "default") -> "Agent[AppT]":
         """Resolve one frozen root Agent by id."""
@@ -921,6 +953,7 @@ async def _open_runtime(
             close_callback=components.close_callback,
             local_coordinator=components.local_coordinator,
             task_node_runtime=components.task_node_runtime,
+            metric_control=components.metric_control,
         )
     except BaseException:
         await components.close_callback()

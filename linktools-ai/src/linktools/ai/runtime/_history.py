@@ -53,6 +53,8 @@ _MODEL_USAGE_INPUT_METADATA_KEY = "linktools.ai.model_usage.input_tokens"
 _MODEL_USAGE_OUTPUT_METADATA_KEY = "linktools.ai.model_usage.output_tokens"
 _MODEL_USAGE_CACHE_READ_METADATA_KEY = "linktools.ai.model_usage.cache_read_tokens"
 _MODEL_USAGE_CACHE_WRITE_METADATA_KEY = "linktools.ai.model_usage.cache_write_tokens"
+_OBSERVATION_ID_METADATA_KEY = "linktools.ai.observation_id"
+_DURATION_NS_METADATA_KEY = "linktools.ai.duration_ns"
 _MODEL_USAGE_METADATA_KEYS = frozenset(
     {
         _MODEL_USAGE_INPUT_METADATA_KEY,
@@ -798,7 +800,25 @@ def _trace_item(record: ExecutionRecord, segment_sequence: int, depth: int, ordi
     if value is None:
         return None
     kind, status = value
-    payload = {"kind": kind, "status": status, "step_index": event.step_index, "segment_sequence": segment_sequence, "scope": "root" if depth == 0 else "subagent", "depth": depth}
+    payload = {
+        "kind": kind,
+        "status": status,
+        "step_index": event.step_index,
+        "segment_sequence": segment_sequence,
+        "scope": "root" if depth == 0 else "subagent",
+        "depth": depth,
+        "occurred_at": _event_timestamp(event).isoformat(),
+    }
+    observation_id = event.metadata.get(_OBSERVATION_ID_METADATA_KEY)
+    if observation_id is not None:
+        if not observation_id:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        payload["observation_id"] = observation_id
+    duration_ns = event.metadata.get(_DURATION_NS_METADATA_KEY)
+    if duration_ns is not None:
+        if not duration_ns.isdigit():
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        payload["duration_ns"] = int(duration_ns)
     if kind == "MODEL_RESPONSE":
         payload["token_usage"] = _model_token_usage(event) if status == "SUCCEEDED" else None
     if event.agent_name is not None:

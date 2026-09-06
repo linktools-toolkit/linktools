@@ -34,7 +34,7 @@ from ._graph import (
     TaskNodeView,
     TaskResultRecord,
 )
-from ._metrics import _TaskMetricProjector
+from ._metrics import _TaskMetricAdmissionRepository, _TaskMetricProjector
 
 _logger = environ.get_logger("ai.task.local")
 _HEARTBEAT_SECONDS = 30.0
@@ -297,6 +297,7 @@ class LocalTaskGraphLauncher:
         owner: str,
         metric_recorder: MetricRecorder | None = None,
         metric_source_namespace: str | None = None,
+        metric_admissions: "_TaskMetricAdmissionRepository | None" = None,
     ) -> None:
         try:
             validate_lease_owner(owner)
@@ -316,6 +317,7 @@ class LocalTaskGraphLauncher:
                 repository,
                 metric_recorder,
                 source_namespace=metric_source_namespace,
+                admissions=metric_admissions,
             )
         )
         self._graphs: dict[tuple[str, str], _GraphRun] = {}

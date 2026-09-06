@@ -37,10 +37,12 @@ from ..core import (
     Principal,
     ResourceKind,
     ResourceRef,
+    RunContextData,
     StopReason,
     UsageMetrics,
     canonical_json_bytes,
     canonical_sha256,
+    overlay_run_context,
     principal_identity_payload,
 )
 from ..core import (
@@ -91,6 +93,16 @@ if TYPE_CHECKING:
     from .state import RuntimePayloadRef
 
 _logger = environ.get_logger("ai.runtime.execution")
+
+
+def _overlay_execution_context(
+    base: Mapping[str, object],
+    overlay: Mapping[str, object],
+) -> RunContextData:
+    try:
+        return overlay_run_context(base, overlay)
+    except (TypeError, ValueError) as error:
+        raise AIError(ErrorCode.REQUEST_FIELD_INVALID) from error
 
 
 def _consumed_query(method: "Callable[..., object]") -> "Callable[..., object]":
@@ -1393,7 +1405,7 @@ class DefaultExecutionService:
             mode=previous.mode,
             planning=previous.planning,
             thinking=previous.thinking,
-            context=request.context,
+            context=_overlay_execution_context(previous.context, request.context),
         )
         return await self._start(
             binding_digest,
@@ -1424,7 +1436,7 @@ class DefaultExecutionService:
             mode=previous.mode,
             planning=previous.planning,
             thinking=previous.thinking,
-            context=request.context,
+            context=_overlay_execution_context(previous.context, request.context),
         )
         return await self._start(
             binding_digest,

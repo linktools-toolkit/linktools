@@ -11,7 +11,7 @@ from typing import Protocol, cast
 
 from linktools.core import environ
 
-from ..core import Page, TaskStatus, canonical_sha256
+from ..core import Page, RunContextData, TaskStatus, canonical_sha256
 from ..observe import MetricMeasurement, MetricRecorder, Observation
 from ._event import TaskEvent, TaskEventType
 
@@ -48,6 +48,19 @@ class _TaskMetricRepository(Protocol):
     ) -> TaskEvent | None: ...
 
 
+class _TaskMetricAdmission(Protocol):
+    context: RunContextData
+
+
+class _TaskMetricAdmissionRepository(Protocol):
+    async def get(
+        self,
+        graph_id: str,
+        *,
+        tenant_id: str,
+    ) -> _TaskMetricAdmission | None: ...
+
+
 @dataclass(slots=True)
 class _Attempt:
     start: TaskEvent
@@ -63,9 +76,11 @@ class _TaskMetricProjector:
         recorder: MetricRecorder,
         *,
         source_namespace: str,
+        admissions: _TaskMetricAdmissionRepository | None = None,
     ) -> None:
         self._repository = repository
         self._recorder = recorder
+        self._admissions = admissions
         self._source_namespace = source_namespace
         self._tasks: dict[tuple[str, str], asyncio.Task[None]] = {}
         self._accepting = True
@@ -160,7 +175,18 @@ class _TaskMetricProjector:
             or terminal.status not in _TERMINAL
         ):
             return
-        self._record_graph(admission, terminal, tenant_id=tenant_id)
+        context: RunContextData = {}
+        if self._admissions is not None:
+            admitted = await self._admissions.get(graph_id, tenant_id=tenant_id)
+            if admitted is None:
+                raise ValueError("task metric admission is missing")
+            context = admitted.context
+        self._record_graph(
+            admission,
+            terminal,
+            tenant_id=tenant_id,
+            context=context,
+        )
 
         attempts: dict[tuple[str, int], _Attempt] = {}
         cursor = 0
@@ -201,6 +227,7 @@ class _TaskMetricProjector:
                 fence,
                 attempt,
                 tenant_id=tenant_id,
+                context=context,
             )
 
     @staticmethod
@@ -252,6 +279,7 @@ class _TaskMetricProjector:
         terminal: TaskEvent,
         *,
         tenant_id: str,
+        context: RunContextData,
     ) -> None:
         latency = _latency_ns(admission, terminal)
         if latency is None:
@@ -273,7 +301,7 @@ class _TaskMetricProjector:
                 tenant_id=tenant_id,
                 status=terminal.status.value,
                 error_code=terminal.error_code,
-                correlation={"graph_id": terminal.graph_id},
+                correlation=_task_correlation(context, graph_id=terminal.graph_id),
                 dimensions={},
                 measurements=(MetricMeasurement("latency_ns", 1, latency),),
             )
@@ -287,18 +315,19 @@ class _TaskMetricProjector:
         attempt: _Attempt,
         *,
         tenant_id: str,
+        context: RunContextData,
     ) -> None:
         terminal = cast(TaskEvent, attempt.terminal)
         latency = _latency_ns(attempt.start, terminal)
         if latency is None:
             return
-        correlation: dict[str, str | int] = {
-            "graph_id": graph_id,
-            "node_id": node_id,
-            "fence": fence,
-        }
-        if attempt.execution_id is not None:
-            correlation["execution_id"] = attempt.execution_id
+        correlation = _task_correlation(
+            context,
+            graph_id=graph_id,
+            node_id=node_id,
+            fence=fence,
+            execution_id=attempt.execution_id,
+        )
         self._safe_record(
             lambda: Observation(
                 version=1,
@@ -329,6 +358,17 @@ class _TaskMetricProjector:
             self._recorder.try_record(factory())
         except Exception:
             _logger.exception("task metric observation rejected")
+
+
+def _task_correlation(
+    context: RunContextData,
+    **system: str | int | None,
+) -> dict[str, str | int]:
+    correlation: dict[str, str | int] = dict(context)
+    for key, value in system.items():
+        if value is not None:
+            correlation[f"linktools.{key}"] = value
+    return correlation
 
 
 def _latency_ns(start: TaskEvent, terminal: TaskEvent) -> int | None:
