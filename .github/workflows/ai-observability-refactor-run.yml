@@ -8,7 +8,7 @@ on:
       - .github/workflows/ai-observability-refactor-run.yml
 
 permissions:
-  contents: write
+  contents: read
 
 env:
   PIP_DISABLE_PIP_VERSION_CHECK: "1"
@@ -30,28 +30,30 @@ jobs:
           python -m pip install --quiet --upgrade pip
           python -m pip install --quiet -U -r requirements.txt
           python manage.py install --editable --quiet
-      - name: Apply runtime metric context fix
+      - name: Apply diagnostic patches
         run: |
           python - <<'PY'
           from pathlib import Path
 
-          path = Path("linktools-ai/src/linktools/ai/runtime/_metric_capability.py")
-          text = path.read_text()
+          model = Path("linktools-ai/src/linktools/ai/runtime/_metric_capability.py")
+          text = model.read_text()
           old = "None if run_context is None else run_context.context"
           new = "None if run_context is None else run_context.correlation"
           assert text.count(old) == 1, text.count(old)
-          path.write_text(text.replace(old, new))
+          model.write_text(text.replace(old, new))
+
+          local = Path("linktools-ai/src/linktools/ai/runtime/_local.py")
+          text = local.read_text()
+          old = '''        self._live_broker.complete(execution_id)\n        _record_execution_terminal(\n'''
+          new = '''        self._live_broker.complete(execution_id)\n        print("EXEC_METRIC_BEFORE", self._metric_recorder is not None, committed.execution.status, committed.execution.created_at, committed.result.created_at, getattr(self._metric_recorder, "status", lambda: None)())\n        _record_execution_terminal(\n'''
+          assert text.count(old) == 1, text.count(old)
+          text = text.replace(old, new)
+          old = '''            session_id=session_id,\n        )\n        _release_metric_execution_context(self._metric_recorder, execution_id)\n'''
+          new = '''            session_id=session_id,\n        )\n        print("EXEC_METRIC_AFTER", getattr(self._metric_recorder, "status", lambda: None)())\n        _release_metric_execution_context(self._metric_recorder, execution_id)\n'''
+          assert text.count(old) == 1, text.count(old)
+          local.write_text(text.replace(old, new))
           PY
-      - name: Validate targeted runtime metrics
+      - name: Trace execution metric producer
         run: |
-          python -m pytest -q \
-            tests/ai/test_runtime_metrics.py::test_runtime_projects_model_agent_and_execution_metrics \
-            tests/ai/test_runtime_metrics_multi.py::test_runtime_states_share_metrics_without_lifecycle_coupling
-          git diff --check
-      - name: Commit validated fix
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add linktools-ai/src/linktools/ai/runtime/_metric_capability.py
-          git commit -m "fix(ai): preserve model metric correlation"
-          git push origin HEAD:feat/ai-metrics-observability
+          python -m pytest -q -s \
+            tests/ai/test_runtime_metrics.py::test_runtime_projects_model_agent_and_execution_metrics
