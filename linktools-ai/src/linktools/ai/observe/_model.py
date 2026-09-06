@@ -27,6 +27,7 @@ _CANONICAL_FIELD_MAX = 128
 _VALUE_MAX = 256
 _DIMENSIONS_MAX = 16
 _CORRELATIONS_MAX = 16
+_CORRELATION_FILTERS_MAX = 8
 _MEASUREMENTS_MAX = 32
 _QUERY_FIELDS_MAX = 20
 _INDICATOR_VALUES_MAX = 16
@@ -426,6 +427,7 @@ class MetricQuery:
     aggregation: MetricAggregation | None = None
     percentile: float | None = None
     filters: Mapping[str, str] = MappingProxyType({})
+    correlation_filters: Mapping[str, str | int] = MappingProxyType({})
     group_by: tuple[str, ...] = ()
     bucket: timedelta | None = None
 
@@ -460,6 +462,24 @@ class MetricQuery:
             _identifier(key, name="filter key")
             _required_text(value, name="filter value", maximum=_VALUE_MAX)
 
+        if not isinstance(self.correlation_filters, Mapping):
+            raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+        correlation_filters = dict(self.correlation_filters)
+        if len(correlation_filters) > _CORRELATION_FILTERS_MAX:
+            raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+        for key, value in correlation_filters.items():
+            _identifier(key, name="correlation filter key")
+            if key in _CANONICAL_QUERY_FIELDS:
+                raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+            if isinstance(value, str):
+                _required_text(
+                    value,
+                    name="correlation filter value",
+                    maximum=_VALUE_MAX,
+                )
+            else:
+                _int64(value, name="correlation filter value")
+
         groups = _string_tuple(
             self.group_by,
             name="group field",
@@ -475,6 +495,11 @@ class MetricQuery:
         ):
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
         object.__setattr__(self, "filters", MappingProxyType(filters))
+        object.__setattr__(
+            self,
+            "correlation_filters",
+            MappingProxyType(correlation_filters),
+        )
         object.__setattr__(self, "group_by", groups)
 
 
