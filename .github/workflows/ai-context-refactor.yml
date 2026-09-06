@@ -18,11 +18,11 @@ jobs:
   refactor:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@v4
         with:
           ref: feat/ai-metrics-observability
           fetch-depth: 0
-      - uses: actions/setup-python@v7
+      - uses: actions/setup-python@v5
         with:
           python-version: "3.10"
 
@@ -37,7 +37,6 @@ jobs:
           tests = Path("tests/ai")
           paths = list(root.rglob("*.py")) + list(tests.rglob("*.py"))
 
-          # Durable/request values renamed to correlation in the previous pass; remove stale member reads.
           member_owners = (
               "request", "execution", "parent", "previous", "current", "original",
               "recovery_input", "checkpoint_input", "admission", "admitted", "launch",
@@ -49,16 +48,18 @@ jobs:
                   text = text.replace(f"{owner}.context", f"{owner}.correlation")
               path.write_text(text)
 
-          # Naming should match the value it validates.
           service_api = root / "runtime" / "service_api.py"
-          text = service_api.read_text().replace("_request_context", "_request_correlation")
-          service_api.write_text(text)
+          service_api.write_text(
+              service_api.read_text().replace("_request_context", "_request_correlation")
+          )
 
           execution = root / "runtime" / "_execution.py"
-          text = execution.read_text().replace("_overlay_execution_context", "_overlay_execution_correlation")
-          execution.write_text(text)
+          execution.write_text(
+              execution.read_text().replace(
+                  "_overlay_execution_context", "_overlay_execution_correlation"
+              )
+          )
 
-          # AgentContext is the sole in-process owner of execution memory_scope and correlation.
           local = root / "runtime" / "_local.py"
           text = local.read_text()
           old = '''                execution_id=current.execution_id,
@@ -72,20 +73,19 @@ jobs:
 '''
           if old not in text:
               raise SystemExit("AgentContext constructor shape not found")
-          text = text.replace(old, new, 1)
-          local.write_text(text)
+          local.write_text(text.replace(old, new, 1))
 
-          # Public operation metadata is correlation, including direct test call sites.
-          public_files = [root / "runtime" / "_agent.py", root / "runtime" / "_runtime_service.py"]
+          public_files = [
+              root / "runtime" / "_agent.py",
+              root / "runtime" / "_runtime_service.py",
+          ]
           for path in public_files:
-              text = path.read_text()
-              text = text.replace(
+              text = path.read_text().replace(
                   'context: "Mapping[str, object] | None" = None',
                   'correlation: "Mapping[str, object] | None" = None',
               )
               path.write_text(text)
 
-          # Old exported symbols are forbidden after this breaking cleanup.
           forbidden = (
               "RunContextData", "RunContextValue", "normalize_run_context",
               "overlay_run_context", "merge_run_context",
@@ -99,7 +99,6 @@ jobs:
           if bad:
               raise SystemExit("old correlation symbols remain:\n" + "\n".join(bad))
 
-          # These member names refer to durable execution/task values and must not regress.
           suspicious = re.compile(
               r"\b(?:request|execution|parent|previous|current|original|recovery_input|"
               r"checkpoint_input|admission|admitted|launch)\.context\b"
