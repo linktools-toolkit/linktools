@@ -40,16 +40,18 @@ jobs:
           from pathlib import Path
 
 
-          def replace_once(path: str, old: str, new: str) -> None:
+          def converge(path: str, old: str, new: str) -> None:
               target = Path(path)
               text = target.read_text()
               count = text.count(old)
-              assert count == 1, (path, count, old)
-              target.write_text(text.replace(old, new, 1))
+              if count:
+                  assert count == 1, (path, count, old)
+                  target.write_text(text.replace(old, new, 1))
+              else:
+                  assert new in text, (path, old, new)
 
 
-          # Correlation is nonsemantic replay metadata. Durable semantic fields still gate replay.
-          replace_once(
+          converge(
               "linktools-ai/src/linktools/ai/runtime/_local.py",
               "            or request.thinking != execution.thinking\n"
               "            or request.correlation != execution.correlation\n"
@@ -57,71 +59,64 @@ jobs:
               "            or request.thinking != execution.thinking\n"
               "            or execution.binding != binding.snapshot\n",
           )
-          replace_once(
+          converge(
               "linktools-ai/src/linktools/ai/runtime/_execution.py",
               "            if request.correlation and dict(request.correlation) != dict(parent.correlation):\n"
               "                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)\n"
               "            request = replace(request, correlation=parent.correlation)\n",
               "            request = replace(request, correlation=parent.correlation)\n",
           )
-          replace_once(
+          converge(
               "tests/ai/test_execution_context_durability.py",
               '''@pytest.mark.asyncio\nasync def test_local_start_rejects_correlation_drift_from_durable_execution() -> None:\n    execution = _execution(correlation={"trace_id": "durable", "attempt": 1})\n    backend = _backend(execution)\n    request = ExecutionRequest(\n        user_prompt="hello",\n        user_prompt_codec="text",\n        principal=Principal("user", "tenant"),\n        idempotency_key="execution-correlation-start-0001",\n        memory_scope=None,\n        mode="run",\n        planning=False,\n        thinking=False,\n        correlation={"trace_id": "request", "attempt": 1},\n    )\n\n    with pytest.raises(AIError) as raised:\n        await backend._validate_start(request, execution)\n\n    assert raised.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR\n''',
               '''@pytest.mark.asyncio\nasync def test_local_start_accepts_correlation_drift_from_durable_execution() -> None:\n    execution = _execution(correlation={"trace_id": "durable", "attempt": 1})\n    backend = _backend(execution)\n    request = ExecutionRequest(\n        user_prompt="hello",\n        user_prompt_codec="text",\n        principal=Principal("user", "tenant"),\n        idempotency_key="execution-correlation-start-0001",\n        memory_scope=None,\n        mode="run",\n        planning=False,\n        thinking=False,\n        correlation={"trace_id": "request", "attempt": 1},\n    )\n\n    await backend._validate_start(request, execution)\n    assert dict(execution.correlation) == {"attempt": 1, "trace_id": "durable"}\n''',
           )
-          replace_once(
+          converge(
               "tests/ai/test_skill_subagent_final_refactor.py",
               '        thinking="high",\n        context={},\n',
               '        thinking="high",\n        correlation={},\n',
           )
 
-          # The core module is correlation-only now; keep the private module name precise.
           core = Path("linktools-ai/src/linktools/ai/core")
           old_module = core / "_context.py"
           new_module = core / "_correlation.py"
-          assert old_module.exists() and not new_module.exists()
-          old_module.rename(new_module)
-          replace_once(
+          if old_module.exists():
+              assert not new_module.exists()
+              old_module.rename(new_module)
+          else:
+              assert new_module.exists()
+          converge(
               "linktools-ai/src/linktools/ai/core/__init__.py",
               "from ._context import (",
               "from ._correlation import (",
           )
 
-          # Metrics must remain fail-open even when a backend is built without a recorder.
-          replace_once(
+          converge(
               "linktools-ai/src/linktools/ai/runtime/_local.py",
               '''    def _record_committed_terminal(\n        self,\n        committed: ExecutionTerminalCommitResult,\n        *,\n        session_id: str | None,\n    ) -> None:\n        _record_execution_terminal(\n            self._metric_recorder,\n            source_namespace=self._namespace,\n            result=committed,\n            session_id=session_id,\n        )\n        _release_metric_execution_context(\n            self._metric_recorder,\n            committed.execution.execution_id,\n        )\n''',
               '''    def _record_committed_terminal(\n        self,\n        committed: ExecutionTerminalCommitResult,\n        *,\n        session_id: str | None,\n    ) -> None:\n        recorder = getattr(self, "_metric_recorder", None)\n        if recorder is None:\n            return\n        _record_execution_terminal(\n            recorder,\n            source_namespace=self._namespace,\n            result=committed,\n            session_id=session_id,\n        )\n        _release_metric_execution_context(\n            recorder,\n            committed.execution.execution_id,\n        )\n''',
           )
-
-          # Task graph latency is intentionally not a v1 built-in without a stable lifecycle contract.
-          replace_once(
+          converge(
               "tests/ai/test_runtime_metrics.py",
-              "    assert graph_terminals[0].measurements[0].value == 4_000_000_000\n",
-              "    assert graph_terminals[0].measurements == ()\n",
+              "    assert graph_terminals[0].measurements[0].value == 4_000_000_000",
+              "    assert graph_terminals[0].measurements == ()",
           )
-
-          # Runtime tenant ownership belongs exclusively to RuntimeContext.
-          replace_once(
+          converge(
               "tests/ai/test_workspace_runtime_regressions.py",
               "from linktools.ai.runtime import Runtime, RuntimeDomain, RuntimeState\n",
               "from linktools.ai.runtime import Runtime, RuntimeContext, RuntimeDomain, RuntimeState\n",
           )
-          replace_once(
+          converge(
               "tests/ai/test_workspace_runtime_regressions.py",
               '''    async with Runtime.open(\n        workspace,\n        tenant_id="tenant-a",\n        models=models,\n    ) as runtime:\n''',
               '''    async with Runtime.open(\n        workspace,\n        context=RuntimeContext(None, tenant_id="tenant-a"),\n        models=models,\n    ) as runtime:\n''',
           )
 
-          # Migrate every legacy TaskNodeRunner test double to TaskNodeInvocation.
           changed_runner_files: list[Path] = []
           required = {"graph_id", "principal", "context", "dependency_results"}
           for path in sorted(Path("tests/ai").glob("*.py")):
               original = path.read_text()
-              try:
-                  tree = ast.parse(original)
-              except SyntaxError:
-                  continue
+              tree = ast.parse(original)
               candidates: list[ast.AsyncFunctionDef] = []
               for node in ast.walk(tree):
                   if not isinstance(node, ast.AsyncFunctionDef) or node.name not in {"run", "cancel"}:
@@ -182,32 +177,16 @@ jobs:
               if "TaskNodeInvocation" not in original:
                   marker = "    TaskNode,\n"
                   assert marker in migrated, path
-                  migrated = migrated.replace(
-                      marker,
-                      marker + "    TaskNodeInvocation,\n",
-                      1,
-                  )
+                  migrated = migrated.replace(marker, marker + "    TaskNodeInvocation,\n", 1)
               path.write_text(migrated)
               changed_runner_files.append(path)
 
-          assert changed_runner_files, "expected legacy TaskNodeRunner test doubles"
-          print("migrated runner files:")
+          print(f"migrated {len(changed_runner_files)} TaskNodeRunner test files")
           for path in changed_runner_files:
               print(path)
           PY
 
-          python -m ruff check --fix \
-            linktools-ai/src/linktools/ai/runtime/_local.py \
-            linktools-ai/src/linktools/ai/runtime/_execution.py \
-            linktools-ai/src/linktools/ai/core/__init__.py \
-            linktools-ai/src/linktools/ai/core/_correlation.py \
-            tests/ai/test_execution_context_durability.py \
-            tests/ai/test_skill_subagent_final_refactor.py \
-            tests/ai/test_runtime_metrics.py \
-            tests/ai/test_workspace_runtime_regressions.py \
-            tests/ai/test_task_liveness_notifications.py \
-            tests/ai/test_task_reliable_review_regressions.py \
-            tests/ai/test_task_sqlite_cas_convergence.py
+          python -m ruff check --fix linktools-ai/src/linktools/ai/core linktools-ai/src/linktools/ai/runtime tests/ai
       - name: Validate focused regressions
         run: |
           python -m pytest -q \
