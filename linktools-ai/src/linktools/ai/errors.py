@@ -157,7 +157,6 @@ class ErrorCode(str, Enum):
     TASK_WAIT_TIMEOUT = "TASK_WAIT_TIMEOUT"
     LINKTOOLS_AI_RELEASE_MISMATCH = "LINKTOOLS_AI_RELEASE_MISMATCH"
     HTTP_ROUTE_NOT_FOUND = "HTTP_ROUTE_NOT_FOUND"
-    MIDDLEWARE_FAILED = "MIDDLEWARE_FAILED"
     MODEL_REGISTRY_CONFLICT = "MODEL_REGISTRY_CONFLICT"
     MODEL_CONNECTION_NOT_FOUND = "MODEL_CONNECTION_NOT_FOUND"
     MODEL_CONNECTION_CONFLICT = "MODEL_CONNECTION_CONFLICT"
@@ -259,93 +258,25 @@ class ErrorDiagnostics:
         )
 
 
-@dataclass(frozen=True, slots=True)
-class SafeError:
-    code: str
-    category: str
-    retryable: bool
-    operation_id: str
-    safe_details: "Mapping[str, _SafeJsonValue]"
-    cause_digest: str
-
-
 class AIError(Error):
-    """An error with a stable machine-readable code."""
-
     def __init__(
         self,
         code: ErrorCode,
-        message: str = "",
+        message: str | None = None,
         *,
-        category: "str | None" = None,
-        retryable: "bool | None" = None,
-        operation_id: "str | None" = None,
         safe_details: "Mapping[str, _SafeJsonValue] | None" = None,
-        diagnostics: "ErrorDiagnostics | None" = None,
+        diagnostics: ErrorDiagnostics | None = None,
+        category: str | None = None,
+        retryable: bool | None = None,
+        operation_id: str | None = None,
     ) -> None:
         super().__init__(message or code.value)
-        if diagnostics is not None and not isinstance(diagnostics, ErrorDiagnostics):
-            raise TypeError("error diagnostics are invalid")
         self.code = code
-        self.category = category or code.value.split("_", 1)[0]
-        self.retryable = (
-            code
-            in {
-                ErrorCode.RUNTIME_DEPENDENCY_NOT_READY,
-                ErrorCode.SERVICE_NOT_READY,
-                ErrorCode.STORAGE_CACHE_CORRUPT,
-                ErrorCode.STORAGE_OWNER_MISMATCH,
-                ErrorCode.STORAGE_UNAVAILABLE,
-                ErrorCode.STORAGE_DEPENDENCY_NOT_READY,
-                ErrorCode.SESSION_ACTIVE_EXECUTIONS,
-                ErrorCode.SESSION_CLEANUP_REQUIRED,
-                ErrorCode.MODEL_RATE_LIMITED,
-                ErrorCode.MODEL_TIMEOUT,
-                ErrorCode.MODEL_UNAVAILABLE,
-                ErrorCode.EXECUTION_CONCURRENCY_LIMIT_EXCEEDED,
-                ErrorCode.EXECUTION_NOT_READY,
-                ErrorCode.EXECUTION_WAIT_TIMEOUT,
-                ErrorCode.TASK_WAIT_TIMEOUT,
-            }
-            if retryable is None
-            else retryable
-        )
-        self.operation_id = operation_id
         self.safe_details = _safe_json_mapping(safe_details)
         self.diagnostics = diagnostics
-
-    def to_safe_error(self, *, operation_id: str) -> SafeError:
-        return SafeError(
-            self.code.value,
-            self.category,
-            self.retryable,
-            operation_id,
-            self.safe_details,
-            _cause_digest({"type": type(self).__name__, "code": self.code.value}),
-        )
+        self.category = category
+        self.retryable = retryable
+        self.operation_id = operation_id
 
 
-class StorageError(AIError):
-    def __init__(self, message: str, code: ErrorCode = ErrorCode.STORAGE_UNAVAILABLE) -> None:
-        super().__init__(code, message)
-
-
-class InvalidStoragePathError(StorageError):
-    def __init__(self, message: str) -> None:
-        super().__init__(message, ErrorCode.STORAGE_PATH_INVALID)
-
-
-class AssetError(AIError):
-    def __init__(self, message: str, code: ErrorCode = ErrorCode.STORAGE_UNAVAILABLE) -> None:
-        super().__init__(code, message)
-
-
-__all__ = [
-    "AIError",
-    "AssetError",
-    "ErrorCode",
-    "ErrorDiagnostics",
-    "InvalidStoragePathError",
-    "SafeError",
-    "StorageError",
-]
+__all__ = ["AIError", "ErrorCode", "ErrorDiagnostics"]
