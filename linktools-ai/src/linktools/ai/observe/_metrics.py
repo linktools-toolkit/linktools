@@ -356,6 +356,7 @@ _BUILTIN_DEFINITIONS = (
     ),
     _token("linktools.model.input_tokens", "input_tokens", "linktools.model.request", _MODEL_FIELDS),
     _token("linktools.model.output_tokens", "output_tokens", "linktools.model.request", _MODEL_FIELDS),
+    _token("linktools.model.total_tokens", "total_tokens", "linktools.model.request", _MODEL_FIELDS),
     _token("linktools.model.cache_read_tokens", "cache_read_tokens", "linktools.model.request", _MODEL_FIELDS),
     _token("linktools.model.cache_write_tokens", "cache_write_tokens", "linktools.model.request", _MODEL_FIELDS),
     _count("linktools.tool.execution.count", "linktools.tool.execution", _TOOL_FIELDS),

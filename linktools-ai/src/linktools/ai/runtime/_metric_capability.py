@@ -175,17 +175,27 @@ def _provider_usage_measurements(
     response: ModelResponse,
 ) -> tuple[MetricMeasurement, ...]:
     usage = response.usage
-    values = (
+    values = [
         ("input_tokens", usage.input_tokens),
         ("output_tokens", usage.output_tokens),
         ("cache_read_tokens", usage.cache_read_tokens),
         ("cache_write_tokens", usage.cache_write_tokens),
-    )
-    return tuple(
+    ]
+    measurements = [
         MetricMeasurement(name, 1, value)
         for name, value in values
         if value > 0
-    )
+    ]
+    if usage.input_tokens > 0 and usage.output_tokens > 0:
+        measurements.insert(
+            2,
+            MetricMeasurement(
+                "total_tokens",
+                1,
+                usage.input_tokens + usage.output_tokens,
+            ),
+        )
+    return tuple(measurements)
 
 
 def _model_error_code(error: Exception) -> str:
