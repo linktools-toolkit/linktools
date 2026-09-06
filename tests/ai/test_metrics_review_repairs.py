@@ -197,7 +197,7 @@ async def test_model_metric_rejection_is_logged_without_escaping(
     assert logger.exceptions == ["model metric observation rejected"]
 
 
-def test_non_percentile_accumulators_do_not_retain_samples() -> None:
+async def test_non_percentile_accumulators_do_not_retain_samples() -> None:
     at = datetime(2026, 9, 7, tzinfo=timezone.utc)
     for aggregation in (
         MetricAggregation.COUNT,
