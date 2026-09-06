@@ -26,57 +26,47 @@ jobs:
         with:
           python-version: "3.10"
 
-      - name: Repair context boundaries
+      - name: Restore vendor RunContext imports
         shell: bash
         run: |
           python - <<'PY'
           from pathlib import Path
-          import re
 
-          root = Path("linktools-ai/src/linktools/ai")
+          roots = [Path("linktools-ai/src"), Path("tests/ai")]
+          changed = []
+          for root in roots:
+              for path in root.rglob("*.py"):
+                  text = path.read_text()
+                  new = text.replace(
+                      "AgentContext as PydanticRunContext",
+                      "RunContext as PydanticRunContext",
+                  )
+                  if new != text:
+                      path.write_text(new)
+                      changed.append(str(path))
+          print("restored vendor RunContext in:")
+          print("\n".join(changed) or "<none>")
 
-          # Pydantic AI owns its own RunContext API. LinkTools keeps a distinct alias only.
-          for path in (root / "capability").rglob("*.py"):
-              text = path.read_text()
-              text = text.replace(
-                  "from pydantic_ai.tools import AgentContext as PydanticRunContext",
-                  "from pydantic_ai.tools import RunContext as PydanticRunContext",
-              )
-              path.write_text(text)
-
-          # Correlation is durable metadata, not execution identity. Replays keep the
-          # first durable value and must not conflict only because a caller supplied drift.
-          execution = root / "runtime" / "_execution.py"
-          text = execution.read_text()
-          text, count = re.subn(
-              r"\n\s*if dict\(execution\.correlation\) != dict\(request\.correlation\):\n\s*raise AIError\(ErrorCode\.IDEMPOTENCY_CONFLICT\)",
-              "",
-              text,
-          )
-          if count != 1:
-              raise SystemExit(f"expected one replay correlation check, found {count}")
-          execution.write_text(text)
-
-          # Guard the vendor boundary and the new idempotency invariant.
-          for path in (root / "capability").rglob("*.py"):
-              text = path.read_text()
-              if "from pydantic_ai.tools import AgentContext" in text:
-                  raise SystemExit(f"invalid pydantic context import remains: {path}")
-          text = execution.read_text()
-          if "dict(execution.correlation) != dict(request.correlation)" in text:
-              raise SystemExit("correlation replay conflict remains")
+          bad = []
+          for root in roots:
+              for path in root.rglob("*.py"):
+                  text = path.read_text()
+                  if "AgentContext as PydanticRunContext" in text:
+                      bad.append(str(path))
+          if bad:
+              raise SystemExit("invalid PydanticRunContext imports remain:\n" + "\n".join(bad))
           PY
           python -m compileall -q linktools-ai/src tests/ai
           git diff --check
 
-      - name: Commit semantic fixes
+      - name: Commit vendor boundary fix
         shell: bash
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add linktools-ai tests/ai
           if ! git diff --cached --quiet; then
-            git commit -m "fix(ai): preserve correlation replay semantics"
+            git commit -m "fix(ai): preserve pydantic run context boundary"
             git push origin HEAD:feat/ai-metrics-observability
           fi
 
