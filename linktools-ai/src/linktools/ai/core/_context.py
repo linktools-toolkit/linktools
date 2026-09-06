@@ -53,25 +53,19 @@ def normalize_run_context(
     return cast(RunContextData, ImmutableJsonMapping(normalized))
 
 
-def merge_run_context(
+def overlay_run_context(
     base: "Mapping[str, object] | None",
     overlay: "Mapping[str, object] | None",
 ) -> RunContextData:
-    """Merge portable context without allowing identity-changing overrides."""
+    """Apply an operation overlay to inherited Runtime defaults."""
     left = normalize_run_context(base)
     right = normalize_run_context(overlay)
-    merged: dict[str, object] = dict(left)
-    for key, value in right.items():
-        previous = merged.get(key)
-        if previous is not None and previous != value:
-            raise ValueError("context key conflicts with inherited value")
-        merged[key] = value
-    return normalize_run_context(merged)
+    return normalize_run_context({**left, **right})
 
 
 __all__ = [
     "RunContextData",
     "RunContextValue",
-    "merge_run_context",
     "normalize_run_context",
+    "overlay_run_context",
 ]
