@@ -371,6 +371,7 @@ class LocalExecutionBackend:
             request.mode != execution.mode
             or request.planning is not execution.planning
             or request.thinking != execution.thinking
+            or request.context != execution.context
             or execution.binding != binding.snapshot
         ):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -690,6 +691,7 @@ class LocalExecutionBackend:
             thinking=execution.thinking,
             binding=execution.binding,
             repository_instructions=execution.repository_instructions,
+            context=execution.context,
         )
         candidate = RecoveryCheckpoint(
             execution_id=execution.execution_id,
@@ -860,6 +862,7 @@ class LocalExecutionBackend:
             or current.planning is not execution.planning
             or current.thinking != execution.thinking
             or current.binding != execution.binding
+            or current.context != execution.context
         ):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         if current.status in {
@@ -930,6 +933,7 @@ class LocalExecutionBackend:
             or execution.thinking != recovery_input.thinking
             or execution.binding != recovery_input.binding
             or execution.repository_instructions != recovery_input.repository_instructions
+            or execution.context != recovery_input.context
         ):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
 
@@ -2170,6 +2174,7 @@ class LocalExecutionBackend:
             or execution.thinking != recovery_input.thinking
             or execution.binding != recovery_input.binding
             or execution.repository_instructions != recovery_input.repository_instructions
+            or execution.context != recovery_input.context
         ):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         if checkpoint.handoff_phase is not RecoveryHandoffPhase.NONE:
@@ -2288,6 +2293,7 @@ class LocalExecutionBackend:
             mode=recovery_input.mode,
             planning=recovery_input.planning,
             thinking=recovery_input.thinking,
+            context=recovery_input.context,
         )
         self._recovery_relaunch_ids.add(checkpoint.execution_id)
         await self.launch(request, execution)
@@ -2669,6 +2675,7 @@ class LocalExecutionBackend:
             thinking=recovery_input.thinking,
             binding=recovery_input.binding,
             repository_instructions=recovery_input.repository_instructions,
+            context=recovery_input.context,
         )
         await self._execution.executions.create_with_history_head(execution)
         return execution
@@ -3707,6 +3714,7 @@ class LocalExecutionBackend:
                 session_id=current.session_id,
                 execution_id=current.execution_id,
                 session_metadata=session_metadata,
+                context=current.context,
             )
             plan_store = RuntimePlanStore(
                 self._session_state_store if current.session_id is not None else self._execution_state_store,
