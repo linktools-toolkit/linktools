@@ -180,7 +180,7 @@ class _TaskMetricProjector:
             admitted = await self._admissions.get(graph_id, tenant_id=tenant_id)
             if admitted is None:
                 raise ValueError("task metric admission is missing")
-            context = admitted.context
+            context = admitted.correlation
         self._record_graph(
             admission,
             terminal,

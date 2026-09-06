@@ -525,7 +525,7 @@ def _record_execution_terminal(
     if latency is not None:
         measurements.insert(0, _measurement("latency_ns", latency))
     correlation = _metric_correlation(
-        execution.context,
+        execution.correlation,
         execution_id=execution.execution_id,
         session_id=session_id,
         parent_execution_id=execution.parent_execution_id,

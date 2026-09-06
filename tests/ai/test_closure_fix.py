@@ -346,7 +346,7 @@ async def test_launcher_cancel_clears_retained_failure() -> None:
     repository.failure = RuntimeError("scheduler failure")
     launcher = LocalTaskGraphLauncher(repository, _TaskRunner(), owner="launcher")
     request = _task_request()
-    launch = TaskGraphLaunch(request.graph, request.principal, request.limits, request.context)
+    launch = TaskGraphLaunch(request.graph, request.principal, request.limits, request.correlation)
     await launcher.start(launch)
     await asyncio.sleep(0)
     await asyncio.sleep(0)

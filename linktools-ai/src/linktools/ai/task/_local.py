@@ -380,7 +380,7 @@ class LocalTaskGraphLauncher:
                     node,
                     graph_id=graph_id,
                     principal=launch.principal,
-                    context=launch.context,
+                    context=launch.correlation,
                     dependency_results=await self._dependency_results(
                         graph_id, node, tenant_id=tenant_id
                     ),
@@ -632,7 +632,7 @@ class LocalTaskGraphLauncher:
                 node,
                 graph_id=request.graph.graph_id,
                 principal=request.principal,
-                context=request.context,
+                context=request.correlation,
                 dependency_results=await self._dependency_results(
                     request.graph.graph_id,
                     node,
@@ -699,7 +699,7 @@ class LocalTaskGraphLauncher:
                 node,
                 graph_id=graph_id,
                 principal=request.principal,
-                context=request.context,
+                context=request.correlation,
                 dependency_results=dependency_results,
                 control=control,
             ),

@@ -95,7 +95,7 @@ if TYPE_CHECKING:
 _logger = environ.get_logger("ai.runtime.execution")
 
 
-def _overlay_execution_context(
+def _overlay_execution_correlation(
     base: Mapping[str, object],
     overlay: Mapping[str, object],
 ) -> CorrelationData:
@@ -378,7 +378,7 @@ class DefaultExecutionService:
         binding: AgentBinding,
         request: ExecutionRequest,
     ) -> None:
-        if dict(execution.context) != dict(request.context):
+        if dict(execution.correlation) != dict(request.correlation):
             raise AIError(ErrorCode.IDEMPOTENCY_CONFLICT)
         if (
             execution.binding_digest != binding.digest
@@ -655,7 +655,7 @@ class DefaultExecutionService:
             mode=mode,
             planning=execution.planning,
             thinking=execution.thinking,
-            correlation=execution.context,
+            correlation=execution.correlation,
         )
         return await self.start_subagent(
             execution.binding_digest,
@@ -757,9 +757,9 @@ class DefaultExecutionService:
                 != (root_execution_id or parent.root_execution_id)
             ):
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            if request.context and dict(request.context) != dict(parent.context):
+            if request.correlation and dict(request.correlation) != dict(parent.correlation):
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            request = replace(request, context=parent.context)
+            request = replace(request, context=parent.correlation)
         conversation_run_id = conversation_step_run_id
         session = None
         if session_id is not None and source_execution_id is None:
@@ -899,7 +899,7 @@ class DefaultExecutionService:
             thinking=request.thinking,
             binding=binding.snapshot,
             repository_instructions=repository_instructions,
-            correlation=request.context,
+            correlation=request.correlation,
         )
         reservation = await self._state.executions.reserve_start(
             ExecutionStartReservation(
@@ -1405,7 +1405,7 @@ class DefaultExecutionService:
             mode=previous.mode,
             planning=previous.planning,
             thinking=previous.thinking,
-            correlation=_overlay_execution_context(previous.context, request.context),
+            correlation=_overlay_execution_correlation(previous.correlation, request.correlation),
         )
         return await self._start(
             binding_digest,
@@ -1436,7 +1436,7 @@ class DefaultExecutionService:
             mode=previous.mode,
             planning=previous.planning,
             thinking=previous.thinking,
-            correlation=_overlay_execution_context(previous.context, request.context),
+            correlation=_overlay_execution_correlation(previous.correlation, request.correlation),
         )
         return await self._start(
             binding_digest,

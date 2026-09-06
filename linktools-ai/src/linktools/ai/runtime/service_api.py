@@ -43,7 +43,7 @@ from ..task import (
 from ._snapshot import RunSnapshot
 
 
-def _request_context(value: Mapping[str, object] | None) -> CorrelationData:
+def _request_correlation(value: Mapping[str, object] | None) -> CorrelationData:
     try:
         return normalize_correlation(value)
     except (TypeError, ValueError) as error:
@@ -75,7 +75,7 @@ class ExecutionRequest:
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
         object.__setattr__(self, "mode", mode)
         object.__setattr__(self, "thinking", thinking)
-        object.__setattr__(self, "correlation", _request_context(self.correlation))
+        object.__setattr__(self, "correlation", _request_correlation(self.correlation))
 
 
 @dataclass(frozen=True, slots=True)
@@ -91,7 +91,7 @@ class RetryExecutionRequest:
         if self.user_prompt_codec not in {"text", "pydantic-user-content-v1"}:
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
         validate_idempotency_key(self.idempotency_key)
-        object.__setattr__(self, "correlation", _request_context(self.correlation))
+        object.__setattr__(self, "correlation", _request_correlation(self.correlation))
 
 
 @dataclass(frozen=True, slots=True)
@@ -107,7 +107,7 @@ class ForkExecutionRequest:
         if self.user_prompt_codec not in {"text", "pydantic-user-content-v1"}:
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
         validate_idempotency_key(self.idempotency_key)
-        object.__setattr__(self, "correlation", _request_context(self.correlation))
+        object.__setattr__(self, "correlation", _request_correlation(self.correlation))
 
 
 @dataclass(frozen=True, slots=True)
@@ -379,7 +379,7 @@ class ResumeSessionRequest:
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
         object.__setattr__(self, "mode", mode)
         object.__setattr__(self, "thinking", thinking)
-        object.__setattr__(self, "correlation", _request_context(self.correlation))
+        object.__setattr__(self, "correlation", _request_correlation(self.correlation))
 
 
 @dataclass(frozen=True, slots=True)

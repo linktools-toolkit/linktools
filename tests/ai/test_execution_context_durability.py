@@ -181,8 +181,8 @@ def test_recovery_execution_input_v1_context_wire_is_backward_readable() -> None
 
 def test_execution_context_is_normalized_and_immutable() -> None:
     execution = _execution(context={"trace_id": "trace", "attempt": 3})
-    assert dict(execution.context) == {"attempt": 3, "trace_id": "trace"}
+    assert dict(execution.correlation) == {"attempt": 3, "trace_id": "trace"}
 
     changed = replace(execution, context={"trace_id": "other"})
-    assert dict(execution.context) == {"attempt": 3, "trace_id": "trace"}
+    assert dict(execution.correlation) == {"attempt": 3, "trace_id": "trace"}
     assert dict(changed.context) == {"trace_id": "other"}
