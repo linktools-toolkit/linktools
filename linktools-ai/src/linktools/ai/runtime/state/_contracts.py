@@ -1020,6 +1020,7 @@ class RecoveryExecutionInput:
     thinking: ThinkingValue
     binding: AgentBindingSnapshot
     repository_instructions: RuntimePayloadRef | None = None
+    context: Mapping[str, str | int] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         prompt = self.user_prompt
@@ -1037,6 +1038,7 @@ class RecoveryExecutionInput:
             raise ValueError("plan mode requires planning")
         object.__setattr__(self, "mode", mode)
         object.__setattr__(self, "thinking", thinking)
+        object.__setattr__(self, "context", normalize_run_context(self.context))
         if (
             not isinstance(self.binding, AgentBindingSnapshot)
             or self.binding.binding_digest != self.binding_digest
@@ -1768,6 +1770,9 @@ class TaskAdmissionRepository(RuntimeRepository, Protocol):
     async def admit(
         self, admission: TaskGraphAdmission, graph: TaskGraph
     ) -> TaskGraphView: ...
+    async def get(
+        self, graph_id: str, *, tenant_id: str
+    ) -> TaskGraphAdmission | None: ...
     async def list_recoverable_page(
         self, *, cursor: str | None, limit: int
     ) -> Page[TaskGraphLaunch]: ...
