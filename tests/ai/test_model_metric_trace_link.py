@@ -111,7 +111,7 @@ def _trace(event) -> object:
 
 
 @pytest.mark.asyncio
-async def test_model_metric_and_trace_share_observation_id() -> None:
+async def test_model_metric_and_trace_share_observation_id_and_duration() -> None:
     store = InMemoryStepStore()
     recorder = _Recorder()
     run_id = "metric-trace-run"
@@ -137,11 +137,14 @@ async def test_model_metric_and_trace_share_observation_id() -> None:
     expected = _model_observation_id(run_id, event.step_index)
     assert model_observations[0].observation_id == expected
     assert event.metadata["linktools.ai.observation_id"] == expected
-    assert _trace(event).payload["observation_id"] == expected
+    assert int(event.metadata["linktools.ai.duration_ns"]) >= 0
+    trace = _trace(event)
+    assert trace.payload["observation_id"] == expected
+    assert trace.payload["duration_ns"] == int(event.metadata["linktools.ai.duration_ns"])
 
 
 @pytest.mark.asyncio
-async def test_failed_model_metric_and_trace_share_observation_id() -> None:
+async def test_failed_model_metric_and_trace_share_observation_id_and_duration() -> None:
     async def fail_model(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
         del messages, info
         raise RuntimeError("boom")
@@ -172,11 +175,14 @@ async def test_failed_model_metric_and_trace_share_observation_id() -> None:
     expected = _model_observation_id(run_id, event.step_index)
     assert model_observations[0].observation_id == expected
     assert event.metadata["linktools.ai.observation_id"] == expected
-    assert _trace(event).payload["observation_id"] == expected
+    assert int(event.metadata["linktools.ai.duration_ns"]) >= 0
+    trace = _trace(event)
+    assert trace.payload["observation_id"] == expected
+    assert trace.payload["duration_ns"] == int(event.metadata["linktools.ai.duration_ns"])
 
 
 @pytest.mark.asyncio
-async def test_model_trace_omits_metric_identity_when_metrics_disabled() -> None:
+async def test_model_trace_omits_metric_metadata_when_metrics_disabled() -> None:
     store = InMemoryStepStore()
     run_id = "no-metrics-run"
     agent = Agent(
@@ -193,3 +199,4 @@ async def test_model_trace_omits_metric_identity_when_metrics_disabled() -> None
     ]
     assert len(completed) == 1
     assert "linktools.ai.observation_id" not in completed[0].metadata
+    assert "linktools.ai.duration_ns" not in completed[0].metadata

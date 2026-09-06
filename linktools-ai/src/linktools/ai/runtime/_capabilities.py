@@ -247,6 +247,12 @@ class _RuntimeStepPersistence(StepPersistence[None]):
         repr=False,
         compare=False,
     )
+    _model_metric_started_ns: "dict[int, int]" = field(
+        default_factory=dict,
+        init=False,
+        repr=False,
+        compare=False,
+    )
 
     def __post_init__(self) -> None:
         if not isinstance(self.plan_mode, bool):
@@ -282,6 +288,18 @@ class _RuntimeStepPersistence(StepPersistence[None]):
             self.deferred_pause_sink(self._last_observed_step_index)
         return await super().after_run(ctx, result=result)
 
+    async def before_model_request(
+        self,
+        ctx: "RunContext[None]",
+        request_context: ModelRequestContext,
+    ) -> ModelRequestContext:
+        observed = await super().before_model_request(ctx, request_context)
+        if self.tool_metrics is not None:
+            if ctx.run_step in self._model_metric_started_ns:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            self._model_metric_started_ns[ctx.run_step] = monotonic_ns()
+        return observed
+
     async def _record_runtime_event(
         self,
         ctx: "RunContext[None]",
@@ -311,10 +329,14 @@ class _RuntimeStepPersistence(StepPersistence[None]):
     def _model_metric_metadata(self, ctx: "RunContext[None]") -> dict[str, str]:
         metadata = dict(self.metadata)
         if self.tool_metrics is not None:
+            started = self._model_metric_started_ns.pop(ctx.run_step, None)
+            if started is None:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             metadata[_OBSERVATION_ID_METADATA_KEY] = _model_observation_id(
                 self._effective_run_id(ctx),
                 ctx.run_step,
             )
+            metadata[_DURATION_NS_METADATA_KEY] = str(monotonic_ns() - started)
         return metadata
 
     async def after_model_request(
