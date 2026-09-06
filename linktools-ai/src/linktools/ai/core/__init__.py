@@ -5,8 +5,8 @@
 from ._context import (
     RunContextData,
     RunContextValue,
-    merge_run_context,
     normalize_run_context,
+    overlay_run_context,
 )
 from ._discovery import DEFAULT_DISCOVERY_POLICY
 from ._ids import (
@@ -142,13 +142,13 @@ __all__ = [
     "canonical_string_tuple",
     "deterministic_id",
     "idempotency_key_digest",
-    "merge_run_context",
     "normalize_execution_mode",
     "normalize_json_value",
     "normalize_run_context",
     "normalize_thinking",
     "operation_cas_immutable_matches",
     "operation_replay_matches",
+    "overlay_run_context",
     "principal_identity_payload",
     "service_principal",
     "step_conversation_id",
