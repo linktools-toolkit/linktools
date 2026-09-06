@@ -333,6 +333,52 @@ class SqlMetricStore:
             domain="metrics.observation",
         )
 
+    async def get_observation(
+        self,
+        namespace: str,
+        observation_id: str,
+    ) -> Observation | None:
+        from sqlalchemy import select
+
+        await self._initialize()
+        namespace_key = namespace_digest(namespace)
+        identity = observation_digest(namespace, observation_id)
+        statement = (
+            select(self._observations)
+            .where(self._observations.c.observation_digest == identity)
+            .limit(1)
+        )
+        async with self._context.sessions() as session:
+            row = (await session.execute(statement)).mappings().first()
+        if row is None:
+            return None
+        observation = self._decode_observation_row(namespace, namespace_key, row)
+        if observation.observation_id != observation_id:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        return observation
+
+    def _decode_observation_row(
+        self,
+        namespace: str,
+        namespace_key: str,
+        row: "Mapping[str, object]",
+    ) -> Observation:
+        observation = decode_observation_envelope(
+            row["payload_json"], expected_namespace=namespace
+        )
+        expected_identity = observation_digest(namespace, observation.observation_id)
+        expected_payload = observation_payload_digest(namespace, observation)
+        if (
+            row["namespace_digest"] != namespace_key
+            or row["kind"] != observation.kind
+            or _utc_database_datetime(cast("datetime", row["occurred_at"]))
+            != observation.occurred_at
+            or row["observation_digest"] != expected_identity
+            or row["payload_digest"] != expected_payload
+        ):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        return observation
+
     async def scan_observations(
         self,
         namespace: str,
@@ -375,25 +421,10 @@ class SqlMetricStore:
 
         has_more = len(rows) > limit
         selected = rows[:limit]
-        values: list[Observation] = []
-        for row in selected:
-            observation = decode_observation_envelope(
-                row["payload_json"], expected_namespace=namespace
-            )
-            expected_identity = observation_digest(
-                namespace, observation.observation_id
-            )
-            expected_payload = observation_payload_digest(namespace, observation)
-            if (
-                row["namespace_digest"] != namespace_key
-                or row["kind"] != observation.kind
-                or _utc_database_datetime(cast("datetime", row["occurred_at"]))
-                != observation.occurred_at
-                or row["observation_digest"] != expected_identity
-                or row["payload_digest"] != expected_payload
-            ):
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            values.append(observation)
+        values = [
+            self._decode_observation_row(namespace, namespace_key, row)
+            for row in selected
+        ]
 
         next_cursor = None
         if has_more and values:
