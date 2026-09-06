@@ -6,7 +6,6 @@ from __future__ import annotations
 
 import asyncio
 import uuid
-from collections.abc import Mapping
 from datetime import datetime, timezone
 from time import monotonic_ns
 
@@ -29,14 +28,16 @@ from pydantic_ai.exceptions import (
 )
 from pydantic_ai.messages import ModelResponse
 from pydantic_ai.models import ModelRequestContext
-from pydantic_ai.tools import RunContext
+from pydantic_ai.tools import RunContext as PydanticRunContext
 from pydantic_ai.usage import UsageLimitExceeded
 
+from ..capability import RunContext
 from ..errors import AIError, ErrorCode
 from ..observe import MetricMeasurement, MetricRecorder, Observation
+from ._metrics import _metric_correlation
 
 
-class _RuntimeModelMetricCapability(AbstractCapability[None]):
+class _RuntimeModelMetricCapability(AbstractCapability[RunContext[object]]):
     """Observe actual model request attempts without mutating semantics."""
 
     def __init__(
@@ -66,18 +67,18 @@ class _RuntimeModelMetricCapability(AbstractCapability[None]):
 
     async def wrap_model_request(
         self,
-        ctx: RunContext[None],
+        ctx: PydanticRunContext[RunContext[object]],
         *,
         request_context: ModelRequestContext,
         handler: WrapModelRequestHandler,
     ) -> ModelResponse:
-        del ctx
         attempt_id = uuid.uuid4().hex
         started = monotonic_ns()
         try:
             response = await handler(request_context)
         except asyncio.CancelledError:
             self._record_model(
+                ctx.deps,
                 attempt_id,
                 started,
                 status="CANCELLED",
@@ -87,6 +88,7 @@ class _RuntimeModelMetricCapability(AbstractCapability[None]):
             raise
         except Exception as error:
             self._record_model(
+                ctx.deps,
                 attempt_id,
                 started,
                 status="FAILED",
@@ -95,6 +97,7 @@ class _RuntimeModelMetricCapability(AbstractCapability[None]):
             )
             raise
         self._record_model(
+            ctx.deps,
             attempt_id,
             started,
             status="SUCCEEDED",
@@ -105,6 +108,7 @@ class _RuntimeModelMetricCapability(AbstractCapability[None]):
 
     def _record_model(
         self,
+        run_context: RunContext[object],
         attempt_id: str,
         started: int,
         *,
@@ -122,7 +126,12 @@ class _RuntimeModelMetricCapability(AbstractCapability[None]):
                 tenant_id=self._tenant_id,
                 status=status,
                 error_code=error_code,
-                correlation=self._correlation(),
+                correlation=_metric_correlation(
+                    run_context.context,
+                    execution_id=self._execution_id,
+                    session_id=self._session_id,
+                    step_run_id=self._step_run_id,
+                ),
                 dimensions={
                     "agent_id": self._agent_id,
                     "provider": self._provider,
@@ -138,15 +147,6 @@ class _RuntimeModelMetricCapability(AbstractCapability[None]):
         except Exception:
             return
 
-    def _correlation(self) -> Mapping[str, str | int]:
-        values: dict[str, str | int] = {
-            "execution_id": self._execution_id,
-            "step_run_id": self._step_run_id,
-        }
-        if self._session_id is not None:
-            values["session_id"] = self._session_id
-        return values
-
 
 def _provider_usage_measurements(
     response: ModelResponse,
@@ -155,6 +155,7 @@ def _provider_usage_measurements(
     return (
         MetricMeasurement("input_tokens", 1, usage.input_tokens),
         MetricMeasurement("output_tokens", 1, usage.output_tokens),
+        MetricMeasurement("total_tokens", 1, usage.input_tokens + usage.output_tokens),
         MetricMeasurement("cache_read_tokens", 1, usage.cache_read_tokens),
         MetricMeasurement("cache_write_tokens", 1, usage.cache_write_tokens),
     )
