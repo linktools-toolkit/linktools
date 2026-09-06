@@ -12,7 +12,7 @@ from typing import Generic, Literal, Protocol, TypeAlias, TypeVar, cast
 
 from pydantic_ai import Tool
 from pydantic_ai.capabilities import AbstractCapability
-from pydantic_ai.tools import AgentContext as PydanticRunContext
+from pydantic_ai.tools import RunContext as PydanticRunContext
 
 from ..asset import AssetInfo, AssetKey, AssetStore
 from ..core import ImmutableJsonMapping, JsonValue, canonical_sha256

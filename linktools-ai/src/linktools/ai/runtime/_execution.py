@@ -378,8 +378,6 @@ class DefaultExecutionService:
         binding: AgentBinding,
         request: ExecutionRequest,
     ) -> None:
-        if dict(execution.correlation) != dict(request.correlation):
-            raise AIError(ErrorCode.IDEMPOTENCY_CONFLICT)
         if (
             execution.binding_digest != binding.digest
             or execution.planning is not request.planning
