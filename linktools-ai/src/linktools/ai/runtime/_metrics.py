@@ -7,13 +7,14 @@ from __future__ import annotations
 import asyncio
 import uuid
 from collections.abc import Callable, Mapping
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from time import monotonic
 
 from linktools.core import environ
 
-from ..core import canonical_sha256
-from ..errors import ErrorCode
+from ..core import RunContextData, UsageMetrics, canonical_sha256, normalize_run_context
+from ..errors import AIError, ErrorCode
 from ..observe import MetricMeasurement, MetricRecorder, Metrics, Observation
 from ._execution import _ExecutionTerminalCommitter
 from .state._contracts import ExecutionTerminalCommit, ExecutionTerminalCommitResult
@@ -27,6 +28,39 @@ _CLOSE_DEADLINE_SECONDS = 10.0
 _WARNING_INTERVAL_SECONDS = 30.0
 
 
+@dataclass(frozen=True, slots=True)
+class RuntimeMetricStatus:
+    enabled: bool
+    accepting: bool
+    accepted: int
+    persisted: int
+    pending: int
+    rejected: int
+    lost: int
+    write_failures: int
+
+
+@dataclass(frozen=True, slots=True)
+class RuntimeMetricFlushResult:
+    completed: bool
+    status: RuntimeMetricStatus
+
+
+def _disabled_metric_status() -> RuntimeMetricStatus:
+    return RuntimeMetricStatus(False, False, 0, 0, 0, 0, 0, 0)
+
+
+def _metric_correlation(
+    context: RunContextData | Mapping[str, object] | None,
+    **system: str | int | None,
+) -> dict[str, str | int]:
+    values: dict[str, str | int] = dict(normalize_run_context(context))
+    for key, value in system.items():
+        if value is not None:
+            values[f"linktools.{key}"] = value
+    return values
+
+
 class _RuntimeMetricBuffer(MetricRecorder):
     """Bound one Runtime's automatic observations without owning the Metrics store."""
 
@@ -37,24 +71,70 @@ class _RuntimeMetricBuffer(MetricRecorder):
         )
         self._accepting = True
         self._accepted = 0
-        self._dropped = 0
+        self._persisted = 0
+        self._rejected = 0
+        self._lost = 0
         self._write_failures = 0
         self._last_warning_at = 0.0
         self._writer: asyncio.Task[None] | None = None
+        self._resolution_event = asyncio.Event()
+
+    def status(self) -> RuntimeMetricStatus:
+        pending = self._accepted - self._persisted - self._lost
+        if pending < 0:
+            raise RuntimeError("runtime metric counters are inconsistent")
+        return RuntimeMetricStatus(
+            True,
+            self._accepting,
+            self._accepted,
+            self._persisted,
+            pending,
+            self._rejected,
+            self._lost,
+            self._write_failures,
+        )
+
+    async def flush(self, *, timeout_seconds: float = 5.0) -> RuntimeMetricFlushResult:
+        if (
+            isinstance(timeout_seconds, bool)
+            or not isinstance(timeout_seconds, (int, float))
+            or timeout_seconds < 0
+        ):
+            raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+        target = self._accepted
+        if self._resolved >= target:
+            return RuntimeMetricFlushResult(True, self.status())
+
+        async def wait_resolved() -> None:
+            while self._resolved < target:
+                self._resolution_event.clear()
+                if self._resolved >= target:
+                    return
+                await self._resolution_event.wait()
+
+        try:
+            await asyncio.wait_for(wait_resolved(), float(timeout_seconds))
+        except asyncio.TimeoutError:
+            return RuntimeMetricFlushResult(False, self.status())
+        return RuntimeMetricFlushResult(True, self.status())
+
+    @property
+    def _resolved(self) -> int:
+        return self._persisted + self._lost
 
     def try_record(self, observation: Observation) -> bool:
         if not isinstance(observation, Observation):
-            self._drop("runtime metric observation invalid")
+            self._reject("runtime metric observation invalid")
             return False
         if not self._accepting:
-            self._drop("runtime metric buffer closed")
+            self._reject("runtime metric buffer closed")
             return False
         if not self._start_writer():
             return False
         try:
             self._queue.put_nowait(observation)
         except asyncio.QueueFull:
-            self._drop("runtime metric queue full")
+            self._reject("runtime metric queue full")
             return False
         self._accepted += 1
         return True
@@ -65,7 +145,7 @@ class _RuntimeMetricBuffer(MetricRecorder):
         try:
             loop = asyncio.get_running_loop()
         except RuntimeError:
-            self._drop("runtime metric writer requires a running event loop")
+            self._reject("runtime metric writer requires a running event loop")
             return False
         self._writer = loop.create_task(
             self._run(),
@@ -84,7 +164,7 @@ class _RuntimeMetricBuffer(MetricRecorder):
             if writer is not None and not writer.done():
                 writer.cancel()
                 await asyncio.gather(writer, return_exceptions=True)
-            self._drop_remaining("runtime metric close failed")
+            self._lose_remaining("runtime metric close failed")
             self._log_close()
 
     async def _close_impl(self) -> None:
@@ -100,13 +180,13 @@ class _RuntimeMetricBuffer(MetricRecorder):
                 timeout=_CLOSE_DEADLINE_SECONDS,
             )
         except asyncio.TimeoutError:
-            self._drop_remaining("runtime metric close deadline exceeded")
+            self._lose_remaining("runtime metric close deadline exceeded")
         remaining = max(0.0, _CLOSE_DEADLINE_SECONDS - (monotonic() - started))
         if not writer.done():
             try:
                 self._queue.put_nowait(None)
             except asyncio.QueueFull:
-                self._drop_remaining("runtime metric close queue remained full")
+                self._lose_remaining("runtime metric close queue remained full")
                 self._queue.put_nowait(None)
             try:
                 await asyncio.wait_for(asyncio.shield(writer), timeout=remaining)
@@ -114,19 +194,25 @@ class _RuntimeMetricBuffer(MetricRecorder):
                 writer.cancel()
                 await self._consume_cancelled_writer(writer)
         self._consume_writer(writer)
-        self._drop_remaining("runtime metric close cleanup")
+        self._lose_remaining("runtime metric close cleanup")
         self._log_close()
 
     def _log_close(self) -> None:
-        if self._dropped or self._write_failures:
+        if self._rejected or self._lost or self._write_failures:
             _logger.warning(
-                "runtime metrics closed with loss: accepted=%s dropped=%s write_failures=%s",
+                "runtime metrics closed with loss: accepted=%s persisted=%s rejected=%s lost=%s write_failures=%s",
                 self._accepted,
-                self._dropped,
+                self._persisted,
+                self._rejected,
+                self._lost,
                 self._write_failures,
             )
         else:
-            _logger.debug("runtime metrics closed: accepted=%s", self._accepted)
+            _logger.debug(
+                "runtime metrics closed: accepted=%s persisted=%s",
+                self._accepted,
+                self._persisted,
+            )
 
     async def _run(self) -> None:
         while True:
@@ -152,6 +238,10 @@ class _RuntimeMetricBuffer(MetricRecorder):
                 batch.append(item)
             try:
                 await self._write(tuple(batch))
+            except asyncio.CancelledError:
+                self._lost += len(batch)
+                self._resolution_event.set()
+                raise
             finally:
                 for _ in batch:
                     self._queue.task_done()
@@ -164,20 +254,23 @@ class _RuntimeMetricBuffer(MetricRecorder):
                 self._metrics.record_observations(batch),
                 timeout=_WRITE_TIMEOUT_SECONDS,
             )
-            return
         except asyncio.CancelledError:
             raise
         except Exception:
             self._write_failures += 1
-            self._dropped += len(batch)
+            self._lost += len(batch)
+            self._resolution_event.set()
             self._warn("runtime metric batch write failed")
+        else:
+            self._persisted += len(batch)
+            self._resolution_event.set()
 
-    def _drop(self, message: str) -> None:
-        self._dropped += 1
+    def _reject(self, message: str) -> None:
+        self._rejected += 1
         self._warn(message)
 
-    def _drop_remaining(self, message: str) -> None:
-        dropped = 0
+    def _lose_remaining(self, message: str) -> None:
+        lost = 0
         while True:
             try:
                 item = self._queue.get_nowait()
@@ -185,9 +278,10 @@ class _RuntimeMetricBuffer(MetricRecorder):
                 break
             self._queue.task_done()
             if item is not None:
-                dropped += 1
-        if dropped:
-            self._dropped += dropped
+                lost += 1
+        if lost:
+            self._lost += lost
+            self._resolution_event.set()
             self._warn(message)
 
     def _warn(self, message: str) -> None:
@@ -196,10 +290,12 @@ class _RuntimeMetricBuffer(MetricRecorder):
             return
         self._last_warning_at = now
         _logger.warning(
-            "%s: accepted=%s dropped=%s write_failures=%s",
+            "%s: accepted=%s persisted=%s rejected=%s lost=%s write_failures=%s",
             message,
             self._accepted,
-            self._dropped,
+            self._persisted,
+            self._rejected,
+            self._lost,
             self._write_failures,
         )
 
@@ -257,6 +353,31 @@ class _MetricExecutionTerminalCommitter:
         return result
 
 
+def _usage_measurements(usage: UsageMetrics) -> tuple[MetricMeasurement, ...]:
+    return (
+        _measurement("model_requests", usage.model_requests),
+        _measurement("tool_calls", usage.tool_calls),
+        _measurement("input_tokens", usage.input_tokens),
+        _measurement("output_tokens", usage.output_tokens),
+        _measurement("total_tokens", usage.total_tokens),
+        _measurement("cache_read_tokens", usage.cache_read_tokens),
+        _measurement("cache_write_tokens", usage.cache_write_tokens),
+    )
+
+
+def _execution_latency_ns(result: ExecutionTerminalCommitResult) -> int | None:
+    delta = result.result.created_at - result.execution.created_at
+    if delta.total_seconds() < 0:
+        _logger.warning(
+            "execution metric negative latency skipped: execution=%s",
+            result.execution.execution_id,
+        )
+        return None
+    return (
+        (delta.days * 86_400 + delta.seconds) * 1_000_000 + delta.microseconds
+    ) * 1_000
+
+
 def _record_execution_terminal(
     recorder: MetricRecorder | None,
     *,
@@ -267,14 +388,17 @@ def _record_execution_terminal(
     if recorder is None:
         return
     execution = result.execution
-    usage = result.result.usage
-    correlation: dict[str, str | int] = {"execution_id": execution.execution_id}
-    if session_id is not None:
-        correlation["session_id"] = session_id
-    if execution.parent_execution_id is not None:
-        correlation["parent_execution_id"] = execution.parent_execution_id
-    if execution.root_execution_id is not None:
-        correlation["root_execution_id"] = execution.root_execution_id
+    latency = _execution_latency_ns(result)
+    measurements = list(_usage_measurements(result.result.usage))
+    if latency is not None:
+        measurements.insert(0, _measurement("latency_ns", latency))
+    correlation = _metric_correlation(
+        execution.context,
+        execution_id=execution.execution_id,
+        session_id=session_id,
+        parent_execution_id=execution.parent_execution_id,
+        root_execution_id=execution.root_execution_id,
+    )
     _try_record(
         recorder,
         lambda: _observation(
@@ -294,10 +418,7 @@ def _record_execution_terminal(
                 "agent_id": execution.binding.agent_spec.id,
                 "lineage_kind": execution.lineage_kind.value,
             },
-            measurements=(
-                _measurement("input_tokens", usage.input_tokens),
-                _measurement("output_tokens", usage.output_tokens),
-            ),
+            measurements=tuple(measurements),
             occurred_at=result.result.created_at,
         ),
     )
@@ -385,4 +506,4 @@ def _try_record(
         return False
 
 
-__all__: list[str] = []
+__all__ = ["RuntimeMetricFlushResult", "RuntimeMetricStatus"]
