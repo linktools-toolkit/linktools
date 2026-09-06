@@ -10,516 +10,130 @@ on:
 permissions:
   contents: write
 
+env:
+  PIP_DISABLE_PIP_VERSION_CHECK: "1"
+  PYTHONUNBUFFERED: "1"
+
 jobs:
   refactor:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           ref: feat/ai-metrics-observability
           fetch-depth: 0
-
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
-          python-version: "3.12"
+          python-version: "3.10"
 
-      - name: Apply context model refactor
+      - name: Fix semantic correlation ownership
         shell: bash
         run: |
           python - <<'PY'
-          from __future__ import annotations
-
-          import ast
-          import re
           from pathlib import Path
-
-          ROOT = Path.cwd()
-          AI = ROOT / "linktools-ai"
-          SRC = AI / "src" / "linktools" / "ai"
-          TESTS = ROOT / "tests" / "ai"
-
-          def python_files():
-              yield from SRC.rglob("*.py")
-              yield from TESTS.rglob("*.py")
-
-          def replace_tokens(path: Path, replacements: dict[str, str]) -> None:
-              text = path.read_text()
-              for old, new in replacements.items():
-                  text = text.replace(old, new)
-              path.write_text(text)
-
-          # The portable mapping is correlation metadata, not a generic run context.
-          symbol_replacements = {
-              "RunContextData": "CorrelationData",
-              "RunContextValue": "CorrelationValue",
-              "normalize_run_context": "normalize_correlation",
-              "overlay_run_context": "overlay_correlation",
-              "merge_run_context": "overlay_correlation",
-          }
-          for path in python_files():
-              replace_tokens(path, symbol_replacements)
-
-          # Rename only LinkTools capability.RunContext. Pydantic AI RunContext is unrelated.
-          for path in python_files():
-              text = path.read_text()
-              try:
-                  tree = ast.parse(text)
-              except SyntaxError:
-                  continue
-              owns_linktools_run_context = False
-              for node in ast.walk(tree):
-                  if not isinstance(node, ast.ImportFrom):
-                      continue
-                  module = node.module or ""
-                  if module.endswith("capability") and any(
-                      alias.name == "RunContext" for alias in node.names
-                  ):
-                      owns_linktools_run_context = True
-                      break
-              if owns_linktools_run_context:
-                  text = re.sub(r"\bRunContext\b", "AgentContext", text)
-                  path.write_text(text)
-
-          core_context = '''#!/usr/bin/env python3
-          # -*- coding: utf-8 -*-
-          """Portable correlation metadata shared by Runtime-owned operations."""
-
           import re
-          from collections.abc import Mapping
-          from typing import cast
 
-          from ._json import ImmutableJsonMapping, JsonValue, canonical_json_bytes
+          root = Path("linktools-ai/src/linktools/ai")
+          tests = Path("tests/ai")
+          paths = list(root.rglob("*.py")) + list(tests.rglob("*.py"))
 
-          _CORRELATION_MAX_ITEMS = 8
-          _CORRELATION_KEY_MAX = 128
-          _CORRELATION_STRING_MAX = 256
-          _CORRELATION_BYTES_MAX = 4 * 1024
-          _INT64_MIN = -(2**63)
-          _INT64_MAX = 2**63 - 1
-          _CORRELATION_KEY_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
-          _RESERVED_CORRELATION_PREFIX = "linktools."
-
-          CorrelationValue = str | int
-          CorrelationData = Mapping[str, CorrelationValue]
-
-
-          def normalize_correlation(
-              value: "Mapping[str, object] | None",
-          ) -> CorrelationData:
-              """Validate correlation metadata and return an immutable canonical mapping."""
-              if value is None:
-                  return cast(CorrelationData, ImmutableJsonMapping({}))
-              if not isinstance(value, Mapping):
-                  raise TypeError("correlation must be a mapping")
-              if len(value) > _CORRELATION_MAX_ITEMS:
-                  raise ValueError("correlation contains too many entries")
-              normalized: dict[str, JsonValue] = {}
-              for key, item in value.items():
-                  if (
-                      not isinstance(key, str)
-                      or len(key) > _CORRELATION_KEY_MAX
-                      or _CORRELATION_KEY_RE.fullmatch(key) is None
-                      or key.startswith(_RESERVED_CORRELATION_PREFIX)
-                  ):
-                      raise ValueError("correlation key is invalid")
-                  if isinstance(item, bool) or not isinstance(item, (str, int)):
-                      raise TypeError("correlation value must be string or integer")
-                  if isinstance(item, str):
-                      if not item or len(item) > _CORRELATION_STRING_MAX:
-                          raise ValueError("correlation string value is invalid")
-                  elif item < _INT64_MIN or item > _INT64_MAX:
-                      raise ValueError("correlation integer value is out of range")
-                  normalized[key] = item
-              if len(canonical_json_bytes(normalized)) > _CORRELATION_BYTES_MAX:
-                  raise ValueError("correlation payload is too large")
-              return cast(CorrelationData, ImmutableJsonMapping(normalized))
-
-
-          def overlay_correlation(
-              base: "Mapping[str, object] | None",
-              overlay: "Mapping[str, object] | None",
-          ) -> CorrelationData:
-              """Overlay operation correlation metadata on inherited Runtime defaults."""
-              left = normalize_correlation(base)
-              right = normalize_correlation(overlay)
-              return normalize_correlation({**left, **right})
-
-
-          __all__ = [
-              "CorrelationData",
-              "CorrelationValue",
-              "normalize_correlation",
-              "overlay_correlation",
-          ]
-          '''
-          import textwrap
-          (SRC / "core" / "_context.py").write_text(textwrap.dedent(core_context))
-
-          core_init = SRC / "core" / "__init__.py"
-          text = core_init.read_text()
-          text = text.replace(
-              "from ._context import (\n    CorrelationData,\n    CorrelationValue,\n    overlay_correlation,\n    normalize_correlation,\n    overlay_correlation,\n)",
-              "from ._context import (\n    CorrelationData,\n    CorrelationValue,\n    normalize_correlation,\n    overlay_correlation,\n)",
+          # Durable/request values renamed to correlation in the previous pass; remove stale member reads.
+          member_owners = (
+              "request", "execution", "parent", "previous", "current", "original",
+              "recovery_input", "checkpoint_input", "admission", "admitted", "launch",
+              "existing", "record",
           )
-          text = text.replace('    "overlay_correlation",\n    "normalize_execution_mode",', '    "normalize_execution_mode",')
-          core_init.write_text(text)
-
-          capability_context = '''#!/usr/bin/env python3
-          # -*- coding: utf-8 -*-
-          """Per-execution application context exposed to LinkTools tools."""
-
-          from collections.abc import Mapping
-          from dataclasses import dataclass, field
-          from typing import Generic, TypeVar
-
-          from ..core import (
-              CorrelationData,
-              ImmutableJsonMapping,
-              JsonValue,
-              Principal,
-              normalize_correlation,
-              validate_memory_scope,
-          )
-          from ..workspace import Workspace
-
-          AppT = TypeVar("AppT")
-
-
-          @dataclass(frozen=True, slots=True)
-          class AgentContext(Generic[AppT]):
-              app: AppT
-              principal: Principal
-              workspace: Workspace
-              session_id: "str | None"
-              execution_id: str
-              session_metadata: Mapping[str, JsonValue]
-              memory_scope: "str | None" = None
-              correlation: CorrelationData = field(default_factory=dict)
-
-              def __post_init__(self) -> None:
-                  if not isinstance(self.principal, Principal):
-                      raise TypeError("principal must be Principal")
-                  if not isinstance(self.workspace, Workspace):
-                      raise TypeError("workspace must be Workspace")
-                  if self.session_id is not None and (
-                      not isinstance(self.session_id, str) or not self.session_id.strip()
-                  ):
-                      raise ValueError("session_id must be a non-empty string or None")
-                  if not isinstance(self.execution_id, str) or not self.execution_id.strip():
-                      raise ValueError("execution_id must be a non-empty string")
-                  if self.memory_scope is not None:
-                      object.__setattr__(
-                          self,
-                          "memory_scope",
-                          validate_memory_scope(self.memory_scope),
-                      )
-                  object.__setattr__(
-                      self,
-                      "session_metadata",
-                      ImmutableJsonMapping(dict(self.session_metadata)),
-                  )
-                  object.__setattr__(
-                      self,
-                      "correlation",
-                      normalize_correlation(self.correlation),
-                  )
-
-
-          __all__ = ["AgentContext"]
-          '''
-          (SRC / "capability" / "_context.py").write_text(textwrap.dedent(capability_context))
-          capability_init = SRC / "capability" / "__init__.py"
-          text = capability_init.read_text()
-          text = re.sub(r"\bRunContext\b", "AgentContext", text)
-          capability_init.write_text(text)
-
-          runtime_context = '''#!/usr/bin/env python3
-          # -*- coding: utf-8 -*-
-          """Public Runtime root context."""
-
-          from __future__ import annotations
-
-          from collections.abc import Mapping
-          from dataclasses import dataclass, field
-          from typing import Generic, TypeVar
-
-          from ..core import (
-              CorrelationData,
-              normalize_correlation,
-              overlay_correlation,
-              validate_tenant_id,
-          )
-
-          AppT = TypeVar("AppT")
-
-
-          @dataclass(frozen=True, slots=True)
-          class RuntimeContext(Generic[AppT]):
-              """Runtime-lifetime application, tenant, and default correlation metadata."""
-
-              app: AppT
-              tenant_id: str = "default"
-              correlation: CorrelationData = field(default_factory=dict)
-
-              def __post_init__(self) -> None:
-                  object.__setattr__(self, "tenant_id", validate_tenant_id(self.tenant_id))
-                  object.__setattr__(
-                      self,
-                      "correlation",
-                      normalize_correlation(self.correlation),
-                  )
-
-              def overlay(
-                  self,
-                  correlation: "Mapping[str, object] | None",
-              ) -> RuntimeContext[AppT]:
-                  return RuntimeContext(
-                      self.app,
-                      self.tenant_id,
-                      overlay_correlation(self.correlation, correlation),
-                  )
-
-
-          __all__ = ["RuntimeContext"]
-          '''
-          (SRC / "runtime" / "_context.py").write_text(textwrap.dedent(runtime_context))
-
-          # Rename correlation fields inside the durable/public value types that own them.
-          correlation_classes = {
-              "ExecutionRequest",
-              "RetryExecutionRequest",
-              "ForkExecutionRequest",
-              "ResumeSessionRequest",
-              "ExecutionRecord",
-              "RecoveryExecutionInput",
-              "TaskGraphRequest",
-              "TaskGraphLaunch",
-              "TaskGraphAdmission",
-              "TaskNodeContext",
-          }
-
-          def rewrite_class_blocks(path: Path) -> None:
+          for path in paths:
               text = path.read_text()
-              try:
-                  tree = ast.parse(text)
-              except SyntaxError:
-                  return
-              ranges = []
-              for node in ast.walk(tree):
-                  if isinstance(node, ast.ClassDef) and node.name in correlation_classes:
-                      ranges.append((node.lineno, node.end_lineno))
-              if not ranges:
-                  return
-              lines = text.splitlines(keepends=True)
-              for start, end in sorted(ranges, reverse=True):
-                  block = "".join(lines[start - 1 : end])
-                  block = re.sub(r"\bcontext\b", "correlation", block)
-                  lines[start - 1 : end] = [block]
-              path.write_text("".join(lines))
-
-          for path in python_files():
-              rewrite_class_blocks(path)
-
-          constructor_names = correlation_classes | {"AgentContext", "RuntimeContext"}
-
-          def rename_constructor_keywords(path: Path) -> None:
-              text = path.read_text()
-              try:
-                  tree = ast.parse(text)
-              except SyntaxError:
-                  return
-              ranges = []
-              for node in ast.walk(tree):
-                  if not isinstance(node, ast.Call):
-                      continue
-                  name = None
-                  if isinstance(node.func, ast.Name):
-                      name = node.func.id
-                  elif isinstance(node.func, ast.Attribute):
-                      name = node.func.attr
-                  if name in constructor_names and any(
-                      kw.arg == "context" for kw in node.keywords
-                  ):
-                      ranges.append((node.lineno, node.end_lineno))
-              if not ranges:
-                  return
-              lines = text.splitlines(keepends=True)
-              for start, end in sorted(ranges, reverse=True):
-                  block = "".join(lines[start - 1 : end])
-                  block = re.sub(r"\bcontext\s*=", "correlation=", block)
-                  lines[start - 1 : end] = [block]
-              path.write_text("".join(lines))
-
-          for path in python_files():
-              rename_constructor_keywords(path)
-
-          # Public Agent/Session operation overlays are correlation metadata.
-          agent_path = SRC / "runtime" / "_agent.py"
-          text = agent_path.read_text()
-          text = text.replace(
-              'context: "Mapping[str, object] | None" = None',
-              'correlation: "Mapping[str, object] | None" = None',
-          )
-          text = text.replace("context=context", "correlation=correlation")
-          agent_path.write_text(text)
-
-          # Runtime root ownership: tenant belongs to RuntimeContext; operation metadata is correlation.
-          runtime_path = SRC / "runtime" / "_runtime_service.py"
-          text = runtime_path.read_text()
-          text = text.replace("RunContextData", "CorrelationData")
-          text = text.replace("normalize_run_context", "normalize_correlation")
-          text = text.replace("overlay_run_context", "overlay_correlation")
-          text = text.replace("_portable_context", "_request_correlation")
-          text = text.replace("_overlay_portable_context", "_overlay_request_correlation")
-          text = text.replace("effective_context", "effective_correlation")
-          text = text.replace(
-              'context: "Mapping[str, object] | None" = None',
-              'correlation: "Mapping[str, object] | None" = None',
-          )
-          text = text.replace("_request_correlation(context)", "_request_correlation(correlation)")
-          text = text.replace(
-              "_overlay_request_correlation(self.context, context)",
-              "_overlay_request_correlation(self.correlation, correlation)",
-          )
-          text = text.replace("context=effective_correlation", "correlation=effective_correlation")
-          text = text.replace("        tenant_id: str = \"default\",\n", "")
-          text = text.replace('        tenant_id: "str | None" = None,\n', "")
-          text = text.replace(
-              "        self._runtime_context = context\n        self._tenant_id = validate_tenant_id(tenant_id)\n",
-              "        self._context = context\n",
-          )
-          text = text.replace("tenant_id=self._tenant_id", "tenant_id=self._context.tenant_id")
-          text = text.replace("        return self._tenant_id\n", "        return self._context.tenant_id\n")
-          text = text.replace(
-              "    @property\n    def runtime_context(self) -> RuntimeContext[AppT]:\n        return self._runtime_context\n\n",
-              "",
-          )
-          text = text.replace("self._runtime_context.app", "self._context.app")
-          text = text.replace(
-              "    @property\n    def context(self) -> CorrelationData:\n        return self._runtime_context.values\n",
-              "    @property\n    def context(self) -> RuntimeContext[AppT]:\n        return self._context\n\n    @property\n    def correlation(self) -> CorrelationData:\n        return self._context.correlation\n",
-          )
-          text = text.replace("            tenant_id=tenant_id,\n", "")
-          text = text.replace(
-              "    tenant_id: \"str | None\",\n",
-              "",
-          )
-          text = text.replace(
-              "        tenant_id=tenant_id,\n        models=models,",
-              "        tenant_id=context.tenant_id,\n        models=models,",
-          )
-          text = text.replace("            tenant_id=components.tenant_id,\n", "")
-          text = text.replace("    validate_tenant_id,\n", "")
-          runtime_path.write_text(text)
-
-          # Rename portable-correlation parameters where their type makes ownership unambiguous.
-          def rename_typed_context_params(path: Path) -> None:
-              text = path.read_text()
-              try:
-                  tree = ast.parse(text)
-              except SyntaxError:
-                  return
-              ranges = []
-              for node in ast.walk(tree):
-                  if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                      continue
-                  selected = False
-                  for arg in [*node.args.posonlyargs, *node.args.args, *node.args.kwonlyargs]:
-                      if arg.arg != "context" or arg.annotation is None:
-                          continue
-                      annotation = ast.get_source_segment(text, arg.annotation) or ""
-                      if "CorrelationData" in annotation:
-                          selected = True
-                          break
-                  if selected:
-                      ranges.append((node.lineno, node.end_lineno))
-              if not ranges:
-                  return
-              lines = text.splitlines(keepends=True)
-              for start, end in sorted(ranges, reverse=True):
-                  block = "".join(lines[start - 1 : end])
-                  block = re.sub(r"\bcontext\b", "correlation", block)
-                  lines[start - 1 : end] = [block]
-              path.write_text("".join(lines))
-
-          for path in python_files():
-              rename_typed_context_params(path)
-
-          # AgentContext is now the single owner of memory_scope during agent execution.
-          executor_path = SRC / "runtime" / "_agent_executor.py"
-          text = executor_path.read_text()
-          text = text.replace("    memory_scope: str | None = None\n", "")
-          text = text.replace("scope.memory_scope", "scope.context.memory_scope")
-          executor_path.write_text(text)
-
-          # Remove correlation-only drift from execution idempotency replay identity.
-          execution_path = SRC / "runtime" / "_execution.py"
-          text = execution_path.read_text()
-          text = re.sub(
-              r"\n\s*if dict\(execution\.correlation\) != dict\(request\.correlation\):\n\s*raise AIError\(ErrorCode\.IDEMPOTENCY_CONFLICT\)",
-              "",
-              text,
-          )
-          execution_path.write_text(text)
-
-          # Persist the semantic name rather than the former generic JSON column name.
-          for path in [
-              SRC / "runtime" / "_execution.py",
-              SRC / "runtime" / "state" / "_codec.py",
-              SRC / "runtime" / "state" / "_contracts.py",
-              SRC / "runtime" / "state" / "_materializer.py",
-              SRC / "runtime" / "state" / "_root.py",
-              AI / "migrations" / "init_schema.sql",
-          ]:
-              if not path.exists():
-                  continue
-              text = path.read_text()
-              text = text.replace('"context"', '"correlation"')
-              text = text.replace("`context`", "`correlation`")
+              for owner in member_owners:
+                  text = text.replace(f"{owner}.context", f"{owner}.correlation")
               path.write_text(text)
 
-          print("=== remaining old correlation symbols ===")
-          for path in python_files():
+          # Naming should match the value it validates.
+          service_api = root / "runtime" / "service_api.py"
+          text = service_api.read_text().replace("_request_context", "_request_correlation")
+          service_api.write_text(text)
+
+          execution = root / "runtime" / "_execution.py"
+          text = execution.read_text().replace("_overlay_execution_context", "_overlay_execution_correlation")
+          execution.write_text(text)
+
+          # AgentContext is the sole in-process owner of execution memory_scope and correlation.
+          local = root / "runtime" / "_local.py"
+          text = local.read_text()
+          old = '''                execution_id=current.execution_id,
+                session_metadata=session_metadata,
+                correlation=current.correlation,
+'''
+          new = '''                execution_id=current.execution_id,
+                session_metadata=session_metadata,
+                memory_scope=current.memory_scope,
+                correlation=current.correlation,
+'''
+          if old not in text:
+              raise SystemExit("AgentContext constructor shape not found")
+          text = text.replace(old, new, 1)
+          local.write_text(text)
+
+          # Public operation metadata is correlation, including direct test call sites.
+          public_files = [root / "runtime" / "_agent.py", root / "runtime" / "_runtime_service.py"]
+          for path in public_files:
               text = path.read_text()
-              hits = [
-                  symbol
-                  for symbol in (
-                      "RunContextData",
-                      "RunContextValue",
-                      "normalize_run_context",
-                      "overlay_run_context",
-                      "merge_run_context",
-                  )
-                  if symbol in text
-              ]
-              if hits:
-                  print(path.relative_to(ROOT), hits)
+              text = text.replace(
+                  'context: "Mapping[str, object] | None" = None',
+                  'correlation: "Mapping[str, object] | None" = None',
+              )
+              path.write_text(text)
 
-          print("=== LinkTools AgentContext constructors ===")
-          for path in python_files():
+          # Old exported symbols are forbidden after this breaking cleanup.
+          forbidden = (
+              "RunContextData", "RunContextValue", "normalize_run_context",
+              "overlay_run_context", "merge_run_context",
+          )
+          bad = []
+          for path in paths:
+              text = path.read_text()
+              for symbol in forbidden:
+                  if symbol in text:
+                      bad.append(f"{path}:{symbol}")
+          if bad:
+              raise SystemExit("old correlation symbols remain:\n" + "\n".join(bad))
+
+          # These member names refer to durable execution/task values and must not regress.
+          suspicious = re.compile(
+              r"\b(?:request|execution|parent|previous|current|original|recovery_input|"
+              r"checkpoint_input|admission|admitted|launch)\.context\b"
+          )
+          bad = []
+          for path in paths:
               for lineno, line in enumerate(path.read_text().splitlines(), 1):
-                  if "AgentContext(" in line:
-                      print(f"{path.relative_to(ROOT)}:{lineno}: {line.strip()}")
+                  if suspicious.search(line):
+                      bad.append(f"{path}:{lineno}:{line.strip()}")
+          if bad:
+              raise SystemExit("stale .context member reads remain:\n" + "\n".join(bad))
           PY
+          python -m compileall -q linktools-ai/src tests/ai
+          git diff --check
 
-      - name: Inspect and commit refactor
+      - name: Commit semantic fixes
         shell: bash
         run: |
-          git diff --check
-          python -m compileall -q linktools-ai/src tests/ai || true
-          git status --short
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add linktools-ai tests/ai
-          if git diff --cached --quiet; then
-            echo "No refactor changes"
-            exit 1
+          if ! git diff --cached --quiet; then
+            git commit -m "fix(ai): complete correlation ownership rename"
+            git push origin HEAD:feat/ai-metrics-observability
           fi
-          git commit -m "refactor(ai): clarify runtime execution contexts"
-          git push origin HEAD:feat/ai-metrics-observability
 
-      - name: Run linktools-ai check
-        shell: bash
+      - name: Install tooling
         run: |
-          python manage.py install --editable
-          python manage.py check linktools-ai
+          python -m pip install --quiet --upgrade pip
+          python -m pip install --quiet -U -r requirements.txt
+          python manage.py install --editable --quiet
+
+      - name: Run linktools-ai tests
+        run: python -m pytest -q tests/ai
+
+      - name: Run repository checks
+        run: python manage.py check --skip-compatibility
