@@ -36,6 +36,7 @@ _FRAMEWORK_CORRELATION_KEYS = frozenset(
         "graph_id",
         "node_id",
         "fence",
+        "attempt_index",
     }
 )
 
@@ -50,6 +51,10 @@ class RuntimeMetricStatus:
     rejected: int
     lost: int
     write_failures: int
+    queue_size: int = 0
+    queue_capacity: int = 0
+    high_watermark: int = 0
+    last_failure_code: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -87,6 +92,8 @@ class _RuntimeMetricBuffer(MetricRecorder):
         self._rejected = 0
         self._lost = 0
         self._write_failures = 0
+        self._high_watermark = 0
+        self._last_failure_code: str | None = None
         self._last_warning_at = 0.0
         self._writer: asyncio.Task[None] | None = None
         self._resolution_event = asyncio.Event()
@@ -100,10 +107,12 @@ class _RuntimeMetricBuffer(MetricRecorder):
         try:
             normalized = normalize_correlation(correlation)
         except (TypeError, ValueError):
+            self._set_failure("EXECUTION_CONTEXT_INVALID")
             self._warn("runtime metric execution correlation invalid")
             return False
         current = self._execution_contexts.get(execution_id)
         if current is not None and dict(current) != dict(normalized):
+            self._set_failure("EXECUTION_CONTEXT_CONFLICT")
             self._warn("runtime metric execution correlation conflict")
             return False
         self._execution_contexts[execution_id] = normalized
@@ -125,6 +134,10 @@ class _RuntimeMetricBuffer(MetricRecorder):
             self._rejected,
             self._lost,
             self._write_failures,
+            self._queue.qsize(),
+            self._queue.maxsize,
+            self._high_watermark,
+            self._last_failure_code,
         )
 
     async def flush(self, *, timeout_seconds: float = 5.0) -> RuntimeMetricFlushResult:
@@ -157,24 +170,28 @@ class _RuntimeMetricBuffer(MetricRecorder):
 
     def try_record(self, observation: Observation) -> bool:
         if not isinstance(observation, Observation):
-            self._reject("runtime metric observation invalid")
+            self._reject("runtime metric observation invalid", "INVALID_OBSERVATION")
             return False
         if not self._accepting:
-            self._reject("runtime metric buffer closed")
+            self._reject("runtime metric buffer closed", "BUFFER_CLOSED")
             return False
         try:
             enriched = self._enrich_observation(observation)
         except (AIError, TypeError, ValueError):
-            self._reject("runtime metric observation enrichment failed")
+            self._reject(
+                "runtime metric observation enrichment failed",
+                "ENRICHMENT_FAILED",
+            )
             return False
         if not self._start_writer():
             return False
         try:
             self._queue.put_nowait(enriched)
         except asyncio.QueueFull:
-            self._reject("runtime metric queue full")
+            self._reject("runtime metric queue full", "QUEUE_FULL")
             return False
         self._accepted += 1
+        self._high_watermark = max(self._high_watermark, self._queue.qsize())
         return True
 
     def _enrich_observation(self, observation: Observation) -> Observation:
@@ -205,7 +222,10 @@ class _RuntimeMetricBuffer(MetricRecorder):
         try:
             loop = asyncio.get_running_loop()
         except RuntimeError:
-            self._reject("runtime metric writer requires a running event loop")
+            self._reject(
+                "runtime metric writer requires a running event loop",
+                "WRITER_UNAVAILABLE",
+            )
             return False
         self._writer = loop.create_task(
             self._run(),
@@ -218,6 +238,7 @@ class _RuntimeMetricBuffer(MetricRecorder):
         try:
             await self._close_impl()
         except BaseException:  # noqa: BLE001
+            self._set_failure("CLOSE_FAILED")
             _logger.exception("runtime metric close failed open")
             self._accepting = False
             writer = self._writer
@@ -242,17 +263,20 @@ class _RuntimeMetricBuffer(MetricRecorder):
                 timeout=_CLOSE_DEADLINE_SECONDS,
             )
         except asyncio.TimeoutError:
+            self._set_failure("CLOSE_TIMEOUT")
             self._lose_remaining("runtime metric close deadline exceeded")
         remaining = max(0.0, _CLOSE_DEADLINE_SECONDS - (monotonic() - started))
         if not writer.done():
             try:
                 self._queue.put_nowait(None)
             except asyncio.QueueFull:
+                self._set_failure("CLOSE_TIMEOUT")
                 self._lose_remaining("runtime metric close queue remained full")
                 self._queue.put_nowait(None)
             try:
                 await asyncio.wait_for(asyncio.shield(writer), timeout=remaining)
             except asyncio.TimeoutError:
+                self._set_failure("CLOSE_TIMEOUT")
                 writer.cancel()
                 await self._consume_cancelled_writer(writer)
         self._consume_writer(writer)
@@ -322,15 +346,20 @@ class _RuntimeMetricBuffer(MetricRecorder):
         except Exception:
             self._write_failures += 1
             self._lost += len(batch)
+            self._set_failure("WRITE_FAILED")
             self._resolution_event.set()
             self._warn("runtime metric batch write failed")
         else:
             self._persisted += len(batch)
             self._resolution_event.set()
 
-    def _reject(self, message: str) -> None:
+    def _reject(self, message: str, code: str) -> None:
         self._rejected += 1
+        self._set_failure(code)
         self._warn(message)
+
+    def _set_failure(self, code: str) -> None:
+        self._last_failure_code = code
 
     def _lose_remaining(self, message: str) -> None:
         lost = 0
@@ -369,6 +398,7 @@ class _RuntimeMetricBuffer(MetricRecorder):
             pass
         except BaseException:
             self._write_failures += 1
+            self._set_failure("WRITER_FAILED")
             self._warn("runtime metric writer failed during cancellation")
 
     def _consume_writer(self, writer: asyncio.Task[None]) -> None:
@@ -380,6 +410,7 @@ class _RuntimeMetricBuffer(MetricRecorder):
             pass
         except BaseException:
             self._write_failures += 1
+            self._set_failure("WRITER_FAILED")
             self._warn("runtime metric writer failed")
 
 
@@ -408,8 +439,13 @@ def _execution_usage_measurements(
     usage: UsageMetrics,
 ) -> tuple[MetricMeasurement, ...]:
     return (
+        _measurement("model_requests", usage.model_requests),
+        _measurement("tool_calls", usage.tool_calls),
         _measurement("input_tokens", usage.input_tokens),
         _measurement("output_tokens", usage.output_tokens),
+        _measurement("cache_read_tokens", usage.cache_read_tokens),
+        _measurement("cache_write_tokens", usage.cache_write_tokens),
+        _measurement("total_tokens", usage.total_tokens),
     )
 
 

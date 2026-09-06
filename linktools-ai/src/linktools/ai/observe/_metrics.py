@@ -235,17 +235,30 @@ def _count(name: str, kind: str, fields: tuple[str, ...]) -> MetricDefinition:
     )
 
 
-def _latency(name: str, kind: str, fields: tuple[str, ...]) -> MetricDefinition:
+def _distribution(
+    name: str,
+    measurement: str,
+    kind: str,
+    fields: tuple[str, ...],
+    *,
+    unit: str,
+    description: str | None = None,
+) -> MetricDefinition:
     return MetricDefinition(
         name=name,
         revision=1,
         observation_kind=kind,
-        source=MetricSource.measurement("latency_ns"),
+        source=MetricSource.measurement(measurement),
         metric_type=MetricType.DISTRIBUTION,
-        unit="ns",
+        unit=unit,
         default_aggregation=MetricAggregation.MEAN,
         query_fields=fields,
+        description=description,
     )
+
+
+def _latency(name: str, kind: str, fields: tuple[str, ...]) -> MetricDefinition:
+    return _distribution(name, "latency_ns", kind, fields, unit="ns")
 
 
 def _measurement_counter(
@@ -255,6 +268,7 @@ def _measurement_counter(
     fields: tuple[str, ...],
     *,
     unit: str,
+    description: str | None = None,
 ) -> MetricDefinition:
     return MetricDefinition(
         name=name,
@@ -265,6 +279,7 @@ def _measurement_counter(
         unit=unit,
         default_aggregation=MetricAggregation.SUM,
         query_fields=fields,
+        description=description,
     )
 
 
@@ -273,6 +288,8 @@ def _token(
     measurement: str,
     kind: str,
     fields: tuple[str, ...],
+    *,
+    description: str | None = None,
 ) -> MetricDefinition:
     return _measurement_counter(
         name,
@@ -280,6 +297,7 @@ def _token(
         kind,
         fields,
         unit="token",
+        description=description,
     )
 
 
@@ -310,6 +328,7 @@ _EXECUTION_FIELDS = (*_CANONICAL, "agent_id", "lineage_kind")
 _TASK_ATTEMPT_FIELDS = _CANONICAL
 _TASK_GRAPH_FIELDS = _CANONICAL
 _STORAGE_FIELDS = (*_CANONICAL, "domain", "target")
+_EXECUTION_SCOPE = "Cumulative value for one durable terminal execution; do not add it to per-request model metrics."
 
 _BUILTIN_DEFINITIONS = (
     _count("linktools.model.request.count", "linktools.model.request", _MODEL_FIELDS),
@@ -373,9 +392,79 @@ _BUILTIN_DEFINITIONS = (
         ("CANCELLED",),
         _EXECUTION_FIELDS,
     ),
-    _token("linktools.execution.input_tokens", "input_tokens", "linktools.execution.terminal", _EXECUTION_FIELDS),
-    _token("linktools.execution.output_tokens", "output_tokens", "linktools.execution.terminal", _EXECUTION_FIELDS),
+    _measurement_counter(
+        "linktools.execution.model_requests",
+        "model_requests",
+        "linktools.execution.terminal",
+        _EXECUTION_FIELDS,
+        unit="request",
+        description=_EXECUTION_SCOPE,
+    ),
+    _measurement_counter(
+        "linktools.execution.tool_calls",
+        "tool_calls",
+        "linktools.execution.terminal",
+        _EXECUTION_FIELDS,
+        unit="call",
+        description=_EXECUTION_SCOPE,
+    ),
+    _token(
+        "linktools.execution.input_tokens",
+        "input_tokens",
+        "linktools.execution.terminal",
+        _EXECUTION_FIELDS,
+        description=_EXECUTION_SCOPE,
+    ),
+    _token(
+        "linktools.execution.output_tokens",
+        "output_tokens",
+        "linktools.execution.terminal",
+        _EXECUTION_FIELDS,
+        description=_EXECUTION_SCOPE,
+    ),
+    _token(
+        "linktools.execution.cache_read_tokens",
+        "cache_read_tokens",
+        "linktools.execution.terminal",
+        _EXECUTION_FIELDS,
+        description=_EXECUTION_SCOPE,
+    ),
+    _token(
+        "linktools.execution.cache_write_tokens",
+        "cache_write_tokens",
+        "linktools.execution.terminal",
+        _EXECUTION_FIELDS,
+        description=_EXECUTION_SCOPE,
+    ),
+    _token(
+        "linktools.execution.total_tokens",
+        "total_tokens",
+        "linktools.execution.terminal",
+        _EXECUTION_FIELDS,
+        description=_EXECUTION_SCOPE,
+    ),
     _count("linktools.task.node.attempt.count", "linktools.task.node.attempt", _TASK_ATTEMPT_FIELDS),
+    _distribution(
+        "linktools.task.node.attempt.latency",
+        "latency_ns",
+        "linktools.task.node.attempt",
+        _TASK_ATTEMPT_FIELDS,
+        unit="ns",
+    ),
+    _distribution(
+        "linktools.task.node.attempt.queue_wait",
+        "queue_wait_ns",
+        "linktools.task.node.attempt",
+        _TASK_ATTEMPT_FIELDS,
+        unit="ns",
+    ),
+    _measurement_counter(
+        "linktools.task.node.attempt.retry_count",
+        "retry_count",
+        "linktools.task.node.attempt",
+        _TASK_ATTEMPT_FIELDS,
+        unit="attempt",
+    ),
     _ratio(
         "linktools.task.node.attempt.failure_ratio",
         "linktools.task.node.attempt",
@@ -384,6 +473,20 @@ _BUILTIN_DEFINITIONS = (
         _TASK_ATTEMPT_FIELDS,
     ),
     _count("linktools.task.graph.count", "linktools.task.graph.terminal", _TASK_GRAPH_FIELDS),
+    _distribution(
+        "linktools.task.graph.latency",
+        "latency_ns",
+        "linktools.task.graph.terminal",
+        _TASK_GRAPH_FIELDS,
+        unit="ns",
+    ),
+    _measurement_counter(
+        "linktools.task.graph.retry_count",
+        "retry_count",
+        "linktools.task.graph.terminal",
+        _TASK_GRAPH_FIELDS,
+        unit="attempt",
+    ),
     _ratio(
         "linktools.task.graph.failure_ratio",
         "linktools.task.graph.terminal",

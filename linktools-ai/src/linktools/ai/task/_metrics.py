@@ -7,12 +7,13 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Callable
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Protocol, cast
 
 from linktools.core import environ
 
 from ..core import Page, CorrelationData, TaskStatus, canonical_sha256
-from ..observe import MetricRecorder, Observation
+from ..observe import MetricMeasurement, MetricRecorder, Observation
 from ._event import TaskEvent, TaskEventType
 
 _logger = environ.get_logger("ai.task.metrics")
@@ -65,6 +66,9 @@ class _TaskMetricAdmissionRepository(Protocol):
 @dataclass(slots=True)
 class _Attempt:
     execution_id: str | None
+    started_at: datetime
+    attempt_index: int
+    ready_at: datetime | None = None
     invalid: bool = False
     terminal: TaskEvent | None = None
 
@@ -189,13 +193,10 @@ class _TaskMetricProjector:
             if admitted is None:
                 raise ValueError("task metric admission is missing")
             correlation = admitted.correlation
-        accepted = self._record_graph(
-            terminal,
-            tenant_id=tenant_id,
-            correlation=correlation,
-        )
 
         attempts: dict[tuple[str, int], _Attempt] = {}
+        ready_at: dict[str, datetime] = {}
+        attempt_counts: dict[str, int] = {}
         cursor = 0
         event_count = 0
         while True:
@@ -221,10 +222,29 @@ class _TaskMetricProjector:
                         event_count,
                     )
                     return False
-                self._consume_node_event(attempts, event)
+                self._consume_node_event(
+                    attempts,
+                    ready_at,
+                    attempt_counts,
+                    event,
+                )
             if page.next_cursor is None:
                 break
 
+        retry_count = sum(
+            1
+            for attempt in attempts.values()
+            if not attempt.invalid
+            and attempt.terminal is not None
+            and attempt.attempt_index > 1
+        )
+        accepted = self._record_graph(
+            admission,
+            terminal,
+            retry_count=retry_count,
+            tenant_id=tenant_id,
+            correlation=correlation,
+        )
         for (node_id, fence), attempt in attempts.items():
             if attempt.invalid or attempt.terminal is None:
                 continue
@@ -244,9 +264,14 @@ class _TaskMetricProjector:
     @staticmethod
     def _consume_node_event(
         attempts: dict[tuple[str, int], _Attempt],
+        ready_at: dict[str, datetime],
+        attempt_counts: dict[str, int],
         event: TaskEvent,
     ) -> None:
         if event.event_type is not TaskEventType.NODE_CHANGED or event.node_id is None:
+            return
+        if event.status is TaskStatus.READY:
+            ready_at[event.node_id] = event.occurred_at
             return
         if event.fence < 1:
             return
@@ -254,7 +279,14 @@ class _TaskMetricProjector:
         if event.status is TaskStatus.RUNNING:
             attempt = attempts.get(key)
             if attempt is None:
-                attempts[key] = _Attempt(event.execution_id)
+                attempt_index = attempt_counts.get(event.node_id, 0) + 1
+                attempt_counts[event.node_id] = attempt_index
+                attempts[key] = _Attempt(
+                    event.execution_id,
+                    event.occurred_at,
+                    attempt_index,
+                    ready_at.get(event.node_id),
+                )
                 return
             if (
                 event.execution_id is not None
@@ -286,11 +318,17 @@ class _TaskMetricProjector:
 
     def _record_graph(
         self,
+        admission: TaskEvent,
         terminal: TaskEvent,
         *,
+        retry_count: int,
         tenant_id: str,
         correlation: CorrelationData,
     ) -> bool:
+        measurements = [MetricMeasurement("retry_count", 1, retry_count)]
+        latency = _duration_ns(admission.occurred_at, terminal.occurred_at)
+        if latency is not None:
+            measurements.insert(0, MetricMeasurement("latency_ns", 1, latency))
         return self._safe_record(
             lambda: Observation(
                 version=1,
@@ -310,7 +348,7 @@ class _TaskMetricProjector:
                 error_code=terminal.error_code,
                 correlation=_task_correlation(correlation, graph_id=terminal.graph_id),
                 dimensions={},
-                measurements=(),
+                measurements=tuple(measurements),
             )
         )
 
@@ -331,7 +369,24 @@ class _TaskMetricProjector:
             node_id=node_id,
             fence=fence,
             execution_id=attempt.execution_id,
+            attempt_index=attempt.attempt_index,
         )
+        measurements = [
+            MetricMeasurement(
+                "retry_count",
+                1,
+                1 if attempt.attempt_index > 1 else 0,
+            )
+        ]
+        latency = _duration_ns(attempt.started_at, terminal.occurred_at)
+        if latency is not None:
+            measurements.insert(0, MetricMeasurement("latency_ns", 1, latency))
+        if attempt.ready_at is not None:
+            queue_wait = _duration_ns(attempt.ready_at, attempt.started_at)
+            if queue_wait is not None:
+                measurements.append(
+                    MetricMeasurement("queue_wait_ns", 1, queue_wait)
+                )
         return self._safe_record(
             lambda: Observation(
                 version=1,
@@ -353,7 +408,7 @@ class _TaskMetricProjector:
                 error_code=terminal.error_code,
                 correlation=correlation,
                 dimensions={},
-                measurements=(),
+                measurements=tuple(measurements),
             )
         )
 
@@ -363,6 +418,16 @@ class _TaskMetricProjector:
         except Exception:
             _logger.exception("task metric observation rejected")
             return False
+
+
+def _duration_ns(start: datetime, end: datetime) -> int | None:
+    delta = end - start
+    if delta.total_seconds() < 0:
+        _logger.warning("task metric negative duration skipped")
+        return None
+    return (
+        (delta.days * 86_400 + delta.seconds) * 1_000_000 + delta.microseconds
+    ) * 1_000
 
 
 def _task_correlation(

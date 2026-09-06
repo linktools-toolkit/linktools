@@ -64,6 +64,10 @@ class _Recorder:
         return True
 
 
+def _values(observation: Observation) -> dict[str, int | float]:
+    return {item.name: item.value for item in observation.measurements}
+
+
 def _admitted(graph_id: str, at: datetime, *, terminal: bool = False) -> TaskEvent:
     return TaskEvent(
         1,
@@ -148,7 +152,7 @@ async def _project(events: tuple[TaskEvent, ...], recorder: _Recorder) -> None:
     await projector._project(events[0].graph_id, tenant_id="tenant")
 
 
-async def test_empty_graph_records_terminal_without_latency() -> None:
+async def test_empty_graph_records_zero_terminal_latency() -> None:
     now = datetime(2026, 9, 5, tzinfo=timezone.utc)
     event = _admitted("empty", now, terminal=True)
     recorder = _Recorder()
@@ -159,7 +163,7 @@ async def test_empty_graph_records_terminal_without_latency() -> None:
     observation = recorder.observations[0]
     assert observation.kind == "linktools.task.graph.terminal"
     assert observation.status == "SUCCEEDED"
-    assert observation.measurements == ()
+    assert _values(observation) == {"latency_ns": 0, "retry_count": 0}
 
 
 async def test_node_attempt_uses_first_running_event_for_same_fence() -> None:
@@ -193,8 +197,12 @@ async def test_node_attempt_uses_first_running_event_for_same_fence() -> None:
         for observation in recorder.observations
         if observation.kind == "linktools.task.node.attempt"
     )
-    assert attempt.measurements == ()
+    assert _values(attempt) == {
+        "latency_ns": 5_000_000_000,
+        "retry_count": 0,
+    }
     assert dict(attempt.correlation) == {
+        "linktools.attempt_index": 1,
         "linktools.execution_id": "execution",
         "linktools.fence": 1,
         "linktools.graph_id": "graph",
@@ -235,7 +243,11 @@ async def test_unmatched_old_fence_is_not_paired_with_new_attempt() -> None:
     )
     assert len(attempts) == 1
     assert attempts[0].correlation["linktools.fence"] == 2
-    assert attempts[0].measurements == ()
+    assert attempts[0].correlation["linktools.attempt_index"] == 2
+    assert _values(attempts[0]) == {
+        "latency_ns": 5_000_000_000,
+        "retry_count": 1,
+    }
 
 
 async def test_one_rejected_task_fact_does_not_abort_later_attempts() -> None:
