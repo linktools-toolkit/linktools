@@ -1,0 +1,74 @@
+name: AI metrics test alignment one-shot
+
+on:
+  push:
+    branches:
+      - feat/ai-metrics-observability
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: feat/ai-metrics-observability
+          fetch-depth: 0
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.10'
+      - name: Align task metric correlation assertions
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          replacements = {
+              "tests/ai/test_runtime_metrics.py": [
+                  (
+                      '''    assert dict(attempts[0].correlation) == {\n        "execution_id": "execution",\n        "fence": 1,\n        "graph_id": "graph",\n        "node_id": "node",\n    }\n''',
+                      '''    assert dict(attempts[0].correlation) == {\n        "linktools.execution_id": "execution",\n        "linktools.fence": 1,\n        "linktools.graph_id": "graph",\n        "linktools.node_id": "node",\n    }\n''',
+                  ),
+              ],
+              "tests/ai/test_task_metric_projector.py": [
+                  (
+                      '''    assert dict(attempt.correlation) == {\n        "execution_id": "execution",\n        "fence": 1,\n        "graph_id": "graph",\n        "node_id": "node",\n    }\n''',
+                      '''    assert dict(attempt.correlation) == {\n        "linktools.execution_id": "execution",\n        "linktools.fence": 1,\n        "linktools.graph_id": "graph",\n        "linktools.node_id": "node",\n    }\n''',
+                  ),
+                  (
+                      '    assert attempts[0].correlation["fence"] == 2\n',
+                      '    assert attempts[0].correlation["linktools.fence"] == 2\n',
+                  ),
+              ],
+          }
+
+          for filename, changes in replacements.items():
+              path = Path(filename)
+              value = path.read_text()
+              for old, new in changes:
+                  count = value.count(old)
+                  if count != 1:
+                      raise RuntimeError(
+                          f"{filename}: expected one assertion match, got {count}"
+                      )
+                  value = value.replace(old, new, 1)
+              path.write_text(value)
+          PY
+
+          python -m pip install --quiet --upgrade pip
+          python -m pip install --quiet -U -r requirements.txt
+          python manage.py install --editable --quiet
+          python -m pytest -q -p no:cacheprovider \
+            tests/ai/test_runtime_metrics.py \
+            tests/ai/test_task_metric_projector.py \
+            tests/ai/test_observability_closure.py
+          python manage.py check linktools-ai
+          rm .github/workflows/ai-metrics-test-alignment-once.yml
+          git diff --check
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -A
+          git commit -m 'test(ai): align task metric correlation contract'
+          git push origin HEAD:feat/ai-metrics-observability
