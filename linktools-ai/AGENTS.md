@@ -19,7 +19,7 @@ Package instructions for `linktools-ai`. Repository-wide rules in [../AGENTS.md]
 
 - Runtime startup must not implicitly create or migrate database schemas; schema provisioning is an explicit deployment/migration operation.
 - Persisted or replayed data is a versioned contract. Compatibility must be based on explicit LinkTools semantics, not incidental dependency serialization or schema.
-- Persistence protocols must remain evolvable and backward-compatible. Additive or non-semantic changes must not invalidate previously persisted data or make the storage system unreadable; incompatible changes require an explicit version boundary and a defined compatibility or migration path.
+- Published or explicitly compatibility-committed persistence protocols must remain evolvable and backward-compatible. Pre-release protocols without real compatibility obligations may make incompatible changes when they simplify the contract, provided owners, codecs, schema, fixtures, and tests change atomically. Corrupt or unsupported durable data must still fail closed with typed errors.
 - Stable hashes and idempotency identities must remain stable when non-semantic optional/default fields change; include codec/version/provenance when they change semantics.
 - Durable contracts must stay minimal. Persist stable references for dependencies intentionally resolved at use time; persist dependency semantics only when exact replay of an already-established durable fact requires them. Do not copy, embed, or recursively snapshot referenced configuration for convenience or speculative future recovery.
 - A semantic fact must have one durable owner. Any persisted duplicate used as an index, projection, or cache must be explicitly derived and must not become an independent source of truth or define conflicting recovery semantics.
@@ -60,7 +60,7 @@ These describe the current architecture and may evolve; they are not rules by th
 | `asset` | Raw Asset keys, metadata, `AssetStore`, backends |
 | `spec` | Agent/Skill/MCP declarations and codecs |
 | `model` | Model routes, credentials, registries, materialization |
-| `observe` | Execution observation scope, middleware, snapshots |
+| `observe` | Metrics contracts, facade, stores, codecs, and query semantics |
 | `capability` | Capability composition, loaders, Skill/MCP/workspace projection |
 | `task` | Task graph, DAG, lease, launcher contracts |
 | `agent` | Agent compilation, definitions, output contracts, execution binding |
