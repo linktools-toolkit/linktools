@@ -36,7 +36,6 @@ jobs:
           root = Path("linktools-ai/src/linktools/ai")
           tests = Path("tests/ai")
           paths = list(root.rglob("*.py")) + list(tests.rglob("*.py"))
-
           member_owners = (
               "request", "execution", "parent", "previous", "current", "original",
               "recovery_input", "checkpoint_input", "admission", "admitted", "launch",
@@ -49,37 +48,19 @@ jobs:
               path.write_text(text)
 
           service_api = root / "runtime" / "service_api.py"
-          service_api.write_text(
-              service_api.read_text().replace("_request_context", "_request_correlation")
-          )
-
+          service_api.write_text(service_api.read_text().replace("_request_context", "_request_correlation"))
           execution = root / "runtime" / "_execution.py"
-          execution.write_text(
-              execution.read_text().replace(
-                  "_overlay_execution_context", "_overlay_execution_correlation"
-              )
-          )
+          execution.write_text(execution.read_text().replace("_overlay_execution_context", "_overlay_execution_correlation"))
 
           local = root / "runtime" / "_local.py"
           text = local.read_text()
-          old = '''                execution_id=current.execution_id,
-                session_metadata=session_metadata,
-                correlation=current.correlation,
-'''
-          new = '''                execution_id=current.execution_id,
-                session_metadata=session_metadata,
-                memory_scope=current.memory_scope,
-                correlation=current.correlation,
-'''
+          old = "                execution_id=current.execution_id,\n                session_metadata=session_metadata,\n                correlation=current.correlation,\n"
+          new = "                execution_id=current.execution_id,\n                session_metadata=session_metadata,\n                memory_scope=current.memory_scope,\n                correlation=current.correlation,\n"
           if old not in text:
               raise SystemExit("AgentContext constructor shape not found")
           local.write_text(text.replace(old, new, 1))
 
-          public_files = [
-              root / "runtime" / "_agent.py",
-              root / "runtime" / "_runtime_service.py",
-          ]
-          for path in public_files:
+          for path in (root / "runtime" / "_agent.py", root / "runtime" / "_runtime_service.py"):
               text = path.read_text().replace(
                   'context: "Mapping[str, object] | None" = None',
                   'correlation: "Mapping[str, object] | None" = None',
@@ -100,8 +81,7 @@ jobs:
               raise SystemExit("old correlation symbols remain:\n" + "\n".join(bad))
 
           suspicious = re.compile(
-              r"\b(?:request|execution|parent|previous|current|original|recovery_input|"
-              r"checkpoint_input|admission|admitted|launch)\.context\b"
+              r"\b(?:request|execution|parent|previous|current|original|recovery_input|checkpoint_input|admission|admitted|launch)\.context\b"
           )
           bad = []
           for path in paths:
