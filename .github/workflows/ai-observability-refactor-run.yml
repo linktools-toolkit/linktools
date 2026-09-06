@@ -30,49 +30,59 @@ jobs:
           python -m pip install --quiet --upgrade pip
           python -m pip install --quiet -U -r requirements.txt
           python manage.py install --editable --quiet
-      - name: Apply production fixes
+      - name: Apply correlation contract cleanup
         run: |
           python - <<'PY'
           from pathlib import Path
 
-          model = Path("linktools-ai/src/linktools/ai/runtime/_metric_capability.py")
-          text = model.read_text()
-          old = "None if run_context is None else run_context.context"
-          new = "None if run_context is None else run_context.correlation"
-          assert text.count(old) == 1, text.count(old)
-          model.write_text(text.replace(old, new))
-
           local = Path("linktools-ai/src/linktools/ai/runtime/_local.py")
           text = local.read_text()
-          marker = '''    async def _commit_terminal_checkpoint_owned(\n'''
-          helper = '''    def _record_committed_terminal(\n        self,\n        committed: ExecutionTerminalCommitResult,\n        *,\n        session_id: str | None,\n    ) -> None:\n        _record_execution_terminal(\n            self._metric_recorder,\n            source_namespace=self._namespace,\n            result=committed,\n            session_id=session_id,\n        )\n        _release_metric_execution_context(\n            self._metric_recorder,\n            committed.execution.execution_id,\n        )\n\n'''
-          assert text.count(marker) == 1, text.count(marker)
-          text = text.replace(marker, helper + marker, 1)
-
-          old = '''        self._live_broker.complete(execution_id)\n        _record_execution_terminal(\n            self._metric_recorder,\n            source_namespace=self._namespace,\n            result=committed,\n            session_id=session_id,\n        )\n        _release_metric_execution_context(self._metric_recorder, execution_id)\n        return committed\n'''
-          new = '''        self._live_broker.complete(execution_id)\n        self._record_committed_terminal(committed, session_id=session_id)\n        return committed\n'''
-          assert text.count(old) == 1, text.count(old)
-          text = text.replace(old, new, 1)
-
-          old = '''        committed = await self._runtime_commands.commit_terminal_checkpoint(\n            commit,\n            session_id=current.session_id,\n            expected_cursor=expected_cursor,\n            next_cursor=next_cursor,\n            conversation_run=conversation_run,\n            conversation_snapshot=conversation_snapshot,\n            recovery_checkpoint=recovery_checkpoint,\n            recovery_run=recovery_run,\n            recovery_snapshot=recovery_snapshot,\n            execution_run=step_run,\n            execution_events=step_events,\n            execution_snapshots=snapshots,\n            execution_projections=execution_projections,\n            audit_events=pending_audit,\n            background_tasks=self._execution_task_set(current.execution_id),\n        )\n        self._pending_audit_events.pop(current.execution_id, None)\n        return committed\n'''
-          new = '''        committed = await self._runtime_commands.commit_terminal_checkpoint(\n            commit,\n            session_id=current.session_id,\n            expected_cursor=expected_cursor,\n            next_cursor=next_cursor,\n            conversation_run=conversation_run,\n            conversation_snapshot=conversation_snapshot,\n            recovery_checkpoint=recovery_checkpoint,\n            recovery_run=recovery_run,\n            recovery_snapshot=recovery_snapshot,\n            execution_run=step_run,\n            execution_events=step_events,\n            execution_snapshots=snapshots,\n            execution_projections=execution_projections,\n            audit_events=pending_audit,\n            background_tasks=self._execution_task_set(current.execution_id),\n        )\n        self._record_committed_terminal(committed, session_id=current.session_id)\n        self._pending_audit_events.pop(current.execution_id, None)\n        return committed\n'''
+          old = '''            or request.thinking != execution.thinking\n            or request.correlation != execution.correlation\n            or execution.binding != binding.snapshot\n'''
+          new = '''            or request.thinking != execution.thinking\n            or execution.binding != binding.snapshot\n'''
           assert text.count(old) == 1, text.count(old)
           local.write_text(text.replace(old, new, 1))
+
+          execution = Path("linktools-ai/src/linktools/ai/runtime/_execution.py")
+          text = execution.read_text()
+          old = '''            if request.correlation and dict(request.correlation) != dict(parent.correlation):\n                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)\n            request = replace(request, correlation=parent.correlation)\n'''
+          new = '''            request = replace(request, correlation=parent.correlation)\n'''
+          assert text.count(old) == 1, text.count(old)
+          execution.write_text(text.replace(old, new, 1))
+
+          test = Path("tests/ai/test_execution_context_durability.py")
+          text = test.read_text()
+          old = '''@pytest.mark.asyncio\nasync def test_local_start_rejects_correlation_drift_from_durable_execution() -> None:\n    execution = _execution(correlation={"trace_id": "durable", "attempt": 1})\n    backend = _backend(execution)\n    request = ExecutionRequest(\n        user_prompt="hello",\n        user_prompt_codec="text",\n        principal=Principal("user", "tenant"),\n        idempotency_key="execution-correlation-start-0001",\n        memory_scope=None,\n        mode="run",\n        planning=False,\n        thinking=False,\n        correlation={"trace_id": "request", "attempt": 1},\n    )\n\n    with pytest.raises(AIError) as raised:\n        await backend._validate_start(request, execution)\n\n    assert raised.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR\n'''
+          new = '''@pytest.mark.asyncio\nasync def test_local_start_accepts_correlation_drift_from_durable_execution() -> None:\n    execution = _execution(correlation={"trace_id": "durable", "attempt": 1})\n    backend = _backend(execution)\n    request = ExecutionRequest(\n        user_prompt="hello",\n        user_prompt_codec="text",\n        principal=Principal("user", "tenant"),\n        idempotency_key="execution-correlation-start-0001",\n        memory_scope=None,\n        mode="run",\n        planning=False,\n        thinking=False,\n        correlation={"trace_id": "request", "attempt": 1},\n    )\n\n    await backend._validate_start(request, execution)\n    assert dict(execution.correlation) == {"attempt": 1, "trace_id": "durable"}\n'''
+          assert text.count(old) == 1, text.count(old)
+          test.write_text(text.replace(old, new, 1))
+
+          core = Path("linktools-ai/src/linktools/ai/core")
+          old_module = core / "_context.py"
+          new_module = core / "_correlation.py"
+          assert old_module.exists() and not new_module.exists()
+          old_module.rename(new_module)
+          init = core / "__init__.py"
+          text = init.read_text()
+          assert text.count("from ._context import (") == 1
+          init.write_text(text.replace("from ._context import (", "from ._correlation import (", 1))
           PY
-      - name: Validate targeted runtime metrics
+      - name: Validate correlation contract
         run: |
           python -m pytest -q \
-            tests/ai/test_runtime_metrics.py::test_runtime_projects_model_agent_and_execution_metrics \
-            tests/ai/test_runtime_metrics_multi.py::test_runtime_states_share_metrics_without_lifecycle_coupling
-          python -m pytest -q tests/ai/test_task_metric_projector.py
+            tests/ai/test_execution_context_durability.py \
+            tests/ai/test_task_context_durability.py \
+            tests/ai/test_skill_subagent_final_refactor.py
+          python manage.py check linktools-ai
           git diff --check
-          ! grep -R "run_context\.context" -n linktools-ai/src tests/ai
-      - name: Commit validated production fixes
+          ! git grep -n "core\._context\|from \.\?_context import\|merge_run_context\|RunContextData\|RunContextValue" -- linktools-ai/src tests/ai
+      - name: Commit validated correlation cleanup
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add \
-            linktools-ai/src/linktools/ai/runtime/_metric_capability.py \
-            linktools-ai/src/linktools/ai/runtime/_local.py
-          git commit -m "fix(ai): project durable terminal metrics"
+          git add -A \
+            linktools-ai/src/linktools/ai/core \
+            linktools-ai/src/linktools/ai/runtime/_execution.py \
+            linktools-ai/src/linktools/ai/runtime/_local.py \
+            tests/ai/test_execution_context_durability.py
+          git commit -m "refactor(ai): make correlation replay nonsemantic"
           git push origin HEAD:feat/ai-metrics-observability
