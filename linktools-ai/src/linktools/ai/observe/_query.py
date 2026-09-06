@@ -195,6 +195,11 @@ async def execute_query(
                 for key, value in query.filters.items()
             ):
                 continue
+            if any(
+                observation.correlation.get(key) != value
+                for key, value in query.correlation_filters.items()
+            ):
+                continue
             sample = _validated_sample(definition, observation)
             if sample is None:
                 continue
