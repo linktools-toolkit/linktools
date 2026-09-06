@@ -56,6 +56,13 @@ jobs:
           assert text.count(old) == 1, text.count(old)
           test.write_text(text.replace(old, new, 1))
 
+          subagent_test = Path("tests/ai/test_skill_subagent_final_refactor.py")
+          text = subagent_test.read_text()
+          old = '''            thinking="high",\n            context={},\n'''
+          new = '''            thinking="high",\n            correlation={},\n'''
+          assert text.count(old) == 1, text.count(old)
+          subagent_test.write_text(text.replace(old, new, 1))
+
           core = Path("linktools-ai/src/linktools/ai/core")
           old_module = core / "_context.py"
           new_module = core / "_correlation.py"
@@ -83,6 +90,7 @@ jobs:
             linktools-ai/src/linktools/ai/core \
             linktools-ai/src/linktools/ai/runtime/_execution.py \
             linktools-ai/src/linktools/ai/runtime/_local.py \
-            tests/ai/test_execution_context_durability.py
+            tests/ai/test_execution_context_durability.py \
+            tests/ai/test_skill_subagent_final_refactor.py
           git commit -m "refactor(ai): make correlation replay nonsemantic"
           git push origin HEAD:feat/ai-metrics-observability
