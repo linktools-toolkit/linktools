@@ -43,27 +43,29 @@ jobs:
               old = "text = re.sub(r'^\\s*operation_result = .*\\n', '', text, flags=re.MULTILINE)"
               if old not in script:
                   raise SystemExit("operation-result cleanup hook missing")
-              replacement = '''text = text.replace(
-          """            if current is not None and current.status in {
-              ExecutionStatus.SUCCEEDED,
-              ExecutionStatus.FAILED,
-              ExecutionStatus.CANCELLED,
-              ExecutionStatus.CANCELLING,
-          }:
-              operation_result = _execution_operation_result(current.status)
-          if execution_id in self._worker_shutdown_set():
-              operation_result = "cancelled"
-  """,
-          "",
-      )
-      text = re.sub(r'^\\s*operation_result = .*\\n', '', text, flags=re.MULTILINE)'''
+              replacement = (
+                  "text = text.replace(\n"
+                  "    '''            if current is not None and current.status in {\n"
+                  "                ExecutionStatus.SUCCEEDED,\n"
+                  "                ExecutionStatus.FAILED,\n"
+                  "                ExecutionStatus.CANCELLED,\n"
+                  "                ExecutionStatus.CANCELLING,\n"
+                  "            }:\n"
+                  "                operation_result = _execution_operation_result(current.status)\n"
+                  "            if execution_id in self._worker_shutdown_set():\n"
+                  "                operation_result = \\\"cancelled\\\"\n"
+                  "''',\n"
+                  "    '',\n"
+                  ")\n"
+                  "text = re.sub(r'^\\s*operation_result = .*\\n', '', text, flags=re.MULTILINE)"
+              )
               script = script.replace(old, replacement, 1)
               test_name = "async def test_trigger_deduplicates_successful_projection() -> None:"
               if test_name not in script:
                   raise SystemExit("projector dedup test hook missing")
               script = script.replace(
                   test_name,
-                  "@pytest.mark.asyncio\\nasync def test_trigger_deduplicates_successful_projection() -> None:",
+                  "@pytest.mark.asyncio\nasync def test_trigger_deduplicates_successful_projection() -> None:",
                   1,
               )
               exec(compile(script, "<p2-review-fix>", "exec"), {})
