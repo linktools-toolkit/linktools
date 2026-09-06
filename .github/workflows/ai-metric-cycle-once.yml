@@ -1,0 +1,92 @@
+name: AI metric cycle one-shot
+
+on:
+  push:
+    branches:
+      - feat/ai-metrics-observability
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: feat/ai-metrics-observability
+          fetch-depth: 0
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.10'
+      - name: Repair Runtime metric dependency direction
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          def once(value: str, old: str, new: str, label: str) -> str:
+              count = value.count(old)
+              if count != 1:
+                  raise RuntimeError(f"{label}: expected one match, got {count}")
+              return value.replace(old, new, 1)
+
+          path = Path('linktools-ai/src/linktools/ai/runtime/_metrics.py')
+          value = path.read_text()
+          value = once(
+              value,
+              'from ..core import RunContextData, UsageMetrics, canonical_sha256, normalize_run_context\n',
+              'from ..core import RunContextData, UsageMetrics, normalize_run_context\n',
+              'metrics core import',
+          )
+          value = once(
+              value,
+              'from ._execution import _ExecutionTerminalCommitter\n',
+              '''from ._execution import _ExecutionTerminalCommitter\nfrom ._metric_id import (\n    _model_observation_id,\n    _stable_observation_id,\n    _tool_observation_id,\n)\n''',
+              'metrics identity import',
+          )
+          start = value.index('\ndef _stable_observation_id(*parts: str) -> str:\n')
+          end = value.index('\ndef _measurement(name: str, value: int | float) -> MetricMeasurement:\n', start)
+          value = value[:start] + value[end:]
+          path.write_text(value)
+
+          path = Path('linktools-ai/src/linktools/ai/runtime/_capabilities.py')
+          value = path.read_text()
+          value = once(
+              value,
+              'from ._metrics import _model_observation_id, _tool_observation_id\n',
+              'from ._metric_id import _model_observation_id, _tool_observation_id\n',
+              'capabilities metric id import',
+          )
+          path.write_text(value)
+
+          path = Path('linktools-ai/src/linktools/ai/runtime/_tool_metrics.py')
+          value = path.read_text()
+          value = once(
+              value,
+              'from ._metrics import _tool_observation_id\n',
+              'from ._metric_id import _tool_observation_id\n',
+              'tool metric id import',
+          )
+          path.write_text(value)
+
+          path = Path('linktools-ai/src/linktools/ai/runtime/_metric_capability.py')
+          value = path.read_text()
+          value = once(
+              value,
+              '''from ._metrics import (\n    _bind_metric_agent_usage,\n    _bind_metric_execution_context,\n    _metric_correlation,\n    _model_observation_id,\n)\n''',
+              '''from ._metric_id import _model_observation_id\nfrom ._metrics import (\n    _bind_metric_agent_usage,\n    _bind_metric_execution_context,\n    _metric_correlation,\n)\n''',
+              'model metric id import',
+          )
+          path.write_text(value)
+          PY
+
+          python -m compileall -q linktools-ai/src/linktools/ai tests/ai
+          git diff --check
+          python -m scripts.check.ai
+          rm .github/workflows/ai-metric-cycle-once.yml
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -A
+          git commit -m 'fix(ai): restore runtime metric dependency direction'
+          git push origin HEAD:feat/ai-metrics-observability
