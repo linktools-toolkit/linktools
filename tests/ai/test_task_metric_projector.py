@@ -145,7 +145,7 @@ async def _project(events: tuple[TaskEvent, ...], recorder: _Recorder) -> None:
     await projector._project(events[0].graph_id, tenant_id="tenant")
 
 
-async def test_empty_graph_has_exact_zero_latency() -> None:
+async def test_empty_graph_records_terminal_without_latency() -> None:
     now = datetime(2026, 9, 5, tzinfo=timezone.utc)
     event = _admitted("empty", now, terminal=True)
     recorder = _Recorder()
@@ -156,8 +156,7 @@ async def test_empty_graph_has_exact_zero_latency() -> None:
     observation = recorder.observations[0]
     assert observation.kind == "linktools.task.graph.terminal"
     assert observation.status == "SUCCEEDED"
-    assert observation.measurements[0].name == "latency_ns"
-    assert observation.measurements[0].value == 0
+    assert observation.measurements == ()
 
 
 async def test_node_attempt_uses_first_running_event_for_same_fence() -> None:
@@ -191,7 +190,7 @@ async def test_node_attempt_uses_first_running_event_for_same_fence() -> None:
         for observation in recorder.observations
         if observation.kind == "linktools.task.node.attempt"
     )
-    assert attempt.measurements[0].value == 5_000_000_000
+    assert attempt.measurements == ()
     assert dict(attempt.correlation) == {
         "linktools.execution_id": "execution",
         "linktools.fence": 1,
@@ -233,7 +232,7 @@ async def test_unmatched_old_fence_is_not_paired_with_new_attempt() -> None:
     )
     assert len(attempts) == 1
     assert attempts[0].correlation["linktools.fence"] == 2
-    assert attempts[0].measurements[0].value == 5_000_000_000
+    assert attempts[0].measurements == ()
 
 
 async def test_one_rejected_task_fact_does_not_abort_later_attempts() -> None:

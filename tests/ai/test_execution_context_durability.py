@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Durable Execution context and recovery compatibility regressions."""
+"""Durable Execution correlation and recovery regressions."""
 
 from dataclasses import replace
 from datetime import datetime, timezone
@@ -42,7 +42,7 @@ def _binding() -> AgentBindingSnapshot:
     )
 
 
-def _execution(*, context: dict[str, str | int]) -> ExecutionRecord:
+def _execution(*, correlation: dict[str, str | int]) -> ExecutionRecord:
     now = datetime(2026, 1, 1, tzinfo=timezone.utc)
     binding = _binding()
     return ExecutionRecord(
@@ -67,11 +67,11 @@ def _execution(*, context: dict[str, str | int]) -> ExecutionRecord:
         planning=False,
         thinking=False,
         binding=binding,
-        correlation=context,
+        correlation=correlation,
     )
 
 
-def _recovery_input(*, context: dict[str, str | int]) -> RecoveryExecutionInput:
+def _recovery_input(*, correlation: dict[str, str | int]) -> RecoveryExecutionInput:
     binding = _binding()
     return RecoveryExecutionInput(
         user_prompt="hello",
@@ -96,7 +96,7 @@ def _recovery_input(*, context: dict[str, str | int]) -> RecoveryExecutionInput:
         planning=False,
         thinking=False,
         binding=binding,
-        correlation=context,
+        correlation=correlation,
     )
 
 
@@ -114,14 +114,14 @@ def _backend(execution: ExecutionRecord) -> LocalExecutionBackend:
 
 
 @pytest.mark.asyncio
-async def test_local_start_rejects_context_drift_from_durable_execution() -> None:
-    execution = _execution(context={"trace_id": "durable", "attempt": 1})
+async def test_local_start_rejects_correlation_drift_from_durable_execution() -> None:
+    execution = _execution(correlation={"trace_id": "durable", "attempt": 1})
     backend = _backend(execution)
     request = ExecutionRequest(
         user_prompt="hello",
         user_prompt_codec="text",
         principal=Principal("user", "tenant"),
-        idempotency_key="execution-context-start-0001",
+        idempotency_key="execution-correlation-start-0001",
         memory_scope=None,
         mode="run",
         planning=False,
@@ -135,10 +135,10 @@ async def test_local_start_rejects_context_drift_from_durable_execution() -> Non
     assert raised.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
 
 
-def test_recovery_identity_rejects_context_drift() -> None:
-    execution = _execution(context={"trace_id": "durable"})
+def test_recovery_identity_rejects_correlation_drift() -> None:
+    execution = _execution(correlation={"trace_id": "durable"})
     backend = _backend(execution)
-    recovery = _recovery_input(context={"trace_id": "other"})
+    recovery = _recovery_input(correlation={"trace_id": "other"})
 
     with pytest.raises(AIError) as raised:
         backend._validate_recovery_identity(execution, recovery)
@@ -146,28 +146,28 @@ def test_recovery_identity_rejects_context_drift() -> None:
     assert raised.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
 
 
-def test_recovery_execution_input_v1_context_wire_is_backward_readable() -> None:
-    empty = _recovery_input(context={})
+def test_recovery_execution_input_v1_correlation_wire_round_trips() -> None:
+    empty = _recovery_input(correlation={})
     payload = _encode_persisted_domain(empty)
     assert isinstance(payload, dict)
     assert payload["$dataclass"] == "recovery_execution_input"
     fields = payload["fields"]
     assert isinstance(fields, dict)
-    assert "context" not in fields
+    assert "correlation" not in fields
 
     decoded = _decode_enveloped_domain(
         encode_envelope({"type": "recovery_execution_input", "payload": payload}),
         RecoveryExecutionInput,
     )
     assert decoded == empty
-    assert dict(decoded.context) == {}
+    assert dict(decoded.correlation) == {}
 
-    populated = _recovery_input(context={"trace_id": "trace", "attempt": 2})
+    populated = _recovery_input(correlation={"trace_id": "trace", "attempt": 2})
     populated_payload = _encode_persisted_domain(populated)
     assert isinstance(populated_payload, dict)
     populated_fields = populated_payload["fields"]
     assert isinstance(populated_fields, dict)
-    assert "context" in populated_fields
+    assert "correlation" in populated_fields
     assert (
         _decode_enveloped_domain(
             encode_envelope(
@@ -179,10 +179,10 @@ def test_recovery_execution_input_v1_context_wire_is_backward_readable() -> None
     )
 
 
-def test_execution_context_is_normalized_and_immutable() -> None:
-    execution = _execution(context={"trace_id": "trace", "attempt": 3})
+def test_execution_correlation_is_normalized_and_immutable() -> None:
+    execution = _execution(correlation={"trace_id": "trace", "attempt": 3})
     assert dict(execution.correlation) == {"attempt": 3, "trace_id": "trace"}
 
-    changed = replace(execution, context={"trace_id": "other"})
+    changed = replace(execution, correlation={"trace_id": "other"})
     assert dict(execution.correlation) == {"attempt": 3, "trace_id": "trace"}
-    assert dict(changed.context) == {"trace_id": "other"}
+    assert dict(changed.correlation) == {"trace_id": "other"}

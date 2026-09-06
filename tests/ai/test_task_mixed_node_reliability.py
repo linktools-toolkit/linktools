@@ -22,6 +22,7 @@ from linktools.ai.task import (
     TaskGraphRequest,
     TaskNode,
     TaskNodeContext,
+    TaskNodeInvocation,
     TaskNodeRunControl,
     TaskNodeRunResult,
 )
@@ -209,31 +210,19 @@ class _BindingRunner:
 
     async def run(
         self,
-        node: TaskNode,
+        invocation: TaskNodeInvocation,
         *,
-        graph_id: str,
-        principal: object,
-        context: object,
-        dependency_results: object,
         control: TaskNodeRunControl,
     ) -> TaskNodeRunResult:
-        del node, graph_id, principal, context, dependency_results
+        del invocation
         self.control = control
         self.entered.set()
         await self.release.wait()
         payload = StoredPayload.inline_json({"done": True})
         return TaskNodeRunResult(payload.digest, result_payload=payload)
 
-    async def cancel(
-        self,
-        node: TaskNode,
-        *,
-        graph_id: str,
-        principal: object,
-        context: object,
-        dependency_results: object,
-    ) -> None:
-        del node, graph_id, principal, context, dependency_results
+    async def cancel(self, invocation: TaskNodeInvocation) -> None:
+        del invocation
 
 
 @pytest.mark.asyncio

@@ -18,7 +18,6 @@ def test_model_usage_records_normalized_zero_cache_fields() -> None:
     assert [(item.name, item.value) for item in measurements] == [
         ("input_tokens", 12),
         ("output_tokens", 4),
-        ("total_tokens", 16),
         ("cache_read_tokens", 0),
         ("cache_write_tokens", 0),
     ]
@@ -32,7 +31,6 @@ def test_model_usage_records_all_normalized_zero_fields() -> None:
     assert [(item.name, item.value) for item in measurements] == [
         ("input_tokens", 0),
         ("output_tokens", 0),
-        ("total_tokens", 0),
         ("cache_read_tokens", 0),
         ("cache_write_tokens", 0),
     ]
