@@ -63,7 +63,6 @@ class _TaskMetricAdmissionRepository(Protocol):
 
 @dataclass(slots=True)
 class _Attempt:
-    start: TaskEvent
     execution_id: str | None
     invalid: bool = False
     terminal: TaskEvent | None = None
@@ -182,7 +181,6 @@ class _TaskMetricProjector:
                 raise ValueError("task metric admission is missing")
             correlation = admitted.correlation
         self._record_graph(
-            admission,
             terminal,
             tenant_id=tenant_id,
             correlation=correlation,
@@ -243,7 +241,7 @@ class _TaskMetricProjector:
         if event.status is TaskStatus.RUNNING:
             attempt = attempts.get(key)
             if attempt is None:
-                attempts[key] = _Attempt(event, event.execution_id)
+                attempts[key] = _Attempt(event.execution_id)
                 return
             if (
                 event.execution_id is not None
@@ -275,13 +273,11 @@ class _TaskMetricProjector:
 
     def _record_graph(
         self,
-        admission: TaskEvent,
         terminal: TaskEvent,
         *,
         tenant_id: str,
         correlation: CorrelationData,
     ) -> None:
-        del admission
         self._safe_record(
             lambda: Observation(
                 version=1,
