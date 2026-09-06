@@ -37,6 +37,8 @@ jobs:
                   raise SystemExit(f"pattern not found in {path}: {old[:160]!r}")
               target.write_text(text.replace(old, new, count))
 
+          # Remove the misleading Storage metric catalog/producers. There is no
+          # stable physical-storage operation owner in v1 yet.
           metrics_facade = "linktools-ai/src/linktools/ai/observe/_metrics.py"
           replace(metrics_facade, '_STORAGE_FIELDS = (*_CANONICAL, "domain", "target")\n', '')
           replace(
@@ -49,7 +51,7 @@ jobs:
           replace(runtime_metrics, 'import uuid\n', '')
           text = Path(runtime_metrics).read_text()
           start = text.index('def _record_storage_operation(\n')
-          end = text.index('def _measurement(\n', start)
+          end = text.index('def _measurement(', start)
           Path(runtime_metrics).write_text(text[:start] + text[end:])
 
           local = "linktools-ai/src/linktools/ai/runtime/_local.py"
@@ -71,20 +73,18 @@ jobs:
           )
           text = Path(local).read_text()
           text = re.sub(r'^\s*operation_result = .*\n', '', text, flags=re.MULTILINE)
-          marker = '        finally:\n            _record_storage_operation(\n'
-          if marker not in text:
+          text, changed = re.subn(
+              r'\n        finally:\n            _record_storage_operation\([\s\S]*?\n            \)\n(?=\n    async def _finish_checkpoint)',
+              '\n',
+              text,
+              count=1,
+          )
+          if changed != 1:
               raise SystemExit('runtime storage metric finally block missing')
-          start = text.index(marker)
-          end = text.index('\n\n    async def _finish_checkpoint(', start)
-          text = text[:start] + text[end:]
-          if text.count('_execution_operation_result(') == 1:
-              start = text.index('def _execution_operation_result(')
-              next_def = text.find('\n\ndef ', start + 1)
-              if next_def < 0:
-                  raise SystemExit('next function after _execution_operation_result missing')
-              text = text[:start] + text[next_def + 2:]
           Path(local).write_text(text)
 
+          # Keep Metrics.sqlite close-free and operation-scoped, but validate
+          # schema only once per SQLiteMetricStore lifetime.
           sql = "linktools-ai/src/linktools/ai/observe/_sql.py"
           replace(
               sql,
@@ -111,11 +111,19 @@ jobs:
               '''        try:\n            await self._ensure_schema(engine)\n            yield SqlMetricStore(engine, validate_schema=False)\n        finally:\n            await engine.dispose()\n''',
           )
 
+          # One Task projector is shared by Service and Launcher. Successful
+          # projections are remembered in a bounded recent cache, while failed
+          # recorder admission remains retryable.
           task_metrics = "linktools-ai/src/linktools/ai/task/_metrics.py"
           replace(
               task_metrics,
+              '_DRAIN_TIMEOUT_SECONDS = 5.0\n',
+              '_DRAIN_TIMEOUT_SECONDS = 5.0\n_PROJECTED_CACHE_SIZE = 4096\n',
+          )
+          replace(
+              task_metrics,
               '''        self._tasks: dict[tuple[str, str], asyncio.Task[None]] = {}\n        self._accepting = True\n''',
-              '''        self._tasks: dict[tuple[str, str], asyncio.Task[bool]] = {}\n        self._projected: set[tuple[str, str]] = set()\n        self._accepting = True\n''',
+              '''        self._tasks: dict[tuple[str, str], asyncio.Task[bool]] = {}\n        self._projected: dict[tuple[str, str], None] = {}\n        self._accepting = True\n''',
           )
           replace(
               task_metrics,
@@ -125,7 +133,7 @@ jobs:
           replace(
               task_metrics,
               '''        def consume(done: asyncio.Task[None]) -> None:\n            try:\n                done.result()\n            except asyncio.CancelledError:\n                pass\n            except BaseException:  # noqa: BLE001\n                _logger.exception("task metric projection failed: graph=%s", graph_id)\n            finally:\n                if self._tasks.get(key) is done:\n                    self._tasks.pop(key, None)\n''',
-              '''        def consume(done: asyncio.Task[bool]) -> None:\n            try:\n                if done.result():\n                    self._projected.add(key)\n            except asyncio.CancelledError:\n                pass\n            except BaseException:  # noqa: BLE001\n                _logger.exception("task metric projection failed: graph=%s", graph_id)\n            finally:\n                if self._tasks.get(key) is done:\n                    self._tasks.pop(key, None)\n''',
+              '''        def consume(done: asyncio.Task[bool]) -> None:\n            try:\n                if done.result():\n                    self._projected[key] = None\n                    while len(self._projected) > _PROJECTED_CACHE_SIZE:\n                        self._projected.pop(next(iter(self._projected)))\n            except asyncio.CancelledError:\n                pass\n            except BaseException:  # noqa: BLE001\n                _logger.exception("task metric projection failed: graph=%s", graph_id)\n            finally:\n                if self._tasks.get(key) is done:\n                    self._tasks.pop(key, None)\n''',
           )
           replace(
               task_metrics,
@@ -139,13 +147,41 @@ jobs:
           )
           replace(
               task_metrics,
+              '''        self._record_graph(\n            terminal,\n            tenant_id=tenant_id,\n            correlation=correlation,\n        )\n''',
+              '''        accepted = self._record_graph(\n            terminal,\n            tenant_id=tenant_id,\n            correlation=correlation,\n        )\n''',
+          )
+          replace(
+              task_metrics,
               '''                    return\n                self._consume_node_event(attempts, event)\n''',
               '''                    return False\n                self._consume_node_event(attempts, event)\n''',
           )
           replace(
               task_metrics,
               '''            self._record_attempt(\n                graph_id,\n                node_id,\n                fence,\n                attempt,\n                tenant_id=tenant_id,\n                correlation=correlation,\n            )\n\n    @staticmethod\n''',
-              '''            self._record_attempt(\n                graph_id,\n                node_id,\n                fence,\n                attempt,\n                tenant_id=tenant_id,\n                correlation=correlation,\n            )\n        return True\n\n    @staticmethod\n''',
+              '''            accepted = (\n                self._record_attempt(\n                    graph_id,\n                    node_id,\n                    fence,\n                    attempt,\n                    tenant_id=tenant_id,\n                    correlation=correlation,\n                )\n                and accepted\n            )\n        return accepted\n\n    @staticmethod\n''',
+          )
+          replace(
+              task_metrics,
+              '''    def _record_graph(\n        self,\n        terminal: TaskEvent,\n        *,\n        tenant_id: str,\n        correlation: CorrelationData,\n    ) -> None:\n        self._safe_record(\n''',
+              '''    def _record_graph(\n        self,\n        terminal: TaskEvent,\n        *,\n        tenant_id: str,\n        correlation: CorrelationData,\n    ) -> bool:\n        return self._safe_record(\n''',
+          )
+          replace(
+              task_metrics,
+              '''        tenant_id: str,\n        correlation: CorrelationData,\n    ) -> None:\n        terminal = cast(TaskEvent, attempt.terminal)\n''',
+              '''        tenant_id: str,\n        correlation: CorrelationData,\n    ) -> bool:\n        terminal = cast(TaskEvent, attempt.terminal)\n''',
+          )
+          replace(task_metrics, '        self._safe_record(\n            lambda: Observation(\n', '        return self._safe_record(\n            lambda: Observation(\n', count=1)
+          # The first replacement above affected _record_graph; update the later
+          # _record_attempt call explicitly if it still lacks return.
+          text = Path(task_metrics).read_text()
+          attempt_start = text.index('    def _record_attempt(\n')
+          safe_start = text.index('        self._safe_record(\n', attempt_start)
+          text = text[:safe_start] + '        return self._safe_record(\n' + text[safe_start + len('        self._safe_record(\n'):]
+          Path(task_metrics).write_text(text)
+          replace(
+              task_metrics,
+              '''    def _safe_record(self, factory: Callable[[], Observation]) -> None:\n        try:\n            self._recorder.try_record(factory())\n        except Exception:\n            _logger.exception("task metric observation rejected")\n''',
+              '''    def _safe_record(self, factory: Callable[[], Observation]) -> bool:\n        try:\n            return self._recorder.try_record(factory())\n        except Exception:\n            _logger.exception("task metric observation rejected")\n            return False\n''',
           )
 
           task_local = "linktools-ai/src/linktools/ai/task/_local.py"
@@ -155,9 +191,11 @@ jobs:
               'from ._metrics import _TaskMetricAdmissionRepository, _TaskMetricProjector\n',
               'from ._metrics import _TaskMetricProjector\n',
           )
-          old_constructor = '''    def __init__(\n        self,\n        repository: _TaskRepository,\n        runner: TaskNodeRunner,\n        *,\n        owner: str,\n        metric_recorder: MetricRecorder | None = None,\n        metric_source_namespace: str | None = None,\n        metric_admissions: "_TaskMetricAdmissionRepository | None" = None,\n    ) -> None:\n        try:\n            validate_lease_owner(owner)\n        except AIError as error:\n            raise ValueError("task launcher lease owner is invalid") from error\n        if (metric_recorder is None) != (metric_source_namespace is None):\n            raise ValueError(\n                "task metric recorder and source namespace must be configured together"\n            )\n        self._repository = repository\n        self._runner = runner\n        self._owner = owner\n        self._metric_projector = (\n            None\n            if metric_recorder is None or metric_source_namespace is None\n            else _TaskMetricProjector(\n                repository,\n                metric_recorder,\n                source_namespace=metric_source_namespace,\n                admissions=metric_admissions,\n            )\n        )\n'''
-          new_constructor = '''    def __init__(\n        self,\n        repository: _TaskRepository,\n        runner: TaskNodeRunner,\n        *,\n        owner: str,\n        metric_projector: "_TaskMetricProjector | None" = None,\n    ) -> None:\n        try:\n            validate_lease_owner(owner)\n        except AIError as error:\n            raise ValueError("task launcher lease owner is invalid") from error\n        self._repository = repository\n        self._runner = runner\n        self._owner = owner\n        self._metric_projector = metric_projector\n'''
-          replace(task_local, old_constructor, new_constructor)
+          replace(
+              task_local,
+              '''    def __init__(\n        self,\n        repository: _TaskRepository,\n        runner: TaskNodeRunner,\n        *,\n        owner: str,\n        metric_recorder: MetricRecorder | None = None,\n        metric_source_namespace: str | None = None,\n        metric_admissions: "_TaskMetricAdmissionRepository | None" = None,\n    ) -> None:\n        try:\n            validate_lease_owner(owner)\n        except AIError as error:\n            raise ValueError("task launcher lease owner is invalid") from error\n        if (metric_recorder is None) != (metric_source_namespace is None):\n            raise ValueError(\n                "task metric recorder and source namespace must be configured together"\n            )\n        self._repository = repository\n        self._runner = runner\n        self._owner = owner\n        self._metric_projector = (\n            None\n            if metric_recorder is None or metric_source_namespace is None\n            else _TaskMetricProjector(\n                repository,\n                metric_recorder,\n                source_namespace=metric_source_namespace,\n                admissions=metric_admissions,\n            )\n        )\n''',
+              '''    def __init__(\n        self,\n        repository: _TaskRepository,\n        runner: TaskNodeRunner,\n        *,\n        owner: str,\n        metric_projector: "_TaskMetricProjector | None" = None,\n    ) -> None:\n        try:\n            validate_lease_owner(owner)\n        except AIError as error:\n            raise ValueError("task launcher lease owner is invalid") from error\n        self._repository = repository\n        self._runner = runner\n        self._owner = owner\n        self._metric_projector = metric_projector\n''',
+          )
           replace(
               task_local,
               '''        await self._drain_runner_background()\n        if self._metric_projector is not None:\n            await self._metric_projector.close()\n        async with self._lock:\n''',
@@ -195,19 +233,13 @@ jobs:
           )
 
           runtime_metrics_test = "tests/ai/test_runtime_metrics.py"
-          replace(
-              runtime_metrics_test,
-              'from linktools.ai.task import (\n',
-              'from linktools.ai.task import (\n',
-          )
           text = Path(runtime_metrics_test).read_text()
-          import_anchor = 'from linktools.ai.workspace import Workspace\n'
-          if 'from linktools.ai.task._metrics import _TaskMetricProjector\n' not in text:
-              text = text.replace(
-                  import_anchor,
-                  'from linktools.ai.task._metrics import _TaskMetricProjector\n' + import_anchor,
-                  1,
-              )
+          anchor = 'from linktools.ai.workspace import Workspace\n'
+          text = text.replace(
+              anchor,
+              'from linktools.ai.task._metrics import _TaskMetricProjector\n' + anchor,
+              1,
+          )
           Path(runtime_metrics_test).write_text(text)
           replace(
               runtime_metrics_test,
@@ -233,16 +265,11 @@ jobs:
               '''    ) -> Page[TaskEvent]:\n        del tenant_id\n        self.list_calls += 1\n        selected = tuple(\n''',
           )
           with Path(projector_test).open('a') as handle:
-              handle.write('''\n\nasync def test_trigger_deduplicates_successful_projection_for_runtime_lifetime() -> None:\n    now = datetime(2026, 9, 5, tzinfo=timezone.utc)\n    repository = _Repository(\n        (\n            _admitted("dedup", now),\n            _graph_terminal("dedup", 2, now + timedelta(seconds=1)),\n        )\n    )\n    recorder = _Recorder()\n    projector = _TaskMetricProjector(\n        repository,\n        recorder,\n        source_namespace="workspace",\n    )\n\n    projector.trigger("dedup", tenant_id="tenant")\n    while projector._tasks:\n        await asyncio.sleep(0)\n    first_calls = repository.list_calls\n    assert first_calls == 2\n\n    projector.trigger("dedup", tenant_id="tenant")\n    await asyncio.sleep(0)\n    assert repository.list_calls == first_calls\n    await projector.close()\n''')
+              handle.write('''\n\nasync def test_trigger_deduplicates_successful_projection() -> None:\n    now = datetime(2026, 9, 5, tzinfo=timezone.utc)\n    repository = _Repository(\n        (\n            _admitted("dedup", now),\n            _graph_terminal("dedup", 2, now + timedelta(seconds=1)),\n        )\n    )\n    recorder = _Recorder()\n    projector = _TaskMetricProjector(\n        repository,\n        recorder,\n        source_namespace="workspace",\n    )\n\n    projector.trigger("dedup", tenant_id="tenant")\n    while projector._tasks:\n        await asyncio.sleep(0)\n    first_calls = repository.list_calls\n    assert first_calls == 2\n\n    projector.trigger("dedup", tenant_id="tenant")\n    await asyncio.sleep(0)\n    assert repository.list_calls == first_calls\n    await projector.close()\n''')
 
           Path("tests/ai/test_metrics_sqlite_validation.py").write_text('''#!/usr/bin/env python3\n# -*- coding: utf-8 -*-\n"""SQLite Metrics validates schema once per close-free store lifetime."""\n\nfrom datetime import datetime, timedelta, timezone\nfrom pathlib import Path\n\nimport pytest\nfrom linktools.ai.migrate import provision_metrics_sqlite\nfrom linktools.ai.observe import (\n    MetricAggregation,\n    MetricDefinition,\n    MetricQuery,\n    MetricSource,\n    MetricType,\n    MetricWindow,\n    Metrics,\n)\nimport linktools.ai.observe._sqlite as sqlite_module\n\n\n@pytest.mark.asyncio\nasync def test_sqlite_schema_validation_is_cached_across_operations(\n    tmp_path: Path,\n    monkeypatch: pytest.MonkeyPatch,\n) -> None:\n    path = tmp_path / "metrics.db"\n    await provision_metrics_sqlite(path)\n    real_validate = sqlite_module.validate_sql\n    calls = 0\n\n    async def counting_validate(engine: object, metadata: object) -> None:\n        nonlocal calls\n        calls += 1\n        await real_validate(engine, metadata)  # type: ignore[arg-type]\n\n    monkeypatch.setattr(sqlite_module, "validate_sql", counting_validate)\n    metrics = Metrics.sqlite(path, namespace="validation-cache")\n    definition = MetricDefinition(\n        name="business.validation_cache",\n        revision=1,\n        observation_kind="business.validation_cache.sample",\n        source=MetricSource.measurement("value"),\n        metric_type=MetricType.COUNTER,\n        unit="1",\n        default_aggregation=MetricAggregation.SUM,\n    )\n    occurred_at = datetime(2026, 9, 6, tzinfo=timezone.utc)\n\n    await metrics.define(definition)\n    await metrics.record(\n        definition.name,\n        1,\n        observation_id="sample",\n        occurred_at=occurred_at,\n    )\n    result = await metrics.query(\n        MetricQuery(\n            definition.name,\n            MetricWindow.between(\n                occurred_at - timedelta(seconds=1),\n                occurred_at + timedelta(seconds=1),\n            ),\n        )\n    )\n\n    assert result.points[0].value == 1\n    assert calls == 1\n''')
 
-          # Review invariants for this batch.
-          for path in (
-              metrics_facade,
-              runtime_metrics,
-              local,
-          ):
+          for path in (metrics_facade, runtime_metrics, local):
               text = Path(path).read_text()
               if 'linktools.storage.operation' in text or '_record_storage_operation' in text:
                   raise SystemExit(f'stale storage metric producer/catalog remains in {path}')
