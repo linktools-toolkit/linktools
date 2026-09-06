@@ -38,6 +38,7 @@ from pydantic_ai.usage import UsageLimitExceeded
 from ..capability import AgentContext
 from ..errors import AIError, ErrorCode
 from ..observe import MetricMeasurement, MetricRecorder, Observation
+from ._metric_id import _model_observation_id
 from ._metrics import (
     _bind_metric_execution_context,
     _metric_correlation,
@@ -90,7 +91,11 @@ class _RuntimeModelMetricCapability(AbstractCapability[AgentContext[object]]):
         handler: WrapModelRequestHandler,
     ) -> ModelResponse:
         run_context = None if ctx is None else ctx.deps
-        attempt_id = uuid.uuid4().hex
+        attempt_id = (
+            uuid.uuid4().hex
+            if ctx is None
+            else _model_observation_id(self._step_run_id, ctx.run_step)
+        )
         started = monotonic_ns()
         try:
             response = await handler(request_context)

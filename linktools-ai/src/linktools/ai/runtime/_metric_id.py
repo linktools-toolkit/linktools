@@ -9,6 +9,14 @@ def _stable_observation_id(*parts: str) -> str:
     return canonical_sha256({"parts": list(parts)})
 
 
+def _model_observation_id(step_run_id: str, step_index: int) -> str:
+    return _stable_observation_id(
+        "linktools.model.request.v1",
+        step_run_id,
+        str(step_index),
+    )
+
+
 def _tool_observation_id(
     source_namespace: str,
     tenant_id: str,

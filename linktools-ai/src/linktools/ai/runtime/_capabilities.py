@@ -67,7 +67,7 @@ from ..workspace import (
     RepositoryInstructions,
     WorkspacePolicy,
 )
-from ._metric_id import _tool_observation_id
+from ._metric_id import _model_observation_id, _tool_observation_id
 from ._tool_metrics import _ToolMetricContext
 
 _logger = environ.get_logger("ai.runtime.capabilities")
@@ -308,6 +308,15 @@ class _RuntimeStepPersistence(StepPersistence[None]):
             event_index=event_index,
         )
 
+    def _model_metric_metadata(self, ctx: "RunContext[None]") -> dict[str, str]:
+        metadata = dict(self.metadata)
+        if self.tool_metrics is not None:
+            metadata[_OBSERVATION_ID_METADATA_KEY] = _model_observation_id(
+                self._effective_run_id(ctx),
+                ctx.run_step,
+            )
+        return metadata
+
     async def after_model_request(
         self,
         ctx: "RunContext[None]",
@@ -316,7 +325,7 @@ class _RuntimeStepPersistence(StepPersistence[None]):
         response: ModelResponse,
     ) -> ModelResponse:
         del request_context
-        metadata = dict(self.metadata)
+        metadata = self._model_metric_metadata(ctx)
         metadata.update(_model_usage_metadata(response))
         await self._record_runtime_event(
             ctx,
@@ -324,6 +333,22 @@ class _RuntimeStepPersistence(StepPersistence[None]):
             metadata=metadata,
         )
         return response
+
+    async def on_model_request_error(
+        self,
+        ctx: "RunContext[None]",
+        *,
+        request_context: ModelRequestContext,
+        error: Exception,
+    ) -> ModelResponse:
+        del request_context
+        await self._record_runtime_event(
+            ctx,
+            kind="model_request_failed",
+            metadata=self._model_metric_metadata(ctx),
+            error=repr(error),
+        )
+        raise error
 
     async def before_tool_execute(
         self,
