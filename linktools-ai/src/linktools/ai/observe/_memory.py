@@ -89,6 +89,20 @@ class InMemoryMetricStore:
             for identity, candidate in pending.items():
                 self._observations.setdefault(identity, candidate)
 
+    async def get_observation(
+        self,
+        namespace: str,
+        observation_id: str,
+    ) -> Observation | None:
+        identity = observation_digest(namespace, observation_id)
+        async with self._lock:
+            current = self._observations.get(identity)
+            if current is None:
+                return None
+            if current[0] != namespace:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            return current[2]
+
     async def scan_observations(
         self,
         namespace: str,
