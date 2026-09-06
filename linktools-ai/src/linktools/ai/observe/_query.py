@@ -30,6 +30,7 @@ _MAX_EXTRACTED_SAMPLES = 100_000
 _MAX_GROUPS = 256
 _MAX_BUCKETS = 2_048
 _MAX_RESULT_POINTS = 16_384
+_RUNTIME_CONTEXT_FIELD_PREFIX = "context."
 
 
 def _facet(observation: Observation, field: str) -> str | None:
@@ -42,6 +43,14 @@ def _facet(observation: Observation, field: str) -> str | None:
     if field == "error_code":
         return observation.error_code
     return observation.dimensions.get(field)
+
+
+def _query_field_allowed(definition: MetricDefinition, field: str) -> bool:
+    return field in definition.query_fields or (
+        definition.name.startswith("linktools.")
+        and field.startswith(_RUNTIME_CONTEXT_FIELD_PREFIX)
+        and len(field) > len(_RUNTIME_CONTEXT_FIELD_PREFIX)
+    )
 
 
 def _group_sort_key(group: tuple[str | None, ...]) -> tuple[tuple[int, str], ...]:
@@ -137,9 +146,8 @@ async def execute_query(
     if aggregation is not MetricAggregation.PERCENTILE and query.percentile is not None:
         raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
 
-    allowed_fields = set(definition.query_fields)
     for field in (*query.filters.keys(), *query.group_by):
-        if field not in allowed_fields:
+        if not _query_field_allowed(definition, field):
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
 
     start, end = query.window.resolve()

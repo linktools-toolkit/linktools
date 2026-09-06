@@ -935,6 +935,10 @@ async def _open_runtime(
         metrics=metrics,
     )
     try:
+        if components.metric_control is not None:
+            components.metric_control.configure_runtime_dimensions(
+                context.metric_dimensions
+            )
         runtime = Runtime(
             components.catalog,
             components.compiler,

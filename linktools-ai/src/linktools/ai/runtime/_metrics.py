@@ -98,6 +98,19 @@ class _RuntimeMetricBuffer(MetricRecorder):
         self._writer: asyncio.Task[None] | None = None
         self._resolution_event = asyncio.Event()
         self._execution_contexts: dict[str, CorrelationData] = {}
+        self._runtime_dimensions: dict[str, str] = {}
+        self._runtime_dimensions_configured = False
+
+    def configure_runtime_dimensions(self, dimensions: Mapping[str, str]) -> None:
+        normalized = {f"context.{key}": value for key, value in dimensions.items()}
+        if self._runtime_dimensions_configured:
+            if self._runtime_dimensions != normalized:
+                raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+            return
+        if self._accepted or self._writer is not None or self._execution_contexts:
+            raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+        self._runtime_dimensions = normalized
+        self._runtime_dimensions_configured = True
 
     def bind_execution_context(
         self,
@@ -212,9 +225,21 @@ class _RuntimeMetricBuffer(MetricRecorder):
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             correlation[normalized_key] = value
 
-        if correlation == raw:
+        raw_dimensions = dict(observation.dimensions)
+        dimensions = dict(self._runtime_dimensions)
+        for key, value in raw_dimensions.items():
+            existing = dimensions.get(key)
+            if existing is not None and existing != value:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            dimensions[key] = value
+
+        if correlation == raw and dimensions == raw_dimensions:
             return observation
-        return replace(observation, correlation=correlation)
+        return replace(
+            observation,
+            correlation=correlation,
+            dimensions=dimensions,
+        )
 
     def _start_writer(self) -> bool:
         if self._writer is not None:
