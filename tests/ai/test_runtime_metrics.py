@@ -571,10 +571,10 @@ async def test_task_commit_unknown_readback_projects_durable_terminal_history() 
     assert len(attempts) == 1
     assert attempts[0].occurred_at == repository.terminal_time
     assert dict(attempts[0].correlation) == {
-        "execution_id": "execution",
-        "fence": 1,
-        "graph_id": "graph",
-        "node_id": "node",
+        "linktools.execution_id": "execution",
+        "linktools.fence": 1,
+        "linktools.graph_id": "graph",
+        "linktools.node_id": "node",
     }
     assert attempts[0].measurements[0].value == 2_000_000_000
     assert len(graph_terminals) == 1

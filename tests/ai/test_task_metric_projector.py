@@ -193,10 +193,10 @@ async def test_node_attempt_uses_first_running_event_for_same_fence() -> None:
     )
     assert attempt.measurements[0].value == 5_000_000_000
     assert dict(attempt.correlation) == {
-        "execution_id": "execution",
-        "fence": 1,
-        "graph_id": "graph",
-        "node_id": "node",
+        "linktools.execution_id": "execution",
+        "linktools.fence": 1,
+        "linktools.graph_id": "graph",
+        "linktools.node_id": "node",
     }
 
 
@@ -232,7 +232,7 @@ async def test_unmatched_old_fence_is_not_paired_with_new_attempt() -> None:
         if observation.kind == "linktools.task.node.attempt"
     )
     assert len(attempts) == 1
-    assert attempts[0].correlation["fence"] == 2
+    assert attempts[0].correlation["linktools.fence"] == 2
     assert attempts[0].measurements[0].value == 5_000_000_000
 
 
