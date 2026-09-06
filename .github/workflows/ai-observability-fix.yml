@@ -44,16 +44,8 @@ jobs:
           )
 
           metric_capability = "linktools-ai/src/linktools/ai/runtime/_metric_capability.py"
-          replace(
-              metric_capability,
-              'from ._metric_id import _model_observation_id\n',
-              '',
-          )
-          replace(
-              metric_capability,
-              '        self._attempts: dict[int, int] = {}\n',
-              '',
-          )
+          replace(metric_capability, 'from ._metric_id import _model_observation_id\n', '')
+          replace(metric_capability, '        self._attempts: dict[int, int] = {}\n', '')
           replace(
               metric_capability,
               '''        run_context = None if ctx is None else ctx.deps\n        if ctx is None:\n            attempt_id = uuid.uuid4().hex\n        else:\n            attempt_index = self._attempts.get(ctx.run_step, 0) + 1\n            self._attempts[ctx.run_step] = attempt_index\n            attempt_id = _model_observation_id(\n                self._source_namespace,\n                self._tenant_id,\n                self._execution_id,\n                self._step_run_id,\n                ctx.run_step,\n                attempt_index,\n            )\n        started = monotonic_ns()\n''',
@@ -95,6 +87,13 @@ jobs:
           end = text.index('def _tool_observation_id(\n', start)
           Path(metric_id).write_text(text[:start] + text[end:])
 
+          runtime_metrics = "linktools-ai/src/linktools/ai/runtime/_metrics.py"
+          replace(
+              runtime_metrics,
+              '''from ._metric_id import (\n    _model_observation_id,\n    _stable_observation_id,\n    _tool_observation_id,\n)\n''',
+              'from ._metric_id import _stable_observation_id\n',
+          )
+
           closure = "tests/ai/test_observability_closure.py"
           replace(
               closure,
@@ -119,8 +118,7 @@ jobs:
               raise SystemExit("task test insertion anchor missing")
           Path(task_test).write_text(text.replace(anchor, insertion + anchor, 1))
 
-          new_test = Path("tests/ai/test_runtime_metric_attempt_identity.py")
-          new_test.write_text('''#!/usr/bin/env python3\n# -*- coding: utf-8 -*-\n"""Actual model attempts keep unique metric identities across re-execution."""\n\nimport pytest\nfrom linktools.ai.observe import Observation\nfrom linktools.ai.runtime._metric_capability import _RuntimeModelMetricCapability\nfrom pydantic_ai.messages import ModelResponse\n\n\nclass _Recorder:\n    def __init__(self) -> None:\n        self.observations: list[Observation] = []\n\n    def try_record(self, observation: Observation) -> bool:\n        self.observations.append(observation)\n        return True\n\n\n@pytest.mark.asyncio\nasync def test_actual_model_attempts_never_reuse_observation_identity() -> None:\n    recorder = _Recorder()\n    capability = _RuntimeModelMetricCapability(\n        recorder,\n        source_namespace="workspace",\n        tenant_id="tenant",\n        execution_id="execution",\n        session_id=None,\n        step_run_id="durable-step-run",\n        agent_id="agent",\n        provider="test",\n        model_identity="test:model",\n        route_id="default",\n    )\n\n    async def handler(_request: object) -> ModelResponse:\n        return ModelResponse(parts=())\n\n    await capability.wrap_model_request(\n        None,\n        request_context=object(),  # type: ignore[arg-type]\n        handler=handler,  # type: ignore[arg-type]\n    )\n    await capability.wrap_model_request(\n        None,\n        request_context=object(),  # type: ignore[arg-type]\n        handler=handler,  # type: ignore[arg-type]\n    )\n\n    assert len(recorder.observations) == 2\n    assert recorder.observations[0].observation_id != recorder.observations[1].observation_id\n''')
+          Path("tests/ai/test_runtime_metric_attempt_identity.py").write_text('''#!/usr/bin/env python3\n# -*- coding: utf-8 -*-\n"""Actual model attempts keep unique metric identities across re-execution."""\n\nimport pytest\nfrom linktools.ai.observe import Observation\nfrom linktools.ai.runtime._metric_capability import _RuntimeModelMetricCapability\nfrom pydantic_ai.messages import ModelResponse\n\n\nclass _Recorder:\n    def __init__(self) -> None:\n        self.observations: list[Observation] = []\n\n    def try_record(self, observation: Observation) -> bool:\n        self.observations.append(observation)\n        return True\n\n\n@pytest.mark.asyncio\nasync def test_actual_model_attempts_never_reuse_observation_identity() -> None:\n    recorder = _Recorder()\n    capability = _RuntimeModelMetricCapability(\n        recorder,\n        source_namespace="workspace",\n        tenant_id="tenant",\n        execution_id="execution",\n        session_id=None,\n        step_run_id="durable-step-run",\n        agent_id="agent",\n        provider="test",\n        model_identity="test:model",\n        route_id="default",\n    )\n\n    async def handler(_request: object) -> ModelResponse:\n        return ModelResponse(parts=())\n\n    await capability.wrap_model_request(\n        None,\n        request_context=object(),  # type: ignore[arg-type]\n        handler=handler,  # type: ignore[arg-type]\n    )\n    await capability.wrap_model_request(\n        None,\n        request_context=object(),  # type: ignore[arg-type]\n        handler=handler,  # type: ignore[arg-type]\n    )\n\n    assert len(recorder.observations) == 2\n    assert recorder.observations[0].observation_id != recorder.observations[1].observation_id\n''')
           PY
       - name: Install tooling
         run: |
