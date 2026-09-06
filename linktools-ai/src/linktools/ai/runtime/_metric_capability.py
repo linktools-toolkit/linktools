@@ -112,18 +112,19 @@ class _RuntimeModelMetricCapability(AbstractCapability[RunContext[object]]):
 
     async def wrap_model_request(
         self,
-        ctx: PydanticRunContext[RunContext[object]],
+        ctx: PydanticRunContext[RunContext[object]] | None,
         *,
         request_context: ModelRequestContext,
         handler: WrapModelRequestHandler,
     ) -> ModelResponse:
         attempt_id = uuid.uuid4().hex
         started = monotonic_ns()
+        run_context = None if ctx is None else ctx.deps
         try:
             response = await handler(request_context)
         except asyncio.CancelledError:
             self._record_model(
-                ctx.deps,
+                run_context,
                 attempt_id,
                 started,
                 status="CANCELLED",
@@ -133,7 +134,7 @@ class _RuntimeModelMetricCapability(AbstractCapability[RunContext[object]]):
             raise
         except Exception as error:
             self._record_model(
-                ctx.deps,
+                run_context,
                 attempt_id,
                 started,
                 status="FAILED",
@@ -142,7 +143,7 @@ class _RuntimeModelMetricCapability(AbstractCapability[RunContext[object]]):
             )
             raise
         self._record_model(
-            ctx.deps,
+            run_context,
             attempt_id,
             started,
             status="SUCCEEDED",
@@ -153,7 +154,7 @@ class _RuntimeModelMetricCapability(AbstractCapability[RunContext[object]]):
 
     def _record_model(
         self,
-        run_context: RunContext[object],
+        run_context: RunContext[object] | None,
         attempt_id: str,
         started: int,
         *,
@@ -172,7 +173,7 @@ class _RuntimeModelMetricCapability(AbstractCapability[RunContext[object]]):
                 status=status,
                 error_code=error_code,
                 correlation=_metric_correlation(
-                    run_context.context,
+                    None if run_context is None else run_context.context,
                     execution_id=self._execution_id,
                     session_id=self._session_id,
                     step_run_id=self._step_run_id,
