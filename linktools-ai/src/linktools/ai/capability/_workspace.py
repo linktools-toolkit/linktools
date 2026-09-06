@@ -17,7 +17,7 @@ from pydantic_ai_harness.filesystem import FileSystem
 from pydantic_ai_harness.shell import LLM_API_KEY_ENV_PATTERNS, Shell
 
 from ..workspace import Sandbox, SandboxSession, Workspace
-from ._context import RunContext
+from ._context import AgentContext
 from ._group import (
     CapabilityContribution,
     capability_fingerprint,
@@ -25,7 +25,7 @@ from ._group import (
 )
 
 if TYPE_CHECKING:
-    from pydantic_ai import RunContext as PydanticRunContext
+    from pydantic_ai import AgentContext as PydanticRunContext
     from pydantic_ai.toolsets import ToolsetTool
     from pydantic_ai_harness.filesystem import FileSystemToolset
     from pydantic_ai_harness.shell import ShellToolset
@@ -68,7 +68,7 @@ class _LocalSandbox:
 
     async def _open_for_run(
         self,
-        ctx: "PydanticRunContext[RunContext[object]]",
+        ctx: "PydanticRunContext[AgentContext[object]]",
     ) -> SandboxSession:
         session = _LocalSandboxSession(self._root)
         await session._bind_run(ctx)
@@ -78,40 +78,40 @@ class _LocalSandbox:
 class _LocalSandboxSession:
     def __init__(self, root: Path) -> None:
         self._filesystem = cast(
-            "FileSystemToolset[RunContext[object]]",
-            FileSystem[RunContext[object]](root_dir=root).get_toolset(),
+            "FileSystemToolset[AgentContext[object]]",
+            FileSystem[AgentContext[object]](root_dir=root).get_toolset(),
         )
         self._shell = cast(
-            "ShellToolset[RunContext[object]]",
-            Shell[RunContext[object]](
+            "ShellToolset[AgentContext[object]]",
+            Shell[AgentContext[object]](
                 cwd=root,
                 denied_env_patterns=LLM_API_KEY_ENV_PATTERNS,
             ).get_toolset(),
         )
-        self._shell_context: "PydanticRunContext[RunContext[object]] | None" = None
-        self._shell_tools: "dict[str, ToolsetTool[RunContext[object]]]" = {}
+        self._shell_context: "PydanticRunContext[AgentContext[object]] | None" = None
+        self._shell_tools: "dict[str, ToolsetTool[AgentContext[object]]]" = {}
         self._stack: AsyncExitStack | None = None
 
     async def _bind_run(
         self,
-        ctx: "PydanticRunContext[RunContext[object]]",
+        ctx: "PydanticRunContext[AgentContext[object]]",
     ) -> None:
         stack = AsyncExitStack()
         try:
             filesystem = cast(
-                "FileSystemToolset[RunContext[object]]",
+                "FileSystemToolset[AgentContext[object]]",
                 await self._filesystem.for_run(ctx),
             )
             self._filesystem = cast(
-                "FileSystemToolset[RunContext[object]]",
+                "FileSystemToolset[AgentContext[object]]",
                 await stack.enter_async_context(filesystem),
             )
             shell = cast(
-                "ShellToolset[RunContext[object]]",
+                "ShellToolset[AgentContext[object]]",
                 await self._shell.for_run(ctx),
             )
             self._shell = cast(
-                "ShellToolset[RunContext[object]]",
+                "ShellToolset[AgentContext[object]]",
                 await stack.enter_async_context(shell),
             )
             self._shell_context = ctx
@@ -123,7 +123,7 @@ class _LocalSandboxSession:
 
     async def _call_shell(self, name: str, args: dict[str, Any]) -> str:
         ctx = cast(
-            "PydanticRunContext[RunContext[object]]",
+            "PydanticRunContext[AgentContext[object]]",
             self._shell_context,
         )
         result = await self._shell.call_tool(
@@ -437,7 +437,7 @@ class _WorkspaceToolSurface:
         return await self._require_session().stop_command(command_id)
 
 
-class _WorkspaceSandboxToolset(FunctionToolset[RunContext[object]]):
+class _WorkspaceSandboxToolset(FunctionToolset[AgentContext[object]]):
     def __init__(
         self,
         sandbox: Sandbox,
@@ -455,7 +455,7 @@ class _WorkspaceSandboxToolset(FunctionToolset[RunContext[object]]):
 
     async def for_run(
         self,
-        ctx: "PydanticRunContext[RunContext[object]]",
+        ctx: "PydanticRunContext[AgentContext[object]]",
     ) -> "_WorkspaceSandboxToolset":
         session = (
             await self._sandbox._open_for_run(ctx)
@@ -517,7 +517,7 @@ def workspace_tool_contributions(
 def workspace_capabilities(
     workspace: Workspace,
     selected_tool_names: Sequence[str],
-) -> "tuple[AbstractCapability[RunContext[object]], ...]":
+) -> "tuple[AbstractCapability[AgentContext[object]], ...]":
     """Materialize the selected workspace tools through one per-run SandboxSession."""
     selected = frozenset(selected_tool_names)
     unknown = selected.difference(_WORKSPACE_TOOL_NAMES)
