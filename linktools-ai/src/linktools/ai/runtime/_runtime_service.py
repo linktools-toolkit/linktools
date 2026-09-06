@@ -296,6 +296,12 @@ class Runtime(Generic[AppT]):
         timeout_seconds: float = 5.0,
     ) -> RuntimeMetricFlushResult:
         self._ensure_open()
+        if (
+            isinstance(timeout_seconds, bool)
+            or not isinstance(timeout_seconds, (int, float))
+            or timeout_seconds < 0
+        ):
+            raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
         control = self._metric_control
         if control is None:
             return RuntimeMetricFlushResult(True, _disabled_metric_status())

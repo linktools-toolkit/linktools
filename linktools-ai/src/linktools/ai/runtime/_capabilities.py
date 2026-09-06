@@ -301,6 +301,8 @@ class _RuntimeStepPersistence(StepPersistence[None]):
         kind: str,
         metadata: Mapping[str, str],
         error: str | None = None,
+        tool_call_id: str | None = None,
+        tool_name: str | None = None,
     ) -> None:
         event_index = self._event_sequence
         self._event_sequence += 1
@@ -311,6 +313,8 @@ class _RuntimeStepPersistence(StepPersistence[None]):
             conversation_id=ctx.conversation_id,
             parent_run_id=self.parent_run_id,
             agent_name=self.agent_name,
+            tool_call_id=tool_call_id,
+            tool_name=tool_name,
             error=error,
             metadata=dict(metadata),
             event_index=event_index,
@@ -329,7 +333,12 @@ class _RuntimeStepPersistence(StepPersistence[None]):
         if terminal:
             active = self._model_started.pop(ctx.run_step, None)
             if active is None:
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                _logger.warning(
+                    "model metric trace timing unavailable: run=%s step=%s",
+                    self.run_id or ctx.run_id,
+                    ctx.run_step,
+                )
+                return metadata
             attempt_index, started = active
             metadata[_DURATION_NS_METADATA_KEY] = str(monotonic_ns() - started)
         else:
@@ -681,18 +690,57 @@ class _RuntimeStepPersistence(StepPersistence[None]):
         )
         return metadata
 
-    async def _with_tool_metric_metadata(
+    async def _persist_tool_completed(
         self,
+        ctx: "RunContext[None]",
+        *,
         call: ToolCallPart,
+        tool_def: ToolDefinition,
+        result: Any,
         state: _ToolCallState,
-        operation: Callable[[], Any],
     ) -> Any:
-        previous = self.metadata
-        self.metadata = self._tool_metric_metadata(call, state)
-        try:
-            return await operation()
-        finally:
-            self.metadata = previous
+        run_id = self._effective_run_id(ctx)
+        await self._finish_tool_effect(
+            run_id,
+            call.tool_call_id,
+            tool_def.name,
+            "completed",
+        )
+        await self._record_runtime_event(
+            ctx,
+            kind="tool_call_completed",
+            metadata=self._tool_metric_metadata(call, state),
+            tool_call_id=call.tool_call_id,
+            tool_name=tool_def.name,
+        )
+        return result
+
+    async def _persist_tool_failed(
+        self,
+        ctx: "RunContext[None]",
+        *,
+        call: ToolCallPart,
+        tool_def: ToolDefinition,
+        error: BaseException,
+        state: _ToolCallState,
+    ) -> Any:
+        run_id = self._effective_run_id(ctx)
+        await self._finish_tool_effect(
+            run_id,
+            call.tool_call_id,
+            tool_def.name,
+            "failed",
+            repr(error),
+        )
+        await self._record_runtime_event(
+            ctx,
+            kind="tool_call_failed",
+            metadata=self._tool_metric_metadata(call, state),
+            tool_call_id=call.tool_call_id,
+            tool_name=tool_def.name,
+            error=repr(error),
+        )
+        raise error
 
     async def after_tool_execute(
         self,
@@ -710,17 +758,14 @@ class _RuntimeStepPersistence(StepPersistence[None]):
         if state.preserve_started or not state.operation_terminalized or state.cached_failure:
             self._calls.pop(key, None)
             raise AIError(ErrorCode.TOOL_EFFECT_UNKNOWN)
-        async def persist() -> Any:
-            return await super(_RuntimeStepPersistence, self).after_tool_execute(
+        try:
+            return await self._persist_tool_completed(
                 ctx,
                 call=call,
                 tool_def=tool_def,
-                args=args,
                 result=result,
+                state=state,
             )
-
-        try:
-            return await self._with_tool_metric_metadata(call, state, persist)
         finally:
             self._calls.pop(key, None)
 
@@ -881,17 +926,14 @@ class _RuntimeStepPersistence(StepPersistence[None]):
     ) -> Any:
         if state.effect_terminalized:
             raise error
-        async def persist() -> Any:
-            return await super(_RuntimeStepPersistence, self).on_tool_execute_error(
+        try:
+            result = await self._persist_tool_failed(
                 ctx,
                 call=call,
                 tool_def=tool_def,
-                args=args,
                 error=error,
+                state=state,
             )
-
-        try:
-            result = await self._with_tool_metric_metadata(call, state, persist)
         except BaseException as raised:
             state.effect_terminalized = True
             if raised is error:
@@ -914,17 +956,14 @@ class _RuntimeStepPersistence(StepPersistence[None]):
     ) -> Any:
         if state.effect_terminalized:
             return result
-        async def persist() -> Any:
-            return await super(_RuntimeStepPersistence, self).after_tool_execute(
+        try:
+            value = await self._persist_tool_completed(
                 ctx,
                 call=call,
                 tool_def=tool_def,
-                args=args,
                 result=result,
+                state=state,
             )
-
-        try:
-            value = await self._with_tool_metric_metadata(call, state, persist)
         except BaseException:
             state.effect_terminalized = True
             raise
