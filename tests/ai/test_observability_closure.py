@@ -14,7 +14,7 @@ from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.observe import Metrics, Observation
 from linktools.ai.runtime import Runtime, RuntimeContext
 from linktools.ai.runtime import _metrics as runtime_metrics
-from linktools.ai.runtime._execution import _overlay_execution_context
+from linktools.ai.runtime._execution import _overlay_execution_correlation
 from linktools.ai.runtime._history import _trace_item
 from linktools.ai.runtime._metric_id import _model_observation_id, _tool_observation_id
 from linktools.ai.task import TaskEvent, TaskEventType
@@ -101,7 +101,7 @@ class _TaskAdmissions:
     async def get(self, graph_id: str, *, tenant_id: str) -> object:
         assert graph_id == "graph"
         assert tenant_id == "tenant"
-        return SimpleNamespace(context={"audit_run_id": "audit-1", "stage": "analysis"})
+        return SimpleNamespace(correlation={"audit_run_id": "audit-1", "stage": "analysis"})
 
 
 def _observation(observation_id: str) -> Observation:
@@ -120,36 +120,36 @@ def _observation(observation_id: str) -> Observation:
     )
 
 
-def test_runtime_context_overlay_is_explicit_and_bounded() -> None:
+def test_runtime_correlation_overlay_is_explicit_and_bounded() -> None:
     root = RuntimeContext(
         object(),
-        {"audit_run_id": "audit-1", "stage": "collect"},
+        correlation={"audit_run_id": "audit-1", "stage": "collect"},
     )
 
     effective = root.overlay({"stage": "analyze", "event_id": "event-1"})
 
     assert effective.app is root.app
-    assert dict(root.values) == {"audit_run_id": "audit-1", "stage": "collect"}
-    assert dict(effective.values) == {
+    assert dict(root.correlation) == {"audit_run_id": "audit-1", "stage": "collect"}
+    assert dict(effective.correlation) == {
         "audit_run_id": "audit-1",
         "stage": "analyze",
         "event_id": "event-1",
     }
 
 
-def test_retry_and_fork_context_inherit_source_then_overlay() -> None:
+def test_retry_and_fork_correlation_inherit_source_then_overlay() -> None:
     source = {"audit_run_id": "audit-1", "stage": "collect"}
 
-    inherited = _overlay_execution_context(source, {})
-    overridden = _overlay_execution_context(source, {"stage": "analyze"})
+    inherited = _overlay_execution_correlation(source, {})
+    overridden = _overlay_execution_correlation(source, {"stage": "analyze"})
 
     assert dict(inherited) == source
     assert dict(overridden) == {"audit_run_id": "audit-1", "stage": "analyze"}
 
 
-def test_retry_and_fork_context_reject_invalid_overlay() -> None:
+def test_retry_and_fork_correlation_reject_invalid_overlay() -> None:
     with pytest.raises(AIError) as raised:
-        _overlay_execution_context(
+        _overlay_execution_correlation(
             {"audit_run_id": "audit-1"},
             {f"key_{index}": str(index) for index in range(8)},
         )
@@ -210,7 +210,7 @@ async def test_runtime_metric_flush_is_an_acceptance_barrier() -> None:
 
 
 @pytest.mark.asyncio
-async def test_task_metric_projector_joins_durable_admission_context() -> None:
+async def test_task_metric_projector_joins_durable_admission_correlation() -> None:
     recorder = _Recorder()
     projector = _TaskMetricProjector(
         _TaskEvents(),  # type: ignore[arg-type]
