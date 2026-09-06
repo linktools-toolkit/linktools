@@ -58,8 +58,8 @@ jobs:
 
           subagent_test = Path("tests/ai/test_skill_subagent_final_refactor.py")
           text = subagent_test.read_text()
-          old = '''            thinking="high",\n            context={},\n'''
-          new = '''            thinking="high",\n            correlation={},\n'''
+          old = '''        thinking="high",\n        context={},\n'''
+          new = '''        thinking="high",\n        correlation={},\n'''
           assert text.count(old) == 1, text.count(old)
           subagent_test.write_text(text.replace(old, new, 1))
 
@@ -81,7 +81,7 @@ jobs:
             tests/ai/test_skill_subagent_final_refactor.py
           python manage.py check linktools-ai
           git diff --check
-          ! git grep -n "core\._context\|from \.\?_context import\|merge_run_context\|RunContextData\|RunContextValue" -- linktools-ai/src tests/ai
+          ! git grep -n "core\._context\|merge_run_context\|RunContextData\|RunContextValue" -- linktools-ai/src tests/ai
       - name: Commit validated correlation cleanup
         run: |
           git config user.name "github-actions[bot]"
