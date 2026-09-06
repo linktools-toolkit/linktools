@@ -5,7 +5,7 @@
 from __future__ import annotations
 
 import math
-from collections import defaultdict
+from dataclasses import dataclass, field
 from datetime import datetime
 
 from ..core import canonical_json_bytes
@@ -99,35 +99,88 @@ def _empty_value(aggregation: MetricAggregation) -> int | float | None:
     return None
 
 
-def _aggregate(
-    aggregation: MetricAggregation,
-    samples: list[tuple[int | float, datetime, str]],
-    *,
-    percentile: float | None,
-    seconds: float,
-) -> int | float | None:
-    if not samples:
-        return _empty_value(aggregation)
-    values = [sample[0] for sample in samples]
-    if aggregation is MetricAggregation.COUNT:
-        return len(values)
-    if aggregation is MetricAggregation.SUM:
-        return sum(values)
-    if aggregation is MetricAggregation.MEAN:
-        return sum(values) / len(values)
-    if aggregation is MetricAggregation.MIN:
-        return min(values)
-    if aggregation is MetricAggregation.MAX:
-        return max(values)
-    if aggregation is MetricAggregation.RATE:
-        return sum(values) / seconds
-    if aggregation is MetricAggregation.LATEST:
-        return max(samples, key=lambda item: (item[1], item[2]))[0]
-    if percentile is None:
-        raise RuntimeError("percentile is required")
-    ordered = sorted(values)
-    rank = math.ceil(percentile * len(ordered))
-    return ordered[rank - 1]
+@dataclass(slots=True)
+class _Accumulator:
+    aggregation: MetricAggregation
+    count: int = 0
+    value: int | float | None = None
+    latest_at: datetime | None = None
+    latest_digest: str | None = None
+    samples: list[int | float] | None = field(default=None)
+
+    def __post_init__(self) -> None:
+        if self.aggregation is MetricAggregation.PERCENTILE:
+            self.samples = []
+
+    def add(
+        self,
+        sample: int | float,
+        *,
+        occurred_at: datetime,
+        digest: str | None,
+    ) -> None:
+        self.count += 1
+        if self.aggregation is MetricAggregation.COUNT:
+            return
+        if self.aggregation in {
+            MetricAggregation.SUM,
+            MetricAggregation.MEAN,
+            MetricAggregation.RATE,
+        }:
+            self.value = sample if self.value is None else self.value + sample
+            return
+        if self.aggregation is MetricAggregation.MIN:
+            self.value = sample if self.value is None else min(self.value, sample)
+            return
+        if self.aggregation is MetricAggregation.MAX:
+            self.value = sample if self.value is None else max(self.value, sample)
+            return
+        if self.aggregation is MetricAggregation.LATEST:
+            if digest is None:
+                raise RuntimeError("latest aggregation requires observation digest")
+            if self.latest_at is None or (occurred_at, digest) > (
+                self.latest_at,
+                self.latest_digest or "",
+            ):
+                self.latest_at = occurred_at
+                self.latest_digest = digest
+                self.value = sample
+            return
+        if self.samples is None:
+            raise RuntimeError("percentile accumulator is invalid")
+        self.samples.append(sample)
+
+    def result(
+        self,
+        *,
+        percentile: float | None,
+        seconds: float,
+    ) -> int | float | None:
+        if self.count == 0:
+            return _empty_value(self.aggregation)
+        if self.aggregation is MetricAggregation.COUNT:
+            return self.count
+        if self.aggregation is MetricAggregation.SUM:
+            return self.value
+        if self.aggregation is MetricAggregation.MEAN:
+            if self.value is None:
+                raise RuntimeError("mean accumulator is invalid")
+            return self.value / self.count
+        if self.aggregation in {
+            MetricAggregation.MIN,
+            MetricAggregation.MAX,
+            MetricAggregation.LATEST,
+        }:
+            return self.value
+        if self.aggregation is MetricAggregation.RATE:
+            if self.value is None:
+                raise RuntimeError("rate accumulator is invalid")
+            return self.value / seconds
+        if percentile is None or self.samples is None:
+            raise RuntimeError("percentile is required")
+        ordered = sorted(self.samples)
+        rank = math.ceil(percentile * len(ordered))
+        return ordered[rank - 1]
 
 
 async def execute_query(
@@ -158,14 +211,8 @@ async def execute_query(
         if bucket_count > _MAX_BUCKETS:
             raise AIError(ErrorCode.METRIC_QUERY_LIMIT_EXCEEDED)
 
-    groups: dict[
-        tuple[str | None, ...],
-        list[tuple[int | float, datetime, str]],
-    ] = defaultdict(list)
-    bucket_groups: dict[
-        tuple[tuple[str | None, ...], int],
-        list[tuple[int | float, datetime, str]],
-    ] = defaultdict(list)
+    groups: dict[tuple[str | None, ...], _Accumulator] = {}
+    bucket_groups: dict[tuple[tuple[str | None, ...], int], _Accumulator] = {}
     actual_groups: set[tuple[str | None, ...]] = set()
     scanned_count = 0
     scanned_bytes = 0
@@ -219,17 +266,34 @@ async def execute_query(
                 if len(actual_groups) > _MAX_GROUPS:
                     raise AIError(ErrorCode.METRIC_QUERY_LIMIT_EXCEEDED)
 
-            item = (
-                sample,
-                observation.occurred_at,
-                observation_digest(namespace, observation.observation_id),
+            digest = (
+                observation_digest(namespace, observation.observation_id)
+                if aggregation is MetricAggregation.LATEST
+                else None
             )
             if query.bucket is None:
-                groups[group].append(item)
+                accumulator = groups.get(group)
+                if accumulator is None:
+                    accumulator = _Accumulator(aggregation)
+                    groups[group] = accumulator
+                accumulator.add(
+                    sample,
+                    occurred_at=observation.occurred_at,
+                    digest=digest,
+                )
             else:
                 index = int((observation.occurred_at - start) // query.bucket)
                 if 0 <= index < bucket_count:
-                    bucket_groups[(group, index)].append(item)
+                    key = (group, index)
+                    accumulator = bucket_groups.get(key)
+                    if accumulator is None:
+                        accumulator = _Accumulator(aggregation)
+                        bucket_groups[key] = accumulator
+                    accumulator.add(
+                        sample,
+                        occurred_at=observation.occurred_at,
+                        digest=digest,
+                    )
 
         next_cursor = page.next_cursor
         if next_cursor is None:
@@ -258,22 +322,18 @@ async def execute_query(
         raise AIError(ErrorCode.METRIC_QUERY_LIMIT_EXCEEDED)
 
     if query.bucket is None:
-        if not query.group_by and () not in groups:
-            groups[()] = []
         for group in result_groups:
-            samples = groups.get(group, [])
+            accumulator = groups.get(group) or _Accumulator(aggregation)
             points.append(
                 MetricPoint(
                     dimensions=tuple(zip(query.group_by, group, strict=True)),
                     bucket_start=None,
                     bucket_end=None,
-                    value=_aggregate(
-                        aggregation,
-                        samples,
+                    value=accumulator.result(
                         percentile=query.percentile,
                         seconds=window_delta.total_seconds(),
                     ),
-                    sample_count=len(samples),
+                    sample_count=accumulator.count,
                 )
             )
     else:
@@ -281,19 +341,19 @@ async def execute_query(
             for index in range(bucket_count):
                 bucket_start = start + query.bucket * index
                 bucket_end = min(end, bucket_start + query.bucket)
-                samples = bucket_groups.get((group, index), [])
+                accumulator = bucket_groups.get((group, index)) or _Accumulator(
+                    aggregation
+                )
                 points.append(
                     MetricPoint(
                         dimensions=tuple(zip(query.group_by, group, strict=True)),
                         bucket_start=bucket_start,
                         bucket_end=bucket_end,
-                        value=_aggregate(
-                            aggregation,
-                            samples,
+                        value=accumulator.result(
                             percentile=query.percentile,
                             seconds=(bucket_end - bucket_start).total_seconds(),
                         ),
-                        sample_count=len(samples),
+                        sample_count=accumulator.count,
                     )
                 )
 
