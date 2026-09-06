@@ -326,6 +326,7 @@ class MetricDefinition:
     unit: str
     default_aggregation: MetricAggregation
     query_fields: tuple[str, ...] = ()
+    description: str | None = None
 
     def __post_init__(self) -> None:
         _identifier(self.name, name="metric name")
@@ -345,6 +346,11 @@ class MetricDefinition:
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
         if self.default_aggregation not in _ALLOWED_AGGREGATIONS[self.metric_type]:
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+        if self.description is not None and not isinstance(self.description, str):
+            raise AIError(
+                ErrorCode.REQUEST_FIELD_INVALID,
+                safe_details={"field": "description"},
+            )
 
         fields = _string_tuple(
             self.query_fields,

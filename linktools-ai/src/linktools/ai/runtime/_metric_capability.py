@@ -170,11 +170,16 @@ def _provider_usage_measurements(
     response: ModelResponse,
 ) -> tuple[MetricMeasurement, ...]:
     usage = response.usage
-    return (
-        MetricMeasurement("input_tokens", 1, usage.input_tokens),
-        MetricMeasurement("output_tokens", 1, usage.output_tokens),
-        MetricMeasurement("cache_read_tokens", 1, usage.cache_read_tokens),
-        MetricMeasurement("cache_write_tokens", 1, usage.cache_write_tokens),
+    values = (
+        ("input_tokens", usage.input_tokens),
+        ("output_tokens", usage.output_tokens),
+        ("cache_read_tokens", usage.cache_read_tokens),
+        ("cache_write_tokens", usage.cache_write_tokens),
+    )
+    return tuple(
+        MetricMeasurement(name, 1, value)
+        for name, value in values
+        if value > 0
     )
 
 

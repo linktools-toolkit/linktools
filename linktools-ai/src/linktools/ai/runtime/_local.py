@@ -9,6 +9,7 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
+from time import monotonic_ns
 from typing import Protocol, TypeVar, cast
 
 from linktools.core import environ
@@ -77,6 +78,7 @@ from ._event import ExecutionDelta, LiveExecutionEventBroker
 from ._execution import CancelEffectOutcome, ExecutionStartIdentity
 from ._metrics import (
     _record_execution_terminal,
+    _record_storage_operation,
     _release_metric_execution_context,
 )
 from ._object import RuntimeObjectKeyFactory, put_runtime_object, read_runtime_object
@@ -368,6 +370,8 @@ class LocalExecutionBackend:
                 execution.tenant_id,
             )
             raise AIError(ErrorCode.AUTHORIZATION_DENIED)
+        if request.correlation != execution.correlation:
+            raise AIError(ErrorCode.IDEMPOTENCY_CONFLICT)
         binding = self._catalog.binding(execution.binding_digest)
         if (
             request.mode != execution.mode
@@ -1477,7 +1481,7 @@ class LocalExecutionBackend:
                 if current_run is not None:
                     current_attempt = await self._load_repository_instruction_attempt_provenance(
                         archive,
-                        current_run,
+                        run=current_run,
                         execution=execution,
                         sequence=captured_upper_sequence,
                     )
@@ -3411,6 +3415,11 @@ class LocalExecutionBackend:
             recovery_relaunch_ids = set()
         exact_recovery_context = execution_id in recovery_relaunch_ids
         recovery_relaunch_ids.discard(execution_id)
+        metric_recorder = getattr(self, "_metric_recorder", None)
+        metric_id = uuid.uuid4().hex if metric_recorder is not None else None
+        metric_started = monotonic_ns() if metric_id is not None else None
+        metric_status = "FAILED"
+        metric_error_code: str | None = None
         claimed_from_admitted = False
         try:
             current = await self._execution.executions.get(execution_id, tenant_id=original.tenant_id)
@@ -3828,6 +3837,8 @@ class LocalExecutionBackend:
                                 execution_id,
                             )
                         raise _secondary_execution_error(commit_error, error) from error
+                metric_status = current.status.value
+                metric_error_code = current.error_code
                 _logger.exception(
                     "local execution failed: execution=%s",
                     execution_id,
@@ -3837,6 +3848,7 @@ class LocalExecutionBackend:
                 if not self._recovery_enabled or checkpoint is None:
                     raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
                 await self._commit_approval_pause(current, result)
+                metric_status = "SUCCEEDED"
                 return
             committed = await self._commit_success(
                 current,
@@ -3845,6 +3857,12 @@ class LocalExecutionBackend:
                 result.usage,
                 run_id,
             )
+            metric_status = (
+                "CANCELLED"
+                if committed.status is ExecutionStatus.CANCELLING
+                else committed.status.value
+            )
+            metric_error_code = committed.error_code
             _logger.debug("local execution completed: execution=%s run=%s", execution_id, run_id)
         except asyncio.CancelledError:
             current = await self._execution.executions.get(
@@ -3852,6 +3870,7 @@ class LocalExecutionBackend:
                 tenant_id=original.tenant_id,
             )
             if current is not None and current.status is ExecutionStatus.FINALIZING:
+                metric_status = "CANCELLED"
                 raise
             if current is not None and current.status is ExecutionStatus.CANCELLING:
                 self._worker_shutdown_set().discard(execution_id)
@@ -3880,13 +3899,39 @@ class LocalExecutionBackend:
                     StopReason.CANCELLED,
                     run_id=run_id,
                 )
+            if current is not None and current.status in {
+                ExecutionStatus.SUCCEEDED,
+                ExecutionStatus.FAILED,
+                ExecutionStatus.CANCELLED,
+            }:
+                metric_status = current.status.value
+                metric_error_code = current.error_code
+            else:
+                metric_status = "CANCELLED"
             raise
-        except Exception:
+        except Exception as error:
+            metric_status = "FAILED"
+            metric_error_code = _execution_error_code(error).value
             _logger.exception(
                 "local execution infrastructure failure: execution=%s",
                 execution_id,
             )
             raise
+        finally:
+            _record_storage_operation(
+                metric_recorder,
+                observation_id=metric_id,
+                started_at_ns=metric_started,
+                source_namespace=self._namespace,
+                tenant_id=original.tenant_id,
+                execution_id=execution_id,
+                session_id=original.session_id,
+                correlation=original.correlation,
+                status=metric_status,
+                error_code=metric_error_code,
+                domain="execution",
+                target="runtime",
+            )
 
     async def _finish_checkpoint(self, checkpoint: RecoveryCheckpoint) -> None:
         if checkpoint.state is RecoveryCheckpointState.COMPLETED:

@@ -309,6 +309,7 @@ _AGENT_FIELDS = (*_CANONICAL, "agent_id")
 _EXECUTION_FIELDS = (*_CANONICAL, "agent_id", "lineage_kind")
 _TASK_ATTEMPT_FIELDS = _CANONICAL
 _TASK_GRAPH_FIELDS = _CANONICAL
+_STORAGE_FIELDS = (*_CANONICAL, "domain", "target")
 
 _BUILTIN_DEFINITIONS = (
     _count("linktools.model.request.count", "linktools.model.request", _MODEL_FIELDS),
@@ -396,6 +397,23 @@ _BUILTIN_DEFINITIONS = (
         "status",
         ("CANCELLED",),
         _TASK_GRAPH_FIELDS,
+    ),
+    _count(
+        "linktools.storage.operation.count",
+        "linktools.storage.operation",
+        _STORAGE_FIELDS,
+    ),
+    _latency(
+        "linktools.storage.operation.latency",
+        "linktools.storage.operation",
+        _STORAGE_FIELDS,
+    ),
+    _ratio(
+        "linktools.storage.operation.failure_ratio",
+        "linktools.storage.operation",
+        "status",
+        ("FAILED",),
+        _STORAGE_FIELDS,
     ),
 )
 _BUILTINS = {definition.name: definition for definition in _BUILTIN_DEFINITIONS}

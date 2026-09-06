@@ -125,6 +125,34 @@ async def test_bucket_query_limit_fails_explicitly_before_scan() -> None:
 
 
 @pytest.mark.asyncio
+async def test_bucket_larger_than_window_returns_one_partial_bucket() -> None:
+    metrics = Metrics.in_memory(namespace="bucket-partial")
+    counter = _definition(
+        "business.bucket.partial",
+        MetricType.COUNTER,
+        MetricAggregation.SUM,
+    )
+    await metrics.define(counter)
+    start = datetime(2026, 9, 5, 5, 0, tzinfo=timezone.utc)
+    end = start + timedelta(minutes=5)
+
+    result = await metrics.query(
+        MetricQuery(
+            counter.name,
+            MetricWindow.between(start, end),
+            bucket=timedelta(minutes=10),
+        )
+    )
+
+    assert len(result.points) == 1
+    point = result.points[0]
+    assert point.bucket_start == start
+    assert point.bucket_end == end
+    assert point.value == 0
+    assert point.sample_count == 0
+
+
+@pytest.mark.asyncio
 async def test_same_observation_id_is_isolated_by_metrics_namespace() -> None:
     store = InMemoryMetricStore()
     left = Metrics.from_store(store, namespace="namespace-left")

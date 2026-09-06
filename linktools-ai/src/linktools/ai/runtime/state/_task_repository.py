@@ -2061,6 +2061,8 @@ class TaskAdmissionRepositoryImpl(RepositoryBase):
             node_records,
             stored_operation=stored_operation,
         )
+        if existing.correlation != admission.correlation:
+            raise AIError(ErrorCode.IDEMPOTENCY_CONFLICT)
         if existing != admission and not _same_task_admission_contract(existing, admission):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         return await self._repair_aggregate_projection(
@@ -2232,6 +2234,11 @@ class TaskAdmissionRepositoryImpl(RepositoryBase):
                 node_records,
                 stored_operation=stored_operation,
             )
+            if existing.correlation != admission.correlation:
+                return CommitObservation(
+                    DurableCommitState.NOT_COMMITTED,
+                    error=AIError(ErrorCode.IDEMPOTENCY_CONFLICT),
+                )
             if existing != admission and not _same_task_admission_contract(existing, admission):
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             return CommitObservation(DurableCommitState.COMMITTED, view)

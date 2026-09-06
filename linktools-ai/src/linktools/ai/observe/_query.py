@@ -146,8 +146,6 @@ async def execute_query(
     window_delta = end - start
     bucket_count = 1
     if query.bucket is not None:
-        if query.bucket > window_delta:
-            raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
         bucket_count = math.ceil(window_delta / query.bucket)
         if bucket_count > _MAX_BUCKETS:
             raise AIError(ErrorCode.METRIC_QUERY_LIMIT_EXCEEDED)

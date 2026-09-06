@@ -4,6 +4,7 @@
 
 import pytest
 from linktools.ai.core import Principal, TaskStatus
+from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.runtime import RuntimeState
 from linktools.ai.runtime.state._codec import (
     _decode_enveloped_domain,
@@ -87,7 +88,7 @@ async def test_task_admission_correlation_is_durable_but_not_semantic_identity()
 
 
 @pytest.mark.asyncio
-async def test_task_admission_correlation_drift_reuses_first_durable_value() -> None:
+async def test_task_admission_correlation_drift_conflicts() -> None:
     state = RuntimeState.in_memory()
     await state.initialize(namespace="task-correlation-conflict", tenant_id="tenant")
     try:
@@ -100,10 +101,11 @@ async def test_task_admission_correlation_drift_reuses_first_durable_value() -> 
         )
         assert original.request_digest == drifted.request_digest
 
-        first_view = await state.task.admissions.admit(original, graph)
-        replay_view = await state.task.admissions.admit(drifted, graph)
+        await state.task.admissions.admit(original, graph)
+        with pytest.raises(AIError) as raised:
+            await state.task.admissions.admit(drifted, graph)
 
-        assert replay_view == first_view
+        assert raised.value.code is ErrorCode.IDEMPOTENCY_CONFLICT
         stored = await state.task.admissions.get(graph.graph_id, tenant_id="tenant")
         assert stored == original
         assert dict(stored.correlation) == {"trace_id": "trace-a"}
@@ -112,7 +114,7 @@ async def test_task_admission_correlation_drift_reuses_first_durable_value() -> 
 
 
 @pytest.mark.asyncio
-async def test_task_service_replay_arms_scheduler_from_first_durable_correlation() -> None:
+async def test_task_service_replay_rejects_correlation_drift() -> None:
     state = RuntimeState.in_memory()
     await state.initialize(namespace="task-correlation-service-replay", tenant_id="tenant")
     launcher = _CaptureLauncher()
@@ -128,12 +130,13 @@ async def test_task_service_replay_arms_scheduler_from_first_durable_correlation
             launcher,
         )
 
-        await service.run_graph(
-            _request(graph, correlation={"trace_id": "trace-b"})
-        )
+        with pytest.raises(AIError) as raised:
+            await service.run_graph(
+                _request(graph, correlation={"trace_id": "trace-b"})
+            )
 
-        assert launcher.started is not None
-        assert dict(launcher.started.correlation) == {"trace_id": "trace-a"}
+        assert raised.value.code is ErrorCode.IDEMPOTENCY_CONFLICT
+        assert launcher.started is None
     finally:
         await state.close()
 

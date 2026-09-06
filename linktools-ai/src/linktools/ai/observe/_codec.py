@@ -32,7 +32,7 @@ def _source_payload(source: MetricSource) -> dict[str, object]:
 
 
 def _definition_payload(definition: MetricDefinition) -> dict[str, object]:
-    return {
+    payload: dict[str, object] = {
         "name": definition.name,
         "revision": definition.revision,
         "observation_kind": definition.observation_kind,
@@ -42,10 +42,14 @@ def _definition_payload(definition: MetricDefinition) -> dict[str, object]:
         "default_aggregation": definition.default_aggregation.value,
         "query_fields": list(definition.query_fields),
     }
+    if definition.description is not None:
+        payload["description"] = definition.description
+    return payload
 
 
 def _definition_semantic_payload(definition: MetricDefinition) -> dict[str, object]:
     payload = _definition_payload(definition)
+    payload.pop("description", None)
     payload["query_fields"] = sorted(definition.query_fields)
     return payload
 
@@ -207,6 +211,9 @@ def decode_definition_envelope(
             ),
             query_fields=_text_tuple(
                 data.get("query_fields", []), field="query_fields"
+            ),
+            description=_optional_text(
+                data.get("description"), field="description"
             ),
         )
     except AIError as error:

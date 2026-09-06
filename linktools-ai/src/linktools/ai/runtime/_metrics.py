@@ -8,7 +8,7 @@ import asyncio
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
-from time import monotonic
+from time import monotonic, monotonic_ns
 
 from linktools.core import environ
 
@@ -383,7 +383,6 @@ class _RuntimeMetricBuffer(MetricRecorder):
             self._warn("runtime metric writer failed")
 
 
-
 def _bind_metric_execution_context(
     recorder: MetricRecorder,
     execution_id: str,
@@ -469,6 +468,45 @@ def _record_execution_terminal(
             },
             measurements=tuple(measurements),
             occurred_at=result.result.created_at,
+        ),
+    )
+
+
+def _record_storage_operation(
+    recorder: MetricRecorder | None,
+    *,
+    observation_id: str | None,
+    started_at_ns: int | None,
+    source_namespace: str,
+    tenant_id: str,
+    execution_id: str,
+    session_id: str | None,
+    correlation: CorrelationData,
+    status: str,
+    error_code: str | None,
+    domain: str,
+    target: str,
+) -> None:
+    if recorder is None or observation_id is None or started_at_ns is None:
+        return
+    _try_record(
+        recorder,
+        lambda: _observation(
+            observation_id=observation_id,
+            kind="linktools.storage.operation",
+            source_namespace=source_namespace,
+            tenant_id=tenant_id,
+            status=status,
+            error_code=error_code,
+            correlation=_metric_correlation(
+                correlation,
+                execution_id=execution_id,
+                session_id=session_id,
+            ),
+            dimensions={"domain": domain, "target": target},
+            measurements=(
+                _measurement("latency_ns", monotonic_ns() - started_at_ns),
+            ),
         ),
     )
 
