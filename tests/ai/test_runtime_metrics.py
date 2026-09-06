@@ -154,6 +154,14 @@ class _CommitUnknownOnceMetricStore(_FailingMetricStore):
         if len(self.batches) == 1:
             raise AIError(ErrorCode.STORAGE_COMMIT_UNKNOWN)
 
+    async def get_observation(
+        self,
+        namespace: str,
+        observation_id: str,
+    ) -> None:
+        del namespace, observation_id
+        return None
+
 
 def _write_default_agent(root: Path) -> None:
     path = root / ".linktools" / "agents" / "default"
@@ -563,7 +571,7 @@ async def test_task_commit_unknown_readback_projects_durable_terminal_history() 
     await projector.close()
 
     assert repository.complete_calls == 1
-    assert repository.list_event_calls == 2
+    assert repository.list_event_calls == 1
     attempts = tuple(
         observation
         for observation in recorder.observations
