@@ -159,7 +159,7 @@ class _RuntimeModelMetricCapability(AbstractCapability[AgentContext[object]]):
                 status=status,
                 error_code=error_code,
                 correlation=_metric_correlation(
-                    None if run_context is None else run_context.context,
+                    None if run_context is None else run_context.correlation,
                     execution_id=self._execution_id,
                     session_id=self._session_id,
                     step_run_id=self._step_run_id,

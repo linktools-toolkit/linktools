@@ -465,6 +465,23 @@ class LocalExecutionBackend:
                 continue
             return value, cancellation
 
+    def _record_committed_terminal(
+        self,
+        committed: ExecutionTerminalCommitResult,
+        *,
+        session_id: str | None,
+    ) -> None:
+        _record_execution_terminal(
+            self._metric_recorder,
+            source_namespace=self._namespace,
+            result=committed,
+            session_id=session_id,
+        )
+        _release_metric_execution_context(
+            self._metric_recorder,
+            committed.execution.execution_id,
+        )
+
     async def _commit_terminal_checkpoint_owned(
         self,
         commit: ExecutionTerminalCommit,
@@ -493,13 +510,7 @@ class LocalExecutionBackend:
             durable_sequence=committed.execution.event_sequence,
         )
         self._live_broker.complete(execution_id)
-        _record_execution_terminal(
-            self._metric_recorder,
-            source_namespace=self._namespace,
-            result=committed,
-            session_id=session_id,
-        )
-        _release_metric_execution_context(self._metric_recorder, execution_id)
+        self._record_committed_terminal(committed, session_id=session_id)
         return committed
 
     async def commit_terminal_checkpoint(
@@ -4965,6 +4976,7 @@ class LocalExecutionBackend:
             audit_events=pending_audit,
             background_tasks=self._execution_task_set(current.execution_id),
         )
+        self._record_committed_terminal(committed, session_id=current.session_id)
         self._pending_audit_events.pop(current.execution_id, None)
         return committed
 
