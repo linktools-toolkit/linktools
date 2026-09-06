@@ -1,0 +1,151 @@
+name: AI observability review fixes
+
+on:
+  push:
+    branches:
+      - feat/ai-metrics-observability
+
+permissions:
+  contents: write
+
+env:
+  PIP_DISABLE_PIP_VERSION_CHECK: "1"
+  PYTHONUNBUFFERED: "1"
+
+jobs:
+  fix:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: feat/ai-metrics-observability
+          fetch-depth: 0
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.10'
+      - name: Apply P1 review fixes
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          def replace(path: str, old: str, new: str) -> None:
+              target = Path(path)
+              text = target.read_text()
+              if old not in text:
+                  raise SystemExit(f"pattern not found in {path}: {old[:120]!r}")
+              target.write_text(text.replace(old, new, 1))
+
+          service = "linktools-ai/src/linktools/ai/task/_service_impl.py"
+          replace(
+              service,
+              '''        view = await self._persistence.admissions.admit(admission, request.graph)\n        if _terminal(view.status):\n            await self._observe_metric_history(view, tenant_id=tenant_id)\n        else:\n            await self._arm_graph(admission.bind(request.graph))\n        return await self._result(view, tenant_id)\n''',
+              '''        view = await self._persistence.admissions.admit(admission, request.graph)\n        durable_admission = await self._persistence.admissions.get(\n            graph_id,\n            tenant_id=tenant_id,\n        )\n        if durable_admission is None:\n            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)\n        if _terminal(view.status):\n            await self._observe_metric_history(view, tenant_id=tenant_id)\n        else:\n            await self._arm_graph(durable_admission.bind(request.graph))\n        return await self._result(view, tenant_id)\n''',
+          )
+
+          metric_capability = "linktools-ai/src/linktools/ai/runtime/_metric_capability.py"
+          replace(
+              metric_capability,
+              'from ._metric_id import _model_observation_id\n',
+              '',
+          )
+          replace(
+              metric_capability,
+              '        self._attempts: dict[int, int] = {}\n',
+              '',
+          )
+          replace(
+              metric_capability,
+              '''        run_context = None if ctx is None else ctx.deps\n        if ctx is None:\n            attempt_id = uuid.uuid4().hex\n        else:\n            attempt_index = self._attempts.get(ctx.run_step, 0) + 1\n            self._attempts[ctx.run_step] = attempt_index\n            attempt_id = _model_observation_id(\n                self._source_namespace,\n                self._tenant_id,\n                self._execution_id,\n                self._step_run_id,\n                ctx.run_step,\n                attempt_index,\n            )\n        started = monotonic_ns()\n''',
+              '''        run_context = None if ctx is None else ctx.deps\n        attempt_id = uuid.uuid4().hex\n        started = monotonic_ns()\n''',
+          )
+
+          capabilities = "linktools-ai/src/linktools/ai/runtime/_capabilities.py"
+          replace(
+              capabilities,
+              'from ._metric_id import _model_observation_id, _tool_observation_id\n',
+              'from ._metric_id import _tool_observation_id\n',
+          )
+          replace(
+              capabilities,
+              '''    _model_attempts: dict[int, int] = field(\n        default_factory=dict,\n        init=False,\n        repr=False,\n        compare=False,\n    )\n    _model_started: dict[int, tuple[int, int]] = field(\n        default_factory=dict,\n        init=False,\n        repr=False,\n        compare=False,\n    )\n''',
+              '',
+          )
+          text = Path(capabilities).read_text()
+          start = text.index('    def _model_metric_metadata(\n')
+          end = text.index('    async def after_model_request(\n', start)
+          text = text[:start] + text[end:]
+          Path(capabilities).write_text(text)
+          replace(
+              capabilities,
+              '        metadata = self._model_metric_metadata(ctx, terminal=True)\n',
+              '        metadata = dict(self.metadata)\n',
+          )
+          text = Path(capabilities).read_text()
+          marker = '    async def on_model_request_error(\n'
+          if marker in text:
+              start = text.index(marker)
+              end = text.index('    async def before_tool_execute(\n', start)
+              text = text[:start] + text[end:]
+              Path(capabilities).write_text(text)
+
+          metric_id = "linktools-ai/src/linktools/ai/runtime/_metric_id.py"
+          text = Path(metric_id).read_text()
+          start = text.index('def _model_observation_id(\n')
+          end = text.index('def _tool_observation_id(\n', start)
+          Path(metric_id).write_text(text[:start] + text[end:])
+
+          closure = "tests/ai/test_observability_closure.py"
+          replace(
+              closure,
+              'from linktools.ai.runtime._metric_id import _model_observation_id, _tool_observation_id\n',
+              'from linktools.ai.runtime._metric_id import _tool_observation_id\n',
+          )
+          text = Path(closure).read_text()
+          start = text.index('def test_model_and_tool_observation_ids_are_replay_stable() -> None:\n')
+          replacement = '''def test_tool_observation_ids_are_replay_stable() -> None:\n    tool = _tool_observation_id(\n        "workspace",\n        "tenant",\n        "execution",\n        "step-run",\n        "call-1",\n    )\n    assert tool == _tool_observation_id(\n        "workspace",\n        "tenant",\n        "execution",\n        "step-run",\n        "call-1",\n    )\n    assert tool != _tool_observation_id(\n        "workspace",\n        "tenant",\n        "execution",\n        "step-run",\n        "call-2",\n    )\n'''
+          Path(closure).write_text(text[:start] + replacement)
+
+          task_test = "tests/ai/test_task_context_durability.py"
+          replace(
+              task_test,
+              '''class _CaptureLauncher:\n    def __init__(self) -> None:\n        self.cancelled: TaskGraphLaunch | None = None\n\n    async def start(self, launch: TaskGraphLaunch) -> TaskGraphHandle:\n        raise AssertionError(f"unexpected scheduler start for {launch.graph.graph_id}")\n''',
+              '''class _CaptureLauncher:\n    def __init__(self) -> None:\n        self.started: TaskGraphLaunch | None = None\n        self.cancelled: TaskGraphLaunch | None = None\n\n    async def start(self, launch: TaskGraphLaunch) -> TaskGraphHandle:\n        self.started = launch\n        return TaskGraphHandle(\n            launch.graph.graph_id,\n            f"capture:{launch.principal.tenant_id}:{launch.graph.graph_id}",\n        )\n''',
+          )
+          text = Path(task_test).read_text()
+          insertion = '''\n\n@pytest.mark.asyncio\nasync def test_task_service_replay_arms_scheduler_from_first_durable_correlation() -> None:\n    state = RuntimeState.in_memory()\n    await state.initialize(namespace="task-correlation-service-replay", tenant_id="tenant")\n    launcher = _CaptureLauncher()\n    try:\n        graph = TaskGraph("task-correlation-service-replay", (TaskNode("node"),))\n        original = TaskGraphAdmission.from_request(\n            _request(graph, correlation={"trace_id": "trace-a"})\n        )\n        await state.task.admissions.admit(original, graph)\n        service = DefaultTaskService(\n            state.task,\n            _AllowAuthorization(),\n            launcher,\n        )\n\n        await service.run_graph(\n            _request(graph, correlation={"trace_id": "trace-b"})\n        )\n\n        assert launcher.started is not None\n        assert dict(launcher.started.correlation) == {"trace_id": "trace-a"}\n    finally:\n        await state.close()\n'''
+          anchor = '\n\n@pytest.mark.asyncio\nasync def test_cancel_cleanup_restores_durable_submission_principal_and_correlation() -> None:\n'
+          if anchor not in text:
+              raise SystemExit("task test insertion anchor missing")
+          Path(task_test).write_text(text.replace(anchor, insertion + anchor, 1))
+
+          new_test = Path("tests/ai/test_runtime_metric_attempt_identity.py")
+          new_test.write_text('''#!/usr/bin/env python3\n# -*- coding: utf-8 -*-\n"""Actual model attempts keep unique metric identities across re-execution."""\n\nimport pytest\nfrom linktools.ai.observe import Observation\nfrom linktools.ai.runtime._metric_capability import _RuntimeModelMetricCapability\nfrom pydantic_ai.messages import ModelResponse\n\n\nclass _Recorder:\n    def __init__(self) -> None:\n        self.observations: list[Observation] = []\n\n    def try_record(self, observation: Observation) -> bool:\n        self.observations.append(observation)\n        return True\n\n\n@pytest.mark.asyncio\nasync def test_actual_model_attempts_never_reuse_observation_identity() -> None:\n    recorder = _Recorder()\n    capability = _RuntimeModelMetricCapability(\n        recorder,\n        source_namespace="workspace",\n        tenant_id="tenant",\n        execution_id="execution",\n        session_id=None,\n        step_run_id="durable-step-run",\n        agent_id="agent",\n        provider="test",\n        model_identity="test:model",\n        route_id="default",\n    )\n\n    async def handler(_request: object) -> ModelResponse:\n        return ModelResponse(parts=())\n\n    await capability.wrap_model_request(\n        None,\n        request_context=object(),  # type: ignore[arg-type]\n        handler=handler,  # type: ignore[arg-type]\n    )\n    await capability.wrap_model_request(\n        None,\n        request_context=object(),  # type: ignore[arg-type]\n        handler=handler,  # type: ignore[arg-type]\n    )\n\n    assert len(recorder.observations) == 2\n    assert recorder.observations[0].observation_id != recorder.observations[1].observation_id\n''')
+          PY
+      - name: Install tooling
+        run: |
+          python -m pip install --quiet --upgrade pip
+          python -m pip install --quiet -U -r requirements.txt
+          python manage.py install --editable --quiet
+      - name: Run focused tests
+        run: |
+          python -m pytest -q \
+            tests/ai/test_task_context_durability.py \
+            tests/ai/test_observability_closure.py \
+            tests/ai/test_runtime_metric_attempt_identity.py \
+            tests/ai/test_runtime_metrics.py \
+            tests/ai/test_model_usage_trace.py
+      - name: Run linktools-ai gate
+        run: python manage.py check linktools-ai
+      - name: Commit validated fixes
+        shell: bash
+        run: |
+          if git diff --quiet -- linktools-ai tests/ai; then
+            echo "No validated changes to commit"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add linktools-ai tests/ai
+          git commit -m "fix(ai): harden observability replay semantics"
+          git push origin HEAD:feat/ai-metrics-observability
