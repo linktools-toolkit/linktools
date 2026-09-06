@@ -1,0 +1,88 @@
+name: AI observability review fixes v3
+
+on:
+  push:
+    branches:
+      - feat/ai-metrics-observability
+
+permissions:
+  contents: write
+
+env:
+  PIP_DISABLE_PIP_VERSION_CHECK: "1"
+  PYTHONUNBUFFERED: "1"
+
+jobs:
+  fix:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: feat/ai-metrics-observability
+          fetch-depth: 0
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.10'
+      - name: Apply final P2 patch
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import textwrap
+
+          catalog = Path("linktools-ai/src/linktools/ai/observe/_metrics.py")
+          if "linktools.storage.operation.count" not in catalog.read_text():
+              print("P2 source changes already applied")
+          else:
+              workflow = Path(".github/workflows/ai-observability-fix2.yml").read_text()
+              marker = "          python - <<'PY'\n"
+              start = workflow.index(marker) + len(marker)
+              end = workflow.index("\n          PY", start)
+              script = textwrap.dedent(workflow[start:end])
+              tail_start = script.index(
+                  '    runtime_metrics_test = "tests/ai/test_runtime_metrics.py"'
+              )
+              tail = (
+                  '    runtime_metrics_test = "tests/ai/test_runtime_metrics.py"\n'
+                  '    target = Path(runtime_metrics_test)\n'
+                  '    text = target.read_text()\n'
+                  '    launcher_start = text.index("    launcher = LocalTaskGraphLauncher(\\n")\n'
+                  '    projector_arg = text.index("        metric_projector=projector,\\n", launcher_start)\n'
+                  '    text = text[:projector_arg] + text[projector_arg + len("        metric_projector=projector,\\n"):]\n'
+                  '    launcher_end = text.index("    )", launcher_start) + len("    )")\n'
+                  '    text = text[:launcher_end] + "\\n    launcher._bind_metric_projector(projector)" + text[launcher_end:]\n'
+                  '    target.write_text(text)\n'
+              )
+              script = script[:tail_start] + tail
+              exec(compile(script, "<p2-review-fix-v3>", "exec"), {})
+          PY
+      - name: Install tooling
+        run: |
+          python -m pip install --quiet --upgrade pip
+          python -m pip install --quiet -U -r requirements.txt
+          python manage.py install --editable --quiet
+      - name: Run focused tests
+        run: |
+          python -m pytest -q \
+            tests/ai/test_runtime_metrics.py \
+            tests/ai/test_task_metric_projector.py \
+            tests/ai/test_metrics_sqlite_interop.py \
+            tests/ai/test_metrics_sqlite_validation.py \
+            tests/ai/test_metrics.py \
+            tests/ai/test_observability_closure.py \
+            tests/ai/test_runtime_metric_attempt_identity.py \
+            tests/ai/test_task_context_durability.py
+      - name: Run linktools-ai gate
+        run: python manage.py check linktools-ai
+      - name: Commit validated P2 fixes
+        shell: bash
+        run: |
+          if git diff --quiet -- linktools-ai tests/ai; then
+            echo "No source changes to commit"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add linktools-ai tests/ai
+          git commit -m "fix(ai): tighten metrics ownership and I/O"
+          git push origin HEAD:feat/ai-metrics-observability
