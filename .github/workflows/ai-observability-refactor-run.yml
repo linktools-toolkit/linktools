@@ -60,10 +60,11 @@ jobs:
 
           path = Path("tests/ai/test_task_sqlite_cas_convergence.py")
           text = path.read_text()
-          import_old = "    TaskNode,\n    TaskNodeView,\n"
-          import_new = "    TaskNode,\n    TaskNodeInvocation,\n    TaskNodeView,\n"
-          assert text.count(import_old) == 1
-          text = text.replace(import_old, import_new, 1)
+          if "    TaskNodeInvocation,\n" not in text:
+              import_old = "    TaskNode,\n    TaskNodeView,\n"
+              import_new = "    TaskNode,\n    TaskNodeInvocation,\n    TaskNodeView,\n"
+              assert text.count(import_old) == 1
+              text = text.replace(import_old, import_new, 1)
 
           run_old = '''async def _digest_run(\n    self: RuntimeTaskNodeRunner,\n    node: TaskNode,\n    *,\n    graph_id: str,\n    principal: Principal,\n    context: Mapping[str, str | int],\n    dependency_results: Mapping[str, TaskDependencyResult],\n    control: TaskNodeRunControl,\n) -> TaskNodeRunResult:\n    del self, principal, context, dependency_results, control\n    await asyncio.sleep(0)\n    payload = StoredPayload.inline_json({"graph_id": graph_id, "node_id": node.node_id})\n    return TaskNodeRunResult(payload.digest, result_payload=payload)\n'''
           run_new = '''async def _digest_run(\n    self: RuntimeTaskNodeRunner,\n    invocation: TaskNodeInvocation,\n    *,\n    control: TaskNodeRunControl,\n) -> TaskNodeRunResult:\n    del self, control\n    await asyncio.sleep(0)\n    payload = StoredPayload.inline_json(\n        {"graph_id": invocation.graph_id, "node_id": invocation.node.node_id}\n    )\n    return TaskNodeRunResult(payload.digest, result_payload=payload)\n'''
