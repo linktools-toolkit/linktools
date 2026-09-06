@@ -66,10 +66,10 @@ class TaskNodeContext(Generic[AppT]):
         if not isinstance(self.idempotency_key, str) or not self.idempotency_key.strip():
             raise ValueError("task idempotency key is required")
         if not isinstance(self.input, Mapping):
-            raise TypeError("task node correlation input must be a mapping")
+            raise TypeError("task node input must be a mapping")
         normalized_input = normalize_json_value(dict(self.input))
         if not isinstance(normalized_input, dict):
-            raise TypeError("task node correlation input must be a mapping")
+            raise TypeError("task node input must be a mapping")
         dependencies = dict(self.dependencies)
         if any(
             not isinstance(key, str)
