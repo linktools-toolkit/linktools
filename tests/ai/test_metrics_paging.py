@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Metric query paging and idempotent commit-unknown replay regressions."""
+"""Metric query paging and idempotent commit-unknown regressions."""
 
 from __future__ import annotations
 
@@ -90,7 +90,7 @@ async def test_query_scans_multiple_store_pages_without_truncation() -> None:
     assert result.points[0].sample_count == 600
 
 
-async def test_commit_unknown_replays_the_exact_same_observation_batch_once() -> None:
+async def test_commit_unknown_resolves_committed_batch_from_readback() -> None:
     store = _CommitUnknownOnceStore()
     metrics = Metrics.from_store(store, namespace="commit-unknown")
     occurred_at = datetime(2026, 9, 5, tzinfo=timezone.utc)
@@ -125,8 +125,7 @@ async def test_commit_unknown_replays_the_exact_same_observation_batch_once() ->
 
     await metrics.record_observations(observations)
 
-    assert len(store.calls) == 2
-    assert store.calls[0] is store.calls[1]
+    assert len(store.calls) == 1
     assert tuple(item.observation_id for item in store.calls[0]) == (
         "stable-a",
         "stable-b",
