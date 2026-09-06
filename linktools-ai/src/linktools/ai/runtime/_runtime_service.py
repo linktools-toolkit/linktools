@@ -28,10 +28,10 @@ from ..core import (
     SessionStatus,
     TaskStatus,
     ThinkingValue,
-    merge_run_context,
     normalize_execution_mode,
     normalize_run_context,
     normalize_thinking,
+    overlay_run_context,
     validate_agent_id,
     validate_idempotency_key,
     validate_memory_scope,
@@ -54,6 +54,7 @@ from ..task import (
 )
 from ..workspace import Workspace
 from ._agent import Agent, Execution, Session
+from ._context import RuntimeContext
 from ._input import UserPromptTransport
 from .service_api import (
     ApprovalService,
@@ -116,12 +117,12 @@ def _portable_context(value: "Mapping[str, object] | None") -> RunContextData:
         raise AIError(ErrorCode.REQUEST_FIELD_INVALID) from error
 
 
-def _merge_portable_context(
+def _overlay_portable_context(
     base: Mapping[str, object],
     overlay: "Mapping[str, object] | None",
 ) -> RunContextData:
     try:
-        return merge_run_context(base, overlay)
+        return overlay_run_context(base, overlay)
     except (TypeError, ValueError) as error:
         raise AIError(ErrorCode.REQUEST_FIELD_INVALID) from error
 
@@ -142,9 +143,8 @@ class Runtime(Generic[AppT]):
         artifact: ArtifactService,
         *,
         workspace: Workspace,
-        app: AppT,
+        context: RuntimeContext[AppT],
         tenant_id: str = "default",
-        context: "Mapping[str, object] | None" = None,
         close_callback: "Callable[[], Awaitable[None]] | None" = None,
         local_coordinator: "_LocalRuntimeCoordinatorPort | None" = None,
         task_node_runtime: "_TaskNodeRuntimePort | None" = None,
@@ -165,6 +165,8 @@ class Runtime(Generic[AppT]):
             )
         ):
             raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+        if not isinstance(context, RuntimeContext):
+            raise TypeError("context must be RuntimeContext")
         self._catalog = catalog
         self._compiler = compiler
         self.execution = execution
@@ -175,9 +177,8 @@ class Runtime(Generic[AppT]):
         self.event = event
         self.artifact = artifact
         self._workspace = workspace
-        self._app = app
+        self._runtime_context = context
         self._tenant_id = validate_tenant_id(tenant_id)
-        self._context = _portable_context(context)
         self._default_principal = Principal(
             principal_id="runtime",
             tenant_id=self._tenant_id,
@@ -197,12 +198,11 @@ class Runtime(Generic[AppT]):
         cls,
         workspace: Workspace,
         *,
-        app: None = None,
+        context: None = None,
         tenant_id: "str | None" = None,
         models: "ModelRegistry | None" = None,
         state: "RuntimeState | None" = None,
         capabilities: "Sequence[CapabilityGroup[None]]" = (),
-        context: "Mapping[str, object] | None" = None,
         metrics: "Metrics | None" = None,
     ) -> "AbstractAsyncContextManager[Runtime[None]]": ...
 
@@ -212,12 +212,11 @@ class Runtime(Generic[AppT]):
         cls,
         workspace: Workspace,
         *,
-        app: AppT,
+        context: RuntimeContext[AppT],
         tenant_id: "str | None" = None,
         models: "ModelRegistry | None" = None,
         state: "RuntimeState | None" = None,
         capabilities: "Sequence[CapabilityGroup[AppT]]" = (),
-        context: "Mapping[str, object] | None" = None,
         metrics: "Metrics | None" = None,
     ) -> "AbstractAsyncContextManager[Runtime[AppT]]": ...
 
@@ -226,22 +225,23 @@ class Runtime(Generic[AppT]):
         cls,
         workspace: Workspace,
         *,
-        app: object = None,
+        context: "RuntimeContext[object] | None" = None,
         tenant_id: "str | None" = None,
         models: "ModelRegistry | None" = None,
         state: "RuntimeState | None" = None,
         capabilities: "Sequence[CapabilityGroup[object]]" = (),
-        context: "Mapping[str, object] | None" = None,
         metrics: "Metrics | None" = None,
     ) -> "AbstractAsyncContextManager[Runtime[object]]":
+        root_context = RuntimeContext(None) if context is None else context
+        if not isinstance(root_context, RuntimeContext):
+            raise TypeError("context must be RuntimeContext")
         return _open_runtime(
             workspace,
-            app=app,
+            context=root_context,
             tenant_id=tenant_id,
             models=models,
             state=state,
             capabilities=capabilities,
-            context=context,
             metrics=metrics,
         )
 
@@ -258,12 +258,16 @@ class Runtime(Generic[AppT]):
         return self._workspace
 
     @property
+    def runtime_context(self) -> RuntimeContext[AppT]:
+        return self._runtime_context
+
+    @property
     def app(self) -> AppT:
-        return self._app
+        return self._runtime_context.app
 
     @property
     def context(self) -> RunContextData:
-        return self._context
+        return self._runtime_context.values
 
     def agent(self, agent_id: str = "default") -> "Agent[AppT]":
         """Resolve one frozen root Agent by id."""
@@ -323,7 +327,7 @@ class Runtime(Generic[AppT]):
     ) -> "Execution[AppT]":
         self._ensure_open()
         resolved_principal = self._resolve_principal(principal)
-        effective_context = _merge_portable_context(self._context, context)
+        effective_context = _overlay_portable_context(self.context, context)
         validate_user_prompt(str(user_prompt))
         definition = self._catalog.definition(agent_digest)
         resolved_mode, resolved_planning, resolved_thinking = _execution_policy(
@@ -417,7 +421,7 @@ class Runtime(Generic[AppT]):
             user_prompt.codec,
             principal,
             idempotency_key or secrets.token_urlsafe(32),
-            _merge_portable_context(self._context, context),
+            _portable_context(context),
         )
         handle = await self.execution.retry(binding_digest, execution_id, request)
         return Execution(self, handle.execution_id, binding_digest, principal)
@@ -438,7 +442,7 @@ class Runtime(Generic[AppT]):
             user_prompt.codec,
             principal,
             idempotency_key or secrets.token_urlsafe(32),
-            _merge_portable_context(self._context, context),
+            _portable_context(context),
         )
         handle = await self.execution.fork(binding_digest, execution_id, request)
         return Execution(self, handle.execution_id, binding_digest, principal)
@@ -722,7 +726,7 @@ class Runtime(Generic[AppT]):
     ) -> TaskGraphRequest:
         self._ensure_open()
         resolved_principal = self._resolve_principal(principal)
-        effective_context = _merge_portable_context(self._context, context)
+        effective_context = _overlay_portable_context(self.context, context)
         selected_limits = limits or TaskGraphLimits()
         validate_idempotency_key(idempotency_key)
         graph.validate_limits(selected_limits)
@@ -882,19 +886,18 @@ def _validate_memory_scope(value: "str | None") -> "str | None":
 async def _open_runtime(
     workspace: Workspace,
     *,
-    app: object,
+    context: RuntimeContext[object],
     tenant_id: "str | None",
     models: "ModelRegistry | None",
     state: "RuntimeState | None",
     capabilities: "Sequence[CapabilityGroup[object]]",
-    context: "Mapping[str, object] | None",
     metrics: "Metrics | None",
 ):
     from ._factory import compose_runtime_components
 
     components = await compose_runtime_components(
         workspace,
-        app=app,
+        app=context.app,
         tenant_id=tenant_id,
         models=models,
         state=state,
@@ -913,9 +916,8 @@ async def _open_runtime(
             components.event,
             components.artifact,
             workspace=workspace,
-            app=app,
-            tenant_id=components.tenant_id,
             context=context,
+            tenant_id=components.tenant_id,
             close_callback=components.close_callback,
             local_coordinator=components.local_coordinator,
             task_node_runtime=components.task_node_runtime,
