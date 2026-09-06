@@ -27,7 +27,7 @@ def test_top_level_public_surface_is_exact() -> None:
         "Agent",
         "CapabilityGroup",
         "Execution",
-        "RunContext",
+        "AgentContext",
         "Runtime",
         "Session",
         "Workspace",

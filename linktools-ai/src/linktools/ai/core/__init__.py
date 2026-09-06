@@ -2,6 +2,12 @@
 # -*- coding: utf-8 -*-
 """Pure core values and errors."""
 
+from ._correlation import (
+    CorrelationData,
+    CorrelationValue,
+    normalize_correlation,
+    overlay_correlation,
+)
 from ._discovery import DEFAULT_DISCOVERY_POLICY
 from ._ids import (
     canonical_identity_digest,
@@ -119,6 +125,8 @@ __all__ = [
     "RedactionPolicy",
     "ResourceKind",
     "ResourceRef",
+    "CorrelationData",
+    "CorrelationValue",
     "SessionStatus",
     "StopReason",
     "StructuredRedactor",
@@ -132,13 +140,15 @@ __all__ = [
     "canonical_json_bytes",
     "canonical_sha256",
     "canonical_string_tuple",
-    "normalize_execution_mode",
-    "normalize_thinking",
     "deterministic_id",
     "idempotency_key_digest",
+    "normalize_execution_mode",
     "normalize_json_value",
+    "normalize_correlation",
+    "normalize_thinking",
     "operation_cas_immutable_matches",
     "operation_replay_matches",
+    "overlay_correlation",
     "principal_identity_payload",
     "service_principal",
     "step_conversation_id",

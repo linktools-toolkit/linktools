@@ -37,10 +37,12 @@ from ..core import (
     Principal,
     ResourceKind,
     ResourceRef,
+    CorrelationData,
     StopReason,
     UsageMetrics,
     canonical_json_bytes,
     canonical_sha256,
+    overlay_correlation,
     principal_identity_payload,
 )
 from ..core import (
@@ -91,6 +93,16 @@ if TYPE_CHECKING:
     from .state import RuntimePayloadRef
 
 _logger = environ.get_logger("ai.runtime.execution")
+
+
+def _overlay_execution_correlation(
+    base: Mapping[str, object],
+    overlay: Mapping[str, object],
+) -> CorrelationData:
+    try:
+        return overlay_correlation(base, overlay)
+    except (TypeError, ValueError) as error:
+        raise AIError(ErrorCode.REQUEST_FIELD_INVALID) from error
 
 
 def _consumed_query(method: "Callable[..., object]") -> "Callable[..., object]":
@@ -366,6 +378,8 @@ class DefaultExecutionService:
         binding: AgentBinding,
         request: ExecutionRequest,
     ) -> None:
+        if execution.correlation != request.correlation:
+            raise AIError(ErrorCode.IDEMPOTENCY_CONFLICT)
         if (
             execution.binding_digest != binding.digest
             or execution.planning is not request.planning
@@ -641,6 +655,7 @@ class DefaultExecutionService:
             mode=mode,
             planning=execution.planning,
             thinking=execution.thinking,
+            correlation=execution.correlation,
         )
         return await self.start_subagent(
             execution.binding_digest,
@@ -728,6 +743,21 @@ class DefaultExecutionService:
         if request.idempotency_key is None:
             raise AIError(ErrorCode.IDEMPOTENCY_KEY_INVALID)
         binding = self._binding(binding_digest)
+        parent: ExecutionRecord | None = None
+        if lineage_kind is ExecutionLineageKind.SUBAGENT:
+            if parent_execution_id is None:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            parent = await self._state.executions.get(
+                parent_execution_id,
+                tenant_id=request.principal.tenant_id,
+            )
+            if (
+                parent is None
+                or parent.root_execution_id
+                != (root_execution_id or parent.root_execution_id)
+            ):
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            request = replace(request, correlation=parent.correlation)
         conversation_run_id = conversation_step_run_id
         session = None
         if session_id is not None and source_execution_id is None:
@@ -813,16 +843,7 @@ class DefaultExecutionService:
         repository_instructions = None
         if self._instruction_resolver is not None:
             if lineage_kind is ExecutionLineageKind.SUBAGENT:
-                if parent_execution_id is None:
-                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                parent = await self._state.executions.get(
-                    parent_execution_id,
-                    tenant_id=request.principal.tenant_id,
-                )
-                if (
-                    parent is None
-                    or parent.root_execution_id != (root_execution_id or parent.root_execution_id)
-                ):
+                if parent is None:
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                 repository_instructions = parent.repository_instructions
                 if repository_instructions is None:
@@ -876,6 +897,7 @@ class DefaultExecutionService:
             thinking=request.thinking,
             binding=binding.snapshot,
             repository_instructions=repository_instructions,
+            correlation=request.correlation,
         )
         reservation = await self._state.executions.reserve_start(
             ExecutionStartReservation(
@@ -1381,6 +1403,7 @@ class DefaultExecutionService:
             mode=previous.mode,
             planning=previous.planning,
             thinking=previous.thinking,
+            correlation=_overlay_execution_correlation(previous.correlation, request.correlation),
         )
         return await self._start(
             binding_digest,
@@ -1411,6 +1434,7 @@ class DefaultExecutionService:
             mode=previous.mode,
             planning=previous.planning,
             thinking=previous.thinking,
+            correlation=_overlay_execution_correlation(previous.correlation, request.correlation),
         )
         return await self._start(
             binding_digest,

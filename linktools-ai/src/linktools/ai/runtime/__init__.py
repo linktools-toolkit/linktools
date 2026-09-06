@@ -6,17 +6,20 @@ from ..errors import ErrorDiagnostics
 from ._agent import Agent, Execution, Session
 from ._approval import DefaultApprovalService
 from ._artifact import DefaultArtifactService
+from ._context import RuntimeContext
 from ._evaluation import DefaultEvaluationService
 from ._event import DefaultEventService, ExecutionDelta, LiveExecutionEventBroker
 from ._execution import DefaultExecutionService
 from ._history_service import DefaultExecutionHistoryService
 from ._input import user_prompt_transport
 from ._local import LocalExecutionBackend
+from ._metrics import RuntimeMetricFlushResult, RuntimeMetricStatus
 from ._object import RuntimeObjectKeyFactory, put_runtime_object, read_runtime_object
 from ._planner import DefaultTaskService, RuntimeTaskNodeRunner
 from ._runtime_history import RuntimeHistory
 from ._runtime_service import Runtime
 from ._session import DefaultSessionService
+from ._snapshot import RunSnapshot, snapshot_digest
 from .service_api import (
     ApprovalCreateRequest,
     ApprovalDecisionRequest,
@@ -136,9 +139,13 @@ __all__ = [
     "ResumeSessionRequest",
     "RetryExecutionRequest",
     "RunEvaluationRequest",
+    "RunSnapshot",
     "Runtime",
+    "RuntimeContext",
     "RuntimeDomain",
     "RuntimeHistory",
+    "RuntimeMetricFlushResult",
+    "RuntimeMetricStatus",
     "RuntimeObjectKeyFactory",
     "RuntimeRetentionMode",
     "RuntimeState",
@@ -156,5 +163,6 @@ __all__ = [
     "UpdateSessionRequest",
     "put_runtime_object",
     "read_runtime_object",
+    "snapshot_digest",
     "user_prompt_transport",
 ]

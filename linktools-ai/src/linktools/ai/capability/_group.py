@@ -30,7 +30,7 @@ from ..spec import (
     ThinkingValue,
 )
 from ..task import TaskNodeHandler
-from ._context import RunContext
+from ._context import AgentContext
 from ._names import SKILL_TOOL_NAMES, SUBAGENT_TOOL_NAMES
 from ._skill import SkillDefinition
 from ._skill_source import AssetSkillResourceSource, SkillResourceSource, SkillSourceRef
@@ -79,7 +79,7 @@ class CapabilityContribution(Generic[AppT]):
     kind: ContributionKind
     id: str
     fingerprint: str
-    value: "Tool[RunContext[AppT]] | AgentSpec | SkillDefinition | MCPServerSpec | AbstractCapability[RunContext[AppT]] | TaskNodeHandler[AppT]"
+    value: "Tool[AgentContext[AppT]] | AgentSpec | SkillDefinition | MCPServerSpec | AbstractCapability[AgentContext[AppT]] | TaskNodeHandler[AppT]"
 
     def __post_init__(self) -> None:
         if self.kind not in {"tool", "agent", "skill", "mcp", "capability", "task"}:
@@ -135,7 +135,7 @@ class CapabilityContribution(Generic[AppT]):
         cls,
         kind: Literal["tool", "capability"],
         identity: str,
-        value: "Tool[RunContext[AppT]] | AbstractCapability[RunContext[AppT]]",
+        value: "Tool[AgentContext[AppT]] | AbstractCapability[AgentContext[AppT]]",
         *,
         revision: int = 1,
         semantic_config: "Mapping[str, JsonValue] | None" = None,
@@ -281,7 +281,7 @@ class CapabilityGroup(Generic[AppT]):
         *,
         name: "str | None" = None,
         revision: int = 1,
-    ) -> "Tool[RunContext[AppT]]":
+    ) -> "Tool[AgentContext[AppT]]":
         """Register one ordinary model-visible Python tool."""
         _validate_revision(revision)
         tool_name = name or function.__name__
@@ -324,11 +324,11 @@ class CapabilityGroup(Generic[AppT]):
 
     def capability(
         self,
-        capability: "AbstractCapability[RunContext[AppT]]",
+        capability: "AbstractCapability[AgentContext[AppT]]",
         *,
         revision: int = 1,
         semantic_config: "Mapping[str, JsonValue] | None" = None,
-    ) -> "AbstractCapability[RunContext[AppT]]":
+    ) -> "AbstractCapability[AgentContext[AppT]]":
         """Register one always-selected Pydantic runtime behavior capability."""
         _validate_revision(revision)
         try:
@@ -543,11 +543,11 @@ def _adapt_tool(function: Callable[..., object], *, name: str) -> Tool:
     signature = inspect.signature(function)
     parameters = tuple(signature.parameters.values())
     if not parameters:
-        raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID, "tool requires RunContext")
+        raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID, "tool requires AgentContext")
 
     @functools.wraps(function)
     async def invoke(
-        ctx: PydanticRunContext[RunContext[object]],
+        ctx: PydanticRunContext[AgentContext[object]],
         *args: object,
         **kwargs: object,
     ) -> object:
@@ -557,7 +557,7 @@ def _adapt_tool(function: Callable[..., object], *, name: str) -> Tool:
         return result
 
     first = parameters[0].replace(
-        annotation=PydanticRunContext[RunContext[object]],
+        annotation=PydanticRunContext[AgentContext[object]],
     )
     invoke.__signature__ = signature.replace(  # type: ignore[attr-defined]
         parameters=(first, *parameters[1:]),

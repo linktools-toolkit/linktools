@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Canonical run snapshot digest."""
+"""Canonical Runtime run snapshot digest."""
 
 from dataclasses import dataclass
 
@@ -17,7 +17,15 @@ class RunSnapshot:
     digest: str
 
     def verify(self) -> bool:
-        return self.digest == snapshot_digest({"snapshot_id": self.snapshot_id, "execution_id": self.execution_id, "binding_digest": self.binding_digest, "trace_digest": self.trace_digest, "result_digest": self.result_digest})
+        return self.digest == snapshot_digest(
+            {
+                "snapshot_id": self.snapshot_id,
+                "execution_id": self.execution_id,
+                "binding_digest": self.binding_digest,
+                "trace_digest": self.trace_digest,
+                "result_digest": self.result_digest,
+            }
+        )
 
 
 def snapshot_digest(value: JsonValue) -> str:

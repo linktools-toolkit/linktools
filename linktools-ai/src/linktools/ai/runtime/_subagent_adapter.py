@@ -11,7 +11,7 @@ from pydantic_ai.exceptions import ModelRetry, ToolFailed
 from pydantic_ai.tools import RunContext as PydanticRunContext
 from pydantic_ai.toolsets import FunctionToolset
 
-from ..capability import RunContext, SubagentCapability
+from ..capability import AgentContext, SubagentCapability
 from ..errors import AIError, ErrorCode
 
 _SUBAGENT_CAPABILITY_ID = "linktools-subagent"
@@ -23,26 +23,26 @@ _MODEL_CORRECTABLE_ERRORS = frozenset(
 )
 
 
-class _PydanticSubagentCapability(AbstractCapability[RunContext[object]]):
+class _PydanticSubagentCapability(AbstractCapability[AgentContext[object]]):
     def __init__(self, capability: SubagentCapability) -> None:
         self.id = _SUBAGENT_CAPABILITY_ID
         self._capability = capability
 
     def get_instructions(
         self,
-    ) -> "Callable[[PydanticRunContext[RunContext[object]]], Awaitable[str | None]]":
-        async def render(ctx: PydanticRunContext[RunContext[object]]) -> "str | None":
+    ) -> "Callable[[PydanticRunContext[AgentContext[object]]], Awaitable[str | None]]":
+        async def render(ctx: PydanticRunContext[AgentContext[object]]) -> "str | None":
             del ctx
             return self._capability.instructions()
 
         return render
 
-    def get_toolset(self) -> "FunctionToolset[RunContext[object]]":
-        toolset = FunctionToolset[RunContext[object]](id=self.id)
+    def get_toolset(self) -> "FunctionToolset[AgentContext[object]]":
+        toolset = FunctionToolset[AgentContext[object]](id=self.id)
 
         @toolset.tool
         async def list_subagents(
-            ctx: PydanticRunContext[RunContext[object]],
+            ctx: PydanticRunContext[AgentContext[object]],
         ) -> "list[dict[str, str]]":
             """List subagents available for this agent run."""
             del ctx
@@ -50,7 +50,7 @@ class _PydanticSubagentCapability(AbstractCapability[RunContext[object]]):
 
         @toolset.tool
         async def delegate_task(
-            ctx: PydanticRunContext[RunContext[object]],
+            ctx: PydanticRunContext[AgentContext[object]],
             subagent_id: str,
             task: str,
         ) -> "dict[str, PydanticJsonValue]":

@@ -24,23 +24,25 @@ from ..core import (
     JsonValue,
     Principal,
     PrincipalKind,
+    CorrelationData,
     SessionStatus,
     TaskStatus,
     ThinkingValue,
     normalize_execution_mode,
+    normalize_correlation,
     normalize_thinking,
+    overlay_correlation,
     validate_agent_id,
     validate_idempotency_key,
     validate_memory_scope,
     validate_resource_id,
-    validate_tenant_id,
     validate_user_prompt,
 )
 from ..errors import AIError, ErrorCode
 from ..model import ModelRegistry
 
 if TYPE_CHECKING:
-    from ..observe import Middleware
+    from ..observe import Metrics
     from ..task import TaskResultRecord
 from ..task import (
     TaskGraph,
@@ -51,7 +53,13 @@ from ..task import (
 )
 from ..workspace import Workspace
 from ._agent import Agent, Execution, Session
+from ._context import RuntimeContext
 from ._input import UserPromptTransport
+from ._metrics import (
+    RuntimeMetricFlushResult,
+    RuntimeMetricStatus,
+    _disabled_metric_status,
+)
 from .service_api import (
     ApprovalService,
     ArtifactService,
@@ -106,6 +114,33 @@ class _TaskNodeRuntimePort(Protocol):
     async def read_result_record(self, record: "TaskResultRecord") -> JsonValue: ...
 
 
+class _RuntimeMetricControl(Protocol):
+    def status(self) -> RuntimeMetricStatus: ...
+
+    async def flush(
+        self,
+        *,
+        timeout_seconds: float = 5.0,
+    ) -> RuntimeMetricFlushResult: ...
+
+
+def _request_correlation(value: "Mapping[str, object] | None") -> CorrelationData:
+    try:
+        return normalize_correlation(value)
+    except (TypeError, ValueError) as error:
+        raise AIError(ErrorCode.REQUEST_FIELD_INVALID) from error
+
+
+def _overlay_request_correlation(
+    base: Mapping[str, object],
+    overlay: "Mapping[str, object] | None",
+) -> CorrelationData:
+    try:
+        return overlay_correlation(base, overlay)
+    except (TypeError, ValueError) as error:
+        raise AIError(ErrorCode.REQUEST_FIELD_INVALID) from error
+
+
 class Runtime(Generic[AppT]):
     """Frozen Runtime composition and service graph."""
 
@@ -122,11 +157,11 @@ class Runtime(Generic[AppT]):
         artifact: ArtifactService,
         *,
         workspace: Workspace,
-        app: AppT,
-        tenant_id: str = "default",
+        context: RuntimeContext[AppT],
         close_callback: "Callable[[], Awaitable[None]] | None" = None,
         local_coordinator: "_LocalRuntimeCoordinatorPort | None" = None,
         task_node_runtime: "_TaskNodeRuntimePort | None" = None,
+        metric_control: "_RuntimeMetricControl | None" = None,
     ) -> None:
         if any(
             value is None
@@ -144,6 +179,8 @@ class Runtime(Generic[AppT]):
             )
         ):
             raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+        if not isinstance(context, RuntimeContext):
+            raise TypeError("context must be RuntimeContext")
         self._catalog = catalog
         self._compiler = compiler
         self.execution = execution
@@ -154,16 +191,16 @@ class Runtime(Generic[AppT]):
         self.event = event
         self.artifact = artifact
         self._workspace = workspace
-        self._app = app
-        self._tenant_id = validate_tenant_id(tenant_id)
+        self._context = context
         self._default_principal = Principal(
             principal_id="runtime",
-            tenant_id=self._tenant_id,
+            tenant_id=self._context.tenant_id,
             kind=PrincipalKind.LOCAL_TRUSTED.value,
         )
         self._close_callback = close_callback
         self._local_coordinator = local_coordinator
         self._task_node_runtime = task_node_runtime
+        self._metric_control = metric_control
         self._closed = False
         self._closing = False
         self._close_lock = asyncio.Lock()
@@ -175,12 +212,11 @@ class Runtime(Generic[AppT]):
         cls,
         workspace: Workspace,
         *,
-        app: None = None,
-        tenant_id: "str | None" = None,
+        context: None = None,
         models: "ModelRegistry | None" = None,
         state: "RuntimeState | None" = None,
         capabilities: "Sequence[CapabilityGroup[None]]" = (),
-        middleware: "Sequence[Middleware]" = (),
+        metrics: "Metrics | None" = None,
     ) -> "AbstractAsyncContextManager[Runtime[None]]": ...
 
     @classmethod
@@ -189,12 +225,11 @@ class Runtime(Generic[AppT]):
         cls,
         workspace: Workspace,
         *,
-        app: AppT,
-        tenant_id: "str | None" = None,
+        context: RuntimeContext[AppT],
         models: "ModelRegistry | None" = None,
         state: "RuntimeState | None" = None,
         capabilities: "Sequence[CapabilityGroup[AppT]]" = (),
-        middleware: "Sequence[Middleware]" = (),
+        metrics: "Metrics | None" = None,
     ) -> "AbstractAsyncContextManager[Runtime[AppT]]": ...
 
     @classmethod
@@ -202,26 +237,27 @@ class Runtime(Generic[AppT]):
         cls,
         workspace: Workspace,
         *,
-        app: object = None,
-        tenant_id: "str | None" = None,
+        context: "RuntimeContext[object] | None" = None,
         models: "ModelRegistry | None" = None,
         state: "RuntimeState | None" = None,
         capabilities: "Sequence[CapabilityGroup[object]]" = (),
-        middleware: "Sequence[Middleware]" = (),
+        metrics: "Metrics | None" = None,
     ) -> "AbstractAsyncContextManager[Runtime[object]]":
+        root_context = RuntimeContext(None) if context is None else context
+        if not isinstance(root_context, RuntimeContext):
+            raise TypeError("context must be RuntimeContext")
         return _open_runtime(
             workspace,
-            app=app,
-            tenant_id=tenant_id,
+            context=root_context,
             models=models,
             state=state,
             capabilities=capabilities,
-            middleware=middleware,
+            metrics=metrics,
         )
 
     @property
     def tenant_id(self) -> str:
-        return self._tenant_id
+        return self._context.tenant_id
 
     @property
     def default_principal(self) -> Principal:
@@ -233,7 +269,36 @@ class Runtime(Generic[AppT]):
 
     @property
     def app(self) -> AppT:
-        return self._app
+        return self._context.app
+
+    @property
+    def context(self) -> RuntimeContext[AppT]:
+        return self._context
+
+    @property
+    def correlation(self) -> CorrelationData:
+        return self._context.correlation
+
+    def metric_status(self) -> RuntimeMetricStatus:
+        control = self._metric_control
+        return _disabled_metric_status() if control is None else control.status()
+
+    async def flush_metrics(
+        self,
+        *,
+        timeout_seconds: float = 5.0,
+    ) -> RuntimeMetricFlushResult:
+        self._ensure_open()
+        if (
+            isinstance(timeout_seconds, bool)
+            or not isinstance(timeout_seconds, (int, float))
+            or timeout_seconds < 0
+        ):
+            raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+        control = self._metric_control
+        if control is None:
+            return RuntimeMetricFlushResult(True, _disabled_metric_status())
+        return await control.flush(timeout_seconds=timeout_seconds)
 
     def agent(self, agent_id: str = "default") -> "Agent[AppT]":
         """Resolve one frozen root Agent by id."""
@@ -289,9 +354,11 @@ class Runtime(Generic[AppT]):
         mode: ExecutionMode,
         planning: "bool | None",
         thinking: "ThinkingValue | None",
+        correlation: "Mapping[str, object] | None" = None,
     ) -> "Execution[AppT]":
         self._ensure_open()
         resolved_principal = self._resolve_principal(principal)
+        effective_correlation = _overlay_request_correlation(self.correlation, correlation)
         validate_user_prompt(str(user_prompt))
         definition = self._catalog.definition(agent_digest)
         resolved_mode, resolved_planning, resolved_thinking = _execution_policy(
@@ -312,6 +379,7 @@ class Runtime(Generic[AppT]):
             mode=resolved_mode,
             planning=resolved_planning,
             thinking=resolved_thinking,
+            correlation=effective_correlation,
         )
         if session_id is None:
             handle = await self.execution.run(binding.digest, request)
@@ -328,6 +396,7 @@ class Runtime(Generic[AppT]):
                 mode=request.mode,
                 planning=request.planning,
                 thinking=request.thinking,
+                correlation=effective_correlation,
             )
             handle = await self.session.resume(
                 definition.spec.id,
@@ -375,6 +444,7 @@ class Runtime(Generic[AppT]):
         *,
         principal: Principal,
         idempotency_key: "str | None",
+        correlation: "Mapping[str, object] | None" = None,
     ) -> "Execution[AppT]":
         self._ensure_open()
         request = RetryExecutionRequest(
@@ -382,6 +452,7 @@ class Runtime(Generic[AppT]):
             user_prompt.codec,
             principal,
             idempotency_key or secrets.token_urlsafe(32),
+            _request_correlation(correlation),
         )
         handle = await self.execution.retry(binding_digest, execution_id, request)
         return Execution(self, handle.execution_id, binding_digest, principal)
@@ -394,6 +465,7 @@ class Runtime(Generic[AppT]):
         *,
         principal: Principal,
         idempotency_key: "str | None",
+        correlation: "Mapping[str, object] | None" = None,
     ) -> "Execution[AppT]":
         self._ensure_open()
         request = ForkExecutionRequest(
@@ -401,6 +473,7 @@ class Runtime(Generic[AppT]):
             user_prompt.codec,
             principal,
             idempotency_key or secrets.token_urlsafe(32),
+            _request_correlation(correlation),
         )
         handle = await self.execution.fork(binding_digest, execution_id, request)
         return Execution(self, handle.execution_id, binding_digest, principal)
@@ -588,12 +661,14 @@ class Runtime(Generic[AppT]):
         principal: "Principal | None" = None,
         idempotency_key: str,
         limits: "TaskGraphLimits | None" = None,
+        correlation: "Mapping[str, object] | None" = None,
     ) -> TaskGraphResult:
         request = await self._admit_graph(
             graph,
             principal=principal,
             idempotency_key=idempotency_key,
             limits=limits,
+            correlation=correlation,
         )
         return await self.task.run_graph(request)
 
@@ -605,12 +680,14 @@ class Runtime(Generic[AppT]):
         idempotency_key: str,
         limits: "TaskGraphLimits | None" = None,
         timeout_seconds: "float | None" = None,
+        correlation: "Mapping[str, object] | None" = None,
     ) -> TaskGraphResult:
         request = await self._admit_graph(
             graph,
             principal=principal,
             idempotency_key=idempotency_key,
             limits=limits,
+            correlation=correlation,
         )
         return await self.task.run_graph_and_wait(
             request,
@@ -676,9 +753,11 @@ class Runtime(Generic[AppT]):
         principal: "Principal | None",
         idempotency_key: str,
         limits: "TaskGraphLimits | None",
+        correlation: "Mapping[str, object] | None" = None,
     ) -> TaskGraphRequest:
         self._ensure_open()
         resolved_principal = self._resolve_principal(principal)
+        effective_correlation = _overlay_request_correlation(self.correlation, correlation)
         selected_limits = limits or TaskGraphLimits()
         validate_idempotency_key(idempotency_key)
         graph.validate_limits(selected_limits)
@@ -699,6 +778,7 @@ class Runtime(Generic[AppT]):
             resolved_principal,
             idempotency_key,
             selected_limits,
+            effective_correlation,
         )
 
     async def _ensure_session(
@@ -756,7 +836,7 @@ class Runtime(Generic[AppT]):
                 return
             if not self._closing:
                 self._closing = True
-                _logger.info("runtime close started: tenant=%s", self._tenant_id)
+                _logger.info("runtime close started: tenant=%s", self.tenant_id)
             task = self._close_task
             retry = task is None
             if task is not None and task.done():
@@ -805,7 +885,7 @@ class Runtime(Generic[AppT]):
             await self._close_callback()
         async with self._close_lock:
             self._closed = True
-            _logger.info("runtime close completed: tenant=%s", self._tenant_id)
+            _logger.info("runtime close completed: tenant=%s", self.tenant_id)
 
 
 def _execution_policy(
@@ -837,25 +917,28 @@ def _validate_memory_scope(value: "str | None") -> "str | None":
 async def _open_runtime(
     workspace: Workspace,
     *,
-    app: object,
-    tenant_id: "str | None",
+    context: RuntimeContext[object],
     models: "ModelRegistry | None",
     state: "RuntimeState | None",
     capabilities: "Sequence[CapabilityGroup[object]]",
-    middleware: "Sequence[Middleware]",
+    metrics: "Metrics | None",
 ):
     from ._factory import compose_runtime_components
 
     components = await compose_runtime_components(
         workspace,
-        app=app,
-        tenant_id=tenant_id,
+        app=context.app,
+        tenant_id=context.tenant_id,
         models=models,
         state=state,
         capabilities=capabilities,
-        middleware=middleware,
+        metrics=metrics,
     )
     try:
+        if components.metric_control is not None:
+            components.metric_control.configure_runtime_dimensions(
+                context.metric_dimensions
+            )
         runtime = Runtime(
             components.catalog,
             components.compiler,
@@ -867,11 +950,11 @@ async def _open_runtime(
             components.event,
             components.artifact,
             workspace=workspace,
-            app=app,
-            tenant_id=components.tenant_id,
+            context=context,
             close_callback=components.close_callback,
             local_coordinator=components.local_coordinator,
             task_node_runtime=components.task_node_runtime,
+            metric_control=components.metric_control,
         )
     except BaseException:
         await components.close_callback()

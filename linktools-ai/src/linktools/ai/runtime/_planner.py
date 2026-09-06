@@ -17,6 +17,7 @@ from ..core import (
     ExecutionStatus,
     JsonValue,
     Principal,
+    CorrelationData,
     ThinkingValue,
     canonical_json_bytes,
     canonical_sha256,
@@ -38,6 +39,7 @@ from ..task import (
     TaskNode,
     TaskNodeContext,
     TaskNodeHandler,
+    TaskNodeInvocation,
     TaskNodeRunControl,
     TaskNodeRunError,
     TaskNodeRunResult,
@@ -205,6 +207,7 @@ class _AgentTaskNodeHandler:
         *,
         graph_id: str,
         principal: Principal,
+        correlation: CorrelationData,
         dependencies: Mapping[str, TaskDependency],
         control: TaskNodeRunControl,
     ) -> tuple[JsonValue, str]:
@@ -212,6 +215,7 @@ class _AgentTaskNodeHandler:
             node,
             graph_id=graph_id,
             principal=principal,
+            correlation=correlation,
             dependencies=dependencies,
         )
         key = (principal.tenant_id, graph_id, node.node_id)
@@ -291,6 +295,7 @@ class _AgentTaskNodeHandler:
         *,
         graph_id: str,
         principal: Principal,
+        correlation: CorrelationData,
         dependencies: Mapping[str, TaskDependency],
         durable_execution_id: str | None,
     ) -> None:
@@ -318,6 +323,7 @@ class _AgentTaskNodeHandler:
                 node,
                 graph_id=graph_id,
                 principal=principal,
+                correlation=correlation,
                 dependencies=dependencies,
             )
             try:
@@ -355,6 +361,7 @@ class _AgentTaskNodeHandler:
         *,
         graph_id: str,
         principal: Principal,
+        correlation: CorrelationData,
         dependencies: Mapping[str, TaskDependency],
     ) -> tuple[str, ExecutionRequest]:
         payload = node.input
@@ -417,6 +424,7 @@ class _AgentTaskNodeHandler:
             mode=cast(ExecutionMode, normalized["mode"]),
             planning=cast(bool, normalized["planning"]),
             thinking=cast(ThinkingValue, normalized["thinking"]),
+            correlation=correlation,
         )
 
     async def _bind_execution(
@@ -712,13 +720,15 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
 
     async def run(
         self,
-        node: TaskNode,
+        invocation: TaskNodeInvocation,
         *,
-        graph_id: str,
-        principal: Principal,
-        dependency_results: Mapping[str, TaskDependencyResult],
         control: TaskNodeRunControl,
     ) -> TaskNodeRunResult:
+        node = invocation.node
+        graph_id = invocation.graph_id
+        principal = invocation.principal
+        correlation = invocation.correlation
+        dependency_results = invocation.dependency_results
         task_type, task_version, body = _parse_node(node, request=False)
         handler = self._handler(task_type, task_version, request=False)
         dependencies = await self._dependencies(
@@ -731,6 +741,7 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
                 node,
                 graph_id=graph_id,
                 principal=principal,
+                correlation=correlation,
                 dependencies=dependencies,
                 control=control,
             )
@@ -741,7 +752,7 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
                 principal,
                 dependencies,
             )
-            context = TaskNodeContext(
+            task_context = TaskNodeContext(
                 self._app,
                 principal,
                 graph_id,
@@ -749,9 +760,10 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
                 body,
                 dependencies,
                 idempotency_key,
+                correlation,
             )
             try:
-                output = normalize_json_value(await handler.run(context))
+                output = normalize_json_value(await handler.run(task_context))
             except asyncio.CancelledError:
                 raise
             except AIError:
@@ -769,14 +781,12 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         return TaskNodeRunResult(digest, execution_id, payload)
 
-    async def cancel(
-        self,
-        node: TaskNode,
-        *,
-        graph_id: str,
-        principal: Principal,
-        dependency_results: Mapping[str, TaskDependencyResult],
-    ) -> None:
+    async def cancel(self, invocation: TaskNodeInvocation) -> None:
+        node = invocation.node
+        graph_id = invocation.graph_id
+        principal = invocation.principal
+        correlation = invocation.correlation
+        dependency_results = invocation.dependency_results
         task_type, task_version, body = _parse_node(node, request=False)
         handler = self._handler(task_type, task_version, request=False)
         dependencies = await self._dependencies(
@@ -804,11 +814,12 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
                 node,
                 graph_id=graph_id,
                 principal=principal,
+                correlation=correlation,
                 dependencies=dependencies,
                 durable_execution_id=state.execution_id,
             )
             return
-        context = TaskNodeContext(
+        task_context = TaskNodeContext(
             self._app,
             principal,
             graph_id,
@@ -816,8 +827,9 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
             body,
             dependencies,
             _custom_idempotency_key(graph_id, node, principal, dependencies),
+            correlation,
         )
-        await handler.cancel(context)
+        await handler.cancel(task_context)
 
     async def get_result_record(
         self,

@@ -6,9 +6,11 @@ from __future__ import annotations
 
 import asyncio
 import sys
+import uuid
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
+from time import monotonic_ns
 from typing import TYPE_CHECKING, Any, Protocol, cast
 
 from linktools.core import environ
@@ -66,7 +68,7 @@ from pydantic_ai_harness.step_persistence import StepPersistence, StepStore
 
 from ..agent import AgentBinding, AgentDefinition, AssistantTextOutput
 from ..capability import (
-    RunContext,
+    AgentContext,
     SKILL_TOOL_NAMES,
     SkillCapability,
     SkillSourceRegistry,
@@ -92,7 +94,8 @@ from ..core import (
     normalize_json_value,
 )
 from ..errors import AIError, ErrorCode, ErrorDiagnostics
-from ..observe import MiddlewarePipeline, context_for
+from ..observe import MetricMeasurement, MetricRecorder, Observation
+
 if TYPE_CHECKING:
     from ..workspace import RepositoryInstructionResolver, RepositoryInstructions
 from ._capabilities import (
@@ -101,7 +104,6 @@ from ._capabilities import (
     PLANNING_TOOL_NAMES,
     SUBAGENT_TOOL_NAMES,
     ToolOperationBridge,
-    _ObservationalMiddlewareCapability,
     _WorkspaceToolGate,
     _tool_effect_policy,
     compose_platform_capabilities,
@@ -111,8 +113,10 @@ from ._capabilities import (
     tool_name_allowed,
 )
 from ._input import _RuntimeUserPrompt, _restore_user_prompt
+from ._metric_capability import _RuntimeModelMetricCapability
 from ._skill_adapter import _PydanticSkillCapability
 from ._subagent_adapter import _PydanticSubagentCapability
+from ._tool_metrics import _ToolMetricContext
 
 _logger = environ.get_logger("ai.runtime.agent_executor")
 _RUNTIME_RESERVED_TOOL_NAMES = frozenset(
@@ -174,7 +178,7 @@ AgentExecutionOutcome = AgentExecutionResult | AgentExecutionPaused
 @dataclass(frozen=True, slots=True)
 class _RunScope:
     binding: AgentBinding
-    context: RunContext[object]
+    context: AgentContext[object]
     user_prompt: _RuntimeUserPrompt | None
     history: list[ModelMessage]
     conversation_id: str
@@ -182,7 +186,6 @@ class _RunScope:
     step_run_id: str
     segment_sequence: int
     history_id: str | None = None
-    memory_scope: str | None = None
     memory_store: SearchableMemoryStore | None = None
     plan_store_resolver: Callable[[PydanticRunContext[object]], PlanStore] | None = None
     mode: ExecutionMode = "run"
@@ -222,15 +225,13 @@ class AgentExecutor:
         skill_sources: SkillSourceRegistry,
         *,
         instruction_resolver: RepositoryInstructionResolver,
-        middleware: MiddlewarePipeline,
+        metrics: MetricRecorder | None = None,
     ) -> None:
         if not isinstance(skill_sources, SkillSourceRegistry):
             raise TypeError("skill_sources must be SkillSourceRegistry")
-        if not isinstance(middleware, MiddlewarePipeline):
-            raise TypeError("middleware must be MiddlewarePipeline")
         self._skill_sources = skill_sources
         self._instruction_resolver = instruction_resolver
-        self._middleware = middleware
+        self._metrics = metrics
         self._detached_tasks: set[asyncio.Task[Any]] = set()
 
     @classmethod
@@ -309,6 +310,8 @@ class AgentExecutor:
         )
         result: AgentExecutionOutcome | None = None
         primary_error: BaseException | None = None
+        metric_started = monotonic_ns() if self._metrics is not None else None
+        metric_id = uuid.uuid4().hex if self._metrics is not None else None
         try:
             try:
                 result = await self._execute(scope, run_usage=run_usage, usage_limits=usage_limits)
@@ -324,6 +327,13 @@ class AgentExecutor:
                 primary_error = mapped
                 raise mapped from error
         finally:
+            self._record_agent_run(
+                scope,
+                metric_id=metric_id,
+                metric_started=metric_started,
+                result=result,
+                primary_error=primary_error,
+            )
             if scope.usage_sink is not None:
                 usage = result.usage if result is not None else _usage_metrics(run_usage)
                 if isinstance(primary_error, asyncio.CancelledError):
@@ -343,6 +353,62 @@ class AgentExecutor:
                             scope.step_run_id,
                             exc_info=False,
                         )
+
+    def _record_agent_run(
+        self,
+        scope: _RunScope,
+        *,
+        metric_id: str | None,
+        metric_started: int | None,
+        result: AgentExecutionOutcome | None,
+        primary_error: BaseException | None,
+    ) -> None:
+        if self._metrics is None or metric_id is None or metric_started is None:
+            return
+        if isinstance(primary_error, asyncio.CancelledError):
+            status = "CANCELLED"
+            error_code = None
+        elif primary_error is not None:
+            status = "FAILED"
+            error_code = (
+                primary_error.code.value if isinstance(primary_error, AIError) else ErrorCode.INTERNAL_ERROR.value
+            )
+        elif isinstance(result, AgentExecutionPaused):
+            status = "PAUSED"
+            error_code = None
+        else:
+            status = "SUCCEEDED"
+            error_code = None
+        correlation: dict[str, str | int] = {
+            "execution_id": scope.context.execution_id,
+            "step_run_id": scope.step_run_id,
+        }
+        if scope.context.session_id is not None:
+            correlation["session_id"] = scope.context.session_id
+        try:
+            self._metrics.try_record(
+                Observation(
+                    version=1,
+                    observation_id=metric_id,
+                    kind="linktools.agent.run",
+                    occurred_at=datetime.now(timezone.utc),
+                    source_namespace=scope.context.workspace.workspace_id,
+                    tenant_id=scope.context.principal.tenant_id,
+                    status=status,
+                    error_code=error_code,
+                    correlation=correlation,
+                    dimensions={"agent_id": scope.binding.definition.spec.id},
+                    measurements=(
+                        MetricMeasurement(
+                            "latency_ns",
+                            1,
+                            monotonic_ns() - metric_started,
+                        ),
+                    ),
+                )
+            )
+        except (AIError, TypeError, ValueError):
+            return
 
     def _detach_task(
         self,
@@ -392,6 +458,7 @@ class AgentExecutor:
             model=model,
             skill_sources=self._skill_sources,
             deferred_pause_sink=capture_deferred_step,
+            metrics=self._metrics,
         )
         presentation = _ToolPresentation(
             definition.ordinary_tool_policy,
@@ -412,17 +479,26 @@ class AgentExecutor:
             policy=scope.context.workspace.policy,
             trusted_tool_classes=trusted_tool_classes,
         )
-        middleware = _ObservationalMiddlewareCapability(
-            self._middleware,
-            context_for(
-                scope.context.principal,
-                scope.context.execution_id,
-                scope.context.session_id,
-                scope.step_run_id,
-                definition.spec.id,
-            ),
+        runtime_capabilities: tuple[AbstractCapability[object], ...] = ()
+        if self._metrics is not None:
+            runtime_capabilities = (
+                _RuntimeModelMetricCapability(
+                    self._metrics,
+                    source_namespace=scope.context.workspace.workspace_id,
+                    tenant_id=scope.context.principal.tenant_id,
+                    execution_id=scope.context.execution_id,
+                    session_id=scope.context.session_id,
+                    step_run_id=scope.step_run_id,
+                    agent_id=definition.spec.id,
+                    provider=definition.model.provider,
+                    model_identity=definition.model.model_identity,
+                    route_id=definition.model.route_id,
+                ),
+            )
+        capabilities = cast(
+            "tuple[AbstractCapability[AgentContext[object]], ...]",
+            (presentation, gate, *runtime_capabilities, *capabilities),
         )
-        capabilities = (presentation, gate, middleware, *capabilities)
         if scope.replace_history_system_prompt:
             capabilities = (*capabilities, ReinjectSystemPrompt(replace_existing=True))
         _logger.debug(
@@ -563,18 +639,19 @@ async def _materialize_agent(
     model: Model,
     skill_sources: SkillSourceRegistry,
     deferred_pause_sink: Callable[[int], None],
+    metrics: MetricRecorder | None,
 ) -> tuple[
-    PydanticAgent[RunContext[object], object],
-    tuple[AbstractCapability[RunContext[object]], ...],
+    PydanticAgent[AgentContext[object], object],
+    tuple[AbstractCapability[AgentContext[object]], ...],
     tuple[str, ...],
     tuple[tuple[str, str], ...],
     tuple[str, ...],
 ]:
     definition = scope.binding.definition
-    business_tools: list[Tool[RunContext[object]]] = []
+    business_tools: list[Tool[AgentContext[object]]] = []
     workspace_names: list[str] = []
     for candidate in definition.selected_tools:
-        tool = cast("Tool[RunContext[object]]", candidate.value)
+        tool = cast("Tool[AgentContext[object]]", candidate.value)
         if workspace_tool_class(tool) is None:
             business_tools.append(tool)
         else:
@@ -582,7 +659,7 @@ async def _materialize_agent(
 
     runtime_tool_names = select_runtime_tool_names(
         ordinary_tool_policy=definition.ordinary_tool_policy,
-        memory_scope=scope.memory_scope,
+        memory_scope=scope.context.memory_scope,
         planning=scope.planning,
         subagent_available=scope.subagent_available and bool(scope.binding.snapshot.subagents),
     )
@@ -594,12 +671,12 @@ async def _materialize_agent(
         sorted(mcp_server_selector(server.id) for server in definition.mcp_servers)
     )
 
-    capabilities: list[AbstractCapability[RunContext[object]]] = []
+    capabilities: list[AbstractCapability[AgentContext[object]]] = []
     capabilities.extend(workspace_capabilities(scope.context.workspace, workspace_names))
     for candidate in definition.selected_capabilities:
         if not isinstance(candidate.value, AbstractCapability):
             raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
-        capabilities.append(cast("AbstractCapability[RunContext[object]]", candidate.value))
+        capabilities.append(cast("AbstractCapability[AgentContext[object]]", candidate.value))
     if definition.skill_definitions:
         capabilities.append(
             _PydanticSkillCapability(
@@ -621,7 +698,7 @@ async def _materialize_agent(
     if definition.mcp_servers:
         capabilities.extend(
             cast(
-                "tuple[AbstractCapability[RunContext[object]], ...]",
+                "tuple[AbstractCapability[AgentContext[object]], ...]",
                 await materialize_mcp_servers(
                     definition.mcp_servers,
                     definition.mcp_selector_policy,
@@ -635,13 +712,26 @@ async def _materialize_agent(
                 ),
             )
         )
+    tool_metrics = (
+        None
+        if metrics is None
+        else _ToolMetricContext(
+            metrics,
+            source_namespace=scope.context.workspace.workspace_id,
+            tenant_id=scope.context.principal.tenant_id,
+            execution_id=scope.context.execution_id,
+            session_id=scope.context.session_id,
+            step_run_id=scope.step_run_id,
+            agent_id=definition.spec.id,
+        )
+    )
     platform = await compose_platform_capabilities(
         agent_name=definition.spec.id,
         conversation_id=scope.conversation_id,
         step_run_id=scope.step_run_id,
         segment_sequence=scope.segment_sequence,
         history_id=scope.history_id,
-        memory_scope=scope.memory_scope,
+        memory_scope=scope.context.memory_scope,
         step_store=scope.step_store,
         memory_store=scope.memory_store,
         runtime_tool_names=runtime_tool_names,
@@ -654,6 +744,7 @@ async def _materialize_agent(
         background_tasks=scope.background_tasks,
         plan_store_resolver=scope.plan_store_resolver,
         deferred_pause_sink=deferred_pause_sink,
+        tool_metrics=tool_metrics,
     )
     platform = tuple(
         _RuntimePersistenceBoundary(capability)
@@ -661,7 +752,7 @@ async def _materialize_agent(
         else capability
         for capability in platform
     )
-    capabilities.extend(cast("tuple[AbstractCapability[RunContext[object]], ...]", platform))
+    capabilities.extend(cast("tuple[AbstractCapability[AgentContext[object]], ...]", platform))
 
     business_output_type: object
     if scope.binding.output_binding.mode == "text":
@@ -680,14 +771,14 @@ async def _materialize_agent(
         value for value in (base_instructions, preload_instructions) if value != ""
     )
     agent = cast(
-        "PydanticAgent[RunContext[object], object]",
+        "PydanticAgent[AgentContext[object], object]",
         PydanticAgent(
             model,
             name=definition.spec.id,
             system_prompt=definition.spec.system_prompt,
             instructions=runtime_instructions,
             output_type=output_type,
-            deps_type=RunContext,
+            deps_type=AgentContext,
             retries={"tools": _MAX_TOOL_RETRIES},
             tools=tuple(business_tools),
         ),
@@ -757,7 +848,7 @@ def _thinking_settings(model: Model, thinking: ThinkingValue) -> ModelSettings:
     return ModelSettings(thinking=thinking)
 
 
-class _RuntimePersistenceBoundary(WrapperCapability[RunContext[object]]):
+class _RuntimePersistenceBoundary(WrapperCapability[AgentContext[object]]):
     def get_ordering(self) -> CapabilityOrdering:
         return CapabilityOrdering(
             position="outermost",
@@ -765,7 +856,7 @@ class _RuntimePersistenceBoundary(WrapperCapability[RunContext[object]]):
         )
 
 
-class _ToolPresentation(AbstractCapability[RunContext[object]]):
+class _ToolPresentation(AbstractCapability[AgentContext[object]]):
     def __init__(
         self,
         ordinary_policy: tuple[str, ...],
@@ -790,13 +881,13 @@ class _ToolPresentation(AbstractCapability[RunContext[object]]):
 
     def get_wrapper_toolset(
         self,
-        toolset: AbstractToolset[RunContext[object]],
-    ) -> AbstractToolset[RunContext[object]]:
+        toolset: AbstractToolset[AgentContext[object]],
+    ) -> AbstractToolset[AgentContext[object]]:
         return PreparedToolset(toolset, self._prepare_final_tools)
 
     async def _prepare_final_tools(
         self,
-        _ctx: PydanticRunContext[RunContext[object]],
+        _ctx: PydanticRunContext[AgentContext[object]],
         tool_defs: list[ToolDefinition],
     ) -> list[ToolDefinition]:
         names = [tool.name for tool in tool_defs]

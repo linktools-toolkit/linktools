@@ -9,7 +9,7 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
-from time import monotonic
+from time import monotonic_ns
 from typing import Protocol, TypeVar, cast
 
 from linktools.core import environ
@@ -28,7 +28,7 @@ from pydantic_ai_harness.step_persistence import (
 )
 
 from ..agent import AgentBinding, AgentCatalog, SubagentRef
-from ..capability import RunContext, SubagentDelegate
+from ..capability import AgentContext, SubagentDelegate
 from ..workspace import RepositoryInstructions, Workspace
 from ._agent_executor import (
     AgentExecutionPaused,
@@ -67,15 +67,20 @@ from ..core import (
     validate_tenant_id,
 )
 from ..errors import AIError, ErrorCode, ErrorDiagnostics
+from ..observe import MetricRecorder
 from ..storage import (
     ObjectStore,
     PayloadPolicy,
-    StorageMetrics,
     StoredPayload,
     payload_fits_inline,
 )
 from ._event import ExecutionDelta, LiveExecutionEventBroker
 from ._execution import CancelEffectOutcome, ExecutionStartIdentity
+from ._metrics import (
+    _record_execution_terminal,
+    _record_storage_operation,
+    _release_metric_execution_context,
+)
 from ._object import RuntimeObjectKeyFactory, put_runtime_object, read_runtime_object
 from ._tool import RuntimeToolOperationBridge, _ToolOperationRuntimeRepository
 from .service_api import ExecutionRequest, ToolApprovalContext
@@ -250,7 +255,6 @@ class LocalExecutionBackend:
         recovery: RecoveryState,
         execution_objects: ObjectStore,
         recovery_objects: ObjectStore,
-        metrics: StorageMetrics,
         namespace: str,
         steps: StepStore,
         executor: AgentExecutor,
@@ -270,13 +274,14 @@ class LocalExecutionBackend:
         payload_policy: "PayloadPolicy | None" = None,
         execution_objects_durable: bool = True,
         tool_operations: "_ToolOperationRuntimeRepository | None" = None,
+        metric_recorder: "MetricRecorder | None" = None,
     ) -> None:
         self._conversation = conversation
         self._execution = execution_state
         self._recovery = recovery
         self._execution_objects = execution_objects
         self._recovery_objects = recovery_objects
-        self._metrics = metrics
+        self._metric_recorder = metric_recorder
         self._namespace = namespace
         self._steps = steps
         self._executor = executor
@@ -365,6 +370,8 @@ class LocalExecutionBackend:
                 execution.tenant_id,
             )
             raise AIError(ErrorCode.AUTHORIZATION_DENIED)
+        if request.correlation != execution.correlation:
+            raise AIError(ErrorCode.IDEMPOTENCY_CONFLICT)
         binding = self._catalog.binding(execution.binding_digest)
         if (
             request.mode != execution.mode
@@ -459,6 +466,26 @@ class LocalExecutionBackend:
                 continue
             return value, cancellation
 
+    def _record_committed_terminal(
+        self,
+        committed: ExecutionTerminalCommitResult,
+        *,
+        session_id: str | None,
+    ) -> None:
+        recorder = getattr(self, "_metric_recorder", None)
+        if recorder is None:
+            return
+        _record_execution_terminal(
+            recorder,
+            source_namespace=self._namespace,
+            result=committed,
+            session_id=session_id,
+        )
+        _release_metric_execution_context(
+            recorder,
+            committed.execution.execution_id,
+        )
+
     async def _commit_terminal_checkpoint_owned(
         self,
         commit: ExecutionTerminalCommit,
@@ -487,6 +514,7 @@ class LocalExecutionBackend:
             durable_sequence=committed.execution.event_sequence,
         )
         self._live_broker.complete(execution_id)
+        self._record_committed_terminal(committed, session_id=session_id)
         return committed
 
     async def commit_terminal_checkpoint(
@@ -689,6 +717,7 @@ class LocalExecutionBackend:
             thinking=execution.thinking,
             binding=execution.binding,
             repository_instructions=execution.repository_instructions,
+            correlation=execution.correlation,
         )
         candidate = RecoveryCheckpoint(
             execution_id=execution.execution_id,
@@ -721,7 +750,6 @@ class LocalExecutionBackend:
             session_id=execution.session_id,
             expected_cursor=expected,
         )
-        self._metrics.count("execution.start.checkpoint", domain="execution", target="runtime")
         _logger.info("execution start checkpoint committed: execution=%s", execution.execution_id)
         return started
 
@@ -852,6 +880,7 @@ class LocalExecutionBackend:
             or current.planning is not execution.planning
             or current.thinking != execution.thinking
             or current.binding != execution.binding
+            or current.correlation != execution.correlation
         ):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         if current.status in {
@@ -922,6 +951,7 @@ class LocalExecutionBackend:
             or execution.thinking != recovery_input.thinking
             or execution.binding != recovery_input.binding
             or execution.repository_instructions != recovery_input.repository_instructions
+            or execution.correlation != recovery_input.correlation
         ):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
 
@@ -1451,7 +1481,7 @@ class LocalExecutionBackend:
                 if current_run is not None:
                     current_attempt = await self._load_repository_instruction_attempt_provenance(
                         archive,
-                        current_run,
+                        run=current_run,
                         execution=execution,
                         sequence=captured_upper_sequence,
                     )
@@ -2162,6 +2192,7 @@ class LocalExecutionBackend:
             or execution.thinking != recovery_input.thinking
             or execution.binding != recovery_input.binding
             or execution.repository_instructions != recovery_input.repository_instructions
+            or execution.correlation != recovery_input.correlation
         ):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         if checkpoint.handoff_phase is not RecoveryHandoffPhase.NONE:
@@ -2280,6 +2311,7 @@ class LocalExecutionBackend:
             mode=recovery_input.mode,
             planning=recovery_input.planning,
             thinking=recovery_input.thinking,
+            correlation=recovery_input.correlation,
         )
         self._recovery_relaunch_ids.add(checkpoint.execution_id)
         await self.launch(request, execution)
@@ -2661,6 +2693,7 @@ class LocalExecutionBackend:
             thinking=recovery_input.thinking,
             binding=recovery_input.binding,
             repository_instructions=recovery_input.repository_instructions,
+            correlation=recovery_input.correlation,
         )
         await self._execution.executions.create_with_history_head(execution)
         return execution
@@ -3382,8 +3415,11 @@ class LocalExecutionBackend:
             recovery_relaunch_ids = set()
         exact_recovery_context = execution_id in recovery_relaunch_ids
         recovery_relaunch_ids.discard(execution_id)
-        operation_started_at = monotonic()
-        operation_result = "failure"
+        metric_recorder = getattr(self, "_metric_recorder", None)
+        metric_id = uuid.uuid4().hex if metric_recorder is not None else None
+        metric_started = monotonic_ns() if metric_id is not None else None
+        metric_status = "FAILED"
+        metric_error_code: str | None = None
         claimed_from_admitted = False
         try:
             current = await self._execution.executions.get(execution_id, tenant_id=original.tenant_id)
@@ -3690,13 +3726,15 @@ class LocalExecutionBackend:
                 if session is None:
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                 session_metadata = session.metadata
-            public_context = RunContext(
+            public_context = AgentContext(
                 app=self._app,
                 principal=request.principal,
                 workspace=self._workspace,
                 session_id=current.session_id,
                 execution_id=current.execution_id,
                 session_metadata=session_metadata,
+                memory_scope=current.memory_scope,
+                correlation=current.correlation,
             )
             plan_store = RuntimePlanStore(
                 self._session_state_store if current.session_id is not None else self._execution_state_store,
@@ -3717,7 +3755,6 @@ class LocalExecutionBackend:
                         step_run_id=run_id,
                         segment_sequence=current.agent_run_sequence,
                         history_id=history_id,
-                        memory_scope=current.memory_scope,
                         memory_store=memory,
                         plan_store_resolver=lambda _ctx: plan_store,
                         mode=current.mode,
@@ -3800,7 +3837,8 @@ class LocalExecutionBackend:
                                 execution_id,
                             )
                         raise _secondary_execution_error(commit_error, error) from error
-                operation_result = _execution_operation_result(current.status)
+                metric_status = current.status.value
+                metric_error_code = current.error_code
                 _logger.exception(
                     "local execution failed: execution=%s",
                     execution_id,
@@ -3810,7 +3848,7 @@ class LocalExecutionBackend:
                 if not self._recovery_enabled or checkpoint is None:
                     raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
                 await self._commit_approval_pause(current, result)
-                operation_result = "success"
+                metric_status = "SUCCEEDED"
                 return
             committed = await self._commit_success(
                 current,
@@ -3819,7 +3857,12 @@ class LocalExecutionBackend:
                 result.usage,
                 run_id,
             )
-            operation_result = _execution_operation_result(committed.status)
+            metric_status = (
+                "CANCELLED"
+                if committed.status is ExecutionStatus.CANCELLING
+                else committed.status.value
+            )
+            metric_error_code = committed.error_code
             _logger.debug("local execution completed: execution=%s run=%s", execution_id, run_id)
         except asyncio.CancelledError:
             current = await self._execution.executions.get(
@@ -3827,6 +3870,7 @@ class LocalExecutionBackend:
                 tenant_id=original.tenant_id,
             )
             if current is not None and current.status is ExecutionStatus.FINALIZING:
+                metric_status = "CANCELLED"
                 raise
             if current is not None and current.status is ExecutionStatus.CANCELLING:
                 self._worker_shutdown_set().discard(execution_id)
@@ -3859,20 +3903,35 @@ class LocalExecutionBackend:
                 ExecutionStatus.SUCCEEDED,
                 ExecutionStatus.FAILED,
                 ExecutionStatus.CANCELLED,
-                ExecutionStatus.CANCELLING,
             }:
-                operation_result = _execution_operation_result(current.status)
-            if execution_id in self._worker_shutdown_set():
-                operation_result = "cancelled"
+                metric_status = current.status.value
+                metric_error_code = current.error_code
+            else:
+                metric_status = "CANCELLED"
             raise
-        except Exception:
+        except Exception as error:
+            metric_status = "FAILED"
+            metric_error_code = _execution_error_code(error).value
             _logger.exception(
                 "local execution infrastructure failure: execution=%s",
                 execution_id,
             )
             raise
         finally:
-            self._metrics.operation("execution", "runtime", operation_result, operation_started_at)
+            _record_storage_operation(
+                metric_recorder,
+                observation_id=metric_id,
+                started_at_ns=metric_started,
+                source_namespace=self._namespace,
+                tenant_id=original.tenant_id,
+                execution_id=execution_id,
+                session_id=original.session_id,
+                correlation=original.correlation,
+                status=metric_status,
+                error_code=metric_error_code,
+                domain="execution",
+                target="runtime",
+            )
 
     async def _finish_checkpoint(self, checkpoint: RecoveryCheckpoint) -> None:
         if checkpoint.state is RecoveryCheckpointState.COMPLETED:
@@ -4920,6 +4979,7 @@ class LocalExecutionBackend:
             audit_events=pending_audit,
             background_tasks=self._execution_task_set(current.execution_id),
         )
+        self._record_committed_terminal(committed, session_id=current.session_id)
         self._pending_audit_events.pop(current.execution_id, None)
         return committed
 

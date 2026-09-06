@@ -13,13 +13,13 @@ from linktools.ai.core import Principal, TaskStatus
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.runtime import RuntimeState
 from linktools.ai.task import (
-    CancelGraphRequest,
     LocalTaskGraphLauncher,
     TaskDependencyResult,
     TaskGraph,
     TaskGraphLaunch,
     TaskGraphLimits,
     TaskNode,
+    TaskNodeInvocation,
     TaskNodeRunControl,
     TaskNodeRunResult,
 )
@@ -33,27 +33,30 @@ class _RecordingRunner:
 
     async def run(
         self,
-        node: TaskNode,
+        invocation: TaskNodeInvocation,
         *,
-        graph_id: str,
-        principal: Principal,
-        dependency_results: Mapping[str, TaskDependencyResult],
         control: TaskNodeRunControl,
     ) -> TaskNodeRunResult:
-        del node, graph_id, principal, dependency_results, control
+        node = invocation.node
+        graph_id = invocation.graph_id
+        principal = invocation.principal
+        correlation = invocation.correlation
+        dependency_results = invocation.dependency_results
+        del node, graph_id, principal, correlation, dependency_results, control
         raise AssertionError(
             "runner must not start during explicit remote cancellation"
         )
 
     async def cancel(
         self,
-        node: TaskNode,
-        *,
-        graph_id: str,
-        principal: Principal,
-        dependency_results: Mapping[str, TaskDependencyResult],
+        invocation: TaskNodeInvocation,
     ) -> None:
-        del graph_id, principal, dependency_results
+        node = invocation.node
+        graph_id = invocation.graph_id
+        principal = invocation.principal
+        correlation = invocation.correlation
+        dependency_results = invocation.dependency_results
+        del graph_id, principal, correlation, dependency_results
         self.cancelled_nodes.append(node.node_id)
 
 
@@ -64,14 +67,16 @@ class _BlockingRunner:
 
     async def run(
         self,
-        node: TaskNode,
+        invocation: TaskNodeInvocation,
         *,
-        graph_id: str,
-        principal: Principal,
-        dependency_results: Mapping[str, TaskDependencyResult],
         control: TaskNodeRunControl,
     ) -> TaskNodeRunResult:
-        del node, graph_id, principal, dependency_results, control
+        node = invocation.node
+        graph_id = invocation.graph_id
+        principal = invocation.principal
+        correlation = invocation.correlation
+        dependency_results = invocation.dependency_results
+        del node, graph_id, principal, correlation, dependency_results, control
         self.entered.set()
         try:
             await asyncio.Event().wait()
@@ -82,13 +87,14 @@ class _BlockingRunner:
 
     async def cancel(
         self,
-        node: TaskNode,
-        *,
-        graph_id: str,
-        principal: Principal,
-        dependency_results: Mapping[str, TaskDependencyResult],
+        invocation: TaskNodeInvocation,
     ) -> None:
-        del node, graph_id, principal, dependency_results
+        node = invocation.node
+        graph_id = invocation.graph_id
+        principal = invocation.principal
+        correlation = invocation.correlation
+        dependency_results = invocation.dependency_results
+        del node, graph_id, principal, correlation, dependency_results
 
 
 class _AllowAuthorization:
@@ -182,13 +188,14 @@ async def test_explicit_cancel_cleans_running_node_without_local_scheduler_owner
         )
         runner = _RecordingRunner()
         launcher = LocalTaskGraphLauncher(repository, runner, owner="local-worker")
-        principal = trusted_workspace_principal("tenant")
         await repository.cancel_graph(graph.graph_id, tenant_id="tenant")
-
-        view = await launcher.cancel(
-            graph.graph_id,
-            CancelGraphRequest(principal, "remote-cancel-request-0001"),
+        launch = TaskGraphLaunch(
+            graph,
+            Principal("task-test", "tenant"),
+            TaskGraphLimits(),
         )
+
+        view = await launcher.cancel(launch)
 
         assert view.status is TaskStatus.CANCELLED
         assert runner.cancelled_nodes == ["node"]
@@ -333,14 +340,16 @@ async def test_inflight_node_does_not_suppress_expired_foreign_lease_reclaim(
 
         async def run(
             self,
-            node: TaskNode,
+            invocation: TaskNodeInvocation,
             *,
-            graph_id: str,
-            principal: Principal,
-            dependency_results: Mapping[str, TaskDependencyResult],
             control: TaskNodeRunControl,
         ) -> TaskNodeRunResult:
-            del graph_id, principal, dependency_results, control
+            node = invocation.node
+            graph_id = invocation.graph_id
+            principal = invocation.principal
+            correlation = invocation.correlation
+            dependency_results = invocation.dependency_results
+            del graph_id, principal, correlation, dependency_results, control
             if node.node_id == "foreign":
                 self.foreign_reclaimed.set()
                 return TaskNodeRunResult("a" * 64)
@@ -354,13 +363,14 @@ async def test_inflight_node_does_not_suppress_expired_foreign_lease_reclaim(
 
         async def cancel(
             self,
-            node: TaskNode,
-            *,
-            graph_id: str,
-            principal: Principal,
-            dependency_results: Mapping[str, TaskDependencyResult],
+            invocation: TaskNodeInvocation,
         ) -> None:
-            del node, graph_id, principal, dependency_results
+            node = invocation.node
+            graph_id = invocation.graph_id
+            principal = invocation.principal
+            correlation = invocation.correlation
+            dependency_results = invocation.dependency_results
+            del node, graph_id, principal, correlation, dependency_results
 
     state = RuntimeState.in_memory()
     await state.initialize(

@@ -419,6 +419,8 @@ async def test_terminal_commit_cancellation_still_finalizes_after_durable_commit
     backend._pending_audit_events = {}
     backend._pending_audit_locks = {}
     backend._execution_durable_tasks = {}
+    backend._metric_recorder = None
+    backend._namespace = "test"
     started = asyncio.Event()
 
     async def commit(*args: object, **kwargs: object) -> object:

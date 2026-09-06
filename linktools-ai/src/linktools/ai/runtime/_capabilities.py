@@ -10,14 +10,14 @@ import os
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, NoReturn, Protocol
+from time import monotonic_ns
+from typing import Any, Protocol
 
 from linktools.core import environ
 from pydantic import ValidationError
 from pydantic_ai.capabilities import (
     AbstractCapability,
     AgentNode,
-    CapabilityOrdering,
     NodeResult,
     WrapToolExecuteHandler,
 )
@@ -61,13 +61,14 @@ from ..capability import (
 )
 from ..core import JsonValue, canonical_json_bytes, normalize_json_value
 from ..errors import AIError, ErrorCode
-from ..observe import MiddlewarePipeline, ObservationContext
 from ..workspace import (
     RepositoryInstructionDocument,
     RepositoryInstructionResolver,
     RepositoryInstructions,
     WorkspacePolicy,
 )
+from ._metric_id import _model_observation_id, _tool_observation_id
+from ._tool_metrics import _ToolMetricContext
 
 _logger = environ.get_logger("ai.runtime.capabilities")
 
@@ -80,6 +81,8 @@ _MODEL_USAGE_INPUT_METADATA_KEY = "linktools.ai.model_usage.input_tokens"
 _MODEL_USAGE_OUTPUT_METADATA_KEY = "linktools.ai.model_usage.output_tokens"
 _MODEL_USAGE_CACHE_READ_METADATA_KEY = "linktools.ai.model_usage.cache_read_tokens"
 _MODEL_USAGE_CACHE_WRITE_METADATA_KEY = "linktools.ai.model_usage.cache_write_tokens"
+_OBSERVATION_ID_METADATA_KEY = "linktools.ai.observation_id"
+_DURATION_NS_METADATA_KEY = "linktools.ai.duration_ns"
 _MODEL_TOOL_ERROR_MAX_CHARS = 4096
 _MODEL_TOOL_ERROR_HEAD_CHARS = 1024
 _MODEL_TOOL_ERROR_TRUNCATION_MARKER = "...[truncated]..."
@@ -148,6 +151,8 @@ class _ToolCallState:
     preserve_started: bool = False
     cached_failure: bool = False
     effect_terminalized: bool = False
+    suppress_cancel_metric: bool = False
+    metric_started_ns: int | None = None
     heartbeat_task: "asyncio.Task[None] | None" = None
 
 
@@ -225,6 +230,11 @@ class _RuntimeStepPersistence(StepPersistence[None]):
         repr=False,
         compare=False,
     )
+    tool_metrics: "_ToolMetricContext | None" = field(
+        default=None,
+        repr=False,
+        compare=False,
+    )
     _calls: "dict[tuple[str, str], _ToolCallState]" = field(
         default_factory=dict,
         init=False,
@@ -233,6 +243,12 @@ class _RuntimeStepPersistence(StepPersistence[None]):
     )
     _last_observed_step_index: "int | None" = field(
         default=None,
+        init=False,
+        repr=False,
+        compare=False,
+    )
+    _model_metric_started_ns: "dict[int, int]" = field(
+        default_factory=dict,
         init=False,
         repr=False,
         compare=False,
@@ -272,6 +288,57 @@ class _RuntimeStepPersistence(StepPersistence[None]):
             self.deferred_pause_sink(self._last_observed_step_index)
         return await super().after_run(ctx, result=result)
 
+    async def before_model_request(
+        self,
+        ctx: "RunContext[None]",
+        request_context: ModelRequestContext,
+    ) -> ModelRequestContext:
+        observed = await super().before_model_request(ctx, request_context)
+        if self.tool_metrics is not None:
+            if ctx.run_step in self._model_metric_started_ns:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            self._model_metric_started_ns[ctx.run_step] = monotonic_ns()
+        return observed
+
+    async def _record_runtime_event(
+        self,
+        ctx: "RunContext[None]",
+        *,
+        kind: str,
+        metadata: Mapping[str, str],
+        error: str | None = None,
+        tool_call_id: str | None = None,
+        tool_name: str | None = None,
+    ) -> None:
+        event_index = self._event_sequence
+        self._event_sequence += 1
+        await self._append_event(
+            run_id=self._effective_run_id(ctx),
+            kind=kind,
+            step_index=ctx.run_step,
+            conversation_id=ctx.conversation_id,
+            parent_run_id=self.parent_run_id,
+            agent_name=self.agent_name,
+            tool_call_id=tool_call_id,
+            tool_name=tool_name,
+            error=error,
+            metadata=dict(metadata),
+            event_index=event_index,
+        )
+
+    def _model_metric_metadata(self, ctx: "RunContext[None]") -> dict[str, str]:
+        metadata = dict(self.metadata)
+        if self.tool_metrics is not None:
+            started = self._model_metric_started_ns.pop(ctx.run_step, None)
+            if started is None:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            metadata[_OBSERVATION_ID_METADATA_KEY] = _model_observation_id(
+                self._effective_run_id(ctx),
+                ctx.run_step,
+            )
+            metadata[_DURATION_NS_METADATA_KEY] = str(monotonic_ns() - started)
+        return metadata
+
     async def after_model_request(
         self,
         ctx: "RunContext[None]",
@@ -280,23 +347,30 @@ class _RuntimeStepPersistence(StepPersistence[None]):
         response: ModelResponse,
     ) -> ModelResponse:
         del request_context
-        run_id = self.run_id or ctx.run_id
-        if not run_id:
-            raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
-        metadata = dict(self.metadata)
+        metadata = self._model_metric_metadata(ctx)
         metadata.update(_model_usage_metadata(response))
-        await self.store.append_event(
-            StepEvent(
-                run_id=run_id,
-                kind="model_request_completed",
-                step_index=ctx.run_step,
-                conversation_id=ctx.conversation_id,
-                parent_run_id=self.parent_run_id,
-                agent_name=self.agent_name,
-                metadata=metadata,
-            )
+        await self._record_runtime_event(
+            ctx,
+            kind="model_request_completed",
+            metadata=metadata,
         )
         return response
+
+    async def on_model_request_error(
+        self,
+        ctx: "RunContext[None]",
+        *,
+        request_context: ModelRequestContext,
+        error: Exception,
+    ) -> ModelResponse:
+        del request_context
+        await self._record_runtime_event(
+            ctx,
+            kind="model_request_failed",
+            metadata=self._model_metric_metadata(ctx),
+            error=repr(error),
+        )
+        raise error
 
     async def before_tool_execute(
         self,
@@ -379,7 +453,17 @@ class _RuntimeStepPersistence(StepPersistence[None]):
 
         async def tracked_handler(validated_args: dict[str, Any]) -> Any:
             state.handler_entered = True
-            return await handler(validated_args)
+            if self.tool_metrics is not None:
+                state.metric_started_ns = monotonic_ns()
+            if self.tool_metrics is None:
+                return await handler(validated_args)
+            return await self.tool_metrics.execute(
+                call=call,
+                tool_def=tool_def,
+                args=validated_args,
+                handler=handler,
+                suppress_cancel=lambda: state.suppress_cancel_metric,
+            )
 
         handler_task = asyncio.create_task(
             super().wrap_tool_execute(
@@ -407,6 +491,7 @@ class _RuntimeStepPersistence(StepPersistence[None]):
                 state.heartbeat_observed = True
                 heartbeat_error = heartbeat_task.exception()
                 if heartbeat_error is not None:
+                    state.suppress_cancel_metric = True
                     handler_task.cancel()
                     self._detach_task(handler_task, "tool handler after heartbeat loss")
                     handler_detached = True
@@ -511,6 +596,8 @@ class _RuntimeStepPersistence(StepPersistence[None]):
             )
             raise AssertionError("dynamic deferred failure hook must raise")
         except asyncio.CancelledError as error:
+            if not state.handler_observed:
+                state.suppress_cancel_metric = True
             if state.operation_terminalized:
                 state.preserve_started = False
                 keep_call_state = False
@@ -544,12 +631,86 @@ class _RuntimeStepPersistence(StepPersistence[None]):
             await self._stop_heartbeat(state)
             if not handler_detached:
                 if not handler_task.done():
+                    state.suppress_cancel_metric = True
                     handler_task.cancel()
                     self._detach_task(handler_task, "tool handler cleanup")
                 elif not state.handler_observed:
                     self._consume_task(handler_task, "tool handler cleanup")
             if not keep_call_state:
                 self._calls.pop(key, None)
+
+    def _tool_metric_metadata(
+        self,
+        call: ToolCallPart,
+        state: _ToolCallState,
+    ) -> dict[str, str]:
+        metadata = dict(self.metadata)
+        metrics = self.tool_metrics
+        if metrics is None or not state.handler_entered or state.metric_started_ns is None:
+            return metadata
+        metadata[_OBSERVATION_ID_METADATA_KEY] = _tool_observation_id(
+            metrics.source_namespace,
+            metrics.tenant_id,
+            metrics.execution_id,
+            metrics.step_run_id,
+            call.tool_call_id,
+        )
+        metadata[_DURATION_NS_METADATA_KEY] = str(
+            monotonic_ns() - state.metric_started_ns
+        )
+        return metadata
+
+    async def _persist_tool_completed(
+        self,
+        ctx: "RunContext[None]",
+        *,
+        call: ToolCallPart,
+        tool_def: ToolDefinition,
+        result: Any,
+        state: _ToolCallState,
+    ) -> Any:
+        run_id = self._effective_run_id(ctx)
+        await self._finish_tool_effect(
+            run_id,
+            call.tool_call_id,
+            tool_def.name,
+            "completed",
+        )
+        await self._record_runtime_event(
+            ctx,
+            kind="tool_call_completed",
+            metadata=self._tool_metric_metadata(call, state),
+            tool_call_id=call.tool_call_id,
+            tool_name=tool_def.name,
+        )
+        return result
+
+    async def _persist_tool_failed(
+        self,
+        ctx: "RunContext[None]",
+        *,
+        call: ToolCallPart,
+        tool_def: ToolDefinition,
+        error: BaseException,
+        state: _ToolCallState,
+    ) -> Any:
+        run_id = self._effective_run_id(ctx)
+        await self._finish_tool_effect(
+            run_id,
+            call.tool_call_id,
+            tool_def.name,
+            "failed",
+            repr(error),
+        )
+        await self._record_runtime_event(
+            ctx,
+            kind="tool_call_failed",
+            metadata=self._tool_metric_metadata(call, state),
+            tool_call_id=call.tool_call_id,
+            tool_name=tool_def.name,
+            error=repr(error),
+        )
+        raise error
 
     async def after_tool_execute(
         self,
@@ -568,12 +729,12 @@ class _RuntimeStepPersistence(StepPersistence[None]):
             self._calls.pop(key, None)
             raise AIError(ErrorCode.TOOL_EFFECT_UNKNOWN)
         try:
-            return await super().after_tool_execute(
+            return await self._persist_tool_completed(
                 ctx,
                 call=call,
                 tool_def=tool_def,
-                args=args,
                 result=result,
+                state=state,
             )
         finally:
             self._calls.pop(key, None)
@@ -736,12 +897,12 @@ class _RuntimeStepPersistence(StepPersistence[None]):
         if state.effect_terminalized:
             raise error
         try:
-            result = await super().on_tool_execute_error(
+            result = await self._persist_tool_failed(
                 ctx,
                 call=call,
                 tool_def=tool_def,
-                args=args,
                 error=error,
+                state=state,
             )
         except BaseException as raised:
             state.effect_terminalized = True
@@ -766,12 +927,12 @@ class _RuntimeStepPersistence(StepPersistence[None]):
         if state.effect_terminalized:
             return result
         try:
-            value = await super().after_tool_execute(
+            value = await self._persist_tool_completed(
                 ctx,
                 call=call,
                 tool_def=tool_def,
-                args=args,
                 result=result,
+                state=state,
             )
         except BaseException:
             state.effect_terminalized = True
@@ -786,89 +947,6 @@ class _RuntimeStepPersistence(StepPersistence[None]):
 
     def _decision_key(self, ctx: "RunContext[None]", call: ToolCallPart) -> tuple[str, str]:
         return self._effective_run_id(ctx), call.tool_call_id
-
-
-class _ObservationalMiddlewareCapability(AbstractCapability[None]):
-    def __init__(
-        self,
-        pipeline: MiddlewarePipeline,
-        context: ObservationContext,
-    ) -> None:
-        if not isinstance(pipeline, MiddlewarePipeline):
-            raise TypeError("pipeline must be MiddlewarePipeline")
-        if not isinstance(context, ObservationContext):
-            raise TypeError("context must be observe.ObservationContext")
-        self._pipeline = pipeline
-        self._context = context
-
-    async def before_run(self, ctx: RunContext[None]) -> None:
-        del ctx
-        await self._pipeline.before_run(self._context)
-
-    async def before_model_request(
-        self,
-        ctx: RunContext[None],
-        request_context: ModelRequestContext,
-    ) -> ModelRequestContext:
-        del ctx
-        await self._pipeline.before_model(self._context)
-        return request_context
-
-    async def after_model_request(
-        self,
-        ctx: RunContext[None],
-        *,
-        request_context: ModelRequestContext,
-        response: ModelResponse,
-    ) -> ModelResponse:
-        del ctx, request_context
-        await self._pipeline.after_model(self._context)
-        return response
-
-    async def before_tool_execute(
-        self,
-        ctx: RunContext[None],
-        *,
-        call: ToolCallPart,
-        tool_def: ToolDefinition,
-        args: dict[str, Any],
-    ) -> dict[str, Any]:
-        del ctx, call, tool_def
-        await self._pipeline.before_tool(self._context)
-        return args
-
-    async def after_tool_execute(
-        self,
-        ctx: RunContext[None],
-        *,
-        call: ToolCallPart,
-        tool_def: ToolDefinition,
-        args: dict[str, Any],
-        result: Any,
-    ) -> Any:
-        del ctx, call, tool_def, args
-        await self._pipeline.after_tool(self._context)
-        return result
-
-    async def on_run_error(
-        self,
-        ctx: RunContext[None],
-        *,
-        error: BaseException,
-    ) -> NoReturn:
-        del ctx
-        await self._pipeline.on_error(self._context, error)
-        raise error
-
-    async def after_run(
-        self,
-        ctx: RunContext[None],
-        *,
-        result: AgentRunResult[Any],
-    ) -> AgentRunResult[Any]:
-        del ctx
-        await self._pipeline.after_run(self._context)
-        return result
 
 
 class _WorkspaceToolGate(AbstractCapability[None]):
@@ -924,9 +1002,6 @@ class _WorkspaceToolGate(AbstractCapability[None]):
         if self._repository_instructions_enabled:
             self._restore_exposure_map(repository_instruction_history)
             self._validate_active_limits()
-
-    def get_ordering(self) -> CapabilityOrdering:
-        return CapabilityOrdering(wraps=(_ObservationalMiddlewareCapability,))
 
     def get_instructions(self) -> Callable[[RunContext[None]], str]:
         def active_repository_instructions(_ctx: RunContext[None]) -> str:
@@ -1237,6 +1312,7 @@ async def compose_platform_capabilities(
     background_tasks: "set[asyncio.Task[object]]",
     plan_store_resolver: "Callable[[RunContext[None]], PlanStore] | None",
     deferred_pause_sink: "Callable[[int], None] | None" = None,
+    tool_metrics: "_ToolMetricContext | None" = None,
 ) -> "tuple[AbstractCapability[None], ...]":
     _validate_compaction_target(context_target_tokens)
     _validate_trusted_tool_classes(trusted_tool_classes)
@@ -1260,6 +1336,7 @@ async def compose_platform_capabilities(
             trusted_mcp_selectors=trusted_mcp_selectors,
             background_tasks=background_tasks,
             deferred_pause_sink=deferred_pause_sink,
+            tool_metrics=tool_metrics,
         )
     )
     selected = frozenset(runtime_tool_names)

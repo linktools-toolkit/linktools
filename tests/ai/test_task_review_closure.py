@@ -70,8 +70,8 @@ class _FailingCancelLauncher:
         del launch
         return SimpleNamespace()
 
-    async def cancel(self, graph_id: str, request: object) -> object:
-        del graph_id, request
+    async def cancel(self, launch: object) -> object:
+        del launch
         raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
 
 

@@ -229,6 +229,7 @@ async def test_recovery_start_unknown_uses_execution_error_domain() -> None:
                 thinking=False,
                 binding="snapshot",
                 repository_instructions=None,
+                correlation={},
                 session_id=None,
                 status=ExecutionStatus.START_UNKNOWN,
             )
@@ -252,6 +253,7 @@ async def test_recovery_start_unknown_uses_execution_error_domain() -> None:
         thinking=False,
         binding="snapshot",
         repository_instructions=None,
+        correlation={},
     )
     checkpoint = SimpleNamespace(
         execution_id="execution",

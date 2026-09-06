@@ -19,7 +19,6 @@ from ...storage import (
     ObjectStore,
     SqlObjectStore,
     SqlStorageContext,
-    StorageMetrics,
     TransientObjectStore,
     build_object_sql_metadata,
     create_sql_storage_context,
@@ -87,7 +86,6 @@ class _MaterializedRuntimeState:
     steps: RuntimeStepStore
     retention: RuntimeRetentionController
     maintenance: RuntimeStorageMaintenance
-    metrics: StorageMetrics
     close_actions: tuple[Callable[[], Awaitable[None]], ...]
 
 
@@ -385,7 +383,6 @@ async def materialize_runtime_state(
             steps=steps,
             retention=retention,
             maintenance=maintenance,
-            metrics=StorageMetrics(),
             close_actions=tuple(actions),
         )
     except BaseException:

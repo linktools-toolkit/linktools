@@ -5,14 +5,14 @@
 from dataclasses import dataclass, fields
 
 import pytest
-from linktools.ai.capability import CapabilityContribution, CapabilityGroup, RunContext
+from linktools.ai.capability import CapabilityContribution, CapabilityGroup, AgentContext
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.spec import AgentSpec
 from pydantic_ai.capabilities import AbstractCapability
 
 
 @dataclass
-class _Capability(AbstractCapability[RunContext[None]]):
+class _Capability(AbstractCapability[AgentContext[None]]):
     id: str = "test-capability"
 
     @classmethod

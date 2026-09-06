@@ -1,0 +1,243 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""Pydantic-specific automatic Model metric producer."""
+
+from __future__ import annotations
+
+import asyncio
+import uuid
+from datetime import datetime, timezone
+from time import monotonic_ns
+from typing import Any
+
+from openai import (
+    APIConnectionError as OpenAIAPIConnectionError,
+    APIError as OpenAIAPIError,
+    APIStatusError as OpenAIAPIStatusError,
+    APITimeoutError as OpenAIAPITimeoutError,
+)
+from pydantic import ValidationError
+from pydantic_ai.capabilities import (
+    AbstractCapability,
+    WrapModelRequestHandler,
+)
+from pydantic_ai.exceptions import (
+    ConcurrencyLimitExceeded,
+    ContentFilterError,
+    ModelAPIError,
+    ModelHTTPError,
+    RunCancelled,
+    UnexpectedModelBehavior,
+    UserError,
+)
+from pydantic_ai.messages import ModelResponse
+from pydantic_ai.models import ModelRequestContext
+from pydantic_ai.tools import RunContext as PydanticRunContext
+from pydantic_ai.usage import UsageLimitExceeded
+
+from ..capability import AgentContext
+from ..errors import AIError, ErrorCode
+from ..observe import MetricMeasurement, MetricRecorder, Observation
+from ._metric_id import _model_observation_id
+from ._metrics import (
+    _bind_metric_execution_context,
+    _metric_correlation,
+)
+
+
+class _RuntimeModelMetricCapability(AbstractCapability[AgentContext[object]]):
+    """Observe actual model request attempts without mutating semantics."""
+
+    def __init__(
+        self,
+        recorder: MetricRecorder,
+        *,
+        source_namespace: str,
+        tenant_id: str,
+        execution_id: str,
+        session_id: str | None,
+        step_run_id: str,
+        agent_id: str,
+        provider: str,
+        model_identity: str,
+        route_id: str,
+    ) -> None:
+        self._recorder = recorder
+        self._source_namespace = source_namespace
+        self._tenant_id = tenant_id
+        self._execution_id = execution_id
+        self._session_id = session_id
+        self._step_run_id = step_run_id
+        self._agent_id = agent_id
+        self._provider = provider
+        self._model_identity = model_identity
+        self._route_id = route_id
+
+    async def before_run(
+        self,
+        ctx: PydanticRunContext[AgentContext[object]],
+    ) -> None:
+        _bind_metric_execution_context(
+            self._recorder,
+            self._execution_id,
+            ctx.deps.correlation,
+        )
+
+    async def wrap_model_request(
+        self,
+        ctx: PydanticRunContext[AgentContext[object]] | None,
+        *,
+        request_context: ModelRequestContext,
+        handler: WrapModelRequestHandler,
+    ) -> ModelResponse:
+        run_context = None if ctx is None else ctx.deps
+        attempt_id = (
+            uuid.uuid4().hex
+            if ctx is None
+            else _model_observation_id(self._step_run_id, ctx.run_step)
+        )
+        started = monotonic_ns()
+        try:
+            response = await handler(request_context)
+        except asyncio.CancelledError:
+            self._record_model(
+                run_context,
+                attempt_id,
+                started,
+                status="CANCELLED",
+                error_code=None,
+                measurements=(),
+            )
+            raise
+        except Exception as error:
+            self._record_model(
+                run_context,
+                attempt_id,
+                started,
+                status="FAILED",
+                error_code=_model_error_code(error),
+                measurements=(),
+            )
+            raise
+        self._record_model(
+            run_context,
+            attempt_id,
+            started,
+            status="SUCCEEDED",
+            error_code=None,
+            measurements=_provider_usage_measurements(response),
+        )
+        return response
+
+    def _record_model(
+        self,
+        run_context: AgentContext[object] | None,
+        attempt_id: str,
+        started: int,
+        *,
+        status: str,
+        error_code: str | None,
+        measurements: tuple[MetricMeasurement, ...],
+    ) -> None:
+        try:
+            observation = Observation(
+                version=1,
+                observation_id=attempt_id,
+                kind="linktools.model.request",
+                occurred_at=datetime.now(timezone.utc),
+                source_namespace=self._source_namespace,
+                tenant_id=self._tenant_id,
+                status=status,
+                error_code=error_code,
+                correlation=_metric_correlation(
+                    None if run_context is None else run_context.correlation,
+                    execution_id=self._execution_id,
+                    session_id=self._session_id,
+                    step_run_id=self._step_run_id,
+                ),
+                dimensions={
+                    "agent_id": self._agent_id,
+                    "provider": self._provider,
+                    "model_identity": self._model_identity,
+                    "route_id": self._route_id,
+                },
+                measurements=(
+                    MetricMeasurement("latency_ns", 1, monotonic_ns() - started),
+                    *measurements,
+                ),
+            )
+            self._recorder.try_record(observation)
+        except Exception:
+            return
+
+
+def _provider_usage_measurements(
+    response: ModelResponse,
+) -> tuple[MetricMeasurement, ...]:
+    usage = response.usage
+    values = [
+        ("input_tokens", usage.input_tokens),
+        ("output_tokens", usage.output_tokens),
+        ("cache_read_tokens", usage.cache_read_tokens),
+        ("cache_write_tokens", usage.cache_write_tokens),
+    ]
+    measurements = [
+        MetricMeasurement(name, 1, value)
+        for name, value in values
+        if value > 0
+    ]
+    if usage.input_tokens > 0 and usage.output_tokens > 0:
+        measurements.insert(
+            2,
+            MetricMeasurement(
+                "total_tokens",
+                1,
+                usage.input_tokens + usage.output_tokens,
+            ),
+        )
+    return tuple(measurements)
+
+
+def _model_error_code(error: Exception) -> str:
+    if isinstance(error, AIError):
+        return error.code.value
+    if isinstance(error, UsageLimitExceeded):
+        return ErrorCode.EXECUTION_USAGE_LIMIT_EXCEEDED.value
+    if isinstance(error, RunCancelled):
+        return ErrorCode.EXECUTION_CANCELLED.value
+    if isinstance(error, ConcurrencyLimitExceeded):
+        return ErrorCode.EXECUTION_CONCURRENCY_LIMIT_EXCEEDED.value
+    if isinstance(error, ContentFilterError):
+        return ErrorCode.MODEL_CONTENT_FILTERED.value
+    if isinstance(error, ModelHTTPError):
+        return _http_error_code(error.status_code).value
+    if isinstance(error, OpenAIAPITimeoutError):
+        return ErrorCode.MODEL_TIMEOUT.value
+    if isinstance(error, OpenAIAPIConnectionError):
+        return ErrorCode.MODEL_UNAVAILABLE.value
+    if isinstance(error, OpenAIAPIStatusError):
+        return _http_error_code(error.status_code).value
+    if isinstance(error, (ModelAPIError, OpenAIAPIError)):
+        return ErrorCode.MODEL_API_ERROR.value
+    if isinstance(error, UnexpectedModelBehavior):
+        return ErrorCode.MODEL_RESPONSE_INVALID.value
+    if isinstance(error, ValidationError):
+        return ErrorCode.OUTPUT_VALIDATION_FAILED.value
+    if isinstance(error, UserError):
+        return ErrorCode.INTERNAL_ERROR.value
+    return ErrorCode.INTERNAL_ERROR.value
+
+
+def _http_error_code(status_code: int) -> ErrorCode:
+    if status_code == 408:
+        return ErrorCode.MODEL_TIMEOUT
+    if status_code == 429:
+        return ErrorCode.MODEL_RATE_LIMITED
+    if status_code >= 500:
+        return ErrorCode.MODEL_UNAVAILABLE
+    if 400 <= status_code < 500:
+        return ErrorCode.MODEL_REQUEST_REJECTED
+    return ErrorCode.MODEL_API_ERROR
+
+
+__all__: list[str] = []

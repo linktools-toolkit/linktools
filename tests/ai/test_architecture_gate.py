@@ -175,7 +175,7 @@ def test_linktools_ai_top_level_exports_are_exact() -> None:
         "Agent",
         "CapabilityGroup",
         "Execution",
-        "RunContext",
+        "AgentContext",
         "Runtime",
         "Session",
         "Workspace",

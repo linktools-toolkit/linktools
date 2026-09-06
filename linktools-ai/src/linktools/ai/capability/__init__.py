@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """Capability loading, tool adaptation, and runtime materialization contracts."""
 
-from ._context import RunContext
+from ._context import AgentContext
 from ._group import (
     CapabilityContribution,
     CapabilityGroup,
@@ -47,7 +47,7 @@ __all__ = [
     "CapabilityLoadContext",
     "CapabilityLoader",
     "LocalSkillResourceSource",
-    "RunContext",
+    "AgentContext",
     "SKILL_TOOL_NAMES",
     "SUBAGENT_TOOL_NAMES",
     "SkillCapability",

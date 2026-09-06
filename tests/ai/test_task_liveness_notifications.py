@@ -19,6 +19,7 @@ from linktools.ai.task import (
     TaskGraphLaunch,
     TaskGraphLimits,
     TaskNode,
+    TaskNodeInvocation,
     TaskNodeRunControl,
     TaskNodeRunResult,
 )
@@ -39,14 +40,16 @@ class _BlockingRunner:
 
     async def run(
         self,
-        node: TaskNode,
+        invocation: TaskNodeInvocation,
         *,
-        graph_id: str,
-        principal: Principal,
-        dependency_results: Mapping[str, TaskDependencyResult],
         control: TaskNodeRunControl,
     ) -> TaskNodeRunResult:
-        del node, graph_id, principal, dependency_results, control
+        node = invocation.node
+        graph_id = invocation.graph_id
+        principal = invocation.principal
+        correlation = invocation.correlation
+        dependency_results = invocation.dependency_results
+        del node, graph_id, principal, correlation, dependency_results, control
         self.entered.set()
         try:
             await self.release.wait()
@@ -57,13 +60,14 @@ class _BlockingRunner:
 
     async def cancel(
         self,
-        node: TaskNode,
-        *,
-        graph_id: str,
-        principal: Principal,
-        dependency_results: Mapping[str, TaskDependencyResult],
+        invocation: TaskNodeInvocation,
     ) -> None:
-        del node, graph_id, principal, dependency_results
+        node = invocation.node
+        graph_id = invocation.graph_id
+        principal = invocation.principal
+        correlation = invocation.correlation
+        dependency_results = invocation.dependency_results
+        del node, graph_id, principal, correlation, dependency_results
 
 
 @pytest.mark.asyncio
