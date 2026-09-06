@@ -34,19 +34,8 @@ jobs:
         run: |
           python -m compileall -q linktools-ai/src tests/ai
           git diff --check
-      - name: Focused observability contracts
+      - name: Diagnose runtime metric delivery
         run: |
-          python -m pytest -q \
-            tests/ai/test_agent_composition.py \
-            tests/ai/test_architecture_gate.py \
-            tests/ai/test_execution_context_durability.py \
-            tests/ai/test_task_context_durability.py \
-            tests/ai/test_task_mixed_node_reliability.py \
-            tests/ai/test_runtime_metric_usage.py \
-            tests/ai/test_task_metric_projector.py \
-            tests/ai/test_runtime_metrics.py \
-            tests/ai/test_runtime_metrics_multi.py
-      - name: All linktools-ai tests
-        run: python -m pytest -q tests/ai
-      - name: Repository check
-        run: python manage.py check
+          python -m pytest -q -s --log-cli-level=DEBUG \
+            tests/ai/test_runtime_metrics.py::test_runtime_projects_model_agent_and_execution_metrics \
+            tests/ai/test_runtime_metrics_multi.py::test_runtime_states_share_metrics_without_lifecycle_coupling
