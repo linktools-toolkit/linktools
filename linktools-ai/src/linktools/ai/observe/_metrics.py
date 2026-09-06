@@ -182,6 +182,9 @@ class Metrics:
                 raise
             await self._store.put_observations(self._namespace, batch)
 
+    async def get_observation(self, observation_id: str) -> Observation | None:
+        return await self._store.get_observation(self._namespace, observation_id)
+
     async def query(self, query: MetricQuery) -> MetricQueryResult:
         if not isinstance(query, MetricQuery):
             raise TypeError("query must be MetricQuery")
@@ -245,11 +248,13 @@ def _latency(name: str, kind: str, fields: tuple[str, ...]) -> MetricDefinition:
     )
 
 
-def _token(
+def _measurement_counter(
     name: str,
     measurement: str,
     kind: str,
     fields: tuple[str, ...],
+    *,
+    unit: str,
 ) -> MetricDefinition:
     return MetricDefinition(
         name=name,
@@ -257,9 +262,24 @@ def _token(
         observation_kind=kind,
         source=MetricSource.measurement(measurement),
         metric_type=MetricType.COUNTER,
-        unit="token",
+        unit=unit,
         default_aggregation=MetricAggregation.SUM,
         query_fields=fields,
+    )
+
+
+def _token(
+    name: str,
+    measurement: str,
+    kind: str,
+    fields: tuple[str, ...],
+) -> MetricDefinition:
+    return _measurement_counter(
+        name,
+        measurement,
+        kind,
+        fields,
+        unit="token",
     )
 
 
@@ -328,6 +348,12 @@ _BUILTIN_DEFINITIONS = (
         _MODEL_FIELDS,
     ),
     _token(
+        "linktools.model.total_tokens",
+        "total_tokens",
+        "linktools.model.request",
+        _MODEL_FIELDS,
+    ),
+    _token(
         "linktools.model.cache_read_tokens",
         "cache_read_tokens",
         "linktools.model.request",
@@ -365,8 +391,32 @@ _BUILTIN_DEFINITIONS = (
         ("FAILED",),
         _AGENT_FIELDS,
     ),
+    _measurement_counter(
+        "linktools.agent.model_requests",
+        "model_requests",
+        "linktools.agent.run",
+        _AGENT_FIELDS,
+        unit="1",
+    ),
+    _measurement_counter(
+        "linktools.agent.tool_calls",
+        "tool_calls",
+        "linktools.agent.run",
+        _AGENT_FIELDS,
+        unit="1",
+    ),
+    _token("linktools.agent.input_tokens", "input_tokens", "linktools.agent.run", _AGENT_FIELDS),
+    _token("linktools.agent.output_tokens", "output_tokens", "linktools.agent.run", _AGENT_FIELDS),
+    _token("linktools.agent.total_tokens", "total_tokens", "linktools.agent.run", _AGENT_FIELDS),
+    _token("linktools.agent.cache_read_tokens", "cache_read_tokens", "linktools.agent.run", _AGENT_FIELDS),
+    _token("linktools.agent.cache_write_tokens", "cache_write_tokens", "linktools.agent.run", _AGENT_FIELDS),
     _count(
         "linktools.execution.count",
+        "linktools.execution.terminal",
+        _EXECUTION_FIELDS,
+    ),
+    _latency(
+        "linktools.execution.latency",
         "linktools.execution.terminal",
         _EXECUTION_FIELDS,
     ),
@@ -384,6 +434,20 @@ _BUILTIN_DEFINITIONS = (
         ("CANCELLED",),
         _EXECUTION_FIELDS,
     ),
+    _measurement_counter(
+        "linktools.execution.model_requests",
+        "model_requests",
+        "linktools.execution.terminal",
+        _EXECUTION_FIELDS,
+        unit="1",
+    ),
+    _measurement_counter(
+        "linktools.execution.tool_calls",
+        "tool_calls",
+        "linktools.execution.terminal",
+        _EXECUTION_FIELDS,
+        unit="1",
+    ),
     _token(
         "linktools.execution.input_tokens",
         "input_tokens",
@@ -393,6 +457,24 @@ _BUILTIN_DEFINITIONS = (
     _token(
         "linktools.execution.output_tokens",
         "output_tokens",
+        "linktools.execution.terminal",
+        _EXECUTION_FIELDS,
+    ),
+    _token(
+        "linktools.execution.total_tokens",
+        "total_tokens",
+        "linktools.execution.terminal",
+        _EXECUTION_FIELDS,
+    ),
+    _token(
+        "linktools.execution.cache_read_tokens",
+        "cache_read_tokens",
+        "linktools.execution.terminal",
+        _EXECUTION_FIELDS,
+    ),
+    _token(
+        "linktools.execution.cache_write_tokens",
+        "cache_write_tokens",
         "linktools.execution.terminal",
         _EXECUTION_FIELDS,
     ),
