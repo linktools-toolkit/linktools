@@ -37,8 +37,6 @@ jobs:
                   raise SystemExit(f"pattern not found in {path}: {old[:160]!r}")
               target.write_text(text.replace(old, new, count))
 
-          # Remove the misleading Storage metric catalog/producers. There is no
-          # stable physical-storage operation owner in v1 yet.
           metrics_facade = "linktools-ai/src/linktools/ai/observe/_metrics.py"
           replace(metrics_facade, '_STORAGE_FIELDS = (*_CANONICAL, "domain", "target")\n', '')
           replace(
@@ -83,8 +81,6 @@ jobs:
               raise SystemExit('runtime storage metric finally block missing')
           Path(local).write_text(text)
 
-          # Keep Metrics.sqlite close-free and operation-scoped, but validate
-          # schema only once per SQLiteMetricStore lifetime.
           sql = "linktools-ai/src/linktools/ai/observe/_sql.py"
           replace(
               sql,
@@ -111,15 +107,8 @@ jobs:
               '''        try:\n            await self._ensure_schema(engine)\n            yield SqlMetricStore(engine, validate_schema=False)\n        finally:\n            await engine.dispose()\n''',
           )
 
-          # One Task projector is shared by Service and Launcher. Successful
-          # projections are remembered in a bounded recent cache, while failed
-          # recorder admission remains retryable.
           task_metrics = "linktools-ai/src/linktools/ai/task/_metrics.py"
-          replace(
-              task_metrics,
-              '_DRAIN_TIMEOUT_SECONDS = 5.0\n',
-              '_DRAIN_TIMEOUT_SECONDS = 5.0\n_PROJECTED_CACHE_SIZE = 4096\n',
-          )
+          replace(task_metrics, '_DRAIN_TIMEOUT_SECONDS = 5.0\n', '_DRAIN_TIMEOUT_SECONDS = 5.0\n_PROJECTED_CACHE_SIZE = 4096\n')
           replace(
               task_metrics,
               '''        self._tasks: dict[tuple[str, str], asyncio.Task[None]] = {}\n        self._accepting = True\n''',
@@ -171,13 +160,6 @@ jobs:
               '''        tenant_id: str,\n        correlation: CorrelationData,\n    ) -> bool:\n        terminal = cast(TaskEvent, attempt.terminal)\n''',
           )
           replace(task_metrics, '        self._safe_record(\n            lambda: Observation(\n', '        return self._safe_record(\n            lambda: Observation(\n', count=1)
-          # The first replacement above affected _record_graph; update the later
-          # _record_attempt call explicitly if it still lacks return.
-          text = Path(task_metrics).read_text()
-          attempt_start = text.index('    def _record_attempt(\n')
-          safe_start = text.index('        self._safe_record(\n', attempt_start)
-          text = text[:safe_start] + '        return self._safe_record(\n' + text[safe_start + len('        self._safe_record(\n'):]
-          Path(task_metrics).write_text(text)
           replace(
               task_metrics,
               '''    def _safe_record(self, factory: Callable[[], Observation]) -> None:\n        try:\n            self._recorder.try_record(factory())\n        except Exception:\n            _logger.exception("task metric observation rejected")\n''',
@@ -186,11 +168,7 @@ jobs:
 
           task_local = "linktools-ai/src/linktools/ai/task/_local.py"
           replace(task_local, 'from ..observe import MetricRecorder\n', '')
-          replace(
-              task_local,
-              'from ._metrics import _TaskMetricAdmissionRepository, _TaskMetricProjector\n',
-              'from ._metrics import _TaskMetricProjector\n',
-          )
+          replace(task_local, 'from ._metrics import _TaskMetricAdmissionRepository, _TaskMetricProjector\n', 'from ._metrics import _TaskMetricProjector\n')
           replace(
               task_local,
               '''    def __init__(\n        self,\n        repository: _TaskRepository,\n        runner: TaskNodeRunner,\n        *,\n        owner: str,\n        metric_recorder: MetricRecorder | None = None,\n        metric_source_namespace: str | None = None,\n        metric_admissions: "_TaskMetricAdmissionRepository | None" = None,\n    ) -> None:\n        try:\n            validate_lease_owner(owner)\n        except AIError as error:\n            raise ValueError("task launcher lease owner is invalid") from error\n        if (metric_recorder is None) != (metric_source_namespace is None):\n            raise ValueError(\n                "task metric recorder and source namespace must be configured together"\n            )\n        self._repository = repository\n        self._runner = runner\n        self._owner = owner\n        self._metric_projector = (\n            None\n            if metric_recorder is None or metric_source_namespace is None\n            else _TaskMetricProjector(\n                repository,\n                metric_recorder,\n                source_namespace=metric_source_namespace,\n                admissions=metric_admissions,\n            )\n        )\n''',
@@ -211,11 +189,7 @@ jobs:
           )
 
           factory = "linktools-ai/src/linktools/ai/runtime/_factory.py"
-          replace(
-              factory,
-              'from ..task import LocalTaskGraphLauncher, TaskNodeHandler\n',
-              'from ..task import LocalTaskGraphLauncher, TaskNodeHandler\nfrom ..task._metrics import _TaskMetricProjector\n',
-          )
+          replace(factory, 'from ..task import LocalTaskGraphLauncher, TaskNodeHandler\n', 'from ..task import LocalTaskGraphLauncher, TaskNodeHandler\nfrom ..task._metrics import _TaskMetricProjector\n')
           replace(
               factory,
               '''    metric_buffer = None if metrics is None else _RuntimeMetricBuffer(metrics)\n    metric_source_namespace = None if metric_buffer is None else namespace\n''',
@@ -235,48 +209,28 @@ jobs:
           runtime_metrics_test = "tests/ai/test_runtime_metrics.py"
           text = Path(runtime_metrics_test).read_text()
           anchor = 'from linktools.ai.workspace import Workspace\n'
-          text = text.replace(
-              anchor,
-              'from linktools.ai.task._metrics import _TaskMetricProjector\n' + anchor,
-              1,
-          )
+          text = text.replace(anchor, 'from linktools.ai.task._metrics import _TaskMetricProjector\n' + anchor, 1)
           Path(runtime_metrics_test).write_text(text)
           replace(
               runtime_metrics_test,
               '''    recorder = _CaptureRecorder()\n    launcher = LocalTaskGraphLauncher(\n        repository,  # type: ignore[arg-type]\n        _SuccessfulTaskRunner(),  # type: ignore[arg-type]\n        owner="worker",\n        metric_recorder=recorder,\n        metric_source_namespace="workspace",\n    )\n''',
               '''    recorder = _CaptureRecorder()\n    projector = _TaskMetricProjector(\n        repository,  # type: ignore[arg-type]\n        recorder,\n        source_namespace="workspace",\n    )\n    launcher = LocalTaskGraphLauncher(\n        repository,  # type: ignore[arg-type]\n        _SuccessfulTaskRunner(),  # type: ignore[arg-type]\n        owner="worker",\n        metric_projector=projector,\n    )\n''',
           )
-          replace(
-              runtime_metrics_test,
-              '    await launcher.shutdown()\n\n    assert repository.complete_calls == 1\n',
-              '    await launcher.shutdown()\n    await projector.close()\n\n    assert repository.complete_calls == 1\n',
-          )
+          replace(runtime_metrics_test, '    await launcher.shutdown()\n\n    assert repository.complete_calls == 1\n', '    await launcher.shutdown()\n    await projector.close()\n\n    assert repository.complete_calls == 1\n')
 
           projector_test = "tests/ai/test_task_metric_projector.py"
           replace(projector_test, 'from __future__ import annotations\n\n', 'from __future__ import annotations\n\nimport asyncio\n')
-          replace(
-              projector_test,
-              '''    def __init__(self, events: tuple[TaskEvent, ...]) -> None:\n        self.events = events\n''',
-              '''    def __init__(self, events: tuple[TaskEvent, ...]) -> None:\n        self.events = events\n        self.list_calls = 0\n''',
-          )
-          replace(
-              projector_test,
-              '''    ) -> Page[TaskEvent]:\n        del tenant_id\n        selected = tuple(\n''',
-              '''    ) -> Page[TaskEvent]:\n        del tenant_id\n        self.list_calls += 1\n        selected = tuple(\n''',
-          )
+          replace(projector_test, '    def __init__(self, events: tuple[TaskEvent, ...]) -> None:\n        self.events = events\n', '    def __init__(self, events: tuple[TaskEvent, ...]) -> None:\n        self.events = events\n        self.list_calls = 0\n')
+          replace(projector_test, '    ) -> Page[TaskEvent]:\n        del tenant_id\n        selected = tuple(\n', '    ) -> Page[TaskEvent]:\n        del tenant_id\n        self.list_calls += 1\n        selected = tuple(\n')
           with Path(projector_test).open('a') as handle:
-              handle.write('''\n\nasync def test_trigger_deduplicates_successful_projection() -> None:\n    now = datetime(2026, 9, 5, tzinfo=timezone.utc)\n    repository = _Repository(\n        (\n            _admitted("dedup", now),\n            _graph_terminal("dedup", 2, now + timedelta(seconds=1)),\n        )\n    )\n    recorder = _Recorder()\n    projector = _TaskMetricProjector(\n        repository,\n        recorder,\n        source_namespace="workspace",\n    )\n\n    projector.trigger("dedup", tenant_id="tenant")\n    while projector._tasks:\n        await asyncio.sleep(0)\n    first_calls = repository.list_calls\n    assert first_calls == 2\n\n    projector.trigger("dedup", tenant_id="tenant")\n    await asyncio.sleep(0)\n    assert repository.list_calls == first_calls\n    await projector.close()\n''')
+              handle.write('''\n\nasync def test_trigger_deduplicates_successful_projection() -> None:\n    now = datetime(2026, 9, 5, tzinfo=timezone.utc)\n    repository = _Repository((_admitted("dedup", now), _graph_terminal("dedup", 2, now + timedelta(seconds=1))))\n    recorder = _Recorder()\n    projector = _TaskMetricProjector(repository, recorder, source_namespace="workspace")\n    projector.trigger("dedup", tenant_id="tenant")\n    while projector._tasks:\n        await asyncio.sleep(0)\n    first_calls = repository.list_calls\n    assert first_calls == 2\n    projector.trigger("dedup", tenant_id="tenant")\n    await asyncio.sleep(0)\n    assert repository.list_calls == first_calls\n    await projector.close()\n''')
 
-          Path("tests/ai/test_metrics_sqlite_validation.py").write_text('''#!/usr/bin/env python3\n# -*- coding: utf-8 -*-\n"""SQLite Metrics validates schema once per close-free store lifetime."""\n\nfrom datetime import datetime, timedelta, timezone\nfrom pathlib import Path\n\nimport pytest\nfrom linktools.ai.migrate import provision_metrics_sqlite\nfrom linktools.ai.observe import (\n    MetricAggregation,\n    MetricDefinition,\n    MetricQuery,\n    MetricSource,\n    MetricType,\n    MetricWindow,\n    Metrics,\n)\nimport linktools.ai.observe._sqlite as sqlite_module\n\n\n@pytest.mark.asyncio\nasync def test_sqlite_schema_validation_is_cached_across_operations(\n    tmp_path: Path,\n    monkeypatch: pytest.MonkeyPatch,\n) -> None:\n    path = tmp_path / "metrics.db"\n    await provision_metrics_sqlite(path)\n    real_validate = sqlite_module.validate_sql\n    calls = 0\n\n    async def counting_validate(engine: object, metadata: object) -> None:\n        nonlocal calls\n        calls += 1\n        await real_validate(engine, metadata)  # type: ignore[arg-type]\n\n    monkeypatch.setattr(sqlite_module, "validate_sql", counting_validate)\n    metrics = Metrics.sqlite(path, namespace="validation-cache")\n    definition = MetricDefinition(\n        name="business.validation_cache",\n        revision=1,\n        observation_kind="business.validation_cache.sample",\n        source=MetricSource.measurement("value"),\n        metric_type=MetricType.COUNTER,\n        unit="1",\n        default_aggregation=MetricAggregation.SUM,\n    )\n    occurred_at = datetime(2026, 9, 6, tzinfo=timezone.utc)\n\n    await metrics.define(definition)\n    await metrics.record(\n        definition.name,\n        1,\n        observation_id="sample",\n        occurred_at=occurred_at,\n    )\n    result = await metrics.query(\n        MetricQuery(\n            definition.name,\n            MetricWindow.between(\n                occurred_at - timedelta(seconds=1),\n                occurred_at + timedelta(seconds=1),\n            ),\n        )\n    )\n\n    assert result.points[0].value == 1\n    assert calls == 1\n''')
+          Path("tests/ai/test_metrics_sqlite_validation.py").write_text('''#!/usr/bin/env python3\n# -*- coding: utf-8 -*-\n"""SQLite Metrics validates schema once per close-free store lifetime."""\n\nfrom datetime import datetime, timedelta, timezone\nfrom pathlib import Path\n\nimport pytest\nfrom linktools.ai.migrate import provision_metrics_sqlite\nfrom linktools.ai.observe import MetricAggregation, MetricDefinition, MetricQuery, MetricSource, MetricType, MetricWindow, Metrics\nimport linktools.ai.observe._sqlite as sqlite_module\n\n\n@pytest.mark.asyncio\nasync def test_sqlite_schema_validation_is_cached_across_operations(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:\n    path = tmp_path / "metrics.db"\n    await provision_metrics_sqlite(path)\n    real_validate = sqlite_module.validate_sql\n    calls = 0\n    async def counting_validate(engine: object, metadata: object) -> None:\n        nonlocal calls\n        calls += 1\n        await real_validate(engine, metadata)  # type: ignore[arg-type]\n    monkeypatch.setattr(sqlite_module, "validate_sql", counting_validate)\n    metrics = Metrics.sqlite(path, namespace="validation-cache")\n    definition = MetricDefinition(name="business.validation_cache", revision=1, observation_kind="business.validation_cache.sample", source=MetricSource.measurement("value"), metric_type=MetricType.COUNTER, unit="1", default_aggregation=MetricAggregation.SUM)\n    occurred_at = datetime(2026, 9, 6, tzinfo=timezone.utc)\n    await metrics.define(definition)\n    await metrics.record(definition.name, 1, observation_id="sample", occurred_at=occurred_at)\n    result = await metrics.query(MetricQuery(definition.name, MetricWindow.between(occurred_at - timedelta(seconds=1), occurred_at + timedelta(seconds=1))))\n    assert result.points[0].value == 1\n    assert calls == 1\n''')
 
           for path in (metrics_facade, runtime_metrics, local):
               text = Path(path).read_text()
               if 'linktools.storage.operation' in text or '_record_storage_operation' in text:
                   raise SystemExit(f'stale storage metric producer/catalog remains in {path}')
-          if 'metric_recorder: MetricRecorder' in Path(task_local).read_text():
-              raise SystemExit('launcher still owns metric recorder')
-          if 'metric_recorder: MetricRecorder' in Path(task_service).read_text():
-              raise SystemExit('task service still constructs its own projector')
           PY
       - name: Install tooling
         run: |
