@@ -234,7 +234,7 @@ class _DefinitionCommitUnknownStore(InMemoryMetricStore):
         definition: MetricDefinition,
     ) -> MetricDefinition:
         self.calls += 1
-        stored = await super().put_definition(namespace, definition)
+        await super().put_definition(namespace, definition)
         raise AIError(ErrorCode.STORAGE_COMMIT_UNKNOWN)
 
 
