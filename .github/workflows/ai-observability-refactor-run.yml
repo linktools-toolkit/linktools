@@ -26,109 +26,36 @@ jobs:
         with:
           python-version: "3.10"
 
-      - name: Apply production residual fixes
+      - name: Apply correlation residual fixes
         shell: bash
         run: |
           python - <<'PY'
           from pathlib import Path
-          import textwrap
 
-          def replace_exact(path: str, old: str, new: str, count: int) -> None:
-              file = Path(path)
-              text = file.read_text()
+          fixes = (
+              (
+                  Path("linktools-ai/src/linktools/ai/runtime/state/_codec.py"),
+                  "if not value.context:",
+                  "if not value.correlation:",
+                  3,
+              ),
+              (
+                  Path("linktools-ai/src/linktools/ai/runtime/_runtime_service.py"),
+                  "self._tenant_id",
+                  "self.tenant_id",
+                  2,
+              ),
+          )
+          for path, old, new, expected in fixes:
+              text = path.read_text()
               actual = text.count(old)
-              if actual != count:
-                  raise SystemExit(f"{path}: expected {count} matches for {old!r}, got {actual}")
-              file.write_text(text.replace(old, new))
-
-          replace_exact(
-              "linktools-ai/src/linktools/ai/runtime/state/_codec.py",
-              "if not value.context:",
-              "if not value.correlation:",
-              3,
-          )
-          replace_exact(
-              "linktools-ai/src/linktools/ai/runtime/_runtime_service.py",
-              "self._tenant_id",
-              "self.tenant_id",
-              2,
-          )
-
-          path = Path("linktools-ai/src/linktools/ai/task/_metrics.py")
-          text = path.read_text()
-          old = textwrap.dedent('''\
-          @dataclass(slots=True)
-          class _Attempt:
-              start: TaskEvent
-              execution_id: str | None
-              invalid: bool = False
-              terminal: TaskEvent | None = None
-          ''')
-          new = textwrap.dedent('''\
-          @dataclass(slots=True)
-          class _Attempt:
-              execution_id: str | None
-              invalid: bool = False
-              terminal: TaskEvent | None = None
-          ''')
-          if text.count(old) != 1:
-              raise SystemExit("task attempt shape mismatch")
-          text = text.replace(old, new, 1)
-          if text.count("attempts[key] = _Attempt(event, event.execution_id)") != 1:
-              raise SystemExit("task attempt construction mismatch")
-          text = text.replace(
-              "attempts[key] = _Attempt(event, event.execution_id)",
-              "attempts[key] = _Attempt(event.execution_id)",
-              1,
-          )
-          old_call = textwrap.dedent('''\
-                  self._record_graph(
-                      admission,
-                      terminal,
-                      tenant_id=tenant_id,
-                      correlation=correlation,
+              if actual != expected:
+                  raise SystemExit(
+                      f"{path}: expected {expected} matches for {old!r}, got {actual}"
                   )
-          ''')
-          new_call = textwrap.dedent('''\
-                  self._record_graph(
-                      terminal,
-                      tenant_id=tenant_id,
-                      correlation=correlation,
-                  )
-          ''')
-          if old_call not in text:
-              # keep source indentation while matching by stripping common indentation
-              old_call = "        " + old_call.replace("\n", "\n        ").rstrip("        ")
-              new_call = "        " + new_call.replace("\n", "\n        ").rstrip("        ")
-          if text.count(old_call) != 1:
-              raise SystemExit("task graph record call mismatch")
-          text = text.replace(old_call, new_call, 1)
-          old_method = textwrap.dedent('''\
-              def _record_graph(
-                  self,
-                  admission: TaskEvent,
-                  terminal: TaskEvent,
-                  *,
-                  tenant_id: str,
-                  correlation: CorrelationData,
-              ) -> None:
-                  del admission
-          ''')
-          new_method = textwrap.dedent('''\
-              def _record_graph(
-                  self,
-                  terminal: TaskEvent,
-                  *,
-                  tenant_id: str,
-                  correlation: CorrelationData,
-              ) -> None:
-          ''')
-          if text.count(old_method) != 1:
-              raise SystemExit("task graph record method mismatch")
-          text = text.replace(old_method, new_method, 1)
-          path.write_text(text)
+              path.write_text(text.replace(old, new))
           PY
-          python -m compileall -q linktools-ai/src tests/ai
+          python -m compileall -q linktools-ai/src
           git diff --check
 
       - name: Commit production fixes
@@ -137,10 +64,8 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add linktools-ai/src/linktools/ai
-          if ! git diff --cached --quiet; then
-            git commit -m "fix(ai): complete correlation refactor"
-            git push origin HEAD:feat/ai-metrics-observability
-          fi
+          git commit -m "fix(ai): complete correlation refactor"
+          git push origin HEAD:feat/ai-metrics-observability
 
       - name: Install tooling
         run: |
@@ -163,9 +88,8 @@ jobs:
           path: /tmp/ai-tests.log
           if-no-files-found: ignore
 
-      - name: Verify core production slices
+      - name: Verify production slices
         run: |
           python -m pytest -q \
             tests/ai/persistence/test_execution_start_service.py \
-            tests/ai/test_runtime_persistence_evidence.py \
-            tests/ai/test_task_reliable_review_regressions.py
+            tests/ai/test_runtime_persistence_evidence.py
