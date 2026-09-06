@@ -836,7 +836,7 @@ class Runtime(Generic[AppT]):
                 return
             if not self._closing:
                 self._closing = True
-                _logger.info("runtime close started: tenant=%s", self._tenant_id)
+                _logger.info("runtime close started: tenant=%s", self.tenant_id)
             task = self._close_task
             retry = task is None
             if task is not None and task.done():
@@ -885,7 +885,7 @@ class Runtime(Generic[AppT]):
             await self._close_callback()
         async with self._close_lock:
             self._closed = True
-            _logger.info("runtime close completed: tenant=%s", self._tenant_id)
+            _logger.info("runtime close completed: tenant=%s", self.tenant_id)
 
 
 def _execution_policy(
