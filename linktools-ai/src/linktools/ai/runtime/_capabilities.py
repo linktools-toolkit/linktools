@@ -67,7 +67,7 @@ from ..workspace import (
     RepositoryInstructions,
     WorkspacePolicy,
 )
-from ._metrics import _model_observation_id, _tool_observation_id
+from ._metric_id import _model_observation_id, _tool_observation_id
 from ._tool_metrics import _ToolMetricContext
 
 _logger = environ.get_logger("ai.runtime.capabilities")

@@ -41,11 +41,11 @@ from ..capability import RunContext
 from ..core import UsageMetrics
 from ..errors import AIError, ErrorCode
 from ..observe import MetricMeasurement, MetricRecorder, Observation
+from ._metric_id import _model_observation_id
 from ._metrics import (
     _bind_metric_agent_usage,
     _bind_metric_execution_context,
     _metric_correlation,
-    _model_observation_id,
 )
 
 

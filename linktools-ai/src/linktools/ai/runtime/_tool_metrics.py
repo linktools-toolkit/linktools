@@ -25,7 +25,7 @@ from pydantic_ai.tools import ToolDefinition
 
 from ..errors import AIError, ErrorCode
 from ..observe import MetricMeasurement, MetricRecorder, Observation
-from ._metrics import _tool_observation_id
+from ._metric_id import _tool_observation_id
 
 _logger = environ.get_logger("ai.runtime.tool_metrics")
 

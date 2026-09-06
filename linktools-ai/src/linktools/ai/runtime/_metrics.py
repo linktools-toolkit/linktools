@@ -13,10 +13,15 @@ from time import monotonic
 
 from linktools.core import environ
 
-from ..core import RunContextData, UsageMetrics, canonical_sha256, normalize_run_context
+from ..core import RunContextData, UsageMetrics, normalize_run_context
 from ..errors import AIError, ErrorCode
 from ..observe import MetricMeasurement, MetricRecorder, Metrics, Observation
 from ._execution import _ExecutionTerminalCommitter
+from ._metric_id import (
+    _model_observation_id,
+    _stable_observation_id,
+    _tool_observation_id,
+)
 from .state._contracts import ExecutionTerminalCommit, ExecutionTerminalCommitResult
 
 _logger = environ.get_logger("ai.runtime.metrics")
@@ -581,46 +586,6 @@ def _record_storage_operation(
             dimensions={"domain": domain, "target": target},
             measurements=measurements,
         ),
-    )
-
-
-def _stable_observation_id(*parts: str) -> str:
-    return canonical_sha256({"parts": list(parts)})
-
-
-def _model_observation_id(
-    source_namespace: str,
-    tenant_id: str,
-    execution_id: str,
-    step_run_id: str,
-    step_index: int,
-    attempt_index: int,
-) -> str:
-    return _stable_observation_id(
-        "linktools.model.request.v1",
-        source_namespace,
-        tenant_id,
-        execution_id,
-        step_run_id,
-        str(step_index),
-        str(attempt_index),
-    )
-
-
-def _tool_observation_id(
-    source_namespace: str,
-    tenant_id: str,
-    execution_id: str,
-    step_run_id: str,
-    tool_call_id: str,
-) -> str:
-    return _stable_observation_id(
-        "linktools.tool.execution.v1",
-        source_namespace,
-        tenant_id,
-        execution_id,
-        step_run_id,
-        tool_call_id,
     )
 
 
