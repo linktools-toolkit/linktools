@@ -92,6 +92,7 @@ class _RuntimeMetricBuffer(MetricRecorder):
         self._writer: asyncio.Task[None] | None = None
         self._resolution_event = asyncio.Event()
         self._execution_contexts: dict[str, RunContextData] = {}
+        self._agent_usage: dict[tuple[str, str], UsageMetrics] = {}
 
     def bind_execution_context(
         self,
@@ -110,8 +111,25 @@ class _RuntimeMetricBuffer(MetricRecorder):
         self._execution_contexts[execution_id] = normalized
         return True
 
+    def bind_agent_usage(
+        self,
+        execution_id: str,
+        step_run_id: str,
+        usage: UsageMetrics,
+    ) -> bool:
+        key = (execution_id, step_run_id)
+        current = self._agent_usage.get(key)
+        if current is not None and current != usage:
+            self._warn("runtime metric agent usage conflict")
+            return False
+        self._agent_usage[key] = usage
+        return True
+
     def release_execution_context(self, execution_id: str) -> None:
         self._execution_contexts.pop(execution_id, None)
+        stale = [key for key in self._agent_usage if key[0] == execution_id]
+        for key in stale:
+            self._agent_usage.pop(key, None)
 
     def status(self) -> RuntimeMetricStatus:
         pending = self._accepted - self._persisted - self._lost
@@ -166,7 +184,7 @@ class _RuntimeMetricBuffer(MetricRecorder):
         try:
             enriched = self._enrich_observation(observation)
         except (AIError, TypeError, ValueError):
-            self._reject("runtime metric correlation enrichment failed")
+            self._reject("runtime metric observation enrichment failed")
             return False
         if not self._start_writer():
             return False
@@ -181,6 +199,7 @@ class _RuntimeMetricBuffer(MetricRecorder):
     def _enrich_observation(self, observation: Observation) -> Observation:
         raw = dict(observation.correlation)
         execution_id = raw.get("linktools.execution_id", raw.get("execution_id"))
+        step_run_id = raw.get("linktools.step_run_id", raw.get("step_run_id"))
         context = (
             self._execution_contexts.get(execution_id)
             if isinstance(execution_id, str)
@@ -195,9 +214,30 @@ class _RuntimeMetricBuffer(MetricRecorder):
             if existing is not None and existing != value:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             correlation[normalized_key] = value
-        if correlation == raw:
+
+        measurements = observation.measurements
+        if (
+            observation.kind == "linktools.agent.run"
+            and isinstance(execution_id, str)
+            and isinstance(step_run_id, str)
+        ):
+            usage = self._agent_usage.pop((execution_id, step_run_id), None)
+            if usage is not None:
+                existing = {(item.name, item.revision) for item in measurements}
+                usage_values = tuple(
+                    item
+                    for item in _usage_measurements(usage)
+                    if (item.name, item.revision) not in existing
+                )
+                measurements = (*measurements, *usage_values)
+
+        if correlation == raw and measurements == observation.measurements:
             return observation
-        return replace(observation, correlation=correlation)
+        return replace(
+            observation,
+            correlation=correlation,
+            measurements=measurements,
+        )
 
     def _start_writer(self) -> bool:
         if self._writer is not None:
@@ -226,6 +266,7 @@ class _RuntimeMetricBuffer(MetricRecorder):
                 await asyncio.gather(writer, return_exceptions=True)
             self._lose_remaining("runtime metric close failed")
             self._execution_contexts.clear()
+            self._agent_usage.clear()
             self._log_close()
 
     async def _close_impl(self) -> None:
@@ -233,6 +274,7 @@ class _RuntimeMetricBuffer(MetricRecorder):
         writer = self._writer
         if writer is None:
             self._execution_contexts.clear()
+            self._agent_usage.clear()
             self._log_close()
             return
         started = monotonic()
@@ -258,6 +300,7 @@ class _RuntimeMetricBuffer(MetricRecorder):
         self._consume_writer(writer)
         self._lose_remaining("runtime metric close cleanup")
         self._execution_contexts.clear()
+        self._agent_usage.clear()
         self._log_close()
 
     def _log_close(self) -> None:
@@ -425,6 +468,16 @@ def _bind_metric_execution_context(
 ) -> None:
     if isinstance(recorder, _RuntimeMetricBuffer):
         recorder.bind_execution_context(execution_id, context)
+
+
+def _bind_metric_agent_usage(
+    recorder: MetricRecorder,
+    execution_id: str,
+    step_run_id: str,
+    usage: UsageMetrics,
+) -> None:
+    if isinstance(recorder, _RuntimeMetricBuffer):
+        recorder.bind_agent_usage(execution_id, step_run_id, usage)
 
 
 def _usage_measurements(usage: UsageMetrics) -> tuple[MetricMeasurement, ...]:
