@@ -26,47 +26,49 @@ jobs:
         with:
           python-version: "3.10"
 
-      - name: Restore vendor RunContext imports
+      - name: Align observability closure tests
         shell: bash
         run: |
           python - <<'PY'
           from pathlib import Path
 
-          roots = [Path("linktools-ai/src"), Path("tests/ai")]
-          changed = []
-          for root in roots:
-              for path in root.rglob("*.py"):
-                  text = path.read_text()
-                  new = text.replace(
-                      "AgentContext as PydanticRunContext",
-                      "RunContext as PydanticRunContext",
-                  )
-                  if new != text:
-                      path.write_text(new)
-                      changed.append(str(path))
-          print("restored vendor RunContext in:")
-          print("\n".join(changed) or "<none>")
+          path = Path("tests/ai/test_observability_closure.py")
+          text = path.read_text()
+          text = text.replace("_overlay_execution_context", "_overlay_execution_correlation")
+          text = text.replace("SimpleNamespace(context=", "SimpleNamespace(correlation=")
+          text = text.replace(
+              'RuntimeContext(\n        object(),\n        {"audit_run_id": "audit-1", "stage": "collect"},\n    )',
+              'RuntimeContext(\n        object(),\n        correlation={"audit_run_id": "audit-1", "stage": "collect"},\n    )',
+          )
+          text = text.replace("root.values", "root.correlation")
+          text = text.replace("effective.values", "effective.correlation")
+          text = text.replace("context_overlay", "correlation_overlay")
+          text = text.replace("context_inherit", "correlation_inherit")
+          text = text.replace("context_reject", "correlation_reject")
+          text = text.replace("durable_admission_context", "durable_admission_correlation")
+          path.write_text(text)
 
-          bad = []
-          for root in roots:
-              for path in root.rglob("*.py"):
-                  text = path.read_text()
-                  if "AgentContext as PydanticRunContext" in text:
-                      bad.append(str(path))
-          if bad:
-              raise SystemExit("invalid PydanticRunContext imports remain:\n" + "\n".join(bad))
+          old = (
+              "_overlay_execution_context",
+              "root.values",
+              "effective.values",
+              "SimpleNamespace(context=",
+          )
+          remaining = [item for item in old if item in text]
+          if remaining:
+              raise SystemExit(f"stale observability test names remain: {remaining}")
           PY
           python -m compileall -q linktools-ai/src tests/ai
           git diff --check
 
-      - name: Commit vendor boundary fix
+      - name: Commit test alignment
         shell: bash
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add linktools-ai tests/ai
+          git add tests/ai
           if ! git diff --cached --quiet; then
-            git commit -m "fix(ai): preserve pydantic run context boundary"
+            git commit -m "test(ai): align correlation context contract"
             git push origin HEAD:feat/ai-metrics-observability
           fi
 
