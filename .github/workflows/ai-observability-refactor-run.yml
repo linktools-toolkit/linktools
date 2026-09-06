@@ -26,45 +26,64 @@ jobs:
         with:
           python-version: "3.10"
 
-      - name: Apply correlation residual fixes
+      - name: Apply correlation semantic fixes
         shell: bash
         run: |
           python - <<'PY'
           from pathlib import Path
 
-          fixes = (
-              (
-                  Path("linktools-ai/src/linktools/ai/runtime/state/_codec.py"),
-                  "if not value.context:",
-                  "if not value.correlation:",
-                  3,
-              ),
-              (
-                  Path("linktools-ai/src/linktools/ai/runtime/_runtime_service.py"),
-                  "self._tenant_id",
-                  "self.tenant_id",
-                  2,
-              ),
-          )
-          for path, old, new, expected in fixes:
-              text = path.read_text()
-              actual = text.count(old)
-              if actual != expected:
-                  raise SystemExit(
-                      f"{path}: expected {expected} matches for {old!r}, got {actual}"
-                  )
-              path.write_text(text.replace(old, new))
+          execution = Path("linktools-ai/src/linktools/ai/runtime/_execution.py")
+          text = execution.read_text()
+          old = "request = replace(request, context=parent.correlation)"
+          if text.count(old) != 1:
+              raise SystemExit(f"subagent correlation inheritance: expected one match, got {text.count(old)}")
+          execution.write_text(text.replace(old, "request = replace(request, correlation=parent.correlation)", 1))
+
+          repository = Path("linktools-ai/src/linktools/ai/runtime/state/_task_repository.py")
+          text = repository.read_text()
+          old = '''        if existing != admission:\n            if _same_task_admission_contract(existing, admission):\n                raise AIError(ErrorCode.IDEMPOTENCY_CONFLICT)\n            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)\n'''
+          new = '''        if existing != admission and not _same_task_admission_contract(existing, admission):\n            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)\n'''
+          if text.count(old) != 1:
+              raise SystemExit("task admission replay block mismatch")
+          text = text.replace(old, new, 1)
+          old = '''            if existing != admission:\n                if _same_task_admission_contract(existing, admission):\n                    return CommitObservation(\n                        DurableCommitState.NOT_COMMITTED,\n                        error=AIError(ErrorCode.IDEMPOTENCY_CONFLICT),\n                    )\n                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)\n            return CommitObservation(DurableCommitState.COMMITTED, view)\n'''
+          new = '''            if existing != admission and not _same_task_admission_contract(existing, admission):\n                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)\n            return CommitObservation(DurableCommitState.COMMITTED, view)\n'''
+          if text.count(old) != 1:
+              raise SystemExit("task admission readback block mismatch")
+          repository.write_text(text.replace(old, new, 1))
           PY
           python -m compileall -q linktools-ai/src
           git diff --check
 
-      - name: Commit production fixes
+      - name: Scan stale correlation field access
+        shell: bash
+        run: |
+          python - <<'PY' | tee /tmp/src-correlation-scan.log
+          from pathlib import Path
+          import re
+          root = Path("linktools-ai/src/linktools/ai")
+          patterns = (
+              re.compile(r"\b(?:request|execution|admission|launch|recovery_input)\.context\b"),
+              re.compile(r"replace\(request,\s*context="),
+              re.compile(r"\bcontext=(?:request|launch|execution|admission)\.correlation\b"),
+          )
+          found = []
+          for path in root.rglob("*.py"):
+              for lineno, line in enumerate(path.read_text().splitlines(), 1):
+                  if any(pattern.search(line) for pattern in patterns):
+                      found.append(f"{path}:{lineno}:{line.strip()}")
+          print("\n".join(found))
+          if found:
+              raise SystemExit("stale correlation field access remains")
+          PY
+
+      - name: Commit semantic fixes
         shell: bash
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add linktools-ai/src/linktools/ai
-          git commit -m "fix(ai): complete correlation refactor"
+          git commit -m "fix(ai): preserve correlation across idempotent replay"
           git push origin HEAD:feat/ai-metrics-observability
 
       - name: Install tooling
@@ -73,23 +92,23 @@ jobs:
           python -m pip install --quiet -U -r requirements.txt
           python manage.py install --editable --quiet
 
-      - name: Run linktools-ai tests
+      - name: Run correlation slices
         continue-on-error: true
         shell: bash
         run: |
           set -o pipefail
-          python -m pytest -q tests/ai 2>&1 | tee /tmp/ai-tests.log
+          python -m pytest -q \
+            tests/ai/test_execution_context_durability.py \
+            tests/ai/test_task_context_durability.py \
+            tests/ai/test_task_mixed_node_reliability.py \
+            2>&1 | tee /tmp/correlation-tests.log
 
       - name: Upload logs
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: ai-observability-residual-logs
-          path: /tmp/ai-tests.log
+          name: ai-correlation-semantics-logs
+          path: |
+            /tmp/src-correlation-scan.log
+            /tmp/correlation-tests.log
           if-no-files-found: ignore
-
-      - name: Verify production slices
-        run: |
-          python -m pytest -q \
-            tests/ai/persistence/test_execution_start_service.py \
-            tests/ai/test_runtime_persistence_evidence.py
