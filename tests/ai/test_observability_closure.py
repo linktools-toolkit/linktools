@@ -16,7 +16,7 @@ from linktools.ai.runtime import Runtime, RuntimeContext
 from linktools.ai.runtime import _metrics as runtime_metrics
 from linktools.ai.runtime._execution import _overlay_execution_correlation
 from linktools.ai.runtime._history import _trace_item
-from linktools.ai.runtime._metric_id import _model_observation_id, _tool_observation_id
+from linktools.ai.runtime._metric_id import _tool_observation_id
 from linktools.ai.task import TaskEvent, TaskEventType
 from linktools.ai.task._metrics import _TaskMetricProjector
 from pydantic_ai_harness.step_persistence import StepEvent
@@ -286,31 +286,7 @@ async def test_trace_observation_id_supports_exact_metric_loss_check() -> None:
     assert stored.observation_id == trace.payload["observation_id"]
 
 
-def test_model_and_tool_observation_ids_are_replay_stable() -> None:
-    model = _model_observation_id(
-        "workspace",
-        "tenant",
-        "execution",
-        "step-run",
-        4,
-        1,
-    )
-    assert model == _model_observation_id(
-        "workspace",
-        "tenant",
-        "execution",
-        "step-run",
-        4,
-        1,
-    )
-    assert model != _model_observation_id(
-        "workspace",
-        "tenant",
-        "execution",
-        "step-run",
-        4,
-        2,
-    )
+def test_tool_observation_ids_are_replay_stable() -> None:
     tool = _tool_observation_id(
         "workspace",
         "tenant",

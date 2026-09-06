@@ -30,10 +30,15 @@ class _AllowAuthorization:
 
 class _CaptureLauncher:
     def __init__(self) -> None:
+        self.started: TaskGraphLaunch | None = None
         self.cancelled: TaskGraphLaunch | None = None
 
     async def start(self, launch: TaskGraphLaunch) -> TaskGraphHandle:
-        raise AssertionError(f"unexpected scheduler start for {launch.graph.graph_id}")
+        self.started = launch
+        return TaskGraphHandle(
+            launch.graph.graph_id,
+            f"capture:{launch.principal.tenant_id}:{launch.graph.graph_id}",
+        )
 
     async def cancel(self, launch: TaskGraphLaunch) -> TaskGraphView:
         self.cancelled = launch
@@ -102,6 +107,33 @@ async def test_task_admission_correlation_drift_reuses_first_durable_value() -> 
         stored = await state.task.admissions.get(graph.graph_id, tenant_id="tenant")
         assert stored == original
         assert dict(stored.correlation) == {"trace_id": "trace-a"}
+    finally:
+        await state.close()
+
+
+@pytest.mark.asyncio
+async def test_task_service_replay_arms_scheduler_from_first_durable_correlation() -> None:
+    state = RuntimeState.in_memory()
+    await state.initialize(namespace="task-correlation-service-replay", tenant_id="tenant")
+    launcher = _CaptureLauncher()
+    try:
+        graph = TaskGraph("task-correlation-service-replay", (TaskNode("node"),))
+        original = TaskGraphAdmission.from_request(
+            _request(graph, correlation={"trace_id": "trace-a"})
+        )
+        await state.task.admissions.admit(original, graph)
+        service = DefaultTaskService(
+            state.task,
+            _AllowAuthorization(),
+            launcher,
+        )
+
+        await service.run_graph(
+            _request(graph, correlation={"trace_id": "trace-b"})
+        )
+
+        assert launcher.started is not None
+        assert dict(launcher.started.correlation) == {"trace_id": "trace-a"}
     finally:
         await state.close()
 

@@ -67,7 +67,7 @@ from ..workspace import (
     RepositoryInstructions,
     WorkspacePolicy,
 )
-from ._metric_id import _model_observation_id, _tool_observation_id
+from ._metric_id import _tool_observation_id
 from ._tool_metrics import _ToolMetricContext
 
 _logger = environ.get_logger("ai.runtime.capabilities")
@@ -247,18 +247,6 @@ class _RuntimeStepPersistence(StepPersistence[None]):
         repr=False,
         compare=False,
     )
-    _model_attempts: dict[int, int] = field(
-        default_factory=dict,
-        init=False,
-        repr=False,
-        compare=False,
-    )
-    _model_started: dict[int, tuple[int, int]] = field(
-        default_factory=dict,
-        init=False,
-        repr=False,
-        compare=False,
-    )
 
     def __post_init__(self) -> None:
         if not isinstance(self.plan_mode, bool):
@@ -320,55 +308,6 @@ class _RuntimeStepPersistence(StepPersistence[None]):
             event_index=event_index,
         )
 
-    def _model_metric_metadata(
-        self,
-        ctx: "RunContext[None]",
-        *,
-        terminal: bool,
-    ) -> dict[str, str]:
-        metadata = dict(self.metadata)
-        metrics = self.tool_metrics
-        if metrics is None:
-            return metadata
-        if terminal:
-            active = self._model_started.pop(ctx.run_step, None)
-            if active is None:
-                _logger.warning(
-                    "model metric trace timing unavailable: run=%s step=%s",
-                    self.run_id or ctx.run_id,
-                    ctx.run_step,
-                )
-                return metadata
-            attempt_index, started = active
-            metadata[_DURATION_NS_METADATA_KEY] = str(monotonic_ns() - started)
-        else:
-            attempt_index = self._model_attempts.get(ctx.run_step, 0) + 1
-            self._model_attempts[ctx.run_step] = attempt_index
-            if ctx.run_step in self._model_started:
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            self._model_started[ctx.run_step] = (attempt_index, monotonic_ns())
-        metadata[_OBSERVATION_ID_METADATA_KEY] = _model_observation_id(
-            metrics.source_namespace,
-            metrics.tenant_id,
-            metrics.execution_id,
-            metrics.step_run_id,
-            ctx.run_step,
-            attempt_index,
-        )
-        return metadata
-
-    async def before_model_request(
-        self,
-        ctx: "RunContext[None]",
-        request_context: ModelRequestContext,
-    ) -> ModelRequestContext:
-        await self._record_runtime_event(
-            ctx,
-            kind="model_request_started",
-            metadata=self._model_metric_metadata(ctx, terminal=False),
-        )
-        return request_context
-
     async def after_model_request(
         self,
         ctx: "RunContext[None]",
@@ -377,7 +316,7 @@ class _RuntimeStepPersistence(StepPersistence[None]):
         response: ModelResponse,
     ) -> ModelResponse:
         del request_context
-        metadata = self._model_metric_metadata(ctx, terminal=True)
+        metadata = dict(self.metadata)
         metadata.update(_model_usage_metadata(response))
         await self._record_runtime_event(
             ctx,
@@ -385,22 +324,6 @@ class _RuntimeStepPersistence(StepPersistence[None]):
             metadata=metadata,
         )
         return response
-
-    async def on_model_request_error(
-        self,
-        ctx: "RunContext[None]",
-        *,
-        request_context: ModelRequestContext,
-        error: Exception,
-    ) -> ModelResponse:
-        del request_context
-        await self._record_runtime_event(
-            ctx,
-            kind="model_request_failed",
-            metadata=self._model_metric_metadata(ctx, terminal=True),
-            error=repr(error),
-        )
-        raise error
 
     async def before_tool_execute(
         self,

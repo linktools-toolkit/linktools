@@ -239,10 +239,16 @@ class DefaultTaskService(TaskApi):
             self._preflight.validate_request(request.graph)
         admission = TaskGraphAdmission.from_request(request)
         view = await self._persistence.admissions.admit(admission, request.graph)
+        durable_admission = await self._persistence.admissions.get(
+            graph_id,
+            tenant_id=tenant_id,
+        )
+        if durable_admission is None:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         if _terminal(view.status):
             await self._observe_metric_history(view, tenant_id=tenant_id)
         else:
-            await self._arm_graph(admission.bind(request.graph))
+            await self._arm_graph(durable_admission.bind(request.graph))
         return await self._result(view, tenant_id)
 
     async def _arm_graph(self, launch: TaskGraphLaunch) -> None:
