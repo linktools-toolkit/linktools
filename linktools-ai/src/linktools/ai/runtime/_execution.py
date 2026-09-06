@@ -757,7 +757,7 @@ class DefaultExecutionService:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             if request.correlation and dict(request.correlation) != dict(parent.correlation):
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            request = replace(request, context=parent.correlation)
+            request = replace(request, correlation=parent.correlation)
         conversation_run_id = conversation_step_run_id
         session = None
         if session_id is not None and source_execution_id is None:
