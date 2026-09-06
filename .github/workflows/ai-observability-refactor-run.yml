@@ -37,6 +37,36 @@ jobs:
           end = source.index("          PY\n", start)
           lines = source[start:end].splitlines()
           body = "\n".join(line[10:] if line.startswith("          ") else line for line in lines) + "\n"
+          old_helper = '''def replace_once(text: str, old: str, new: str, label: str) -> str:
+              count = text.count(old)
+              if count != 1:
+                  raise SystemExit(f"{label}: expected one match, got {count}")
+              return text.replace(old, new, 1)
+          '''
+          new_helper = '''def replace_once(text: str, old: str, new: str, label: str) -> str:
+              count = text.count(old)
+              if count == 1:
+                  return text.replace(old, new, 1)
+              if count == 0 and old:
+                  first = old.splitlines()[0]
+                  candidates = [line for line in text.splitlines() if line.lstrip() == first]
+                  for candidate in candidates:
+                      indent = candidate[: len(candidate) - len(candidate.lstrip())]
+                      old_lines = old.splitlines()
+                      new_lines = new.splitlines()
+                      indented_old = "\\n".join(indent + line if line else line for line in old_lines)
+                      indented_new = "\\n".join(indent + line if line else line for line in new_lines)
+                      if old.endswith("\\n"):
+                          indented_old += "\\n"
+                      if new.endswith("\\n"):
+                          indented_new += "\\n"
+                      if text.count(indented_old) == 1:
+                          return text.replace(indented_old, indented_new, 1)
+              raise SystemExit(f"{label}: expected one match, got {count}")
+          '''
+          if old_helper not in body:
+              raise SystemExit('replace_once helper not found')
+          body = body.replace(old_helper, new_helper, 1)
           body = body.replace(
               'read("runtime/_local.py").count("_record_execution_terminal(") != 2',
               'read("runtime/_local.py").count("_record_execution_terminal(") != 1',
