@@ -118,9 +118,14 @@ async def test_local_start_rejects_context_drift_from_durable_execution() -> Non
     execution = _execution(context={"trace_id": "durable", "attempt": 1})
     backend = _backend(execution)
     request = ExecutionRequest(
-        "hello",
-        Principal("user", "tenant"),
-        "execution-context-start-0001",
+        user_prompt="hello",
+        user_prompt_codec="text",
+        principal=Principal("user", "tenant"),
+        idempotency_key="execution-context-start-0001",
+        memory_scope=None,
+        mode="run",
+        planning=False,
+        thinking=False,
         context={"trace_id": "request", "attempt": 1},
     )
 
