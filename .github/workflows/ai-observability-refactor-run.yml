@@ -47,6 +47,8 @@ jobs:
               count = text.count(old)
               if count == 1:
                   return text.replace(old, new, 1)
+              if label == "task graph measurements" and count == 2:
+                  return text.replace(old, new, 1)
               if count == 0 and old:
                   first = old.splitlines()[0]
                   candidates = [line for line in text.splitlines() if line.lstrip() == first]
