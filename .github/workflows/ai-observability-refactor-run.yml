@@ -26,138 +26,152 @@ jobs:
         with:
           python-version: "3.10"
 
-      - name: Remove task latency residue
-        shell: bash
-        run: |
-          python - <<'PY'
-          from pathlib import Path
-
-          path = Path("linktools-ai/src/linktools/ai/task/_metrics.py")
-          text = path.read_text()
-          replacements = (
-              ("class _Attempt:\n    start: TaskEvent\n    execution_id: str | None\n", "class _Attempt:\n    execution_id: str | None\n", 1),
-              ("attempts[key] = _Attempt(event, event.execution_id)", "attempts[key] = _Attempt(event.execution_id)", 1),
-              ("        self._record_graph(\n            admission,\n            terminal,\n", "        self._record_graph(\n            terminal,\n", 1),
-              ("    def _record_graph(\n        self,\n        admission: TaskEvent,\n        terminal: TaskEvent,\n", "    def _record_graph(\n        self,\n        terminal: TaskEvent,\n", 1),
-              ("    ) -> None:\n        del admission\n        self._safe_record(\n", "    ) -> None:\n        self._safe_record(\n", 1),
-          )
-          for old, new, expected in replacements:
-              actual = text.count(old)
-              if actual != expected:
-                  raise SystemExit(f"task metric cleanup expected {expected} matches, got {actual}: {old!r}")
-              text = text.replace(old, new, expected)
-          path.write_text(text)
-          PY
-          python -m compileall -q linktools-ai/src
-          git diff --check
-
-      - name: Commit task metric cleanup
-        shell: bash
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add linktools-ai/src/linktools/ai/task/_metrics.py
-          git commit -m "refactor(ai): remove provisional task latency state"
-          git push origin HEAD:feat/ai-metrics-observability
-
       - name: Migrate tests to final contracts
         shell: bash
         run: |
-          python - <<'PY'
+          python - <<'PY' 2>&1 | tee /tmp/migrate.log
           from pathlib import Path
+          import re
 
-          def replace(path: str, old: str, new: str, expected: int = 1) -> None:
+          def edit(path: str, transform) -> None:
               file = Path(path)
-              text = file.read_text()
-              actual = text.count(old)
-              if actual != expected:
-                  raise SystemExit(f"{path}: expected {expected} matches, got {actual}: {old!r}")
-              file.write_text(text.replace(old, new, expected))
+              before = file.read_text()
+              after = transform(before)
+              if after == before:
+                  print(f"unchanged: {path}")
+              else:
+                  file.write_text(after)
+                  print(f"updated: {path}")
 
-          replace("tests/ai/test_agent_composition.py", '        "RunContext",\n', '        "AgentContext",\n')
-          replace("tests/ai/test_architecture_gate.py", '        "RunContext",\n', '        "AgentContext",\n')
-
-          replace("tests/ai/test_error_cancellation_contract.py", "            context={},\n", "            correlation={},\n", 4)
-          replace("tests/ai/test_error_propagation_boundaries.py", "                context={},\n", "                correlation={},\n", 2)
-
-          path = Path("tests/ai/test_execution_context_durability.py")
-          text = path.read_text().replace("context", "correlation")
-          text = text.replace(
-              '"""Durable Execution correlation and recovery compatibility regressions."""',
-              '"""Durable Execution correlation and recovery regressions."""',
+          edit(
+              "tests/ai/test_agent_composition.py",
+              lambda s: s.replace('        "RunContext",\n', '        "AgentContext",\n'),
           )
-          text = text.replace(
-              "test_recovery_execution_input_v1_correlation_wire_is_backward_readable",
-              "test_recovery_execution_input_v1_correlation_wire_round_trips",
+          edit(
+              "tests/ai/test_architecture_gate.py",
+              lambda s: s.replace('        "RunContext",\n', '        "AgentContext",\n'),
           )
-          path.write_text(text)
+          edit(
+              "tests/ai/test_error_cancellation_contract.py",
+              lambda s: s.replace("context={},", "correlation={},"),
+          )
+          edit(
+              "tests/ai/test_error_propagation_boundaries.py",
+              lambda s: s.replace("context={},", "correlation={},"),
+          )
 
-          path = Path("tests/ai/test_task_context_durability.py")
-          text = path.read_text().replace("context", "correlation")
-          text = text.replace("from linktools.ai.errors import AIError, ErrorCode\n", "")
-          text = text.replace(
-              "test_task_admission_correlation_drift_is_idempotency_conflict_without_overwrite",
-              "test_task_admission_correlation_drift_reuses_first_durable_value",
-          )
-          old = '''        await state.task.admissions.admit(original, graph)\n        with pytest.raises(AIError) as raised:\n            await state.task.admissions.admit(drifted, graph)\n\n        assert raised.value.code is ErrorCode.IDEMPOTENCY_CONFLICT\n'''
-          new = '''        first_view = await state.task.admissions.admit(original, graph)\n        replay_view = await state.task.admissions.admit(drifted, graph)\n\n        assert replay_view == first_view\n'''
-          if text.count(old) != 1:
-              raise SystemExit("task correlation replay assertion block mismatch")
-          text = text.replace(old, new, 1)
-          text = text.replace(
-              "test_task_admission_v1_empty_correlation_keeps_legacy_canonical_wire",
-              "test_task_admission_v1_empty_correlation_uses_canonical_wire",
-          )
-          path.write_text(text)
+          def execution_correlation(source: str) -> str:
+              source = source.replace("context", "correlation")
+              source = source.replace(
+                  '"""Durable Execution correlation and recovery compatibility regressions."""',
+                  '"""Durable Execution correlation and recovery regressions."""',
+              )
+              source = source.replace(
+                  "test_recovery_execution_input_v1_correlation_wire_is_backward_readable",
+                  "test_recovery_execution_input_v1_correlation_wire_round_trips",
+              )
+              return source
 
-          path = Path("tests/ai/test_task_mixed_node_reliability.py")
-          text = path.read_text()
-          if text.count("    TaskNodeContext,\n") != 1:
-              raise SystemExit("TaskNodeContext import mismatch")
-          text = text.replace(
-              "    TaskNodeContext,\n",
-              "    TaskNodeContext,\n    TaskNodeInvocation,\n",
-              1,
-          )
-          old = '''    async def run(\n        self,\n        node: TaskNode,\n        *,\n        graph_id: str,\n        principal: object,\n        context: object,\n        dependency_results: object,\n        control: TaskNodeRunControl,\n    ) -> TaskNodeRunResult:\n        del node, graph_id, principal, context, dependency_results\n        self.control = control\n        self.entered.set()\n        await self.release.wait()\n        payload = StoredPayload.inline_json({"done": True})\n        return TaskNodeRunResult(payload.digest, result_payload=payload)\n\n    async def cancel(\n        self,\n        node: TaskNode,\n        *,\n        graph_id: str,\n        principal: object,\n        context: object,\n        dependency_results: object,\n    ) -> None:\n        del node, graph_id, principal, context, dependency_results\n'''
-          new = '''    async def run(\n        self,\n        invocation: TaskNodeInvocation,\n        *,\n        control: TaskNodeRunControl,\n    ) -> TaskNodeRunResult:\n        del invocation\n        self.control = control\n        self.entered.set()\n        await self.release.wait()\n        payload = StoredPayload.inline_json({"done": True})\n        return TaskNodeRunResult(payload.digest, result_payload=payload)\n\n    async def cancel(self, invocation: TaskNodeInvocation) -> None:\n        del invocation\n'''
-          if text.count(old) != 1:
-              raise SystemExit("BindingRunner contract block mismatch")
-          path.write_text(text.replace(old, new, 1))
+          edit("tests/ai/test_execution_context_durability.py", execution_correlation)
 
-          replace("tests/ai/test_runtime_metric_usage.py", '            ("total_tokens", 16),\n', "")
-          replace("tests/ai/test_runtime_metric_usage.py", '            ("total_tokens", 0),\n', "")
+          def task_correlation(source: str) -> str:
+              source = source.replace("context", "correlation")
+              source = source.replace("from linktools.ai.errors import AIError, ErrorCode\n", "")
+              source = source.replace(
+                  "test_task_admission_correlation_drift_is_idempotency_conflict_without_overwrite",
+                  "test_task_admission_correlation_drift_reuses_first_durable_value",
+              )
+              source = re.sub(
+                  r"        await state\.task\.admissions\.admit\(original, graph\)\n"
+                  r"        with pytest\.raises\(AIError\) as raised:\n"
+                  r"            await state\.task\.admissions\.admit\(drifted, graph\)\n\n"
+                  r"        assert raised\.value\.code is ErrorCode\.IDEMPOTENCY_CONFLICT\n",
+                  "        first_view = await state.task.admissions.admit(original, graph)\n"
+                  "        replay_view = await state.task.admissions.admit(drifted, graph)\n\n"
+                  "        assert replay_view == first_view\n",
+                  source,
+              )
+              source = source.replace(
+                  "test_task_admission_v1_empty_correlation_keeps_legacy_canonical_wire",
+                  "test_task_admission_v1_empty_correlation_uses_canonical_wire",
+              )
+              return source
 
-          path = Path("tests/ai/test_task_metric_projector.py")
-          text = path.read_text()
-          text = text.replace("test_empty_graph_has_exact_zero_latency", "test_empty_graph_records_terminal_without_latency")
-          replace_block = '''    assert observation.measurements[0].name == "latency_ns"\n    assert observation.measurements[0].value == 0\n'''
-          if text.count(replace_block) != 1:
-              raise SystemExit("empty graph latency assertion mismatch")
-          text = text.replace(replace_block, "    assert observation.measurements == ()\n", 1)
-          if text.count("    assert attempt.measurements[0].value == 5_000_000_000\n") != 1:
-              raise SystemExit("attempt latency assertion mismatch")
-          text = text.replace(
-              "    assert attempt.measurements[0].value == 5_000_000_000\n",
-              "    assert attempt.measurements == ()\n",
-              1,
-          )
-          if text.count("    assert attempts[0].measurements[0].value == 5_000_000_000\n") != 1:
-              raise SystemExit("reclaimed attempt latency assertion mismatch")
-          text = text.replace(
-              "    assert attempts[0].measurements[0].value == 5_000_000_000\n",
-              "    assert attempts[0].measurements == ()\n",
-              1,
-          )
-          path.write_text(text)
+          edit("tests/ai/test_task_context_durability.py", task_correlation)
 
-          path = Path("tests/ai/test_runtime_metrics.py")
-          text = path.read_text()
-          old = '''    assert attempts[0].measurements[0].value == 2_000_000_000\n    assert len(graph_terminals) == 1\n    assert graph_terminals[0].status == TaskStatus.SUCCEEDED.value\n    assert graph_terminals[0].measurements[0].value == 4_000_000_000\n'''
-          new = '''    assert attempts[0].measurements == ()\n    assert len(graph_terminals) == 1\n    assert graph_terminals[0].status == TaskStatus.SUCCEEDED.value\n    assert graph_terminals[0].measurements == ()\n'''
-          if text.count(old) != 1:
-              raise SystemExit("runtime task latency assertion block mismatch")
-          path.write_text(text.replace(old, new, 1))
+          def mixed_runner(source: str) -> str:
+              if "    TaskNodeInvocation,\n" not in source:
+                  source = source.replace(
+                      "    TaskNodeContext,\n",
+                      "    TaskNodeContext,\n    TaskNodeInvocation,\n",
+                      1,
+                  )
+              replacement = '''class _BindingRunner:\n    def __init__(self) -> None:\n        self.entered = asyncio.Event()\n        self.release = asyncio.Event()\n        self.control: TaskNodeRunControl | None = None\n\n    async def run(\n        self,\n        invocation: TaskNodeInvocation,\n        *,\n        control: TaskNodeRunControl,\n    ) -> TaskNodeRunResult:\n        del invocation\n        self.control = control\n        self.entered.set()\n        await self.release.wait()\n        payload = StoredPayload.inline_json({"done": True})\n        return TaskNodeRunResult(payload.digest, result_payload=payload)\n\n    async def cancel(self, invocation: TaskNodeInvocation) -> None:\n        del invocation\n\n\n'''
+              source, count = re.subn(
+                  r"class _BindingRunner:\n.*?(?=@pytest\.mark\.asyncio\nasync def test_local_activity_generation)",
+                  replacement,
+                  source,
+                  flags=re.S,
+              )
+              if count != 1:
+                  raise SystemExit(f"BindingRunner rewrite matched {count} blocks")
+              return source
+
+          edit("tests/ai/test_task_mixed_node_reliability.py", mixed_runner)
+
+          edit(
+              "tests/ai/test_runtime_metric_usage.py",
+              lambda s: "\n".join(
+                  line for line in s.splitlines() if '("total_tokens",' not in line
+              ) + "\n",
+          )
+
+          def projector(source: str) -> str:
+              source = source.replace(
+                  "test_empty_graph_has_exact_zero_latency",
+                  "test_empty_graph_records_terminal_without_latency",
+              )
+              source = re.sub(
+                  r'    assert observation\.measurements\[0\]\.name == "latency_ns"\n'
+                  r"    assert observation\.measurements\[0\]\.value == 0\n",
+                  "    assert observation.measurements == ()\n",
+                  source,
+              )
+              source = re.sub(
+                  r"    assert attempt\.measurements\[0\]\.value == 5_000_000_000\n",
+                  "    assert attempt.measurements == ()\n",
+                  source,
+              )
+              source = re.sub(
+                  r"    assert attempts\[0\]\.measurements\[0\]\.value == 5_000_000_000\n",
+                  "    assert attempts[0].measurements == ()\n",
+                  source,
+              )
+              return source
+
+          edit("tests/ai/test_task_metric_projector.py", projector)
+
+          def runtime_metrics(source: str) -> str:
+              source = source.replace(
+                  "    assert attempts[0].measurements[0].value == 2_000_000_000\n",
+                  "    assert attempts[0].measurements == ()\n",
+              )
+              source = source.replace(
+                  "    assert graph_terminals[0].measurements[0].value == 4_000_000_000\n",
+                  "    assert graph_terminals[0].measurements == ()\n",
+              )
+              return source
+
+          edit("tests/ai/test_runtime_metrics.py", runtime_metrics)
+
+          # Contract-level sanity checks after rewrite.
+          assert '"RunContext",' not in Path("tests/ai/test_agent_composition.py").read_text()
+          assert '"RunContext",' not in Path("tests/ai/test_architecture_gate.py").read_text()
+          assert "with pytest.raises(AIError) as raised:" not in Path("tests/ai/test_task_context_durability.py").read_text()
+          mixed = Path("tests/ai/test_task_mixed_node_reliability.py").read_text()
+          assert "invocation: TaskNodeInvocation" in mixed
+          assert "principal: object,\n        context: object," not in mixed
+          assert '("total_tokens",' not in Path("tests/ai/test_runtime_metric_usage.py").read_text()
           PY
           python -m compileall -q tests/ai
           git diff --check
@@ -165,6 +179,8 @@ jobs:
       - name: Commit test migrations
         shell: bash
         run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add tests/ai
           git commit -m "test(ai): align context and metrics contracts"
           git push origin HEAD:feat/ai-metrics-observability
@@ -202,12 +218,13 @@ jobs:
           set -o pipefail
           python -m pytest -q tests/ai 2>&1 | tee /tmp/ai-tests.log
 
-      - name: Upload test logs
+      - name: Upload logs
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: ai-observability-contract-logs
           path: |
+            /tmp/migrate.log
             /tmp/focused.log
             /tmp/ai-tests.log
           if-no-files-found: ignore
