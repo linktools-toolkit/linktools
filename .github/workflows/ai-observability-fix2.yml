@@ -30,6 +30,13 @@ jobs:
           from pathlib import Path
           import textwrap
 
+          def replace(path: str, old: str, new: str) -> None:
+              target = Path(path)
+              text = target.read_text()
+              if old not in text:
+                  raise SystemExit(f"post-patch pattern missing in {path}: {old[:120]!r}")
+              target.write_text(text.replace(old, new, 1))
+
           catalog = Path("linktools-ai/src/linktools/ai/observe/_metrics.py")
           if "linktools.storage.operation.count" not in catalog.read_text():
               print("P2 source changes already applied")
@@ -69,6 +76,69 @@ jobs:
                   1,
               )
               exec(compile(script, "<p2-review-fix>", "exec"), {})
+
+              # Keep the private Task metric implementation owned inside the task
+              # package. DefaultTaskService constructs the single projector and
+              # binds it to LocalTaskGraphLauncher; Runtime factory never imports
+              # task._metrics.
+              task_local = "linktools-ai/src/linktools/ai/task/_local.py"
+              replace(
+                  task_local,
+                  '''    def __init__(\n        self,\n        repository: _TaskRepository,\n        runner: TaskNodeRunner,\n        *,\n        owner: str,\n        metric_projector: "_TaskMetricProjector | None" = None,\n    ) -> None:\n        try:\n            validate_lease_owner(owner)\n        except AIError as error:\n            raise ValueError("task launcher lease owner is invalid") from error\n        self._repository = repository\n        self._runner = runner\n        self._owner = owner\n        self._metric_projector = metric_projector\n        self._graphs: dict[tuple[str, str], _GraphRun] = {}\n''',
+                  '''    def __init__(\n        self,\n        repository: _TaskRepository,\n        runner: TaskNodeRunner,\n        *,\n        owner: str,\n    ) -> None:\n        try:\n            validate_lease_owner(owner)\n        except AIError as error:\n            raise ValueError("task launcher lease owner is invalid") from error\n        self._repository = repository\n        self._runner = runner\n        self._owner = owner\n        self._metric_projector = None\n        self._graphs: dict[tuple[str, str], _GraphRun] = {}\n''',
+              )
+              replace(
+                  task_local,
+                  '''        self._accepting = True\n\n    async def start(self, request: TaskGraphLaunch) -> TaskGraphHandle:\n''',
+                  '''        self._accepting = True\n\n    def _bind_metric_projector(self, projector: _TaskMetricProjector) -> None:\n        if not isinstance(projector, _TaskMetricProjector):\n            raise TypeError("projector must be _TaskMetricProjector")\n        if self._metric_projector is not None and self._metric_projector is not projector:\n            raise RuntimeError("task metric projector is already bound")\n        self._metric_projector = projector\n\n    async def start(self, request: TaskGraphLaunch) -> TaskGraphHandle:\n''',
+              )
+
+              task_service = "linktools-ai/src/linktools/ai/task/_service_impl.py"
+              replace(
+                  task_service,
+                  'from typing import Protocol, cast\n',
+                  'from typing import Protocol, cast, runtime_checkable\n',
+              )
+              replace(
+                  task_service,
+                  'from ..errors import AIError, ErrorCode\n',
+                  'from ..errors import AIError, ErrorCode\nfrom ..observe import MetricRecorder\n',
+              )
+              replace(
+                  task_service,
+                  '''class _LocalTaskWaiter(Protocol):\n''',
+                  '''@runtime_checkable\nclass _TaskMetricProjectorBinder(Protocol):\n    def _bind_metric_projector(self, projector: _TaskMetricProjector) -> None: ...\n\n\nclass _LocalTaskWaiter(Protocol):\n''',
+              )
+              replace(
+                  task_service,
+                  '''        local_waiter: "_LocalTaskWaiter | None" = None,\n        preflight: "_TaskGraphPreflight | None" = None,\n        metric_projector: "_TaskMetricProjector | None" = None,\n    ) -> None:\n        self._persistence = persistence\n        self._authorization = authorization\n        self._launcher = launcher\n        self._local_waiter = local_waiter\n        self._preflight = preflight\n        self._metric_projector = metric_projector\n''',
+                  '''        local_waiter: "_LocalTaskWaiter | None" = None,\n        preflight: "_TaskGraphPreflight | None" = None,\n        metric_recorder: MetricRecorder | None = None,\n        metric_source_namespace: str | None = None,\n    ) -> None:\n        if (metric_recorder is None) != (metric_source_namespace is None):\n            raise ValueError(\n                "task metric recorder and source namespace must be configured together"\n            )\n        self._persistence = persistence\n        self._authorization = authorization\n        self._launcher = launcher\n        self._local_waiter = local_waiter\n        self._preflight = preflight\n        self._metric_projector = (\n            None\n            if metric_recorder is None or metric_source_namespace is None\n            else _TaskMetricProjector(\n                persistence.tasks,\n                metric_recorder,\n                source_namespace=metric_source_namespace,\n                admissions=persistence.admissions,\n            )\n        )\n        if (\n            self._metric_projector is not None\n            and isinstance(launcher, _TaskMetricProjectorBinder)\n        ):\n            launcher._bind_metric_projector(self._metric_projector)\n''',
+              )
+
+              factory = "linktools-ai/src/linktools/ai/runtime/_factory.py"
+              replace(factory, 'from ..task._metrics import _TaskMetricProjector\n', '')
+              replace(
+                  factory,
+                  '''    metric_buffer = None if metrics is None else _RuntimeMetricBuffer(metrics)\n    task_metric_projector = (\n        None\n        if metric_buffer is None\n        else _TaskMetricProjector(\n            state.task.tasks,\n            metric_buffer,\n            source_namespace=namespace,\n            admissions=state.task.admissions,\n        )\n    )\n''',
+                  '''    metric_buffer = None if metrics is None else _RuntimeMetricBuffer(metrics)\n    metric_source_namespace = None if metric_buffer is None else namespace\n''',
+              )
+              replace(
+                  factory,
+                  '''            owner=f"runtime:{tenant_id}:{uuid.uuid4().hex}",\n            metric_projector=task_metric_projector,\n''',
+                  '''            owner=f"runtime:{tenant_id}:{uuid.uuid4().hex}",\n''',
+              )
+              replace(
+                  factory,
+                  '''            local_waiter=task_launcher,\n            preflight=task_runner,\n            metric_projector=task_metric_projector,\n''',
+                  '''            local_waiter=task_launcher,\n            preflight=task_runner,\n            metric_recorder=metric_buffer,\n            metric_source_namespace=metric_source_namespace,\n''',
+              )
+
+              runtime_metrics_test = "tests/ai/test_runtime_metrics.py"
+              replace(
+                  runtime_metrics_test,
+                  '''        owner="worker",\n        metric_projector=projector,\n    )\n\n    launch = TaskGraphLaunch(\n''',
+                  '''        owner="worker",\n    )\n    launcher._bind_metric_projector(projector)\n\n    launch = TaskGraphLaunch(\n''',
+              )
           PY
       - name: Install tooling
         run: |
