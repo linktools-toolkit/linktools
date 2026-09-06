@@ -79,6 +79,12 @@ class MetricStore(Protocol):
         observations: tuple[Observation, ...],
     ) -> None: ...
 
+    async def get_observation(
+        self,
+        namespace: str,
+        observation_id: str,
+    ) -> Observation | None: ...
+
     async def scan_observations(
         self,
         namespace: str,
