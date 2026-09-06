@@ -16,6 +16,7 @@ from linktools.ai.runtime import Runtime, RuntimeContext
 from linktools.ai.runtime import _metrics as runtime_metrics
 from linktools.ai.runtime._execution import _overlay_execution_context
 from linktools.ai.runtime._history import _trace_item
+from linktools.ai.runtime._metric_id import _model_observation_id, _tool_observation_id
 from linktools.ai.task import TaskEvent, TaskEventType
 from linktools.ai.task._metrics import _TaskMetricProjector
 from pydantic_ai_harness.step_persistence import StepEvent
@@ -230,7 +231,7 @@ async def test_task_metric_projector_joins_durable_admission_context() -> None:
 
 @pytest.mark.asyncio
 async def test_trace_observation_id_supports_exact_metric_loss_check() -> None:
-    observation_id = runtime_metrics._tool_observation_id(
+    observation_id = _tool_observation_id(
         "workspace",
         "tenant",
         "execution",
@@ -286,7 +287,7 @@ async def test_trace_observation_id_supports_exact_metric_loss_check() -> None:
 
 
 def test_model_and_tool_observation_ids_are_replay_stable() -> None:
-    model = runtime_metrics._model_observation_id(
+    model = _model_observation_id(
         "workspace",
         "tenant",
         "execution",
@@ -294,7 +295,7 @@ def test_model_and_tool_observation_ids_are_replay_stable() -> None:
         4,
         1,
     )
-    assert model == runtime_metrics._model_observation_id(
+    assert model == _model_observation_id(
         "workspace",
         "tenant",
         "execution",
@@ -302,7 +303,7 @@ def test_model_and_tool_observation_ids_are_replay_stable() -> None:
         4,
         1,
     )
-    assert model != runtime_metrics._model_observation_id(
+    assert model != _model_observation_id(
         "workspace",
         "tenant",
         "execution",
@@ -310,21 +311,21 @@ def test_model_and_tool_observation_ids_are_replay_stable() -> None:
         4,
         2,
     )
-    tool = runtime_metrics._tool_observation_id(
+    tool = _tool_observation_id(
         "workspace",
         "tenant",
         "execution",
         "step-run",
         "call-1",
     )
-    assert tool == runtime_metrics._tool_observation_id(
+    assert tool == _tool_observation_id(
         "workspace",
         "tenant",
         "execution",
         "step-run",
         "call-1",
     )
-    assert tool != runtime_metrics._tool_observation_id(
+    assert tool != _tool_observation_id(
         "workspace",
         "tenant",
         "execution",
