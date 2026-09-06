@@ -5,6 +5,7 @@
 from ._context import (
     RunContextData,
     RunContextValue,
+    merge_run_context,
     normalize_run_context,
     overlay_run_context,
 )
@@ -142,6 +143,7 @@ __all__ = [
     "canonical_string_tuple",
     "deterministic_id",
     "idempotency_key_digest",
+    "merge_run_context",
     "normalize_execution_mode",
     "normalize_json_value",
     "normalize_run_context",
