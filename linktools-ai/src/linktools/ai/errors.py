@@ -235,7 +235,7 @@ class ErrorDiagnostics:
             not isinstance(self.exception_message, str)
             or len(self.exception_message) > _DIAGNOSTIC_EXCEPTION_MESSAGE_MAX_LENGTH
         ):
-            raise ValueError("diagnostic exception message must be lowercase SHA-256")
+            raise ValueError("diagnostic exception message is invalid")
         if not _is_sha256(self.cause_digest):
             raise ValueError("diagnostic cause digest must be lowercase SHA-256")
 
