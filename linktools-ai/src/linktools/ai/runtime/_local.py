@@ -76,7 +76,11 @@ from ..storage import (
 )
 from ._event import ExecutionDelta, LiveExecutionEventBroker
 from ._execution import CancelEffectOutcome, ExecutionStartIdentity
-from ._metrics import _record_execution_terminal, _record_storage_operation
+from ._metrics import (
+    _record_execution_terminal,
+    _record_storage_operation,
+    _release_metric_execution_context,
+)
 from ._object import RuntimeObjectKeyFactory, put_runtime_object, read_runtime_object
 from ._tool import RuntimeToolOperationBridge, _ToolOperationRuntimeRepository
 from .service_api import ExecutionRequest, ToolApprovalContext
@@ -489,6 +493,13 @@ class LocalExecutionBackend:
             durable_sequence=committed.execution.event_sequence,
         )
         self._live_broker.complete(execution_id)
+        _record_execution_terminal(
+            self._metric_recorder,
+            source_namespace=self._namespace,
+            result=committed,
+            session_id=session_id,
+        )
+        _release_metric_execution_context(self._metric_recorder, execution_id)
         return committed
 
     async def commit_terminal_checkpoint(
@@ -4836,12 +4847,6 @@ class LocalExecutionBackend:
                         terminal_plan=plan,
                     )
                     durable_commit = True
-                    _record_execution_terminal(
-                        self._metric_recorder,
-                        source_namespace=self._namespace,
-                        result=committed,
-                        session_id=current.session_id,
-                    )
                     self._confirm_committed_events(
                         current.execution_id,
                         pending_count=pending_count,

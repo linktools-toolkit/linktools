@@ -12,7 +12,7 @@ from typing import Protocol, cast
 from linktools.core import environ
 
 from ..core import Page, CorrelationData, TaskStatus, canonical_sha256
-from ..observe import MetricMeasurement, MetricRecorder, Observation
+from ..observe import MetricRecorder, Observation
 from ._event import TaskEvent, TaskEventType
 
 _logger = environ.get_logger("ai.task.metrics")
@@ -49,7 +49,7 @@ class _TaskMetricRepository(Protocol):
 
 
 class _TaskMetricAdmission(Protocol):
-    context: CorrelationData
+    correlation: CorrelationData
 
 
 class _TaskMetricAdmissionRepository(Protocol):
@@ -175,17 +175,17 @@ class _TaskMetricProjector:
             or terminal.status not in _TERMINAL
         ):
             return
-        context: CorrelationData = {}
+        correlation: CorrelationData = {}
         if self._admissions is not None:
             admitted = await self._admissions.get(graph_id, tenant_id=tenant_id)
             if admitted is None:
                 raise ValueError("task metric admission is missing")
-            context = admitted.correlation
+            correlation = admitted.correlation
         self._record_graph(
             admission,
             terminal,
             tenant_id=tenant_id,
-            context=context,
+            correlation=correlation,
         )
 
         attempts: dict[tuple[str, int], _Attempt] = {}
@@ -227,7 +227,7 @@ class _TaskMetricProjector:
                 fence,
                 attempt,
                 tenant_id=tenant_id,
-                context=context,
+                correlation=correlation,
             )
 
     @staticmethod
@@ -281,9 +281,7 @@ class _TaskMetricProjector:
         tenant_id: str,
         correlation: CorrelationData,
     ) -> None:
-        latency = _latency_ns(admission, terminal)
-        if latency is None:
-            return
+        del admission
         self._safe_record(
             lambda: Observation(
                 version=1,
@@ -303,7 +301,7 @@ class _TaskMetricProjector:
                 error_code=terminal.error_code,
                 correlation=_task_correlation(correlation, graph_id=terminal.graph_id),
                 dimensions={},
-                measurements=(MetricMeasurement("latency_ns", 1, latency),),
+                measurements=(),
             )
         )
 
@@ -318,9 +316,6 @@ class _TaskMetricProjector:
         correlation: CorrelationData,
     ) -> None:
         terminal = cast(TaskEvent, attempt.terminal)
-        latency = _latency_ns(attempt.start, terminal)
-        if latency is None:
-            return
         correlation = _task_correlation(
             correlation,
             graph_id=graph_id,
@@ -349,7 +344,7 @@ class _TaskMetricProjector:
                 error_code=terminal.error_code,
                 correlation=correlation,
                 dimensions={},
-                measurements=(MetricMeasurement("latency_ns", 1, latency),),
+                measurements=(),
             )
         )
 
@@ -369,21 +364,6 @@ def _task_correlation(
         if value is not None:
             correlation[f"linktools.{key}"] = value
     return correlation
-
-
-def _latency_ns(start: TaskEvent, terminal: TaskEvent) -> int | None:
-    delta = terminal.occurred_at - start.occurred_at
-    if delta.total_seconds() < 0:
-        _logger.warning(
-            "task metric negative latency skipped: graph=%s start=%s terminal=%s",
-            terminal.graph_id,
-            start.sequence,
-            terminal.sequence,
-        )
-        return None
-    return (
-        (delta.days * 86_400 + delta.seconds) * 1_000_000 + delta.microseconds
-    ) * 1_000
 
 
 __all__: list[str] = []

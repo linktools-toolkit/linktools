@@ -99,27 +99,24 @@ class TaskNodeRunControl(Protocol):
     async def bind_execution(self, execution_id: str) -> None: ...
 
 
+@dataclass(frozen=True, slots=True)
+class TaskNodeInvocation:
+    node: TaskNode
+    graph_id: str
+    principal: Principal
+    correlation: CorrelationData
+    dependency_results: "Mapping[str, TaskDependencyResult]"
+
+
 class TaskNodeRunner(Protocol):
     async def run(
         self,
-        node: TaskNode,
+        invocation: TaskNodeInvocation,
         *,
-        graph_id: str,
-        principal: Principal,
-        correlation: CorrelationData,
-        dependency_results: "Mapping[str, TaskDependencyResult]",
         control: TaskNodeRunControl,
     ) -> TaskNodeRunResult: ...
 
-    async def cancel(
-        self,
-        node: TaskNode,
-        *,
-        graph_id: str,
-        principal: Principal,
-        correlation: CorrelationData,
-        dependency_results: "Mapping[str, TaskDependencyResult]",
-    ) -> None: ...
+    async def cancel(self, invocation: TaskNodeInvocation) -> None: ...
 
 
 @runtime_checkable
@@ -377,13 +374,15 @@ class LocalTaskGraphLauncher:
                 continue
             try:
                 await self._runner.cancel(
-                    node,
-                    graph_id=graph_id,
-                    principal=launch.principal,
-                    context=launch.correlation,
-                    dependency_results=await self._dependency_results(
-                        graph_id, node, tenant_id=tenant_id
-                    ),
+                    TaskNodeInvocation(
+                        node,
+                        graph_id,
+                        launch.principal,
+                        launch.correlation,
+                        await self._dependency_results(
+                            graph_id, node, tenant_id=tenant_id
+                        ),
+                    )
                 )
             except asyncio.CancelledError:
                 raise
@@ -629,15 +628,17 @@ class LocalTaskGraphLauncher:
             if node is None:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             await self._runner.cancel(
-                node,
-                graph_id=request.graph.graph_id,
-                principal=request.principal,
-                context=request.correlation,
-                dependency_results=await self._dependency_results(
-                    request.graph.graph_id,
+                TaskNodeInvocation(
                     node,
-                    tenant_id=tenant_id,
-                ),
+                    request.graph.graph_id,
+                    request.principal,
+                    request.correlation,
+                    await self._dependency_results(
+                        request.graph.graph_id,
+                        node,
+                        tenant_id=tenant_id,
+                    ),
+                )
             )
 
     async def _wait_scheduler(
@@ -696,11 +697,13 @@ class LocalTaskGraphLauncher:
         heartbeat_stop = asyncio.Event()
         runner_task = asyncio.create_task(
             self._runner.run(
-                node,
-                graph_id=graph_id,
-                principal=request.principal,
-                context=request.correlation,
-                dependency_results=dependency_results,
+                TaskNodeInvocation(
+                    node,
+                    graph_id,
+                    request.principal,
+                    request.correlation,
+                    dependency_results,
+                ),
                 control=control,
             ),
             name=f"task-runner-{graph_id}-{node.node_id}",

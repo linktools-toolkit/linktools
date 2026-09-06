@@ -20,7 +20,6 @@ from pydantic import ValidationError
 from pydantic_ai.capabilities import (
     AbstractCapability,
     WrapModelRequestHandler,
-    WrapRunHandler,
 )
 from pydantic_ai.exceptions import (
     ConcurrencyLimitExceeded,
@@ -33,17 +32,14 @@ from pydantic_ai.exceptions import (
 )
 from pydantic_ai.messages import ModelResponse
 from pydantic_ai.models import ModelRequestContext
-from pydantic_ai.run import AgentRunResult
 from pydantic_ai.tools import RunContext as PydanticRunContext
 from pydantic_ai.usage import UsageLimitExceeded
 
 from ..capability import AgentContext
-from ..core import UsageMetrics
 from ..errors import AIError, ErrorCode
 from ..observe import MetricMeasurement, MetricRecorder, Observation
 from ._metric_id import _model_observation_id
 from ._metrics import (
-    _bind_metric_agent_usage,
     _bind_metric_execution_context,
     _metric_correlation,
 )
@@ -85,32 +81,8 @@ class _RuntimeModelMetricCapability(AbstractCapability[AgentContext[object]]):
         _bind_metric_execution_context(
             self._recorder,
             self._execution_id,
-            ctx.deps.context,
+            ctx.deps.correlation,
         )
-
-    async def wrap_run(
-        self,
-        ctx: PydanticRunContext[AgentContext[object]],
-        *,
-        handler: WrapRunHandler,
-    ) -> AgentRunResult[Any]:
-        try:
-            return await handler()
-        finally:
-            usage = ctx.usage
-            _bind_metric_agent_usage(
-                self._recorder,
-                self._execution_id,
-                self._step_run_id,
-                UsageMetrics(
-                    model_requests=usage.requests,
-                    tool_calls=usage.tool_calls,
-                    input_tokens=usage.input_tokens,
-                    output_tokens=usage.output_tokens,
-                    cache_read_tokens=usage.cache_read_tokens,
-                    cache_write_tokens=usage.cache_write_tokens,
-                ),
-            )
 
     async def wrap_model_request(
         self,
@@ -215,7 +187,6 @@ def _provider_usage_measurements(
     return (
         MetricMeasurement("input_tokens", 1, usage.input_tokens),
         MetricMeasurement("output_tokens", 1, usage.output_tokens),
-        MetricMeasurement("total_tokens", 1, usage.input_tokens + usage.output_tokens),
         MetricMeasurement("cache_read_tokens", 1, usage.cache_read_tokens),
         MetricMeasurement("cache_write_tokens", 1, usage.cache_write_tokens),
     )

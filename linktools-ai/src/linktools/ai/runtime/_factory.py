@@ -53,7 +53,7 @@ from ._execution import DefaultExecutionService
 from ._history import StepExecutionHistoryReader, StepSessionHistoryReader
 from ._local import LocalExecutionBackend
 from ._memory import RuntimeMemoryStore
-from ._metrics import _MetricExecutionTerminalCommitter, _RuntimeMetricBuffer
+from ._metrics import _RuntimeMetricBuffer
 from ._object import RuntimeObjectKeyFactory
 from ._planner import DefaultTaskService, RuntimeTaskNodeRunner
 from ._session import DefaultSessionService
@@ -551,15 +551,7 @@ async def _build_local_components(
         )
         execution.bind_backend(backend)
         execution.bind_local_waiter(backend)
-        execution.bind_terminal_committer(
-            backend
-            if metric_buffer is None
-            else _MetricExecutionTerminalCommitter(
-                backend,
-                metric_buffer,
-                source_namespace=namespace,
-            )
-        )
+        execution.bind_terminal_committer(backend)
         execution.bind_terminal_verifier(backend.verify_terminal_projection)
         execution.bind_subagent_cancellation(dispatcher)
         session = DefaultSessionService(

@@ -16,13 +16,12 @@ from linktools.core import environ
 from ..core import CorrelationData, UsageMetrics, normalize_correlation
 from ..errors import AIError, ErrorCode
 from ..observe import MetricMeasurement, MetricRecorder, Metrics, Observation
-from ._execution import _ExecutionTerminalCommitter
 from ._metric_id import (
     _model_observation_id,
     _stable_observation_id,
     _tool_observation_id,
 )
-from .state._contracts import ExecutionTerminalCommit, ExecutionTerminalCommitResult
+from .state._contracts import ExecutionTerminalCommitResult
 
 _logger = environ.get_logger("ai.runtime.metrics")
 _QUEUE_CAPACITY = 1024
@@ -97,7 +96,6 @@ class _RuntimeMetricBuffer(MetricRecorder):
         self._writer: asyncio.Task[None] | None = None
         self._resolution_event = asyncio.Event()
         self._execution_contexts: dict[str, CorrelationData] = {}
-        self._agent_usage: dict[tuple[str, str], UsageMetrics] = {}
 
     def bind_execution_context(
         self,
@@ -116,25 +114,8 @@ class _RuntimeMetricBuffer(MetricRecorder):
         self._execution_contexts[execution_id] = normalized
         return True
 
-    def bind_agent_usage(
-        self,
-        execution_id: str,
-        step_run_id: str,
-        usage: UsageMetrics,
-    ) -> bool:
-        key = (execution_id, step_run_id)
-        current = self._agent_usage.get(key)
-        if current is not None and current != usage:
-            self._warn("runtime metric agent usage conflict")
-            return False
-        self._agent_usage[key] = usage
-        return True
-
     def release_execution_context(self, execution_id: str) -> None:
         self._execution_contexts.pop(execution_id, None)
-        stale = [key for key in self._agent_usage if key[0] == execution_id]
-        for key in stale:
-            self._agent_usage.pop(key, None)
 
     def status(self) -> RuntimeMetricStatus:
         pending = self._accepted - self._persisted - self._lost
@@ -204,7 +185,6 @@ class _RuntimeMetricBuffer(MetricRecorder):
     def _enrich_observation(self, observation: Observation) -> Observation:
         raw = dict(observation.correlation)
         execution_id = raw.get("linktools.execution_id", raw.get("execution_id"))
-        step_run_id = raw.get("linktools.step_run_id", raw.get("step_run_id"))
         context = (
             self._execution_contexts.get(execution_id)
             if isinstance(execution_id, str)
@@ -220,29 +200,9 @@ class _RuntimeMetricBuffer(MetricRecorder):
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             correlation[normalized_key] = value
 
-        measurements = observation.measurements
-        if (
-            observation.kind == "linktools.agent.run"
-            and isinstance(execution_id, str)
-            and isinstance(step_run_id, str)
-        ):
-            usage = self._agent_usage.pop((execution_id, step_run_id), None)
-            if usage is not None:
-                existing = {(item.name, item.revision) for item in measurements}
-                usage_values = tuple(
-                    item
-                    for item in _usage_measurements(usage)
-                    if (item.name, item.revision) not in existing
-                )
-                measurements = (*measurements, *usage_values)
-
-        if correlation == raw and measurements == observation.measurements:
+        if correlation == raw:
             return observation
-        return replace(
-            observation,
-            correlation=correlation,
-            measurements=measurements,
-        )
+        return replace(observation, correlation=correlation)
 
     def _start_writer(self) -> bool:
         if self._writer is not None:
@@ -271,7 +231,6 @@ class _RuntimeMetricBuffer(MetricRecorder):
                 await asyncio.gather(writer, return_exceptions=True)
             self._lose_remaining("runtime metric close failed")
             self._execution_contexts.clear()
-            self._agent_usage.clear()
             self._log_close()
 
     async def _close_impl(self) -> None:
@@ -279,7 +238,6 @@ class _RuntimeMetricBuffer(MetricRecorder):
         writer = self._writer
         if writer is None:
             self._execution_contexts.clear()
-            self._agent_usage.clear()
             self._log_close()
             return
         started = monotonic()
@@ -305,7 +263,6 @@ class _RuntimeMetricBuffer(MetricRecorder):
         self._consume_writer(writer)
         self._lose_remaining("runtime metric close cleanup")
         self._execution_contexts.clear()
-        self._agent_usage.clear()
         self._log_close()
 
     def _log_close(self) -> None:
@@ -431,40 +388,6 @@ class _RuntimeMetricBuffer(MetricRecorder):
             self._warn("runtime metric writer failed")
 
 
-class _MetricExecutionTerminalCommitter:
-    """Project service-owned durable terminal checkpoints into Metrics."""
-
-    def __init__(
-        self,
-        delegate: _ExecutionTerminalCommitter,
-        recorder: MetricRecorder,
-        *,
-        source_namespace: str,
-    ) -> None:
-        self._delegate = delegate
-        self._recorder = recorder
-        self._source_namespace = source_namespace
-
-    async def commit_terminal_checkpoint(
-        self,
-        commit: ExecutionTerminalCommit,
-        *,
-        session_id: str | None,
-    ) -> ExecutionTerminalCommitResult:
-        result = await self._delegate.commit_terminal_checkpoint(
-            commit,
-            session_id=session_id,
-        )
-        _record_execution_terminal(
-            self._recorder,
-            source_namespace=self._source_namespace,
-            result=result,
-            session_id=session_id,
-        )
-        if isinstance(self._recorder, _RuntimeMetricBuffer):
-            self._recorder.release_execution_context(result.execution.execution_id)
-        return result
-
 
 def _bind_metric_execution_context(
     recorder: MetricRecorder,
@@ -475,25 +398,24 @@ def _bind_metric_execution_context(
         recorder.bind_execution_context(execution_id, correlation)
 
 
-def _bind_metric_agent_usage(
-    recorder: MetricRecorder,
+def _release_metric_execution_context(
+    recorder: MetricRecorder | None,
     execution_id: str,
-    step_run_id: str,
-    usage: UsageMetrics,
 ) -> None:
-    if isinstance(recorder, _RuntimeMetricBuffer):
-        recorder.bind_agent_usage(execution_id, step_run_id, usage)
+    if not isinstance(recorder, _RuntimeMetricBuffer):
+        return
+    try:
+        recorder.release_execution_context(execution_id)
+    except Exception:
+        _logger.exception("runtime metric execution context release failed")
 
 
-def _usage_measurements(usage: UsageMetrics) -> tuple[MetricMeasurement, ...]:
+def _execution_usage_measurements(
+    usage: UsageMetrics,
+) -> tuple[MetricMeasurement, ...]:
     return (
-        _measurement("model_requests", usage.model_requests),
-        _measurement("tool_calls", usage.tool_calls),
         _measurement("input_tokens", usage.input_tokens),
         _measurement("output_tokens", usage.output_tokens),
-        _measurement("total_tokens", usage.total_tokens),
-        _measurement("cache_read_tokens", usage.cache_read_tokens),
-        _measurement("cache_write_tokens", usage.cache_write_tokens),
     )
 
 
@@ -521,7 +443,7 @@ def _record_execution_terminal(
         return
     execution = result.execution
     latency = _execution_latency_ns(result)
-    measurements = list(_usage_measurements(result.result.usage))
+    measurements = list(_execution_usage_measurements(result.result.usage))
     if latency is not None:
         measurements.insert(0, _measurement("latency_ns", latency))
     correlation = _metric_correlation(

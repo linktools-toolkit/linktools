@@ -39,6 +39,7 @@ from ..task import (
     TaskNode,
     TaskNodeContext,
     TaskNodeHandler,
+    TaskNodeInvocation,
     TaskNodeRunControl,
     TaskNodeRunError,
     TaskNodeRunResult,
@@ -719,14 +720,15 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
 
     async def run(
         self,
-        node: TaskNode,
+        invocation: TaskNodeInvocation,
         *,
-        graph_id: str,
-        principal: Principal,
-        correlation: CorrelationData,
-        dependency_results: Mapping[str, TaskDependencyResult],
         control: TaskNodeRunControl,
     ) -> TaskNodeRunResult:
+        node = invocation.node
+        graph_id = invocation.graph_id
+        principal = invocation.principal
+        correlation = invocation.correlation
+        dependency_results = invocation.dependency_results
         task_type, task_version, body = _parse_node(node, request=False)
         handler = self._handler(task_type, task_version, request=False)
         dependencies = await self._dependencies(
@@ -779,15 +781,12 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         return TaskNodeRunResult(digest, execution_id, payload)
 
-    async def cancel(
-        self,
-        node: TaskNode,
-        *,
-        graph_id: str,
-        principal: Principal,
-        correlation: CorrelationData,
-        dependency_results: Mapping[str, TaskDependencyResult],
-    ) -> None:
+    async def cancel(self, invocation: TaskNodeInvocation) -> None:
+        node = invocation.node
+        graph_id = invocation.graph_id
+        principal = invocation.principal
+        correlation = invocation.correlation
+        dependency_results = invocation.dependency_results
         task_type, task_version, body = _parse_node(node, request=False)
         handler = self._handler(task_type, task_version, request=False)
         dependencies = await self._dependencies(
