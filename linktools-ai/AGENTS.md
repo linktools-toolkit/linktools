@@ -60,11 +60,11 @@ These describe the current architecture and may evolve; they are not rules by th
 | `asset` | Raw Asset keys, metadata, `AssetStore`, backends |
 | `spec` | Agent/Skill/MCP declarations and codecs |
 | `model` | Model routes, credentials, registries, materialization |
-| `observe` | Metrics observation contracts, metric definitions, queries, and metric stores |
+| `observe` | Execution observation scope, middleware, snapshots |
 | `capability` | Capability composition, loaders, Skill/MCP/workspace projection |
 | `task` | Task graph, DAG, lease, launcher contracts |
 | `agent` | Agent compilation, definitions, output contracts, execution binding |
-| `runtime` | Composition root, execution, persistence contracts, service APIs, automatic metric producers |
+| `runtime` | Composition root, execution, persistence contracts, service APIs |
 | `workspace` | Workspace identity, paths, policy, configuration, sandbox contracts |
 | `migrate` | Explicit database schema provisioning |
 
