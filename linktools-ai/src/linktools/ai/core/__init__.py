@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """Pure core values and errors."""
 
-from ._context import (
+from ._correlation import (
     CorrelationData,
     CorrelationValue,
     normalize_correlation,

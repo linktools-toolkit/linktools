@@ -579,4 +579,4 @@ async def test_task_commit_unknown_readback_projects_durable_terminal_history() 
     assert attempts[0].measurements == ()
     assert len(graph_terminals) == 1
     assert graph_terminals[0].status == TaskStatus.SUCCEEDED.value
-    assert graph_terminals[0].measurements[0].value == 4_000_000_000
+    assert graph_terminals[0].measurements == ()

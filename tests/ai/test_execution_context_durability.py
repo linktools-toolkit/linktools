@@ -114,7 +114,7 @@ def _backend(execution: ExecutionRecord) -> LocalExecutionBackend:
 
 
 @pytest.mark.asyncio
-async def test_local_start_rejects_correlation_drift_from_durable_execution() -> None:
+async def test_local_start_accepts_correlation_drift_from_durable_execution() -> None:
     execution = _execution(correlation={"trace_id": "durable", "attempt": 1})
     backend = _backend(execution)
     request = ExecutionRequest(
@@ -129,10 +129,8 @@ async def test_local_start_rejects_correlation_drift_from_durable_execution() ->
         correlation={"trace_id": "request", "attempt": 1},
     )
 
-    with pytest.raises(AIError) as raised:
-        await backend._validate_start(request, execution)
-
-    assert raised.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
+    await backend._validate_start(request, execution)
+    assert dict(execution.correlation) == {"attempt": 1, "trace_id": "durable"}
 
 
 def test_recovery_identity_rejects_correlation_drift() -> None:

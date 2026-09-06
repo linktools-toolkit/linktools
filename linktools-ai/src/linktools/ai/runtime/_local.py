@@ -375,7 +375,6 @@ class LocalExecutionBackend:
             request.mode != execution.mode
             or request.planning is not execution.planning
             or request.thinking != execution.thinking
-            or request.correlation != execution.correlation
             or execution.binding != binding.snapshot
         ):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -471,14 +470,17 @@ class LocalExecutionBackend:
         *,
         session_id: str | None,
     ) -> None:
+        recorder = getattr(self, "_metric_recorder", None)
+        if recorder is None:
+            return
         _record_execution_terminal(
-            self._metric_recorder,
+            recorder,
             source_namespace=self._namespace,
             result=committed,
             session_id=session_id,
         )
         _release_metric_execution_context(
-            self._metric_recorder,
+            recorder,
             committed.execution.execution_id,
         )
 

@@ -10,7 +10,7 @@ from linktools.ai.asset import (
 )
 from linktools.ai.capability import CapabilityGroup
 from linktools.ai.model import ModelRegistry
-from linktools.ai.runtime import Runtime, RuntimeDomain, RuntimeState
+from linktools.ai.runtime import Runtime, RuntimeContext, RuntimeDomain, RuntimeState
 from linktools.ai.runtime._memory import RuntimeMemoryStore
 from linktools.ai.spec import AgentSpec, AgentSpecCodec, MCPServerSpec, MCPServerSpecCodec
 from linktools.ai.storage import StorageOverlay
@@ -106,7 +106,7 @@ async def test_workspace_session_survives_cold_restart(tmp_path) -> None:
 
     async with Runtime.open(
         workspace,
-        tenant_id="tenant-a",
+        context=RuntimeContext(None, tenant_id="tenant-a"),
         models=models,
     ) as runtime:
         assert runtime.tenant_id == "tenant-a"
