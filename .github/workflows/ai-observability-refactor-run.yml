@@ -41,10 +41,11 @@ jobs:
 
           local = Path("linktools-ai/src/linktools/ai/runtime/_local.py")
           text = local.read_text()
-          old = "                        memory_scope=current.memory_scope,\n"
+          old = "                        history_id=history_id,\n                        memory_scope=current.memory_scope,\n                        memory_store=memory,\n"
+          new = "                        history_id=history_id,\n                        memory_store=memory,\n"
           if text.count(old) != 1:
-              raise SystemExit(f"run scope memory ownership: expected 1 match, got {text.count(old)}")
-          local.write_text(text.replace(old, "", 1))
+              raise SystemExit(f"run scope memory ownership: expected 1 scoped match, got {text.count(old)}")
+          local.write_text(text.replace(old, new, 1))
           PY
           python -m compileall -q linktools-ai/src
           git diff --check
