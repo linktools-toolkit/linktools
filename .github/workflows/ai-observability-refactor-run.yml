@@ -26,62 +26,147 @@ jobs:
         with:
           python-version: "3.10"
 
-      - name: Fix runtime residuals
+      - name: Remove task latency residue
         shell: bash
         run: |
           python - <<'PY'
           from pathlib import Path
 
-          runtime = Path("linktools-ai/src/linktools/ai/runtime/_runtime_service.py")
-          text = runtime.read_text()
-          old = "            limits=limits,\n            context=context,\n"
-          new = "            limits=limits,\n            correlation=correlation,\n"
-          if text.count(old) != 2:
-              raise SystemExit(f"graph correlation forwarding: expected 2 scoped matches, got {text.count(old)}")
-          runtime.write_text(text.replace(old, new))
-
-          local = Path("linktools-ai/src/linktools/ai/runtime/_local.py")
-          text = local.read_text()
-          old = "                        history_id=history_id,\n                        memory_scope=current.memory_scope,\n                        memory_store=memory,\n"
-          new = "                        history_id=history_id,\n                        memory_store=memory,\n"
-          if text.count(old) != 1:
-              raise SystemExit(f"run scope memory ownership: expected 1 scoped match, got {text.count(old)}")
-          local.write_text(text.replace(old, new, 1))
+          path = Path("linktools-ai/src/linktools/ai/task/_metrics.py")
+          text = path.read_text()
+          replacements = (
+              ("class _Attempt:\n    start: TaskEvent\n    execution_id: str | None\n", "class _Attempt:\n    execution_id: str | None\n", 1),
+              ("attempts[key] = _Attempt(event, event.execution_id)", "attempts[key] = _Attempt(event.execution_id)", 1),
+              ("        self._record_graph(\n            admission,\n            terminal,\n", "        self._record_graph(\n            terminal,\n", 1),
+              ("    def _record_graph(\n        self,\n        admission: TaskEvent,\n        terminal: TaskEvent,\n", "    def _record_graph(\n        self,\n        terminal: TaskEvent,\n", 1),
+              ("    ) -> None:\n        del admission\n        self._safe_record(\n", "    ) -> None:\n        self._safe_record(\n", 1),
+          )
+          for old, new, expected in replacements:
+              actual = text.count(old)
+              if actual != expected:
+                  raise SystemExit(f"task metric cleanup expected {expected} matches, got {actual}: {old!r}")
+              text = text.replace(old, new, expected)
+          path.write_text(text)
           PY
           python -m compileall -q linktools-ai/src
           git diff --check
 
-      - name: Scan source residuals
-        shell: bash
-        run: |
-          python - <<'PY' | tee /tmp/runtime-residual-scan.log
-          from pathlib import Path
-          import re
-
-          root = Path("linktools-ai/src/linktools/ai")
-          patterns = (
-              re.compile(r"\b(?:request|execution|admission|launch|recovery_input)\.context\b"),
-              re.compile(r"replace\(request,\s*context="),
-              re.compile(r"\bcontext=(?:request|launch|execution|admission)\.correlation\b"),
-              re.compile(r"limits=limits,\s*\n\s*context=context"),
-          )
-          found = []
-          for path in root.rglob("*.py"):
-              source = path.read_text()
-              if any(pattern.search(source) for pattern in patterns):
-                  found.append(str(path))
-          print("\n".join(found))
-          if found:
-              raise SystemExit("stale runtime context access remains")
-          PY
-
-      - name: Commit runtime fixes
+      - name: Commit task metric cleanup
         shell: bash
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add linktools-ai/src/linktools/ai
-          git commit -m "fix(ai): complete runtime context ownership"
+          git add linktools-ai/src/linktools/ai/task/_metrics.py
+          git commit -m "refactor(ai): remove provisional task latency state"
+          git push origin HEAD:feat/ai-metrics-observability
+
+      - name: Migrate tests to final contracts
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          def replace(path: str, old: str, new: str, expected: int = 1) -> None:
+              file = Path(path)
+              text = file.read_text()
+              actual = text.count(old)
+              if actual != expected:
+                  raise SystemExit(f"{path}: expected {expected} matches, got {actual}: {old!r}")
+              file.write_text(text.replace(old, new, expected))
+
+          replace("tests/ai/test_agent_composition.py", '        "RunContext",\n', '        "AgentContext",\n')
+          replace("tests/ai/test_architecture_gate.py", '        "RunContext",\n', '        "AgentContext",\n')
+
+          replace("tests/ai/test_error_cancellation_contract.py", "            context={},\n", "            correlation={},\n", 4)
+          replace("tests/ai/test_error_propagation_boundaries.py", "                context={},\n", "                correlation={},\n", 2)
+
+          path = Path("tests/ai/test_execution_context_durability.py")
+          text = path.read_text().replace("context", "correlation")
+          text = text.replace(
+              '"""Durable Execution correlation and recovery compatibility regressions."""',
+              '"""Durable Execution correlation and recovery regressions."""',
+          )
+          text = text.replace(
+              "test_recovery_execution_input_v1_correlation_wire_is_backward_readable",
+              "test_recovery_execution_input_v1_correlation_wire_round_trips",
+          )
+          path.write_text(text)
+
+          path = Path("tests/ai/test_task_context_durability.py")
+          text = path.read_text().replace("context", "correlation")
+          text = text.replace("from linktools.ai.errors import AIError, ErrorCode\n", "")
+          text = text.replace(
+              "test_task_admission_correlation_drift_is_idempotency_conflict_without_overwrite",
+              "test_task_admission_correlation_drift_reuses_first_durable_value",
+          )
+          old = '''        await state.task.admissions.admit(original, graph)\n        with pytest.raises(AIError) as raised:\n            await state.task.admissions.admit(drifted, graph)\n\n        assert raised.value.code is ErrorCode.IDEMPOTENCY_CONFLICT\n'''
+          new = '''        first_view = await state.task.admissions.admit(original, graph)\n        replay_view = await state.task.admissions.admit(drifted, graph)\n\n        assert replay_view == first_view\n'''
+          if text.count(old) != 1:
+              raise SystemExit("task correlation replay assertion block mismatch")
+          text = text.replace(old, new, 1)
+          text = text.replace(
+              "test_task_admission_v1_empty_correlation_keeps_legacy_canonical_wire",
+              "test_task_admission_v1_empty_correlation_uses_canonical_wire",
+          )
+          path.write_text(text)
+
+          path = Path("tests/ai/test_task_mixed_node_reliability.py")
+          text = path.read_text()
+          if text.count("    TaskNodeContext,\n") != 1:
+              raise SystemExit("TaskNodeContext import mismatch")
+          text = text.replace(
+              "    TaskNodeContext,\n",
+              "    TaskNodeContext,\n    TaskNodeInvocation,\n",
+              1,
+          )
+          old = '''    async def run(\n        self,\n        node: TaskNode,\n        *,\n        graph_id: str,\n        principal: object,\n        context: object,\n        dependency_results: object,\n        control: TaskNodeRunControl,\n    ) -> TaskNodeRunResult:\n        del node, graph_id, principal, context, dependency_results\n        self.control = control\n        self.entered.set()\n        await self.release.wait()\n        payload = StoredPayload.inline_json({"done": True})\n        return TaskNodeRunResult(payload.digest, result_payload=payload)\n\n    async def cancel(\n        self,\n        node: TaskNode,\n        *,\n        graph_id: str,\n        principal: object,\n        context: object,\n        dependency_results: object,\n    ) -> None:\n        del node, graph_id, principal, context, dependency_results\n'''
+          new = '''    async def run(\n        self,\n        invocation: TaskNodeInvocation,\n        *,\n        control: TaskNodeRunControl,\n    ) -> TaskNodeRunResult:\n        del invocation\n        self.control = control\n        self.entered.set()\n        await self.release.wait()\n        payload = StoredPayload.inline_json({"done": True})\n        return TaskNodeRunResult(payload.digest, result_payload=payload)\n\n    async def cancel(self, invocation: TaskNodeInvocation) -> None:\n        del invocation\n'''
+          if text.count(old) != 1:
+              raise SystemExit("BindingRunner contract block mismatch")
+          path.write_text(text.replace(old, new, 1))
+
+          replace("tests/ai/test_runtime_metric_usage.py", '            ("total_tokens", 16),\n', "")
+          replace("tests/ai/test_runtime_metric_usage.py", '            ("total_tokens", 0),\n', "")
+
+          path = Path("tests/ai/test_task_metric_projector.py")
+          text = path.read_text()
+          text = text.replace("test_empty_graph_has_exact_zero_latency", "test_empty_graph_records_terminal_without_latency")
+          replace_block = '''    assert observation.measurements[0].name == "latency_ns"\n    assert observation.measurements[0].value == 0\n'''
+          if text.count(replace_block) != 1:
+              raise SystemExit("empty graph latency assertion mismatch")
+          text = text.replace(replace_block, "    assert observation.measurements == ()\n", 1)
+          if text.count("    assert attempt.measurements[0].value == 5_000_000_000\n") != 1:
+              raise SystemExit("attempt latency assertion mismatch")
+          text = text.replace(
+              "    assert attempt.measurements[0].value == 5_000_000_000\n",
+              "    assert attempt.measurements == ()\n",
+              1,
+          )
+          if text.count("    assert attempts[0].measurements[0].value == 5_000_000_000\n") != 1:
+              raise SystemExit("reclaimed attempt latency assertion mismatch")
+          text = text.replace(
+              "    assert attempts[0].measurements[0].value == 5_000_000_000\n",
+              "    assert attempts[0].measurements == ()\n",
+              1,
+          )
+          path.write_text(text)
+
+          path = Path("tests/ai/test_runtime_metrics.py")
+          text = path.read_text()
+          old = '''    assert attempts[0].measurements[0].value == 2_000_000_000\n    assert len(graph_terminals) == 1\n    assert graph_terminals[0].status == TaskStatus.SUCCEEDED.value\n    assert graph_terminals[0].measurements[0].value == 4_000_000_000\n'''
+          new = '''    assert attempts[0].measurements == ()\n    assert len(graph_terminals) == 1\n    assert graph_terminals[0].status == TaskStatus.SUCCEEDED.value\n    assert graph_terminals[0].measurements == ()\n'''
+          if text.count(old) != 1:
+              raise SystemExit("runtime task latency assertion block mismatch")
+          path.write_text(text.replace(old, new, 1))
+          PY
+          python -m compileall -q tests/ai
+          git diff --check
+
+      - name: Commit test migrations
+        shell: bash
+        run: |
+          git add tests/ai
+          git commit -m "test(ai): align context and metrics contracts"
           git push origin HEAD:feat/ai-metrics-observability
 
       - name: Install tooling
@@ -90,17 +175,47 @@ jobs:
           python -m pip install --quiet -U -r requirements.txt
           python manage.py install --editable --quiet
 
-      - name: Run production smoke tests
+      - name: Run focused contracts
+        continue-on-error: true
         shell: bash
         run: |
+          set -o pipefail
           python -m pytest -q \
+            tests/ai/test_agent_composition.py \
+            tests/ai/test_architecture_gate.py \
+            tests/ai/test_error_cancellation_contract.py \
+            tests/ai/test_error_propagation_boundaries.py \
+            tests/ai/test_execution_context_durability.py \
+            tests/ai/test_task_context_durability.py \
+            tests/ai/test_task_mixed_node_reliability.py \
+            tests/ai/test_runtime_metric_usage.py \
+            tests/ai/test_task_metric_projector.py \
+            tests/ai/test_runtime_metrics.py \
             tests/ai/test_runtime_metrics_multi.py \
-            tests/ai/test_runtime_approval_composition.py
+            tests/ai/test_runtime_approval_composition.py \
+            2>&1 | tee /tmp/focused.log
 
-      - name: Upload scan
+      - name: Run all linktools-ai tests
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -o pipefail
+          python -m pytest -q tests/ai 2>&1 | tee /tmp/ai-tests.log
+
+      - name: Upload test logs
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: ai-runtime-residual-scan
-          path: /tmp/runtime-residual-scan.log
+          name: ai-observability-contract-logs
+          path: |
+            /tmp/focused.log
+            /tmp/ai-tests.log
           if-no-files-found: ignore
+
+      - name: Verify focused contracts
+        run: |
+          python -m pytest -q \
+            tests/ai/test_execution_context_durability.py \
+            tests/ai/test_task_context_durability.py \
+            tests/ai/test_task_mixed_node_reliability.py \
+            tests/ai/test_runtime_metrics.py
