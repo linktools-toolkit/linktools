@@ -1,0 +1,405 @@
+name: AI metrics closure one-shot
+
+on:
+  push:
+    branches:
+      - feat/ai-metrics-observability
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: feat/ai-metrics-observability
+          fetch-depth: 0
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.10'
+      - name: Apply reviewed observability closure
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          def read(path: str) -> str:
+              return Path(path).read_text()
+
+          def write(path: str, value: str) -> None:
+              Path(path).write_text(value)
+
+          def once(value: str, old: str, new: str, *, label: str) -> str:
+              count = value.count(old)
+              if count != 1:
+                  raise RuntimeError(f"{label}: expected one match, got {count}")
+              return value.replace(old, new, 1)
+
+          # Retry/Fork inherit source durable context and apply only the caller overlay.
+          path = 'linktools-ai/src/linktools/ai/runtime/_execution.py'
+          value = read(path)
+          value = once(
+              value,
+              '    ResourceRef,\n    StopReason,\n',
+              '    ResourceRef,\n    RunContextData,\n    StopReason,\n',
+              label='execution RunContextData import',
+          )
+          value = once(
+              value,
+              '    principal_identity_payload,\n)',
+              '    overlay_run_context,\n    principal_identity_payload,\n)',
+              label='execution overlay import',
+          )
+          value = once(
+              value,
+              '_logger = environ.get_logger("ai.runtime.execution")\n\n\n',
+              '''_logger = environ.get_logger("ai.runtime.execution")\n\n\ndef _overlay_execution_context(\n    base: Mapping[str, object],\n    overlay: Mapping[str, object],\n) -> RunContextData:\n    try:\n        return overlay_run_context(base, overlay)\n    except (TypeError, ValueError) as error:\n        raise AIError(ErrorCode.REQUEST_FIELD_INVALID) from error\n\n\n''',
+              label='execution overlay helper',
+          )
+          target = '            thinking=previous.thinking,\n            context=request.context,\n'
+          if value.count(target) != 2:
+              raise RuntimeError(f'execution retry/fork context: expected two matches, got {value.count(target)}')
+          value = value.replace(
+              target,
+              '            thinking=previous.thinking,\n            context=_overlay_execution_context(previous.context, request.context),\n',
+          )
+          write(path, value)
+
+          # Runtime exposes the single root context and the Runtime-owned metric control plane.
+          path = 'linktools-ai/src/linktools/ai/runtime/_runtime_service.py'
+          value = read(path)
+          value = once(
+              value,
+              'from ._input import UserPromptTransport\n',
+              '''from ._input import UserPromptTransport\nfrom ._metrics import (\n    RuntimeMetricFlushResult,\n    RuntimeMetricStatus,\n    _disabled_metric_status,\n)\n''',
+              label='runtime metric imports',
+          )
+          marker = '''class _TaskNodeRuntimePort(Protocol):\n    def admit_node(self, node: "TaskNode") -> "TaskNode": ...\n\n    async def get_result_record(\n        self,\n        graph_id: str,\n        node_id: str,\n        *,\n        tenant_id: str,\n    ) -> "TaskResultRecord | None": ...\n\n    async def read_result_record(self, record: "TaskResultRecord") -> JsonValue: ...\n\n\n'''
+          value = once(
+              value,
+              marker,
+              marker + '''class _RuntimeMetricControl(Protocol):\n    def status(self) -> RuntimeMetricStatus: ...\n\n    async def flush(\n        self,\n        *,\n        timeout_seconds: float = 5.0,\n    ) -> RuntimeMetricFlushResult: ...\n\n\n''',
+              label='runtime metric protocol',
+          )
+          value = once(
+              value,
+              '        task_node_runtime: "_TaskNodeRuntimePort | None" = None,\n    ) -> None:',
+              '        task_node_runtime: "_TaskNodeRuntimePort | None" = None,\n        metric_control: "_RuntimeMetricControl | None" = None,\n    ) -> None:',
+              label='runtime metric control argument',
+          )
+          value = once(
+              value,
+              '        self._task_node_runtime = task_node_runtime\n        self._closed = False\n',
+              '        self._task_node_runtime = task_node_runtime\n        self._metric_control = metric_control\n        self._closed = False\n',
+              label='runtime metric control assignment',
+          )
+          value = once(
+              value,
+              '''    @property\n    def context(self) -> RunContextData:\n        return self._runtime_context.values\n\n    def agent(self, agent_id: str = "default") -> "Agent[AppT]":\n''',
+              '''    @property\n    def context(self) -> RunContextData:\n        return self._runtime_context.values\n\n    def metric_status(self) -> RuntimeMetricStatus:\n        control = self._metric_control\n        return _disabled_metric_status() if control is None else control.status()\n\n    async def flush_metrics(\n        self,\n        *,\n        timeout_seconds: float = 5.0,\n    ) -> RuntimeMetricFlushResult:\n        self._ensure_open()\n        control = self._metric_control\n        if control is None:\n            return RuntimeMetricFlushResult(True, _disabled_metric_status())\n        return await control.flush(timeout_seconds=timeout_seconds)\n\n    def agent(self, agent_id: str = "default") -> "Agent[AppT]":\n''',
+              label='runtime metric public api',
+          )
+          value = once(
+              value,
+              '            task_node_runtime=components.task_node_runtime,\n        )\n',
+              '            task_node_runtime=components.task_node_runtime,\n            metric_control=components.metric_control,\n        )\n',
+              label='runtime metric control wiring',
+          )
+          write(path, value)
+
+          path = 'linktools-ai/src/linktools/ai/runtime/_factory.py'
+          value = read(path)
+          value = once(
+              value,
+              '    task_node_runtime: RuntimeTaskNodeRunner[object]\n\n\nasync def compose_runtime_components(',
+              '    task_node_runtime: RuntimeTaskNodeRunner[object]\n    metric_control: _RuntimeMetricBuffer | None\n\n\nasync def compose_runtime_components(',
+              label='factory metric component field',
+          )
+          value = once(
+              value,
+              '            metric_source_namespace=metric_source_namespace,\n        )\n        task_service = DefaultTaskService(',
+              '            metric_source_namespace=metric_source_namespace,\n            metric_admissions=state.task.admissions,\n        )\n        task_service = DefaultTaskService(',
+              label='factory task admission metrics',
+          )
+          value = once(
+              value,
+              '        task_node_runtime=cast("RuntimeTaskNodeRunner[object]", task_runner),\n    )\n',
+              '        task_node_runtime=cast("RuntimeTaskNodeRunner[object]", task_runner),\n        metric_control=metric_buffer,\n    )\n',
+              label='factory metric component return',
+          )
+          write(path, value)
+
+          path = 'linktools-ai/src/linktools/ai/runtime/__init__.py'
+          value = read(path)
+          value = once(
+              value,
+              'from ._local import LocalExecutionBackend\n',
+              'from ._local import LocalExecutionBackend\nfrom ._metrics import RuntimeMetricFlushResult, RuntimeMetricStatus\n',
+              label='runtime exports import',
+          )
+          value = once(
+              value,
+              '    "RuntimeHistory",\n',
+              '    "RuntimeHistory",\n    "RuntimeMetricFlushResult",\n    "RuntimeMetricStatus",\n',
+              label='runtime exports names',
+          )
+          write(path, value)
+
+          # Task observations recover portable correlation from the durable admission in the background projector.
+          path = 'linktools-ai/src/linktools/ai/task/_metrics.py'
+          value = read(path)
+          value = once(
+              value,
+              'from ..core import Page, TaskStatus, canonical_sha256\n',
+              'from ..core import Page, RunContextData, TaskStatus, canonical_sha256\n',
+              label='task metrics context import',
+          )
+          marker = '''class _TaskMetricRepository(Protocol):\n    async def list_events(\n        self,\n        graph_id: str,\n        *,\n        tenant_id: str,\n        after_sequence: int,\n        limit: int,\n    ) -> Page[TaskEvent]: ...\n\n    async def latest_event(\n        self,\n        graph_id: str,\n        *,\n        tenant_id: str,\n    ) -> TaskEvent | None: ...\n\n\n'''
+          value = once(
+              value,
+              marker,
+              marker + '''class _TaskMetricAdmission(Protocol):\n    context: RunContextData\n\n\nclass _TaskMetricAdmissionRepository(Protocol):\n    async def get(\n        self,\n        graph_id: str,\n        *,\n        tenant_id: str,\n    ) -> _TaskMetricAdmission | None: ...\n\n\n''',
+              label='task metric admission protocol',
+          )
+          value = once(
+              value,
+              '''        recorder: MetricRecorder,\n        *,\n        source_namespace: str,\n    ) -> None:\n        self._repository = repository\n        self._recorder = recorder\n''',
+              '''        recorder: MetricRecorder,\n        *,\n        source_namespace: str,\n        admissions: _TaskMetricAdmissionRepository | None = None,\n    ) -> None:\n        self._repository = repository\n        self._recorder = recorder\n        self._admissions = admissions\n''',
+              label='task projector admissions',
+          )
+          value = once(
+              value,
+              '        self._record_graph(admission, terminal, tenant_id=tenant_id)\n\n        attempts:',
+              '''        context: RunContextData = {}\n        if self._admissions is not None:\n            admitted = await self._admissions.get(graph_id, tenant_id=tenant_id)\n            if admitted is None:\n                raise ValueError("task metric admission is missing")\n            context = admitted.context\n        self._record_graph(\n            admission,\n            terminal,\n            tenant_id=tenant_id,\n            context=context,\n        )\n\n        attempts:''',
+              label='task projector durable context load',
+          )
+          value = once(
+              value,
+              '''                attempt,\n                tenant_id=tenant_id,\n            )\n''',
+              '''                attempt,\n                tenant_id=tenant_id,\n                context=context,\n            )\n''',
+              label='task attempt context pass',
+          )
+          value = once(
+              value,
+              '''        terminal: TaskEvent,\n        *,\n        tenant_id: str,\n    ) -> None:\n''',
+              '''        terminal: TaskEvent,\n        *,\n        tenant_id: str,\n        context: RunContextData,\n    ) -> None:\n''',
+              label='task graph context signature',
+          )
+          value = once(
+              value,
+              '                correlation={"graph_id": terminal.graph_id},\n',
+              '                correlation=_task_correlation(context, graph_id=terminal.graph_id),\n',
+              label='task graph correlation',
+          )
+          value = once(
+              value,
+              '''        attempt: _Attempt,\n        *,\n        tenant_id: str,\n    ) -> None:\n''',
+              '''        attempt: _Attempt,\n        *,\n        tenant_id: str,\n        context: RunContextData,\n    ) -> None:\n''',
+              label='task attempt context signature',
+          )
+          value = once(
+              value,
+              '''        correlation: dict[str, str | int] = {\n            "graph_id": graph_id,\n            "node_id": node_id,\n            "fence": fence,\n        }\n        if attempt.execution_id is not None:\n            correlation["execution_id"] = attempt.execution_id\n''',
+              '''        correlation = _task_correlation(\n            context,\n            graph_id=graph_id,\n            node_id=node_id,\n            fence=fence,\n            execution_id=attempt.execution_id,\n        )\n''',
+              label='task attempt correlation',
+          )
+          value = once(
+              value,
+              '\n\ndef _latency_ns(start: TaskEvent, terminal: TaskEvent) -> int | None:\n',
+              '''\n\ndef _task_correlation(\n    context: RunContextData,\n    **system: str | int | None,\n) -> dict[str, str | int]:\n    correlation: dict[str, str | int] = dict(context)\n    for key, value in system.items():\n        if value is not None:\n            correlation[f"linktools.{key}"] = value\n    return correlation\n\n\ndef _latency_ns(start: TaskEvent, terminal: TaskEvent) -> int | None:\n''',
+              label='task correlation helper',
+          )
+          write(path, value)
+
+          path = 'linktools-ai/src/linktools/ai/task/_service_impl.py'
+          value = read(path)
+          value = once(
+              value,
+              '''                persistence.tasks,\n                metric_recorder,\n                source_namespace=metric_source_namespace,\n            )\n''',
+              '''                persistence.tasks,\n                metric_recorder,\n                source_namespace=metric_source_namespace,\n                admissions=persistence.admissions,\n            )\n''',
+              label='task service projector admission',
+          )
+          write(path, value)
+
+          path = 'linktools-ai/src/linktools/ai/task/_local.py'
+          value = read(path)
+          value = once(
+              value,
+              'from ._metrics import _TaskMetricProjector\n',
+              'from ._metrics import _TaskMetricAdmissionRepository, _TaskMetricProjector\n',
+              label='task launcher metric admission import',
+          )
+          value = once(
+              value,
+              '''        metric_recorder: MetricRecorder | None = None,\n        metric_source_namespace: str | None = None,\n    ) -> None:\n''',
+              '''        metric_recorder: MetricRecorder | None = None,\n        metric_source_namespace: str | None = None,\n        metric_admissions: "_TaskMetricAdmissionRepository | None" = None,\n    ) -> None:\n''',
+              label='task launcher admission arg',
+          )
+          value = once(
+              value,
+              '''                repository,\n                metric_recorder,\n                source_namespace=metric_source_namespace,\n            )\n''',
+              '''                repository,\n                metric_recorder,\n                source_namespace=metric_source_namespace,\n                admissions=metric_admissions,\n            )\n''',
+              label='task launcher projector admission',
+          )
+          write(path, value)
+
+          # Stable Model/Tool observation identities and durable trace linkage.
+          path = 'linktools-ai/src/linktools/ai/runtime/_metrics.py'
+          value = read(path)
+          value = once(
+              value,
+              '\n\ndef _measurement(name: str, value: int | float) -> MetricMeasurement:\n',
+              '''\n\ndef _model_observation_id(\n    source_namespace: str,\n    tenant_id: str,\n    execution_id: str,\n    step_run_id: str,\n    step_index: int,\n    attempt_index: int,\n) -> str:\n    return _stable_observation_id(\n        "linktools.model.request.v1",\n        source_namespace,\n        tenant_id,\n        execution_id,\n        step_run_id,\n        str(step_index),\n        str(attempt_index),\n    )\n\n\ndef _tool_observation_id(\n    source_namespace: str,\n    tenant_id: str,\n    execution_id: str,\n    step_run_id: str,\n    tool_call_id: str,\n) -> str:\n    return _stable_observation_id(\n        "linktools.tool.execution.v1",\n        source_namespace,\n        tenant_id,\n        execution_id,\n        step_run_id,\n        tool_call_id,\n    )\n\n\ndef _measurement(name: str, value: int | float) -> MetricMeasurement:\n''',
+              label='runtime deterministic observation ids',
+          )
+          write(path, value)
+
+          path = 'linktools-ai/src/linktools/ai/runtime/_metric_capability.py'
+          value = read(path)
+          value = once(
+              value,
+              '    _metric_correlation,\n)',
+              '    _metric_correlation,\n    _model_observation_id,\n)',
+              label='model observation id import',
+          )
+          value = once(
+              value,
+              '        self._route_id = route_id\n\n    async def before_run(',
+              '        self._route_id = route_id\n        self._attempts: dict[int, int] = {}\n\n    async def before_run(',
+              label='model attempt counters',
+          )
+          value = once(
+              value,
+              '''        attempt_id = uuid.uuid4().hex\n        started = monotonic_ns()\n        run_context = None if ctx is None else ctx.deps\n''',
+              '''        run_context = None if ctx is None else ctx.deps\n        if ctx is None:\n            attempt_id = uuid.uuid4().hex\n        else:\n            attempt_index = self._attempts.get(ctx.run_step, 0) + 1\n            self._attempts[ctx.run_step] = attempt_index\n            attempt_id = _model_observation_id(\n                self._source_namespace,\n                self._tenant_id,\n                self._execution_id,\n                self._step_run_id,\n                ctx.run_step,\n                attempt_index,\n            )\n        started = monotonic_ns()\n''',
+              label='model deterministic attempt id',
+          )
+          write(path, value)
+
+          path = 'linktools-ai/src/linktools/ai/runtime/_tool_metrics.py'
+          value = read(path)
+          value = once(value, 'import uuid\n', '', label='tool uuid import')
+          value = once(
+              value,
+              'from ..observe import MetricMeasurement, MetricRecorder, Observation\n',
+              'from ..observe import MetricMeasurement, MetricRecorder, Observation\nfrom ._metrics import _tool_observation_id\n',
+              label='tool observation id import',
+          )
+          value = once(
+              value,
+              '        attempt_id = uuid.uuid4().hex\n        started = monotonic_ns()\n',
+              '''        attempt_id = _tool_observation_id(\n            self.source_namespace,\n            self.tenant_id,\n            self.execution_id,\n            self.step_run_id,\n            call.tool_call_id,\n        )\n        started = monotonic_ns()\n''',
+              label='tool deterministic observation id',
+          )
+          write(path, value)
+
+          path = 'linktools-ai/src/linktools/ai/runtime/_capabilities.py'
+          value = read(path)
+          value = once(
+              value,
+              'from pathlib import Path\n',
+              'from pathlib import Path\nfrom time import monotonic_ns\n',
+              label='step timing import',
+          )
+          value = once(
+              value,
+              'from ._tool_metrics import _ToolMetricContext\n',
+              'from ._metrics import _model_observation_id, _tool_observation_id\nfrom ._tool_metrics import _ToolMetricContext\n',
+              label='step observation id imports',
+          )
+          value = once(
+              value,
+              '_MODEL_USAGE_CACHE_WRITE_METADATA_KEY = "linktools.ai.model_usage.cache_write_tokens"\n',
+              '_MODEL_USAGE_CACHE_WRITE_METADATA_KEY = "linktools.ai.model_usage.cache_write_tokens"\n_OBSERVATION_ID_METADATA_KEY = "linktools.ai.observation_id"\n_DURATION_NS_METADATA_KEY = "linktools.ai.duration_ns"\n',
+              label='step metric metadata keys',
+          )
+          value = once(
+              value,
+              '    suppress_cancel_metric: bool = False\n    heartbeat_task: "asyncio.Task[None] | None" = None\n',
+              '    suppress_cancel_metric: bool = False\n    metric_started_ns: int | None = None\n    heartbeat_task: "asyncio.Task[None] | None" = None\n',
+              label='tool state metric timing',
+          )
+          value = once(
+              value,
+              '''    _last_observed_step_index: "int | None" = field(\n        default=None,\n        init=False,\n        repr=False,\n        compare=False,\n    )\n\n    def __post_init__(self) -> None:\n''',
+              '''    _last_observed_step_index: "int | None" = field(\n        default=None,\n        init=False,\n        repr=False,\n        compare=False,\n    )\n    _model_attempts: dict[int, int] = field(\n        default_factory=dict,\n        init=False,\n        repr=False,\n        compare=False,\n    )\n    _model_started: dict[int, tuple[int, int]] = field(\n        default_factory=dict,\n        init=False,\n        repr=False,\n        compare=False,\n    )\n\n    def __post_init__(self) -> None:\n''',
+              label='model trace attempt state',
+          )
+          old_after_model = '''    async def after_model_request(\n        self,\n        ctx: "RunContext[None]",\n        *,\n        request_context: ModelRequestContext,\n        response: ModelResponse,\n    ) -> ModelResponse:\n        del request_context\n        run_id = self.run_id or ctx.run_id\n        if not run_id:\n            raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)\n        metadata = dict(self.metadata)\n        metadata.update(_model_usage_metadata(response))\n        await self.store.append_event(\n            StepEvent(\n                run_id=run_id,\n                kind="model_request_completed",\n                step_index=ctx.run_step,\n                conversation_id=ctx.conversation_id,\n                parent_run_id=self.parent_run_id,\n                agent_name=self.agent_name,\n                metadata=metadata,\n            )\n        )\n        return response\n\n'''
+          new_after_model = '''    async def _record_runtime_event(\n        self,\n        ctx: "RunContext[None]",\n        *,\n        kind: str,\n        metadata: Mapping[str, str],\n        error: str | None = None,\n    ) -> None:\n        event_index = self._event_sequence\n        self._event_sequence += 1\n        await self._append_event(\n            run_id=self._effective_run_id(ctx),\n            kind=kind,\n            step_index=ctx.run_step,\n            conversation_id=ctx.conversation_id,\n            parent_run_id=self.parent_run_id,\n            agent_name=self.agent_name,\n            error=error,\n            metadata=dict(metadata),\n            event_index=event_index,\n        )\n\n    def _model_metric_metadata(\n        self,\n        ctx: "RunContext[None]",\n        *,\n        terminal: bool,\n    ) -> dict[str, str]:\n        metadata = dict(self.metadata)\n        metrics = self.tool_metrics\n        if metrics is None:\n            return metadata\n        if terminal:\n            active = self._model_started.pop(ctx.run_step, None)\n            if active is None:\n                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)\n            attempt_index, started = active\n            metadata[_DURATION_NS_METADATA_KEY] = str(monotonic_ns() - started)\n        else:\n            attempt_index = self._model_attempts.get(ctx.run_step, 0) + 1\n            self._model_attempts[ctx.run_step] = attempt_index\n            if ctx.run_step in self._model_started:\n                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)\n            self._model_started[ctx.run_step] = (attempt_index, monotonic_ns())\n        metadata[_OBSERVATION_ID_METADATA_KEY] = _model_observation_id(\n            metrics.source_namespace,\n            metrics.tenant_id,\n            metrics.execution_id,\n            metrics.step_run_id,\n            ctx.run_step,\n            attempt_index,\n        )\n        return metadata\n\n    async def before_model_request(\n        self,\n        ctx: "RunContext[None]",\n        request_context: ModelRequestContext,\n    ) -> ModelRequestContext:\n        await self._record_runtime_event(\n            ctx,\n            kind="model_request_started",\n            metadata=self._model_metric_metadata(ctx, terminal=False),\n        )\n        return request_context\n\n    async def after_model_request(\n        self,\n        ctx: "RunContext[None]",\n        *,\n        request_context: ModelRequestContext,\n        response: ModelResponse,\n    ) -> ModelResponse:\n        del request_context\n        metadata = self._model_metric_metadata(ctx, terminal=True)\n        metadata.update(_model_usage_metadata(response))\n        await self._record_runtime_event(\n            ctx,\n            kind="model_request_completed",\n            metadata=metadata,\n        )\n        return response\n\n    async def on_model_request_error(\n        self,\n        ctx: "RunContext[None]",\n        *,\n        request_context: ModelRequestContext,\n        error: Exception,\n    ) -> ModelResponse:\n        del request_context\n        await self._record_runtime_event(\n            ctx,\n            kind="model_request_failed",\n            metadata=self._model_metric_metadata(ctx, terminal=True),\n            error=repr(error),\n        )\n        raise error\n\n'''
+          value = once(value, old_after_model, new_after_model, label='model trace hooks')
+
+          value = once(
+              value,
+              '''        try:\n            await super().before_tool_execute(ctx, call=call, tool_def=tool_def, args=args)\n        except BaseException:\n''',
+              '''        try:\n            await super().before_tool_execute(ctx, call=call, tool_def=tool_def, args=args)\n        except BaseException:\n''',
+              label='tool before anchor',
+          )
+          # The start event remains the Harness authority. Timing begins only when the real handler is entered.
+          value = once(
+              value,
+              '''        async def tracked_handler(validated_args: dict[str, Any]) -> Any:\n            state.handler_entered = True\n            if self.tool_metrics is None:\n''',
+              '''        async def tracked_handler(validated_args: dict[str, Any]) -> Any:\n            state.handler_entered = True\n            if self.tool_metrics is not None:\n                state.metric_started_ns = monotonic_ns()\n            if self.tool_metrics is None:\n''',
+              label='tool actual handler timing',
+          )
+          helper_anchor = '''    async def after_tool_execute(\n        self,\n        ctx: "RunContext[None]",\n'''
+          helper = '''    def _tool_metric_metadata(\n        self,\n        call: ToolCallPart,\n        state: _ToolCallState,\n    ) -> dict[str, str]:\n        metadata = dict(self.metadata)\n        metrics = self.tool_metrics\n        if metrics is None or not state.handler_entered or state.metric_started_ns is None:\n            return metadata\n        metadata[_OBSERVATION_ID_METADATA_KEY] = _tool_observation_id(\n            metrics.source_namespace,\n            metrics.tenant_id,\n            metrics.execution_id,\n            metrics.step_run_id,\n            call.tool_call_id,\n        )\n        metadata[_DURATION_NS_METADATA_KEY] = str(\n            monotonic_ns() - state.metric_started_ns\n        )\n        return metadata\n\n    async def _with_tool_metric_metadata(\n        self,\n        call: ToolCallPart,\n        state: _ToolCallState,\n        operation: Callable[[], Any],\n    ) -> Any:\n        previous = self.metadata\n        self.metadata = self._tool_metric_metadata(call, state)\n        try:\n            return await operation()\n        finally:\n            self.metadata = previous\n\n'''
+          value = once(value, helper_anchor, helper + helper_anchor, label='tool trace metadata helper')
+
+          old = '''        try:\n            return await super().after_tool_execute(\n                ctx,\n                call=call,\n                tool_def=tool_def,\n                args=args,\n                result=result,\n            )\n        finally:\n'''
+          new = '''        async def persist() -> Any:\n            return await super(_RuntimeStepPersistence, self).after_tool_execute(\n                ctx,\n                call=call,\n                tool_def=tool_def,\n                args=args,\n                result=result,\n            )\n\n        try:\n            return await self._with_tool_metric_metadata(call, state, persist)\n        finally:\n'''
+          value = once(value, old, new, label='tool completed trace metadata')
+
+          old = '''        try:\n            result = await super().on_tool_execute_error(\n                ctx,\n                call=call,\n                tool_def=tool_def,\n                args=args,\n                error=error,\n            )\n        except BaseException as raised:\n'''
+          new = '''        async def persist() -> Any:\n            return await super(_RuntimeStepPersistence, self).on_tool_execute_error(\n                ctx,\n                call=call,\n                tool_def=tool_def,\n                args=args,\n                error=error,\n            )\n\n        try:\n            result = await self._with_tool_metric_metadata(call, state, persist)\n        except BaseException as raised:\n'''
+          value = once(value, old, new, label='tool failed trace metadata')
+
+          old = '''        try:\n            value = await super().after_tool_execute(\n                ctx,\n                call=call,\n                tool_def=tool_def,\n                args=args,\n                result=result,\n            )\n        except BaseException:\n'''
+          new = '''        async def persist() -> Any:\n            return await super(_RuntimeStepPersistence, self).after_tool_execute(\n                ctx,\n                call=call,\n                tool_def=tool_def,\n                args=args,\n                result=result,\n            )\n\n        try:\n            value = await self._with_tool_metric_metadata(call, state, persist)\n        except BaseException:\n'''
+          value = once(value, old, new, label='tool skip trace metadata')
+          write(path, value)
+
+          path = 'linktools-ai/src/linktools/ai/runtime/_history.py'
+          value = read(path)
+          value = once(
+              value,
+              '_MODEL_USAGE_CACHE_WRITE_METADATA_KEY = "linktools.ai.model_usage.cache_write_tokens"\n',
+              '_MODEL_USAGE_CACHE_WRITE_METADATA_KEY = "linktools.ai.model_usage.cache_write_tokens"\n_OBSERVATION_ID_METADATA_KEY = "linktools.ai.observation_id"\n_DURATION_NS_METADATA_KEY = "linktools.ai.duration_ns"\n',
+              label='history metric metadata keys',
+          )
+          value = once(
+              value,
+              '''    payload = {"kind": kind, "status": status, "step_index": event.step_index, "segment_sequence": segment_sequence, "scope": "root" if depth == 0 else "subagent", "depth": depth}\n    if kind == "MODEL_RESPONSE":\n''',
+              '''    payload = {\n        "kind": kind,\n        "status": status,\n        "step_index": event.step_index,\n        "segment_sequence": segment_sequence,\n        "scope": "root" if depth == 0 else "subagent",\n        "depth": depth,\n        "occurred_at": _event_timestamp(event).isoformat(),\n    }\n    observation_id = event.metadata.get(_OBSERVATION_ID_METADATA_KEY)\n    if observation_id is not None:\n        if not observation_id:\n            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)\n        payload["observation_id"] = observation_id\n    duration_ns = event.metadata.get(_DURATION_NS_METADATA_KEY)\n    if duration_ns is not None:\n        if not duration_ns.isdigit():\n            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)\n        payload["duration_ns"] = int(duration_ns)\n    if kind == "MODEL_RESPONSE":\n''',
+              label='trace observation linkage',
+          )
+          write(path, value)
+
+          # Tests use the unified RuntimeContext constructor contract.
+          path = 'tests/ai/test_final_fix_conformance.py'
+          value = read(path)
+          value = once(
+              value,
+              'from linktools.ai.runtime import CloseSessionRequest, DefaultSessionService, Runtime\n',
+              'from linktools.ai.runtime import CloseSessionRequest, DefaultSessionService, Runtime, RuntimeContext\n',
+              label='test RuntimeContext import',
+          )
+          value = once(
+              value,
+              '        workspace=object(),\n        app=None,\n        close_callback=close_callback,\n',
+              '        workspace=object(),\n        context=RuntimeContext(None),\n        close_callback=close_callback,\n',
+              label='test RuntimeContext constructor',
+          )
+          write(path, value)
+          PY
+
+          python -m compileall -q linktools-ai/src/linktools/ai tests/ai
+          git diff --check
+          rm .github/workflows/ai-metrics-closure-once.yml
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -A
+          git commit -m 'feat(ai): close runtime observability correlation gaps'
+          git push origin HEAD:feat/ai-metrics-observability
