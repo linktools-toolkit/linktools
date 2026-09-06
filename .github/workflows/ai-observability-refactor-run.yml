@@ -32,158 +32,48 @@ jobs:
           python manage.py install --editable --quiet
       - name: Apply final contract cleanup
         run: |
-          python - <<'PY'
-          from __future__ import annotations
-
-          import ast
-          import re
+          python - <<'EXTRACT'
+          import subprocess
           from pathlib import Path
 
-
-          def converge(path: str, old: str, new: str) -> None:
-              target = Path(path)
-              text = target.read_text()
-              count = text.count(old)
-              if count:
-                  assert count == 1, (path, count, old)
-                  target.write_text(text.replace(old, new, 1))
-              else:
-                  assert new in text, (path, old, new)
-
-
-          converge(
-              "linktools-ai/src/linktools/ai/runtime/_local.py",
-              "            or request.thinking != execution.thinking\n"
-              "            or request.correlation != execution.correlation\n"
-              "            or execution.binding != binding.snapshot\n",
-              "            or request.thinking != execution.thinking\n"
-              "            or execution.binding != binding.snapshot\n",
+          source = subprocess.check_output(
+              [
+                  "git",
+                  "show",
+                  "d87b6b95fa9bbf21f455abe4368a127cb614fe8e:.github/workflows/ai-observability-refactor-run.yml",
+              ],
+              text=True,
           )
-          converge(
-              "linktools-ai/src/linktools/ai/runtime/_execution.py",
-              "            if request.correlation and dict(request.correlation) != dict(parent.correlation):\n"
-              "                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)\n"
-              "            request = replace(request, correlation=parent.correlation)\n",
-              "            request = replace(request, correlation=parent.correlation)\n",
+          marker = "          python - <<'PY'\n"
+          start = source.index(marker) + len(marker)
+          end = source.index("          PY\n", start)
+          body = source[start:end]
+          script = "".join(
+              line[10:] if line.startswith("          ") else line
+              for line in body.splitlines(keepends=True)
           )
-          converge(
-              "tests/ai/test_execution_context_durability.py",
-              '''@pytest.mark.asyncio\nasync def test_local_start_rejects_correlation_drift_from_durable_execution() -> None:\n    execution = _execution(correlation={"trace_id": "durable", "attempt": 1})\n    backend = _backend(execution)\n    request = ExecutionRequest(\n        user_prompt="hello",\n        user_prompt_codec="text",\n        principal=Principal("user", "tenant"),\n        idempotency_key="execution-correlation-start-0001",\n        memory_scope=None,\n        mode="run",\n        planning=False,\n        thinking=False,\n        correlation={"trace_id": "request", "attempt": 1},\n    )\n\n    with pytest.raises(AIError) as raised:\n        await backend._validate_start(request, execution)\n\n    assert raised.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR\n''',
-              '''@pytest.mark.asyncio\nasync def test_local_start_accepts_correlation_drift_from_durable_execution() -> None:\n    execution = _execution(correlation={"trace_id": "durable", "attempt": 1})\n    backend = _backend(execution)\n    request = ExecutionRequest(\n        user_prompt="hello",\n        user_prompt_codec="text",\n        principal=Principal("user", "tenant"),\n        idempotency_key="execution-correlation-start-0001",\n        memory_scope=None,\n        mode="run",\n        planning=False,\n        thinking=False,\n        correlation={"trace_id": "request", "attempt": 1},\n    )\n\n    await backend._validate_start(request, execution)\n    assert dict(execution.correlation) == {"attempt": 1, "trace_id": "durable"}\n''',
-          )
-          converge(
-              "tests/ai/test_skill_subagent_final_refactor.py",
-              '        thinking="high",\n        context={},\n',
-              '        thinking="high",\n        correlation={},\n',
-          )
+          Path("/tmp/apply_observability_cleanup.py").write_text(script)
+          EXTRACT
+          python /tmp/apply_observability_cleanup.py
+          python - <<'PY'
+          from pathlib import Path
 
-          core = Path("linktools-ai/src/linktools/ai/core")
-          old_module = core / "_context.py"
-          new_module = core / "_correlation.py"
-          if old_module.exists():
-              assert not new_module.exists()
-              old_module.rename(new_module)
-          else:
-              assert new_module.exists()
-          converge(
-              "linktools-ai/src/linktools/ai/core/__init__.py",
-              "from ._context import (",
-              "from ._correlation import (",
-          )
+          path = Path("tests/ai/test_task_sqlite_cas_convergence.py")
+          text = path.read_text()
+          import_old = "    TaskNode,\n    TaskNodeView,\n"
+          import_new = "    TaskNode,\n    TaskNodeInvocation,\n    TaskNodeView,\n"
+          assert text.count(import_old) == 1
+          text = text.replace(import_old, import_new, 1)
 
-          converge(
-              "linktools-ai/src/linktools/ai/runtime/_local.py",
-              '''    def _record_committed_terminal(\n        self,\n        committed: ExecutionTerminalCommitResult,\n        *,\n        session_id: str | None,\n    ) -> None:\n        _record_execution_terminal(\n            self._metric_recorder,\n            source_namespace=self._namespace,\n            result=committed,\n            session_id=session_id,\n        )\n        _release_metric_execution_context(\n            self._metric_recorder,\n            committed.execution.execution_id,\n        )\n''',
-              '''    def _record_committed_terminal(\n        self,\n        committed: ExecutionTerminalCommitResult,\n        *,\n        session_id: str | None,\n    ) -> None:\n        recorder = getattr(self, "_metric_recorder", None)\n        if recorder is None:\n            return\n        _record_execution_terminal(\n            recorder,\n            source_namespace=self._namespace,\n            result=committed,\n            session_id=session_id,\n        )\n        _release_metric_execution_context(\n            recorder,\n            committed.execution.execution_id,\n        )\n''',
-          )
-          converge(
-              "tests/ai/test_runtime_metrics.py",
-              "    assert graph_terminals[0].measurements[0].value == 4_000_000_000",
-              "    assert graph_terminals[0].measurements == ()",
-          )
-          converge(
-              "tests/ai/test_workspace_runtime_regressions.py",
-              "from linktools.ai.runtime import Runtime, RuntimeDomain, RuntimeState\n",
-              "from linktools.ai.runtime import Runtime, RuntimeContext, RuntimeDomain, RuntimeState\n",
-          )
-          converge(
-              "tests/ai/test_workspace_runtime_regressions.py",
-              '''    async with Runtime.open(\n        workspace,\n        tenant_id="tenant-a",\n        models=models,\n    ) as runtime:\n''',
-              '''    async with Runtime.open(\n        workspace,\n        context=RuntimeContext(None, tenant_id="tenant-a"),\n        models=models,\n    ) as runtime:\n''',
-          )
+          run_old = '''async def _digest_run(\n    self: RuntimeTaskNodeRunner,\n    node: TaskNode,\n    *,\n    graph_id: str,\n    principal: Principal,\n    context: Mapping[str, str | int],\n    dependency_results: Mapping[str, TaskDependencyResult],\n    control: TaskNodeRunControl,\n) -> TaskNodeRunResult:\n    del self, principal, context, dependency_results, control\n    await asyncio.sleep(0)\n    payload = StoredPayload.inline_json({"graph_id": graph_id, "node_id": node.node_id})\n    return TaskNodeRunResult(payload.digest, result_payload=payload)\n'''
+          run_new = '''async def _digest_run(\n    self: RuntimeTaskNodeRunner,\n    invocation: TaskNodeInvocation,\n    *,\n    control: TaskNodeRunControl,\n) -> TaskNodeRunResult:\n    del self, control\n    await asyncio.sleep(0)\n    payload = StoredPayload.inline_json(\n        {"graph_id": invocation.graph_id, "node_id": invocation.node.node_id}\n    )\n    return TaskNodeRunResult(payload.digest, result_payload=payload)\n'''
+          assert text.count(run_old) == 1
+          text = text.replace(run_old, run_new, 1)
 
-          changed_runner_files: list[Path] = []
-          required = {"graph_id", "principal", "context", "dependency_results"}
-          for path in sorted(Path("tests/ai").glob("*.py")):
-              original = path.read_text()
-              tree = ast.parse(original)
-              candidates: list[ast.AsyncFunctionDef] = []
-              for node in ast.walk(tree):
-                  if not isinstance(node, ast.AsyncFunctionDef) or node.name not in {"run", "cancel"}:
-                      continue
-                  positional = {arg.arg for arg in node.args.args}
-                  kwonly = {arg.arg for arg in node.args.kwonlyargs}
-                  if "node" in positional and required.issubset(kwonly):
-                      candidates.append(node)
-              if not candidates:
-                  continue
-
-              lines = original.splitlines(keepends=True)
-              for fn in sorted(candidates, key=lambda item: item.lineno, reverse=True):
-                  assert fn.body and fn.end_lineno is not None
-                  self_arg = ast.get_source_segment(original, fn.args.args[0]) or "self"
-                  returns = ast.get_source_segment(original, fn.returns) if fn.returns else "None"
-                  indent = " " * fn.col_offset
-                  inner = indent + "    "
-                  used = {name.id for stmt in fn.body for name in ast.walk(stmt) if isinstance(name, ast.Name)}
-                  if "context" in used:
-                      used.add("correlation")
-                      used.discard("context")
-                  body_start = fn.body[0].lineno - 1
-                  body_end = fn.end_lineno
-                  for index in range(body_start, body_end):
-                      lines[index] = re.sub(r"\bcontext\b", "correlation", lines[index])
-
-                  bindings: list[str] = []
-                  for name, expression in (
-                      ("node", "invocation.node"),
-                      ("graph_id", "invocation.graph_id"),
-                      ("principal", "invocation.principal"),
-                      ("correlation", "invocation.correlation"),
-                      ("dependency_results", "invocation.dependency_results"),
-                  ):
-                      if name in used:
-                          bindings.append(f"{inner}{name} = {expression}\n")
-
-                  if fn.name == "run":
-                      signature = [
-                          f"{indent}async def run(\n",
-                          f"{inner}{self_arg},\n",
-                          f"{inner}invocation: TaskNodeInvocation,\n",
-                          f"{inner}*,\n",
-                          f"{inner}control: TaskNodeRunControl,\n",
-                          f"{indent}) -> {returns}:\n",
-                      ]
-                  else:
-                      signature = [
-                          f"{indent}async def cancel(\n",
-                          f"{inner}{self_arg},\n",
-                          f"{inner}invocation: TaskNodeInvocation,\n",
-                          f"{indent}) -> {returns}:\n",
-                      ]
-                  lines[fn.lineno - 1 : body_start] = signature + bindings
-
-              migrated = "".join(lines)
-              if "TaskNodeInvocation" not in original:
-                  marker = "    TaskNode,\n"
-                  assert marker in migrated, path
-                  migrated = migrated.replace(marker, marker + "    TaskNodeInvocation,\n", 1)
-              path.write_text(migrated)
-              changed_runner_files.append(path)
-
-          print(f"migrated {len(changed_runner_files)} TaskNodeRunner test files")
-          for path in changed_runner_files:
-              print(path)
+          cancel_old = '''async def _noop_cancel(\n    self: RuntimeTaskNodeRunner,\n    node: TaskNode,\n    *,\n    graph_id: str,\n    principal: Principal,\n    context: Mapping[str, str | int],\n    dependency_results: Mapping[str, TaskDependencyResult],\n) -> None:\n    del self, node, graph_id, principal, context, dependency_results\n'''
+          cancel_new = '''async def _noop_cancel(\n    self: RuntimeTaskNodeRunner,\n    invocation: TaskNodeInvocation,\n) -> None:\n    del self, invocation\n'''
+          assert text.count(cancel_old) == 1
+          path.write_text(text.replace(cancel_old, cancel_new, 1))
           PY
       - name: Validate focused regressions
         run: |
