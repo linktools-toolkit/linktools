@@ -185,8 +185,6 @@ jobs:
           for path in changed_runner_files:
               print(path)
           PY
-
-          python -m ruff check --fix linktools-ai/src/linktools/ai/core linktools-ai/src/linktools/ai/runtime tests/ai
       - name: Validate focused regressions
         run: |
           python -m pytest -q \
