@@ -34,7 +34,7 @@ from pydantic_ai.usage import UsageLimitExceeded
 from ..capability import RunContext
 from ..errors import AIError, ErrorCode
 from ..observe import MetricMeasurement, MetricRecorder, Observation
-from ._metrics import _metric_correlation
+from ._metrics import _bind_metric_execution_context, _metric_correlation
 
 
 class _RuntimeModelMetricCapability(AbstractCapability[RunContext[object]]):
@@ -64,6 +64,16 @@ class _RuntimeModelMetricCapability(AbstractCapability[RunContext[object]]):
         self._provider = provider
         self._model_identity = model_identity
         self._route_id = route_id
+
+    async def before_run(
+        self,
+        ctx: PydanticRunContext[RunContext[object]],
+    ) -> None:
+        _bind_metric_execution_context(
+            self._recorder,
+            self._execution_id,
+            ctx.deps.context,
+        )
 
     async def wrap_model_request(
         self,
