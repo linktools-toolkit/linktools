@@ -63,9 +63,18 @@ def overlay_run_context(
     return normalize_run_context({**left, **right})
 
 
+def merge_run_context(
+    base: "Mapping[str, object] | None",
+    overlay: "Mapping[str, object] | None",
+) -> RunContextData:
+    """Compatibility name for operation overlay semantics."""
+    return overlay_run_context(base, overlay)
+
+
 __all__ = [
     "RunContextData",
     "RunContextValue",
+    "merge_run_context",
     "normalize_run_context",
     "overlay_run_context",
 ]
