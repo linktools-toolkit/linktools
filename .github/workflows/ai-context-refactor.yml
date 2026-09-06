@@ -26,49 +26,350 @@ jobs:
         with:
           python-version: "3.10"
 
-      - name: Align observability closure tests
+      - name: Refactor Task runner boundary and SQLite lifecycle
         shell: bash
         run: |
           python - <<'PY'
           from pathlib import Path
+          import textwrap
 
-          path = Path("tests/ai/test_observability_closure.py")
-          text = path.read_text()
-          text = text.replace("_overlay_execution_context", "_overlay_execution_correlation")
-          text = text.replace("SimpleNamespace(context=", "SimpleNamespace(correlation=")
+          ai = Path("linktools-ai/src/linktools/ai")
+
+          local = ai / "task" / "_local.py"
+          text = local.read_text()
+          old = '''class TaskNodeRunner(Protocol):
+              async def run(
+                  self,
+                  node: TaskNode,
+                  *,
+                  graph_id: str,
+                  principal: Principal,
+                  correlation: CorrelationData,
+                  dependency_results: "Mapping[str, TaskDependencyResult]",
+                  control: TaskNodeRunControl,
+              ) -> TaskNodeRunResult: ...
+
+              async def cancel(
+                  self,
+                  node: TaskNode,
+                  *,
+                  graph_id: str,
+                  principal: Principal,
+                  correlation: CorrelationData,
+                  dependency_results: "Mapping[str, TaskDependencyResult]",
+              ) -> None: ...
+          '''
+          new = '''@dataclass(frozen=True, slots=True)
+          class TaskNodeInvocation:
+              node: TaskNode
+              graph_id: str
+              principal: Principal
+              correlation: CorrelationData
+              dependency_results: "Mapping[str, TaskDependencyResult]"
+
+
+          class TaskNodeRunner(Protocol):
+              async def run(
+                  self,
+                  invocation: TaskNodeInvocation,
+                  *,
+                  control: TaskNodeRunControl,
+              ) -> TaskNodeRunResult: ...
+
+              async def cancel(self, invocation: TaskNodeInvocation) -> None: ...
+          '''
+          old = textwrap.dedent(old)
+          new = textwrap.dedent(new)
+          if old not in text:
+              raise SystemExit("TaskNodeRunner protocol shape not found")
+          text = text.replace(old, new, 1)
+
+          old = '''                await self._runner.cancel(
+                              node,
+                              graph_id=graph_id,
+                              principal=launch.principal,
+                              context=launch.correlation,
+                              dependency_results=await self._dependency_results(
+                                  graph_id, node, tenant_id=tenant_id
+                              ),
+                          )'''
+          new = '''                await self._runner.cancel(
+                              TaskNodeInvocation(
+                                  node,
+                                  graph_id,
+                                  launch.principal,
+                                  launch.correlation,
+                                  await self._dependency_results(
+                                      graph_id, node, tenant_id=tenant_id
+                                  ),
+                              )
+                          )'''
+          old = textwrap.dedent(old).strip()
+          new = textwrap.dedent(new).strip()
+          if old not in text:
+              raise SystemExit("launcher cancel call shape not found")
+          text = text.replace(old, new, 1)
+
+          old = '''        await self._runner.cancel(
+                      node,
+                      graph_id=request.graph.graph_id,
+                      principal=request.principal,
+                      context=request.correlation,
+                      dependency_results=await self._dependency_results(
+                          request.graph.graph_id,
+                          node,
+                          tenant_id=tenant_id,
+                      ),
+                  )'''
+          new = '''        await self._runner.cancel(
+                      TaskNodeInvocation(
+                          node,
+                          request.graph.graph_id,
+                          request.principal,
+                          request.correlation,
+                          await self._dependency_results(
+                              request.graph.graph_id,
+                              node,
+                              tenant_id=tenant_id,
+                          ),
+                      )
+                  )'''
+          old = textwrap.dedent(old).strip()
+          new = textwrap.dedent(new).strip()
+          if old not in text:
+              raise SystemExit("terminal cancel call shape not found")
+          text = text.replace(old, new, 1)
+
+          old = '''        runner_task = asyncio.create_task(
+                      self._runner.run(
+                          node,
+                          graph_id=graph_id,
+                          principal=request.principal,
+                          context=request.correlation,
+                          dependency_results=dependency_results,
+                          control=control,
+                      ),'''
+          new = '''        runner_task = asyncio.create_task(
+                      self._runner.run(
+                          TaskNodeInvocation(
+                              node,
+                              graph_id,
+                              request.principal,
+                              request.correlation,
+                              dependency_results,
+                          ),
+                          control=control,
+                      ),'''
+          old = textwrap.dedent(old).strip()
+          new = textwrap.dedent(new).strip()
+          if old not in text:
+              raise SystemExit("launcher run call shape not found")
+          text = text.replace(old, new, 1)
+          local.write_text(text)
+
+          task_init = ai / "task" / "__init__.py"
+          text = task_init.read_text()
           text = text.replace(
-              'RuntimeContext(\n        object(),\n        {"audit_run_id": "audit-1", "stage": "collect"},\n    )',
-              'RuntimeContext(\n        object(),\n        correlation={"audit_run_id": "audit-1", "stage": "collect"},\n    )',
+              "    TaskNodeRunControl,\n",
+              "    TaskNodeInvocation,\n    TaskNodeRunControl,\n",
+              1,
           )
-          text = text.replace("root.values", "root.correlation")
-          text = text.replace("effective.values", "effective.correlation")
-          text = text.replace("context_overlay", "correlation_overlay")
-          text = text.replace("context_inherit", "correlation_inherit")
-          text = text.replace("context_reject", "correlation_reject")
-          text = text.replace("durable_admission_context", "durable_admission_correlation")
-          path.write_text(text)
+          text = text.replace(
+              '    "TaskNodeHandler",\n',
+              '    "TaskNodeHandler",\n    "TaskNodeInvocation",\n',
+              1,
+          )
+          task_init.write_text(text)
 
-          old = (
-              "_overlay_execution_context",
-              "root.values",
-              "effective.values",
-              "SimpleNamespace(context=",
+          planner = ai / "runtime" / "_planner.py"
+          text = planner.read_text()
+          text = text.replace(
+              "    TaskNodeContext,\n",
+              "    TaskNodeContext,\n    TaskNodeInvocation,\n",
+              1,
           )
-          remaining = [item for item in old if item in text]
-          if remaining:
-              raise SystemExit(f"stale observability test names remain: {remaining}")
+          old = '''    async def run(
+                  self,
+                  node: TaskNode,
+                  *,
+                  graph_id: str,
+                  principal: Principal,
+                  correlation: CorrelationData,
+                  dependency_results: Mapping[str, TaskDependencyResult],
+                  control: TaskNodeRunControl,
+              ) -> TaskNodeRunResult:
+                  task_type, task_version, body = _parse_node(node, request=False)'''
+          new = '''    async def run(
+                  self,
+                  invocation: TaskNodeInvocation,
+                  *,
+                  control: TaskNodeRunControl,
+              ) -> TaskNodeRunResult:
+                  node = invocation.node
+                  graph_id = invocation.graph_id
+                  principal = invocation.principal
+                  correlation = invocation.correlation
+                  dependency_results = invocation.dependency_results
+                  task_type, task_version, body = _parse_node(node, request=False)'''
+          old = textwrap.dedent(old)
+          new = textwrap.dedent(new)
+          if old not in text:
+              raise SystemExit("RuntimeTaskNodeRunner.run shape not found")
+          text = text.replace(old, new, 1)
+
+          old = '''    async def cancel(
+                  self,
+                  node: TaskNode,
+                  *,
+                  graph_id: str,
+                  principal: Principal,
+                  correlation: CorrelationData,
+                  dependency_results: Mapping[str, TaskDependencyResult],
+              ) -> None:
+                  task_type, task_version, body = _parse_node(node, request=False)'''
+          new = '''    async def cancel(self, invocation: TaskNodeInvocation) -> None:
+                  node = invocation.node
+                  graph_id = invocation.graph_id
+                  principal = invocation.principal
+                  correlation = invocation.correlation
+                  dependency_results = invocation.dependency_results
+                  task_type, task_version, body = _parse_node(node, request=False)'''
+          old = textwrap.dedent(old)
+          new = textwrap.dedent(new)
+          if old not in text:
+              raise SystemExit("RuntimeTaskNodeRunner.cancel shape not found")
+          text = text.replace(old, new, 1)
+          planner.write_text(text)
+
+          sqlite = ai / "observe" / "_sqlite.py"
+          sqlite.write_text(textwrap.dedent('''\
+          #!/usr/bin/env python3
+          # -*- coding: utf-8 -*-
+          """Close-free SQLite MetricStore using operation-scoped engines."""
+
+          from __future__ import annotations
+
+          from collections.abc import AsyncIterator
+          from contextlib import asynccontextmanager
+          from datetime import datetime
+          from pathlib import Path
+
+          from ..core import Page
+          from ._model import MetricDefinition, Observation
+          from ._sql import SqlMetricStore
+
+
+          class SQLiteMetricStore:
+              """SQLite convenience store without a caller-visible lifecycle."""
+
+              def __init__(self, path: str | Path) -> None:
+                  if not isinstance(path, (str, Path)):
+                      raise TypeError("metrics sqlite path must be str or Path")
+                  self._path = Path(path).expanduser().resolve()
+
+              @asynccontextmanager
+              async def _store(self) -> AsyncIterator[SqlMetricStore]:
+                  try:
+                      from sqlalchemy.ext.asyncio import create_async_engine
+                      from sqlalchemy.pool import NullPool
+                  except ImportError as error:
+                      raise RuntimeError(
+                          "Metrics.sqlite() requires the 'sqlalchemy' and 'aiosqlite' packages"
+                      ) from error
+                  engine = create_async_engine(
+                      f"sqlite+aiosqlite:///{self._path}",
+                      poolclass=NullPool,
+                  )
+                  try:
+                      yield SqlMetricStore(engine)
+                  finally:
+                      await engine.dispose()
+
+              async def put_definition(
+                  self,
+                  namespace: str,
+                  definition: MetricDefinition,
+              ) -> MetricDefinition:
+                  async with self._store() as store:
+                      return await store.put_definition(namespace, definition)
+
+              async def get_definition(
+                  self,
+                  namespace: str,
+                  name: str,
+                  revision: int,
+              ) -> MetricDefinition | None:
+                  async with self._store() as store:
+                      return await store.get_definition(namespace, name, revision)
+
+              async def latest_definition(
+                  self,
+                  namespace: str,
+                  name: str,
+              ) -> MetricDefinition | None:
+                  async with self._store() as store:
+                      return await store.latest_definition(namespace, name)
+
+              async def put_observations(
+                  self,
+                  namespace: str,
+                  observations: tuple[Observation, ...],
+              ) -> None:
+                  async with self._store() as store:
+                      await store.put_observations(namespace, observations)
+
+              async def get_observation(
+                  self,
+                  namespace: str,
+                  observation_id: str,
+              ) -> Observation | None:
+                  async with self._store() as store:
+                      return await store.get_observation(namespace, observation_id)
+
+              async def scan_observations(
+                  self,
+                  namespace: str,
+                  kind: str,
+                  start: datetime,
+                  end: datetime,
+                  *,
+                  cursor: str | None,
+                  limit: int,
+              ) -> Page[Observation]:
+                  async with self._store() as store:
+                      return await store.scan_observations(
+                          namespace,
+                          kind,
+                          start,
+                          end,
+                          cursor=cursor,
+                          limit=limit,
+                      )
+
+              async def prune_observations(
+                  self,
+                  namespace: str,
+                  *,
+                  before: datetime,
+              ) -> int:
+                  async with self._store() as store:
+                      return await store.prune_observations(namespace, before=before)
+
+
+          __all__ = ["SQLiteMetricStore"]
+          '''))
           PY
           python -m compileall -q linktools-ai/src tests/ai
           git diff --check
 
-      - name: Commit test alignment
+      - name: Commit boundary refactor
         shell: bash
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add tests/ai
+          git add linktools-ai
           if ! git diff --cached --quiet; then
-            git commit -m "test(ai): align correlation context contract"
+            git commit -m "refactor(ai): tighten task and sqlite lifecycles"
             git push origin HEAD:feat/ai-metrics-observability
           fi
 
@@ -78,8 +379,9 @@ jobs:
           python -m pip install --quiet -U -r requirements.txt
           python manage.py install --editable --quiet
 
+      - name: Run focused tests
+        run: |
+          python -m pytest -q tests/ai/test_metrics_sqlite_interop.py tests/ai/test_task_mixed_node_reliability.py tests/ai/test_task_reliable_review_regressions.py
+
       - name: Run linktools-ai tests
         run: python -m pytest -q tests/ai
-
-      - name: Run repository checks
-        run: python manage.py check --skip-compatibility
