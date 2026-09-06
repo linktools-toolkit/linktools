@@ -7,10 +7,10 @@ from typing import cast
 
 from pydantic_ai.capabilities import AbstractCapability
 from pydantic_ai.exceptions import ModelRetry, ToolFailed
-from pydantic_ai.tools import RunContext as PydanticRunContext
+from pydantic_ai.tools import AgentContext as PydanticRunContext
 from pydantic_ai.toolsets import FunctionToolset
 
-from ..capability import RunContext, SkillCapability
+from ..capability import AgentContext, SkillCapability
 from ..errors import AIError, ErrorCode
 
 _SKILL_CAPABILITY_ID = "linktools-skill"
@@ -29,26 +29,26 @@ _MODEL_FAILURE_ERRORS = frozenset(
 )
 
 
-class _PydanticSkillCapability(AbstractCapability[RunContext[object]]):
+class _PydanticSkillCapability(AbstractCapability[AgentContext[object]]):
     def __init__(self, capability: SkillCapability) -> None:
         self.id = _SKILL_CAPABILITY_ID
         self._capability = capability
 
     def get_instructions(
         self,
-    ) -> "Callable[[PydanticRunContext[RunContext[object]]], Awaitable[str | None]]":
-        async def render(ctx: PydanticRunContext[RunContext[object]]) -> "str | None":
+    ) -> "Callable[[PydanticRunContext[AgentContext[object]]], Awaitable[str | None]]":
+        async def render(ctx: PydanticRunContext[AgentContext[object]]) -> "str | None":
             del ctx
             return self._capability.instructions()
 
         return render
 
-    def get_toolset(self) -> "FunctionToolset[RunContext[object]]":
-        toolset = FunctionToolset[RunContext[object]](id=self.id)
+    def get_toolset(self) -> "FunctionToolset[AgentContext[object]]":
+        toolset = FunctionToolset[AgentContext[object]](id=self.id)
 
         @toolset.tool
         async def list_skills(
-            ctx: PydanticRunContext[RunContext[object]],
+            ctx: PydanticRunContext[AgentContext[object]],
         ) -> "list[dict[str, str]]":
             """List skills available for this agent run."""
             del ctx
@@ -56,7 +56,7 @@ class _PydanticSkillCapability(AbstractCapability[RunContext[object]]):
 
         @toolset.tool
         async def load_skill(
-            ctx: PydanticRunContext[RunContext[object]],
+            ctx: PydanticRunContext[AgentContext[object]],
             skill_id: str,
             path: "str | None" = None,
         ) -> "dict[str, str | list[str]]":

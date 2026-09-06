@@ -3,11 +3,10 @@
 """Pure core values and errors."""
 
 from ._context import (
-    RunContextData,
-    RunContextValue,
-    merge_run_context,
-    normalize_run_context,
-    overlay_run_context,
+    CorrelationData,
+    CorrelationValue,
+    normalize_correlation,
+    overlay_correlation,
 )
 from ._discovery import DEFAULT_DISCOVERY_POLICY
 from ._ids import (
@@ -126,8 +125,8 @@ __all__ = [
     "RedactionPolicy",
     "ResourceKind",
     "ResourceRef",
-    "RunContextData",
-    "RunContextValue",
+    "CorrelationData",
+    "CorrelationValue",
     "SessionStatus",
     "StopReason",
     "StructuredRedactor",
@@ -143,14 +142,13 @@ __all__ = [
     "canonical_string_tuple",
     "deterministic_id",
     "idempotency_key_digest",
-    "merge_run_context",
     "normalize_execution_mode",
     "normalize_json_value",
-    "normalize_run_context",
+    "normalize_correlation",
     "normalize_thinking",
     "operation_cas_immutable_matches",
     "operation_replay_matches",
-    "overlay_run_context",
+    "overlay_correlation",
     "principal_identity_payload",
     "service_principal",
     "step_conversation_id",

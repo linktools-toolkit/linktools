@@ -17,12 +17,12 @@ from ..core import (
     JsonValue,
     Page,
     Principal,
-    RunContextData,
+    CorrelationData,
     SessionStatus,
     ThinkingValue,
     UsageMetrics,
     normalize_execution_mode,
-    normalize_run_context,
+    normalize_correlation,
     normalize_thinking,
     validate_idempotency_key,
     validate_memory_scope,
@@ -43,9 +43,9 @@ from ..task import (
 from ._snapshot import RunSnapshot
 
 
-def _request_context(value: Mapping[str, object] | None) -> RunContextData:
+def _request_context(value: Mapping[str, object] | None) -> CorrelationData:
     try:
-        return normalize_run_context(value)
+        return normalize_correlation(value)
     except (TypeError, ValueError) as error:
         raise AIError(ErrorCode.REQUEST_FIELD_INVALID) from error
 
@@ -60,7 +60,7 @@ class ExecutionRequest:
     mode: ExecutionMode
     planning: bool
     thinking: ThinkingValue
-    context: RunContextData = field(default_factory=dict)
+    correlation: CorrelationData = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         validate_user_prompt(self.user_prompt)
@@ -75,7 +75,7 @@ class ExecutionRequest:
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
         object.__setattr__(self, "mode", mode)
         object.__setattr__(self, "thinking", thinking)
-        object.__setattr__(self, "context", _request_context(self.context))
+        object.__setattr__(self, "correlation", _request_context(self.correlation))
 
 
 @dataclass(frozen=True, slots=True)
@@ -84,14 +84,14 @@ class RetryExecutionRequest:
     user_prompt_codec: str
     principal: Principal
     idempotency_key: str
-    context: RunContextData = field(default_factory=dict)
+    correlation: CorrelationData = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         validate_user_prompt(self.user_prompt)
         if self.user_prompt_codec not in {"text", "pydantic-user-content-v1"}:
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
         validate_idempotency_key(self.idempotency_key)
-        object.__setattr__(self, "context", _request_context(self.context))
+        object.__setattr__(self, "correlation", _request_context(self.correlation))
 
 
 @dataclass(frozen=True, slots=True)
@@ -100,14 +100,14 @@ class ForkExecutionRequest:
     user_prompt_codec: str
     principal: Principal
     idempotency_key: str
-    context: RunContextData = field(default_factory=dict)
+    correlation: CorrelationData = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         validate_user_prompt(self.user_prompt)
         if self.user_prompt_codec not in {"text", "pydantic-user-content-v1"}:
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
         validate_idempotency_key(self.idempotency_key)
-        object.__setattr__(self, "context", _request_context(self.context))
+        object.__setattr__(self, "correlation", _request_context(self.correlation))
 
 
 @dataclass(frozen=True, slots=True)
@@ -364,7 +364,7 @@ class ResumeSessionRequest:
     mode: ExecutionMode
     planning: bool
     thinking: ThinkingValue
-    context: RunContextData = field(default_factory=dict)
+    correlation: CorrelationData = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         validate_user_prompt(self.user_prompt)
@@ -379,7 +379,7 @@ class ResumeSessionRequest:
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
         object.__setattr__(self, "mode", mode)
         object.__setattr__(self, "thinking", thinking)
-        object.__setattr__(self, "context", _request_context(self.context))
+        object.__setattr__(self, "correlation", _request_context(self.correlation))
 
 
 @dataclass(frozen=True, slots=True)

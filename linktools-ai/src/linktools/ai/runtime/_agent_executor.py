@@ -57,7 +57,7 @@ from pydantic_ai.models import Model
 from pydantic_ai.tools import (
     DeferredToolRequests,
     DeferredToolResults,
-    RunContext as PydanticRunContext,
+    AgentContext as PydanticRunContext,
     ToolDefinition,
 )
 from pydantic_ai.toolsets import AbstractToolset, PreparedToolset
@@ -68,7 +68,7 @@ from pydantic_ai_harness.step_persistence import StepPersistence, StepStore
 
 from ..agent import AgentBinding, AgentDefinition, AssistantTextOutput
 from ..capability import (
-    RunContext,
+    AgentContext,
     SKILL_TOOL_NAMES,
     SkillCapability,
     SkillSourceRegistry,
@@ -178,7 +178,7 @@ AgentExecutionOutcome = AgentExecutionResult | AgentExecutionPaused
 @dataclass(frozen=True, slots=True)
 class _RunScope:
     binding: AgentBinding
-    context: RunContext[object]
+    context: AgentContext[object]
     user_prompt: _RuntimeUserPrompt | None
     history: list[ModelMessage]
     conversation_id: str
@@ -186,7 +186,6 @@ class _RunScope:
     step_run_id: str
     segment_sequence: int
     history_id: str | None = None
-    memory_scope: str | None = None
     memory_store: SearchableMemoryStore | None = None
     plan_store_resolver: Callable[[PydanticRunContext[object]], PlanStore] | None = None
     mode: ExecutionMode = "run"
@@ -497,7 +496,7 @@ class AgentExecutor:
                 ),
             )
         capabilities = cast(
-            "tuple[AbstractCapability[RunContext[object]], ...]",
+            "tuple[AbstractCapability[AgentContext[object]], ...]",
             (presentation, gate, *runtime_capabilities, *capabilities),
         )
         if scope.replace_history_system_prompt:
@@ -642,17 +641,17 @@ async def _materialize_agent(
     deferred_pause_sink: Callable[[int], None],
     metrics: MetricRecorder | None,
 ) -> tuple[
-    PydanticAgent[RunContext[object], object],
-    tuple[AbstractCapability[RunContext[object]], ...],
+    PydanticAgent[AgentContext[object], object],
+    tuple[AbstractCapability[AgentContext[object]], ...],
     tuple[str, ...],
     tuple[tuple[str, str], ...],
     tuple[str, ...],
 ]:
     definition = scope.binding.definition
-    business_tools: list[Tool[RunContext[object]]] = []
+    business_tools: list[Tool[AgentContext[object]]] = []
     workspace_names: list[str] = []
     for candidate in definition.selected_tools:
-        tool = cast("Tool[RunContext[object]]", candidate.value)
+        tool = cast("Tool[AgentContext[object]]", candidate.value)
         if workspace_tool_class(tool) is None:
             business_tools.append(tool)
         else:
@@ -660,7 +659,7 @@ async def _materialize_agent(
 
     runtime_tool_names = select_runtime_tool_names(
         ordinary_tool_policy=definition.ordinary_tool_policy,
-        memory_scope=scope.memory_scope,
+        memory_scope=scope.context.memory_scope,
         planning=scope.planning,
         subagent_available=scope.subagent_available and bool(scope.binding.snapshot.subagents),
     )
@@ -672,12 +671,12 @@ async def _materialize_agent(
         sorted(mcp_server_selector(server.id) for server in definition.mcp_servers)
     )
 
-    capabilities: list[AbstractCapability[RunContext[object]]] = []
+    capabilities: list[AbstractCapability[AgentContext[object]]] = []
     capabilities.extend(workspace_capabilities(scope.context.workspace, workspace_names))
     for candidate in definition.selected_capabilities:
         if not isinstance(candidate.value, AbstractCapability):
             raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
-        capabilities.append(cast("AbstractCapability[RunContext[object]]", candidate.value))
+        capabilities.append(cast("AbstractCapability[AgentContext[object]]", candidate.value))
     if definition.skill_definitions:
         capabilities.append(
             _PydanticSkillCapability(
@@ -699,7 +698,7 @@ async def _materialize_agent(
     if definition.mcp_servers:
         capabilities.extend(
             cast(
-                "tuple[AbstractCapability[RunContext[object]], ...]",
+                "tuple[AbstractCapability[AgentContext[object]], ...]",
                 await materialize_mcp_servers(
                     definition.mcp_servers,
                     definition.mcp_selector_policy,
@@ -732,7 +731,7 @@ async def _materialize_agent(
         step_run_id=scope.step_run_id,
         segment_sequence=scope.segment_sequence,
         history_id=scope.history_id,
-        memory_scope=scope.memory_scope,
+        memory_scope=scope.context.memory_scope,
         step_store=scope.step_store,
         memory_store=scope.memory_store,
         runtime_tool_names=runtime_tool_names,
@@ -753,7 +752,7 @@ async def _materialize_agent(
         else capability
         for capability in platform
     )
-    capabilities.extend(cast("tuple[AbstractCapability[RunContext[object]], ...]", platform))
+    capabilities.extend(cast("tuple[AbstractCapability[AgentContext[object]], ...]", platform))
 
     business_output_type: object
     if scope.binding.output_binding.mode == "text":
@@ -772,14 +771,14 @@ async def _materialize_agent(
         value for value in (base_instructions, preload_instructions) if value != ""
     )
     agent = cast(
-        "PydanticAgent[RunContext[object], object]",
+        "PydanticAgent[AgentContext[object], object]",
         PydanticAgent(
             model,
             name=definition.spec.id,
             system_prompt=definition.spec.system_prompt,
             instructions=runtime_instructions,
             output_type=output_type,
-            deps_type=RunContext,
+            deps_type=AgentContext,
             retries={"tools": _MAX_TOOL_RETRIES},
             tools=tuple(business_tools),
         ),
@@ -849,7 +848,7 @@ def _thinking_settings(model: Model, thinking: ThinkingValue) -> ModelSettings:
     return ModelSettings(thinking=thinking)
 
 
-class _RuntimePersistenceBoundary(WrapperCapability[RunContext[object]]):
+class _RuntimePersistenceBoundary(WrapperCapability[AgentContext[object]]):
     def get_ordering(self) -> CapabilityOrdering:
         return CapabilityOrdering(
             position="outermost",
@@ -857,7 +856,7 @@ class _RuntimePersistenceBoundary(WrapperCapability[RunContext[object]]):
         )
 
 
-class _ToolPresentation(AbstractCapability[RunContext[object]]):
+class _ToolPresentation(AbstractCapability[AgentContext[object]]):
     def __init__(
         self,
         ordinary_policy: tuple[str, ...],
@@ -882,13 +881,13 @@ class _ToolPresentation(AbstractCapability[RunContext[object]]):
 
     def get_wrapper_toolset(
         self,
-        toolset: AbstractToolset[RunContext[object]],
-    ) -> AbstractToolset[RunContext[object]]:
+        toolset: AbstractToolset[AgentContext[object]],
+    ) -> AbstractToolset[AgentContext[object]]:
         return PreparedToolset(toolset, self._prepare_final_tools)
 
     async def _prepare_final_tools(
         self,
-        _ctx: PydanticRunContext[RunContext[object]],
+        _ctx: PydanticRunContext[AgentContext[object]],
         tool_defs: list[ToolDefinition],
     ) -> list[ToolDefinition]:
         names = [tool.name for tool in tool_defs]

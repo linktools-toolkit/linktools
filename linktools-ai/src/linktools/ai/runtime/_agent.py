@@ -71,7 +71,7 @@ class Execution(Generic[AppT]):
         user_prompt: "str | Sequence[UserContent]",
         *,
         idempotency_key: "str | None" = None,
-        context: "Mapping[str, object] | None" = None,
+        correlation: "Mapping[str, object] | None" = None,
     ) -> "Execution[AppT]":
         return await self._runtime._retry_execution(
             self._binding_digest,
@@ -79,7 +79,7 @@ class Execution(Generic[AppT]):
             prepare_user_prompt(user_prompt),
             principal=self._principal,
             idempotency_key=idempotency_key,
-            context=context,
+            correlation=correlation,
         )
 
     async def fork(
@@ -87,7 +87,7 @@ class Execution(Generic[AppT]):
         user_prompt: "str | Sequence[UserContent]",
         *,
         idempotency_key: "str | None" = None,
-        context: "Mapping[str, object] | None" = None,
+        correlation: "Mapping[str, object] | None" = None,
     ) -> "Execution[AppT]":
         return await self._runtime._fork_execution(
             self._binding_digest,
@@ -95,7 +95,7 @@ class Execution(Generic[AppT]):
             prepare_user_prompt(user_prompt),
             principal=self._principal,
             idempotency_key=idempotency_key,
-            context=context,
+            correlation=correlation,
         )
 
     async def history(
@@ -156,7 +156,7 @@ class Session(Generic[AppT]):
         memory_scope: "str | None" = None,
         planning: "bool | None" = None,
         thinking: "ThinkingValue | None" = None,
-        context: "Mapping[str, object] | None" = None,
+        correlation: "Mapping[str, object] | None" = None,
     ) -> "Execution[AppT]":
         return await self._runtime._start_for_agent(
             self._agent_digest,
@@ -169,7 +169,7 @@ class Session(Generic[AppT]):
             mode="run",
             planning=planning,
             thinking=thinking,
-            context=context,
+            correlation=correlation,
         )
 
     async def run(
@@ -182,7 +182,7 @@ class Session(Generic[AppT]):
         memory_scope: "str | None" = None,
         planning: "bool | None" = None,
         thinking: "ThinkingValue | None" = None,
-        context: "Mapping[str, object] | None" = None,
+        correlation: "Mapping[str, object] | None" = None,
         timeout_seconds: "float | None" = None,
     ) -> ExecutionResult:
         execution = await self.start(
@@ -193,7 +193,7 @@ class Session(Generic[AppT]):
             memory_scope=memory_scope,
             planning=planning,
             thinking=thinking,
-            context=context,
+            correlation=correlation,
         )
         return await execution.wait(timeout_seconds=timeout_seconds)
 
@@ -206,7 +206,7 @@ class Session(Generic[AppT]):
         idempotency_key: "str | None" = None,
         memory_scope: "str | None" = None,
         thinking: "ThinkingValue | None" = None,
-        context: "Mapping[str, object] | None" = None,
+        correlation: "Mapping[str, object] | None" = None,
         timeout_seconds: "float | None" = None,
     ) -> ExecutionResult:
         execution = await self._runtime._start_for_agent(
@@ -220,7 +220,7 @@ class Session(Generic[AppT]):
             mode="plan",
             planning=True,
             thinking=thinking,
-            context=context,
+            correlation=correlation,
         )
         return await execution.wait(timeout_seconds=timeout_seconds)
 
@@ -309,7 +309,7 @@ class Agent(Generic[AppT]):
         memory_scope: "str | None" = None,
         planning: "bool | None" = None,
         thinking: "ThinkingValue | None" = None,
-        context: "Mapping[str, object] | None" = None,
+        correlation: "Mapping[str, object] | None" = None,
     ) -> "Execution[AppT]":
         return await self._runtime._start_for_agent(
             self._agent_digest,
@@ -322,7 +322,7 @@ class Agent(Generic[AppT]):
             mode="run",
             planning=planning,
             thinking=thinking,
-            context=context,
+            correlation=correlation,
         )
 
     async def run(
@@ -336,7 +336,7 @@ class Agent(Generic[AppT]):
         memory_scope: "str | None" = None,
         planning: "bool | None" = None,
         thinking: "ThinkingValue | None" = None,
-        context: "Mapping[str, object] | None" = None,
+        correlation: "Mapping[str, object] | None" = None,
         timeout_seconds: "float | None" = None,
     ) -> ExecutionResult:
         execution = await self.start(
@@ -348,7 +348,7 @@ class Agent(Generic[AppT]):
             memory_scope=memory_scope,
             planning=planning,
             thinking=thinking,
-            context=context,
+            correlation=correlation,
         )
         return await execution.wait(timeout_seconds=timeout_seconds)
 
@@ -362,7 +362,7 @@ class Agent(Generic[AppT]):
         idempotency_key: "str | None" = None,
         memory_scope: "str | None" = None,
         thinking: "ThinkingValue | None" = None,
-        context: "Mapping[str, object] | None" = None,
+        correlation: "Mapping[str, object] | None" = None,
         timeout_seconds: "float | None" = None,
     ) -> ExecutionResult:
         execution = await self._runtime._start_for_agent(
@@ -376,7 +376,7 @@ class Agent(Generic[AppT]):
             mode="plan",
             planning=True,
             thinking=thinking,
-            context=context,
+            correlation=correlation,
         )
         return await execution.wait(timeout_seconds=timeout_seconds)
 

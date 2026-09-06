@@ -39,7 +39,7 @@ from ...core import (
     ThinkingValue,
     UsageMetrics,
     normalize_execution_mode,
-    normalize_run_context,
+    normalize_correlation,
     normalize_thinking,
     validate_agent_id,
 )
@@ -471,7 +471,7 @@ class ExecutionRecord:
     result: ResultRecord | None = None
     repository_instructions: RuntimePayloadRef | None = None
     error_diagnostics: ErrorDiagnostics | None = None
-    context: Mapping[str, str | int] = field(default_factory=dict)
+    correlation: Mapping[str, str | int] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         mode = normalize_execution_mode(self.mode)
@@ -482,7 +482,7 @@ class ExecutionRecord:
             raise ValueError("plan mode requires planning")
         object.__setattr__(self, "mode", mode)
         object.__setattr__(self, "thinking", thinking)
-        object.__setattr__(self, "context", normalize_run_context(self.context))
+        object.__setattr__(self, "correlation", normalize_correlation(self.correlation))
         if (
             not isinstance(self.binding, AgentBindingSnapshot)
             or self.binding.binding_digest != self.binding_digest
@@ -1020,7 +1020,7 @@ class RecoveryExecutionInput:
     thinking: ThinkingValue
     binding: AgentBindingSnapshot
     repository_instructions: RuntimePayloadRef | None = None
-    context: Mapping[str, str | int] = field(default_factory=dict)
+    correlation: Mapping[str, str | int] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         prompt = self.user_prompt
@@ -1038,7 +1038,7 @@ class RecoveryExecutionInput:
             raise ValueError("plan mode requires planning")
         object.__setattr__(self, "mode", mode)
         object.__setattr__(self, "thinking", thinking)
-        object.__setattr__(self, "context", normalize_run_context(self.context))
+        object.__setattr__(self, "correlation", normalize_correlation(self.correlation))
         if (
             not isinstance(self.binding, AgentBindingSnapshot)
             or self.binding.binding_digest != self.binding_digest

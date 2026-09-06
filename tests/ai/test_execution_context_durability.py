@@ -67,7 +67,7 @@ def _execution(*, context: dict[str, str | int]) -> ExecutionRecord:
         planning=False,
         thinking=False,
         binding=binding,
-        context=context,
+        correlation=context,
     )
 
 
@@ -96,7 +96,7 @@ def _recovery_input(*, context: dict[str, str | int]) -> RecoveryExecutionInput:
         planning=False,
         thinking=False,
         binding=binding,
-        context=context,
+        correlation=context,
     )
 
 
@@ -126,7 +126,7 @@ async def test_local_start_rejects_context_drift_from_durable_execution() -> Non
         mode="run",
         planning=False,
         thinking=False,
-        context={"trace_id": "request", "attempt": 1},
+        correlation={"trace_id": "request", "attempt": 1},
     )
 
     with pytest.raises(AIError) as raised:

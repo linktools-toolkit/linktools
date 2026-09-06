@@ -24,19 +24,18 @@ from ..core import (
     JsonValue,
     Principal,
     PrincipalKind,
-    RunContextData,
+    CorrelationData,
     SessionStatus,
     TaskStatus,
     ThinkingValue,
     normalize_execution_mode,
-    normalize_run_context,
+    normalize_correlation,
     normalize_thinking,
-    overlay_run_context,
+    overlay_correlation,
     validate_agent_id,
     validate_idempotency_key,
     validate_memory_scope,
     validate_resource_id,
-    validate_tenant_id,
     validate_user_prompt,
 )
 from ..errors import AIError, ErrorCode
@@ -125,19 +124,19 @@ class _RuntimeMetricControl(Protocol):
     ) -> RuntimeMetricFlushResult: ...
 
 
-def _portable_context(value: "Mapping[str, object] | None") -> RunContextData:
+def _request_correlation(value: "Mapping[str, object] | None") -> CorrelationData:
     try:
-        return normalize_run_context(value)
+        return normalize_correlation(value)
     except (TypeError, ValueError) as error:
         raise AIError(ErrorCode.REQUEST_FIELD_INVALID) from error
 
 
-def _overlay_portable_context(
+def _overlay_request_correlation(
     base: Mapping[str, object],
     overlay: "Mapping[str, object] | None",
-) -> RunContextData:
+) -> CorrelationData:
     try:
-        return overlay_run_context(base, overlay)
+        return overlay_correlation(base, overlay)
     except (TypeError, ValueError) as error:
         raise AIError(ErrorCode.REQUEST_FIELD_INVALID) from error
 
@@ -159,7 +158,6 @@ class Runtime(Generic[AppT]):
         *,
         workspace: Workspace,
         context: RuntimeContext[AppT],
-        tenant_id: str = "default",
         close_callback: "Callable[[], Awaitable[None]] | None" = None,
         local_coordinator: "_LocalRuntimeCoordinatorPort | None" = None,
         task_node_runtime: "_TaskNodeRuntimePort | None" = None,
@@ -193,11 +191,10 @@ class Runtime(Generic[AppT]):
         self.event = event
         self.artifact = artifact
         self._workspace = workspace
-        self._runtime_context = context
-        self._tenant_id = validate_tenant_id(tenant_id)
+        self._context = context
         self._default_principal = Principal(
             principal_id="runtime",
-            tenant_id=self._tenant_id,
+            tenant_id=self._context.tenant_id,
             kind=PrincipalKind.LOCAL_TRUSTED.value,
         )
         self._close_callback = close_callback
@@ -216,7 +213,6 @@ class Runtime(Generic[AppT]):
         workspace: Workspace,
         *,
         context: None = None,
-        tenant_id: "str | None" = None,
         models: "ModelRegistry | None" = None,
         state: "RuntimeState | None" = None,
         capabilities: "Sequence[CapabilityGroup[None]]" = (),
@@ -230,7 +226,6 @@ class Runtime(Generic[AppT]):
         workspace: Workspace,
         *,
         context: RuntimeContext[AppT],
-        tenant_id: "str | None" = None,
         models: "ModelRegistry | None" = None,
         state: "RuntimeState | None" = None,
         capabilities: "Sequence[CapabilityGroup[AppT]]" = (),
@@ -243,7 +238,6 @@ class Runtime(Generic[AppT]):
         workspace: Workspace,
         *,
         context: "RuntimeContext[object] | None" = None,
-        tenant_id: "str | None" = None,
         models: "ModelRegistry | None" = None,
         state: "RuntimeState | None" = None,
         capabilities: "Sequence[CapabilityGroup[object]]" = (),
@@ -255,7 +249,6 @@ class Runtime(Generic[AppT]):
         return _open_runtime(
             workspace,
             context=root_context,
-            tenant_id=tenant_id,
             models=models,
             state=state,
             capabilities=capabilities,
@@ -264,7 +257,7 @@ class Runtime(Generic[AppT]):
 
     @property
     def tenant_id(self) -> str:
-        return self._tenant_id
+        return self._context.tenant_id
 
     @property
     def default_principal(self) -> Principal:
@@ -275,16 +268,16 @@ class Runtime(Generic[AppT]):
         return self._workspace
 
     @property
-    def runtime_context(self) -> RuntimeContext[AppT]:
-        return self._runtime_context
-
-    @property
     def app(self) -> AppT:
-        return self._runtime_context.app
+        return self._context.app
 
     @property
-    def context(self) -> RunContextData:
-        return self._runtime_context.values
+    def context(self) -> RuntimeContext[AppT]:
+        return self._context
+
+    @property
+    def correlation(self) -> CorrelationData:
+        return self._context.correlation
 
     def metric_status(self) -> RuntimeMetricStatus:
         control = self._metric_control
@@ -361,11 +354,11 @@ class Runtime(Generic[AppT]):
         mode: ExecutionMode,
         planning: "bool | None",
         thinking: "ThinkingValue | None",
-        context: "Mapping[str, object] | None" = None,
+        correlation: "Mapping[str, object] | None" = None,
     ) -> "Execution[AppT]":
         self._ensure_open()
         resolved_principal = self._resolve_principal(principal)
-        effective_context = _overlay_portable_context(self.context, context)
+        effective_correlation = _overlay_request_correlation(self.correlation, correlation)
         validate_user_prompt(str(user_prompt))
         definition = self._catalog.definition(agent_digest)
         resolved_mode, resolved_planning, resolved_thinking = _execution_policy(
@@ -386,7 +379,7 @@ class Runtime(Generic[AppT]):
             mode=resolved_mode,
             planning=resolved_planning,
             thinking=resolved_thinking,
-            context=effective_context,
+            correlation=effective_correlation,
         )
         if session_id is None:
             handle = await self.execution.run(binding.digest, request)
@@ -403,7 +396,7 @@ class Runtime(Generic[AppT]):
                 mode=request.mode,
                 planning=request.planning,
                 thinking=request.thinking,
-                context=effective_context,
+                correlation=effective_correlation,
             )
             handle = await self.session.resume(
                 definition.spec.id,
@@ -451,7 +444,7 @@ class Runtime(Generic[AppT]):
         *,
         principal: Principal,
         idempotency_key: "str | None",
-        context: "Mapping[str, object] | None" = None,
+        correlation: "Mapping[str, object] | None" = None,
     ) -> "Execution[AppT]":
         self._ensure_open()
         request = RetryExecutionRequest(
@@ -459,7 +452,7 @@ class Runtime(Generic[AppT]):
             user_prompt.codec,
             principal,
             idempotency_key or secrets.token_urlsafe(32),
-            _portable_context(context),
+            _request_correlation(correlation),
         )
         handle = await self.execution.retry(binding_digest, execution_id, request)
         return Execution(self, handle.execution_id, binding_digest, principal)
@@ -472,7 +465,7 @@ class Runtime(Generic[AppT]):
         *,
         principal: Principal,
         idempotency_key: "str | None",
-        context: "Mapping[str, object] | None" = None,
+        correlation: "Mapping[str, object] | None" = None,
     ) -> "Execution[AppT]":
         self._ensure_open()
         request = ForkExecutionRequest(
@@ -480,7 +473,7 @@ class Runtime(Generic[AppT]):
             user_prompt.codec,
             principal,
             idempotency_key or secrets.token_urlsafe(32),
-            _portable_context(context),
+            _request_correlation(correlation),
         )
         handle = await self.execution.fork(binding_digest, execution_id, request)
         return Execution(self, handle.execution_id, binding_digest, principal)
@@ -668,7 +661,7 @@ class Runtime(Generic[AppT]):
         principal: "Principal | None" = None,
         idempotency_key: str,
         limits: "TaskGraphLimits | None" = None,
-        context: "Mapping[str, object] | None" = None,
+        correlation: "Mapping[str, object] | None" = None,
     ) -> TaskGraphResult:
         request = await self._admit_graph(
             graph,
@@ -687,7 +680,7 @@ class Runtime(Generic[AppT]):
         idempotency_key: str,
         limits: "TaskGraphLimits | None" = None,
         timeout_seconds: "float | None" = None,
-        context: "Mapping[str, object] | None" = None,
+        correlation: "Mapping[str, object] | None" = None,
     ) -> TaskGraphResult:
         request = await self._admit_graph(
             graph,
@@ -760,11 +753,11 @@ class Runtime(Generic[AppT]):
         principal: "Principal | None",
         idempotency_key: str,
         limits: "TaskGraphLimits | None",
-        context: "Mapping[str, object] | None" = None,
+        correlation: "Mapping[str, object] | None" = None,
     ) -> TaskGraphRequest:
         self._ensure_open()
         resolved_principal = self._resolve_principal(principal)
-        effective_context = _overlay_portable_context(self.context, context)
+        effective_correlation = _overlay_request_correlation(self.correlation, correlation)
         selected_limits = limits or TaskGraphLimits()
         validate_idempotency_key(idempotency_key)
         graph.validate_limits(selected_limits)
@@ -785,7 +778,7 @@ class Runtime(Generic[AppT]):
             resolved_principal,
             idempotency_key,
             selected_limits,
-            effective_context,
+            effective_correlation,
         )
 
     async def _ensure_session(
@@ -925,7 +918,6 @@ async def _open_runtime(
     workspace: Workspace,
     *,
     context: RuntimeContext[object],
-    tenant_id: "str | None",
     models: "ModelRegistry | None",
     state: "RuntimeState | None",
     capabilities: "Sequence[CapabilityGroup[object]]",
@@ -936,7 +928,7 @@ async def _open_runtime(
     components = await compose_runtime_components(
         workspace,
         app=context.app,
-        tenant_id=tenant_id,
+        tenant_id=context.tenant_id,
         models=models,
         state=state,
         capabilities=capabilities,
@@ -955,7 +947,6 @@ async def _open_runtime(
             components.artifact,
             workspace=workspace,
             context=context,
-            tenant_id=components.tenant_id,
             close_callback=components.close_callback,
             local_coordinator=components.local_coordinator,
             task_node_runtime=components.task_node_runtime,

@@ -15,7 +15,7 @@ from ..core import (
     JsonValue,
     Page,
     Principal,
-    RunContextData,
+    CorrelationData,
     TaskStatus,
     canonical_sha256,
     validate_lease_owner,
@@ -106,7 +106,7 @@ class TaskNodeRunner(Protocol):
         *,
         graph_id: str,
         principal: Principal,
-        context: RunContextData,
+        correlation: CorrelationData,
         dependency_results: "Mapping[str, TaskDependencyResult]",
         control: TaskNodeRunControl,
     ) -> TaskNodeRunResult: ...
@@ -117,7 +117,7 @@ class TaskNodeRunner(Protocol):
         *,
         graph_id: str,
         principal: Principal,
-        context: RunContextData,
+        correlation: CorrelationData,
         dependency_results: "Mapping[str, TaskDependencyResult]",
     ) -> None: ...
 

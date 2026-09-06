@@ -13,12 +13,12 @@ from datetime import datetime, timezone
 from ..core import (
     JsonValue,
     Principal,
-    RunContextData,
+    CorrelationData,
     TaskStatus,
     canonical_json_bytes,
     canonical_sha256,
     idempotency_key_digest,
-    normalize_run_context,
+    normalize_correlation,
     principal_identity_payload,
     validate_idempotency_key,
     validate_lease_owner,
@@ -351,12 +351,12 @@ class TaskGraphRequest:
     principal: Principal
     idempotency_key: str = ""
     limits: TaskGraphLimits = field(default_factory=TaskGraphLimits)
-    context: RunContextData = field(default_factory=dict)
+    correlation: CorrelationData = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         validate_idempotency_key(self.idempotency_key)
         self.graph.validate_limits(self.limits)
-        object.__setattr__(self, "context", normalize_run_context(self.context))
+        object.__setattr__(self, "correlation", normalize_correlation(self.correlation))
 
 
 def _task_graph_request_digest(
@@ -392,10 +392,10 @@ class TaskGraphLaunch:
     graph: TaskGraph
     principal: Principal
     limits: TaskGraphLimits
-    context: RunContextData = field(default_factory=dict)
+    correlation: CorrelationData = field(default_factory=dict)
 
     def __post_init__(self) -> None:
-        object.__setattr__(self, "context", normalize_run_context(self.context))
+        object.__setattr__(self, "correlation", normalize_correlation(self.correlation))
 
 
 @dataclass(frozen=True, slots=True)
@@ -406,7 +406,7 @@ class TaskGraphAdmission:
     limits: TaskGraphLimits
     operation_id: str
     request_digest: str
-    context: RunContextData = field(default_factory=dict)
+    correlation: CorrelationData = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if (
@@ -419,7 +419,7 @@ class TaskGraphAdmission:
             or re.fullmatch(r"[0-9a-f]{64}", self.request_digest) is None
         ):
             raise ValueError("task graph admission is invalid")
-        object.__setattr__(self, "context", normalize_run_context(self.context))
+        object.__setattr__(self, "correlation", normalize_correlation(self.correlation))
 
     @classmethod
     def from_request(cls, request: TaskGraphRequest) -> "TaskGraphAdmission":
@@ -432,7 +432,7 @@ class TaskGraphAdmission:
             _task_graph_request_digest(
                 request.graph, request.principal, request.limits
             ),
-            request.context,
+            request.correlation,
         )
 
     def bind(self, graph: TaskGraph) -> TaskGraphLaunch:
@@ -449,7 +449,7 @@ class TaskGraphAdmission:
                 raise ValueError("task graph admission digest mismatch")
         except (AIError, TypeError, ValueError) as error:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
-        return TaskGraphLaunch(graph, self.principal, self.limits, self.context)
+        return TaskGraphLaunch(graph, self.principal, self.limits, self.correlation)
 
 
 @dataclass(frozen=True, slots=True)

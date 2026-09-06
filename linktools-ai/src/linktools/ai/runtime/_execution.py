@@ -37,12 +37,12 @@ from ..core import (
     Principal,
     ResourceKind,
     ResourceRef,
-    RunContextData,
+    CorrelationData,
     StopReason,
     UsageMetrics,
     canonical_json_bytes,
     canonical_sha256,
-    overlay_run_context,
+    overlay_correlation,
     principal_identity_payload,
 )
 from ..core import (
@@ -98,9 +98,9 @@ _logger = environ.get_logger("ai.runtime.execution")
 def _overlay_execution_context(
     base: Mapping[str, object],
     overlay: Mapping[str, object],
-) -> RunContextData:
+) -> CorrelationData:
     try:
-        return overlay_run_context(base, overlay)
+        return overlay_correlation(base, overlay)
     except (TypeError, ValueError) as error:
         raise AIError(ErrorCode.REQUEST_FIELD_INVALID) from error
 
@@ -655,7 +655,7 @@ class DefaultExecutionService:
             mode=mode,
             planning=execution.planning,
             thinking=execution.thinking,
-            context=execution.context,
+            correlation=execution.context,
         )
         return await self.start_subagent(
             execution.binding_digest,
@@ -899,7 +899,7 @@ class DefaultExecutionService:
             thinking=request.thinking,
             binding=binding.snapshot,
             repository_instructions=repository_instructions,
-            context=request.context,
+            correlation=request.context,
         )
         reservation = await self._state.executions.reserve_start(
             ExecutionStartReservation(
@@ -1405,7 +1405,7 @@ class DefaultExecutionService:
             mode=previous.mode,
             planning=previous.planning,
             thinking=previous.thinking,
-            context=_overlay_execution_context(previous.context, request.context),
+            correlation=_overlay_execution_context(previous.context, request.context),
         )
         return await self._start(
             binding_digest,
@@ -1436,7 +1436,7 @@ class DefaultExecutionService:
             mode=previous.mode,
             planning=previous.planning,
             thinking=previous.thinking,
-            context=_overlay_execution_context(previous.context, request.context),
+            correlation=_overlay_execution_context(previous.context, request.context),
         )
         return await self._start(
             binding_digest,

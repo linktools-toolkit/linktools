@@ -417,7 +417,7 @@ def _encode_v1_execution_record(
         raise TypeError("V1 execution_record encoder received the wrong type")
     encoded = dict(_encode_v1_optional_error_diagnostics(value, codec, persisted))
     if not value.context:
-        encoded.pop("context", None)
+        encoded.pop("correlation", None)
     return encoded
 
 
@@ -439,7 +439,7 @@ def _encode_v1_recovery_execution_input(
         for field in fields(value)
     }
     if not value.context:
-        encoded.pop("context", None)
+        encoded.pop("correlation", None)
     return encoded
 
 
@@ -459,7 +459,7 @@ def _encode_v1_task_graph_admission(
         for field in fields(value)
     }
     if not value.context:
-        encoded.pop("context", None)
+        encoded.pop("correlation", None)
     return encoded
 
 

@@ -34,10 +34,10 @@ from pydantic_ai.exceptions import (
 from pydantic_ai.messages import ModelResponse
 from pydantic_ai.models import ModelRequestContext
 from pydantic_ai.run import AgentRunResult
-from pydantic_ai.tools import RunContext as PydanticRunContext
+from pydantic_ai.tools import AgentContext as PydanticRunContext
 from pydantic_ai.usage import UsageLimitExceeded
 
-from ..capability import RunContext
+from ..capability import AgentContext
 from ..core import UsageMetrics
 from ..errors import AIError, ErrorCode
 from ..observe import MetricMeasurement, MetricRecorder, Observation
@@ -49,7 +49,7 @@ from ._metrics import (
 )
 
 
-class _RuntimeModelMetricCapability(AbstractCapability[RunContext[object]]):
+class _RuntimeModelMetricCapability(AbstractCapability[AgentContext[object]]):
     """Observe actual model request attempts without mutating semantics."""
 
     def __init__(
@@ -80,7 +80,7 @@ class _RuntimeModelMetricCapability(AbstractCapability[RunContext[object]]):
 
     async def before_run(
         self,
-        ctx: PydanticRunContext[RunContext[object]],
+        ctx: PydanticRunContext[AgentContext[object]],
     ) -> None:
         _bind_metric_execution_context(
             self._recorder,
@@ -90,7 +90,7 @@ class _RuntimeModelMetricCapability(AbstractCapability[RunContext[object]]):
 
     async def wrap_run(
         self,
-        ctx: PydanticRunContext[RunContext[object]],
+        ctx: PydanticRunContext[AgentContext[object]],
         *,
         handler: WrapRunHandler,
     ) -> AgentRunResult[Any]:
@@ -114,7 +114,7 @@ class _RuntimeModelMetricCapability(AbstractCapability[RunContext[object]]):
 
     async def wrap_model_request(
         self,
-        ctx: PydanticRunContext[RunContext[object]] | None,
+        ctx: PydanticRunContext[AgentContext[object]] | None,
         *,
         request_context: ModelRequestContext,
         handler: WrapModelRequestHandler,
@@ -168,7 +168,7 @@ class _RuntimeModelMetricCapability(AbstractCapability[RunContext[object]]):
 
     def _record_model(
         self,
-        run_context: RunContext[object] | None,
+        run_context: AgentContext[object] | None,
         attempt_id: str,
         started: int,
         *,

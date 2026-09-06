@@ -8,26 +8,41 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Generic, TypeVar
 
-from ..core import RunContextData, normalize_run_context, overlay_run_context
+from ..core import (
+    CorrelationData,
+    normalize_correlation,
+    overlay_correlation,
+    validate_tenant_id,
+)
 
 AppT = TypeVar("AppT")
 
 
 @dataclass(frozen=True, slots=True)
 class RuntimeContext(Generic[AppT]):
-    """Combine process-local application dependencies with portable Runtime defaults."""
+    """Runtime-lifetime application, tenant, and default correlation metadata."""
 
     app: AppT
-    values: RunContextData = field(default_factory=dict)
+    tenant_id: str = "default"
+    correlation: CorrelationData = field(default_factory=dict)
 
     def __post_init__(self) -> None:
-        object.__setattr__(self, "values", normalize_run_context(self.values))
+        object.__setattr__(self, "tenant_id", validate_tenant_id(self.tenant_id))
+        object.__setattr__(
+            self,
+            "correlation",
+            normalize_correlation(self.correlation),
+        )
 
     def overlay(
         self,
-        values: "Mapping[str, object] | None",
+        correlation: "Mapping[str, object] | None",
     ) -> RuntimeContext[AppT]:
-        return RuntimeContext(self.app, overlay_run_context(self.values, values))
+        return RuntimeContext(
+            self.app,
+            self.tenant_id,
+            overlay_correlation(self.correlation, correlation),
+        )
 
 
 __all__ = ["RuntimeContext"]

@@ -17,7 +17,7 @@ from ..core import (
     ExecutionStatus,
     JsonValue,
     Principal,
-    RunContextData,
+    CorrelationData,
     ThinkingValue,
     canonical_json_bytes,
     canonical_sha256,
@@ -206,7 +206,7 @@ class _AgentTaskNodeHandler:
         *,
         graph_id: str,
         principal: Principal,
-        context: RunContextData,
+        correlation: CorrelationData,
         dependencies: Mapping[str, TaskDependency],
         control: TaskNodeRunControl,
     ) -> tuple[JsonValue, str]:
@@ -214,7 +214,7 @@ class _AgentTaskNodeHandler:
             node,
             graph_id=graph_id,
             principal=principal,
-            context=context,
+            correlation=correlation,
             dependencies=dependencies,
         )
         key = (principal.tenant_id, graph_id, node.node_id)
@@ -294,7 +294,7 @@ class _AgentTaskNodeHandler:
         *,
         graph_id: str,
         principal: Principal,
-        context: RunContextData,
+        correlation: CorrelationData,
         dependencies: Mapping[str, TaskDependency],
         durable_execution_id: str | None,
     ) -> None:
@@ -322,7 +322,7 @@ class _AgentTaskNodeHandler:
                 node,
                 graph_id=graph_id,
                 principal=principal,
-                context=context,
+                correlation=correlation,
                 dependencies=dependencies,
             )
             try:
@@ -360,7 +360,7 @@ class _AgentTaskNodeHandler:
         *,
         graph_id: str,
         principal: Principal,
-        context: RunContextData,
+        correlation: CorrelationData,
         dependencies: Mapping[str, TaskDependency],
     ) -> tuple[str, ExecutionRequest]:
         payload = node.input
@@ -423,7 +423,7 @@ class _AgentTaskNodeHandler:
             mode=cast(ExecutionMode, normalized["mode"]),
             planning=cast(bool, normalized["planning"]),
             thinking=cast(ThinkingValue, normalized["thinking"]),
-            context=context,
+            correlation=correlation,
         )
 
     async def _bind_execution(
@@ -723,7 +723,7 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
         *,
         graph_id: str,
         principal: Principal,
-        context: RunContextData,
+        correlation: CorrelationData,
         dependency_results: Mapping[str, TaskDependencyResult],
         control: TaskNodeRunControl,
     ) -> TaskNodeRunResult:
@@ -739,7 +739,7 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
                 node,
                 graph_id=graph_id,
                 principal=principal,
-                context=context,
+                correlation=correlation,
                 dependencies=dependencies,
                 control=control,
             )
@@ -758,7 +758,7 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
                 body,
                 dependencies,
                 idempotency_key,
-                context,
+                correlation,
             )
             try:
                 output = normalize_json_value(await handler.run(task_context))
@@ -785,7 +785,7 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
         *,
         graph_id: str,
         principal: Principal,
-        context: RunContextData,
+        correlation: CorrelationData,
         dependency_results: Mapping[str, TaskDependencyResult],
     ) -> None:
         task_type, task_version, body = _parse_node(node, request=False)
@@ -815,7 +815,7 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
                 node,
                 graph_id=graph_id,
                 principal=principal,
-                context=context,
+                correlation=correlation,
                 dependencies=dependencies,
                 durable_execution_id=state.execution_id,
             )
@@ -828,7 +828,7 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
             body,
             dependencies,
             _custom_idempotency_key(graph_id, node, principal, dependencies),
-            context,
+            correlation,
         )
         await handler.cancel(task_context)
 

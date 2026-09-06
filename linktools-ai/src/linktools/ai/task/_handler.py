@@ -12,10 +12,10 @@ from ..core import (
     ImmutableJsonMapping,
     JsonValue,
     Principal,
-    RunContextData,
+    CorrelationData,
     canonical_sha256,
     normalize_json_value,
-    normalize_run_context,
+    normalize_correlation,
 )
 from ._graph import TaskNode
 
@@ -56,7 +56,7 @@ class TaskNodeContext(Generic[AppT]):
     input: Mapping[str, JsonValue]
     dependencies: Mapping[str, TaskDependency]
     idempotency_key: str
-    context: RunContextData = field(default_factory=dict)
+    correlation: CorrelationData = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if not isinstance(self.graph_id, str) or not self.graph_id.strip():
@@ -66,10 +66,10 @@ class TaskNodeContext(Generic[AppT]):
         if not isinstance(self.idempotency_key, str) or not self.idempotency_key.strip():
             raise ValueError("task idempotency key is required")
         if not isinstance(self.input, Mapping):
-            raise TypeError("task node context input must be a mapping")
+            raise TypeError("task node correlation input must be a mapping")
         normalized_input = normalize_json_value(dict(self.input))
         if not isinstance(normalized_input, dict):
-            raise TypeError("task node context input must be a mapping")
+            raise TypeError("task node correlation input must be a mapping")
         dependencies = dict(self.dependencies)
         if any(
             not isinstance(key, str)
@@ -80,7 +80,7 @@ class TaskNodeContext(Generic[AppT]):
             raise ValueError("task dependency mapping is invalid")
         object.__setattr__(self, "input", ImmutableJsonMapping(normalized_input))
         object.__setattr__(self, "dependencies", MappingProxyType(dependencies))
-        object.__setattr__(self, "context", normalize_run_context(self.context))
+        object.__setattr__(self, "correlation", normalize_correlation(self.correlation))
 
 
 @runtime_checkable

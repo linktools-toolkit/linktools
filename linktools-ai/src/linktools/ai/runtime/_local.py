@@ -28,7 +28,7 @@ from pydantic_ai_harness.step_persistence import (
 )
 
 from ..agent import AgentBinding, AgentCatalog, SubagentRef
-from ..capability import RunContext, SubagentDelegate
+from ..capability import AgentContext, SubagentDelegate
 from ..workspace import RepositoryInstructions, Workspace
 from ._agent_executor import (
     AgentExecutionPaused,
@@ -691,7 +691,7 @@ class LocalExecutionBackend:
             thinking=execution.thinking,
             binding=execution.binding,
             repository_instructions=execution.repository_instructions,
-            context=execution.context,
+            correlation=execution.context,
         )
         candidate = RecoveryCheckpoint(
             execution_id=execution.execution_id,
@@ -2293,7 +2293,7 @@ class LocalExecutionBackend:
             mode=recovery_input.mode,
             planning=recovery_input.planning,
             thinking=recovery_input.thinking,
-            context=recovery_input.context,
+            correlation=recovery_input.context,
         )
         self._recovery_relaunch_ids.add(checkpoint.execution_id)
         await self.launch(request, execution)
@@ -2675,7 +2675,7 @@ class LocalExecutionBackend:
             thinking=recovery_input.thinking,
             binding=recovery_input.binding,
             repository_instructions=recovery_input.repository_instructions,
-            context=recovery_input.context,
+            correlation=recovery_input.context,
         )
         await self._execution.executions.create_with_history_head(execution)
         return execution
@@ -3707,14 +3707,14 @@ class LocalExecutionBackend:
                 if session is None:
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                 session_metadata = session.metadata
-            public_context = RunContext(
+            public_context = AgentContext(
                 app=self._app,
                 principal=request.principal,
                 workspace=self._workspace,
                 session_id=current.session_id,
                 execution_id=current.execution_id,
                 session_metadata=session_metadata,
-                context=current.context,
+                correlation=current.context,
             )
             plan_store = RuntimePlanStore(
                 self._session_state_store if current.session_id is not None else self._execution_state_store,

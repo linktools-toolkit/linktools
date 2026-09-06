@@ -11,7 +11,7 @@ from typing import Protocol, cast
 
 from linktools.core import environ
 
-from ..core import Page, RunContextData, TaskStatus, canonical_sha256
+from ..core import Page, CorrelationData, TaskStatus, canonical_sha256
 from ..observe import MetricMeasurement, MetricRecorder, Observation
 from ._event import TaskEvent, TaskEventType
 
@@ -49,7 +49,7 @@ class _TaskMetricRepository(Protocol):
 
 
 class _TaskMetricAdmission(Protocol):
-    context: RunContextData
+    context: CorrelationData
 
 
 class _TaskMetricAdmissionRepository(Protocol):
@@ -175,7 +175,7 @@ class _TaskMetricProjector:
             or terminal.status not in _TERMINAL
         ):
             return
-        context: RunContextData = {}
+        context: CorrelationData = {}
         if self._admissions is not None:
             admitted = await self._admissions.get(graph_id, tenant_id=tenant_id)
             if admitted is None:
@@ -279,7 +279,7 @@ class _TaskMetricProjector:
         terminal: TaskEvent,
         *,
         tenant_id: str,
-        context: RunContextData,
+        correlation: CorrelationData,
     ) -> None:
         latency = _latency_ns(admission, terminal)
         if latency is None:
@@ -301,7 +301,7 @@ class _TaskMetricProjector:
                 tenant_id=tenant_id,
                 status=terminal.status.value,
                 error_code=terminal.error_code,
-                correlation=_task_correlation(context, graph_id=terminal.graph_id),
+                correlation=_task_correlation(correlation, graph_id=terminal.graph_id),
                 dimensions={},
                 measurements=(MetricMeasurement("latency_ns", 1, latency),),
             )
@@ -315,14 +315,14 @@ class _TaskMetricProjector:
         attempt: _Attempt,
         *,
         tenant_id: str,
-        context: RunContextData,
+        correlation: CorrelationData,
     ) -> None:
         terminal = cast(TaskEvent, attempt.terminal)
         latency = _latency_ns(attempt.start, terminal)
         if latency is None:
             return
         correlation = _task_correlation(
-            context,
+            correlation,
             graph_id=graph_id,
             node_id=node_id,
             fence=fence,
@@ -361,10 +361,10 @@ class _TaskMetricProjector:
 
 
 def _task_correlation(
-    context: RunContextData,
+    correlation: CorrelationData,
     **system: str | int | None,
 ) -> dict[str, str | int]:
-    correlation: dict[str, str | int] = dict(context)
+    correlation: dict[str, str | int] = dict(correlation)
     for key, value in system.items():
         if value is not None:
             correlation[f"linktools.{key}"] = value

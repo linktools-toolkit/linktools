@@ -13,7 +13,7 @@ from time import monotonic
 
 from linktools.core import environ
 
-from ..core import RunContextData, UsageMetrics, normalize_run_context
+from ..core import CorrelationData, UsageMetrics, normalize_correlation
 from ..errors import AIError, ErrorCode
 from ..observe import MetricMeasurement, MetricRecorder, Metrics, Observation
 from ._execution import _ExecutionTerminalCommitter
@@ -69,10 +69,10 @@ def _disabled_metric_status() -> RuntimeMetricStatus:
 
 
 def _metric_correlation(
-    context: RunContextData | Mapping[str, object] | None,
+    correlation: CorrelationData | Mapping[str, object] | None,
     **system: str | int | None,
 ) -> dict[str, str | int]:
-    values: dict[str, str | int] = dict(normalize_run_context(context))
+    values: dict[str, str | int] = dict(normalize_correlation(correlation))
     for key, value in system.items():
         if value is not None:
             values[f"linktools.{key}"] = value
@@ -96,22 +96,22 @@ class _RuntimeMetricBuffer(MetricRecorder):
         self._last_warning_at = 0.0
         self._writer: asyncio.Task[None] | None = None
         self._resolution_event = asyncio.Event()
-        self._execution_contexts: dict[str, RunContextData] = {}
+        self._execution_contexts: dict[str, CorrelationData] = {}
         self._agent_usage: dict[tuple[str, str], UsageMetrics] = {}
 
     def bind_execution_context(
         self,
         execution_id: str,
-        context: RunContextData | Mapping[str, object],
+        correlation: CorrelationData | Mapping[str, object],
     ) -> bool:
         try:
-            normalized = normalize_run_context(context)
+            normalized = normalize_correlation(correlation)
         except (TypeError, ValueError):
-            self._warn("runtime metric execution context invalid")
+            self._warn("runtime metric execution correlation invalid")
             return False
         current = self._execution_contexts.get(execution_id)
         if current is not None and dict(current) != dict(normalized):
-            self._warn("runtime metric execution context conflict")
+            self._warn("runtime metric execution correlation conflict")
             return False
         self._execution_contexts[execution_id] = normalized
         return True
@@ -469,10 +469,10 @@ class _MetricExecutionTerminalCommitter:
 def _bind_metric_execution_context(
     recorder: MetricRecorder,
     execution_id: str,
-    context: RunContextData,
+    correlation: CorrelationData,
 ) -> None:
     if isinstance(recorder, _RuntimeMetricBuffer):
-        recorder.bind_execution_context(execution_id, context)
+        recorder.bind_execution_context(execution_id, correlation)
 
 
 def _bind_metric_agent_usage(
