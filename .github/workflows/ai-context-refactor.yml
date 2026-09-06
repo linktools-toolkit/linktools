@@ -26,82 +26,45 @@ jobs:
         with:
           python-version: "3.10"
 
-      - name: Fix semantic correlation ownership
+      - name: Complete AgentContext rename
         shell: bash
         run: |
           python - <<'PY'
           from pathlib import Path
           import re
 
-          root = Path("linktools-ai/src/linktools/ai")
-          tests = Path("tests/ai")
-          paths = list(root.rglob("*.py")) + list(tests.rglob("*.py"))
-          member_owners = (
-              "request", "execution", "parent", "previous", "current", "original",
-              "recovery_input", "checkpoint_input", "admission", "admitted", "launch",
-              "existing", "record",
-          )
-          for path in paths:
+          capability = Path("linktools-ai/src/linktools/ai/capability")
+          changed = []
+          for path in capability.rglob("*.py"):
               text = path.read_text()
-              for owner in member_owners:
-                  text = text.replace(f"{owner}.context", f"{owner}.correlation")
-              path.write_text(text)
+              if re.search(r"\bRunContext\b", text):
+                  new = re.sub(r"\bRunContext\b", "AgentContext", text)
+                  path.write_text(new)
+                  changed.append(str(path))
+          print("renamed LinkTools capability context in:")
+          print("\n".join(changed) or "<none>")
 
-          service_api = root / "runtime" / "service_api.py"
-          service_api.write_text(service_api.read_text().replace("_request_context", "_request_correlation"))
-          execution = root / "runtime" / "_execution.py"
-          execution.write_text(execution.read_text().replace("_overlay_execution_context", "_overlay_execution_correlation"))
-
-          local = root / "runtime" / "_local.py"
-          text = local.read_text()
-          old = "                execution_id=current.execution_id,\n                session_metadata=session_metadata,\n                correlation=current.correlation,\n"
-          new = "                execution_id=current.execution_id,\n                session_metadata=session_metadata,\n                memory_scope=current.memory_scope,\n                correlation=current.correlation,\n"
-          if old not in text:
-              raise SystemExit("AgentContext constructor shape not found")
-          local.write_text(text.replace(old, new, 1))
-
-          for path in (root / "runtime" / "_agent.py", root / "runtime" / "_runtime_service.py"):
-              text = path.read_text().replace(
-                  'context: "Mapping[str, object] | None" = None',
-                  'correlation: "Mapping[str, object] | None" = None',
-              )
-              path.write_text(text)
-
-          forbidden = (
-              "RunContextData", "RunContextValue", "normalize_run_context",
-              "overlay_run_context", "merge_run_context",
-          )
+          # A capability-owned RunContext is no longer a valid symbol. PydanticRunContext
+          # remains untouched because only the exact whole word is rejected here.
           bad = []
-          for path in paths:
-              text = path.read_text()
-              for symbol in forbidden:
-                  if symbol in text:
-                      bad.append(f"{path}:{symbol}")
-          if bad:
-              raise SystemExit("old correlation symbols remain:\n" + "\n".join(bad))
-
-          suspicious = re.compile(
-              r"\b(?:request|execution|parent|previous|current|original|recovery_input|checkpoint_input|admission|admitted|launch)\.context\b"
-          )
-          bad = []
-          for path in paths:
+          for path in capability.rglob("*.py"):
               for lineno, line in enumerate(path.read_text().splitlines(), 1):
-                  if suspicious.search(line):
+                  if re.search(r"\bRunContext\b", line):
                       bad.append(f"{path}:{lineno}:{line.strip()}")
           if bad:
-              raise SystemExit("stale .context member reads remain:\n" + "\n".join(bad))
+              raise SystemExit("capability RunContext remains:\n" + "\n".join(bad))
           PY
           python -m compileall -q linktools-ai/src tests/ai
           git diff --check
 
-      - name: Commit semantic fixes
+      - name: Commit rename
         shell: bash
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add linktools-ai tests/ai
           if ! git diff --cached --quiet; then
-            git commit -m "fix(ai): complete correlation ownership rename"
+            git commit -m "refactor(ai): finish agent context rename"
             git push origin HEAD:feat/ai-metrics-observability
           fi
 
