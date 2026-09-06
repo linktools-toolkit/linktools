@@ -421,6 +421,28 @@ def _encode_v1_execution_record(
     return encoded
 
 
+def _encode_v1_recovery_execution_input(
+    value: object,
+    codec: "_VersionCodec",
+    persisted: bool,
+) -> Mapping[str, JsonValue]:
+    if not isinstance(value, RecoveryExecutionInput):
+        raise TypeError(
+            "V1 recovery_execution_input encoder received the wrong type"
+        )
+    encoded = {
+        field.name: _encode_domain(
+            attrgetter(field.name)(value),
+            codec,
+            persisted=persisted,
+        )
+        for field in fields(value)
+    }
+    if not value.context:
+        encoded.pop("context", None)
+    return encoded
+
+
 def _encode_v1_task_graph_admission(
     value: object,
     codec: "_VersionCodec",
@@ -454,6 +476,7 @@ def _encode_v1_recovery_terminal_outcome(
 _V1_DATACLASS_ENCODERS: Mapping[str, DataclassEncoder] = MappingProxyType(
     {
         "execution_record": _encode_v1_execution_record,
+        "recovery_execution_input": _encode_v1_recovery_execution_input,
         "recovery_terminal_outcome": _encode_v1_recovery_terminal_outcome,
         "task_graph_admission": _encode_v1_task_graph_admission,
         "task_node": _encode_v1_task_node,
@@ -1783,6 +1806,7 @@ def _validate_v1_codec_definition() -> None:
         raise RuntimeError("GA v1 enum wire-id registry is incomplete")
     custom_encoders = {
         "execution_record",
+        "recovery_execution_input",
         "recovery_terminal_outcome",
         "task_graph_admission",
         "task_node",
