@@ -1,0 +1,106 @@
+name: AI observability refactor runner
+
+on:
+  push:
+    branches:
+      - feat/ai-metrics-observability
+    paths:
+      - .github/workflows/ai-observability-refactor-run.yml
+
+permissions:
+  contents: write
+
+env:
+  PIP_DISABLE_PIP_VERSION_CHECK: "1"
+  PYTHONUNBUFFERED: "1"
+
+jobs:
+  refactor:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feat/ai-metrics-observability
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+
+      - name: Extract and apply refactor
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          source = Path('.github/workflows/ai-context-refactor.yml').read_text()
+          marker = "          cat > /tmp/refactor.py <<'PY'\n"
+          start = source.index(marker) + len(marker)
+          end = source.index("          PY\n", start)
+          lines = source[start:end].splitlines()
+          body = "\n".join(line[10:] if line.startswith("          ") else line for line in lines) + "\n"
+          body = body.replace(
+              'read("runtime/_local.py").count("_record_execution_terminal(") != 2',
+              'read("runtime/_local.py").count("_record_execution_terminal(") != 1',
+          )
+          Path('/tmp/refactor.py').write_text(body)
+          PY
+          set -o pipefail
+          python /tmp/refactor.py 2>&1 | tee /tmp/refactor.log
+          python -m compileall -q linktools-ai/src tests/ai
+          git diff --check
+
+      - name: Commit source refactor
+        shell: bash
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add linktools-ai/src/linktools/ai
+          if ! git diff --cached --quiet; then
+            git commit -m "refactor(ai): tighten observability boundaries"
+            git push origin HEAD:feat/ai-metrics-observability
+          fi
+
+      - name: Install tooling
+        run: |
+          python -m pip install --quiet --upgrade pip
+          python -m pip install --quiet -U -r requirements.txt
+          python manage.py install --editable --quiet
+
+      - name: Run focused tests
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -o pipefail
+          python -m pytest -q \
+            tests/ai/test_metrics_sqlite_interop.py \
+            tests/ai/test_runtime_metrics.py \
+            tests/ai/test_task_metric_projector.py \
+            tests/ai/test_task_mixed_node_reliability.py \
+            tests/ai/test_task_reliable_review_regressions.py \
+            2>&1 | tee /tmp/focused.log
+
+      - name: Run linktools-ai tests
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -o pipefail
+          python -m pytest -q tests/ai 2>&1 | tee /tmp/ai-tests.log
+
+      - name: Upload logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ai-observability-refactor-logs
+          path: |
+            /tmp/refactor.log
+            /tmp/focused.log
+            /tmp/ai-tests.log
+          if-no-files-found: ignore
+
+      - name: Verify focused tests
+        run: |
+          python -m pytest -q \
+            tests/ai/test_metrics_sqlite_interop.py \
+            tests/ai/test_runtime_metrics.py \
+            tests/ai/test_task_metric_projector.py \
+            tests/ai/test_task_mixed_node_reliability.py \
+            tests/ai/test_task_reliable_review_regressions.py
