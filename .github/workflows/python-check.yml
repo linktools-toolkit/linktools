@@ -57,6 +57,22 @@ jobs:
       - name: Run checks
         run: python manage.py check --skip-compatibility
 
+  python311_ai:
+    name: Python 3.11 linktools-ai checks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.11'
+      - name: Install tooling
+        run: |
+          python -m pip install --quiet --upgrade pip
+          python -m pip install --quiet -U -r requirements.txt
+          python manage.py install --editable --quiet
+      - name: Run linktools-ai checks
+        run: python manage.py check linktools-ai --skip-compatibility
+
   python_latest:
     name: Python latest checks
     runs-on: ubuntu-latest
