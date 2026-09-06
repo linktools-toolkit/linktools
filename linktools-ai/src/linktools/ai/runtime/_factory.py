@@ -579,9 +579,6 @@ async def _build_local_components(
             state.task.tasks,
             task_runner,
             owner=f"runtime:{tenant_id}:{uuid.uuid4().hex}",
-            metric_recorder=metric_buffer,
-            metric_source_namespace=metric_source_namespace,
-            metric_admissions=state.task.admissions,
         )
         task_service = DefaultTaskService(
             state.task,

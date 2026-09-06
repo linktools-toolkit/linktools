@@ -149,14 +149,24 @@ def build_metrics_sql_metadata(*, metadata: "MetaData | None" = None) -> "MetaDa
 
 
 class SqlMetricStore:
-    def __init__(self, engine: "AsyncEngine") -> None:
+    def __init__(
+        self,
+        engine: "AsyncEngine",
+        *,
+        validate_schema: bool = True,
+    ) -> None:
+        if not isinstance(validate_schema, bool):
+            raise TypeError("validate_schema must be bool")
         self._metadata = build_metrics_sql_metadata()
         self._definitions = self._metadata.tables["ai_metric_definitions"]
         self._observations = self._metadata.tables["ai_metric_observations"]
         self._context = create_sql_storage_context(engine)
+        self._validate_schema = validate_schema
 
     async def _initialize(self) -> None:
-        await self._context.initialize(metadata=self._metadata)
+        await self._context.initialize(
+            metadata=self._metadata if self._validate_schema else None
+        )
 
     async def put_definition(
         self,

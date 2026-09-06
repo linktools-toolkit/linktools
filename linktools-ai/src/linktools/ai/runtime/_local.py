@@ -9,7 +9,6 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
-from time import monotonic_ns
 from typing import Protocol, TypeVar, cast
 
 from linktools.core import environ
@@ -78,7 +77,6 @@ from ._event import ExecutionDelta, LiveExecutionEventBroker
 from ._execution import CancelEffectOutcome, ExecutionStartIdentity
 from ._metrics import (
     _record_execution_terminal,
-    _record_storage_operation,
     _release_metric_execution_context,
 )
 from ._object import RuntimeObjectKeyFactory, put_runtime_object, read_runtime_object
@@ -747,14 +745,6 @@ class LocalExecutionBackend:
             recovery_checkpoint=candidate if self._recovery_enabled else None,
             session_id=execution.session_id,
             expected_cursor=expected,
-        )
-        _record_storage_operation(
-            self._metric_recorder,
-            source_namespace=self._namespace,
-            tenant_id=execution.tenant_id,
-            domain="execution",
-            target="runtime",
-            status="SUCCEEDED",
         )
         _logger.info("execution start checkpoint committed: execution=%s", execution.execution_id)
         return started
@@ -3421,10 +3411,6 @@ class LocalExecutionBackend:
             recovery_relaunch_ids = set()
         exact_recovery_context = execution_id in recovery_relaunch_ids
         recovery_relaunch_ids.discard(execution_id)
-        operation_started_at = (
-            None if self._metric_recorder is None else monotonic_ns()
-        )
-        operation_result = "failure"
         claimed_from_admitted = False
         try:
             current = await self._execution.executions.get(execution_id, tenant_id=original.tenant_id)
@@ -3842,7 +3828,6 @@ class LocalExecutionBackend:
                                 execution_id,
                             )
                         raise _secondary_execution_error(commit_error, error) from error
-                operation_result = _execution_operation_result(current.status)
                 _logger.exception(
                     "local execution failed: execution=%s",
                     execution_id,
@@ -3852,7 +3837,6 @@ class LocalExecutionBackend:
                 if not self._recovery_enabled or checkpoint is None:
                     raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
                 await self._commit_approval_pause(current, result)
-                operation_result = "success"
                 return
             committed = await self._commit_success(
                 current,
@@ -3861,7 +3845,6 @@ class LocalExecutionBackend:
                 result.usage,
                 run_id,
             )
-            operation_result = _execution_operation_result(committed.status)
             _logger.debug("local execution completed: execution=%s run=%s", execution_id, run_id)
         except asyncio.CancelledError:
             current = await self._execution.executions.get(
@@ -3897,15 +3880,6 @@ class LocalExecutionBackend:
                     StopReason.CANCELLED,
                     run_id=run_id,
                 )
-            if current is not None and current.status in {
-                ExecutionStatus.SUCCEEDED,
-                ExecutionStatus.FAILED,
-                ExecutionStatus.CANCELLED,
-                ExecutionStatus.CANCELLING,
-            }:
-                operation_result = _execution_operation_result(current.status)
-            if execution_id in self._worker_shutdown_set():
-                operation_result = "cancelled"
             raise
         except Exception:
             _logger.exception(
@@ -3913,24 +3887,6 @@ class LocalExecutionBackend:
                 execution_id,
             )
             raise
-        finally:
-            _record_storage_operation(
-                self._metric_recorder,
-                source_namespace=self._namespace,
-                tenant_id=original.tenant_id,
-                domain="execution",
-                target="runtime",
-                status={
-                    "success": "SUCCEEDED",
-                    "failure": "FAILED",
-                    "cancelled": "CANCELLED",
-                }[operation_result],
-                latency_ns=(
-                    None
-                    if operation_started_at is None
-                    else max(0, monotonic_ns() - operation_started_at)
-                ),
-            )
 
     async def _finish_checkpoint(self, checkpoint: RecoveryCheckpoint) -> None:
         if checkpoint.state is RecoveryCheckpointState.COMPLETED:

@@ -21,7 +21,6 @@ from ..core import (
     validate_lease_owner,
 )
 from ..errors import AIError, ErrorCode
-from ..observe import MetricRecorder
 from ..storage import StoredPayload
 from ._event import TaskEvent
 from ._graph import (
@@ -34,7 +33,7 @@ from ._graph import (
     TaskNodeView,
     TaskResultRecord,
 )
-from ._metrics import _TaskMetricAdmissionRepository, _TaskMetricProjector
+from ._metrics import _TaskMetricProjector
 
 _logger = environ.get_logger("ai.task.local")
 _HEARTBEAT_SECONDS = 30.0
@@ -292,34 +291,25 @@ class LocalTaskGraphLauncher:
         runner: TaskNodeRunner,
         *,
         owner: str,
-        metric_recorder: MetricRecorder | None = None,
-        metric_source_namespace: str | None = None,
-        metric_admissions: "_TaskMetricAdmissionRepository | None" = None,
     ) -> None:
         try:
             validate_lease_owner(owner)
         except AIError as error:
             raise ValueError("task launcher lease owner is invalid") from error
-        if (metric_recorder is None) != (metric_source_namespace is None):
-            raise ValueError(
-                "task metric recorder and source namespace must be configured together"
-            )
         self._repository = repository
         self._runner = runner
         self._owner = owner
-        self._metric_projector = (
-            None
-            if metric_recorder is None or metric_source_namespace is None
-            else _TaskMetricProjector(
-                repository,
-                metric_recorder,
-                source_namespace=metric_source_namespace,
-                admissions=metric_admissions,
-            )
-        )
+        self._metric_projector = None
         self._graphs: dict[tuple[str, str], _GraphRun] = {}
         self._lock = asyncio.Lock()
         self._accepting = True
+
+    def _bind_metric_projector(self, projector: _TaskMetricProjector) -> None:
+        if not isinstance(projector, _TaskMetricProjector):
+            raise TypeError("projector must be _TaskMetricProjector")
+        if self._metric_projector is not None and self._metric_projector is not projector:
+            raise RuntimeError("task metric projector is already bound")
+        self._metric_projector = projector
 
     async def start(self, request: TaskGraphLaunch) -> TaskGraphHandle:
         if not self._accepting:
@@ -446,8 +436,6 @@ class LocalTaskGraphLauncher:
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
         await self._drain_runner_background()
-        if self._metric_projector is not None:
-            await self._metric_projector.close()
         async with self._lock:
             self._graphs.clear()
 

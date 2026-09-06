@@ -20,6 +20,7 @@ _EVENT_PAGE_SIZE = 1000
 _MAX_PROJECTION_EVENTS = 100_000
 _PROJECTION_TIMEOUT_SECONDS = 5.0
 _DRAIN_TIMEOUT_SECONDS = 5.0
+_PROJECTED_CACHE_SIZE = 4096
 _TERMINAL = frozenset(
     {
         TaskStatus.SUCCEEDED,
@@ -81,13 +82,16 @@ class _TaskMetricProjector:
         self._recorder = recorder
         self._admissions = admissions
         self._source_namespace = source_namespace
-        self._tasks: dict[tuple[str, str], asyncio.Task[None]] = {}
+        self._tasks: dict[tuple[str, str], asyncio.Task[bool]] = {}
+        self._projected: dict[tuple[str, str], None] = {}
         self._accepting = True
 
     def trigger(self, graph_id: str, *, tenant_id: str) -> None:
         if not self._accepting:
             return
         key = (tenant_id, graph_id)
+        if key in self._projected:
+            return
         existing = self._tasks.get(key)
         if existing is not None and not existing.done():
             return
@@ -97,9 +101,12 @@ class _TaskMetricProjector:
         )
         self._tasks[key] = task
 
-        def consume(done: asyncio.Task[None]) -> None:
+        def consume(done: asyncio.Task[bool]) -> None:
             try:
-                done.result()
+                if done.result():
+                    self._projected[key] = None
+                    while len(self._projected) > _PROJECTED_CACHE_SIZE:
+                        self._projected.pop(next(iter(self._projected)))
             except asyncio.CancelledError:
                 pass
             except BaseException:  # noqa: BLE001
@@ -131,22 +138,24 @@ class _TaskMetricProjector:
             await asyncio.gather(*pending, return_exceptions=True)
             raise
 
-    async def _project_bounded(self, graph_id: str, *, tenant_id: str) -> None:
+    async def _project_bounded(self, graph_id: str, *, tenant_id: str) -> bool:
         try:
-            await asyncio.wait_for(
+            return await asyncio.wait_for(
                 self._project(graph_id, tenant_id=tenant_id),
                 _PROJECTION_TIMEOUT_SECONDS,
             )
         except asyncio.TimeoutError:
             _logger.warning("task metric projection timed out: graph=%s", graph_id)
+            return False
         except Exception as error:
             _logger.warning(
                 "task metric projection skipped: graph=%s error=%s",
                 graph_id,
                 type(error).__name__,
             )
+            return False
 
-    async def _project(self, graph_id: str, *, tenant_id: str) -> None:
+    async def _project(self, graph_id: str, *, tenant_id: str) -> bool:
         first_page = await self._repository.list_events(
             graph_id,
             tenant_id=tenant_id,
@@ -173,14 +182,14 @@ class _TaskMetricProjector:
             or terminal.node_id is not None
             or terminal.status not in _TERMINAL
         ):
-            return
+            return False
         correlation: CorrelationData = {}
         if self._admissions is not None:
             admitted = await self._admissions.get(graph_id, tenant_id=tenant_id)
             if admitted is None:
                 raise ValueError("task metric admission is missing")
             correlation = admitted.correlation
-        self._record_graph(
+        accepted = self._record_graph(
             terminal,
             tenant_id=tenant_id,
             correlation=correlation,
@@ -211,7 +220,7 @@ class _TaskMetricProjector:
                         graph_id,
                         event_count,
                     )
-                    return
+                    return False
                 self._consume_node_event(attempts, event)
             if page.next_cursor is None:
                 break
@@ -219,14 +228,18 @@ class _TaskMetricProjector:
         for (node_id, fence), attempt in attempts.items():
             if attempt.invalid or attempt.terminal is None:
                 continue
-            self._record_attempt(
-                graph_id,
-                node_id,
-                fence,
-                attempt,
-                tenant_id=tenant_id,
-                correlation=correlation,
+            accepted = (
+                self._record_attempt(
+                    graph_id,
+                    node_id,
+                    fence,
+                    attempt,
+                    tenant_id=tenant_id,
+                    correlation=correlation,
+                )
+                and accepted
             )
+        return accepted
 
     @staticmethod
     def _consume_node_event(
@@ -277,8 +290,8 @@ class _TaskMetricProjector:
         *,
         tenant_id: str,
         correlation: CorrelationData,
-    ) -> None:
-        self._safe_record(
+    ) -> bool:
+        return self._safe_record(
             lambda: Observation(
                 version=1,
                 observation_id=canonical_sha256(
@@ -310,7 +323,7 @@ class _TaskMetricProjector:
         *,
         tenant_id: str,
         correlation: CorrelationData,
-    ) -> None:
+    ) -> bool:
         terminal = cast(TaskEvent, attempt.terminal)
         correlation = _task_correlation(
             correlation,
@@ -319,7 +332,7 @@ class _TaskMetricProjector:
             fence=fence,
             execution_id=attempt.execution_id,
         )
-        self._safe_record(
+        return self._safe_record(
             lambda: Observation(
                 version=1,
                 observation_id=canonical_sha256(
@@ -344,11 +357,12 @@ class _TaskMetricProjector:
             )
         )
 
-    def _safe_record(self, factory: Callable[[], Observation]) -> None:
+    def _safe_record(self, factory: Callable[[], Observation]) -> bool:
         try:
-            self._recorder.try_record(factory())
+            return self._recorder.try_record(factory())
         except Exception:
             _logger.exception("task metric observation rejected")
+            return False
 
 
 def _task_correlation(

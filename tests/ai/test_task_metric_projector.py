@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -18,6 +19,7 @@ pytestmark = pytest.mark.asyncio
 class _Repository:
     def __init__(self, events: tuple[TaskEvent, ...]) -> None:
         self.events = events
+        self.list_calls = 0
 
     async def list_events(
         self,
@@ -28,6 +30,7 @@ class _Repository:
         limit: int,
     ) -> Page[TaskEvent]:
         del tenant_id
+        self.list_calls += 1
         selected = tuple(
             event
             for event in self.events
@@ -257,3 +260,20 @@ async def test_one_rejected_task_fact_does_not_abort_later_attempts() -> None:
     assert [observation.kind for observation in recorder.observations] == [
         "linktools.task.node.attempt"
     ]
+
+
+@pytest.mark.asyncio
+async def test_trigger_deduplicates_successful_projection() -> None:
+    now = datetime(2026, 9, 5, tzinfo=timezone.utc)
+    repository = _Repository((_admitted("dedup", now), _graph_terminal("dedup", 2, now + timedelta(seconds=1))))
+    recorder = _Recorder()
+    projector = _TaskMetricProjector(repository, recorder, source_namespace="workspace")
+    projector.trigger("dedup", tenant_id="tenant")
+    while projector._tasks:
+        await asyncio.sleep(0)
+    first_calls = repository.list_calls
+    assert first_calls == 2
+    projector.trigger("dedup", tenant_id="tenant")
+    await asyncio.sleep(0)
+    assert repository.list_calls == first_calls
+    await projector.close()

@@ -31,6 +31,7 @@ from linktools.ai.task import (
     TaskNodeRunResult,
     TaskNodeView,
 )
+from linktools.ai.task._metrics import _TaskMetricProjector
 from linktools.ai.workspace import Workspace
 from pydantic_ai.models.test import TestModel
 
@@ -536,13 +537,17 @@ async def test_task_commit_unknown_readback_projects_durable_terminal_history() 
     node = TaskNode("node", input={"type": "agent"})
     repository = _CommitUnknownTaskRepository(node)
     recorder = _CaptureRecorder()
+    projector = _TaskMetricProjector(
+        repository,  # type: ignore[arg-type]
+        recorder,
+        source_namespace="workspace",
+    )
     launcher = LocalTaskGraphLauncher(
         repository,  # type: ignore[arg-type]
         _SuccessfulTaskRunner(),  # type: ignore[arg-type]
         owner="worker",
-        metric_recorder=recorder,
-        metric_source_namespace="workspace",
     )
+    launcher._bind_metric_projector(projector)
     launch = TaskGraphLaunch(
         TaskGraph("graph", (node,)),
         Principal("owner", "tenant"),
@@ -555,6 +560,7 @@ async def test_task_commit_unknown_readback_projects_durable_terminal_history() 
             break
         await asyncio.sleep(0)
     await launcher.shutdown()
+    await projector.close()
 
     assert repository.complete_calls == 1
     assert repository.list_event_calls == 2

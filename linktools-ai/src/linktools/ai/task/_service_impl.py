@@ -6,7 +6,7 @@ import asyncio
 from collections.abc import AsyncIterator
 from dataclasses import replace
 from datetime import datetime, timezone
-from typing import Protocol, cast
+from typing import Protocol, cast, runtime_checkable
 
 from linktools.core import environ
 
@@ -47,6 +47,11 @@ from ._service import TaskApi, TaskGraphLauncher
 _logger = environ.get_logger("ai.task.service")
 _GRAPH_OBSERVATION_RECHECK_SECONDS = 1.0
 _TASK_EVENT_READ_LIMIT = 200
+
+
+@runtime_checkable
+class _TaskMetricProjectorBinder(Protocol):
+    def _bind_metric_projector(self, projector: _TaskMetricProjector) -> None: ...
 
 
 class _LocalTaskWaiter(Protocol):
@@ -216,6 +221,11 @@ class DefaultTaskService(TaskApi):
                 admissions=persistence.admissions,
             )
         )
+        if (
+            self._metric_projector is not None
+            and isinstance(launcher, _TaskMetricProjectorBinder)
+        ):
+            launcher._bind_metric_projector(self._metric_projector)
         self._detached_finalizers: set[asyncio.Task[object]] = set()
         self._detached_finalizer_failure: AIError | None = None
 

@@ -5,7 +5,6 @@
 from __future__ import annotations
 
 import asyncio
-import uuid
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
@@ -470,39 +469,6 @@ def _record_execution_terminal(
             },
             measurements=tuple(measurements),
             occurred_at=result.result.created_at,
-        ),
-    )
-
-
-def _record_storage_operation(
-    recorder: MetricRecorder | None,
-    *,
-    source_namespace: str,
-    tenant_id: str,
-    domain: str,
-    target: str,
-    status: str,
-    error_code: str | None = None,
-    latency_ns: int | None = None,
-) -> None:
-    if recorder is None:
-        return
-    measurements = (
-        ()
-        if latency_ns is None
-        else (_measurement("latency_ns", latency_ns),)
-    )
-    _try_record(
-        recorder,
-        lambda: _observation(
-            observation_id=uuid.uuid4().hex,
-            kind="linktools.storage.operation",
-            source_namespace=source_namespace,
-            tenant_id=tenant_id,
-            status=status,
-            error_code=error_code,
-            dimensions={"domain": domain, "target": target},
-            measurements=measurements,
         ),
     )
 
