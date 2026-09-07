@@ -919,7 +919,7 @@ def _percentile_pick_sql(
         coarse, residual = _postgresql_numeric_order()
         return f"""SELECT
         {select_prefix}COUNT(*) AS sample_count,
-        row_to_json(percentile_disc(:percentile) WITHIN GROUP (
+        row_to_json(percentile_disc(CAST(:percentile AS DOUBLE PRECISION)) WITHIN GROUP (
             ORDER BY ROW({coarse}, {residual}, occurred_at, observation_digest, raw_value)
         )) ->> 'f5' AS selected_value
     FROM valid_samples{group_sql}"""
