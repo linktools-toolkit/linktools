@@ -142,7 +142,13 @@ async def _sql_features_available(
         minimum = (9, 4) if plan.aggregation is MetricAggregation.PERCENTILE else (9, 3)
         return version >= minimum
 
-    window = plan.aggregation in {MetricAggregation.LATEST, MetricAggregation.PERCENTILE}
+    window = plan.aggregation in {
+        MetricAggregation.LATEST,
+        MetricAggregation.PERCENTILE,
+        MetricAggregation.SUM,
+        MetricAggregation.MEAN,
+        MetricAggregation.RATE,
+    }
     if version < ((3, 25, 0) if window else (3, 9, 0)):
         return False
 
@@ -316,6 +322,13 @@ def _measurement_sql(
         MetricAggregation.LATEST,
         MetricAggregation.PERCENTILE,
     } or (
+        dialect_name == "sqlite"
+        and plan.aggregation in {
+            MetricAggregation.SUM,
+            MetricAggregation.MEAN,
+            MetricAggregation.RATE,
+        }
+    ) or (
         dialect_name != "sqlite"
         and plan.aggregation in {MetricAggregation.MIN, MetricAggregation.MAX}
     )
@@ -575,7 +588,8 @@ def _measurement_valid_predicate(
         base = (
             "r.value_type IN ('integer', 'real') AND "
             "(r.value_type != 'integer' OR "
-            "r.numeric_value BETWEEN :int64_min AND :int64_max)"
+            "r.numeric_value BETWEEN :int64_min AND :int64_max) AND "
+            "(r.value_type != 'real' OR ABS(r.numeric_value) <= 1.7976931348623157e308)"
         )
     elif dialect_name == "mysql":
         base = (
@@ -649,28 +663,7 @@ def _measurement_sum_sql(
     FROM valid_samples{group_sql}"""
 
     if dialect_name == "sqlite":
-        # Each limb stays within int64 at the admitted sample count. Recombine
-        # only the two aggregate values in Python, never the individual samples.
-        base = _SUM_LIMB_BASE
-        correlation = " AND ".join(
-            f"v.{column} IS totals.{column}" for column in partition_columns
-        )
-        where_sql = f" WHERE {correlation}" if correlation else ""
-        return f"""WITH totals AS (
-        SELECT
-            {select_prefix}COUNT(*) AS sample_count,
-            SUM(CASE WHEN value_type = 'integer'
-                THEN numeric_value / {base} ELSE 0 END) AS integer_sum_high,
-            SUM(CASE WHEN value_type = 'integer'
-                THEN numeric_value % {base} ELSE 0 END) AS integer_sum_low,
-            SUM(CASE WHEN value_type = 'real' THEN 1 ELSE 0 END) AS floating_count
-        FROM valid_samples{group_sql}
-    )
-    SELECT totals.*,
-        CASE WHEN floating_count > 0 THEN (
-            SELECT SUM(v.numeric_value) FROM valid_samples AS v{where_sql}
-        ) ELSE NULL END AS sample_sum
-    FROM totals"""
+        return _sqlite_sum_sql(partition_columns)
 
     if dialect_name == "mysql":
         integer_test = "value_type = 'INTEGER'"
@@ -686,6 +679,74 @@ def _measurement_sum_sql(
             THEN {integer_value} ELSE NULL END) AS integer_sum_low,
         SUM(CASE WHEN {integer_test} THEN 0 ELSE 1 END) AS floating_count
     FROM valid_samples{group_sql}"""
+
+
+def _sqlite_sum_sql(partition_columns: list[str]) -> str:
+    columns = ", ".join(partition_columns)
+    prefix = f"{columns}, " if columns else ""
+    group_sql = f" GROUP BY {columns}" if columns else ""
+    partition_sql = (
+        "PARTITION BY " + ", ".join(f"v.{column}" for column in partition_columns) + " "
+        if columns else ""
+    )
+    source_prefix = "".join(f"v.{column}, " for column in partition_columns)
+    next_prefix = "".join(f"n.{column}, " for column in partition_columns)
+    totals_join = " AND ".join(
+        f"v.{column} IS t.{column}" for column in partition_columns
+    ) or "1 = 1"
+    next_join = " AND ".join(
+        f"n.{column} IS s.{column}" for column in partition_columns
+    ) or "1 = 1"
+    base = _SUM_LIMB_BASE
+    # SQLite SUM uses compensated floating addition. Scalar addition in scan
+    # order preserves the query contract; all-integer partitions need no fold.
+    return f"""WITH RECURSIVE totals AS (
+        SELECT {prefix}COUNT(*) AS sample_count,
+            SUM(CASE WHEN value_type = 'integer'
+                THEN numeric_value / {base} ELSE 0 END) AS integer_sum_high,
+            SUM(CASE WHEN value_type = 'integer'
+                THEN numeric_value % {base} ELSE 0 END) AS integer_sum_low,
+            SUM(CASE WHEN value_type = 'real' THEN 1 ELSE 0 END) AS floating_count
+        FROM valid_samples{group_sql}
+    ), ordered AS (
+        SELECT {source_prefix}v.numeric_value, v.value_type, t.sample_count,
+            ROW_NUMBER() OVER (
+                {partition_sql}ORDER BY occurred_at, observation_digest
+            ) AS ordinal
+        FROM valid_samples AS v
+        JOIN totals AS t ON {totals_join}
+        WHERE t.floating_count > 0
+    ), folded AS (
+        SELECT {prefix}ordinal, sample_count,
+            CASE WHEN value_type = 'integer'
+                THEN numeric_value / {base} ELSE 0 END AS integer_sum_high,
+            CASE WHEN value_type = 'integer'
+                THEN numeric_value % {base} ELSE 0 END AS integer_sum_low,
+            CASE WHEN value_type = 'real' THEN 1 ELSE 0 END AS floating_count,
+            CASE WHEN value_type = 'real' THEN numeric_value ELSE NULL END AS sample_sum
+        FROM ordered WHERE ordinal = 1
+        UNION ALL
+        SELECT {next_prefix}n.ordinal, n.sample_count,
+            s.integer_sum_high + CASE WHEN n.value_type = 'integer'
+                THEN n.numeric_value / {base} ELSE 0 END,
+            s.integer_sum_low + CASE WHEN n.value_type = 'integer'
+                THEN n.numeric_value % {base} ELSE 0 END,
+            s.floating_count + CASE WHEN n.value_type = 'real' THEN 1 ELSE 0 END,
+            CASE WHEN s.floating_count > 0 THEN s.sample_sum + n.numeric_value
+                WHEN n.value_type = 'real' THEN
+                    (s.integer_sum_high * 1.0 * {base} + s.integer_sum_low * 1.0)
+                    + n.numeric_value
+                ELSE NULL END
+        FROM folded AS s
+        JOIN ordered AS n ON n.ordinal = s.ordinal + 1 AND {next_join}
+    )
+    SELECT {prefix}sample_count, integer_sum_high, integer_sum_low,
+        floating_count, NULL AS sample_sum
+    FROM totals WHERE COALESCE(floating_count, 0) = 0
+    UNION ALL
+    SELECT {prefix}sample_count, integer_sum_high, integer_sum_low,
+        floating_count, sample_sum
+    FROM folded WHERE ordinal = sample_count"""
 
 
 def _measurement_pick_sql(
@@ -704,11 +765,14 @@ def _measurement_pick_sql(
     if aggregation is MetricAggregation.LATEST:
         order_sql = "occurred_at DESC, observation_digest DESC"
     else:
-        value = "raw_value" if dialect_name == "mysql" else "numeric_value"
         direction = "ASC" if aggregation is MetricAggregation.MIN else "DESC"
-        order_sql = (
-            f"{value} {direction}, occurred_at ASC, observation_digest ASC"
-        )
+        if dialect_name == "postgresql":
+            coarse, residual = _postgresql_numeric_order()
+            value_order = f"{coarse} {direction}, {residual} {direction}"
+        else:
+            value = "raw_value" if dialect_name == "mysql" else "numeric_value"
+            value_order = f"{value} {direction}"
+        order_sql = f"{value_order}, occurred_at ASC, observation_digest ASC"
     return f"""SELECT
         {select_prefix}sample_count,
         raw_value AS selected_value
@@ -731,9 +795,12 @@ def _percentile_pick_sql(
         select_prefix += ",\n        "
     group_sql = f"\n    GROUP BY {', '.join(partition_columns)}" if partition_columns else ""
     if dialect_name == "postgresql":
+        coarse, residual = _postgresql_numeric_order()
         return f"""SELECT
         {select_prefix}COUNT(*) AS sample_count,
-        percentile_disc(:percentile) WITHIN GROUP (ORDER BY numeric_value) AS selected_value
+        row_to_json(percentile_disc(:percentile) WITHIN GROUP (
+            ORDER BY ROW({coarse}, {residual}, occurred_at, observation_digest, raw_value)
+        )) ->> 'f5' AS selected_value
     FROM valid_samples{group_sql}"""
 
     partition_sql = (
@@ -764,6 +831,21 @@ def _percentile_pick_sql(
         FROM valid_samples
     ) AS ranked
     WHERE sample_rank = {target_rank}"""
+
+
+def _postgresql_numeric_order() -> tuple[str, str]:
+    coarse = "CAST(raw_value AS DOUBLE PRECISION)"
+    integer = "CAST(raw_value AS BIGINT)"
+    # Rounding an int64 to float is monotone. A small exact residual orders
+    # integers sharing that float, without treating a float's short JSON
+    # representation as its exact decimal value.
+    residual = (
+        "CASE WHEN raw_value ~ '^-?[0-9]+$' THEN CASE "
+        f"WHEN {coarse} >= 9223372036854775808.0 THEN "
+        f"{integer} - 9223372036854775807 - 1 "
+        f"ELSE {integer} - CAST({coarse} AS BIGINT) END ELSE 0 END"
+    )
+    return coarse, residual
 
 
 def _facet_parts(field: str) -> tuple[str, ...]:
@@ -980,15 +1062,6 @@ def _coerce_sample_number(value: object) -> int | float | None:
         if not math.isfinite(value):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         return 0.0 if value == 0.0 else value
-    if isinstance(value, Decimal):
-        if not value.is_finite():
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        if value == value.to_integral_value() and _INT64_MIN <= value <= _INT64_MAX:
-            return int(value)
-        floating = float(value)
-        if not math.isfinite(floating):
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        return 0.0 if floating == 0.0 else floating
     if isinstance(value, str):
         try:
             decoded = json.loads(value)
@@ -1006,7 +1079,7 @@ def _coerce_aggregate_number(value: object) -> int | float | None:
     if isinstance(value, int):
         return value
     if isinstance(value, float):
-        if not math.isfinite(value):
+        if math.isnan(value):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         return 0.0 if value == 0.0 else value
     if isinstance(value, Decimal):
