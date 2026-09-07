@@ -222,3 +222,48 @@ def test_server_large_integer_correlation_filter(_server: tuple[str, list[str]])
     plan = replace(_plan(), correlation_filters=(("attempt", 2**53 + 1),))
     result = _run(_server, ((0, None, 1.0), (1, None, 2**53 + 1)), plan)
     assert result == {((), None): (1.0 + (2**53 + 1), 2)}
+
+
+def test_server_sum_large_window_uses_one_source_scan(_server: tuple[str, list[str]]) -> None:
+    name, command = _server
+    plan = _plan()
+    dialect = postgresql.dialect(paramstyle="named") if name == "postgresql" else mysql.dialect(paramstyle="named")
+    statement, params = _measurement_sql(name, plan, _base_params("ns", name, plan))
+    sql = str(text(statement).bindparams(**params).compile(dialect=dialect, compile_kwargs={"literal_binds": True}))
+    payload = json.dumps({"observation": {"measurements": [{"name": "value", "revision": 1, "value": 1.0}]}})
+    if name == "postgresql":
+        schema = "CREATE TEMPORARY TABLE ai_metric_observations (namespace_digest TEXT, kind TEXT, occurred_at TIMESTAMPTZ, observation_digest TEXT, payload_json JSON);"
+        seed = "INSERT INTO ai_metric_observations SELECT 'ns', 'business.numeric', CAST(:start AS TIMESTAMPTZ) + i * INTERVAL '1 microsecond', LPAD(CAST(i AS TEXT), 64, '0'), CAST(:payload AS JSON) FROM generate_series(0, 99999) AS n(i);"
+        explain = "EXPLAIN (ANALYZE, FORMAT JSON) " + sql
+        result_query = "SELECT json_agg(q) FROM (" + sql + ") AS q;"
+    else:
+        schema = "CREATE TABLE ai_metric_observations (namespace_digest VARCHAR(64), kind VARCHAR(128), occurred_at DATETIME(6), observation_digest VARCHAR(64), payload_json JSON);"
+        digits = " UNION ALL ".join(f"SELECT {i} AS d" for i in range(10))
+        number = " + ".join(f"d{i}.d * {10**i}" for i in range(5))
+        generator = " CROSS JOIN ".join(f"digits AS d{i}" for i in range(5))
+        seed = f"INSERT INTO ai_metric_observations WITH digits AS ({digits}), numbers AS (SELECT {number} AS i FROM {generator}) SELECT 'ns', 'business.numeric', TIMESTAMPADD(MICROSECOND, i, CAST(:start AS DATETIME(6))), LPAD(CAST(i AS CHAR), 64, '0'), CAST(:payload AS JSON) FROM numbers;"
+        explain = "EXPLAIN ANALYZE " + sql
+        result_query = "SELECT JSON_OBJECT('sample_sum', q.sample_sum, 'sample_count', q.sample_count, 'invalid_count', q.invalid_count) FROM (" + sql + ") AS q;"
+    seed_sql = str(text(seed).bindparams(start=plan.start.replace(tzinfo=None), payload=payload).compile(dialect=dialect, compile_kwargs={"literal_binds": True}))
+    script = "DROP TABLE IF EXISTS ai_metric_observations;\n" + schema + "\n" + seed_sql
+    script += "\n" + explain + ";\nSELECT '__METRIC_RESULT__';\n" + result_query
+    completed = subprocess.run(command, input=script, capture_output=True, text=True, timeout=45)
+    assert completed.returncode == 0, completed.stderr
+    execution_plan, separator, result = completed.stdout.partition("__METRIC_RESULT__\n")
+    assert separator, completed.stdout
+    rows = json.loads(result) if name == "postgresql" else [json.loads(line) for line in result.splitlines()]
+    assert len(rows) == 1 and rows[0]["invalid_count"] == 0
+    assert rows[0]["sample_count"] == 100000 and rows[0]["sample_sum"] == 100000.0
+    if name == "postgresql":
+        pending = [json.loads(execution_plan)[0]["Plan"]]
+        sources = []
+        while pending:
+            node = pending.pop()
+            if node.get("Relation Name") == "ai_metric_observations":
+                sources.append(node)
+            pending.extend(node.get("Plans", ()))
+        assert len(sources) == 1, execution_plan
+        assert sources[0]["Actual Loops"] == 1, execution_plan
+    else:
+        sources = [line for line in execution_plan.splitlines() if " on ai_metric_observations " in line]
+        assert len(sources) == 1 and "loops=1)" in sources[0], execution_plan
