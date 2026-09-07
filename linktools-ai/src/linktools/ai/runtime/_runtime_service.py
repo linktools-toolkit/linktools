@@ -20,16 +20,16 @@ from ..agent import (
 )
 from ..capability import CapabilityGroup
 from ..core import (
+    CorrelationData,
     ExecutionMode,
     JsonValue,
     Principal,
     PrincipalKind,
-    CorrelationData,
     SessionStatus,
     TaskStatus,
     ThinkingValue,
-    normalize_execution_mode,
     normalize_correlation,
+    normalize_execution_mode,
     normalize_thinking,
     overlay_correlation,
     validate_agent_id,
@@ -54,7 +54,7 @@ from ..task import (
 from ..workspace import Workspace
 from ._agent import Agent, Execution, Session
 from ._context import RuntimeContext
-from ._input import UserPromptTransport
+from ._input import UserPromptTransport, _restore_user_prompt, task_prompt_draft
 from ._metrics import (
     RuntimeMetricFlushResult,
     RuntimeMetricStatus,
@@ -663,10 +663,7 @@ class Runtime(Generic[AppT]):
                 "version": 2,
                 "stage": "draft",
                 "binding": binding.snapshot.to_payload(),
-                "prompt": {
-                    "codec": user_prompt.codec,
-                    "value": str(user_prompt),
-                },
+                "prompt": task_prompt_draft(_restore_user_prompt(user_prompt)),
                 "attachments": list(resolved_attachments),
                 "mode": "run",
                 "planning": resolved_planning,
