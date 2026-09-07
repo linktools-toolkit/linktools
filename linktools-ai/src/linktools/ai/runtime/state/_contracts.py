@@ -57,7 +57,9 @@ from ...task import (
     TaskResultRecord,
     TaskTerminalRecord,
 )
+from ._attachments import AttachmentEntry
 from ._plan import RuntimeDomain
+from ._relocation import PathOrigin
 
 if TYPE_CHECKING:
     from .._tool import ToolStateRepository
@@ -78,6 +80,28 @@ def _error_diagnostics_payload(diagnostics: ErrorDiagnostics) -> dict[str, JsonV
         "exception_message": diagnostics.exception_message,
         "cause_digest": diagnostics.cause_digest,
     }
+
+
+def _managed_input_fields(
+    attachment_manifest: Sequence[AttachmentEntry],
+    input_digest: str | None,
+    path_origin: PathOrigin | None,
+) -> tuple[AttachmentEntry, ...]:
+    manifest = tuple(attachment_manifest)
+    if any(not isinstance(item, AttachmentEntry) for item in manifest):
+        raise TypeError("attachment manifest contains an invalid value")
+    if not manifest:
+        if input_digest is not None or path_origin is not None:
+            raise ValueError("legacy input cannot carry managed input metadata")
+        return ()
+    if not _is_sha256(input_digest):
+        raise ValueError("managed input digest must be lowercase SHA-256")
+    if not isinstance(path_origin, PathOrigin):
+        raise TypeError("managed input requires PathOrigin")
+    paths = tuple(item.path for item in manifest)
+    if len(paths) != len(set(paths)):
+        raise ValueError("attachment manifest contains duplicate paths")
+    return manifest
 
 
 @dataclass(frozen=True, slots=True)
@@ -471,6 +495,9 @@ class ExecutionRecord:
     result: ResultRecord | None = None
     repository_instructions: RuntimePayloadRef | None = None
     error_diagnostics: ErrorDiagnostics | None = None
+    attachment_manifest: tuple[AttachmentEntry, ...] = ()
+    input_digest: str | None = None
+    path_origin: PathOrigin | None = None
     correlation: Mapping[str, str | int] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
@@ -483,6 +510,15 @@ class ExecutionRecord:
         object.__setattr__(self, "mode", mode)
         object.__setattr__(self, "thinking", thinking)
         object.__setattr__(self, "correlation", normalize_correlation(self.correlation))
+        object.__setattr__(
+            self,
+            "attachment_manifest",
+            _managed_input_fields(
+                self.attachment_manifest,
+                self.input_digest,
+                self.path_origin,
+            ),
+        )
         if (
             not isinstance(self.binding, AgentBindingSnapshot)
             or self.binding.binding_digest != self.binding_digest
@@ -1020,6 +1056,9 @@ class RecoveryExecutionInput:
     thinking: ThinkingValue
     binding: AgentBindingSnapshot
     repository_instructions: RuntimePayloadRef | None = None
+    attachment_manifest: tuple[AttachmentEntry, ...] = ()
+    input_digest: str | None = None
+    path_origin: PathOrigin | None = None
     correlation: Mapping[str, str | int] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
@@ -1039,6 +1078,19 @@ class RecoveryExecutionInput:
         object.__setattr__(self, "mode", mode)
         object.__setattr__(self, "thinking", thinking)
         object.__setattr__(self, "correlation", normalize_correlation(self.correlation))
+        object.__setattr__(
+            self,
+            "attachment_manifest",
+            _managed_input_fields(
+                self.attachment_manifest,
+                self.input_digest,
+                self.path_origin,
+            ),
+        )
+        if bool(self.attachment_manifest) != (
+            self.user_prompt_codec == "linktools-input-v2"
+        ):
+            raise ValueError("recovery prompt codec does not match managed input metadata")
         if (
             not isinstance(self.binding, AgentBindingSnapshot)
             or self.binding.binding_digest != self.binding_digest
