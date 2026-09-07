@@ -7,6 +7,7 @@ import json
 import os
 import re
 import shutil
+import stat
 import tempfile
 from collections.abc import Callable, Collection, Mapping
 from dataclasses import dataclass
@@ -106,6 +107,14 @@ def _sync_directories(paths: Collection[Path]) -> None:
         sync_directory(path)
 
 
+@dataclass(frozen=True, slots=True)
+class _JournalPlan:
+    base_generation: int
+    target_generation: int
+    writes: tuple[tuple[str, str], ...]
+    deletes: tuple[str, ...]
+
+
 class FilesystemJournal:
     """Shared crash-safe journal for granular filesystem stores."""
 
@@ -187,67 +196,28 @@ class FilesystemJournal:
         *,
         base_generation: int | None = None,
     ) -> None:
-        if plan.get("journal_version") != 1:
-            raise AIError(self._error_code)
-        base = plan.get("base_generation")
-        target = plan.get("target_generation")
-        if not isinstance(base, int) or not isinstance(target, int) or target != base + 1:
-            raise AIError(self._error_code)
-        if base_generation is not None and base != base_generation:
-            raise AIError(self._error_code)
-        writes = plan.get("writes")
-        deletes = plan.get("deletes")
-        if not isinstance(writes, list) or not isinstance(deletes, list):
-            raise AIError(self._error_code)
-        written_paths: set[str] = set()
-        deleted_paths: set[str] = set()
-        for item in writes:
-            if not isinstance(item, Mapping):
-                raise AIError(self._error_code)
-            relative = _safe_relative(str(item.get("path", "")), self._error_code)
-            digest = item.get("sha256")
-            if (
-                relative != str(item.get("path"))
-                or relative in written_paths
-                or not isinstance(digest, str)
-                or len(digest) != 64
-            ):
-                raise AIError(self._error_code)
-            try:
-                int(digest, 16)
-            except ValueError as error:
-                raise AIError(self._error_code) from error
-            written_paths.add(relative)
-        for value in deletes:
-            relative = _safe_relative(str(value), self._error_code)
-            if relative in deleted_paths or relative in written_paths:
-                raise AIError(self._error_code)
-            deleted_paths.add(relative)
+        self._validate_plan(plan, base_generation=base_generation)
+
+    def validate_publish(self, plan: Mapping[str, object]) -> None:
+        """Validate every publish input without mutating the journal or store."""
+        validated = self._validate_plan(plan)
+        self._validate_publish_entries(validated)
 
     def publish(self, plan: Mapping[str, object]) -> None:
         affected: set[Path] = set()
         try:
-            self.validate(plan)
+            validated = self._validate_plan(plan)
+            self._validate_publish_entries(validated)
             stage = self._transaction / "stage"
-            writes = plan["writes"]
-            deletes = plan["deletes"]
-            if not isinstance(writes, list) or not isinstance(deletes, list):
-                raise AIError(self._error_code)
-            for item in writes:
-                if not isinstance(item, Mapping):
-                    raise AIError(self._error_code)
-                relative = _safe_relative(str(item["path"]), self._error_code)
-                source = validate_root_path(stage, relative)
-                destination = validate_root_path(self._root, relative)
+            for relative, _digest in validated.writes:
+                source = _journal_path(stage, relative, self._error_code)
+                destination = _journal_path(self._root, relative, self._error_code)
                 affected.update(_directory_chain(destination.parent, self._root))
                 destination.parent.mkdir(parents=True, exist_ok=True)
-                if source.is_file():
+                if _lstat(source) is not None:
                     os.replace(source, destination)
-                elif not destination.is_file() or _sha256(destination.read_bytes()) != str(item["sha256"]):
-                    raise AIError(self._error_code)
-            for value in deletes:
-                relative = _safe_relative(str(value), self._error_code)
-                path = validate_root_path(self._root, relative)
+            for relative in validated.deletes:
+                path = _journal_path(self._root, relative, self._error_code)
                 affected.update(_directory_chain(path.parent, self._root))
                 path.unlink(missing_ok=True)
         except AIError:
@@ -286,6 +256,7 @@ class FilesystemJournal:
             )
             if current not in {int(plan["base_generation"]), int(plan["target_generation"])}:
                 raise AIError(self._error_code)
+            self.validate_publish(plan)
             self.publish(plan)
             target = int(plan["target_generation"])
             if current != target:
@@ -297,6 +268,89 @@ class FilesystemJournal:
             raise
         except (OSError, KeyError, TypeError, ValueError) as error:
             raise AIError(self._error_code) from error
+
+    def _validate_plan(
+        self,
+        plan: Mapping[str, object],
+        *,
+        base_generation: int | None = None,
+    ) -> _JournalPlan:
+        if plan.get("journal_version") != 1:
+            raise AIError(self._error_code)
+        base = plan.get("base_generation")
+        target = plan.get("target_generation")
+        if (
+            isinstance(base, bool)
+            or isinstance(target, bool)
+            or not isinstance(base, int)
+            or not isinstance(target, int)
+            or target != base + 1
+        ):
+            raise AIError(self._error_code)
+        if base_generation is not None and base != base_generation:
+            raise AIError(self._error_code)
+        writes = plan.get("writes")
+        deletes = plan.get("deletes")
+        if not isinstance(writes, list) or not isinstance(deletes, list):
+            raise AIError(self._error_code)
+        written_paths: set[str] = set()
+        deleted_paths: set[str] = set()
+        normalized_writes: list[tuple[str, str]] = []
+        normalized_deletes: list[str] = []
+        for item in writes:
+            if not isinstance(item, Mapping):
+                raise AIError(self._error_code)
+            raw_relative = item.get("path")
+            if not isinstance(raw_relative, str):
+                raise AIError(self._error_code)
+            relative = _safe_relative(raw_relative, self._error_code)
+            digest = item.get("sha256")
+            if (
+                relative in written_paths
+                or not isinstance(digest, str)
+                or re.fullmatch(r"[0-9a-f]{64}", digest) is None
+            ):
+                raise AIError(self._error_code)
+            written_paths.add(relative)
+            normalized_writes.append((relative, digest))
+        for value in deletes:
+            if not isinstance(value, str):
+                raise AIError(self._error_code)
+            relative = _safe_relative(value, self._error_code)
+            if relative in deleted_paths or relative in written_paths:
+                raise AIError(self._error_code)
+            deleted_paths.add(relative)
+            normalized_deletes.append(relative)
+        return _JournalPlan(
+            base_generation=base,
+            target_generation=target,
+            writes=tuple(normalized_writes),
+            deletes=tuple(normalized_deletes),
+        )
+
+    def _validate_publish_entries(self, plan: _JournalPlan) -> None:
+        stage = self._transaction / "stage"
+        for relative, digest in plan.writes:
+            source = _journal_path(stage, relative, self._error_code)
+            destination = _journal_path(self._root, relative, self._error_code)
+            source_stat = _lstat(source)
+            if source_stat is not None:
+                _validate_regular_file(source, source_stat, digest, self._error_code)
+                continue
+            destination_stat = _lstat(destination)
+            if destination_stat is None:
+                raise AIError(self._error_code)
+            _validate_regular_file(
+                destination,
+                destination_stat,
+                digest,
+                self._error_code,
+            )
+        for relative in plan.deletes:
+            destination = _journal_path(self._root, relative, self._error_code)
+            destination_stat = _lstat(destination)
+            if destination_stat is not None and not stat.S_ISREG(destination_stat.st_mode):
+                raise AIError(self._error_code)
 
 
 def atomic_write_bytes(path: "str | Path", value: bytes) -> None:
@@ -410,6 +464,41 @@ def _safe_relative(value: str, error_code: ErrorCode) -> str:
     ):
         raise AIError(error_code)
     return value
+
+
+def _journal_path(root: Path, relative: str, error_code: ErrorCode) -> Path:
+    value = _safe_relative(relative, error_code)
+    resolved_root = root.resolve(strict=False)
+    candidate = resolved_root.joinpath(value)
+    resolved_parent = candidate.parent.resolve(strict=False)
+    try:
+        resolved_parent.relative_to(resolved_root)
+    except ValueError as error:
+        raise AIError(error_code) from error
+    return resolved_parent / candidate.name
+
+
+def _lstat(path: Path) -> "os.stat_result | None":
+    try:
+        return path.lstat()
+    except FileNotFoundError:
+        return None
+
+
+def _validate_regular_file(
+    path: Path,
+    path_stat: os.stat_result,
+    digest: str,
+    error_code: ErrorCode,
+) -> None:
+    if not stat.S_ISREG(path_stat.st_mode):
+        raise AIError(error_code)
+    try:
+        value = path.read_bytes()
+    except OSError as error:
+        raise AIError(error_code) from error
+    if _sha256(value) != digest:
+        raise AIError(error_code)
 
 
 def _write_journal_json(path: Path, value: Mapping[str, object]) -> None:
