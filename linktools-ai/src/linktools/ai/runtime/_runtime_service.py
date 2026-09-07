@@ -63,6 +63,7 @@ from ._metrics import (
 from .service_api import (
     ApprovalService,
     ArtifactService,
+    AttachmentService,
     CancelExecutionRequest,
     CancelExecutionResult,
     CloseSessionRequest,
@@ -164,6 +165,7 @@ class Runtime(Generic[AppT]):
         approval: ApprovalService,
         event: EventService,
         artifact: ArtifactService,
+        attachments: AttachmentService,
         *,
         workspace: Workspace,
         context: RuntimeContext[AppT],
@@ -184,6 +186,7 @@ class Runtime(Generic[AppT]):
                 approval,
                 event,
                 artifact,
+                attachments,
                 workspace,
             )
         ):
@@ -199,6 +202,7 @@ class Runtime(Generic[AppT]):
         self.approval = approval
         self.event = event
         self.artifact = artifact
+        self.attachments = attachments
         self._workspace = workspace
         self._context = context
         self._default_principal = Principal(
@@ -982,6 +986,7 @@ async def _open_runtime(
             components.approval,
             components.event,
             components.artifact,
+            components.attachments,
             workspace=workspace,
             context=context,
             close_callback=components.close_callback,
