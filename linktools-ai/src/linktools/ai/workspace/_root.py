@@ -172,6 +172,7 @@ class Workspace:
         start: "str | Path",
         *,
         root: "str | Path | None" = None,
+        workspace_id: "str | None" = None,
         policy: "WorkspacePolicy | None" = None,
         sandbox: "Sandbox | None" = None,
     ) -> "Workspace":
@@ -187,13 +188,20 @@ class Workspace:
             for parent in (candidate, *candidate.parents):
                 config_file = parent / _STORAGE_DIR_NAME / "config.yaml"
                 if config_file.exists():
-                    return cls._build(parent, config_file, selected_policy, sandbox)
+                    return cls._build(
+                        parent,
+                        config_file,
+                        selected_policy,
+                        sandbox,
+                        workspace_id,
+                    )
         config_file = candidate / _STORAGE_DIR_NAME / "config.yaml"
         return cls._build(
             candidate,
             config_file if config_file.exists() else None,
             selected_policy,
             sandbox,
+            workspace_id,
         )
 
     @classmethod
@@ -201,6 +209,7 @@ class Workspace:
         cls,
         root: "str | Path",
         *,
+        workspace_id: "str | None" = None,
         policy: "WorkspacePolicy | None" = None,
         sandbox: "Sandbox | None" = None,
     ) -> "Workspace":
@@ -211,6 +220,7 @@ class Workspace:
             config_file if config_file.exists() else None,
             _select_policy(policy),
             sandbox,
+            workspace_id,
         )
 
     @classmethod
@@ -220,12 +230,20 @@ class Workspace:
         config_file: "Path | None",
         policy: WorkspacePolicy,
         sandbox: "Sandbox | None",
+        workspace_id: "str | None",
     ) -> "Workspace":
-        normalized_root = _normalized_root(root)
+        if workspace_id is not None:
+            if not isinstance(workspace_id, str):
+                raise TypeError("workspace_id must be a string or None")
+            if not workspace_id:
+                raise ValueError("workspace_id cannot be empty")
+            resolved_workspace_id = workspace_id
+        else:
+            resolved_workspace_id = canonical_sha256(["workspace", _normalized_root(root)])
         return cls(
             root=root,
             config=load_config(config_file) if config_file else {},
-            workspace_id=canonical_sha256(["workspace", normalized_root]),
+            workspace_id=resolved_workspace_id,
             policy=policy,
             sandbox=sandbox,
         )
