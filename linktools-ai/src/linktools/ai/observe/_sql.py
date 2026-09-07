@@ -524,15 +524,12 @@ def _sqlite_record_error(
     payload: str,
 ) -> str | None:
     try:
-        try:
-            decoded = json.loads(
-                payload,
-                object_pairs_hook=_unique_json_pairs,
-                parse_constant=_reject_json_constant,
-            )
-            timestamp = datetime.fromisoformat(occurred_at)
-        except (TypeError, ValueError, RecursionError) as error:
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
+        decoded = json.loads(
+            payload,
+            object_pairs_hook=_unique_json_pairs,
+            parse_constant=_reject_json_constant,
+        )
+        timestamp = datetime.fromisoformat(occurred_at)
         _decode_observation_record(
             namespace,
             namespace_key,
@@ -548,6 +545,8 @@ def _sqlite_record_error(
     except AIError as error:
         # Return typed failures to SQL; SQLite otherwise erases their code.
         return error.code.value
+    except (TypeError, ValueError, RecursionError):
+        return ErrorCode.STORAGE_INTEGRITY_ERROR.value
     return None
 
 
