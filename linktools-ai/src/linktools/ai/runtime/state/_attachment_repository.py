@@ -11,7 +11,9 @@ from ._attachments import (
     AttachmentSourceRecord,
     AttachmentUploadRecord,
     InputPrepareRecord,
+    InputPrepareSlot,
     managed_attachment_path,
+    semantic_attachment_entry,
 )
 from ._plan import RuntimeDomain
 from ._repositories import RepositoryBase, projected_record, replace_checked
@@ -71,11 +73,7 @@ class AttachmentRepository(RepositoryBase):
         async def mutate(transaction: StateTransaction) -> AttachmentUploadRecord:
             stored = await transaction.get_record(key)
             if stored is not None:
-                current = await self._decode_kind(
-                    stored,
-                    AttachmentUploadRecord,
-                    "attachment_upload",
-                )
+                current = await self._decode_upload(stored)
                 if not _same_upload_request(current, candidate):
                     raise AIError(ErrorCode.IDEMPOTENCY_CONFLICT)
                 return current
@@ -101,13 +99,7 @@ class AttachmentRepository(RepositoryBase):
         stored = await self._stored_by_key(owner_key, "attachment_upload")
         if stored is None:
             return None
-        value = await self._decode_kind(
-            stored,
-            AttachmentUploadRecord,
-            "attachment_upload",
-        )
-        if not isinstance(value, AttachmentUploadRecord):
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        value = await self._decode_upload(stored)
         _require_upload_path(value, owner_key)
         return value
 
@@ -125,14 +117,7 @@ class AttachmentRepository(RepositoryBase):
             stored = await transaction.get_record(key)
             if stored is None or stored.kind != "attachment_upload":
                 raise AIError(ErrorCode.AUTHORIZATION_DENIED)
-            decoded = await self._decode_kind(
-                stored,
-                AttachmentUploadRecord,
-                "attachment_upload",
-            )
-            if not isinstance(decoded, AttachmentUploadRecord):
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            current = decoded
+            current = await self._decode_upload(stored)
             _require_upload_path(current, owner_key)
             if current.owner_principal != principal:
                 raise AIError(ErrorCode.AUTHORIZATION_DENIED)
@@ -165,14 +150,7 @@ class AttachmentRepository(RepositoryBase):
         async def mutate(transaction: StateTransaction) -> InputPrepareRecord:
             stored = await transaction.get_record(key)
             if stored is not None:
-                decoded = await self._decode_kind(
-                    stored,
-                    InputPrepareRecord,
-                    "input_prepare",
-                )
-                if not isinstance(decoded, InputPrepareRecord):
-                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                current = decoded
+                current = await self._decode_prepare(stored)
                 if (
                     current.intent_digest != candidate.intent_digest
                     or current.path_origin != candidate.path_origin
@@ -201,9 +179,7 @@ class AttachmentRepository(RepositoryBase):
         stored = await self._stored_by_key(owner_key, "input_prepare")
         if stored is None:
             return None
-        value = await self._decode_kind(stored, InputPrepareRecord, "input_prepare")
-        if not isinstance(value, InputPrepareRecord):
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        value = await self._decode_prepare(stored)
         _require_prepare_paths(value, owner_key)
         return value
 
@@ -222,14 +198,8 @@ class AttachmentRepository(RepositoryBase):
             stored = await transaction.get_record(key)
             if stored is None or stored.kind != "input_prepare":
                 raise AIError(ErrorCode.STORAGE_NOT_FOUND)
-            decoded = await self._decode_kind(
-                stored,
-                InputPrepareRecord,
-                "input_prepare",
-            )
-            if not isinstance(decoded, InputPrepareRecord):
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            if decoded != expected:
+            current = await self._decode_prepare(stored)
+            if current != expected:
                 raise AIError(ErrorCode.STORAGE_CONFLICT)
             candidate = replace(
                 projected_record(self, stored, next_record),
@@ -260,16 +230,19 @@ class AttachmentRepository(RepositoryBase):
             upload_stored = await transaction.get_record(upload_key)
             if upload_stored is None or upload_stored.kind != "attachment_upload":
                 raise AIError(ErrorCode.AUTHORIZATION_DENIED)
-            upload_value = await self._decode_kind(
-                upload_stored,
-                AttachmentUploadRecord,
-                "attachment_upload",
-            )
-            if not isinstance(upload_value, AttachmentUploadRecord):
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            _require_upload_path(upload_value, upload_owner_key)
-            if upload_value.owner_principal != principal or upload_value.status != "HELD":
+            upload = await self._decode_upload(upload_stored)
+            _require_upload_path(upload, upload_owner_key)
+            if (
+                upload.owner_principal != principal
+                or upload.status != "HELD"
+                or upload.held_content is None
+            ):
                 raise AIError(ErrorCode.AUTHORIZATION_DENIED)
+            _require_granted_upload_slot(
+                upload,
+                expected_prepare,
+                next_prepare,
+            )
             guarded = await transaction.guard_record(
                 upload_stored.key_digest,
                 expected_storage_version=upload_stored.storage_version,
@@ -280,14 +253,8 @@ class AttachmentRepository(RepositoryBase):
             prepare_stored = await transaction.get_record(prepare_key)
             if prepare_stored is None or prepare_stored.kind != "input_prepare":
                 raise AIError(ErrorCode.STORAGE_NOT_FOUND)
-            prepare_value = await self._decode_kind(
-                prepare_stored,
-                InputPrepareRecord,
-                "input_prepare",
-            )
-            if not isinstance(prepare_value, InputPrepareRecord):
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            if prepare_value != expected_prepare:
+            current = await self._decode_prepare(prepare_stored)
+            if current != expected_prepare:
                 raise AIError(ErrorCode.STORAGE_CONFLICT)
             candidate = replace(
                 projected_record(self, prepare_stored, next_prepare),
@@ -309,23 +276,20 @@ class AttachmentRepository(RepositoryBase):
         owner_key = self.source_key(candidate.execution_id, candidate.relative)
         _require_source_path(candidate, owner_key)
         key = bytes.fromhex(owner_key)
+        execution_key = self._key("execution", candidate.execution_id)
 
         async def mutate(transaction: StateTransaction) -> AttachmentSourceRecord:
+            if await transaction.get_record(execution_key) is None:
+                raise AIError(ErrorCode.STORAGE_NOT_FOUND)
             stored = await transaction.get_record(key)
             if stored is not None:
-                decoded = await self._decode_kind(
-                    stored,
-                    AttachmentSourceRecord,
-                    "attachment_source",
-                )
-                if not isinstance(decoded, AttachmentSourceRecord):
-                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                current = await self._decode_source(stored)
                 if (
-                    decoded.execution_id != candidate.execution_id
-                    or decoded.relative != candidate.relative
+                    current.execution_id != candidate.execution_id
+                    or current.relative != candidate.relative
                 ):
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                return decoded
+                return current
             await transaction.insert_record(
                 self._stored(
                     "attachment_source",
@@ -358,13 +322,7 @@ class AttachmentRepository(RepositoryBase):
         stored = await self._stored_by_key(owner_key, "attachment_source")
         if stored is None:
             return None
-        value = await self._decode_kind(
-            stored,
-            AttachmentSourceRecord,
-            "attachment_source",
-        )
-        if not isinstance(value, AttachmentSourceRecord):
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        value = await self._decode_source(stored)
         _require_source_path(value, owner_key)
         return value
 
@@ -379,15 +337,20 @@ class AttachmentRepository(RepositoryBase):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         return stored
 
-    async def _decode_kind(
-        self,
-        stored: StoredRecord,
-        target: type,
-        kind: str,
-    ) -> object:
-        if stored.kind != kind:
+    async def _decode_upload(self, stored: StoredRecord) -> AttachmentUploadRecord:
+        if stored.kind != "attachment_upload":
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        return await self._decode(stored, target)
+        return await self._decode(stored, AttachmentUploadRecord)
+
+    async def _decode_prepare(self, stored: StoredRecord) -> InputPrepareRecord:
+        if stored.kind != "input_prepare":
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        return await self._decode(stored, InputPrepareRecord)
+
+    async def _decode_source(self, stored: StoredRecord) -> AttachmentSourceRecord:
+        if stored.kind != "attachment_source":
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        return await self._decode(stored, AttachmentSourceRecord)
 
 
 def _same_upload_request(
@@ -410,14 +373,52 @@ def _require_prepare_transition(
         or current.path_origin != candidate.path_origin
     ):
         raise AIError(ErrorCode.IDEMPOTENCY_CONFLICT)
+    if current == candidate:
+        return
     allowed = {
         "PREPARING": {"PREPARING", "READY", "ABORTED"},
-        "READY": {"READY", "ADOPTED", "ABORTED"},
-        "ADOPTED": {"ADOPTED"},
-        "ABORTED": {"ABORTED"},
+        "READY": {"ADOPTED", "ABORTED"},
+        "ADOPTED": set(),
+        "ABORTED": set(),
     }
     if candidate.status not in allowed[current.status]:
         raise AIError(ErrorCode.STORAGE_CONFLICT)
+    if current.status == "PREPARING" and candidate.status == "PREPARING":
+        if (
+            len(candidate.slots) != len(current.slots) + 1
+            or candidate.slots[:-1] != current.slots
+        ):
+            raise AIError(ErrorCode.STORAGE_CONFLICT)
+    if current.status == "PREPARING" and candidate.status == "READY":
+        if candidate.input is None or candidate.input.attachment_manifest != tuple(
+            item.entry for item in current.slots
+        ):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+
+
+def _require_granted_upload_slot(
+    upload: AttachmentUploadRecord,
+    current: InputPrepareRecord,
+    candidate: InputPrepareRecord,
+) -> None:
+    if current.status != "PREPARING" or candidate.status != "PREPARING":
+        raise AIError(ErrorCode.STORAGE_CONFLICT)
+    if len(candidate.slots) != len(current.slots) + 1:
+        raise AIError(ErrorCode.STORAGE_CONFLICT)
+    slot = candidate.slots[-1]
+    if slot.relative is not None:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    if upload.held_content is None or slot.entry.content != upload.held_content:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    semantic = semantic_attachment_entry(slot.entry)
+    if (
+        semantic.name != upload.descriptor.name
+        or semantic.media_type != upload.descriptor.media_type
+        or semantic.presentation != upload.descriptor.presentation
+        or semantic.digest != upload.descriptor.digest
+        or semantic.size != upload.descriptor.size
+    ):
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
 
 
 def _require_upload_path(record: AttachmentUploadRecord, owner_key: str) -> None:
