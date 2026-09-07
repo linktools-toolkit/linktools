@@ -103,7 +103,8 @@ def _observation(
 async def _seed(metrics: Metrics, observations: tuple[Observation, ...]) -> None:
     for definition in _definitions():
         await metrics.define(definition)
-    await metrics.record_observations(observations)
+    for offset in range(0, len(observations), 256):
+        await metrics.record_observations(observations[offset : offset + 256])
 
 
 def _queries(window: MetricWindow) -> tuple[MetricQuery, ...]:
@@ -368,7 +369,10 @@ async def test_every_measurement_aggregation_uses_bounded_sql_round_trips(
             statements.clear()
             await metrics.query(query)
             assert len(statements) == 2
-            assert all(" limit ?" in statement or "with filtered" in statement for statement in statements)
+            assert all(
+                " limit ?" in statement or "with filtered" in statement
+                for statement in statements
+            )
     finally:
         if event.contains(
             engine.sync_engine,
