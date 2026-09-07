@@ -21,7 +21,13 @@ from ._model import (
     Observation,
     validate_metric_value,
 )
-from ._store import MetricStore
+from ._store import (
+    MetricStore,
+    _MetricQueryPushdownPlan,
+    _MetricQueryPushdownResult,
+    _MetricQueryPushdownRow,
+    _MetricQueryPushdownStore,
+)
 
 _SCAN_PAGE_SIZE = 512
 _MAX_SCANNED_OBSERVATIONS = 100_000
@@ -211,6 +217,27 @@ async def execute_query(
         if bucket_count > _MAX_BUCKETS:
             raise AIError(ErrorCode.METRIC_QUERY_LIMIT_EXCEEDED)
 
+    pushdown = await _try_pushdown(
+        store,
+        namespace,
+        definition,
+        query,
+        aggregation=aggregation,
+        start=start,
+        end=end,
+        bucket_count=bucket_count,
+    )
+    if pushdown is not None:
+        return _pushdown_result(
+            definition,
+            query,
+            aggregation,
+            start,
+            end,
+            bucket_count,
+            pushdown,
+        )
+
     groups: dict[tuple[str | None, ...], _Accumulator] = {}
     bucket_groups: dict[tuple[tuple[str | None, ...], int], _Accumulator] = {}
     actual_groups: set[tuple[str | None, ...]] = set()
@@ -302,13 +329,7 @@ async def execute_query(
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         cursor = next_cursor
 
-    result_unit = (
-        "1"
-        if aggregation is MetricAggregation.COUNT
-        else f"{definition.unit}/s"
-        if aggregation is MetricAggregation.RATE
-        else definition.unit
-    )
+    result_unit = _result_unit(definition, aggregation)
     points: list[MetricPoint] = []
 
     result_groups = (
@@ -366,6 +387,159 @@ async def execute_query(
         window_end=end,
         points=tuple(points),
     )
+
+
+async def _try_pushdown(
+    store: MetricStore,
+    namespace: str,
+    definition: MetricDefinition,
+    query: MetricQuery,
+    *,
+    aggregation: MetricAggregation,
+    start: datetime,
+    end: datetime,
+    bucket_count: int,
+) -> _MetricQueryPushdownResult | None:
+    if not isinstance(store, _MetricQueryPushdownStore):
+        return None
+    bucket_microseconds = None
+    if query.bucket is not None:
+        bucket_microseconds = (
+            (query.bucket.days * 86_400 + query.bucket.seconds) * 1_000_000
+            + query.bucket.microseconds
+        )
+    source = definition.source
+    plan = _MetricQueryPushdownPlan(
+        observation_kind=definition.observation_kind,
+        source_kind=source.kind,
+        measurement_name=source.measurement_name,
+        measurement_revision=source.measurement_revision,
+        indicator_field=source.indicator_field,
+        indicator_values=source.indicator_values,
+        aggregation=aggregation,
+        percentile=query.percentile,
+        start=start,
+        end=end,
+        filters=tuple(query.filters.items()),
+        correlation_filters=tuple(query.correlation_filters.items()),
+        group_by=query.group_by,
+        bucket_microseconds=bucket_microseconds,
+        bucket_count=bucket_count,
+        max_scanned_observations=_MAX_SCANNED_OBSERVATIONS,
+        max_extracted_samples=_MAX_EXTRACTED_SAMPLES,
+        max_groups=_MAX_GROUPS,
+        max_result_points=_MAX_RESULT_POINTS,
+    )
+    return await store._execute_metric_query(namespace, plan)
+
+
+def _pushdown_result(
+    definition: MetricDefinition,
+    query: MetricQuery,
+    aggregation: MetricAggregation,
+    start: datetime,
+    end: datetime,
+    bucket_count: int,
+    result: _MetricQueryPushdownResult,
+) -> MetricQueryResult:
+    by_partition: dict[
+        tuple[tuple[str | None, ...], int | None], _MetricQueryPushdownRow
+    ] = {}
+    actual_groups: set[tuple[str | None, ...]] = set()
+    for row in result.rows:
+        key = (row.group, row.bucket_index)
+        if key in by_partition:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        by_partition[key] = row
+        if query.group_by:
+            actual_groups.add(row.group)
+
+    result_groups = (
+        sorted(actual_groups, key=_group_sort_key) if query.group_by else [()]
+    )
+    expected_points = len(result_groups) * bucket_count
+    if expected_points > _MAX_RESULT_POINTS:
+        raise AIError(ErrorCode.METRIC_QUERY_LIMIT_EXCEEDED)
+
+    points: list[MetricPoint] = []
+    if query.bucket is None:
+        seconds = (end - start).total_seconds()
+        for group in result_groups:
+            row = by_partition.get((group, None))
+            points.append(
+                MetricPoint(
+                    dimensions=tuple(zip(query.group_by, group, strict=True)),
+                    bucket_start=None,
+                    bucket_end=None,
+                    value=_pushdown_value(row, aggregation, seconds=seconds),
+                    sample_count=0 if row is None else row.sample_count,
+                )
+            )
+    else:
+        for group in result_groups:
+            for index in range(bucket_count):
+                bucket_start = start + query.bucket * index
+                bucket_end = min(end, bucket_start + query.bucket)
+                row = by_partition.get((group, index))
+                points.append(
+                    MetricPoint(
+                        dimensions=tuple(zip(query.group_by, group, strict=True)),
+                        bucket_start=bucket_start,
+                        bucket_end=bucket_end,
+                        value=_pushdown_value(
+                            row,
+                            aggregation,
+                            seconds=(bucket_end - bucket_start).total_seconds(),
+                        ),
+                        sample_count=0 if row is None else row.sample_count,
+                    )
+                )
+
+    return MetricQueryResult(
+        metric=definition.name,
+        revision=definition.revision,
+        unit=_result_unit(definition, aggregation),
+        aggregation=aggregation,
+        window_start=start,
+        window_end=end,
+        points=tuple(points),
+    )
+
+
+def _pushdown_value(
+    row: _MetricQueryPushdownRow | None,
+    aggregation: MetricAggregation,
+    *,
+    seconds: float,
+) -> int | float | None:
+    if row is None or row.sample_count == 0:
+        return _empty_value(aggregation)
+    if aggregation is MetricAggregation.COUNT:
+        return row.sample_count
+    if aggregation is MetricAggregation.PERCENTILE:
+        if row.selected_value is None:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        return row.selected_value
+    if row.sample_sum is None:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    if aggregation is MetricAggregation.SUM:
+        return row.sample_sum
+    if aggregation is MetricAggregation.MEAN:
+        return row.sample_sum / row.sample_count
+    if aggregation is MetricAggregation.RATE:
+        return row.sample_sum / seconds
+    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+
+
+def _result_unit(
+    definition: MetricDefinition,
+    aggregation: MetricAggregation,
+) -> str:
+    if aggregation is MetricAggregation.COUNT:
+        return "1"
+    if aggregation is MetricAggregation.RATE:
+        return f"{definition.unit}/s"
+    return definition.unit
 
 
 __all__: list[str] = []
