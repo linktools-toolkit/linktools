@@ -76,6 +76,8 @@ async def execute_sql_metric_query(
     namespace_key: str,
     dialect_name: str,
     plan: _MetricQueryPushdownPlan,
+    namespace: str = "",
+    verify: bool = False,
 ) -> _MetricQueryPushdownResult | None:
     if dialect_name not in {"sqlite", "mysql", "postgresql"}:
         return None
@@ -85,8 +87,11 @@ async def execute_sql_metric_query(
     from sqlalchemy import text
 
     params = _base_params(namespace_key, dialect_name, plan)
+    if verify:
+        params["verified_namespace"] = namespace
     if (
-        plan.source_kind is MetricSourceKind.OBSERVATION_COUNT
+        not verify
+        and plan.source_kind is MetricSourceKind.OBSERVATION_COUNT
         and not plan.filters
         and not plan.correlation_filters
         and not plan.group_by
@@ -113,11 +118,11 @@ async def execute_sql_metric_query(
         return None
 
     if plan.source_kind is MetricSourceKind.MEASUREMENT:
-        statement, statement_params = _measurement_sql(dialect_name, plan, params)
+        statement, statement_params = _measurement_sql(dialect_name, plan, params, verify=verify)
         rows = (await session.execute(text(statement), statement_params)).mappings().all()
         return _decode_measurement_rows(rows, plan)
 
-    statement, statement_params = _aggregate_sql(dialect_name, plan, params)
+    statement, statement_params = _aggregate_sql(dialect_name, plan, params, verify=verify)
     rows = (await session.execute(text(statement), statement_params)).mappings().all()
     return _decode_aggregate_rows(rows, plan)
 
@@ -188,9 +193,16 @@ FROM (
 """
 
 
-def _bounded_observations_sql(columns: tuple[str, ...]) -> str:
+def _bounded_observations_sql(
+    columns: tuple[str, ...], *, verify: bool = False
+) -> str:
+    if verify:
+        columns = tuple(dict.fromkeys((
+            *columns, "namespace_digest", "kind", "occurred_at",
+            "observation_digest", "payload_digest", "payload_json",
+        )))
     projection = ", ".join(columns)
-    return f"""bounded_observations AS (
+    bounded = f"""bounded_observations AS (
     SELECT {projection}
     FROM ai_metric_observations
     WHERE namespace_digest = :namespace_key
@@ -201,6 +213,32 @@ def _bounded_observations_sql(columns: tuple[str, ...]) -> str:
 ), scan_stats AS (
     SELECT COUNT(*) AS scanned_count
     FROM bounded_observations
+)"""
+    if not verify:
+        return bounded
+    # SQLite evaluates this scalar only after the capped admission succeeds.
+    # Both validation and aggregation consume the same statement-local rows.
+    verified = bounded + """, verified_scan AS (
+    SELECT scanned_count,
+        CASE WHEN scanned_count < :scan_cap THEN (
+            SELECT MAX(linktools_metric_verify(
+                :verified_namespace, :namespace_key, namespace_digest, observation_digest, payload_digest,
+                kind, occurred_at, payload_json
+            )) FROM bounded_observations
+        ) ELSE NULL END AS record_error
+    FROM scan_stats
+    LIMIT -1 OFFSET 0
+)"""
+    verified_columns = ", ".join(
+        "CASE WHEN t.record_error IS NULL THEN b.payload_json END AS payload_json"
+        if column == "payload_json" else f"b.{column}"
+        for column in columns
+    )
+    # SQL may reorder filters. Never feed unverified JSON into their functions.
+    return verified + f""", verified_observations AS (
+    SELECT {verified_columns}
+    FROM bounded_observations AS b CROSS JOIN verified_scan AS t
+    WHERE t.scanned_count < :scan_cap AND t.record_error IS NULL
 )"""
 
 
@@ -253,6 +291,8 @@ def _aggregate_sql(
     dialect_name: str,
     plan: _MetricQueryPushdownPlan,
     base_params: dict[str, object],
+    *,
+    verify: bool = False,
 ) -> tuple[str, dict[str, object]]:
     params = dict(base_params)
     select_parts, group_columns = _projection_parts(dialect_name, plan)
@@ -279,14 +319,19 @@ def _aggregate_sql(
         if plan.bucket_microseconds is not None
         else ("payload_json",)
     )
-    bounded_sql = _bounded_observations_sql(columns)
+    bounded_sql = _bounded_observations_sql(columns, verify=verify)
 
+    scan_relation = "verified_scan" if verify else "scan_stats"
+    input_relation = "verified_observations" if verify else "bounded_observations"
+    if verify:
+        where_sql = "\n      AND t.record_error IS NULL" + where_sql
+    record_error_column = "t.record_error, " if verify else ""
     sql = f"""
 WITH {bounded_sql}, filtered AS (
     SELECT
         {source_select}
-    FROM bounded_observations AS b
-    CROSS JOIN scan_stats AS t
+    FROM {input_relation} AS b
+    CROSS JOIN {scan_relation} AS t
     WHERE t.scanned_count < :scan_cap{where_sql}
 ), aggregated AS (
     SELECT
@@ -294,8 +339,8 @@ WITH {bounded_sql}, filtered AS (
     FROM filtered{group_sql}
     LIMIT :result_cap
 )
-SELECT t.scanned_count, {result_select}
-FROM scan_stats AS t
+SELECT t.scanned_count, {record_error_column}{result_select}
+FROM {scan_relation} AS t
 LEFT JOIN aggregated AS a ON 1 = 1
 """
     return sql, params
@@ -305,6 +350,8 @@ def _measurement_sql(
     dialect_name: str,
     plan: _MetricQueryPushdownPlan,
     base_params: dict[str, object],
+    *,
+    verify: bool = False,
 ) -> tuple[str, dict[str, object]]:
     params = dict(base_params)
     params["measurement_name"] = plan.measurement_name
@@ -353,19 +400,24 @@ def _measurement_sql(
     selected_columns = ", ".join(f"p.{column}" for column in result_columns)
     if selected_columns:
         selected_columns = ",\n    " + selected_columns
-    bounded_sql = _bounded_observations_sql(tuple(columns))
+    bounded_sql = _bounded_observations_sql(tuple(columns), verify=verify)
     # Keep statistics and reduction from expanding the same JSON array twice.
     if dialect_name == "sqlite":
         measurement_sql += "\n    LIMIT -1 OFFSET 0"
     elif dialect_name == "mysql":
         measurement_sql += "\n    LIMIT 18446744073709551615"
 
+    scan_relation = "verified_scan" if verify else "scan_stats"
+    input_relation = "verified_observations" if verify else "bounded_observations"
+    if verify:
+        where_sql = "\n      AND t.record_error IS NULL" + where_sql
+    record_error_column = "t.record_error, " if verify else ""
     sql = f"""
 WITH {bounded_sql}, filtered AS (
     SELECT
         {filtered_select}
-    FROM bounded_observations AS b
-    CROSS JOIN scan_stats AS t
+    FROM {input_relation} AS b
+    CROSS JOIN {scan_relation} AS t
     WHERE t.scanned_count < :scan_cap{where_sql}
 ), samples_raw AS (
     {measurement_sql}
@@ -386,10 +438,10 @@ WITH {bounded_sql}, filtered AS (
     LIMIT :result_cap
 )
 SELECT
-    t.scanned_count,
+    t.scanned_count, {record_error_column}
     s.extracted_count,
     s.invalid_count{selected_columns}
-FROM scan_stats AS t
+FROM {scan_relation} AS t
 CROSS JOIN sample_stats AS s
 LEFT JOIN reduced AS p ON 1 = 1
 """
@@ -1025,6 +1077,9 @@ def _validate_scan_count(
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     if int(rows[0]["scanned_count"]) > plan.max_scanned_observations:
         raise AIError(ErrorCode.METRIC_QUERY_LIMIT_EXCEEDED)
+    record_error = rows[0].get("record_error")
+    if record_error is not None:
+        raise AIError(ErrorCode(record_error))
 
 
 def _decode_aggregate_rows(

@@ -4,8 +4,9 @@
 
 from __future__ import annotations
 
+import json
 from datetime import datetime, timezone
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, Protocol, cast
 
 from ..core import Page
 from ..errors import AIError, ErrorCode
@@ -39,10 +40,11 @@ from ._store import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping
+    from collections.abc import Callable, Mapping
 
     from sqlalchemy import MetaData
     from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
+    from sqlalchemy.pool import ConnectionPoolEntry, PoolProxiedConnection
 
     from ..storage import SqlValue
 
@@ -167,6 +169,11 @@ class SqlMetricStore:
         self._observations = self._metadata.tables["ai_metric_observations"]
         self._context = create_sql_storage_context(engine)
         self._validate_schema = validate_schema
+        if engine.dialect.name == "sqlite":
+            from sqlalchemy import event
+
+            if not event.contains(engine.sync_engine, "checkout", _configure_sqlite_verifier):
+                event.listen(engine.sync_engine, "checkout", _configure_sqlite_verifier)
 
     async def _initialize(self) -> None:
         await self._context.initialize(
@@ -187,6 +194,8 @@ class SqlMetricStore:
                 namespace_key=namespace_digest(namespace),
                 dialect_name=self._context.dialect.name,
                 plan=plan,
+                namespace=namespace,
+                verify=self._context.dialect.name == "sqlite",
             )
 
     async def put_definition(
@@ -394,21 +403,8 @@ class SqlMetricStore:
         namespace_key: str,
         row: "Mapping[str, object]",
     ) -> Observation:
-        observation = decode_observation_envelope(
-            row["payload_json"], expected_namespace=namespace
-        )
-        expected_identity = observation_digest(namespace, observation.observation_id)
-        expected_payload = observation_payload_digest(namespace, observation)
-        if (
-            row["namespace_digest"] != namespace_key
-            or row["kind"] != observation.kind
-            or _utc_database_datetime(cast("datetime", row["occurred_at"]))
-            != observation.occurred_at
-            or row["observation_digest"] != expected_identity
-            or row["payload_digest"] != expected_payload
-        ):
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        return observation
+        return _decode_observation_record(namespace, namespace_key, row)
+
 
     async def scan_observations(
         self,
@@ -482,6 +478,91 @@ class SqlMetricStore:
             return int(result.rowcount or 0)
 
         return await self._context.run_mutation(delete_rows, domain="metrics.prune")
+
+
+
+class _SqliteFunctionConnection(Protocol):
+    def create_function(
+        self,
+        name: str,
+        arguments: int,
+        function: "Callable[..., str | None]",
+    ) -> None: ...
+
+
+def _configure_sqlite_verifier(
+    connection: _SqliteFunctionConnection,
+    record: "ConnectionPoolEntry",
+    _proxy: "PoolProxiedConnection",
+) -> None:
+    # Pool entry info is cleared when its physical connection is replaced.
+    if record.info.get("linktools_metric_verifier") is not _sqlite_record_error:
+        connection.create_function("linktools_metric_verify", 8, _sqlite_record_error)
+        record.info["linktools_metric_verifier"] = _sqlite_record_error
+
+
+def _unique_json_pairs(pairs: list[tuple[str, object]]) -> dict[str, object]:
+    result = dict(pairs)
+    # SQLite JSON extraction and Python disagree on duplicate object keys.
+    if len(result) != len(pairs):
+        raise ValueError("duplicate JSON object key")
+    return result
+
+
+def _sqlite_record_error(
+    namespace: str,
+    namespace_key: str,
+    stored_namespace: str,
+    stored_identity: str,
+    stored_payload: str,
+    kind: str,
+    occurred_at: str,
+    payload: str,
+) -> str | None:
+    try:
+        try:
+            decoded = json.loads(payload, object_pairs_hook=_unique_json_pairs)
+            timestamp = datetime.fromisoformat(occurred_at)
+        except (TypeError, ValueError, RecursionError) as error:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
+        _decode_observation_record(
+            namespace,
+            namespace_key,
+            {
+                "namespace_digest": stored_namespace,
+                "observation_digest": stored_identity,
+                "payload_digest": stored_payload,
+                "kind": kind,
+                "occurred_at": timestamp,
+                "payload_json": decoded,
+            },
+        )
+    except AIError as error:
+        # Return typed failures to SQL; SQLite otherwise erases their code.
+        return error.code.value
+    return None
+
+
+def _decode_observation_record(
+    namespace: str,
+    namespace_key: str,
+    row: "Mapping[str, object]",
+) -> Observation:
+    observation = decode_observation_envelope(
+        row["payload_json"], expected_namespace=namespace
+    )
+    expected_identity = observation_digest(namespace, observation.observation_id)
+    expected_payload = observation_payload_digest(namespace, observation)
+    if (
+        row["namespace_digest"] != namespace_key
+        or row["kind"] != observation.kind
+        or _utc_database_datetime(cast("datetime", row["occurred_at"]))
+        != observation.occurred_at
+        or row["observation_digest"] != expected_identity
+        or row["payload_digest"] != expected_payload
+    ):
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    return observation
 
 
 def _utc_database_datetime(value: datetime) -> datetime:
