@@ -58,6 +58,7 @@ class _MetricQueryPushdownPlan:
     correlation_filters: tuple[tuple[str, str | int], ...]
     group_by: tuple[str, ...]
     bucket_microseconds: int | None
+    bucket_count: int
     max_scanned_observations: int
     max_extracted_samples: int
     max_groups: int
