@@ -16,6 +16,7 @@ from ..errors import AIError, ErrorCode
 from ..storage import validate_sql
 from ._model import MetricDefinition, Observation
 from ._sql import SqlMetricStore, build_metrics_sql_metadata
+from ._store import _MetricQueryPushdownPlan, _MetricQueryPushdownResult
 
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncEngine
@@ -62,6 +63,14 @@ class SQLiteMetricStore:
             yield SqlMetricStore(engine, validate_schema=False)
         finally:
             await engine.dispose()
+
+    async def _execute_metric_query(
+        self,
+        namespace: str,
+        plan: _MetricQueryPushdownPlan,
+    ) -> _MetricQueryPushdownResult | None:
+        async with self._store() as store:
+            return await store._execute_metric_query(namespace, plan)
 
     async def put_definition(
         self,
