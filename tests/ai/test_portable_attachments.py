@@ -16,6 +16,7 @@ from linktools.ai.runtime.state import (
     InputSource,
     InputTextPart,
     InputV2,
+    Locator,
     ModelExposureEntry,
     PathOrigin,
     PreparedInput,
@@ -119,9 +120,7 @@ def test_released_upload_does_not_retain_content() -> None:
 def test_model_exposure_digest_is_semantic_not_physical() -> None:
     owner = "1" * 64
     entry = _entry(path=managed_attachment_path("p", owner, 0))
-    source = __import__(
-        "linktools.ai.runtime.state", fromlist=["Locator"]
-    ).Locator("state:execution", "records", "2" * 64)
+    source = Locator("state:execution", "records", "2" * 64)
     activation = "3" * 64
     first = ModelExposureEntry(activation, source, 0, entry)
     moved_entry = AttachmentEntry(
