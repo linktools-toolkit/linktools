@@ -6,6 +6,8 @@ from __future__ import annotations
 
 import calendar
 import json
+import math
+from datetime import timezone
 from decimal import Decimal
 from typing import TYPE_CHECKING
 
@@ -38,6 +40,8 @@ _INDICATOR_AGGREGATIONS = frozenset(
         MetricAggregation.RATE,
     }
 )
+_INT64_MIN = -(2**63)
+_INT64_MAX = 2**63 - 1
 
 
 def sql_query_pushdown_supported(plan: _MetricQueryPushdownPlan) -> bool:
@@ -125,19 +129,21 @@ def _base_params(
     dialect_name: str,
     plan: _MetricQueryPushdownPlan,
 ) -> dict[str, object]:
+    start_utc = plan.start.astimezone(timezone.utc)
+    end_utc = plan.end.astimezone(timezone.utc)
     if dialect_name == "sqlite":
-        window_start: object = plan.start.astimezone().replace(tzinfo=None).strftime(
+        window_start: object = start_utc.replace(tzinfo=None).strftime(
             "%Y-%m-%d %H:%M:%S.%f"
         )
-        window_end: object = plan.end.astimezone().replace(tzinfo=None).strftime(
+        window_end: object = end_utc.replace(tzinfo=None).strftime(
             "%Y-%m-%d %H:%M:%S.%f"
         )
     elif dialect_name == "mysql":
-        window_start = plan.start.replace(tzinfo=None)
-        window_end = plan.end.replace(tzinfo=None)
+        window_start = start_utc.replace(tzinfo=None)
+        window_end = end_utc.replace(tzinfo=None)
     else:
-        window_start = plan.start
-        window_end = plan.end
+        window_start = start_utc
+        window_end = end_utc
 
     params: dict[str, object] = {
         "namespace_key": namespace_key,
@@ -152,9 +158,8 @@ def _base_params(
         params["bucket_us"] = plan.bucket_microseconds
         params["bucket_count"] = plan.bucket_count
         if dialect_name == "sqlite":
-            start = plan.start
-            params["start_epoch_seconds"] = calendar.timegm(start.utctimetuple())
-            params["start_microsecond"] = start.microsecond
+            params["start_epoch_seconds"] = calendar.timegm(start_utc.utctimetuple())
+            params["start_microsecond"] = start_utc.microsecond
     return params
 
 
@@ -182,7 +187,11 @@ def _aggregate_sql(
     else:
         sample_sum = "COUNT(*)"
 
-    aggregate_select = [*group_columns, "COUNT(*) AS sample_count", f"{sample_sum} AS sample_sum"]
+    aggregate_select = [
+        *group_columns,
+        "COUNT(*) AS sample_count",
+        f"{sample_sum} AS sample_sum",
+    ]
     aggregate_sql = ",\n        ".join(aggregate_select)
     group_sql = f"\n    GROUP BY {', '.join(group_columns)}" if group_columns else ""
     order_sql = f"\n    ORDER BY {', '.join(group_columns)}" if group_columns else ""
@@ -255,7 +264,7 @@ WITH filtered AS (
     SELECT
         COUNT(*) AS extracted_count,
         COALESCE(SUM(CASE WHEN {valid_predicate} THEN 0 ELSE 1 END), 0) AS invalid_count
-    FROM samples_raw
+    FROM samples_raw AS r
 ), valid_samples AS (
     SELECT r.*
     FROM samples_raw AS r
@@ -365,10 +374,10 @@ def _indicator_condition(
         parameter = f"indicator_{index}"
         params[parameter] = value
         values.append(f":{parameter}")
-    raw = _json_raw_expression(dialect_name, alias, ("observation", field))
-    text = _json_text_expression(dialect_name, alias, ("observation", field))
+    parts = ("observation", field)
+    text = _json_text_expression(dialect_name, alias, parts)
     return (
-        f"{_json_type_expression(dialect_name, raw)} = {_string_type_literal(dialect_name)} "
+        f"{_json_type_condition(dialect_name, alias, parts, string=True)} "
         f"AND {text} IN ({', '.join(values)})"
     )
 
@@ -484,10 +493,9 @@ def _text_equality_condition(
     parts: tuple[str, ...],
     parameter: str,
 ) -> str:
-    raw = _json_raw_expression(dialect_name, alias, parts)
     text = _json_text_expression(dialect_name, alias, parts)
     return (
-        f"{_json_type_expression(dialect_name, raw)} = {_string_type_literal(dialect_name)} "
+        f"{_json_type_condition(dialect_name, alias, parts, string=True)} "
         f"AND {text} = :{parameter}"
     )
 
@@ -502,13 +510,34 @@ def _integer_equality_condition(
     raw = _json_raw_expression(dialect_name, alias, parts)
     text = _json_text_expression(dialect_name, alias, parts)
     if dialect_name == "sqlite":
-        return f"json_type({alias}.payload_json, '{_json_path(parts)}') = 'integer' AND {raw} = :{parameter}"
+        return (
+            f"json_type({alias}.payload_json, '{_json_path(parts)}') = 'integer' "
+            f"AND {raw} = :{parameter}"
+        )
     if dialect_name == "mysql":
         return f"JSON_TYPE({raw}) = 'INTEGER' AND CAST({text} AS SIGNED) = :{parameter}"
     return (
         f"json_typeof({raw}) = 'number' AND {text} ~ '^-?[0-9]+$' "
         f"AND CAST({text} AS BIGINT) = :{parameter}"
     )
+
+
+def _json_type_condition(
+    dialect_name: str,
+    alias: str,
+    parts: tuple[str, ...],
+    *,
+    string: bool,
+) -> str:
+    raw = _json_raw_expression(dialect_name, alias, parts)
+    if dialect_name == "sqlite":
+        expected = "text" if string else "integer"
+        return f"json_type({alias}.payload_json, '{_json_path(parts)}') = '{expected}'"
+    if dialect_name == "mysql":
+        expected = "STRING" if string else "INTEGER"
+        return f"JSON_TYPE({raw}) = '{expected}'"
+    expected = "string" if string else "number"
+    return f"json_typeof({raw}) = '{expected}'"
 
 
 def _json_raw_expression(
@@ -539,18 +568,6 @@ def _json_text_expression(
         )
     arguments = ", ".join(f"'{part}'" for part in parts)
     return f"json_extract_path_text({alias}.payload_json, {arguments})"
-
-
-def _json_type_expression(dialect_name: str, raw_expression: str) -> str:
-    if dialect_name == "sqlite":
-        raise RuntimeError("SQLite JSON type requires a path expression")
-    if dialect_name == "mysql":
-        return f"JSON_TYPE({raw_expression})"
-    return f"json_typeof({raw_expression})"
-
-
-def _string_type_literal(dialect_name: str) -> str:
-    return "'STRING'" if dialect_name == "mysql" else "'string'"
 
 
 def _json_path(parts: tuple[str, ...]) -> str:
@@ -634,20 +651,32 @@ def _coerce_number(value: object) -> int | float | None:
         return None
     if isinstance(value, bool):
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-    if isinstance(value, (int, float)):
+    if isinstance(value, int):
+        if not _INT64_MIN <= value <= _INT64_MAX:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         return value
+    if isinstance(value, float):
+        if not math.isfinite(value):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        return 0.0 if value == 0.0 else value
     if isinstance(value, Decimal):
+        if not value.is_finite():
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         if value.as_tuple().exponent >= 0:
-            return int(value)
-        return float(value)
+            integer = int(value)
+            if not _INT64_MIN <= integer <= _INT64_MAX:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            return integer
+        floating = float(value)
+        if not math.isfinite(floating):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        return 0.0 if floating == 0.0 else floating
     if isinstance(value, str):
         try:
             decoded = json.loads(value)
         except (TypeError, ValueError) as error:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
-        if isinstance(decoded, bool) or not isinstance(decoded, (int, float)):
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        return decoded
+        return _coerce_number(decoded)
     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
 
 
