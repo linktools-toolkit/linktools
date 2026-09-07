@@ -412,6 +412,7 @@ async def _try_pushdown(
     plan = _MetricQueryPushdownPlan(
         observation_kind=definition.observation_kind,
         source_kind=source.kind,
+        metric_type=definition.metric_type,
         measurement_name=source.measurement_name,
         measurement_revision=source.measurement_revision,
         indicator_field=source.indicator_field,
@@ -516,7 +517,12 @@ def _pushdown_value(
         return _empty_value(aggregation)
     if aggregation is MetricAggregation.COUNT:
         return row.sample_count
-    if aggregation is MetricAggregation.PERCENTILE:
+    if aggregation in {
+        MetricAggregation.MIN,
+        MetricAggregation.MAX,
+        MetricAggregation.LATEST,
+        MetricAggregation.PERCENTILE,
+    }:
         if row.selected_value is None:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         return row.selected_value
