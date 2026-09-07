@@ -194,3 +194,24 @@ def test_server_sum_separates_missing_groups_and_buckets(_server: tuple[str, lis
                     for bucket in (0, 1) for group in (None, "x", "X") for index, value in enumerate(values))
     result = _run(_server, records, plan)
     assert result == {((group,), bucket): (0.0, 3) for group in (None, "x", "X") for bucket in (0, 1)}
+
+
+def test_mysql_integer_scalar_representation(_server: tuple[str, list[str]]) -> None:
+    name, command = _server
+    if name != "mysql":
+        return
+    values = (1, 2**53 + 1, 2**63 - 1, -(2**63))
+    fields = []
+    for value in values:
+        raw = f"CAST('{value}' AS JSON)"
+        decimal = f"CAST(JSON_UNQUOTE({raw}) AS DECIMAL(65, 0))"
+        fields.append(
+            f"SELECT JSON_OBJECT('type', JSON_TYPE({raw}), 'text', JSON_UNQUOTE({raw}), "
+            f"'decimal', CAST({decimal} AS CHAR), "
+            f"'valid', {decimal} BETWEEN -9223372036854775808 AND 9223372036854775807);"
+        )
+    result = subprocess.run(command, input="\n".join(fields), capture_output=True, text=True, timeout=5)
+    assert result.returncode == 0, result.stderr
+    actual = [json.loads(line) for line in result.stdout.splitlines()]
+    expected = [{"type": "INTEGER", "text": str(value), "decimal": str(value), "valid": 1} for value in values]
+    assert actual == expected
