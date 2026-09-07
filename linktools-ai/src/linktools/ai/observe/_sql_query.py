@@ -321,14 +321,10 @@ def _measurement_sql(
     ordered = plan.aggregation in {
         MetricAggregation.LATEST,
         MetricAggregation.PERCENTILE,
+        MetricAggregation.SUM,
+        MetricAggregation.MEAN,
+        MetricAggregation.RATE,
     } or (
-        dialect_name == "sqlite"
-        and plan.aggregation in {
-            MetricAggregation.SUM,
-            MetricAggregation.MEAN,
-            MetricAggregation.RATE,
-        }
-    ) or (
         dialect_name != "sqlite"
         and plan.aggregation in {MetricAggregation.MIN, MetricAggregation.MAX}
     )
@@ -500,7 +496,7 @@ def _measurement_source_sql(
     dialect_name: str,
     partition_columns: list[str],
     *,
-    ordered: bool,
+    ordered: bool = True,
 ) -> str:
     prefix = ", ".join(f"f.{column}" for column in partition_columns)
     if prefix:
@@ -665,20 +661,91 @@ def _measurement_sum_sql(
     if dialect_name == "sqlite":
         return _sqlite_sum_sql(partition_columns)
 
+    return _server_sum_sql(dialect_name, partition_columns)
+
+
+def _server_sum_sql(dialect_name: str, partition_columns: list[str]) -> str:
+    columns = ", ".join(partition_columns)
+    prefix = f"{columns}, " if columns else ""
+    source_prefix = "".join(f"v.{column}, " for column in partition_columns)
+    group_sql = f" GROUP BY {columns}" if columns else ""
+    partition_sql = f"PARTITION BY {columns} " if columns else ""
+    source_partition = (
+        "PARTITION BY " + ", ".join(f"v.{column}" for column in partition_columns) + " "
+        if columns else ""
+    )
     if dialect_name == "mysql":
         integer_test = "value_type = 'INTEGER'"
         integer_value = "CAST(JSON_UNQUOTE(raw_value) AS DECIMAL(65, 0))"
+        floating_value = "CAST(JSON_UNQUOTE(v.raw_value) AS DOUBLE)"
+        prefix_value = "CAST(integer_prefix AS DOUBLE)"
+        equal = "<=>"
     else:
         integer_test = "raw_value ~ '^-?[0-9]+$'"
         integer_value = "numeric_value"
-    return f"""SELECT
-        {select_prefix}COUNT(*) AS sample_count,
-        SUM(numeric_value) AS sample_sum,
-        0 AS integer_sum_high,
-        SUM(CASE WHEN {integer_test}
-            THEN {integer_value} ELSE NULL END) AS integer_sum_low,
-        SUM(CASE WHEN {integer_test} THEN 0 ELSE 1 END) AS floating_count
-    FROM valid_samples{group_sql}"""
+        floating_value = "CAST(v.raw_value AS DOUBLE PRECISION)"
+        prefix_value = "CAST(integer_prefix AS DOUBLE PRECISION)"
+        equal = "IS NOT DISTINCT FROM"
+    join_sql = " AND ".join(
+        f"v.{column} {equal} t.{column}" for column in partition_columns
+    ) or "1 = 1"
+    # Native ordered sums consume only the floating suffix. The integer prefix
+    # is converted exactly once, at the same transition as the scan executor.
+    common = f"""WITH totals AS (
+        SELECT {prefix}COUNT(*) AS sample_count,
+            SUM(CASE WHEN {integer_test} THEN {integer_value} ELSE 0 END) AS integer_sum_low,
+            SUM(CASE WHEN {integer_test} THEN 0 ELSE 1 END) AS floating_count
+        FROM valid_samples{group_sql}
+    ), floating_rows AS (
+        SELECT {source_prefix}v.occurred_at, v.observation_digest,
+            t.sample_count, t.floating_count, {floating_value} AS floating_value,
+            CASE WHEN {integer_test} THEN 0 ELSE 1 END AS is_floating,
+            SUM(CASE WHEN {integer_test} THEN {integer_value} ELSE 0 END) OVER (
+                {source_partition}ORDER BY v.occurred_at, v.observation_digest
+                ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
+            ) AS integer_prefix,
+            SUM(CASE WHEN {integer_test} THEN 0 ELSE 1 END) OVER (
+                {source_partition}ORDER BY v.occurred_at, v.observation_digest
+                ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
+            ) AS floating_seen
+        FROM valid_samples AS v JOIN totals AS t ON {join_sql}
+        WHERE t.floating_count > 0
+    ), floating_values AS (
+        SELECT {prefix}occurred_at, observation_digest, sample_count, floating_count,
+            CASE WHEN floating_seen = 0 THEN NULL
+                WHEN floating_seen = 1 AND is_floating = 1
+                    THEN {prefix_value} + floating_value
+                ELSE floating_value END AS value
+        FROM floating_rows
+    )"""
+    if dialect_name == "postgresql":
+        reduction = f"""SELECT {prefix}MAX(sample_count) AS sample_count,
+            MAX(floating_count) AS floating_count,
+            SUM(value ORDER BY occurred_at, observation_digest) AS sample_sum
+        FROM floating_values{group_sql}"""
+    else:
+        reduction = f"""SELECT {prefix}sample_count, floating_count, sample_sum
+        FROM (
+            SELECT {prefix}sample_count, floating_count,
+                ROW_NUMBER() OVER (
+                    {partition_sql}ORDER BY occurred_at, observation_digest
+                ) AS ordinal,
+                SUM(value) OVER (
+                    {partition_sql}ORDER BY occurred_at, observation_digest
+                    ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
+                ) AS sample_sum
+            FROM floating_values
+        ) AS accumulated WHERE ordinal = sample_count"""
+    return f"""{common}, floating_totals AS (
+        {reduction}
+    )
+    SELECT {prefix}sample_count, 0 AS integer_sum_high, integer_sum_low,
+        floating_count, NULL AS sample_sum
+    FROM totals WHERE COALESCE(floating_count, 0) = 0
+    UNION ALL
+    SELECT {prefix}sample_count, 0 AS integer_sum_high, NULL AS integer_sum_low,
+        floating_count, sample_sum
+    FROM floating_totals"""
 
 
 def _sqlite_sum_sql(partition_columns: list[str]) -> str:
