@@ -141,6 +141,15 @@ def _overlay_request_correlation(
         raise AIError(ErrorCode.REQUEST_FIELD_INVALID) from error
 
 
+def _attachment_paths(value: Sequence[str]) -> tuple[str, ...]:
+    if isinstance(value, (str, bytes, bytearray)):
+        raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+    result = tuple(value)
+    if any(not isinstance(item, str) or not item for item in result):
+        raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+    return result
+
+
 class Runtime(Generic[AppT]):
     """Frozen Runtime composition and service graph."""
 
@@ -346,6 +355,7 @@ class Runtime(Generic[AppT]):
         agent_digest: str,
         user_prompt: UserPromptTransport,
         *,
+        attachments: Sequence[str],
         output: "type[BaseModel] | None",
         principal: "Principal | None",
         session_id: "str | None",
@@ -359,6 +369,7 @@ class Runtime(Generic[AppT]):
         self._ensure_open()
         resolved_principal = self._resolve_principal(principal)
         effective_correlation = _overlay_request_correlation(self.correlation, correlation)
+        resolved_attachments = _attachment_paths(attachments)
         validate_user_prompt(str(user_prompt))
         definition = self._catalog.definition(agent_digest)
         resolved_mode, resolved_planning, resolved_thinking = _execution_policy(
@@ -380,6 +391,7 @@ class Runtime(Generic[AppT]):
             planning=resolved_planning,
             thinking=resolved_thinking,
             correlation=effective_correlation,
+            attachments=resolved_attachments,
         )
         if session_id is None:
             handle = await self.execution.run(binding.digest, request)
@@ -397,6 +409,7 @@ class Runtime(Generic[AppT]):
                 planning=request.planning,
                 thinking=request.thinking,
                 correlation=effective_correlation,
+                attachments=request.attachments,
             )
             handle = await self.session.resume(
                 definition.spec.id,
@@ -442,17 +455,19 @@ class Runtime(Generic[AppT]):
         execution_id: str,
         user_prompt: UserPromptTransport,
         *,
+        attachments: Sequence[str],
         principal: Principal,
         idempotency_key: "str | None",
         correlation: "Mapping[str, object] | None" = None,
     ) -> "Execution[AppT]":
         self._ensure_open()
         request = RetryExecutionRequest(
-            str(user_prompt),
-            user_prompt.codec,
-            principal,
-            idempotency_key or secrets.token_urlsafe(32),
-            _request_correlation(correlation),
+            user_prompt=str(user_prompt),
+            user_prompt_codec=user_prompt.codec,
+            principal=principal,
+            idempotency_key=idempotency_key or secrets.token_urlsafe(32),
+            correlation=_request_correlation(correlation),
+            attachments=_attachment_paths(attachments),
         )
         handle = await self.execution.retry(binding_digest, execution_id, request)
         return Execution(self, handle.execution_id, binding_digest, principal)
@@ -463,17 +478,19 @@ class Runtime(Generic[AppT]):
         execution_id: str,
         user_prompt: UserPromptTransport,
         *,
+        attachments: Sequence[str],
         principal: Principal,
         idempotency_key: "str | None",
         correlation: "Mapping[str, object] | None" = None,
     ) -> "Execution[AppT]":
         self._ensure_open()
         request = ForkExecutionRequest(
-            str(user_prompt),
-            user_prompt.codec,
-            principal,
-            idempotency_key or secrets.token_urlsafe(32),
-            _request_correlation(correlation),
+            user_prompt=str(user_prompt),
+            user_prompt_codec=user_prompt.codec,
+            principal=principal,
+            idempotency_key=idempotency_key or secrets.token_urlsafe(32),
+            correlation=_request_correlation(correlation),
+            attachments=_attachment_paths(attachments),
         )
         handle = await self.execution.fork(binding_digest, execution_id, request)
         return Execution(self, handle.execution_id, binding_digest, principal)
@@ -624,6 +641,7 @@ class Runtime(Generic[AppT]):
         node_id: str,
         user_prompt: UserPromptTransport,
         *,
+        attachments: Sequence[str],
         dependencies: tuple[str, ...],
         budget_cost: int,
         output: "type[BaseModel] | None",
@@ -638,10 +656,24 @@ class Runtime(Generic[AppT]):
             thinking=thinking,
         )
         binding = self._bind_agent(agent_digest, output=output)
-        return TaskNode(
-            node_id,
-            dependencies,
-            input={
+        resolved_attachments = _attachment_paths(attachments)
+        if resolved_attachments:
+            task_input: JsonValue = {
+                "type": "linktools.ai.agent",
+                "version": 2,
+                "stage": "draft",
+                "binding": binding.snapshot.to_payload(),
+                "prompt": {
+                    "codec": user_prompt.codec,
+                    "value": str(user_prompt),
+                },
+                "attachments": list(resolved_attachments),
+                "mode": "run",
+                "planning": resolved_planning,
+                "thinking": resolved_thinking,
+            }
+        else:
+            task_input = {
                 "type": "linktools.ai.agent",
                 "version": 1,
                 "binding": binding.snapshot.to_payload(),
@@ -650,7 +682,11 @@ class Runtime(Generic[AppT]):
                 "mode": "run",
                 "planning": resolved_planning,
                 "thinking": resolved_thinking,
-            },
+            }
+        return TaskNode(
+            node_id,
+            dependencies,
+            input=task_input,
             budget_cost=budget_cost,
         )
 
