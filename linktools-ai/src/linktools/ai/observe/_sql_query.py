@@ -304,7 +304,7 @@ def _projection_parts(
 def _bucket_expression(dialect_name: str) -> str:
     if dialect_name == "sqlite":
         return (
-            "CAST((((CAST(strftime('%s', b.occurred_at) AS INTEGER) "
+            "CAST((((CAST(strftime('%s', substr(CAST(b.occurred_at AS TEXT), 1, 19)) AS INTEGER) "
             "- :start_epoch_seconds) * 1000000 + "
             "CAST(COALESCE(NULLIF(substr(CAST(b.occurred_at AS TEXT), 21, 6), ''), '0') AS INTEGER) "
             "- :start_microsecond) / :bucket_us) AS INTEGER)"
