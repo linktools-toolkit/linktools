@@ -13,7 +13,8 @@ from linktools.ai.observe import MetricAggregation, MetricType
 from linktools.ai.observe._sql_query import _base_params, _decode_measurement_rows, _measurement_sql
 from sqlalchemy import text
 from sqlalchemy.dialects import mysql
-from test_metrics_sql_server_sums import _plan, _server
+
+from .test_metrics_sql_server_sums import _plan, _server
 
 
 @pytest.mark.parametrize("_server", ("mysql",), indirect=True)
