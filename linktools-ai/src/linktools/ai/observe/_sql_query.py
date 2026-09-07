@@ -533,7 +533,7 @@ def _measurement_source_sql(
         value_type = f"JSON_TYPE({raw_value})"
         numeric_value = (
             "CASE "
-            f"WHEN {value_type} = 'INTEGER' THEN "
+            f"WHEN {value_type} IN ('INTEGER', 'UNSIGNED INTEGER') THEN "
             f"CAST(JSON_UNQUOTE({raw_value}) AS DECIMAL(65, 0)) "
             f"WHEN {value_type} = 'DOUBLE' THEN "
             f"CAST(JSON_UNQUOTE({raw_value}) AS DOUBLE) "
@@ -589,8 +589,8 @@ def _measurement_valid_predicate(
         )
     elif dialect_name == "mysql":
         base = (
-            "r.value_type IN ('INTEGER', 'DOUBLE') AND "
-            "(r.value_type != 'INTEGER' OR "
+            "r.value_type IN ('INTEGER', 'UNSIGNED INTEGER', 'DOUBLE') AND "
+            "(r.value_type NOT IN ('INTEGER', 'UNSIGNED INTEGER') OR "
             "CAST(JSON_UNQUOTE(r.raw_value) AS DECIMAL(65, 0)) "
             "BETWEEN :int64_min AND :int64_max)"
         )
@@ -675,7 +675,7 @@ def _server_sum_sql(dialect_name: str, partition_columns: list[str]) -> str:
         if columns else ""
     )
     if dialect_name == "mysql":
-        integer_test = "value_type = 'INTEGER'"
+        integer_test = "value_type IN ('INTEGER', 'UNSIGNED INTEGER')"
         integer_value = "CAST(JSON_UNQUOTE(raw_value) AS DECIMAL(65, 0))"
         floating_value = "CAST(JSON_UNQUOTE(v.raw_value) AS DOUBLE)"
         prefix_value = "CAST(integer_prefix AS DOUBLE)"
@@ -955,7 +955,7 @@ def _integer_equality_condition(
         )
     if dialect_name == "mysql":
         return (
-            f"JSON_TYPE({raw}) = 'INTEGER' "
+            f"JSON_TYPE({raw}) IN ('INTEGER', 'UNSIGNED INTEGER') "
             f"AND CAST({text_value} AS SIGNED) = :{parameter}"
         )
     return (
@@ -976,8 +976,9 @@ def _json_type_condition(
         expected = "text" if string else "integer"
         return f"json_type({alias}.payload_json, '{_json_path(parts)}') = '{expected}'"
     if dialect_name == "mysql":
-        expected = "STRING" if string else "INTEGER"
-        return f"JSON_TYPE({raw}) = '{expected}'"
+        if string:
+            return f"JSON_TYPE({raw}) = 'STRING'"
+        return f"JSON_TYPE({raw}) IN ('INTEGER', 'UNSIGNED INTEGER')"
     expected = "string" if string else "number"
     return f"json_typeof({raw}) = '{expected}'"
 

@@ -120,7 +120,7 @@ def _run(
     sql = str(text(statement).bindparams(**params).compile(dialect=dialect, compile_kwargs={"literal_binds": True}))
     inserts = []
     for index, (microseconds, group, value) in enumerate(records):
-        payload = {"observation": {"dimensions": {} if group is None else {"group": group},
+        payload = {"observation": {"dimensions": {} if group is None else {"group": group}, "correlation": {"attempt": 2**53 + 1},
                    "measurements": [{"name": "value", "revision": 1, "value": value}]}}
         occurred_at = plan.start + timedelta(microseconds=microseconds)
         if name == "mysql":
@@ -213,5 +213,12 @@ def test_mysql_integer_scalar_representation(_server: tuple[str, list[str]]) -> 
     result = subprocess.run(command, input="\n".join(fields), capture_output=True, text=True, timeout=5)
     assert result.returncode == 0, result.stderr
     actual = [json.loads(line) for line in result.stdout.splitlines()]
-    expected = [{"type": "INTEGER", "text": str(value), "decimal": str(value), "valid": 1} for value in values]
+    assert {row.pop("type") for row in actual} <= {"INTEGER", "UNSIGNED INTEGER"}
+    expected = [{"text": str(value), "decimal": str(value), "valid": 1} for value in values]
     assert actual == expected
+
+
+def test_server_large_integer_correlation_filter(_server: tuple[str, list[str]]) -> None:
+    plan = replace(_plan(), correlation_filters=(("attempt", 2**53 + 1),))
+    result = _run(_server, ((0, None, 1.0), (1, None, 2**53 + 1)), plan)
+    assert result == {((), None): (1.0 + (2**53 + 1), 2)}
