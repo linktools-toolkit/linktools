@@ -12,7 +12,11 @@ from typing import TYPE_CHECKING
 
 from ..core import canonical_json_bytes, validate_persistence_namespace
 from ..errors import AIError, ErrorCode
-from ._codec import observation_envelope
+from ._codec import (
+    definition_semantic_digest,
+    observation_envelope,
+    observation_payload_digest,
+)
 from ._memory import InMemoryMetricStore
 from ._model import (
     MetricAggregation,
@@ -78,7 +82,23 @@ class Metrics:
                 ErrorCode.REQUEST_FIELD_INVALID,
                 safe_details={"field": "metric"},
             )
-        return await self._store.put_definition(self._namespace, definition)
+        try:
+            return await self._store.put_definition(self._namespace, definition)
+        except AIError as error:
+            if error.code is not ErrorCode.STORAGE_COMMIT_UNKNOWN:
+                raise
+        stored = await self._readback_definition(definition)
+        if stored is not None:
+            return stored
+        try:
+            return await self._store.put_definition(self._namespace, definition)
+        except AIError as error:
+            if error.code is not ErrorCode.STORAGE_COMMIT_UNKNOWN:
+                raise
+            stored = await self._readback_definition(definition)
+            if stored is not None:
+                return stored
+            raise
 
     async def record(
         self,
@@ -177,10 +197,21 @@ class Metrics:
                 raise AIError(ErrorCode.OBSERVATION_PAYLOAD_TOO_LARGE)
         try:
             await self._store.put_observations(self._namespace, batch)
+            return
         except AIError as error:
             if error.code is not ErrorCode.STORAGE_COMMIT_UNKNOWN:
                 raise
+        if await self._readback_observations(batch):
+            return
+        try:
             await self._store.put_observations(self._namespace, batch)
+            return
+        except AIError as error:
+            if error.code is not ErrorCode.STORAGE_COMMIT_UNKNOWN:
+                raise
+            if await self._readback_observations(batch):
+                return
+            raise
 
     async def get_observation(self, observation_id: str) -> Observation | None:
         return await self._store.get_observation(self._namespace, observation_id)
@@ -201,6 +232,46 @@ class Metrics:
             self._namespace,
             before=before.astimezone(timezone.utc),
         )
+
+    async def _readback_definition(
+        self,
+        definition: MetricDefinition,
+    ) -> MetricDefinition | None:
+        stored = await self._store.get_definition(
+            self._namespace,
+            definition.name,
+            definition.revision,
+        )
+        if stored is None:
+            return None
+        if definition_semantic_digest(stored) != definition_semantic_digest(definition):
+            raise AIError(ErrorCode.STORAGE_CONFLICT)
+        return stored
+
+    async def _readback_observations(
+        self,
+        observations: tuple[Observation, ...],
+    ) -> bool:
+        expected: dict[str, str] = {}
+        for observation in observations:
+            digest = observation_payload_digest(self._namespace, observation)
+            current = expected.get(observation.observation_id)
+            if current is not None and current != digest:
+                raise AIError(ErrorCode.STORAGE_CONFLICT)
+            expected[observation.observation_id] = digest
+
+        complete = True
+        for observation_id, expected_digest in expected.items():
+            stored = await self._store.get_observation(
+                self._namespace,
+                observation_id,
+            )
+            if stored is None:
+                complete = False
+                continue
+            if observation_payload_digest(self._namespace, stored) != expected_digest:
+                raise AIError(ErrorCode.STORAGE_CONFLICT)
+        return complete
 
     async def _resolve_definition(
         self,

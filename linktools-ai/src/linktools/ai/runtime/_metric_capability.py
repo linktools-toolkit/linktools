@@ -10,6 +10,7 @@ from datetime import datetime, timezone
 from time import monotonic_ns
 from typing import Any
 
+from linktools.core import environ
 from openai import (
     APIConnectionError as OpenAIAPIConnectionError,
     APIError as OpenAIAPIError,
@@ -43,6 +44,8 @@ from ._metrics import (
     _bind_metric_execution_context,
     _metric_correlation,
 )
+
+_logger = environ.get_logger("ai.runtime.model_metrics")
 
 
 class _RuntimeModelMetricCapability(AbstractCapability[AgentContext[object]]):
@@ -109,6 +112,16 @@ class _RuntimeModelMetricCapability(AbstractCapability[AgentContext[object]]):
                 measurements=(),
             )
             raise
+        except RunCancelled as error:
+            self._record_model(
+                run_context,
+                attempt_id,
+                started,
+                status="CANCELLED",
+                error_code=_model_error_code(error),
+                measurements=(),
+            )
+            raise
         except Exception as error:
             self._record_model(
                 run_context,
@@ -168,7 +181,7 @@ class _RuntimeModelMetricCapability(AbstractCapability[AgentContext[object]]):
             )
             self._recorder.try_record(observation)
         except Exception:
-            return
+            _logger.exception("model metric observation rejected")
 
 
 def _provider_usage_measurements(

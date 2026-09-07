@@ -4,8 +4,9 @@
 
 from __future__ import annotations
 
+import json
 from datetime import datetime, timezone
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, Protocol, cast
 
 from ..core import Page
 from ..errors import AIError, ErrorCode
@@ -30,14 +31,21 @@ from ._codec import (
     observation_envelope,
     observation_payload_digest,
 )
-from ._model import MetricDefinition, Observation
-from ._store import _parse_scan_cursor, _scan_cursor
+from ._model import MetricDefinition, MetricSourceKind, Observation
+from ._store import (
+    _MetricQueryPushdownPlan,
+    _MetricQueryPushdownResult,
+    _MetricQueryPushdownRow,
+    _parse_scan_cursor,
+    _scan_cursor,
+)
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping
+    from collections.abc import Callable, Mapping
 
     from sqlalchemy import MetaData
     from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
+    from sqlalchemy.pool import ConnectionPoolEntry, PoolProxiedConnection
 
     from ..storage import SqlValue
 
@@ -162,11 +170,125 @@ class SqlMetricStore:
         self._observations = self._metadata.tables["ai_metric_observations"]
         self._context = create_sql_storage_context(engine)
         self._validate_schema = validate_schema
+        if engine.dialect.name == "sqlite":
+            from sqlalchemy import event
+
+            if not event.contains(engine.sync_engine, "checkout", _configure_sqlite_verifier):
+                event.listen(engine.sync_engine, "checkout", _configure_sqlite_verifier)
 
     async def _initialize(self) -> None:
         await self._context.initialize(
             metadata=self._metadata if self._validate_schema else None
         )
+
+    async def _execute_metric_query(
+        self,
+        namespace: str,
+        plan: _MetricQueryPushdownPlan,
+    ) -> _MetricQueryPushdownResult | None:
+        from ._sql_query import (
+            _sql_features_available,
+            execute_sql_metric_query,
+            sql_query_pushdown_supported,
+        )
+
+        await self._initialize()
+        dialect_name = self._context.dialect.name
+        namespace_key = namespace_digest(namespace)
+        async with self._context.sessions() as session:
+            if dialect_name in {"mysql", "postgresql"}:
+                if not sql_query_pushdown_supported(plan):
+                    return None
+                # Verification and reduction must see the same immutable records,
+                # including when the borrowed engine normally uses READ COMMITTED.
+                await session.connection(
+                    execution_options={"isolation_level": "REPEATABLE READ"}
+                )
+                if not await _sql_features_available(session, dialect_name, plan):
+                    return None
+                scanned_count = await self._verify_query_records(
+                    session, namespace, namespace_key, plan
+                )
+                if (
+                    plan.source_kind is MetricSourceKind.OBSERVATION_COUNT
+                    and not plan.filters
+                    and not plan.correlation_filters
+                    and not plan.group_by
+                    and plan.bucket_microseconds is None
+                ):
+                    # The fully verified stream already carries this SQL count.
+                    return _MetricQueryPushdownResult(rows=(
+                        _MetricQueryPushdownRow(
+                            group=(), bucket_index=None,
+                            sample_count=scanned_count, sample_sum=scanned_count,
+                        ),
+                    ))
+            return await execute_sql_metric_query(
+                session,
+                namespace_key=namespace_key,
+                dialect_name=dialect_name,
+                plan=plan,
+                namespace=namespace,
+                verify=dialect_name == "sqlite",
+            )
+
+    async def _verify_query_records(
+        self,
+        session: "AsyncSession",
+        namespace: str,
+        namespace_key: str,
+        plan: _MetricQueryPushdownPlan,
+    ) -> int:
+        from sqlalchemy import Text, cast as sql_cast, func, select
+
+        start = plan.start.astimezone(timezone.utc)
+        end = plan.end.astimezone(timezone.utc)
+        if self._context.dialect.name == "mysql":
+            start = start.replace(tzinfo=None)
+            end = end.replace(tzinfo=None)
+        columns = self._observations.c
+        bounded = (
+            select(
+                columns.namespace_digest,
+                columns.observation_digest,
+                columns.payload_digest,
+                columns.kind,
+                columns.occurred_at,
+                sql_cast(columns.payload_json, Text).label("payload_json"),
+            )
+            .where(
+                columns.namespace_digest == namespace_key,
+                columns.kind == plan.observation_kind,
+                columns.occurred_at >= start,
+                columns.occurred_at < end,
+            )
+            .limit(plan.max_scanned_observations + 1)
+            .subquery("metric_verification")
+        )
+        statement = select(bounded, func.count().over().label("scanned_count"))
+        result = await session.stream(statement, execution_options={"yield_per": 512})
+        scanned_count = 0
+        try:
+            async for row in result.mappings():
+                scanned_count = int(row["scanned_count"])
+                if scanned_count > plan.max_scanned_observations:
+                    raise AIError(ErrorCode.METRIC_QUERY_LIMIT_EXCEEDED)
+                try:
+                    # Read JSON text so driver decoding cannot erase duplicate
+                    # members before the codec and SQL extract different values.
+                    payload = json.loads(
+                        row["payload_json"],
+                        object_pairs_hook=_unique_json_pairs,
+                        parse_constant=_reject_json_constant,
+                    )
+                    _decode_observation_record(
+                        namespace, namespace_key, {**row, "payload_json": payload}
+                    )
+                except (TypeError, ValueError, RecursionError) as error:
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
+        finally:
+            await result.close()
+        return scanned_count
 
     async def put_definition(
         self,
@@ -338,10 +460,7 @@ class SqlMetricStore:
                 if existing.get(identity) != payload:
                     raise AIError(ErrorCode.STORAGE_CONFLICT)
 
-        await self._context.run_mutation(
-            write_and_validate,
-            domain="metrics.observation",
-        )
+        await self._context.run_mutation(write_and_validate, domain="metrics.observation")
 
     async def get_observation(
         self,
@@ -373,21 +492,8 @@ class SqlMetricStore:
         namespace_key: str,
         row: "Mapping[str, object]",
     ) -> Observation:
-        observation = decode_observation_envelope(
-            row["payload_json"], expected_namespace=namespace
-        )
-        expected_identity = observation_digest(namespace, observation.observation_id)
-        expected_payload = observation_payload_digest(namespace, observation)
-        if (
-            row["namespace_digest"] != namespace_key
-            or row["kind"] != observation.kind
-            or _utc_database_datetime(cast("datetime", row["occurred_at"]))
-            != observation.occurred_at
-            or row["observation_digest"] != expected_identity
-            or row["payload_digest"] != expected_payload
-        ):
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        return observation
+        return _decode_observation_record(namespace, namespace_key, row)
+
 
     async def scan_observations(
         self,
@@ -461,6 +567,98 @@ class SqlMetricStore:
             return int(result.rowcount or 0)
 
         return await self._context.run_mutation(delete_rows, domain="metrics.prune")
+
+
+
+class _SqliteFunctionConnection(Protocol):
+    def create_function(
+        self,
+        name: str,
+        arguments: int,
+        function: "Callable[..., str | None]",
+    ) -> None: ...
+
+
+def _configure_sqlite_verifier(
+    connection: _SqliteFunctionConnection,
+    record: "ConnectionPoolEntry",
+    _proxy: "PoolProxiedConnection",
+) -> None:
+    # Pool entry info is cleared when its physical connection is replaced.
+    if record.info.get("linktools_metric_verifier") is not _sqlite_record_error:
+        connection.create_function("linktools_metric_verify", 8, _sqlite_record_error)
+        record.info["linktools_metric_verifier"] = _sqlite_record_error
+
+
+def _unique_json_pairs(pairs: list[tuple[str, object]]) -> dict[str, object]:
+    result = dict(pairs)
+    # SQLite JSON extraction and Python disagree on duplicate object keys.
+    if len(result) != len(pairs):
+        raise ValueError("duplicate JSON object key")
+    return result
+
+
+def _reject_json_constant(value: str) -> None:
+    raise ValueError(f"non-JSON numeric constant: {value}")
+
+
+def _sqlite_record_error(
+    namespace: str,
+    namespace_key: str,
+    stored_namespace: str,
+    stored_identity: str,
+    stored_payload: str,
+    kind: str,
+    occurred_at: str,
+    payload: str,
+) -> str | None:
+    try:
+        decoded = json.loads(
+            payload,
+            object_pairs_hook=_unique_json_pairs,
+            parse_constant=_reject_json_constant,
+        )
+        timestamp = datetime.fromisoformat(occurred_at)
+        _decode_observation_record(
+            namespace,
+            namespace_key,
+            {
+                "namespace_digest": stored_namespace,
+                "observation_digest": stored_identity,
+                "payload_digest": stored_payload,
+                "kind": kind,
+                "occurred_at": timestamp,
+                "payload_json": decoded,
+            },
+        )
+    except AIError as error:
+        # Return typed failures to SQL; SQLite otherwise erases their code.
+        return error.code.value
+    except (TypeError, ValueError, RecursionError):
+        return ErrorCode.STORAGE_INTEGRITY_ERROR.value
+    return None
+
+
+def _decode_observation_record(
+    namespace: str,
+    namespace_key: str,
+    row: "Mapping[str, object]",
+) -> Observation:
+    observation = decode_observation_envelope(
+        row["payload_json"], expected_namespace=namespace
+    )
+    expected_identity = observation_digest(namespace, observation.observation_id)
+    expected_payload = observation_payload_digest(namespace, observation)
+    if (
+        row["namespace_digest"] != namespace_key
+        or row["kind"] != observation.kind
+        or _utc_database_datetime(cast("datetime", row["occurred_at"]))
+        != observation.occurred_at
+        or row["observation_digest"] != expected_identity
+        or row["payload_digest"] != expected_payload
+    ):
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    return observation
 
 
 def _utc_database_datetime(value: datetime) -> datetime:

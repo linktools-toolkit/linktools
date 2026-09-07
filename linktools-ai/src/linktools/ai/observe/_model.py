@@ -451,14 +451,22 @@ class MetricQuery:
             self.aggregation, MetricAggregation
         ):
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
-        if self.aggregation is MetricAggregation.PERCENTILE:
-            if (
-                isinstance(self.percentile, bool)
-                or not isinstance(self.percentile, (int, float))
-                or not 0 < self.percentile <= 1
-            ):
-                raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
-        elif self.percentile is not None:
+        if self.percentile is not None and (
+            isinstance(self.percentile, bool)
+            or not isinstance(self.percentile, (int, float))
+            or not 0 < self.percentile <= 1
+        ):
+            raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+        if (
+            self.aggregation is MetricAggregation.PERCENTILE
+            and self.percentile is None
+        ):
+            raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+        if (
+            self.aggregation is not None
+            and self.aggregation is not MetricAggregation.PERCENTILE
+            and self.percentile is not None
+        ):
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
 
         if not isinstance(self.filters, Mapping):

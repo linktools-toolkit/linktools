@@ -5,12 +5,19 @@
 from __future__ import annotations
 
 import re
+from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Protocol
+from typing import Protocol, runtime_checkable
 
 from ..core import Page
 from ..errors import AIError, ErrorCode
-from ._model import MetricDefinition, Observation
+from ._model import (
+    MetricAggregation,
+    MetricDefinition,
+    MetricSourceKind,
+    MetricType,
+    Observation,
+)
 
 _SHA256 = re.compile(r"[0-9a-f]{64}")
 
@@ -34,6 +41,53 @@ def _parse_scan_cursor(cursor: str) -> tuple[datetime, str]:
     if occurred_at.tzinfo is None:
         raise AIError(ErrorCode.CURSOR_INVALID)
     return occurred_at.astimezone(timezone.utc), digest
+
+
+@dataclass(frozen=True, slots=True)
+class _MetricQueryPushdownPlan:
+    observation_kind: str
+    source_kind: MetricSourceKind
+    metric_type: MetricType
+    measurement_name: str | None
+    measurement_revision: int | None
+    indicator_field: str | None
+    indicator_values: tuple[str, ...]
+    aggregation: MetricAggregation
+    percentile: float | None
+    start: datetime
+    end: datetime
+    filters: tuple[tuple[str, str], ...]
+    correlation_filters: tuple[tuple[str, str | int], ...]
+    group_by: tuple[str, ...]
+    bucket_microseconds: int | None
+    bucket_count: int
+    max_scanned_observations: int
+    max_extracted_samples: int
+    max_groups: int
+    max_result_points: int
+
+
+@dataclass(frozen=True, slots=True)
+class _MetricQueryPushdownRow:
+    group: tuple[str | None, ...]
+    bucket_index: int | None
+    sample_count: int
+    sample_sum: int | float | None = None
+    selected_value: int | float | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class _MetricQueryPushdownResult:
+    rows: tuple[_MetricQueryPushdownRow, ...]
+
+
+@runtime_checkable
+class _MetricQueryPushdownStore(Protocol):
+    async def _execute_metric_query(
+        self,
+        namespace: str,
+        plan: _MetricQueryPushdownPlan,
+    ) -> _MetricQueryPushdownResult | None: ...
 
 
 class MetricStore(Protocol):

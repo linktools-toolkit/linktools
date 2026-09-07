@@ -160,22 +160,6 @@ class _TaskMetricProjector:
             return False
 
     async def _project(self, graph_id: str, *, tenant_id: str) -> bool:
-        first_page = await self._repository.list_events(
-            graph_id,
-            tenant_id=tenant_id,
-            after_sequence=0,
-            limit=1,
-        )
-        if len(first_page.items) != 1:
-            raise ValueError("task event admission is missing")
-        admission = first_page.items[0]
-        if (
-            admission.sequence != 1
-            or admission.event_type is not TaskEventType.GRAPH_ADMITTED
-            or admission.graph_id != graph_id
-            or admission.node_id is not None
-        ):
-            raise ValueError("task event admission is invalid")
         terminal = await self._repository.latest_event(
             graph_id,
             tenant_id=tenant_id,
@@ -194,6 +178,7 @@ class _TaskMetricProjector:
                 raise ValueError("task metric admission is missing")
             correlation = admitted.correlation
 
+        admission: TaskEvent | None = None
         attempts: dict[tuple[str, int], _Attempt] = {}
         ready_at: dict[str, datetime] = {}
         attempt_counts: dict[str, int] = {}
@@ -222,6 +207,13 @@ class _TaskMetricProjector:
                         event_count,
                     )
                     return False
+                if event.sequence == 1:
+                    if (
+                        event.event_type is not TaskEventType.GRAPH_ADMITTED
+                        or event.node_id is not None
+                    ):
+                        raise ValueError("task event admission is invalid")
+                    admission = event
                 self._consume_node_event(
                     attempts,
                     ready_at,
@@ -231,6 +223,8 @@ class _TaskMetricProjector:
             if page.next_cursor is None:
                 break
 
+        if admission is None:
+            raise ValueError("task event admission is missing")
         retry_count = sum(
             1
             for attempt in attempts.values()

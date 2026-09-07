@@ -274,17 +274,21 @@ async def test_one_rejected_task_fact_does_not_abort_later_attempts() -> None:
     ]
 
 
-@pytest.mark.asyncio
 async def test_trigger_deduplicates_successful_projection() -> None:
     now = datetime(2026, 9, 5, tzinfo=timezone.utc)
-    repository = _Repository((_admitted("dedup", now), _graph_terminal("dedup", 2, now + timedelta(seconds=1))))
+    repository = _Repository(
+        (
+            _admitted("dedup", now),
+            _graph_terminal("dedup", 2, now + timedelta(seconds=1)),
+        )
+    )
     recorder = _Recorder()
     projector = _TaskMetricProjector(repository, recorder, source_namespace="workspace")
     projector.trigger("dedup", tenant_id="tenant")
     while projector._tasks:
         await asyncio.sleep(0)
     first_calls = repository.list_calls
-    assert first_calls == 2
+    assert first_calls == 1
     projector.trigger("dedup", tenant_id="tenant")
     await asyncio.sleep(0)
     assert repository.list_calls == first_calls

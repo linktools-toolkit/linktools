@@ -16,7 +16,7 @@ from ..core import CorrelationData, UsageMetrics, normalize_correlation
 from ..errors import AIError, ErrorCode
 from ..observe import MetricMeasurement, MetricRecorder, Metrics, Observation
 from ._metric_id import _stable_observation_id
-from .state._contracts import ExecutionTerminalCommitResult
+from .state import ExecutionTerminalCommitResult
 
 _logger = environ.get_logger("ai.runtime.metrics")
 _QUEUE_CAPACITY = 1024
