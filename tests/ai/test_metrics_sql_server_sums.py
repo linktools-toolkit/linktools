@@ -246,7 +246,16 @@ def test_server_sum_large_window_uses_one_source_scan(_server: tuple[str, list[s
         result_query = "SELECT JSON_OBJECT('sample_sum', q.sample_sum, 'sample_count', q.sample_count, 'invalid_count', q.invalid_count) FROM (" + sql + ") AS q;"
     seed_sql = str(text(seed).bindparams(start=plan.start.replace(tzinfo=None), payload=payload).compile(dialect=dialect, compile_kwargs={"literal_binds": True}))
     script = "DROP TABLE IF EXISTS ai_metric_observations;\n" + schema + "\n" + seed_sql
-    script += "\n" + explain + ";\nSELECT '__METRIC_RESULT__';\n" + result_query
+    if name == "mysql":
+        script += "\nTRUNCATE TABLE performance_schema.table_io_waits_summary_by_table;"
+    script += "\n" + explain + ";\n"
+    if name == "mysql":
+        script += (
+            "SELECT '__SOURCE_READS__';\n"
+            "SELECT COUNT_FETCH FROM performance_schema.table_io_waits_summary_by_table "
+            "WHERE OBJECT_SCHEMA = 'metrics_test' AND OBJECT_NAME = 'ai_metric_observations';\n"
+        )
+    script += "SELECT '__METRIC_RESULT__';\n" + result_query
     completed = subprocess.run(command, input=script, capture_output=True, text=True, timeout=45)
     assert completed.returncode == 0, completed.stderr
     execution_plan, separator, result = completed.stdout.partition("__METRIC_RESULT__\n")
@@ -265,5 +274,8 @@ def test_server_sum_large_window_uses_one_source_scan(_server: tuple[str, list[s
         assert len(sources) == 1, execution_plan
         assert sources[0]["Actual Loops"] == 1, execution_plan
     else:
-        sources = [line for line in execution_plan.splitlines() if " on ai_metric_observations " in line]
-        assert len(sources) == 1 and "loops=1)" in sources[0], execution_plan
+        # MySQL can materialize constant CTEs before EXPLAIN prints its tree.
+        # Table instrumentation measures the source even when that subtree is omitted.
+        _, marker, reads = execution_plan.partition("__SOURCE_READS__\n")
+        assert marker, execution_plan
+        assert 100000 <= int(reads.strip()) <= 100001, execution_plan
