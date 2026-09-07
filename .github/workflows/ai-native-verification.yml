@@ -10,14 +10,28 @@ permissions:
 
 jobs:
   source:
-    name: Capture verification source
+    name: Capture verification inputs
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.11'
       - name: Archive tracked verification inputs
         run: git archive --format=tar.gz --output=native-source.tar.gz HEAD
+      - name: Resolve offline verification dependencies
+        run: |
+          python -m pip download --dest wheelhouse --only-binary=:all: \
+            'pydantic-ai-slim[mcp,openai]==2.40.0' \
+            'pydantic-ai-harness==0.29.0' \
+            'sqlalchemy[asyncio]==2.0.51' 'aiosqlite==0.22.1' \
+            asyncpg asyncmy pytest pytest-asyncio psutil filelock jsonschema \
+            rich argcomplete 'requests[socks]' setuptools wheel jinja2 \
+            -r requirements.txt
       - uses: actions/upload-artifact@v4
         with:
-          name: native-source-${{ github.sha }}
-          path: native-source.tar.gz
+          name: native-inputs-${{ github.sha }}
+          path: |
+            native-source.tar.gz
+            wheelhouse
           retention-days: 1
