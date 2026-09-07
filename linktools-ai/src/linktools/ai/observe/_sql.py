@@ -185,18 +185,90 @@ class SqlMetricStore:
         namespace: str,
         plan: _MetricQueryPushdownPlan,
     ) -> _MetricQueryPushdownResult | None:
-        from ._sql_query import execute_sql_metric_query
+        from ._sql_query import (
+            _sql_features_available,
+            execute_sql_metric_query,
+            sql_query_pushdown_supported,
+        )
 
         await self._initialize()
+        dialect_name = self._context.dialect.name
+        namespace_key = namespace_digest(namespace)
         async with self._context.sessions() as session:
+            if dialect_name in {"mysql", "postgresql"}:
+                if not sql_query_pushdown_supported(plan):
+                    return None
+                # Verification and reduction must see the same immutable records,
+                # including when the borrowed engine normally uses READ COMMITTED.
+                await session.connection(
+                    execution_options={"isolation_level": "REPEATABLE READ"}
+                )
+                if not await _sql_features_available(session, dialect_name, plan):
+                    return None
+                await self._verify_query_records(session, namespace, namespace_key, plan)
             return await execute_sql_metric_query(
                 session,
-                namespace_key=namespace_digest(namespace),
-                dialect_name=self._context.dialect.name,
+                namespace_key=namespace_key,
+                dialect_name=dialect_name,
                 plan=plan,
                 namespace=namespace,
-                verify=self._context.dialect.name == "sqlite",
+                verify=dialect_name == "sqlite",
             )
+
+    async def _verify_query_records(
+        self,
+        session: "AsyncSession",
+        namespace: str,
+        namespace_key: str,
+        plan: _MetricQueryPushdownPlan,
+    ) -> None:
+        from sqlalchemy import Text, cast as sql_cast, func, select
+
+        start = plan.start.astimezone(timezone.utc)
+        end = plan.end.astimezone(timezone.utc)
+        if self._context.dialect.name == "mysql":
+            start = start.replace(tzinfo=None)
+            end = end.replace(tzinfo=None)
+        columns = self._observations.c
+        bounded = (
+            select(
+                columns.namespace_digest,
+                columns.observation_digest,
+                columns.payload_digest,
+                columns.kind,
+                columns.occurred_at,
+                sql_cast(columns.payload_json, Text).label("payload_json"),
+            )
+            .where(
+                columns.namespace_digest == namespace_key,
+                columns.kind == plan.observation_kind,
+                columns.occurred_at >= start,
+                columns.occurred_at < end,
+            )
+            .limit(plan.max_scanned_observations + 1)
+            .subquery("metric_verification")
+        )
+        statement = select(bounded, func.count().over().label("scanned_count"))
+        result = await session.stream(statement, execution_options={"yield_per": 128})
+        try:
+            async for row in result.mappings():
+                if row["scanned_count"] > plan.max_scanned_observations:
+                    raise AIError(ErrorCode.METRIC_QUERY_LIMIT_EXCEEDED)
+                try:
+                    # Read JSON text so driver decoding cannot erase duplicate
+                    # members before the codec and SQL extract different values.
+                    payload = json.loads(
+                        row["payload_json"],
+                        object_pairs_hook=_unique_json_pairs,
+                        parse_constant=_reject_json_constant,
+                    )
+                    _decode_observation_record(
+                        namespace, namespace_key, {**row, "payload_json": payload}
+                    )
+                except (TypeError, ValueError, RecursionError) as error:
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
+        finally:
+            await result.close()
 
     async def put_definition(
         self,
@@ -368,10 +440,7 @@ class SqlMetricStore:
                 if existing.get(identity) != payload:
                     raise AIError(ErrorCode.STORAGE_CONFLICT)
 
-        await self._context.run_mutation(
-            write_and_validate,
-            domain="metrics.observation",
-        )
+        await self._context.run_mutation(write_and_validate, domain="metrics.observation")
 
     async def get_observation(
         self,
