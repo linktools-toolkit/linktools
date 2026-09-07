@@ -22,6 +22,7 @@ jobs:
       - name: Resolve offline verification dependencies
         run: |
           python -m pip download --dest wheelhouse --only-binary=:all: \
+            'linktools-setup==0.0.3' \
             'pydantic-ai-slim[mcp,openai]==2.40.0' \
             'pydantic-ai-harness==0.29.0' \
             'sqlalchemy[asyncio]==2.0.51' 'aiosqlite==0.22.1' \
