@@ -12,6 +12,8 @@ class Sandbox(Protocol):
 
 
 class SandboxSession(Protocol):
+    async def read_bytes(self, path: str) -> bytes: ...
+
     async def read_file(
         self,
         path: str,
