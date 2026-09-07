@@ -11,12 +11,12 @@ from ._attachments import (
     AttachmentSourceRecord,
     AttachmentUploadRecord,
     InputPrepareRecord,
-    InputPrepareSlot,
     managed_attachment_path,
     semantic_attachment_entry,
 )
+from ._codec import _encode_persisted_domain, encode_envelope, wire_type_id
 from ._plan import RuntimeDomain
-from ._repositories import RepositoryBase, projected_record, replace_checked
+from ._repositories import RepositoryBase, replace_checked
 from ._store import StateStore, StateTransaction, StoredRecord
 
 _HEX_KEY = re.compile(r"[0-9a-f]{64}")
@@ -126,8 +126,9 @@ class AttachmentRepository(RepositoryBase):
             if current.status != "HELD" or current.held_content is None:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             next_value = replace(current, held_content=None, status="RELEASED")
-            candidate = replace(
-                projected_record(self, stored, next_value),
+            candidate = _project_owner_record(
+                stored,
+                next_value,
                 state="RELEASED",
             )
             await replace_checked(transaction, candidate, stored.storage_version)
@@ -201,8 +202,9 @@ class AttachmentRepository(RepositoryBase):
             current = await self._decode_prepare(stored)
             if current != expected:
                 raise AIError(ErrorCode.STORAGE_CONFLICT)
-            candidate = replace(
-                projected_record(self, stored, next_record),
+            candidate = _project_owner_record(
+                stored,
+                next_record,
                 state=next_record.status,
             )
             await replace_checked(transaction, candidate, stored.storage_version)
@@ -256,8 +258,9 @@ class AttachmentRepository(RepositoryBase):
             current = await self._decode_prepare(prepare_stored)
             if current != expected_prepare:
                 raise AIError(ErrorCode.STORAGE_CONFLICT)
-            candidate = replace(
-                projected_record(self, prepare_stored, next_prepare),
+            candidate = _project_owner_record(
+                prepare_stored,
+                next_prepare,
                 state=next_prepare.status,
             )
             await replace_checked(
@@ -351,6 +354,22 @@ class AttachmentRepository(RepositoryBase):
         if stored.kind != "attachment_source":
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         return await self._decode(stored, AttachmentSourceRecord)
+
+
+def _project_owner_record(
+    current: StoredRecord,
+    value: object,
+    *,
+    state: str,
+) -> StoredRecord:
+    """Replace one owner payload while preserving its opaque record identity."""
+    payload = _encode_persisted_domain(value)
+    return replace(
+        current,
+        state=state,
+        storage_version=current.storage_version + 1,
+        data=encode_envelope({"type": wire_type_id(value), "payload": payload}),
+    )
 
 
 def _same_upload_request(
