@@ -44,6 +44,11 @@ from ._codec import (
     parse_envelope,
     wire_type_id,
 )
+from ._attachment_codec import install_attachment_codec
+
+install_attachment_codec()
+del install_attachment_codec
+
 from ._commands import (
     ConversationStateCommands,
     ExecutionStateCommands,
