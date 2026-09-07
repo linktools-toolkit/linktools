@@ -77,7 +77,11 @@
     "usage_metrics",
     "run_record",
     "step_event",
-    "tool_effect"
+    "tool_effect",
+    "attachment_upload_v1",
+    "input_prepare_v1",
+    "attachment_source_v1",
+    "model_exposure_v1"
   ],
   "enum_wire_type_ids": [
     "approval_decision",
