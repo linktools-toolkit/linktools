@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 """Runtime-owned canonical transport for Pydantic AI user content."""
 
+import base64
 import hashlib
 import json
 from collections.abc import Mapping, Sequence
@@ -36,6 +37,7 @@ _WIRE_TIMESTAMP = datetime(1970, 1, 1, tzinfo=timezone.utc)
 _UserPromptInput: TypeAlias = str | Sequence[UserContent]
 _RuntimeUserPrompt: TypeAlias = str
 DraftPrompt: TypeAlias = JsonValue
+TaskPrompt: TypeAlias = JsonValue
 
 
 class UserPromptTransport(str):
@@ -92,6 +94,48 @@ def input_intent_digest(
             }
         )
     ).hexdigest()
+
+
+def task_prompt_draft(value: _UserPromptInput) -> TaskPrompt:
+    """Encode the in-memory Agent Task v2 prompt without persistence semantics."""
+    if isinstance(value, str):
+        validate_user_prompt(value)
+        return {"kind": "text", "text": value}
+    content = _require_user_content_sequence(value)
+    result: list[JsonValue] = []
+    for item in content:
+        if isinstance(item, UploadedFile):
+            raise AIError(
+                ErrorCode.REQUEST_FIELD_INVALID,
+                safe_details={
+                    "field": "user_prompt",
+                    "reason": "uploaded_file_not_durable",
+                },
+            )
+        if isinstance(item, str):
+            result.append({"kind": "text", "text": item})
+            continue
+        if isinstance(item, BinaryContent):
+            if not item.data or not isinstance(item.media_type, str) or not item.media_type:
+                raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+            result.append(
+                {
+                    "kind": "binary",
+                    "data_b64": base64.b64encode(item.data).decode("ascii"),
+                    "media_type": item.media_type,
+                    "identifier": item.identifier,
+                    "vendor_metadata": _json_object_or_none(item.vendor_metadata),
+                }
+            )
+            continue
+        result.append(
+            {
+                "kind": "native",
+                "codec": _USER_CONTENT_CODEC,
+                "value": _encode_user_content((item,)),
+            }
+        )
+    return result
 
 
 def prepared_user_prompt_transport(value: PreparedInput) -> UserPromptTransport:
