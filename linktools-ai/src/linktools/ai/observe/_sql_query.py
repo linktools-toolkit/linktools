@@ -496,7 +496,7 @@ def _measurement_source_sql(
     dialect_name: str,
     partition_columns: list[str],
     *,
-    ordered: bool = True,
+    ordered: bool,
 ) -> str:
     prefix = ", ".join(f"f.{column}" for column in partition_columns)
     if prefix:
@@ -693,7 +693,7 @@ def _server_sum_sql(dialect_name: str, partition_columns: list[str]) -> str:
     # is converted exactly once, at the same transition as the scan executor.
     common = f"""WITH totals AS (
         SELECT {prefix}COUNT(*) AS sample_count,
-            SUM(CASE WHEN {integer_test} THEN {integer_value} ELSE 0 END) AS integer_sum_low,
+            SUM(CASE WHEN {integer_test} THEN {integer_value} ELSE NULL END) AS integer_sum_low,
             SUM(CASE WHEN {integer_test} THEN 0 ELSE 1 END) AS floating_count
         FROM valid_samples{group_sql}
     ), floating_rows AS (

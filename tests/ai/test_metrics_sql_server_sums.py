@@ -131,12 +131,17 @@ def _run(
         insert = str(row.compile(dialect=dialect, compile_kwargs={"literal_binds": True}))
         inserts.append(insert)
     timestamp = "TIMESTAMPTZ" if name == "postgresql" else "DATETIME(6)"
-    script = f"""CREATE TEMPORARY TABLE ai_metric_observations (
+    temporary = "TEMPORARY " if name == "postgresql" else ""
+    script = "DROP TABLE IF EXISTS ai_metric_observations;\n" + f"""CREATE {temporary}TABLE ai_metric_observations (
         namespace_digest VARCHAR(64), kind VARCHAR(128), occurred_at {timestamp},
         observation_digest VARCHAR(64), payload_json JSON
     );\n""" + "\n".join(inserts)
     if name == "postgresql":
-        script += "\nSELECT COALESCE(json_agg(q), '[]') FROM (" + sql + ") AS q;"
+        script += (
+            "\nSELECT COALESCE(json_agg(typed), '[]') FROM ("
+            "SELECT q.*, pg_typeof(q.sample_sum)::text AS sum_type FROM ("
+            + sql + ") AS q) AS typed;"
+        )
     else:
         columns = ["scanned_count", "extracted_count", "invalid_count", "sample_count", "sample_sum", "integer_sum_high", "integer_sum_low", "floating_count"]
         columns += [f"g{n}" for n in range(len(plan.group_by))]
@@ -147,6 +152,12 @@ def _run(
     result = subprocess.run(command, input=script, capture_output=True, text=True, timeout=30)
     assert result.returncode == 0, result.stderr
     rows = json.loads(result.stdout) if name == "postgresql" else [json.loads(line) for line in result.stdout.splitlines()]
+    if name == "postgresql":
+        for row in rows:
+            assert row["sum_type"] == "double precision"
+            if row["sample_sum"] is not None:
+                # json_agg renders integral float8 values without a decimal point.
+                row["sample_sum"] = float(row["sample_sum"])
     decoded = _decode_measurement_rows(rows, plan)
     return {(row.group, row.bucket_index): (row.sample_sum, row.sample_count) for row in decoded.rows}
 
