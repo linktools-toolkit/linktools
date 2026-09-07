@@ -3,6 +3,7 @@
 """Workspace tool semantics and Sandbox-backed runtime adaptation."""
 
 import asyncio
+import stat
 import sys
 from collections.abc import Sequence
 from contextlib import AsyncExitStack
@@ -16,6 +17,7 @@ from pydantic_ai.toolsets import FunctionToolset
 from pydantic_ai_harness.filesystem import FileSystem
 from pydantic_ai_harness.shell import LLM_API_KEY_ENV_PATTERNS, Shell
 
+from ..errors import AIError, ErrorCode
 from ..workspace import Sandbox, SandboxSession, Workspace
 from ._context import AgentContext
 from ._group import (
@@ -77,6 +79,7 @@ class _LocalSandbox:
 
 class _LocalSandboxSession:
     def __init__(self, root: Path) -> None:
+        self._root = root.resolve()
         self._filesystem = cast(
             "FileSystemToolset[AgentContext[object]]",
             FileSystem[AgentContext[object]](root_dir=root).get_toolset(),
@@ -133,6 +136,29 @@ class _LocalSandboxSession:
             self._shell_tools[name],
         )
         return cast(str, result)
+
+    async def read_bytes(self, path: str) -> bytes:
+        if not isinstance(path, str) or not path or "\x00" in path:
+            raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+        relative = Path(path)
+        if relative.is_absolute() or any(part in {"", ".", ".."} for part in relative.parts):
+            raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+        current = self._root
+        try:
+            for part in relative.parts:
+                current = current / part
+                info = current.lstat()
+                if stat.S_ISLNK(info.st_mode):
+                    raise AIError(ErrorCode.AUTHORIZATION_DENIED)
+            resolved = current.resolve(strict=True)
+            resolved.relative_to(self._root)
+            if not stat.S_ISREG(resolved.stat().st_mode):
+                raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+            return resolved.read_bytes()
+        except AIError:
+            raise
+        except (FileNotFoundError, OSError, ValueError) as error:
+            raise AIError(ErrorCode.REQUEST_FIELD_INVALID) from error
 
     async def read_file(
         self,
@@ -421,7 +447,7 @@ class _WorkspaceToolSurface:
             command_id: The ID returned by start_command.
 
         Returns:
-            Status and recent output of the background command.
+            Status and recent output of a background command.
         """
         return await self._require_session().check_command(command_id)
 
