@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 """Canonical wire support for portable attachment owner records."""
 
+import sys
 from collections.abc import Iterator, Mapping
 from types import MappingProxyType
 from typing import Any, cast
@@ -28,6 +29,20 @@ from ._attachments import (
     ModelExposureEntry,
     PreparedInput,
 )
+from ._codec import (
+    _V1_DATACLASS_DECODERS,
+    _V1_DATACLASS_ENCODERS,
+    _V1_DOMAIN_TYPES,
+    _V1_ENUM_TYPES,
+    _V1_ENUM_WIRE_IDS,
+    _V1_EXTERNAL_SCHEMA_TYPES,
+    _V1_WIRE_IDS,
+    _V1_WIRE_TYPES,
+    _VersionCodec,
+    _decode_domain,
+    _encode_domain,
+    _iter_runtime_object_refs,
+)
 from ._plan import RuntimeDomain
 from ._relocation import Locator, PathOrigin
 
@@ -38,26 +53,28 @@ _ATTACHMENT_WIRE_TYPES = (
     ("model_exposure_v1", ModelExposure),
 )
 _ATTACHMENT_WIRE_IDS = frozenset(item[0] for item in _ATTACHMENT_WIRE_TYPES)
+_CODEC_MODULE = cast(Any, sys.modules[__package__ + "._codec"])
 
 
 def install_attachment_codec() -> None:
-    """Extend the frozen Runtime codec with attachment owner records."""
-    from . import _codec
-
-    current = dict(_codec._V1_WIRE_IDS)
-    if all(current.get(target) == wire_id for wire_id, target in _ATTACHMENT_WIRE_TYPES):
+    """Extend the Runtime v1 codec with attachment owner records."""
+    current = dict(_CODEC_MODULE._V1_WIRE_IDS)
+    if all(
+        current.get(target) == wire_id
+        for wire_id, target in _ATTACHMENT_WIRE_TYPES
+    ):
         return
-    if any(wire_id in _codec._V1_DOMAIN_TYPES for wire_id in _ATTACHMENT_WIRE_IDS):
+    if any(wire_id in _V1_DOMAIN_TYPES for wire_id in _ATTACHMENT_WIRE_IDS):
         raise RuntimeError("attachment wire id conflicts with Runtime codec")
-    if any(target in _codec._V1_WIRE_IDS for _wire_id, target in _ATTACHMENT_WIRE_TYPES):
+    if any(target in _V1_WIRE_IDS for _wire_id, target in _ATTACHMENT_WIRE_TYPES):
         raise RuntimeError("attachment type conflicts with Runtime codec")
 
-    wire_types = (*_codec._V1_WIRE_TYPES, *_ATTACHMENT_WIRE_TYPES)
+    wire_types = (*_V1_WIRE_TYPES, *_ATTACHMENT_WIRE_TYPES)
     wire_ids = MappingProxyType({target: wire_id for wire_id, target in wire_types})
     domain_types = MappingProxyType({wire_id: target for wire_id, target in wire_types})
     encoders = MappingProxyType(
         {
-            **dict(_codec._V1_DATACLASS_ENCODERS),
+            **dict(_V1_DATACLASS_ENCODERS),
             "attachment_upload_v1": _encode_upload,
             "input_prepare_v1": _encode_prepare,
             "attachment_source_v1": _encode_source,
@@ -66,24 +83,24 @@ def install_attachment_codec() -> None:
     )
     decoders = MappingProxyType(
         {
-            **dict(_codec._V1_DATACLASS_DECODERS),
+            **dict(_V1_DATACLASS_DECODERS),
             "attachment_upload_v1": _decode_upload,
             "input_prepare_v1": _decode_prepare,
             "attachment_source_v1": _decode_source,
             "model_exposure_v1": _decode_exposure,
         }
     )
-    codec = _codec._VersionCodec(
+    codec = _VersionCodec(
         version=1,
         wire_ids=wire_ids,
         domain_types=domain_types,
-        enum_wire_ids=_codec._V1_ENUM_WIRE_IDS,
-        enum_types=_codec._V1_ENUM_TYPES,
+        enum_wire_ids=_V1_ENUM_WIRE_IDS,
+        enum_types=_V1_ENUM_TYPES,
         dataclass_encoders=encoders,
         dataclass_decoders=decoders,
-        external_schema_types=_codec._V1_EXTERNAL_SCHEMA_TYPES,
+        external_schema_types=_V1_EXTERNAL_SCHEMA_TYPES,
     )
-    original_iter = _codec._iter_runtime_object_refs
+    original_iter = _iter_runtime_object_refs
 
     def iter_object_refs(
         value: object,
@@ -94,7 +111,7 @@ def install_attachment_codec() -> None:
             wire_id = value.get("$dataclass")
             target = domain_types.get(wire_id) if isinstance(wire_id, str) else None
             if wire_id in _ATTACHMENT_WIRE_IDS and target is not None:
-                decoded = _codec._decode_domain(
+                decoded = _decode_domain(
                     value,
                     target,
                     current_codec,
@@ -104,38 +121,63 @@ def install_attachment_codec() -> None:
                 return
         yield from original_iter(value, domain, current_codec)
 
-    _codec._V1_WIRE_TYPES = wire_types
-    _codec._V1_WIRE_IDS = wire_ids
-    _codec._V1_DOMAIN_TYPES = domain_types
-    _codec._V1_DATACLASS_ENCODERS = encoders
-    _codec._V1_DATACLASS_DECODERS = decoders
-    _codec._V1_CODEC = codec
-    _codec._VERSION_CODECS = MappingProxyType({1: codec})
-    _codec._CURRENT_CODEC = codec
-    _codec._iter_runtime_object_refs = iter_object_refs
+    _CODEC_MODULE._V1_WIRE_TYPES = wire_types
+    _CODEC_MODULE._V1_WIRE_IDS = wire_ids
+    _CODEC_MODULE._V1_DOMAIN_TYPES = domain_types
+    _CODEC_MODULE._V1_DATACLASS_ENCODERS = encoders
+    _CODEC_MODULE._V1_DATACLASS_DECODERS = decoders
+    _CODEC_MODULE._V1_CODEC = codec
+    _CODEC_MODULE._VERSION_CODECS = MappingProxyType({1: codec})
+    _CODEC_MODULE._CURRENT_CODEC = codec
+    _CODEC_MODULE._iter_runtime_object_refs = iter_object_refs
 
 
-def _encode_upload(value: object, codec: Any, persisted: bool) -> Mapping[str, JsonValue]:
-    from ._codec import _encode_domain
-
+def _encode_upload(
+    value: object,
+    codec: Any,
+    persisted: bool,
+) -> Mapping[str, JsonValue]:
     if not isinstance(value, AttachmentUploadRecord):
         raise TypeError("attachment_upload_v1 received the wrong type")
     return {
         "version": 1,
-        "owner_principal": _encode_domain(value.owner_principal, codec, persisted=persisted),
+        "owner_principal": _encode_domain(
+            value.owner_principal,
+            codec,
+            persisted=persisted,
+        ),
         "intent_digest": value.intent_digest,
         "descriptor": _semantic_json(value.descriptor),
-        "held_content": None if value.held_content is None else _content_json(value.held_content),
+        "held_content": (
+            None if value.held_content is None else _content_json(value.held_content)
+        ),
         "status": value.status,
     }
 
 
-def _decode_upload(raw: Mapping[str, object], codec: Any, persisted: bool) -> AttachmentUploadRecord:
-    from ._codec import _decode_domain
-
-    _fields(raw, {"version", "owner_principal", "intent_digest", "descriptor", "held_content", "status"})
+def _decode_upload(
+    raw: Mapping[str, object],
+    codec: Any,
+    persisted: bool,
+) -> AttachmentUploadRecord:
+    _fields(
+        raw,
+        {
+            "version",
+            "owner_principal",
+            "intent_digest",
+            "descriptor",
+            "held_content",
+            "status",
+        },
+    )
     _version(raw["version"], 1)
-    owner = _decode_domain(raw["owner_principal"], Principal, codec, persisted=persisted)
+    owner = _decode_domain(
+        raw["owner_principal"],
+        Principal,
+        codec,
+        persisted=persisted,
+    )
     held = raw["held_content"]
     if not isinstance(owner, Principal):
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -149,7 +191,11 @@ def _decode_upload(raw: Mapping[str, object], codec: Any, persisted: bool) -> At
     )
 
 
-def _encode_prepare(value: object, codec: Any, persisted: bool) -> Mapping[str, JsonValue]:
+def _encode_prepare(
+    value: object,
+    codec: Any,
+    persisted: bool,
+) -> Mapping[str, JsonValue]:
     del codec, persisted
     if not isinstance(value, InputPrepareRecord):
         raise TypeError("input_prepare_v1 received the wrong type")
@@ -165,9 +211,25 @@ def _encode_prepare(value: object, codec: Any, persisted: bool) -> Mapping[str, 
     }
 
 
-def _decode_prepare(raw: Mapping[str, object], codec: Any, persisted: bool) -> InputPrepareRecord:
+def _decode_prepare(
+    raw: Mapping[str, object],
+    codec: Any,
+    persisted: bool,
+) -> InputPrepareRecord:
     del codec, persisted
-    _fields(raw, {"version", "intent_digest", "path_origin", "status", "slots", "input", "target", "error_code"})
+    _fields(
+        raw,
+        {
+            "version",
+            "intent_digest",
+            "path_origin",
+            "status",
+            "slots",
+            "input",
+            "target",
+            "error_code",
+        },
+    )
     _version(raw["version"], 1)
     error_code = raw["error_code"]
     if error_code is not None and not isinstance(error_code, str):
@@ -184,21 +246,43 @@ def _decode_prepare(raw: Mapping[str, object], codec: Any, persisted: bool) -> I
     )
 
 
-def _encode_source(value: object, codec: Any, persisted: bool) -> Mapping[str, JsonValue]:
+def _encode_source(
+    value: object,
+    codec: Any,
+    persisted: bool,
+) -> Mapping[str, JsonValue]:
     del codec, persisted
     if not isinstance(value, AttachmentSourceRecord):
         raise TypeError("attachment_source_v1 received the wrong type")
-    return {"version": 1, "execution_id": value.execution_id, "relative": value.relative, "entry": _entry_json(value.entry)}
+    return {
+        "version": 1,
+        "execution_id": value.execution_id,
+        "relative": value.relative,
+        "entry": _entry_json(value.entry),
+    }
 
 
-def _decode_source(raw: Mapping[str, object], codec: Any, persisted: bool) -> AttachmentSourceRecord:
+def _decode_source(
+    raw: Mapping[str, object],
+    codec: Any,
+    persisted: bool,
+) -> AttachmentSourceRecord:
     del codec, persisted
     _fields(raw, {"version", "execution_id", "relative", "entry"})
     _version(raw["version"], 1)
-    return AttachmentSourceRecord(1, _string(raw["execution_id"]), _string(raw["relative"]), _entry(raw["entry"]))
+    return AttachmentSourceRecord(
+        1,
+        _string(raw["execution_id"]),
+        _string(raw["relative"]),
+        _entry(raw["entry"]),
+    )
 
 
-def _encode_exposure(value: object, codec: Any, persisted: bool) -> Mapping[str, JsonValue]:
+def _encode_exposure(
+    value: object,
+    codec: Any,
+    persisted: bool,
+) -> Mapping[str, JsonValue]:
     del codec, persisted
     if not isinstance(value, ModelExposure):
         raise TypeError("model_exposure_v1 received the wrong type")
@@ -214,9 +298,25 @@ def _encode_exposure(value: object, codec: Any, persisted: bool) -> Mapping[str,
     }
 
 
-def _decode_exposure(raw: Mapping[str, object], codec: Any, persisted: bool) -> ModelExposure:
+def _decode_exposure(
+    raw: Mapping[str, object],
+    codec: Any,
+    persisted: bool,
+) -> ModelExposure:
     del codec, persisted
-    _fields(raw, {"version", "exposure_id", "execution_id", "step_run_id", "run_step", "path_origin", "entries", "activation_digest"})
+    _fields(
+        raw,
+        {
+            "version",
+            "exposure_id",
+            "execution_id",
+            "step_run_id",
+            "run_step",
+            "path_origin",
+            "entries",
+            "activation_digest",
+        },
+    )
     _version(raw["version"], 1)
     return ModelExposure(
         1,
@@ -230,7 +330,10 @@ def _decode_exposure(raw: Mapping[str, object], codec: Any, persisted: bool) -> 
     )
 
 
-def _record_refs(value: object, wire_id: str) -> tuple[tuple[RuntimeDomain, ObjectRef], ...]:
+def _record_refs(
+    value: object,
+    wire_id: str,
+) -> tuple[tuple[RuntimeDomain, ObjectRef], ...]:
     if wire_id == "attachment_upload_v1":
         record = cast(AttachmentUploadRecord, value)
         return () if record.held_content is None else (_content_ref(record.held_content),)
@@ -238,7 +341,10 @@ def _record_refs(value: object, wire_id: str) -> tuple[tuple[RuntimeDomain, Obje
         record = cast(InputPrepareRecord, value)
         refs = [_content_ref(item.entry.content) for item in record.slots]
         if record.input is not None:
-            refs.extend(_content_ref(item.content) for item in record.input.attachment_manifest)
+            refs.extend(
+                _content_ref(item.content)
+                for item in record.input.attachment_manifest
+            )
         return tuple(refs)
     if wire_id == "attachment_source_v1":
         return (_content_ref(cast(AttachmentSourceRecord, value).entry.content),)
@@ -256,7 +362,12 @@ def _content_ref(value: ContentRef) -> tuple[RuntimeDomain, ObjectRef]:
 
 
 def _presentation_json(value: AttachmentPresentation) -> dict[str, JsonValue]:
-    return {"identifier": value.identifier, "vendor_metadata": None if value.vendor_metadata is None else dict(value.vendor_metadata)}
+    return {
+        "identifier": value.identifier,
+        "vendor_metadata": (
+            None if value.vendor_metadata is None else dict(value.vendor_metadata)
+        ),
+    }
 
 
 def _presentation(value: object) -> AttachmentPresentation:
@@ -268,14 +379,22 @@ def _presentation(value: object) -> AttachmentPresentation:
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     if metadata is not None and not isinstance(metadata, Mapping):
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-    return AttachmentPresentation(identifier, None if metadata is None else cast(Mapping[str, JsonValue], metadata))
+    return AttachmentPresentation(
+        identifier,
+        None if metadata is None else cast(Mapping[str, JsonValue], metadata),
+    )
 
 
 def _content_json(value: ContentRef) -> dict[str, JsonValue]:
     return {
         "domain": value.domain,
         "owner_scope": value.owner_scope,
-        "object": {"store_id": value.object.store_id, "key": value.object.key, "digest": value.object.digest, "size": value.object.size},
+        "object": {
+            "store_id": value.object.store_id,
+            "key": value.object.key,
+            "digest": value.object.digest,
+            "size": value.object.size,
+        },
     }
 
 
@@ -290,12 +409,23 @@ def _content(value: object) -> ContentRef:
     return ContentRef(
         _string(raw["domain"]),
         owner_scope,
-        ObjectRef(_string(obj["store_id"]), _string(obj["key"]), _string(obj["digest"]), _integer(obj["size"])),
+        ObjectRef(
+            _string(obj["store_id"]),
+            _string(obj["key"]),
+            _string(obj["digest"]),
+            _integer(obj["size"]),
+        ),
     )
 
 
 def _entry_json(value: AttachmentEntry) -> dict[str, JsonValue]:
-    return {"path": value.path, "name": value.name, "media_type": value.media_type, "presentation": _presentation_json(value.presentation), "content": _content_json(value.content)}
+    return {
+        "path": value.path,
+        "name": value.name,
+        "media_type": value.media_type,
+        "presentation": _presentation_json(value.presentation),
+        "content": _content_json(value.content),
+    }
 
 
 def _entry(value: object) -> AttachmentEntry:
@@ -304,11 +434,24 @@ def _entry(value: object) -> AttachmentEntry:
     name = raw["name"]
     if name is not None and not isinstance(name, str):
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-    return AttachmentEntry(_string(raw["path"]), name, _string(raw["media_type"]), _presentation(raw["presentation"]), _content(raw["content"]))
+    return AttachmentEntry(
+        _string(raw["path"]),
+        name,
+        _string(raw["media_type"]),
+        _presentation(raw["presentation"]),
+        _content(raw["content"]),
+    )
 
 
 def _semantic_json(value: AttachmentSemanticEntry) -> dict[str, JsonValue]:
-    return {"path": value.path, "name": value.name, "media_type": value.media_type, "presentation": _presentation_json(value.presentation), "digest": value.digest, "size": value.size}
+    return {
+        "path": value.path,
+        "name": value.name,
+        "media_type": value.media_type,
+        "presentation": _presentation_json(value.presentation),
+        "digest": value.digest,
+        "size": value.size,
+    }
 
 
 def _semantic(value: object) -> AttachmentSemanticEntry:
@@ -317,7 +460,14 @@ def _semantic(value: object) -> AttachmentSemanticEntry:
     name = raw["name"]
     if name is not None and not isinstance(name, str):
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-    return AttachmentSemanticEntry(_string(raw["path"]), name, _string(raw["media_type"]), _presentation(raw["presentation"]), _string(raw["digest"]), _integer(raw["size"]))
+    return AttachmentSemanticEntry(
+        _string(raw["path"]),
+        name,
+        _string(raw["media_type"]),
+        _presentation(raw["presentation"]),
+        _string(raw["digest"]),
+        _integer(raw["size"]),
+    )
 
 
 def _input_json(value: InputV2) -> dict[str, JsonValue]:
@@ -326,12 +476,22 @@ def _input_json(value: InputV2) -> dict[str, JsonValue]:
         if isinstance(part, InputTextPart):
             parts.append({"kind": "text", "text": part.text})
         elif isinstance(part, InputNativePart):
-            parts.append({"kind": "native", "codec": part.codec, "value": dict(part.value)})
+            parts.append(
+                {"kind": "native", "codec": part.codec, "value": dict(part.value)}
+            )
         elif isinstance(part, InputAttachmentPart):
             parts.append({"kind": "attachment", "index": part.index})
         else:
             raise TypeError("unsupported InputV2 part")
-    return {"version": 2, "parts": parts, "available": list(value.available), "sources": [{"relative": item.relative, "index": item.index} for item in value.sources]}
+    return {
+        "version": 2,
+        "parts": parts,
+        "available": list(value.available),
+        "sources": [
+            {"relative": item.relative, "index": item.index}
+            for item in value.sources
+        ],
+    }
 
 
 def _input(value: object) -> InputV2:
@@ -344,16 +504,31 @@ def _input(value: object) -> InputV2:
         kind = part.get("kind")
         if kind == "text":
             _fields(part, {"kind", "text"})
-            parts.append(InputTextPart("text", _string(part["text"], nonempty=False)))
+            parts.append(
+                InputTextPart("text", _string(part["text"], nonempty=False))
+            )
         elif kind == "native":
             _fields(part, {"kind", "codec", "value"})
-            parts.append(InputNativePart("native", cast(Any, _string(part["codec"])), cast(Mapping[str, JsonValue], _object(part["value"]))))
+            parts.append(
+                InputNativePart(
+                    "native",
+                    cast(Any, _string(part["codec"])),
+                    cast(Mapping[str, JsonValue], _object(part["value"])),
+                )
+            )
         elif kind == "attachment":
             _fields(part, {"kind", "index"})
-            parts.append(InputAttachmentPart("attachment", _integer(part["index"])))
+            parts.append(
+                InputAttachmentPart("attachment", _integer(part["index"]))
+            )
         else:
             raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
-    return InputV2(2, tuple(parts), tuple(_integer(item) for item in _array(raw["available"])), tuple(_source(item) for item in _array(raw["sources"])))
+    return InputV2(
+        2,
+        tuple(parts),
+        tuple(_integer(item) for item in _array(raw["available"])),
+        tuple(_source(item) for item in _array(raw["sources"])),
+    )
 
 
 def _source(value: object) -> InputSource:
@@ -367,7 +542,9 @@ def _prepared_json(value: PreparedInput) -> dict[str, JsonValue]:
         "version": 1,
         "user_prompt_codec": value.user_prompt_codec,
         "user_prompt": _input_json(value.user_prompt),
-        "attachment_manifest": [_entry_json(item) for item in value.attachment_manifest],
+        "attachment_manifest": [
+            _entry_json(item) for item in value.attachment_manifest
+        ],
         "intent_digest": value.intent_digest,
         "input_digest": value.input_digest,
         "path_origin": value.path_origin.to_json(),
@@ -376,7 +553,18 @@ def _prepared_json(value: PreparedInput) -> dict[str, JsonValue]:
 
 def _prepared(value: object) -> PreparedInput:
     raw = _object(value)
-    _fields(raw, {"version", "user_prompt_codec", "user_prompt", "attachment_manifest", "intent_digest", "input_digest", "path_origin"})
+    _fields(
+        raw,
+        {
+            "version",
+            "user_prompt_codec",
+            "user_prompt",
+            "attachment_manifest",
+            "intent_digest",
+            "input_digest",
+            "path_origin",
+        },
+    )
     _version(raw["version"], 1)
     return PreparedInput(
         1,
@@ -390,7 +578,11 @@ def _prepared(value: object) -> PreparedInput:
 
 
 def _slot_json(value: InputPrepareSlot) -> dict[str, JsonValue]:
-    return {"slot": value.slot, "relative": value.relative, "entry": _entry_json(value.entry)}
+    return {
+        "slot": value.slot,
+        "relative": value.relative,
+        "entry": _entry_json(value.entry),
+    }
 
 
 def _slot(value: object) -> InputPrepareSlot:
@@ -399,7 +591,11 @@ def _slot(value: object) -> InputPrepareSlot:
     relative = raw["relative"]
     if relative is not None and not isinstance(relative, str):
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-    return InputPrepareSlot(_integer(raw["slot"]), relative, _entry(raw["entry"]))
+    return InputPrepareSlot(
+        _integer(raw["slot"]),
+        relative,
+        _entry(raw["entry"]),
+    )
 
 
 def _target_json(value: InputTarget) -> dict[str, JsonValue]:
@@ -416,17 +612,29 @@ def _target(value: object) -> InputTarget:
 
 
 def _exposure_entry_json(value: ModelExposureEntry) -> dict[str, JsonValue]:
-    return {"activation_id": value.activation_id, "source": value.source.to_json(), "slot": value.slot, "entry": _entry_json(value.entry)}
+    return {
+        "activation_id": value.activation_id,
+        "source": value.source.to_json(),
+        "slot": value.slot,
+        "entry": _entry_json(value.entry),
+    }
 
 
 def _exposure_entry(value: object) -> ModelExposureEntry:
     raw = _object(value)
     _fields(raw, {"activation_id", "source", "slot", "entry"})
-    return ModelExposureEntry(_string(raw["activation_id"]), Locator.from_json(raw["source"]), _integer(raw["slot"]), _entry(raw["entry"]))
+    return ModelExposureEntry(
+        _string(raw["activation_id"]),
+        Locator.from_json(raw["source"]),
+        _integer(raw["slot"]),
+        _entry(raw["entry"]),
+    )
 
 
 def _object(value: object) -> Mapping[str, object]:
-    if not isinstance(value, Mapping) or any(not isinstance(key, str) for key in value):
+    if not isinstance(value, Mapping) or any(
+        not isinstance(key, str) for key in value
+    ):
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     return cast(Mapping[str, object], value)
 
