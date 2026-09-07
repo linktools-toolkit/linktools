@@ -967,7 +967,9 @@ def _mysql_numeric_order() -> tuple[str, str]:
     residual = (
         "CASE WHEN value_type IN ('INTEGER', 'UNSIGNED INTEGER') THEN "
         f"{integer} - CASE WHEN {coarse} >= 9223372036854775808e0 "
-        f"THEN 9223372036854775808 ELSE CAST({coarse} AS SIGNED) END "
+        "THEN 9223372036854775808 "
+        f"WHEN {coarse} <= -9223372036854775808e0 THEN -9223372036854775808 "
+        f"ELSE CAST({coarse} AS SIGNED) END "
         "ELSE 0 END"
     )
     return coarse, residual
