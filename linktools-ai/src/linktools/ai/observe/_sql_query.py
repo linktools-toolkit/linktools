@@ -51,6 +51,7 @@ _SELECTED_MEASUREMENT_AGGREGATIONS = frozenset(
 )
 _INT64_MIN = -(2**63)
 _INT64_MAX = 2**63 - 1
+_SUM_LIMB_BASE = 2**32
 
 
 def sql_query_pushdown_supported(plan: _MetricQueryPushdownPlan) -> bool:
@@ -337,7 +338,9 @@ def _measurement_sql(
     if plan.aggregation in _SELECTED_MEASUREMENT_AGGREGATIONS:
         result_columns.append("selected_value")
     elif plan.aggregation is not MetricAggregation.COUNT:
-        result_columns.append("sample_sum")
+        result_columns.extend(
+            ("sample_sum", "integer_sum_high", "integer_sum_low", "floating_count")
+        )
     selected_columns = ", ".join(f"p.{column}" for column in result_columns)
     if selected_columns:
         selected_columns = ",\n    " + selected_columns
@@ -627,11 +630,12 @@ def _measurement_reduce_sql(
         MetricAggregation.MEAN,
         MetricAggregation.RATE,
     }:
-        return _measurement_sum_sql(aggregation, partition_columns)
+        return _measurement_sum_sql(dialect_name, aggregation, partition_columns)
     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
 
 
 def _measurement_sum_sql(
+    dialect_name: str,
     aggregation: MetricAggregation,
     partition_columns: list[str],
 ) -> str:
@@ -639,14 +643,48 @@ def _measurement_sum_sql(
     if select_prefix:
         select_prefix += ",\n        "
     group_sql = f"\n    GROUP BY {', '.join(partition_columns)}" if partition_columns else ""
-    sample_sum = (
-        "NULL AS sample_sum"
-        if aggregation is MetricAggregation.COUNT
-        else "SUM(numeric_value) AS sample_sum"
+    if aggregation is MetricAggregation.COUNT:
+        return f"""SELECT
+        {select_prefix}COUNT(*) AS sample_count
+    FROM valid_samples{group_sql}"""
+
+    if dialect_name == "sqlite":
+        # Each limb stays within int64 at the admitted sample count. Recombine
+        # only the two aggregate values in Python, never the individual samples.
+        base = _SUM_LIMB_BASE
+        correlation = " AND ".join(
+            f"v.{column} IS totals.{column}" for column in partition_columns
+        )
+        where_sql = f" WHERE {correlation}" if correlation else ""
+        return f"""WITH totals AS (
+        SELECT
+            {select_prefix}COUNT(*) AS sample_count,
+            SUM(CASE WHEN value_type = 'integer'
+                THEN numeric_value / {base} ELSE 0 END) AS integer_sum_high,
+            SUM(CASE WHEN value_type = 'integer'
+                THEN numeric_value % {base} ELSE 0 END) AS integer_sum_low,
+            SUM(CASE WHEN value_type = 'real' THEN 1 ELSE 0 END) AS floating_count
+        FROM valid_samples{group_sql}
     )
+    SELECT totals.*,
+        CASE WHEN floating_count > 0 THEN (
+            SELECT SUM(v.numeric_value) FROM valid_samples AS v{where_sql}
+        ) ELSE NULL END AS sample_sum
+    FROM totals"""
+
+    if dialect_name == "mysql":
+        integer_test = "value_type = 'INTEGER'"
+        integer_value = "CAST(JSON_UNQUOTE(raw_value) AS DECIMAL(65, 0))"
+    else:
+        integer_test = "raw_value ~ '^-?[0-9]+$'"
+        integer_value = "numeric_value"
     return f"""SELECT
         {select_prefix}COUNT(*) AS sample_count,
-        {sample_sum}
+        SUM(numeric_value) AS sample_sum,
+        0 AS integer_sum_high,
+        SUM(CASE WHEN {integer_test}
+            THEN {integer_value} ELSE NULL END) AS integer_sum_low,
+        SUM(CASE WHEN {integer_test} THEN 0 ELSE 1 END) AS floating_count
     FROM valid_samples{group_sql}"""
 
 
@@ -907,9 +945,19 @@ def _decode_row(
     selected_value = (
         _coerce_sample_number(row.get("selected_value")) if selected else None
     )
-    sample_sum = (
-        None if selected else _coerce_aggregate_number(row.get("sample_sum"))
-    )
+    sample_sum = None
+    if not selected and plan.source_kind is MetricSourceKind.MEASUREMENT:
+        if plan.aggregation is not MetricAggregation.COUNT and sample_count:
+            if int(row["floating_count"]) == 0:
+                high = _coerce_aggregate_number(row["integer_sum_high"])
+                low = _coerce_aggregate_number(row["integer_sum_low"])
+                if not isinstance(high, int) or not isinstance(low, int):
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                sample_sum = high * _SUM_LIMB_BASE + low
+            else:
+                sample_sum = _coerce_aggregate_number(row["sample_sum"])
+    elif not selected:
+        sample_sum = _coerce_aggregate_number(row["sample_sum"])
     return _MetricQueryPushdownRow(
         group=tuple(group_values),
         bucket_index=bucket_index,
@@ -970,16 +1018,6 @@ def _coerce_aggregate_number(value: object) -> int | float | None:
         if not math.isfinite(floating):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         return 0.0 if floating == 0.0 else floating
-    if isinstance(value, str):
-        try:
-            decoded = json.loads(value)
-        except (TypeError, ValueError):
-            try:
-                decoded_decimal = Decimal(value)
-            except Exception as error:
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
-            return _coerce_aggregate_number(decoded_decimal)
-        return _coerce_aggregate_number(decoded)
     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
 
 
