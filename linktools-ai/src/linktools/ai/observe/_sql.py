@@ -31,10 +31,11 @@ from ._codec import (
     observation_envelope,
     observation_payload_digest,
 )
-from ._model import MetricDefinition, Observation
+from ._model import MetricDefinition, MetricSourceKind, Observation
 from ._store import (
     _MetricQueryPushdownPlan,
     _MetricQueryPushdownResult,
+    _MetricQueryPushdownRow,
     _parse_scan_cursor,
     _scan_cursor,
 )
@@ -205,7 +206,23 @@ class SqlMetricStore:
                 )
                 if not await _sql_features_available(session, dialect_name, plan):
                     return None
-                await self._verify_query_records(session, namespace, namespace_key, plan)
+                scanned_count = await self._verify_query_records(
+                    session, namespace, namespace_key, plan
+                )
+                if (
+                    plan.source_kind is MetricSourceKind.OBSERVATION_COUNT
+                    and not plan.filters
+                    and not plan.correlation_filters
+                    and not plan.group_by
+                    and plan.bucket_microseconds is None
+                ):
+                    # The fully verified stream already carries this SQL count.
+                    return _MetricQueryPushdownResult(rows=(
+                        _MetricQueryPushdownRow(
+                            group=(), bucket_index=None,
+                            sample_count=scanned_count, sample_sum=scanned_count,
+                        ),
+                    ))
             return await execute_sql_metric_query(
                 session,
                 namespace_key=namespace_key,
@@ -221,7 +238,7 @@ class SqlMetricStore:
         namespace: str,
         namespace_key: str,
         plan: _MetricQueryPushdownPlan,
-    ) -> None:
+    ) -> int:
         from sqlalchemy import Text, cast as sql_cast, func, select
 
         start = plan.start.astimezone(timezone.utc)
@@ -249,10 +266,12 @@ class SqlMetricStore:
             .subquery("metric_verification")
         )
         statement = select(bounded, func.count().over().label("scanned_count"))
-        result = await session.stream(statement, execution_options={"yield_per": 128})
+        result = await session.stream(statement, execution_options={"yield_per": 512})
+        scanned_count = 0
         try:
             async for row in result.mappings():
-                if row["scanned_count"] > plan.max_scanned_observations:
+                scanned_count = int(row["scanned_count"])
+                if scanned_count > plan.max_scanned_observations:
                     raise AIError(ErrorCode.METRIC_QUERY_LIMIT_EXCEEDED)
                 try:
                     # Read JSON text so driver decoding cannot erase duplicate
@@ -269,6 +288,7 @@ class SqlMetricStore:
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
         finally:
             await result.close()
+        return scanned_count
 
     async def put_definition(
         self,

@@ -181,34 +181,36 @@ async def test_scan_limit_precedes_payload_decoding(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("name", (_COUNT, _VALUE))
 @pytest.mark.parametrize("change", ("insert", "tamper", "prune"))
 async def test_verification_and_aggregation_keep_the_same_snapshot(
-    server_metrics: _ServerMetrics, monkeypatch: pytest.MonkeyPatch, change: str,
+    server_metrics: _ServerMetrics, monkeypatch: pytest.MonkeyPatch, change: str, name: str,
 ) -> None:
     metrics, engine, writer = server_metrics
     await metrics.record_observations((_observation(),))
     verify = SqlMetricStore._verify_query_records
     table = build_metrics_sql_metadata().tables["ai_metric_observations"]
 
-    async def verify_then_write(self: SqlMetricStore, *args: object, **kwargs: object) -> None:
-        await verify(self, *args, **kwargs)
+    async def verify_then_write(self: SqlMetricStore, *args: object, **kwargs: object) -> int:
+        count = await verify(self, *args, **kwargs)
         if change == "insert":
             await Metrics.sql(writer, namespace=_NAMESPACE).record_observations((_observation(1),))
         else:
             async with writer.begin() as connection:
                 statement = delete(table) if change == "prune" else update(table).values(payload_digest="0" * 64)
                 await connection.execute(statement)
+        return count
 
     monkeypatch.setattr(SqlMetricStore, "_verify_query_records", verify_then_write)
-    result = await asyncio.wait_for(metrics.query(MetricQuery(_COUNT, _WINDOW)), timeout=10)
+    result = await asyncio.wait_for(metrics.query(MetricQuery(name, _WINDOW)), timeout=10)
     assert result.points[0].value == 1
     monkeypatch.setattr(SqlMetricStore, "_verify_query_records", verify)
     if change == "tamper":
         with pytest.raises(AIError) as raised:
-            await metrics.query(MetricQuery(_COUNT, _WINDOW))
+            await metrics.query(MetricQuery(name, _WINDOW))
         assert raised.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
     else:
-        result = await metrics.query(MetricQuery(_COUNT, _WINDOW))
+        result = await metrics.query(MetricQuery(name, _WINDOW))
         assert result.points[0].value == (2 if change == "insert" else 0)
     async with engine.connect() as connection:
         assert await connection.get_isolation_level() == "READ COMMITTED"
@@ -224,10 +226,11 @@ async def test_cancelled_query_releases_its_snapshot(
     verified = asyncio.Event()
     block = asyncio.Event()
 
-    async def verify_then_block(self: SqlMetricStore, *args: object, **kwargs: object) -> None:
-        await verify(self, *args, **kwargs)
+    async def verify_then_block(self: SqlMetricStore, *args: object, **kwargs: object) -> int:
+        count = await verify(self, *args, **kwargs)
         verified.set()
         await block.wait()
+        return count
 
     monkeypatch.setattr(SqlMetricStore, "_verify_query_records", verify_then_block)
     task = asyncio.create_task(metrics.query(MetricQuery(_COUNT, _WINDOW)))
@@ -294,3 +297,44 @@ async def test_server_json_text_does_not_erase_duplicate_members(
     with pytest.raises(AIError) as raised:
         await metrics.query(MetricQuery(_COUNT, _WINDOW))
     assert raised.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("count", (0, 1025))
+async def test_global_count_reuses_only_fully_verified_sql_count(
+    server_metrics: _ServerMetrics, count: int,
+) -> None:
+    metrics, engine, _ = server_metrics
+    for offset in range(0, count, 256):
+        await metrics.record_observations(tuple(
+            _observation(index) for index in range(offset, min(offset + 256, count))
+        ))
+    statements: list[str] = []
+
+    def record_statement(
+        connection: object, cursor: object, statement: str, parameters: object,
+        context: object, executemany: bool,
+    ) -> None:
+        if "ai_metric_observations" in statement:
+            statements.append(statement)
+
+    event.listen(engine.sync_engine, "before_cursor_execute", record_statement)
+    try:
+        for aggregation in (MetricAggregation.COUNT, MetricAggregation.SUM, MetricAggregation.RATE):
+            statements.clear()
+            result = await metrics.query(MetricQuery(_COUNT, _WINDOW, aggregation=aggregation))
+            assert result.points[0].value == (count / 2 if aggregation is MetricAggregation.RATE else count)
+            assert result.points[0].sample_count == count
+            assert len(statements) == 1
+            assert "metric_verification" in statements[0]
+    finally:
+        event.remove(engine.sync_engine, "before_cursor_execute", record_statement)
+    if count:
+        table = build_metrics_sql_metadata().tables["ai_metric_observations"]
+        async with engine.begin() as connection:
+            await connection.execute(update(table).where(
+                table.c.occurred_at == _START + timedelta(microseconds=count - 1),
+            ).values(payload_digest="0" * 64))
+        with pytest.raises(AIError) as raised:
+            await metrics.query(MetricQuery(_COUNT, _WINDOW))
+        assert raised.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR

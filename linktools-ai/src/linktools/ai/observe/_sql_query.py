@@ -605,7 +605,7 @@ def _measurement_source_sql(
         )
     ) AS m
       ON 1 = 1
-    WHERE m.measurement_name = :measurement_name
+    WHERE CAST(m.measurement_name AS BINARY) = CAST(:measurement_name AS BINARY)
       AND m.measurement_revision = :measurement_revision"""
     raw_value = "m.value ->> 'value'"
     value_type = "json_typeof(m.value -> 'value')"
@@ -806,7 +806,7 @@ def _sqlite_sum_sql(partition_columns: list[str]) -> str:
     group_sql = f" GROUP BY {columns}" if columns else ""
     partition_sql = (
         "PARTITION BY " + ", ".join(f"v.{column}" for column in partition_columns) + " "
-        if columns else ""
+        if partition_columns else ""
     )
     source_prefix = "".join(f"v.{column}, " for column in partition_columns)
     next_prefix = "".join(f"n.{column}, " for column in partition_columns)
