@@ -888,9 +888,11 @@ def _measurement_pick_sql(
         if dialect_name == "postgresql":
             coarse, residual = _postgresql_numeric_order()
             value_order = f"{coarse} {direction}, {residual} {direction}"
+        elif dialect_name == "mysql":
+            coarse, residual = _mysql_numeric_order()
+            value_order = f"{coarse} {direction}, {residual} {direction}"
         else:
-            value = "raw_value" if dialect_name == "mysql" else "numeric_value"
-            value_order = f"{value} {direction}"
+            value_order = f"numeric_value {direction}"
         order_sql = f"{value_order}, occurred_at ASC, observation_digest ASC"
     return f"""SELECT
         {select_prefix}sample_count,
@@ -927,7 +929,11 @@ def _percentile_pick_sql(
         if partition_columns
         else ""
     )
-    order_value = "raw_value" if dialect_name == "mysql" else "numeric_value"
+    if dialect_name == "mysql":
+        coarse, residual = _mysql_numeric_order()
+        order_sql = f"{coarse} ASC, {residual} ASC"
+    else:
+        order_sql = "numeric_value ASC"
     if dialect_name == "sqlite":
         target_rank = (
             "CAST(:percentile * sample_count AS INTEGER) + "
@@ -945,11 +951,26 @@ def _percentile_pick_sql(
             {select_prefix}raw_value,
             COUNT(*) OVER ({partition_sql}) AS sample_count,
             ROW_NUMBER() OVER (
-                {partition_sql}ORDER BY {order_value} ASC, occurred_at ASC, observation_digest ASC
+                {partition_sql}ORDER BY {order_sql}, occurred_at ASC, observation_digest ASC
             ) AS sample_rank
         FROM valid_samples
     ) AS ranked
     WHERE sample_rank = {target_rank}"""
+
+
+
+def _mysql_numeric_order() -> tuple[str, str]:
+    coarse = "CAST(JSON_UNQUOTE(raw_value) AS DOUBLE)"
+    integer = "CAST(JSON_UNQUOTE(raw_value) AS DECIMAL(65, 0))"
+    # JSON numeric comparison uses a decimal approximation for doubles.
+    # An exact integer residual preserves mixed binary-float ordering.
+    residual = (
+        "CASE WHEN value_type IN ('INTEGER', 'UNSIGNED INTEGER') THEN "
+        f"{integer} - CASE WHEN {coarse} >= 9223372036854775808e0 "
+        f"THEN 9223372036854775808 ELSE CAST({coarse} AS SIGNED) END "
+        "ELSE 0 END"
+    )
+    return coarse, residual
 
 
 def _postgresql_numeric_order() -> tuple[str, str]:
