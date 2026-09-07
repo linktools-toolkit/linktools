@@ -46,6 +46,7 @@ from ..workspace import LocalRepositoryInstructionResolver, LocalRuleCatalog, Wo
 from ._agent_executor import AgentExecutor
 from ._approval import DefaultApprovalService
 from ._artifact import DefaultArtifactService
+from ._attachment import DefaultAttachmentService
 from ._coordinator import _LocalRuntimeCoordinator
 from ._evaluation import DefaultEvaluationService
 from ._event import DefaultEventService, LiveExecutionEventBroker
@@ -69,6 +70,7 @@ from .state import (
     RuntimeStateRoute,
     StateStepArchive,
 )
+from .state._attachment_repository import AttachmentRepository
 
 AppT = TypeVar("AppT")
 _logger = environ.get_logger("ai.runtime.factory")
@@ -85,6 +87,7 @@ class _RuntimeComponents:
     approval: DefaultApprovalService
     event: DefaultEventService
     artifact: DefaultArtifactService
+    attachments: DefaultAttachmentService
     tenant_id: str
     close_callback: Callable[[], Awaitable[None]]
     local_coordinator: _LocalRuntimeCoordinator
@@ -470,6 +473,16 @@ async def _build_local_components(
         payload_policy=payload_policy,
         session_execution_ready=session_execution_ready,
     )
+    attachment_repository = AttachmentRepository(
+        state.execution.executions.state_store,
+        namespace=namespace,
+        tenant_id=tenant_id,
+    )
+    attachments = DefaultAttachmentService(
+        attachment_repository,
+        state,
+        object_key_factory,
+    )
     dispatcher = SubagentDispatcher(catalog, compiler, execution)
     executor = AgentExecutor(
         skill_sources,
@@ -662,6 +675,7 @@ async def _build_local_components(
         approval=approval,
         event=event,
         artifact=artifact,
+        attachments=attachments,
         tenant_id=tenant_id,
         close_callback=coordinator.close,
         local_coordinator=local_coordinator,
