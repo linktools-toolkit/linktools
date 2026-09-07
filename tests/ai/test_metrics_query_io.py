@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Measure complete verified queries without relaxing the per-test timeout."""
+"""Compare complete verified query costs against the scan executor."""
 
 import getpass
 import json
@@ -22,7 +22,11 @@ from linktools.ai.observe import (
     Metrics, MetricStore, build_metrics_sql_metadata,
 )
 from linktools.ai.observe import _sql
+from linktools.ai.observe._codec import (
+    observation_digest, observation_envelope, observation_payload_digest,
+)
 from linktools.ai.observe._sql import SqlMetricStore
+from linktools.ai.storage import namespace_digest
 
 from .test_metrics_server_read_integrity import _COUNT, _NAMESPACE, _WINDOW, _observation
 from .test_metrics_sql_server_sums import _server
@@ -56,8 +60,9 @@ async def _io_data(
     engine = create_async_engine(url, isolation_level="READ COMMITTED", pool_size=1, max_overflow=0)
     count = int(request.param)
     try:
+        metadata = build_metrics_sql_metadata()
         async with engine.begin() as connection:
-            await connection.run_sync(build_metrics_sql_metadata().drop_all)
+            await connection.run_sync(metadata.drop_all)
         await provision_metrics_database(engine)
         metrics = Metrics.sql(engine, namespace=_NAMESPACE)
         await metrics.define(MetricDefinition(
@@ -72,11 +77,23 @@ async def _io_data(
             default_aggregation=MetricAggregation.MEAN, query_fields=("group",),
         )
         await metrics.define(definition)
-        for offset in range(0, count, 256):
-            await metrics.record_observations(tuple(
-                replace(_observation(index), dimensions={"group": f"group-{index % 10}"})
-                for index in range(offset, min(offset + 256, count))
-            ))
+        table = metadata.tables["ai_metric_observations"]
+        namespace_key = namespace_digest(_NAMESPACE)
+        async with engine.begin() as connection:
+            for offset in range(0, count, 512):
+                rows = []
+                for index in range(offset, min(offset + 512, count)):
+                    observation = replace(
+                        _observation(index), dimensions={"group": f"group-{index % 10}"},
+                    )
+                    rows.append({
+                        "namespace_digest": namespace_key,
+                        "observation_digest": observation_digest(_NAMESPACE, observation.observation_id),
+                        "payload_digest": observation_payload_digest(_NAMESPACE, observation),
+                        "kind": observation.kind, "occurred_at": observation.occurred_at,
+                        "payload_json": observation_envelope(_NAMESPACE, observation),
+                    })
+                await connection.execute(table.insert(), rows)
         store = SqlMetricStore(engine)
         await store.latest_definition(_NAMESPACE, _COUNT)
         scan = Metrics.from_store(cast(MetricStore, _ScanStore(store)), namespace=_NAMESPACE)
