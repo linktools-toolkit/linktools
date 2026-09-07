@@ -46,18 +46,26 @@ from ._codec import (
 from ._plan import RuntimeDomain
 from ._relocation import Locator, PathOrigin
 
-_ATTACHMENT_WIRE_TYPES = (
+_ATTACHMENT_VALUE_WIRE_TYPES = (
+    ("attachment_entry_v1", AttachmentEntry),
+    ("path_origin_v1", PathOrigin),
+)
+_ATTACHMENT_OWNER_WIRE_TYPES = (
     ("attachment_upload_v1", AttachmentUploadRecord),
     ("input_prepare_v1", InputPrepareRecord),
     ("attachment_source_v1", AttachmentSourceRecord),
     ("model_exposure_v1", ModelExposure),
+)
+_ATTACHMENT_WIRE_TYPES = (*_ATTACHMENT_VALUE_WIRE_TYPES, *_ATTACHMENT_OWNER_WIRE_TYPES)
+_ATTACHMENT_OWNER_WIRE_IDS = frozenset(
+    item[0] for item in _ATTACHMENT_OWNER_WIRE_TYPES
 )
 _ATTACHMENT_WIRE_IDS = frozenset(item[0] for item in _ATTACHMENT_WIRE_TYPES)
 _CODEC_MODULE = cast(Any, sys.modules[__package__ + "._codec"])
 
 
 def install_attachment_codec() -> None:
-    """Extend the Runtime v1 codec with attachment owner records."""
+    """Extend the Runtime v1 codec with attachment values and owner records."""
     current = dict(_CODEC_MODULE._V1_WIRE_IDS)
     if all(
         current.get(target) == wire_id
@@ -75,6 +83,7 @@ def install_attachment_codec() -> None:
     encoders = MappingProxyType(
         {
             **dict(_V1_DATACLASS_ENCODERS),
+            "attachment_entry_v1": _encode_entry,
             "attachment_upload_v1": _encode_upload,
             "input_prepare_v1": _encode_prepare,
             "attachment_source_v1": _encode_source,
@@ -84,6 +93,7 @@ def install_attachment_codec() -> None:
     decoders = MappingProxyType(
         {
             **dict(_V1_DATACLASS_DECODERS),
+            "attachment_entry_v1": _decode_entry,
             "attachment_upload_v1": _decode_upload,
             "input_prepare_v1": _decode_prepare,
             "attachment_source_v1": _decode_source,
@@ -110,7 +120,16 @@ def install_attachment_codec() -> None:
         if isinstance(value, Mapping):
             wire_id = value.get("$dataclass")
             target = domain_types.get(wire_id) if isinstance(wire_id, str) else None
-            if wire_id in _ATTACHMENT_WIRE_IDS and target is not None:
+            if wire_id == "attachment_entry_v1" and target is AttachmentEntry:
+                decoded = _decode_domain(
+                    value,
+                    AttachmentEntry,
+                    current_codec,
+                    persisted=True,
+                )
+                yield _content_ref(cast(AttachmentEntry, decoded).content)
+                return
+            if wire_id in _ATTACHMENT_OWNER_WIRE_IDS and target is not None:
                 decoded = _decode_domain(
                     value,
                     target,
@@ -130,6 +149,26 @@ def install_attachment_codec() -> None:
     _CODEC_MODULE._VERSION_CODECS = MappingProxyType({1: codec})
     _CODEC_MODULE._CURRENT_CODEC = codec
     _CODEC_MODULE._iter_runtime_object_refs = iter_object_refs
+
+
+def _encode_entry(
+    value: object,
+    codec: Any,
+    persisted: bool,
+) -> Mapping[str, JsonValue]:
+    del codec, persisted
+    if not isinstance(value, AttachmentEntry):
+        raise TypeError("attachment_entry_v1 received the wrong type")
+    return _entry_json(value)
+
+
+def _decode_entry(
+    raw: Mapping[str, object],
+    codec: Any,
+    persisted: bool,
+) -> AttachmentEntry:
+    del codec, persisted
+    return _entry(raw)
 
 
 def _encode_upload(
