@@ -509,6 +509,10 @@ def _unique_json_pairs(pairs: list[tuple[str, object]]) -> dict[str, object]:
     return result
 
 
+def _reject_json_constant(value: str) -> None:
+    raise ValueError(f"non-JSON numeric constant: {value}")
+
+
 def _sqlite_record_error(
     namespace: str,
     namespace_key: str,
@@ -521,7 +525,11 @@ def _sqlite_record_error(
 ) -> str | None:
     try:
         try:
-            decoded = json.loads(payload, object_pairs_hook=_unique_json_pairs)
+            decoded = json.loads(
+                payload,
+                object_pairs_hook=_unique_json_pairs,
+                parse_constant=_reject_json_constant,
+            )
             timestamp = datetime.fromisoformat(occurred_at)
         except (TypeError, ValueError, RecursionError) as error:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
