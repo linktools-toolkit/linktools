@@ -31,7 +31,12 @@ from ._codec import (
     observation_payload_digest,
 )
 from ._model import MetricDefinition, Observation
-from ._store import _parse_scan_cursor, _scan_cursor
+from ._store import (
+    _MetricQueryPushdownPlan,
+    _MetricQueryPushdownResult,
+    _parse_scan_cursor,
+    _scan_cursor,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -167,6 +172,22 @@ class SqlMetricStore:
         await self._context.initialize(
             metadata=self._metadata if self._validate_schema else None
         )
+
+    async def _execute_metric_query(
+        self,
+        namespace: str,
+        plan: _MetricQueryPushdownPlan,
+    ) -> _MetricQueryPushdownResult | None:
+        from ._sql_query import execute_sql_metric_query
+
+        await self._initialize()
+        async with self._context.sessions() as session:
+            return await execute_sql_metric_query(
+                session,
+                namespace_key=namespace_digest(namespace),
+                dialect_name=self._context.dialect.name,
+                plan=plan,
+            )
 
     async def put_definition(
         self,
