@@ -63,6 +63,7 @@ from ._metrics import (
 from .service_api import (
     ApprovalService,
     ArtifactService,
+    AttachmentInfo,
     AttachmentService,
     CancelExecutionRequest,
     CancelExecutionResult,
@@ -125,6 +126,29 @@ class _RuntimeMetricControl(Protocol):
     ) -> RuntimeMetricFlushResult: ...
 
 
+class _UnavailableAttachmentService:
+    async def upload(
+        self,
+        data: bytes,
+        *,
+        media_type: str,
+        name: str | None = None,
+        principal: Principal,
+        idempotency_key: str,
+    ) -> AttachmentInfo:
+        del data, media_type, name, principal, idempotency_key
+        raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+
+    async def release(
+        self,
+        path: str,
+        *,
+        principal: Principal,
+    ) -> None:
+        del path, principal
+        raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+
+
 def _request_correlation(value: "Mapping[str, object] | None") -> CorrelationData:
     try:
         return normalize_correlation(value)
@@ -165,7 +189,7 @@ class Runtime(Generic[AppT]):
         approval: ApprovalService,
         event: EventService,
         artifact: ArtifactService,
-        attachments: AttachmentService,
+        attachments: "AttachmentService | None" = None,
         *,
         workspace: Workspace,
         context: RuntimeContext[AppT],
@@ -186,7 +210,6 @@ class Runtime(Generic[AppT]):
                 approval,
                 event,
                 artifact,
-                attachments,
                 workspace,
             )
         ):
@@ -202,7 +225,9 @@ class Runtime(Generic[AppT]):
         self.approval = approval
         self.event = event
         self.artifact = artifact
-        self.attachments = attachments
+        self.attachments: AttachmentService = (
+            attachments if attachments is not None else _UnavailableAttachmentService()
+        )
         self._workspace = workspace
         self._context = context
         self._default_principal = Principal(
