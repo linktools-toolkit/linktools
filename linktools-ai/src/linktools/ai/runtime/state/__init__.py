@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 """Runtime state contracts and lifecycle owner."""
 
+from ._attachment_codec import install_attachment_codec
 from ._attachments import (
     AttachmentEntry,
     AttachmentPresentation,
@@ -44,11 +45,6 @@ from ._codec import (
     parse_envelope,
     wire_type_id,
 )
-from ._attachment_codec import install_attachment_codec
-
-install_attachment_codec()
-del install_attachment_codec
-
 from ._commands import (
     ConversationStateCommands,
     ExecutionStateCommands,
@@ -204,6 +200,9 @@ from ._views import (
     project_execution_transcript_message,
     project_session_history_message,
 )
+
+install_attachment_codec()
+del install_attachment_codec
 
 __all__ = [
     "CURRENT_DATA_VERSION",
