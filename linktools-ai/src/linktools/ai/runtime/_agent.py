@@ -70,6 +70,7 @@ class Execution(Generic[AppT]):
         self,
         user_prompt: "str | Sequence[UserContent]",
         *,
+        attachments: Sequence[str] = (),
         idempotency_key: "str | None" = None,
         correlation: "Mapping[str, object] | None" = None,
     ) -> "Execution[AppT]":
@@ -77,6 +78,7 @@ class Execution(Generic[AppT]):
             self._binding_digest,
             self.execution_id,
             prepare_user_prompt(user_prompt),
+            attachments=attachments,
             principal=self._principal,
             idempotency_key=idempotency_key,
             correlation=correlation,
@@ -86,6 +88,7 @@ class Execution(Generic[AppT]):
         self,
         user_prompt: "str | Sequence[UserContent]",
         *,
+        attachments: Sequence[str] = (),
         idempotency_key: "str | None" = None,
         correlation: "Mapping[str, object] | None" = None,
     ) -> "Execution[AppT]":
@@ -93,6 +96,7 @@ class Execution(Generic[AppT]):
             self._binding_digest,
             self.execution_id,
             prepare_user_prompt(user_prompt),
+            attachments=attachments,
             principal=self._principal,
             idempotency_key=idempotency_key,
             correlation=correlation,
@@ -150,6 +154,7 @@ class Session(Generic[AppT]):
         self,
         user_prompt: "str | Sequence[UserContent]",
         *,
+        attachments: Sequence[str] = (),
         output: "type[BaseModel] | None" = None,
         principal: "Principal | None" = None,
         idempotency_key: "str | None" = None,
@@ -161,6 +166,7 @@ class Session(Generic[AppT]):
         return await self._runtime._start_for_agent(
             self._agent_digest,
             prepare_user_prompt(user_prompt),
+            attachments=attachments,
             output=output,
             principal=principal or self._principal,
             session_id=self.session_id,
@@ -176,6 +182,7 @@ class Session(Generic[AppT]):
         self,
         user_prompt: "str | Sequence[UserContent]",
         *,
+        attachments: Sequence[str] = (),
         output: "type[BaseModel] | None" = None,
         principal: "Principal | None" = None,
         idempotency_key: "str | None" = None,
@@ -187,6 +194,7 @@ class Session(Generic[AppT]):
     ) -> ExecutionResult:
         execution = await self.start(
             user_prompt,
+            attachments=attachments,
             output=output,
             principal=principal,
             idempotency_key=idempotency_key,
@@ -201,6 +209,7 @@ class Session(Generic[AppT]):
         self,
         user_prompt: "str | Sequence[UserContent]",
         *,
+        attachments: Sequence[str] = (),
         output: "type[BaseModel] | None" = None,
         principal: "Principal | None" = None,
         idempotency_key: "str | None" = None,
@@ -212,6 +221,7 @@ class Session(Generic[AppT]):
         execution = await self._runtime._start_for_agent(
             self._agent_digest,
             prepare_user_prompt(user_prompt),
+            attachments=attachments,
             output=output,
             principal=principal or self._principal,
             session_id=self.session_id,
@@ -302,6 +312,7 @@ class Agent(Generic[AppT]):
         self,
         user_prompt: "str | Sequence[UserContent]",
         *,
+        attachments: Sequence[str] = (),
         output: "type[BaseModel] | None" = None,
         principal: "Principal | None" = None,
         session_id: "str | None" = None,
@@ -314,6 +325,7 @@ class Agent(Generic[AppT]):
         return await self._runtime._start_for_agent(
             self._agent_digest,
             prepare_user_prompt(user_prompt),
+            attachments=attachments,
             output=output,
             principal=principal,
             session_id=session_id,
@@ -329,6 +341,7 @@ class Agent(Generic[AppT]):
         self,
         user_prompt: "str | Sequence[UserContent]",
         *,
+        attachments: Sequence[str] = (),
         output: "type[BaseModel] | None" = None,
         principal: "Principal | None" = None,
         session_id: "str | None" = None,
@@ -341,6 +354,7 @@ class Agent(Generic[AppT]):
     ) -> ExecutionResult:
         execution = await self.start(
             user_prompt,
+            attachments=attachments,
             output=output,
             principal=principal,
             session_id=session_id,
@@ -356,6 +370,7 @@ class Agent(Generic[AppT]):
         self,
         user_prompt: "str | Sequence[UserContent]",
         *,
+        attachments: Sequence[str] = (),
         output: "type[BaseModel] | None" = None,
         principal: "Principal | None" = None,
         session_id: "str | None" = None,
@@ -368,6 +383,7 @@ class Agent(Generic[AppT]):
         execution = await self._runtime._start_for_agent(
             self._agent_digest,
             prepare_user_prompt(user_prompt),
+            attachments=attachments,
             output=output,
             principal=principal,
             session_id=session_id,
@@ -438,6 +454,7 @@ class Agent(Generic[AppT]):
         node_id: str,
         user_prompt: "str | Sequence[UserContent]",
         *,
+        attachments: Sequence[str] = (),
         dependencies: tuple[str, ...] = (),
         budget_cost: int = 1,
         output: "type[BaseModel] | None" = None,
@@ -448,6 +465,7 @@ class Agent(Generic[AppT]):
             self._agent_digest,
             node_id,
             prepare_user_prompt(user_prompt),
+            attachments=attachments,
             dependencies=dependencies,
             budget_cost=budget_cost,
             output=output,
