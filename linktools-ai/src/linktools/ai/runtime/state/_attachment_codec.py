@@ -43,6 +43,7 @@ from ._codec import (
     _encode_domain,
     _iter_runtime_object_refs,
 )
+from ._contracts import ExecutionRecord, RecoveryExecutionInput
 from ._plan import RuntimeDomain
 from ._relocation import Locator, PathOrigin
 
@@ -83,6 +84,8 @@ def install_attachment_codec() -> None:
     encoders = MappingProxyType(
         {
             **dict(_V1_DATACLASS_ENCODERS),
+            "execution_record": _encode_execution_record,
+            "recovery_execution_input": _encode_recovery_execution_input,
             "attachment_entry_v1": _encode_entry,
             "attachment_upload_v1": _encode_upload,
             "input_prepare_v1": _encode_prepare,
@@ -149,6 +152,48 @@ def install_attachment_codec() -> None:
     _CODEC_MODULE._VERSION_CODECS = MappingProxyType({1: codec})
     _CODEC_MODULE._CURRENT_CODEC = codec
     _CODEC_MODULE._iter_runtime_object_refs = iter_object_refs
+
+
+def _encode_execution_record(
+    value: object,
+    codec: Any,
+    persisted: bool,
+) -> Mapping[str, JsonValue]:
+    if not isinstance(value, ExecutionRecord):
+        raise TypeError("execution_record received the wrong type")
+    encoded = dict(
+        _V1_DATACLASS_ENCODERS["execution_record"](
+            value,
+            codec,
+            persisted,
+        )
+    )
+    if not value.attachment_manifest:
+        encoded.pop("attachment_manifest", None)
+        encoded.pop("input_digest", None)
+        encoded.pop("path_origin", None)
+    return encoded
+
+
+def _encode_recovery_execution_input(
+    value: object,
+    codec: Any,
+    persisted: bool,
+) -> Mapping[str, JsonValue]:
+    if not isinstance(value, RecoveryExecutionInput):
+        raise TypeError("recovery_execution_input received the wrong type")
+    encoded = dict(
+        _V1_DATACLASS_ENCODERS["recovery_execution_input"](
+            value,
+            codec,
+            persisted,
+        )
+    )
+    if not value.attachment_manifest:
+        encoded.pop("attachment_manifest", None)
+        encoded.pop("input_digest", None)
+        encoded.pop("path_origin", None)
+    return encoded
 
 
 def _encode_entry(
