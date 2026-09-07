@@ -264,7 +264,7 @@ async def test_sql_pushdown_bounds_observation_select_round_trips(tmp_path: Path
                 group_by=("route",),
             )
         )
-        assert len(statements) == 2
+        assert len(statements) == 1
 
         statements.clear()
         await metrics.query(
@@ -275,7 +275,7 @@ async def test_sql_pushdown_bounds_observation_select_round_trips(tmp_path: Path
                 percentile=0.95,
             )
         )
-        assert len(statements) == 2
+        assert len(statements) == 1
     finally:
         if event.contains(engine.sync_engine, "before_cursor_execute", before_cursor_execute):
             event.remove(engine.sync_engine, "before_cursor_execute", before_cursor_execute)

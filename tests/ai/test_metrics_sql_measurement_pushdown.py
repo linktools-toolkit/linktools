@@ -368,11 +368,8 @@ async def test_every_measurement_aggregation_uses_bounded_sql_round_trips(
         for query in _queries(window):
             statements.clear()
             await metrics.query(query)
-            assert len(statements) == 2
-            assert all(
-                " limit ?" in statement or "with filtered" in statement
-                for statement in statements
-            )
+            assert len(statements) == 1
+            assert "with bounded_observations" in statements[0]
     finally:
         if event.contains(
             engine.sync_engine,

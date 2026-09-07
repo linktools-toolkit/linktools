@@ -84,13 +84,6 @@ async def execute_sql_metric_query(
     from sqlalchemy import text
 
     params = _base_params(namespace_key, dialect_name, plan)
-    scanned = await session.scalar(text(_scan_count_sql()), params)
-    if scanned is None:
-        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-    scanned_count = int(scanned)
-    if scanned_count > plan.max_scanned_observations:
-        raise AIError(ErrorCode.METRIC_QUERY_LIMIT_EXCEEDED)
-
     if (
         plan.source_kind is MetricSourceKind.OBSERVATION_COUNT
         and not plan.filters
@@ -98,6 +91,12 @@ async def execute_sql_metric_query(
         and not plan.group_by
         and plan.bucket_microseconds is None
     ):
+        scanned = await session.scalar(text(_scan_count_sql()), params)
+        if scanned is None:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        scanned_count = int(scanned)
+        if scanned_count > plan.max_scanned_observations:
+            raise AIError(ErrorCode.METRIC_QUERY_LIMIT_EXCEEDED)
         return _MetricQueryPushdownResult(
             rows=(
                 _MetricQueryPushdownRow(
@@ -109,6 +108,9 @@ async def execute_sql_metric_query(
             )
         )
 
+    if not await _sql_features_available(session, dialect_name, plan):
+        return None
+
     if plan.source_kind is MetricSourceKind.MEASUREMENT:
         statement, statement_params = _measurement_sql(dialect_name, plan, params)
         rows = (await session.execute(text(statement), statement_params)).mappings().all()
@@ -117,6 +119,51 @@ async def execute_sql_metric_query(
     statement, statement_params = _aggregate_sql(dialect_name, plan, params)
     rows = (await session.execute(text(statement), statement_params)).mappings().all()
     return _decode_aggregate_rows(rows, plan)
+
+
+async def _sql_features_available(
+    session: "AsyncSession",
+    dialect_name: str,
+    plan: _MetricQueryPushdownPlan,
+) -> bool:
+    connection = await session.connection()
+    version = connection.dialect.server_version_info
+    if version is None:
+        return False
+    if dialect_name == "mysql":
+        minimum = (
+            (8, 0, 17)
+            if plan.source_kind is MetricSourceKind.MEASUREMENT
+            else (8, 0, 1)
+        )
+        return version >= minimum
+    if dialect_name == "postgresql":
+        minimum = (9, 4) if plan.aggregation is MetricAggregation.PERCENTILE else (9, 3)
+        return version >= minimum
+
+    window = plan.aggregation in {MetricAggregation.LATEST, MetricAggregation.PERCENTILE}
+    if version < ((3, 25, 0) if window else (3, 9, 0)):
+        return False
+
+    from sqlalchemy import text
+    from sqlalchemy.exc import OperationalError
+
+    window_column = ", ROW_NUMBER() OVER ()" if window else ""
+    probe = (
+        "SELECT json_type(value), json_extract(value, '$')"
+        f"{window_column} FROM json_each('[1]')"
+    )
+    try:
+        await session.execute(text(probe))
+    except OperationalError as error:
+        if str(error.orig) in {
+            "no such function: json_type",
+            "no such function: json_extract",
+            "no such table: json_each",
+        }:
+            return False
+        raise
+    return True
 
 
 def _scan_count_sql() -> str:
@@ -132,6 +179,27 @@ FROM (
     LIMIT :scan_cap
 ) AS bounded_metric_scan
 """
+
+
+def _bounded_observations_sql(columns: tuple[str, ...]) -> str:
+    projection = ", ".join(columns)
+    return f"""bounded_observations AS (
+    SELECT {projection}
+    FROM ai_metric_observations
+    WHERE namespace_digest = :namespace_key
+      AND kind = :kind
+      AND occurred_at >= :window_start
+      AND occurred_at < :window_end
+    LIMIT :scan_cap
+), scan_stats AS (
+    SELECT COUNT(*) AS scanned_count
+    FROM bounded_observations
+)"""
+
+
+def _result_row_limit(plan: _MetricQueryPushdownPlan) -> int:
+    partition_limit = (plan.max_groups if plan.group_by else 1) * plan.bucket_count
+    return min(plan.max_result_points, partition_limit)
 
 
 def _base_params(
@@ -155,16 +223,13 @@ def _base_params(
         window_start = start_utc
         window_end = end_utc
 
-    partition_limit = (
-        (plan.max_groups if plan.group_by else 1) * plan.bucket_count
-    )
     params: dict[str, object] = {
         "namespace_key": namespace_key,
         "kind": plan.observation_kind,
         "window_start": window_start,
         "window_end": window_end,
         "scan_cap": plan.max_scanned_observations + 1,
-        "result_cap": min(plan.max_result_points, partition_limit) + 1,
+        "result_cap": _result_row_limit(plan) + 1,
         "max_extracted": plan.max_extracted_samples,
         "int64_min": _INT64_MIN,
         "int64_max": _INT64_MAX,
@@ -183,51 +248,48 @@ def _aggregate_sql(
     base_params: dict[str, object],
 ) -> tuple[str, dict[str, object]]:
     params = dict(base_params)
-    select_parts, group_aliases = _projection_parts(dialect_name, plan)
+    select_parts, group_columns = _projection_parts(dialect_name, plan)
     conditions = _filter_conditions(dialect_name, plan, params)
-    group_columns = [*group_aliases]
     if plan.bucket_microseconds is not None:
         group_columns.append("bucket_index")
 
-    source_select = ",\n        ".join(
-        [*select_parts, "b.payload_json AS payload_json"]
-    )
-    if not select_parts:
-        source_select = "b.payload_json AS payload_json"
-
     if plan.source_kind is MetricSourceKind.INDICATOR:
-        indicator = _indicator_condition(dialect_name, plan, params, alias="f")
-        sample_sum = f"SUM(CASE WHEN {indicator} THEN 1 ELSE 0 END)"
+        indicator = _indicator_condition(dialect_name, plan, params, alias="b")
+        sample = f"CASE WHEN {indicator} THEN 1 ELSE 0 END"
     else:
-        sample_sum = "COUNT(*)"
-
-    aggregate_select = [
-        *group_columns,
-        "COUNT(*) AS sample_count",
-        f"{sample_sum} AS sample_sum",
-    ]
-    aggregate_sql = ",\n        ".join(aggregate_select)
+        sample = "1"
+    source_select = ",\n        ".join([*select_parts, f"{sample} AS sample"])
+    aggregate_select = ",\n        ".join(
+        [*group_columns, "COUNT(*) AS sample_count", "SUM(sample) AS sample_sum"]
+    )
+    result_select = ", ".join(
+        f"a.{column}" for column in [*group_columns, "sample_count", "sample_sum"]
+    )
     group_sql = f"\n    GROUP BY {', '.join(group_columns)}" if group_columns else ""
-    order_sql = f"\nORDER BY {', '.join(group_columns)}" if group_columns else ""
     where_sql = "\n      AND " + "\n      AND ".join(conditions) if conditions else ""
+    columns = (
+        ("payload_json", "occurred_at")
+        if plan.bucket_microseconds is not None
+        else ("payload_json",)
+    )
+    bounded_sql = _bounded_observations_sql(columns)
 
     sql = f"""
-WITH filtered AS (
+WITH {bounded_sql}, filtered AS (
     SELECT
         {source_select}
-    FROM ai_metric_observations AS b
-    WHERE b.namespace_digest = :namespace_key
-      AND b.kind = :kind
-      AND b.occurred_at >= :window_start
-      AND b.occurred_at < :window_end{where_sql}
+    FROM bounded_observations AS b
+    CROSS JOIN scan_stats AS t
+    WHERE t.scanned_count < :scan_cap{where_sql}
 ), aggregated AS (
     SELECT
-        {aggregate_sql}
-    FROM filtered AS f{group_sql}
+        {aggregate_select}
+    FROM filtered{group_sql}
     LIMIT :result_cap
 )
-SELECT *
-FROM aggregated{order_sql}
+SELECT t.scanned_count, {result_select}
+FROM scan_stats AS t
+LEFT JOIN aggregated AS a ON 1 = 1
 """
     return sql, params
 
@@ -249,16 +311,25 @@ def _measurement_sql(
     if plan.bucket_microseconds is not None:
         partition_columns.append("bucket_index")
 
+    ordered = plan.aggregation in {
+        MetricAggregation.LATEST,
+        MetricAggregation.PERCENTILE,
+    } or (
+        dialect_name != "sqlite"
+        and plan.aggregation in {MetricAggregation.MIN, MetricAggregation.MAX}
+    )
+    columns = ["payload_json"]
+    if ordered:
+        columns.extend(("occurred_at", "observation_digest"))
+    elif plan.bucket_microseconds is not None:
+        columns.append("occurred_at")
     filtered_select = ",\n        ".join(
-        [
-            *select_parts,
-            "b.occurred_at AS occurred_at",
-            "b.observation_digest AS observation_digest",
-            "b.payload_json AS payload_json",
-        ]
+        [*select_parts, *(f"b.{column} AS {column}" for column in columns)]
     )
     where_sql = "\n      AND " + "\n      AND ".join(conditions) if conditions else ""
-    measurement_sql = _measurement_source_sql(dialect_name, partition_columns)
+    measurement_sql = _measurement_source_sql(
+        dialect_name, partition_columns, ordered=ordered
+    )
     valid_predicate = _measurement_valid_predicate(dialect_name, plan)
     reduced_sql = _measurement_reduce_sql(dialect_name, plan, partition_columns)
 
@@ -270,21 +341,20 @@ def _measurement_sql(
     selected_columns = ", ".join(f"p.{column}" for column in result_columns)
     if selected_columns:
         selected_columns = ",\n    " + selected_columns
-    order_sql = (
-        ", ".join(f"p.{column}" for column in partition_columns)
-        if partition_columns
-        else "p.sample_count"
-    )
+    bounded_sql = _bounded_observations_sql(tuple(columns))
+    # Keep statistics and reduction from expanding the same JSON array twice.
+    if dialect_name == "sqlite":
+        measurement_sql += "\n    LIMIT -1 OFFSET 0"
+    elif dialect_name == "mysql":
+        measurement_sql += "\n    LIMIT 18446744073709551615"
 
     sql = f"""
-WITH filtered AS (
+WITH {bounded_sql}, filtered AS (
     SELECT
         {filtered_select}
-    FROM ai_metric_observations AS b
-    WHERE b.namespace_digest = :namespace_key
-      AND b.kind = :kind
-      AND b.occurred_at >= :window_start
-      AND b.occurred_at < :window_end{where_sql}
+    FROM bounded_observations AS b
+    CROSS JOIN scan_stats AS t
+    WHERE t.scanned_count < :scan_cap{where_sql}
 ), samples_raw AS (
     {measurement_sql}
 ), sample_stats AS (
@@ -304,11 +374,12 @@ WITH filtered AS (
     LIMIT :result_cap
 )
 SELECT
+    t.scanned_count,
     s.extracted_count,
     s.invalid_count{selected_columns}
-FROM sample_stats AS s
+FROM scan_stats AS t
+CROSS JOIN sample_stats AS s
 LEFT JOIN reduced AS p ON 1 = 1
-ORDER BY {order_sql}
 """
     return sql, params
 
@@ -412,14 +483,18 @@ def _indicator_condition(
 def _measurement_source_sql(
     dialect_name: str,
     partition_columns: list[str],
+    *,
+    ordered: bool,
 ) -> str:
     prefix = ", ".join(f"f.{column}" for column in partition_columns)
     if prefix:
         prefix += ",\n        "
-    common = (
-        f"{prefix}f.occurred_at AS occurred_at,\n"
-        "        f.observation_digest AS observation_digest,\n        "
-    )
+    common = prefix
+    if ordered:
+        common += (
+            "f.occurred_at AS occurred_at,\n"
+            "        f.observation_digest AS observation_digest,\n        "
+        )
     if dialect_name == "sqlite":
         raw_value = "json_extract(m.value, '$.value')"
         value_type = "json_type(m.value, '$.value')"
@@ -525,6 +600,19 @@ def _measurement_reduce_sql(
     partition_columns: list[str],
 ) -> str:
     aggregation = plan.aggregation
+    if dialect_name == "sqlite" and aggregation in {
+        MetricAggregation.MIN,
+        MetricAggregation.MAX,
+    }:
+        columns = ", ".join(partition_columns)
+        prefix = f"{columns}, " if columns else ""
+        group_sql = f" GROUP BY {columns}" if columns else ""
+        function = "MIN" if aggregation is MetricAggregation.MIN else "MAX"
+        return (
+            f"SELECT {prefix}COUNT(*) AS sample_count, "
+            f"{function}(numeric_value) AS selected_value "
+            f"FROM valid_samples{group_sql}"
+        )
     if aggregation is MetricAggregation.PERCENTILE:
         return _percentile_pick_sql(dialect_name, partition_columns)
     if aggregation in {
@@ -741,15 +829,27 @@ def _json_path(parts: tuple[str, ...]) -> str:
     return "$" + "".join(f'."{part}"' for part in parts)
 
 
+def _validate_scan_count(
+    rows: list["Mapping[str, object]"],
+    plan: _MetricQueryPushdownPlan,
+) -> None:
+    if not rows:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    if int(rows[0]["scanned_count"]) > plan.max_scanned_observations:
+        raise AIError(ErrorCode.METRIC_QUERY_LIMIT_EXCEEDED)
+
+
 def _decode_aggregate_rows(
     rows: list["Mapping[str, object]"],
     plan: _MetricQueryPushdownPlan,
 ) -> _MetricQueryPushdownResult:
-    if len(rows) > plan.max_result_points:
+    _validate_scan_count(rows, plan)
+    materialized = [row for row in rows if row["sample_count"] is not None]
+    if len(materialized) > _result_row_limit(plan):
         raise AIError(ErrorCode.METRIC_QUERY_LIMIT_EXCEEDED)
     decoded = tuple(
         _decode_row(row, plan, selected=False)
-        for row in rows
+        for row in materialized
     )
     _validate_groups(decoded, plan)
     return _MetricQueryPushdownResult(rows=decoded)
@@ -759,8 +859,7 @@ def _decode_measurement_rows(
     rows: list["Mapping[str, object]"],
     plan: _MetricQueryPushdownPlan,
 ) -> _MetricQueryPushdownResult:
-    if not rows:
-        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    _validate_scan_count(rows, plan)
     extracted = int(rows[0]["extracted_count"])
     invalid = int(rows[0]["invalid_count"])
     if invalid:
@@ -769,16 +868,16 @@ def _decode_measurement_rows(
         raise AIError(ErrorCode.METRIC_QUERY_LIMIT_EXCEEDED)
 
     materialized = [row for row in rows if row.get("sample_count") is not None]
-    if len(materialized) > plan.max_result_points:
+    if len(materialized) > _result_row_limit(plan):
         raise AIError(ErrorCode.METRIC_QUERY_LIMIT_EXCEEDED)
     selected = plan.aggregation in _SELECTED_MEASUREMENT_AGGREGATIONS
     decoded = tuple(
         _decode_row(row, plan, selected=selected)
         for row in materialized
     )
+    _validate_groups(decoded, plan)
     if sum(row.sample_count for row in decoded) != extracted:
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-    _validate_groups(decoded, plan)
     return _MetricQueryPushdownResult(rows=decoded)
 
 
