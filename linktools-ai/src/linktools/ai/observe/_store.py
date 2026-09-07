@@ -15,6 +15,7 @@ from ._model import (
     MetricAggregation,
     MetricDefinition,
     MetricSourceKind,
+    MetricType,
     Observation,
 )
 
@@ -46,6 +47,7 @@ def _parse_scan_cursor(cursor: str) -> tuple[datetime, str]:
 class _MetricQueryPushdownPlan:
     observation_kind: str
     source_kind: MetricSourceKind
+    metric_type: MetricType
     measurement_name: str | None
     measurement_revision: int | None
     indicator_field: str | None
