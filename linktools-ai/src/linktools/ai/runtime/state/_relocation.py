@@ -177,6 +177,29 @@ class Cut:
 
 
 @dataclass(frozen=True, slots=True)
+class WorkspaceLocation:
+    platform: PathPlatform
+    root: str
+
+    def __post_init__(self) -> None:
+        if self.platform not in {"posix", "windows"}:
+            raise ValueError("workspace location platform is invalid")
+        _require_string(self.root, "workspace_location.root")
+
+    def to_json(self) -> dict[str, JsonValue]:
+        return {"platform": self.platform, "root": self.root}
+
+    @classmethod
+    def from_json(cls, value: object) -> "WorkspaceLocation":
+        obj = _require_object(value, "workspace_location")
+        _require_fields(obj, expected=frozenset({"platform", "root"}), field="workspace_location")
+        platform = _require_string(obj["platform"], "workspace_location.platform")
+        if platform not in {"posix", "windows"}:
+            raise ValueError("workspace location platform is invalid")
+        return cls(cast(PathPlatform, platform), _require_string(obj["root"], "workspace_location.root"))
+
+
+@dataclass(frozen=True, slots=True)
 class PathOrigin:
     version: int
     namespace: str
@@ -334,7 +357,11 @@ class LegacyStorageEvidence:
         _require_sha256(self.checkpoint_digest, "legacy.checkpoint_digest")
         _require_int(self.revision, "legacy.revision", minimum=0)
         _require_sha256(self.old_handoff_digest, "legacy.old_handoff_digest")
-        object.__setattr__(self, "source_v6", _immutable_object(_require_object(self.source_v6, "legacy.source_v6")))
+        object.__setattr__(
+            self,
+            "source_v6",
+            _immutable_object(_require_object(self.source_v6, "legacy.source_v6")),
+        )
         object.__setattr__(self, "source_groups", _canonical_groups(self.source_groups))
 
     def to_json(self) -> dict[str, JsonValue]:
@@ -395,7 +422,10 @@ class RestoreResource:
             "source_locator",
             _immutable_object(_require_object(self.source_locator, "restore_resource.source_locator")),
         )
-        layout = tuple(_require_string(value, "restore_resource.relative_layout") for value in self.relative_layout)
+        layout = tuple(
+            _require_string(value, "restore_resource.relative_layout")
+            for value in self.relative_layout
+        )
         if len(layout) != len(set(layout)):
             raise ValueError("restore_resource.relative_layout contains duplicates")
         object.__setattr__(self, "relative_layout", layout)
@@ -477,7 +507,7 @@ class RestoreManifest:
     version: int
     namespace: str
     tenant_id: str
-    source_workspace: PathOrigin
+    source_workspace: WorkspaceLocation
     resources: tuple[RestoreResource, ...]
     groups: RestoreGroups
     legacy_contracts: tuple[LegacyStorageEvidence, ...] = ()
@@ -489,10 +519,8 @@ class RestoreManifest:
             raise ValueError("RestoreManifest version must be 1")
         _require_string(self.namespace, "restore_manifest.namespace")
         _require_string(self.tenant_id, "restore_manifest.tenant_id")
-        if not isinstance(self.source_workspace, PathOrigin):
-            raise TypeError("restore_manifest.source_workspace must be PathOrigin")
-        if self.source_workspace.namespace != self.namespace:
-            raise ValueError("source workspace namespace does not match manifest namespace")
+        if not isinstance(self.source_workspace, WorkspaceLocation):
+            raise TypeError("restore_manifest.source_workspace must be WorkspaceLocation")
         resources = tuple(sorted(self.resources, key=lambda item: item.role))
         if any(not isinstance(item, RestoreResource) for item in resources):
             raise TypeError("restore_manifest.resources must contain RestoreResource")
@@ -503,14 +531,23 @@ class RestoreManifest:
             raise TypeError("restore_manifest.groups must be RestoreGroups")
         if self.groups.roles() != frozenset(roles):
             raise ValueError("restore groups must cover exactly the manifest resource roles")
-        legacy = tuple(sorted(self.legacy_contracts, key=lambda item: _locator_sort_key(item.checkpoint)))
+        legacy = tuple(
+            sorted(self.legacy_contracts, key=lambda item: _locator_sort_key(item.checkpoint))
+        )
         dependencies = tuple(
-            sorted(self.dependencies, key=lambda item: (item.kind, *_locator_sort_key(item.locator), item.digest))
+            sorted(
+                self.dependencies,
+                key=lambda item: (item.kind, *_locator_sort_key(item.locator), item.digest),
+            )
         )
         paths = tuple(
             sorted(
                 self.path_evidence,
-                key=lambda item: (*_locator_sort_key(item.at), item.value_pointer, item.source_value_digest),
+                key=lambda item: (
+                    *_locator_sort_key(item.at),
+                    item.value_pointer,
+                    item.source_value_digest,
+                ),
             )
         )
         if any(not isinstance(item, LegacyStorageEvidence) for item in legacy):
@@ -519,11 +556,17 @@ class RestoreManifest:
             raise TypeError("restore_manifest.dependencies contains invalid values")
         if any(not isinstance(item, PathEvidence) for item in paths):
             raise TypeError("restore_manifest.path_evidence contains invalid values")
-        if len(legacy) != len(set((item.checkpoint, item.checkpoint_digest, item.revision) for item in legacy)):
+        if len(legacy) != len(
+            set((item.checkpoint, item.checkpoint_digest, item.revision) for item in legacy)
+        ):
             raise ValueError("restore_manifest.legacy_contracts contains duplicates")
-        if len(dependencies) != len(set((item.kind, item.locator, item.digest) for item in dependencies)):
+        if len(dependencies) != len(
+            set((item.kind, item.locator, item.digest) for item in dependencies)
+        ):
             raise ValueError("restore_manifest.dependencies contains duplicates")
-        if len(paths) != len(set((item.at, item.value_pointer, item.source_value_digest) for item in paths)):
+        if len(paths) != len(
+            set((item.at, item.value_pointer, item.source_value_digest) for item in paths)
+        ):
             raise ValueError("restore_manifest.path_evidence contains duplicates")
         object.__setattr__(self, "resources", resources)
         object.__setattr__(self, "legacy_contracts", legacy)
@@ -579,7 +622,7 @@ class RestoreManifest:
             _require_int(obj["version"], "restore_manifest.version"),
             _require_string(obj["namespace"], "restore_manifest.namespace"),
             _require_string(obj["tenant_id"], "restore_manifest.tenant_id"),
-            PathOrigin.from_json(obj["source_workspace"]),
+            WorkspaceLocation.from_json(obj["source_workspace"]),
             tuple(
                 RestoreResource.from_json(item)
                 for item in _require_list(obj["resources"], "restore_manifest.resources")
@@ -587,7 +630,9 @@ class RestoreManifest:
             RestoreGroups.from_json(obj["groups"]),
             tuple(
                 LegacyStorageEvidence.from_json(item)
-                for item in _require_list(obj["legacy_contracts"], "restore_manifest.legacy_contracts")
+                for item in _require_list(
+                    obj["legacy_contracts"], "restore_manifest.legacy_contracts"
+                )
             ),
             tuple(
                 Dependency.from_json(item)
@@ -657,4 +702,5 @@ __all__ = [
     "RestoreManifest",
     "RestorePlan",
     "RestoreResource",
+    "WorkspaceLocation",
 ]
