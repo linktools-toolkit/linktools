@@ -1,0 +1,166 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""Runtime-owned child input preparation from parent-authorized attachment grants."""
+
+from collections.abc import Awaitable, Callable, Sequence
+from dataclasses import replace
+
+from ..core import Principal
+from ..errors import AIError, ErrorCode
+from ._attachment import _path_origin, _stable_prepare_error
+from ._input import input_intent_digest
+from .state import (
+    AttachmentEntry,
+    InputAttachmentPart,
+    InputPrepareRecord,
+    InputPrepareSlot,
+    InputTextPart,
+    InputV2,
+    PreparedInput,
+    input_v2_digest,
+    managed_attachment_path,
+)
+from .state._attachment_repository import AttachmentRepository
+
+_Grant = Callable[[str], Awaitable[AttachmentEntry]]
+
+
+class SubagentAttachmentPreparer:
+    """Freeze one explicit parent grant set into a direct child PreparedInput."""
+
+    def __init__(
+        self,
+        repository: AttachmentRepository,
+        workspace,
+    ) -> None:
+        if not isinstance(repository, AttachmentRepository):
+            raise TypeError("repository must be AttachmentRepository")
+        self._repository = repository
+        self._workspace = workspace
+
+    async def prepare(
+        self,
+        task: str,
+        attachments: Sequence[str],
+        *,
+        principal: Principal,
+        idempotency_key: str,
+        grant: _Grant,
+    ) -> PreparedInput:
+        paths = _paths(attachments)
+        if not paths:
+            raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+        intent_digest = input_intent_digest(task, paths)
+        origin = _path_origin(self._workspace)
+        candidate = InputPrepareRecord(
+            1,
+            intent_digest,
+            origin,
+            "PREPARING",
+            (),
+            None,
+            None,
+            None,
+        )
+        owner_key, current = await self._repository.reserve_prepare(
+            "execution.subagent",
+            idempotency_key,
+            candidate,
+        )
+        if current.status == "READY":
+            if current.input is None:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            return current.input
+        if current.status == "ADOPTED":
+            raise AIError(ErrorCode.STORAGE_CONFLICT)
+        if current.status == "ABORTED":
+            raise _stable_prepare_error(current.error_code)
+        if current.status != "PREPARING":
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+
+        unique_paths = tuple(dict.fromkeys(paths))
+        for slot, path in enumerate(unique_paths):
+            if slot < len(current.slots):
+                frozen = current.slots[slot]
+                if (
+                    frozen.slot != slot
+                    or frozen.entry.path
+                    != managed_attachment_path("p", owner_key, slot)
+                ):
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                continue
+            if slot != len(current.slots):
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            source = await grant(path)
+            entry = AttachmentEntry(
+                managed_attachment_path("p", owner_key, slot),
+                source.name,
+                source.media_type,
+                source.presentation,
+                source.content,
+            )
+            next_record = replace(
+                current,
+                slots=(
+                    *current.slots,
+                    InputPrepareSlot(slot, None, entry),
+                ),
+            )
+            current = await self._repository.compare_and_swap_prepare(
+                owner_key,
+                expected=current,
+                next_record=next_record,
+            )
+
+        manifest = tuple(item.entry for item in current.slots)
+        by_path = {path: index for index, path in enumerate(unique_paths)}
+        prompt = InputV2(
+            2,
+            (
+                InputTextPart("text", task),
+                *(InputAttachmentPart("attachment", by_path[path]) for path in paths),
+            ),
+            (),
+            (),
+        )
+        if len(manifest) != len(unique_paths):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        prepared = PreparedInput(
+            1,
+            "linktools-input-v2",
+            prompt,
+            manifest,
+            intent_digest,
+            input_v2_digest(prompt, manifest),
+            origin,
+        )
+        ready = InputPrepareRecord(
+            1,
+            intent_digest,
+            origin,
+            "READY",
+            (),
+            prepared,
+            None,
+            None,
+        )
+        committed = await self._repository.compare_and_swap_prepare(
+            owner_key,
+            expected=current,
+            next_record=ready,
+        )
+        if committed.input is None:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        return committed.input
+
+
+def _paths(value: Sequence[str]) -> tuple[str, ...]:
+    if isinstance(value, (str, bytes, bytearray)):
+        raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+    result = tuple(value)
+    if not result or any(not isinstance(path, str) or not path for path in result):
+        raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+    return result
+
+
+__all__ = ["SubagentAttachmentPreparer"]
