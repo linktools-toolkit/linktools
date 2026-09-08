@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""LinkTools-only capability semantics not provided by Harness."""
+"""LinkTools-owned platform capability semantics not provided by Harness."""
 
 from __future__ import annotations
 

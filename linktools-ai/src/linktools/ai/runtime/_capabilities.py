@@ -7,8 +7,10 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
+from time import monotonic_ns
 from typing import Any, cast
 
+from linktools.core import environ
 from pydantic import ValidationError
 from pydantic_ai.capabilities import (
     AbstractCapability,
@@ -34,7 +36,41 @@ from pydantic_ai.tools import DeferredToolRequests, RunContext, ToolDefinition
 from pydantic_ai_harness.planning import Planning
 from pydantic_ai_harness.step_persistence import StepPersistence
 
-import linktools.ai.runtime._capabilities_native as _native
+from ._platform_capabilities import (
+    MEMORY_READ_TOOL_NAMES,
+    MEMORY_TOOL_NAMES,
+    PLANNING_TOOL_NAMES,
+    PLAN_SAFE_METADATA_KEY,
+    SUBAGENT_TOOL_NAMES,
+    WORKSPACE_FILESYSTEM_READ_TOOL_NAMES,
+    WORKSPACE_FILESYSTEM_TOOL_NAMES,
+    WORKSPACE_SHELL_TOOL_NAMES,
+    ToolOperationBridge,
+    ToolOperationDecision,
+    _CompactionCapability,
+    _DURATION_NS_METADATA_KEY,
+    _MEMORY_CAPABILITY_ID,
+    _MODEL_EFFECT_UNKNOWN_MESSAGE,
+    _MissingToolOperationBridge,
+    _OBSERVATION_ID_METADATA_KEY,
+    _PLANNING_CAPABILITY_ID,
+    _ToolCallState,
+    _WorkspaceToolGate,
+    _bypasses_tool_error_hook,
+    _durable_failure_error,
+    _model_tool_error,
+    _model_usage_metadata,
+    _repository_instruction_marker,
+    _tool_execution_policy,
+    _validate_compaction_target,
+    _validate_trusted_mcp_selectors,
+    _validate_trusted_tool_classes,
+    select_runtime_tool_names,
+    tool_allowed_in_planning,
+    tool_is_control,
+    tool_name_allowed,
+)
+from ._metric_id import _tool_observation_id
 from ._compaction import ExternalModelRequestObserver
 from ._harness import (
     HarnessPlanStoreAdapter,
@@ -50,31 +86,8 @@ from ._tool_metrics import _ToolMetricContext
 from .state import StepStore
 from ..errors import AIError, ErrorCode
 
-MEMORY_TOOL_NAMES = _native.MEMORY_TOOL_NAMES
-MEMORY_READ_TOOL_NAMES = _native.MEMORY_READ_TOOL_NAMES
-PLANNING_TOOL_NAMES = _native.PLANNING_TOOL_NAMES
-PLAN_SAFE_METADATA_KEY = _native.PLAN_SAFE_METADATA_KEY
-SUBAGENT_TOOL_NAMES = _native.SUBAGENT_TOOL_NAMES
-WORKSPACE_FILESYSTEM_READ_TOOL_NAMES = _native.WORKSPACE_FILESYSTEM_READ_TOOL_NAMES
-WORKSPACE_FILESYSTEM_TOOL_NAMES = _native.WORKSPACE_FILESYSTEM_TOOL_NAMES
-WORKSPACE_SHELL_TOOL_NAMES = _native.WORKSPACE_SHELL_TOOL_NAMES
-ToolOperationBridge = _native.ToolOperationBridge
-ToolOperationDecision = _native.ToolOperationDecision
-_CompactionCapability = _native._CompactionCapability
-_MissingToolOperationBridge = _native._MissingToolOperationBridge
-_WorkspaceToolGate = _native._WorkspaceToolGate
-_model_usage_metadata = _native._model_usage_metadata
-_repository_instruction_marker = _native._repository_instruction_marker
-_tool_execution_policy = _native._tool_execution_policy
+_logger = environ.get_logger("ai.runtime.capabilities")
 
-select_runtime_tool_names = _native.select_runtime_tool_names
-tool_allowed_in_planning = _native.tool_allowed_in_planning
-tool_is_control = _native.tool_is_control
-tool_name_allowed = _native.tool_name_allowed
-
-_MEMORY_CAPABILITY_ID = _native._MEMORY_CAPABILITY_ID
-_PLANNING_CAPABILITY_ID = _native._PLANNING_CAPABILITY_ID
-_MODEL_EFFECT_UNKNOWN_MESSAGE = _native._MODEL_EFFECT_UNKNOWN_MESSAGE
 
 @dataclass(kw_only=True, eq=False)
 class _RuntimeStepPersistence(StepPersistence[None]):
@@ -110,7 +123,7 @@ class _RuntimeStepPersistence(StepPersistence[None]):
         repr=False,
         compare=False,
     )
-    _calls: dict[tuple[str, str], _native._ToolCallState] = field(
+    _calls: dict[tuple[str, str], _ToolCallState] = field(
         default_factory=dict,
         init=False,
         repr=False,
@@ -132,8 +145,8 @@ class _RuntimeStepPersistence(StepPersistence[None]):
     def __post_init__(self) -> None:
         if not isinstance(self.plan_mode, bool):
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
-        _native._validate_trusted_tool_classes(self.trusted_tool_classes)
-        _native._validate_trusted_mcp_selectors(self.trusted_mcp_selectors)
+        _validate_trusted_tool_classes(self.trusted_tool_classes)
+        _validate_trusted_mcp_selectors(self.trusted_mcp_selectors)
         if not isinstance(self.store, HarnessStepStoreAdapter):
             self.store = HarnessStepStoreAdapter(
                 cast(StepStore, self.store),
@@ -502,7 +515,7 @@ class _RuntimeStepPersistence(StepPersistence[None]):
         if decision.replay_safe is not policy.replay_safe:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         key = self._decision_key(ctx, call)
-        state = _native._ToolCallState(
+        state = _ToolCallState(
             decision=decision,
             policy=policy,
             operation_terminalized=(
@@ -533,7 +546,7 @@ class _RuntimeStepPersistence(StepPersistence[None]):
                     state=state,
                 )
             except BaseException as raised:
-                if _native._bypasses_tool_error_hook(raised):
+                if _bypasses_tool_error_hook(raised):
                     self._calls.pop(key, None)
                 raise
             raise AssertionError("cached failure tool hook must raise")
@@ -543,7 +556,7 @@ class _RuntimeStepPersistence(StepPersistence[None]):
         async def tracked_handler(validated_args: dict[str, Any]) -> Any:
             state.handler_entered = True
             if self.tool_metrics is not None:
-                state.metric_started_ns = _native.monotonic_ns()
+                state.metric_started_ns = monotonic_ns()
             token = bind_tool_operation_id(state.decision.operation_id)
             try:
                 if self.tool_metrics is None:
@@ -656,7 +669,7 @@ class _RuntimeStepPersistence(StepPersistence[None]):
                     state=state,
                 )
             except BaseException as raised:
-                if state.operation_terminalized and _native._bypasses_tool_error_hook(raised):
+                if state.operation_terminalized and _bypasses_tool_error_hook(raised):
                     keep_call_state = False
                     self._calls.pop(key, None)
                 raise
@@ -729,21 +742,21 @@ class _RuntimeStepPersistence(StepPersistence[None]):
     def _tool_metric_metadata(
         self,
         call: ToolCallPart,
-        state: _native._ToolCallState,
+        state: _ToolCallState,
     ) -> dict[str, str]:
         metadata = dict(self.metadata)
         metrics = self.tool_metrics
         if metrics is None or not state.handler_entered or state.metric_started_ns is None:
             return metadata
-        metadata[_native._OBSERVATION_ID_METADATA_KEY] = _native._tool_observation_id(
+        metadata[_OBSERVATION_ID_METADATA_KEY] = _tool_observation_id(
             metrics.source_namespace,
             metrics.tenant_id,
             metrics.execution_id,
             metrics.step_run_id,
             call.tool_call_id,
         )
-        metadata[_native._DURATION_NS_METADATA_KEY] = str(
-            _native.monotonic_ns() - state.metric_started_ns
+        metadata[_DURATION_NS_METADATA_KEY] = str(
+            monotonic_ns() - state.metric_started_ns
         )
         return metadata
 
@@ -755,7 +768,7 @@ class _RuntimeStepPersistence(StepPersistence[None]):
         tool_def: ToolDefinition,
         args: dict[str, Any],
         result: Any,
-        state: _native._ToolCallState,
+        state: _ToolCallState,
     ) -> Any:
         previous = self.metadata
         self.metadata = self._tool_metric_metadata(call, state)
@@ -778,7 +791,7 @@ class _RuntimeStepPersistence(StepPersistence[None]):
         tool_def: ToolDefinition,
         args: dict[str, Any],
         error: BaseException,
-        state: _native._ToolCallState,
+        state: _ToolCallState,
     ) -> Any:
         previous = self.metadata
         self.metadata = self._tool_metric_metadata(call, state)
@@ -887,7 +900,7 @@ class _RuntimeStepPersistence(StepPersistence[None]):
 
     async def _heartbeat(
         self,
-        state: _native._ToolCallState,
+        state: _ToolCallState,
         handler_task: asyncio.Task[Any],
     ) -> None:
         while not handler_task.done():
@@ -896,7 +909,7 @@ class _RuntimeStepPersistence(StepPersistence[None]):
                 return
             state.decision = await self.tool_operations.renew(state.decision)
 
-    async def _stop_heartbeat(self, state: _native._ToolCallState) -> None:
+    async def _stop_heartbeat(self, state: _ToolCallState) -> None:
         task = state.heartbeat_task
         if task is None:
             return
@@ -932,7 +945,7 @@ class _RuntimeStepPersistence(StepPersistence[None]):
         except asyncio.CancelledError:
             pass
         except BaseException:  # noqa: BLE001
-            _native._logger.exception("detached %s failed", label)
+            _logger.exception("detached %s failed", label)
 
     async def _fail_known_tool(
         self,
@@ -942,10 +955,10 @@ class _RuntimeStepPersistence(StepPersistence[None]):
         tool_def: ToolDefinition,
         args: dict[str, Any],
         error: Exception,
-        state: _native._ToolCallState,
+        state: _ToolCallState,
     ) -> Any:
         state.preserve_started = True
-        durable_error = _native._durable_failure_error(
+        durable_error = _durable_failure_error(
             error,
             call=call,
             tool_def=tool_def,
@@ -972,7 +985,7 @@ class _RuntimeStepPersistence(StepPersistence[None]):
         tool_def: ToolDefinition,
         args: dict[str, Any],
         error: BaseException,
-        state: _native._ToolCallState,
+        state: _ToolCallState,
     ) -> Any:
         if state.terminal_event_recorded:
             raise error
@@ -988,7 +1001,7 @@ class _RuntimeStepPersistence(StepPersistence[None]):
         except BaseException as raised:
             state.terminal_event_recorded = True
             if raised is error:
-                model_error = _native._model_tool_error(
+                model_error = _model_tool_error(
                     error,
                     call=call,
                     tool_def=tool_def,
@@ -1007,7 +1020,7 @@ class _RuntimeStepPersistence(StepPersistence[None]):
         tool_def: ToolDefinition,
         args: dict[str, Any],
         result: Any,
-        state: _native._ToolCallState,
+        state: _ToolCallState,
     ) -> Any:
         if state.terminal_event_recorded:
             return result
@@ -1028,7 +1041,7 @@ class _RuntimeStepPersistence(StepPersistence[None]):
 
     async def _mark_unknown(
         self,
-        state: _native._ToolCallState,
+        state: _ToolCallState,
         error: BaseException,
     ) -> None:
         state.preserve_started = True
@@ -1092,9 +1105,9 @@ async def compose_platform_capabilities(
     model_journal: ModelRequestJournal | None = None,
     external_model_request_observer: ExternalModelRequestObserver | None = None,
 ) -> tuple[AbstractCapability[None], ...]:
-    _native._validate_compaction_target(context_target_tokens)
-    _native._validate_trusted_tool_classes(trusted_tool_classes)
-    _native._validate_trusted_mcp_selectors(trusted_mcp_selectors)
+    _validate_compaction_target(context_target_tokens)
+    _validate_trusted_tool_classes(trusted_tool_classes)
+    _validate_trusted_mcp_selectors(trusted_mcp_selectors)
     capabilities: list[AbstractCapability[None]] = []
     persistence = _RuntimeStepPersistence(
         store=cast(Any, step_store),
