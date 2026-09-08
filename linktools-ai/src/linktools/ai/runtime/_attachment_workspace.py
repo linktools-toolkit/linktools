@@ -4,17 +4,27 @@
 
 from __future__ import annotations
 
+import os
 from contextvars import ContextVar
 from dataclasses import dataclass
 from typing import Any
 
 import linktools.ai.runtime._agent_executor as agent_executor_runtime
+import linktools.ai.runtime._attachment_admission as admission_runtime
 import linktools.ai.runtime._factory as factory_runtime
 import linktools.ai.runtime._local as local_runtime
+from pydantic_ai.messages import ModelResponse, ToolCallPart
 
 from ..capability import attachment_tool_contribution
+from ..core import ExecutionStatus, ToolOperationStatus
 from ..errors import AIError, ErrorCode
+from ..storage import TransientObjectStore
+from ._attachment_active import AttachmentActiveSet
+from ._attachment_projection import AttachmentProjectionCapability
 from ._attachment_read import AttachmentReadRuntime
+from ._object import read_runtime_object
+from .state import ContentRef, ModelExposureEntry, PathOrigin, RuntimeDomain
+from .state._exposure_repository import ModelExposureRepository
 
 
 @dataclass(frozen=True, slots=True)
@@ -66,17 +76,192 @@ async def _materialize_agent_with_attachment_reader(*args: Any, **kwargs: Any):
         or scope.context.principal.tenant_id != owner.tenant_id
     ):
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+
+    managed = admission_runtime._managed_projection.get()
+    if managed is not None and managed.execution_id != owner.execution_id:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    initial = () if managed is None else managed.activations
+    active = AttachmentActiveSet(
+        namespace=owner.backend._namespace,
+        tenant_id=owner.tenant_id,
+        execution_id=owner.execution_id,
+        initial=initial,
+    )
+    await _restore_committed_reads(owner.backend, scope.history, active)
     reader = AttachmentReadRuntime(
         owner.backend,
         execution_id=owner.execution_id,
         tenant_id=owner.tenant_id,
         agent_run_sequence=scope.segment_sequence,
+        on_committed=active.add_committed_read,
     )
     token = _attachment_reader.set(reader.read)
     try:
-        return await _original_materialize_agent(*args, **kwargs)
+        result = await _original_materialize_agent(*args, **kwargs)
     finally:
         _attachment_reader.reset(token)
+
+    read_enabled = any(
+        candidate.id == "read_attachment"
+        for candidate in scope.binding.definition.selected_tools
+    )
+    if managed is None and not read_enabled and not active.entries():
+        return result
+    agent, capabilities, runtime_tools, trusted_tools, trusted_mcp = result
+    filtered = tuple(
+        capability
+        for capability in capabilities
+        if not isinstance(capability, AttachmentProjectionCapability)
+    )
+    capability = _runtime_projection_capability(
+        owner.backend,
+        scope,
+        active,
+        managed,
+    )
+    return (
+        agent,
+        (*filtered, capability),
+        runtime_tools,
+        trusted_tools,
+        trusted_mcp,
+    )
+
+
+async def _restore_committed_reads(
+    backend: local_runtime.LocalExecutionBackend,
+    history: Any,
+    active: AttachmentActiveSet,
+) -> None:
+    operations = backend._tool_operations
+    if operations is None:
+        return
+    for message in tuple(history):
+        if not isinstance(message, ModelResponse):
+            continue
+        run_id = message.run_id
+        if not isinstance(run_id, str) or not run_id:
+            continue
+        for part in message.parts:
+            if not isinstance(part, ToolCallPart) or part.tool_name != "read_attachment":
+                continue
+            record = await operations.get_by_call(
+                run_id,
+                part.tool_call_id,
+                tenant_id=backend._tenant_id,
+            )
+            if record is None:
+                continue
+            if record.tool_name != "read_attachment":
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            if record.status is ToolOperationStatus.COMPLETED:
+                if record.attachment_result is None:
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                await active.add_committed_read(
+                    record.tool_operation_id,
+                    record.attachment_result,
+                )
+            elif record.attachment_result is not None:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+
+
+def _runtime_projection_capability(
+    backend: local_runtime.LocalExecutionBackend,
+    scope: Any,
+    active: AttachmentActiveSet,
+    managed: Any,
+) -> AttachmentProjectionCapability:
+    tenant_id = scope.context.principal.tenant_id
+    execution_id = scope.context.execution_id
+    executions = backend._execution.executions
+    exposures = ModelExposureRepository(
+        backend._recovery.checkpoints.state_store,
+        namespace=backend._namespace,
+        tenant_id=tenant_id,
+    )
+    path_origin = (
+        managed.path_origin
+        if managed is not None
+        else PathOrigin(
+            1,
+            scope.context.workspace.workspace_id,
+            "windows" if os.name == "nt" else "posix",
+            str(scope.context.workspace.root),
+        )
+    )
+
+    async def current_execution():
+        current = await executions.get(execution_id, tenant_id=tenant_id)
+        if current is None:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        if current.status in {ExecutionStatus.CANCELLING, ExecutionStatus.CANCELLED}:
+            raise AIError(ErrorCode.EXECUTION_CANCELLED)
+        if current.status is not ExecutionStatus.STARTED:
+            raise AIError(ErrorCode.STORAGE_CONFLICT)
+        if current.agent_run_sequence != scope.segment_sequence:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        if managed is not None and (
+            current.attachment_manifest != managed.manifest
+            or current.input_digest != managed.input_digest
+            or current.path_origin != managed.path_origin
+        ):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        return current
+
+    async def check_execution(run_step: int) -> None:
+        if isinstance(run_step, bool) or not isinstance(run_step, int) or run_step < 0:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        await current_execution()
+
+    async def authorize_entries(
+        run_step: int,
+        entries: tuple[ModelExposureEntry, ...],
+    ) -> None:
+        if isinstance(run_step, bool) or not isinstance(run_step, int) or run_step < 0:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        await current_execution()
+        active.authorize(entries)
+
+    async def commit_exposure(
+        run_step: int,
+        entries: tuple[ModelExposureEntry, ...],
+    ):
+        return await exposures.put(
+            execution_id=execution_id,
+            step_run_id=scope.step_run_id,
+            run_step=run_step,
+            path_origin=path_origin,
+            entries=entries,
+        )
+
+    async def read_content(content: ContentRef) -> bytes:
+        try:
+            domain = RuntimeDomain(content.domain)
+        except ValueError as error:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
+        if domain is RuntimeDomain.EXECUTION:
+            store = backend._execution_objects
+        elif domain is RuntimeDomain.RECOVERY:
+            store = backend._recovery_objects
+        else:
+            raise AIError(ErrorCode.STORAGE_DEPENDENCY_NOT_READY)
+        if isinstance(store, TransientObjectStore):
+            if content.owner_scope is None:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            store = store.scoped(f"runtime:{domain.value}:{content.owner_scope}")
+        return await read_runtime_object(store, content.object)
+
+    return AttachmentProjectionCapability(
+        execution_id=execution_id,
+        step_run_id=scope.step_run_id,
+        path_origin=path_origin,
+        activations=active.entries(),
+        activation_provider=active.entries,
+        check_execution=check_execution,
+        authorize_entries=authorize_entries,
+        commit_exposure=commit_exposure,
+        read_content=read_content,
+    )
 
 
 def _workspace_capabilities_with_attachment_reader(
