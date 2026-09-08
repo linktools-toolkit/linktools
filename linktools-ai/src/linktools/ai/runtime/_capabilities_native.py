@@ -35,7 +35,6 @@ from pydantic_ai.messages import (
 )
 from pydantic_ai.models import ModelRequestContext
 from pydantic_ai.tools import RunContext, ToolDefinition
-from pydantic_ai.toolsets import AbstractToolset, FunctionToolset
 
 from ..capability import (
     SKILL_TOOL_NAMES,
@@ -44,12 +43,7 @@ from ..capability import (
     WORKSPACE_FILESYSTEM_TOOL_NAMES,
     WORKSPACE_SHELL_TOOL_NAMES,
 )
-from ..core import (
-    JsonValue,
-    canonical_json_bytes,
-    canonical_sha256,
-    normalize_json_value,
-)
+from ..core import canonical_json_bytes, normalize_json_value
 from ..errors import AIError, ErrorCode
 from ..workspace import (
     RepositoryInstructionDocument,
@@ -60,13 +54,6 @@ from ..workspace import (
 )
 from ._compaction import ExternalModelRequestObserver, RuntimeCompaction
 from ._journal import ModelRequestJournal
-from ._memory import (
-    MemoryOperation,
-    MemoryStore,
-    memory_operation_fingerprint,
-    normalize_memory_file,
-)
-from ._metric_id import _tool_observation_id
 from ._tool import ToolOperationDecision
 from .state import ToolOperationRecord
 
@@ -565,148 +552,6 @@ def _scope_applies_to_target(scope: str, target: str) -> bool:
     )
 
 
-class _SelectedMemory(AbstractCapability[None]):
-    def __init__(
-        self,
-        store: MemoryStore,
-        *,
-        selected_tool_names: tuple[str, ...],
-        id: str,
-        operation_identity_run_id: str | None = None,
-    ) -> None:
-        self.id = id
-        self._store = store
-        self._selected_tool_names = selected_tool_names
-        self._operation_identity_run_id = operation_identity_run_id
-
-    def get_instructions(self) -> str:
-        return _memory_guidance(self._selected_tool_names)
-
-    def get_toolset(self) -> AbstractToolset[None]:
-        toolset = FunctionToolset(id="memory")
-        if "read_memory" in self._selected_tool_names:
-            toolset.add_function(self._read_memory, name="read_memory")
-        if "search_memory" in self._selected_tool_names:
-            toolset.add_function(self._search_memory, name="search_memory")
-        if "write_memory" in self._selected_tool_names:
-            toolset.add_function(self._write_memory, name="write_memory")
-        if "delete_memory" in self._selected_tool_names:
-            toolset.add_function(self._delete_memory, name="delete_memory")
-        return toolset
-
-    async def _read_memory(self, ctx: RunContext[None], file: str) -> str:
-        del ctx
-        normalized = _memory_file_argument(file)
-        result = await self._store.read(normalized, max_chars=65_536)
-        if result is None:
-            raise ModelRetry(
-                f"There is no memory file named {normalized!r}; search memory first."
-            )
-        suffix = "\n[truncated]" if result.truncated else ""
-        return result.content + suffix
-
-    async def _search_memory(
-        self,
-        ctx: RunContext[None],
-        query: str,
-    ) -> dict[str, object]:
-        del ctx
-        result = await self._store.search(query, limit=10)
-        return {
-            "matches": [
-                {"file": match.file, "snippet": match.snippet, "score": match.score}
-                for match in result.matches
-            ],
-            "scanned": result.scanned,
-            "truncated": result.truncated,
-        }
-
-    async def _write_memory(
-        self,
-        ctx: RunContext[None],
-        content: str,
-        file: str = "MEMORY.md",
-        old_text: str | None = None,
-    ) -> dict[str, object]:
-        normalized = _memory_file_argument(file)
-        if old_text is None and not content.strip():
-            raise ModelRetry("Nothing to write; provide content to append.")
-        operation = _memory_operation(
-            ctx,
-            "write",
-            normalized,
-            content,
-            old_text,
-            operation_identity_run_id=self._operation_identity_run_id,
-        )
-        replay = await self._store.get_operation(operation)
-        if replay is not None:
-            return {
-                "file": replay.file,
-                "version": replay.version,
-                "status": replay.status,
-            }
-        current = await self._store.read(normalized, max_chars=65_536)
-        if current is not None and current.truncated:
-            raise ModelRetry("The memory file is too large to edit safely.")
-        value = "" if current is None else current.content
-        if old_text is None:
-            next_content = content
-            append = True
-            status = "created" if current is None else "appended"
-        else:
-            if not old_text or value.count(old_text) != 1:
-                raise ModelRetry("old_text must match exactly one existing passage.")
-            next_content = value.replace(old_text, content)
-            append = False
-            status = "updated"
-        mutation = await self._store.write(
-            normalized,
-            content if append else next_content,
-            expected_version=None if current is None else current.version,
-            operation=operation,
-            append=append,
-        )
-        return {
-            "file": normalized,
-            "version": mutation.version,
-            "status": status if not mutation.replayed else mutation.status,
-        }
-
-    async def _delete_memory(
-        self,
-        ctx: RunContext[None],
-        file: str,
-    ) -> dict[str, JsonValue]:
-        normalized = _memory_file_argument(file)
-        if normalized == "MEMORY.md":
-            raise ModelRetry("MEMORY.md is the main notebook; edit it instead.")
-        operation = _memory_operation(
-            ctx,
-            "delete",
-            normalized,
-            operation_identity_run_id=self._operation_identity_run_id,
-        )
-        replay = await self._store.get_operation(operation)
-        if replay is not None:
-            return {
-                "file": replay.file,
-                "version": replay.version,
-                "status": replay.status,
-            }
-        current = await self._store.read(normalized, max_chars=1)
-        mutation = await self._store.delete(
-            normalized,
-            expected_version=None if current is None else current.version,
-            operation=operation,
-        )
-        return {
-            "file": normalized,
-            "version": mutation.version,
-            "status": mutation.status,
-        }
-
-
 class _CompactionCapability(AbstractCapability[None]):
     def __init__(
         self,
@@ -736,69 +581,6 @@ class _CompactionCapability(AbstractCapability[None]):
         request_context: ModelRequestContext,
     ) -> ModelRequestContext:
         return await self._compaction.before_model_request(ctx, request_context)
-
-
-def _memory_guidance(selected_tools: tuple[str, ...]) -> str:
-    actions = ", ".join(f"`{name}`" for name in selected_tools)
-    return f"Use only these memory tools when needed: {actions}."
-
-
-def _memory_file_argument(file: str) -> str:
-    if not isinstance(file, str):
-        raise ModelRetry("memory file must be a string")
-    try:
-        return normalize_memory_file(file)
-    except AIError as error:
-        raise ModelRetry("memory file name is invalid") from error
-
-
-def _memory_operation(
-    ctx: RunContext[None],
-    kind: str,
-    file: str,
-    content: str | None = None,
-    old_text: str | None = None,
-    *,
-    operation_identity_run_id: str | None = None,
-) -> MemoryOperation:
-    call_id = _tool_call_identity(
-        ctx,
-        operation_identity_run_id=operation_identity_run_id,
-    )
-    append = kind == "write" and old_text is None
-    fingerprint = memory_operation_fingerprint(
-        kind,
-        file,
-        content,
-        old_text,
-        append,
-    )
-    return MemoryOperation(
-        call_id,
-        fingerprint,
-        kind,
-        file,
-        content,
-        old_text,
-        append,
-    )
-
-
-def _tool_call_identity(
-    ctx: RunContext[None],
-    *,
-    operation_identity_run_id: str | None,
-) -> str:
-    run_id = operation_identity_run_id or ctx.run_id
-    call_id = ctx.tool_call_id
-    if (
-        not isinstance(run_id, str)
-        or not run_id
-        or not isinstance(call_id, str)
-        or not call_id
-    ):
-        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-    return canonical_sha256({"run_id": run_id, "tool_call_id": call_id})
 
 
 def _model_usage_metadata(response: ModelResponse) -> dict[str, str]:
