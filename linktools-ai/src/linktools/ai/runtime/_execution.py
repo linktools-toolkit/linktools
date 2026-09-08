@@ -261,7 +261,6 @@ class DefaultExecutionService:
         self._release_terminal = release_terminal or _no_release_terminal
         self._terminal_verifier = terminal_verifier or _missing_terminal_verifier
         self._terminal_verifier_is_default = terminal_verifier is None
-        self._terminal_committer: _ExecutionTerminalCommitter | None = None
         self._local_waiter = local_waiter
         if not isinstance(session_execution_ready, bool):
             raise TypeError("session_execution_ready must be bool")
@@ -277,6 +276,7 @@ class DefaultExecutionService:
         self._input_materializer = input_materializer
         self._storage_contract_factory = storage_contract_factory
         self._session_execution_ready = session_execution_ready
+        self._terminal_committer: _ExecutionTerminalCommitter | None = None
         self._local_stream_prepare: Callable[[str], None] | None = None
         self._local_stream_abort: Callable[[str], None] | None = None
         self._subagent_cancellation: _SubagentCancellation | None = None
@@ -332,6 +332,8 @@ class DefaultExecutionService:
                     request.user_prompt,
                     (),
                 ).digest,
+                stored_user_input=None,
+                storage_contract=None,
             )
         canonical_files = await self._input_materializer.canonicalize_files(
             request.files
@@ -344,6 +346,8 @@ class DefaultExecutionService:
             request,
             files=canonical_files,
             input_intent_digest=intent.digest,
+            stored_user_input=None,
+            storage_contract=None,
         )
 
     async def _materialize_request(
@@ -366,6 +370,7 @@ class DefaultExecutionService:
         return replace(
             request,
             user_prompt=canonical,
+            files=(),
             stored_user_input=stored,
         )
 
