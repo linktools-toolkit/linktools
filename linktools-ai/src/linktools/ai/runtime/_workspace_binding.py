@@ -67,6 +67,7 @@ class WorkspaceToolCallBinder:
                 if fields is None:
                     continue
                 existing = await self._store.get(
+                    execution_id,
                     step_run_id,
                     part.tool_call_id,
                 )
@@ -118,6 +119,7 @@ class WorkspaceToolCallBinder:
                 if part.tool_name not in path_fields:
                     continue
                 binding = await self._store.get(
+                    execution_id,
                     step_run_id,
                     part.tool_call_id,
                 )
