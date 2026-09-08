@@ -235,6 +235,8 @@ class _RepositoryBase:
             return self._parent(kind, "graph", value.graph_id)
         if isinstance(value, ExecutionRecord) and value.parent_execution_id is not None:
             return self._parent(kind, "execution", value.parent_execution_id)
+        if isinstance(value, ToolOperationRecord):
+            return self._parent(kind, "execution", value.execution_id)
         return None
 
     async def _record(self, key: bytes) -> StoredRecord | None:
@@ -3939,7 +3941,9 @@ class EvaluationRepositoryImpl(_ResourceRepository[EvaluationRecord]):
 
 
 class MemoryRepositoryImpl(_ResourceRepository[MemoryRecord]):
-    def __init__(self, store: StateStore, *, namespace: str, tenant_id: str) -> None:
+    def __init__(
+        self, store: StateStore, *, namespace: str, tenant_id: str
+    ) -> None:
         super().__init__(
             store,
             namespace=namespace,
@@ -4245,6 +4249,7 @@ class ToolRepositoryImpl(_RepositoryBase):
                 value = ToolOperationRecord(
                     tool_operation_id=request.tool_operation_id,
                     tenant_id=self._tenant_id,
+                    execution_id=request.execution_id,
                     step_run_id=request.step_run_id,
                     tool_call_id=request.tool_call_id,
                     idempotency_key_digest=request.idempotency_key_digest,
@@ -4415,6 +4420,25 @@ class ToolRepositoryImpl(_RepositoryBase):
         return (
             None if record is None else await self._decode(record, ToolOperationRecord)
         )
+
+    async def list_by_execution(
+        self,
+        execution_id: str,
+        *,
+        tenant_id: str,
+    ) -> tuple[ToolOperationRecord, ...]:
+        if tenant_id != self._tenant_id:
+            return ()
+        records = await self._records(
+            "tool_operation",
+            parent=self._parent("tool_operation", "execution", execution_id),
+        )
+        values = tuple(
+            [await self._decode(record, ToolOperationRecord) for record in records]
+        )
+        if any(value.execution_id != execution_id for value in values):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        return values
 
     async def has_by_step_run(
         self,
@@ -5299,6 +5323,7 @@ def _same_idempotency_identity(
 def _tool_replay_matches(left: ToolOperationRecord, right: ToolOperationRecord) -> bool:
     return (
         left.tenant_id == right.tenant_id
+        and left.execution_id == right.execution_id
         and left.step_run_id == right.step_run_id
         and left.tool_call_id == right.tool_call_id
         and left.idempotency_key_digest == right.idempotency_key_digest
@@ -5314,6 +5339,7 @@ def _tool_admission_matches(
 ) -> bool:
     return (
         left.tenant_id == right.tenant_id
+        and left.execution_id == right.execution_id
         and left.tool_operation_id == right.tool_operation_id
         and left.tool_call_id == right.tool_call_id
         and left.idempotency_key_digest == right.idempotency_key_digest
