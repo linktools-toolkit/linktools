@@ -12,7 +12,7 @@ from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.runtime._memory import RuntimeMemoryStore
 from linktools.ai.runtime.state._contracts import MemoryRecord
 from linktools.ai.runtime.state._memory import MemoryStateStorageGroup, MemoryStateStore
-from linktools.ai.runtime.state._memory_repository import MemoryPathRepository
+from linktools.ai.runtime.state._repositories import MemoryRepositoryImpl
 from linktools.ai.storage import StoredPayload
 
 pytestmark = pytest.mark.asyncio
@@ -55,8 +55,8 @@ async def test_list_paths_fails_closed_when_fallback_budget_is_exceeded() -> Non
     assert raised.value.retryable is False
 
 
-def test_memory_repository_projects_logical_path_as_sort_key() -> None:
-    repository = MemoryPathRepository(
+async def test_memory_repository_projects_logical_path_as_sort_key() -> None:
+    repository = MemoryRepositoryImpl(
         MemoryStateStore(MemoryStateStorageGroup()),
         namespace="memory-ordering",
         tenant_id="tenant",

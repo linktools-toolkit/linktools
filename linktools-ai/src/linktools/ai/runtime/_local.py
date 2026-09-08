@@ -3775,9 +3775,6 @@ class LocalExecutionBackend:
                         step_store=self._steps,
                         step_run_id=run_id,
                         segment_sequence=current.agent_run_sequence,
-                        operation_identity_run_id=(
-                            recovery_history_run_id or run_id
-                        ),
                         history_id=history_id,
                         memory_store=memory,
                         plan_store_resolver=lambda _ctx: plan_store,

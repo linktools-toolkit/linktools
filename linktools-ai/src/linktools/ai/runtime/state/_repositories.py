@@ -119,6 +119,21 @@ ValueT = TypeVar("ValueT")
 _RECOVERY_PAGE_SIZE = 128
 _INDEX_ROOT_READ_LIMIT = 64
 _ACTIVE_RECORD_UNSET = object()
+_MAX_RECORD_SORT_KEY_CHARS = 128
+
+
+def _record_sort_key(identity: object, value: object) -> str:
+    if not isinstance(value, MemoryRecord):
+        return sortable_identity(identity)
+    path = value.metadata.get("path")
+    if (
+        not isinstance(path, str)
+        or not path
+        or not path.isascii()
+        or len(path) > _MAX_RECORD_SORT_KEY_CHARS
+    ):
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    return path
 
 
 class _RepositoryBase:
@@ -196,7 +211,7 @@ class _RepositoryBase:
             scope,
             parent,
             kind,
-            sortable_identity(identity),
+            _record_sort_key(identity, value),
             state,
             0,
             lease_owner,
