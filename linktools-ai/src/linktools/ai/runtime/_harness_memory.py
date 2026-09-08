@@ -6,8 +6,14 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from pydantic_ai.toolsets import FilteredToolset
-from pydantic_ai_harness.memory import Memory, MemoryMutation, MemoryOperation, MemoryStore
+from pydantic_ai.toolsets import AbstractToolset, FilteredToolset
+from pydantic_ai_harness.memory import (
+    Memory,
+    MemoryFile,
+    MemoryMutation,
+    MemoryOperation,
+    MemoryStore,
+)
 
 from ._harness import current_tool_operation_id
 
@@ -18,7 +24,7 @@ class HarnessMemoryStoreAdapter:
     def __init__(self, store: MemoryStore) -> None:
         self._store = store
 
-    async def read(self, path: str, *, max_chars: int):
+    async def read(self, path: str, *, max_chars: int) -> MemoryFile | None:
         return await self._store.read(path, max_chars=max_chars)
 
     async def get_operation(self, operation: MemoryOperation) -> MemoryMutation | None:
@@ -69,7 +75,7 @@ class HarnessSelectedMemory(Memory[None]):
 
     selected_tool_names: tuple[str, ...] = ()
 
-    def get_toolset(self):
+    def get_toolset(self) -> AbstractToolset[None] | None:
         toolset = super().get_toolset()
         if toolset is None:
             return None
