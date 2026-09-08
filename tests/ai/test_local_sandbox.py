@@ -4,6 +4,7 @@
 
 import asyncio
 import hashlib
+import os
 import shlex
 import sys
 from pathlib import Path
@@ -17,9 +18,15 @@ from linktools.ai.workspace import LocalSandbox, SandboxResource
 pytestmark = pytest.mark.asyncio
 
 
+def _python_command(code: str) -> str:
+    if os.name == "nt":
+        return f'"{sys.executable}" -c "{code}"'
+    return f"{shlex.quote(sys.executable)} -c {shlex.quote(code)}"
+
+
 async def test_local_sandbox_bounds_command_output(tmp_path: Path) -> None:
     session = await LocalSandbox().open(root=tmp_path)
-    command = f"{sys.executable} -c \"print('x' * 60000)\""
+    command = _python_command("print('x' * 60000)")
     try:
         result = await session.run_command(command, timeout_seconds=None)
     finally:
@@ -27,6 +34,20 @@ async def test_local_sandbox_bounds_command_output(tmp_path: Path) -> None:
 
     assert isinstance(result, str)
     assert len(result) <= 50_000
+
+
+async def test_local_sandbox_preserves_stdout_and_stderr(tmp_path: Path) -> None:
+    session = await LocalSandbox().open(root=tmp_path)
+    command = _python_command(
+        "import sys;print('stdout-value');print('stderr-value',file=sys.stderr)"
+    )
+    try:
+        result = await session.run_command(command, timeout_seconds=5)
+    finally:
+        await session.close()
+
+    assert "[stdout]\nstdout-value" in result
+    assert "[stderr]\nstderr-value" in result
 
 
 async def test_local_sandbox_reaps_background_process_after_shell_exit(
