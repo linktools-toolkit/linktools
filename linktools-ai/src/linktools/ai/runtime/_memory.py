@@ -271,6 +271,10 @@ class RuntimeMemoryStore:
         normalized_prefix = _normalize_prefix(prefix)
         if not isinstance(limit, int) or isinstance(limit, bool) or limit <= 0:
             raise ValueError("limit must be positive")
+        records, _ = await self._list_records(limit=limit)
+        paths = _record_paths(records)
+        if not paths or all(path.startswith(normalized_prefix) for path in paths):
+            return paths[:limit]
         records, has_more = await self._list_records(
             limit=_MAX_LIST_SCAN_RECORDS + 1
         )
@@ -280,17 +284,11 @@ class RuntimeMemoryStore:
                 safe_details={"reason": "memory_listing_capacity"},
                 retryable=False,
             )
-        paths: list[str] = []
-        for record in records:
-            path = record.metadata.get("path")
-            if not isinstance(path, str):
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            normalized = _normalize_path(path)
-            if normalized != path:
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            if normalized.startswith(normalized_prefix):
-                paths.append(normalized)
-        return sorted(paths)[:limit]
+        return [
+            path
+            for path in _record_paths(records)
+            if path.startswith(normalized_prefix)
+        ][:limit]
 
     async def _get_receipt(
         self,
@@ -424,6 +422,21 @@ class RuntimeMemoryStore:
         if len(content) > _MAX_CONTENT_CHARS or "\x00" in content:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         return content
+
+
+def _record_paths(records: list[MemoryRecord]) -> list[str]:
+    paths: list[str] = []
+    for record in records:
+        path = record.metadata.get("path")
+        if not isinstance(path, str):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        normalized = _normalize_path(path)
+        if normalized != path:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        paths.append(normalized)
+    if paths != sorted(paths):
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    return paths
 
 
 def _normalize_path(path: str) -> str:
