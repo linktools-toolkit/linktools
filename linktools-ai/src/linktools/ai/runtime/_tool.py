@@ -495,24 +495,36 @@ class RuntimeToolOperationBridge:
             background_tasks=self._background_tasks,
         )
         if result.state is DurableCommitState.COMMITTED:
-            if result.cancelled:
-                raise asyncio.CancelledError
-        elif result.state is DurableCommitState.NOT_COMMITTED:
+            _logger.error(
+                "tool operation effect became unknown: execution=%s operation=%s error=%s",
+                self._execution_id,
+                decision.operation_id,
+                type(error).__name__,
+            )
+            raise AIError(
+                ErrorCode.TOOL_EFFECT_UNKNOWN,
+                safe_details={
+                    "execution_id": self._execution_id,
+                    "operation_id": decision.operation_id,
+                    "phase": "tool_effect",
+                },
+            ) from error
+        if result.state is DurableCommitState.NOT_COMMITTED:
             if result.error is not None:
                 raise result.error
-            raise AIError(ErrorCode.STORAGE_CONFLICT)
-        elif result.state is DurableCommitState.PARTIAL_INTEGRITY_ERROR:
+            raise AIError(
+                ErrorCode.STORAGE_RECOVERY_REQUIRED,
+                safe_details={
+                    "execution_id": self._execution_id,
+                    "operation_id": decision.operation_id,
+                    "phase": "tool_effect_commit",
+                },
+            ) from error
+        if result.state is DurableCommitState.PARTIAL_INTEGRITY_ERROR:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from result.error
-        elif isinstance(result.error, AIError) and result.error.code is ErrorCode.TOOL_OPERATION_CONFLICT:
+        if isinstance(result.error, AIError) and result.error.code is ErrorCode.TOOL_OPERATION_CONFLICT:
             raise result.error
-        else:
-            raise AIError(ErrorCode.STORAGE_COMMIT_UNKNOWN) from result.error
-        _logger.error(
-            "tool operation effect became unknown: execution=%s operation=%s error=%s",
-            self._execution_id,
-            decision.operation_id,
-            type(error).__name__,
-        )
+        raise AIError(ErrorCode.STORAGE_COMMIT_UNKNOWN) from result.error
 
     async def _result_payload(
         self,
