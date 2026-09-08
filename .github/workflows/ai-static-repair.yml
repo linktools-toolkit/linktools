@@ -1,0 +1,92 @@
+name: Temporary AI static repair
+
+on:
+  push:
+    branches:
+      - refactor/ai-harness-capabilities
+
+permissions:
+  contents: write
+
+jobs:
+  repair:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: refactor/ai-harness-capabilities
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.10'
+      - name: Apply exact static repairs
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          def replace_once(path: str, old: str, new: str) -> None:
+              file = Path(path)
+              text = file.read_text(encoding='utf-8')
+              count = text.count(old)
+              if count != 1:
+                  raise SystemExit(f'{path}: expected one match, found {count}: {old!r}')
+              file.write_text(text.replace(old, new, 1), encoding='utf-8')
+
+          replace_once(
+              'linktools-ai/src/linktools/ai/capability/_workspace.py',
+              'WORKSPACE_FILESYSTEM_TOOL_NAMES = (\n    "create_directory",',
+              '_BASE_WORKSPACE_FILESYSTEM_TOOL_NAMES = (\n    "create_directory",',
+          )
+          replace_once(
+              'linktools-ai/src/linktools/ai/runtime/_agent_executor.py',
+              'from ._input import _RuntimeUserPrompt, _restore_user_prompt\n',
+              'from ._input import CanonicalUserInput, _RuntimeUserPrompt, _restore_user_prompt\n',
+          )
+          replace_once(
+              'linktools-ai/src/linktools/ai/runtime/_agent_executor.py',
+              'from ._plan import RuntimePlanStore\nfrom .state import StepStore\n',
+              'from ._plan import RuntimePlanStore\nfrom ._workspace_binding import WorkspaceToolCallBinder\nfrom .state import StepStore\n',
+          )
+          replace_once(
+              'linktools-ai/src/linktools/ai/runtime/_execution.py',
+              '    ResultRecord,\n    RuntimeDomain,\n    SessionRepository,\n',
+              '    ResultRecord,\n    RuntimeDomain,\n    RuntimeStorageContract,\n    SessionRepository,\n',
+          )
+          replace_once(
+              'linktools-ai/src/linktools/ai/runtime/_local.py',
+              '    ResultRecord,\n    RuntimeDomain,\n    RuntimeStateCommands,\n',
+              '    ResultRecord,\n    RuntimeDomain,\n    RuntimeStorageContract,\n    RuntimeStateCommands,\n',
+          )
+          replace_once(
+              'linktools-ai/src/linktools/ai/runtime/_local.py',
+              '    ToolRepositoryImpl,\n    ToolOperationRecord,\n)\n',
+              '    ToolRepositoryImpl,\n    ToolOperationRecord,\n    WorkspaceToolCallBindingStore,\n)\n',
+          )
+          replace_once(
+              'linktools-ai/src/linktools/ai/runtime/_tool.py',
+              '    ToolOperationAdmission,\n    ToolOperationRecord,\n    run_durable_commit,\n',
+              '    ToolOperationAdmission,\n    ToolOperationRecord,\n    WorkspaceToolCallBinding,\n    WorkspaceToolCallBindingStore,\n    run_durable_commit,\n',
+          )
+          PY
+      - name: Install tooling
+        shell: bash
+        run: |
+          python -m pip install --quiet --upgrade pip
+          python -m pip install --quiet -U -r requirements.txt
+          python manage.py install --editable --quiet
+      - name: Validate linktools-ai
+        run: python manage.py check linktools-ai
+      - name: Commit repair
+        shell: bash
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add linktools-ai/src/linktools/ai/capability/_workspace.py \
+                  linktools-ai/src/linktools/ai/runtime/_agent_executor.py \
+                  linktools-ai/src/linktools/ai/runtime/_execution.py \
+                  linktools-ai/src/linktools/ai/runtime/_local.py \
+                  linktools-ai/src/linktools/ai/runtime/_tool.py
+          git diff --cached --check
+          git commit -m 'fix(ai): restore merged runtime imports'
+          git push origin HEAD:refactor/ai-harness-capabilities
