@@ -44,10 +44,10 @@ class _ExecutionTreeSubscription:
     def __init__(
         self,
         owner: "ExecutionTreeBroker",
-        root_execution_id: str,
+        parent_execution_id: str,
     ) -> None:
         self._owner = owner
-        self._root_execution_id = root_execution_id
+        self._parent_execution_id = parent_execution_id
         self._pending: set[str] = set()
         self._event = asyncio.Event()
         self._closed = False
@@ -80,38 +80,38 @@ class _ExecutionTreeSubscription:
         if self._closed:
             return
         self._closed = True
-        self._owner._remove(self._root_execution_id, self)
+        self._owner._remove(self._parent_execution_id, self)
         self._event.set()
 
 
 class ExecutionTreeBroker:
-    """Notify active tree readers about newly established children."""
+    """Notify active tree readers about newly established direct children."""
 
     def __init__(self) -> None:
         self._subscriptions: dict[str, set[_ExecutionTreeSubscription]] = {}
 
-    def subscribe(self, root_execution_id: str) -> _ExecutionTreeSubscription:
-        subscription = _ExecutionTreeSubscription(self, root_execution_id)
-        self._subscriptions.setdefault(root_execution_id, set()).add(subscription)
+    def subscribe(self, parent_execution_id: str) -> _ExecutionTreeSubscription:
+        subscription = _ExecutionTreeSubscription(self, parent_execution_id)
+        self._subscriptions.setdefault(parent_execution_id, set()).add(subscription)
         return subscription
 
-    def publish(self, root_execution_id: str, child_execution_id: str) -> None:
+    def publish(self, parent_execution_id: str, child_execution_id: str) -> None:
         for subscription in tuple(
-            self._subscriptions.get(root_execution_id, ())
+            self._subscriptions.get(parent_execution_id, ())
         ):
             subscription.publish(child_execution_id)
 
     def _remove(
         self,
-        root_execution_id: str,
+        parent_execution_id: str,
         subscription: _ExecutionTreeSubscription,
     ) -> None:
-        values = self._subscriptions.get(root_execution_id)
+        values = self._subscriptions.get(parent_execution_id)
         if values is None:
             return
         values.discard(subscription)
         if not values:
-            self._subscriptions.pop(root_execution_id, None)
+            self._subscriptions.pop(parent_execution_id, None)
 
 
 @dataclass(frozen=True, slots=True)
@@ -171,11 +171,12 @@ class ExecutionTreeStreamer:
         principal: Principal,
         after_sequences: Mapping[str, int],
     ) -> AsyncIterator[ExecutionTreeEvent]:
-        subscription = self._broker.subscribe(execution_id)
         queue: asyncio.Queue[_TreeItem] = asyncio.Queue()
         views: dict[str, ExecutionView] = {}
         depths: dict[str, int] = {}
         pumps: dict[str, asyncio.Task[None]] = {}
+        child_pumps: dict[str, asyncio.Task[None]] = {}
+        subscriptions: dict[str, _ExecutionTreeSubscription] = {}
         completed: set[str] = set()
 
         async def pump(view: ExecutionView) -> None:
@@ -193,7 +194,9 @@ class ExecutionTreeStreamer:
             finally:
                 await queue.put(_DoneItem(view.execution_id))
 
-        async def pump_children() -> None:
+        async def pump_children(
+            subscription: _ExecutionTreeSubscription,
+        ) -> None:
             while True:
                 child_ids = await subscription.wait()
                 if not child_ids:
@@ -212,6 +215,12 @@ class ExecutionTreeStreamer:
                 return False
             views[view.execution_id] = view
             depths[view.execution_id] = depth
+            subscription = self._broker.subscribe(view.execution_id)
+            subscriptions[view.execution_id] = subscription
+            child_pumps[view.execution_id] = asyncio.create_task(
+                pump_children(subscription),
+                name=f"execution-tree-children-{view.execution_id}",
+            )
             pumps[view.execution_id] = asyncio.create_task(
                 pump(view),
                 name=f"execution-tree-stream-{view.execution_id}",
@@ -230,13 +239,12 @@ class ExecutionTreeStreamer:
                     view.execution_id != execution_id
                     or view.parent_execution_id is not None
                     or view.parent_invocation_id is not None
-                    or view.root_execution_id != execution_id
                     or view.lineage_kind is ExecutionLineageKind.SUBAGENT
                 ):
                     raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
             elif (
                 view.lineage_kind is not ExecutionLineageKind.SUBAGENT
-                or view.root_execution_id != execution_id
+                or view.root_execution_id != views[execution_id].root_execution_id
                 or not view.parent_execution_id
                 or not view.parent_invocation_id
             ):
@@ -279,7 +287,6 @@ class ExecutionTreeStreamer:
                 frozenset(),
             )
 
-        child_pump: asyncio.Task[None] | None = None
         try:
             root = await self._executions.inspect(
                 execution_id,
@@ -288,11 +295,6 @@ class ExecutionTreeStreamer:
             await discover(root, 0, frozenset())
             if set(after_sequences) - set(views):
                 raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
-            child_pump = asyncio.create_task(
-                pump_children(),
-                name=f"execution-tree-children-{execution_id}",
-            )
-
             while True:
                 item = await queue.get()
                 try:
@@ -332,25 +334,22 @@ class ExecutionTreeStreamer:
                         0,
                         frozenset(),
                     ) or added
-                    for child_id in subscription.drain():
-                        added = await discover_child(child_id) or added
+                    for subscription in tuple(subscriptions.values()):
+                        for child_id in subscription.drain():
+                            added = await discover_child(child_id) or added
                     if not added and queue.empty():
                         return
         finally:
-            if child_pump is not None and not child_pump.done():
-                child_pump.cancel()
-            for task in pumps.values():
+            for task in (*child_pumps.values(), *pumps.values()):
                 if not task.done():
                     task.cancel()
             await asyncio.gather(
-                *(
-                    task
-                    for task in (child_pump, *pumps.values())
-                    if task is not None
-                ),
+                *child_pumps.values(),
+                *pumps.values(),
                 return_exceptions=True,
             )
-            await subscription.close()
+            for subscription in tuple(subscriptions.values()):
+                await subscription.close()
 
 
 def _same_lineage(left: ExecutionView, right: ExecutionView) -> bool:

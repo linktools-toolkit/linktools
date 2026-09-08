@@ -1524,6 +1524,8 @@ class DefaultExecutionService:
 
     async def retry(self, binding_digest: str, execution_id: str, request: RetryExecutionRequest) -> ExecutionHandle:
         previous = await self._load_authorized(execution_id, request.principal, AuthorizationAction.EXECUTION_READ)
+        if previous.parent_execution_id is not None:
+            raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
         if previous.binding_digest != binding_digest:
             raise AIError(ErrorCode.RUNTIME_SERVICE_MISMATCH)
         binding = self._binding(previous.binding_digest, previous.binding)
@@ -1555,6 +1557,8 @@ class DefaultExecutionService:
 
     async def fork(self, binding_digest: str, execution_id: str, request: ForkExecutionRequest) -> ExecutionHandle:
         previous = await self._load_authorized(execution_id, request.principal, AuthorizationAction.EXECUTION_READ)
+        if previous.parent_execution_id is not None:
+            raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
         if previous.binding_digest != binding_digest:
             raise AIError(ErrorCode.RUNTIME_SERVICE_MISMATCH)
         binding = self._binding(previous.binding_digest, previous.binding)

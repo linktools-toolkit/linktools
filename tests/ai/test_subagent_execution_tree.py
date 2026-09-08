@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
+from dataclasses import replace
 from datetime import datetime, timezone
+from unittest.mock import AsyncMock
 
 import pytest
 from linktools.ai.agent import AgentBindingSnapshot
@@ -11,6 +13,8 @@ from linktools.ai.core import (
     ExecutionStatus,
     Principal,
 )
+from linktools.ai.errors import AIError, ErrorCode
+from linktools.ai.runtime._execution import DefaultExecutionService
 from linktools.ai.runtime._execution_tree import (
     ExecutionTreeBroker,
     ExecutionTreeStreamer,
@@ -18,6 +22,8 @@ from linktools.ai.runtime._execution_tree import (
 from linktools.ai.runtime.service_api import (
     ExecutionStreamEvent,
     ExecutionView,
+    ForkExecutionRequest,
+    RetryExecutionRequest,
 )
 from linktools.ai.runtime.state import ExecutionRecord
 from linktools.ai.spec import AgentSpec
@@ -165,3 +171,113 @@ async def test_tree_stream_projects_root_and_child_without_global_sequence() -> 
     )
     assert child.parent_invocation_id == "delegate-call"
     assert child.event.durable_sequence == 5
+
+
+def test_non_subagent_lineage_rejects_parent_execution() -> None:
+    with pytest.raises(ValueError):
+        replace(
+            _record(subagent=False, parent_invocation_id=None),
+            parent_execution_id="parent",
+        )
+
+
+class _RetryExecutionReader:
+    def __init__(self) -> None:
+        self.root = ExecutionView(
+            "retry",
+            "root-agent",
+            ExecutionStatus.STARTED,
+            ExecutionLineageKind.RETRY,
+            None,
+            "original-root",
+            None,
+        )
+        self.child = ExecutionView(
+            "retry-child",
+            "child-agent",
+            ExecutionStatus.SUCCEEDED,
+            ExecutionLineageKind.SUBAGENT,
+            "retry",
+            "original-root",
+            "retry-delegate",
+        )
+
+    async def inspect(
+        self,
+        execution_id: str,
+        *,
+        principal: Principal,
+    ) -> ExecutionView:
+        del principal
+        return self.root if execution_id == "retry" else self.child
+
+    async def list_children(
+        self,
+        execution_id: str,
+        *,
+        principal: Principal,
+    ) -> tuple[ExecutionView, ...]:
+        del principal
+        return (self.child,) if execution_id == "retry" else ()
+
+
+@pytest.mark.asyncio
+async def test_tree_stream_accepts_retry_lineage_root() -> None:
+    streamer = ExecutionTreeStreamer(
+        _RetryExecutionReader(),
+        _EventStreamer(),
+        ExecutionTreeBroker(),
+    )
+    values = [
+        item
+        async for item in streamer.stream(
+            "retry",
+            principal=Principal("owner", "tenant", "service"),
+        )
+    ]
+    assert {(item.execution_id, item.root_execution_id) for item in values} == {
+        ("retry", "original-root"),
+        ("retry-child", "original-root"),
+    }
+
+
+@pytest.mark.asyncio
+async def test_tree_broker_keys_notifications_by_direct_parent() -> None:
+    broker = ExecutionTreeBroker()
+    parent = broker.subscribe("retry")
+    historical_root = broker.subscribe("original-root")
+    broker.publish("retry", "child")
+    assert parent.drain() == ("child",)
+    assert historical_root.drain() == ()
+    await parent.close()
+    await historical_root.close()
+
+
+@pytest.mark.asyncio
+async def test_subagent_execution_cannot_be_retried_or_forked(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = object.__new__(DefaultExecutionService)
+    child = _record(subagent=True, parent_invocation_id="delegate-call")
+    monkeypatch.setattr(
+        service,
+        "_load_authorized",
+        AsyncMock(return_value=child),
+    )
+    principal = Principal("owner", "tenant", "service")
+
+    with pytest.raises(AIError) as retry_error:
+        await service.retry(
+            "a" * 64,
+            "child",
+            RetryExecutionRequest("retry", principal, "retry-key"),
+        )
+    assert retry_error.value.code is ErrorCode.REQUEST_FIELD_INVALID
+
+    with pytest.raises(AIError) as fork_error:
+        await service.fork(
+            "a" * 64,
+            "child",
+            ForkExecutionRequest("fork", principal, "fork-key"),
+        )
+    assert fork_error.value.code is ErrorCode.REQUEST_FIELD_INVALID

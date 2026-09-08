@@ -672,9 +672,6 @@ async def _build_local_components(
             backend.worker_failure,
             live_broker,
         )
-        execution.bind_tree_streamer(
-            ExecutionTreeStreamer(execution, event, execution_tree_broker)
-        )
         artifact = DefaultArtifactService(
             state.artifact,
             authorization,
@@ -686,6 +683,13 @@ async def _build_local_components(
             live_broker.abandon_prepared_local_producer,
         )
         local_coordinator = _LocalRuntimeCoordinator(execution, event)
+        execution.bind_tree_streamer(
+            ExecutionTreeStreamer(
+                execution,
+                local_coordinator,
+                execution_tree_broker,
+            )
+        )
         close_actions: list[Callable[[], Awaitable[None]]] = [
             task_service.drain_owned_finalizers,
             task_service.preflight_close,

@@ -26,7 +26,7 @@ _logger = environ.get_logger("ai.runtime.subagent")
 
 
 class _ChildExecutionObserver(Protocol):
-    def publish(self, root_execution_id: str, child_execution_id: str) -> None: ...
+    def publish(self, parent_execution_id: str, child_execution_id: str) -> None: ...
 
 
 class SubagentDispatcher:
@@ -160,7 +160,7 @@ class SubagentDispatcher:
             invocation_id=invocation_id,
         )
         if self._child_observer is not None:
-            self._child_observer.publish(root_execution_id, child.execution_id)
+            self._child_observer.publish(parent_execution_id, child.execution_id)
         return await self._wait_child(
             child.execution_id,
             parent_execution_id=parent_execution_id,

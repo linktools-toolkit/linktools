@@ -680,8 +680,11 @@ class ExecutionRecord:
                 or self.base_execution_id is not None
             ):
                 raise ValueError("subagent execution lineage is invalid")
-        elif self.parent_invocation_id is not None:
-            raise ValueError("non-subagent execution cannot carry parent invocation")
+        elif (
+            self.parent_execution_id is not None
+            or self.parent_invocation_id is not None
+        ):
+            raise ValueError("non-subagent execution cannot carry parent lineage")
         if (
             not isinstance(self.binding, AgentBindingSnapshot)
             or self.binding.binding_digest != self.binding_digest
@@ -1241,8 +1244,11 @@ class RecoveryExecutionInput:
                 or self.base_execution_id is not None
             ):
                 raise ValueError("subagent recovery lineage is invalid")
-        elif self.parent_invocation_id is not None:
-            raise ValueError("non-subagent recovery cannot carry parent invocation")
+        elif (
+            self.parent_execution_id is not None
+            or self.parent_invocation_id is not None
+        ):
+            raise ValueError("non-subagent recovery cannot carry parent lineage")
         if (
             not isinstance(self.binding, AgentBindingSnapshot)
             or self.binding.binding_digest != self.binding_digest

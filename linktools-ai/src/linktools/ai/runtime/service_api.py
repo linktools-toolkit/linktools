@@ -693,7 +693,7 @@ class ExecutionTreeEvent:
             if (
                 self.parent_execution_id is not None
                 or self.parent_invocation_id is not None
-                or self.root_execution_id != self.execution_id
+                or self.lineage_kind is ExecutionLineageKind.SUBAGENT
             ):
                 raise ValueError("root execution tree event lineage is invalid")
         elif (
