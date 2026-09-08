@@ -2,9 +2,13 @@
 # -*- coding: utf-8 -*-
 """Install Task v2 attachment integration with instance-owned coordination."""
 
+import base64
+import binascii
 from collections.abc import Mapping
 from dataclasses import replace
-from typing import Any
+from typing import Any, cast
+
+from pydantic_ai.messages import BinaryContent, UserContent
 
 import linktools.ai.runtime._planner as planner_runtime
 import linktools.ai.runtime._runtime_service as runtime_service
@@ -14,7 +18,7 @@ import linktools.ai.runtime.state._codec as codec_runtime
 from ..errors import AIError, ErrorCode
 from ..task import DefaultTaskService, TaskGraph, TaskGraphLaunch, TaskNode
 from ._attachment import DefaultAttachmentService
-from ._input import managed_user_prompt_draft, task_prompt_draft
+from ._input import _decode_user_content, managed_user_prompt_draft, task_prompt_draft
 from .state import RuntimeDomain
 from .state._attachment_codec import _entry
 from .state._codec import _decode_domain
@@ -34,6 +38,89 @@ _original_agent_run_node: Any = None
 _original_agent_cancel_node: Any = None
 _original_reserve_start: Any = None
 _original_iter_object_refs: Any = None
+
+
+def _decode_task_prompt(body: Mapping[str, Any]) -> tuple[Any, tuple[str, ...]]:
+    prompt = body.get("prompt")
+    attachments = body.get("attachments")
+    if not isinstance(attachments, list) or any(
+        not isinstance(path, str) or not path for path in attachments
+    ):
+        raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+    if isinstance(prompt, Mapping):
+        if (
+            set(prompt) != {"kind", "text"}
+            or prompt.get("kind") != "text"
+            or not isinstance(prompt.get("text"), str)
+        ):
+            raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+        return cast(str, prompt["text"]), tuple(attachments)
+    if not isinstance(prompt, list) or not prompt:
+        raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+    items: list[UserContent] = []
+    for raw in prompt:
+        if not isinstance(raw, Mapping):
+            raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+        kind = raw.get("kind")
+        if kind == "text":
+            if set(raw) != {"kind", "text"} or not isinstance(raw.get("text"), str):
+                raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+            items.append(cast(str, raw["text"]))
+            continue
+        if kind == "binary":
+            if set(raw) != {
+                "kind",
+                "data_b64",
+                "media_type",
+                "identifier",
+                "vendor_metadata",
+            }:
+                raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+            data_b64 = raw.get("data_b64")
+            media_type = raw.get("media_type")
+            identifier = raw.get("identifier")
+            metadata = raw.get("vendor_metadata")
+            if (
+                not isinstance(data_b64, str)
+                or not isinstance(media_type, str)
+                or not media_type
+                or identifier is not None and not isinstance(identifier, str)
+                or metadata is not None and not isinstance(metadata, Mapping)
+            ):
+                raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+            try:
+                data = base64.b64decode(data_b64, validate=True)
+            except (ValueError, binascii.Error) as error:
+                raise AIError(ErrorCode.REQUEST_FIELD_INVALID) from error
+            if not data or base64.b64encode(data).decode("ascii") != data_b64:
+                raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+            items.append(
+                BinaryContent(
+                    data,
+                    media_type=media_type,
+                    identifier=cast(str | None, identifier),
+                    vendor_metadata=(
+                        None if metadata is None else cast(dict[str, Any], dict(metadata))
+                    ),
+                )
+            )
+            continue
+        if kind == "native":
+            if (
+                set(raw) != {"kind", "codec", "value"}
+                or raw.get("codec") != "pydantic-user-content-v1"
+            ):
+                raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+            value = raw.get("value")
+            if not isinstance(value, Mapping):
+                raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+            decoded = _decode_user_content(dict(value))
+            if len(decoded) != 1:
+                raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+            items.append(decoded[0])
+            continue
+        raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+    return tuple(items), tuple(attachments)
 
 
 async def _runtime_admit_graph(
@@ -296,6 +383,7 @@ def install_task_attachments() -> None:
     _original_reserve_start = ExecutionRepositoryImpl.reserve_start
     _original_iter_object_refs = codec_runtime._iter_runtime_object_refs
 
+    task_attachment._decode_draft_prompt = _decode_task_prompt
     task_attachment._original_reserve_start = _original_reserve_start
     task_attachment._original_runtime_init = _original_runtime_init
     task_attachment._original_admit_graph = _original_admit_graph
