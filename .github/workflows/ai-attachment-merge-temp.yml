@@ -1,0 +1,204 @@
+name: AI attachment merge temp
+
+on:
+  push:
+    branches:
+      - refactor/ai-harness-capabilities
+    paths:
+      - .github/workflows/ai-attachment-merge-temp.yml
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: refactor/ai-harness-capabilities
+      - name: Apply attachment merge fix
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          def replace_once(path: str, old: str, new: str) -> None:
+              target = Path(path)
+              text = target.read_text(encoding="utf-8")
+              count = text.count(old)
+              if count != 1:
+                  raise RuntimeError(f"expected one match in {path}, found {count}")
+              target.write_text(text.replace(old, new, 1), encoding="utf-8")
+
+          # Runtime capability bridge: preserve raw args for durable identity, but
+          # execute with the durable canonical workspace binding.
+          capabilities = "linktools-ai/src/linktools/ai/runtime/_capabilities.py"
+          replace_once(
+              capabilities,
+              '''\n    async def effective_args(\n        self,\n        ctx: "RunContext[None]",\n        call: ToolCallPart,\n        tool_def: ToolDefinition,\n        args: dict[str, Any],\n    ) -> dict[str, Any]:\n        del ctx, call, tool_def\n        return args\n\n''',
+              '''\n''',
+          )
+          replace_once(
+              capabilities,
+              '''        handler_task = asyncio.create_task(\n            tracked_handler(args),\n''',
+              '''        handler_task = asyncio.create_task(\n            tracked_handler(effective_args),\n''',
+          )
+
+          native = "linktools-ai/src/linktools/ai/runtime/_capabilities_native.py"
+          replace_once(
+              native,
+              '''    async def list_operations(self) -> tuple[ToolOperationRecord, ...]: ...\n\n\nclass _MissingToolOperationBridge:\n''',
+              '''    async def list_operations(self) -> tuple[ToolOperationRecord, ...]: ...\n\n    async def effective_args(\n        self,\n        ctx: RunContext[None],\n        call: ToolCallPart,\n        tool_def: ToolDefinition,\n        args: dict[str, Any],\n    ) -> dict[str, Any]: ...\n\n\nclass _MissingToolOperationBridge:\n''',
+          )
+          replace_once(
+              native,
+              '''    async def list_operations(self) -> tuple[ToolOperationRecord, ...]:\n        raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)\n\n\nclass _WorkspaceToolGate''',
+              '''    async def list_operations(self) -> tuple[ToolOperationRecord, ...]:\n        raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)\n\n    async def effective_args(\n        self,\n        ctx: RunContext[None],\n        call: ToolCallPart,\n        tool_def: ToolDefinition,\n        args: dict[str, Any],\n    ) -> dict[str, Any]:\n        del ctx, call, tool_def\n        return args\n\n\nclass _WorkspaceToolGate''',
+          )
+
+          # Workspace public adapter: keep Native model tools, add only the byte/path
+          # boundary needed by durable input and tool-call binding.
+          workspace_cap = "linktools-ai/src/linktools/ai/capability/_workspace.py"
+          replace_once(
+              workspace_cap,
+              '''from collections.abc import Awaitable, Sequence\nfrom typing import Any, cast\n''',
+              '''import asyncio\nfrom collections.abc import Awaitable, Mapping, Sequence\nfrom pathlib import Path\nfrom typing import Any, Protocol, cast\n''',
+          )
+          replace_once(
+              workspace_cap,
+              '''from ..workspace import SandboxSession, Workspace\n''',
+              '''from ..workspace import LocalSandbox, Sandbox, SandboxSession, Workspace, normalize_workspace_path\n''',
+          )
+          anchor = '''_logger = environ.get_logger("ai.capability.workspace")\n\n\nclass _WorkspaceToolSurface:\n'''
+          insertion = '''_logger = environ.get_logger("ai.capability.workspace")\n\n\nclass _WorkspaceAccessBackend(Protocol):\n    async def open(self) -> SandboxSession: ...\n\n\nclass _BoundWorkspaceAccessBackend:\n    def __init__(self, sandbox: Sandbox, root: Path) -> None:\n        self._sandbox = sandbox\n        self._root = root\n\n    async def open(self) -> SandboxSession:\n        return await self._sandbox.open(root=self._root)\n\n\nclass WorkspaceAccess:\n    """Own one lazy SandboxSession for durable path and byte access."""\n\n    def __init__(\n        self,\n        backend: _WorkspaceAccessBackend,\n        *,\n        session: SandboxSession | None = None,\n    ) -> None:\n        self._backend = backend\n        self._session = session\n        self._lock = asyncio.Lock()\n        self._closed = False\n\n    @classmethod\n    def for_workspace(cls, workspace: Workspace) -> "WorkspaceAccess":\n        sandbox = workspace.sandbox if workspace.sandbox is not None else LocalSandbox()\n        return cls(_BoundWorkspaceAccessBackend(sandbox, workspace.root))\n\n    async def _ensure_session(self) -> SandboxSession:\n        async with self._lock:\n            if self._closed:\n                raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)\n            if self._session is None:\n                self._session = await self._backend.open()\n            return self._session\n\n    async def canonicalize_path(self, path: str) -> str:\n        session = await self._ensure_session()\n        return normalize_workspace_path(await session.canonicalize_path(path))\n\n    async def read_bytes(\n        self,\n        path: str,\n        *,\n        max_bytes: int | None = None,\n    ) -> bytes:\n        session = await self._ensure_session()\n        return await session.read_bytes(path, max_bytes=max_bytes)\n\n    async def close(self) -> None:\n        async with self._lock:\n            if self._closed:\n                return\n            self._closed = True\n            session = self._session\n            self._session = None\n        if session is not None:\n            await session.close()\n\n\ndef workspace_tool_path_fields(tool: Tool[Any]) -> tuple[str, ...]:\n    metadata = tool.tool_def.metadata or {}\n    return workspace_tool_path_fields_from_metadata(metadata)\n\n\ndef workspace_tool_path_fields_from_metadata(\n    metadata: Mapping[str, object] | None,\n) -> tuple[str, ...]:\n    value = None if metadata is None else metadata.get(_WORKSPACE_PATH_FIELDS_KEY)\n    if not isinstance(value, (list, tuple)):\n        return ()\n    return tuple(item for item in value if isinstance(item, str))\n\n\ndef workspace_tool_path_metadata(fields: Sequence[str]) -> dict[str, object]:\n    values = tuple(fields)\n    if not values or any(not isinstance(field, str) or not field for field in values):\n        raise ValueError("workspace path fields must be non-empty strings")\n    if len(values) != len(set(values)):\n        raise ValueError("workspace path fields must be unique")\n    return {_WORKSPACE_PATH_FIELDS_KEY: list(values)}\n\n\nclass _WorkspaceToolSurface:\n'''
+          replace_once(workspace_cap, anchor, insertion)
+          replace_once(
+              workspace_cap,
+              '''    return Tool(\n        cast(Any, getattr(surface, name)),\n        takes_ctx=False,\n        name=name,\n        metadata={_WORKSPACE_METADATA_KEY: tool_class},\n    )\n''',
+              '''    metadata: dict[str, object] = {_WORKSPACE_METADATA_KEY: tool_class}\n    if tool_class in {"filesystem.read", "filesystem.write"}:\n        metadata.update(workspace_tool_path_metadata(("path",)))\n    return Tool(\n        cast(Any, getattr(surface, name)),\n        takes_ctx=False,\n        name=name,\n        metadata=metadata,\n    )\n''',
+          )
+
+          # Sandbox protocol grows only byte/path operations; existing root/resource
+          # ownership remains Native.
+          sandbox_protocol = "linktools-ai/src/linktools/ai/workspace/_sandbox.py"
+          replace_once(
+              sandbox_protocol,
+              '''class SandboxSession(Protocol):\n    def resource_path(self, key: str) -> str: ...\n\n    async def read_file(\n''',
+              '''class SandboxSession(Protocol):\n    def resource_path(self, key: str) -> str: ...\n\n    async def canonicalize_path(self, path: str) -> str: ...\n\n    async def read_bytes(\n        self,\n        path: str,\n        *,\n        max_bytes: "int | None" = None,\n    ) -> bytes: ...\n\n    async def read_file(\n''',
+          )
+
+          # Keep the root module as the package-level canonical path export.
+          workspace_init = "linktools-ai/src/linktools/ai/workspace/__init__.py"
+          replace_once(
+              workspace_init,
+              '''    SandboxResource,\n    SandboxSession,\n    normalize_workspace_path,\n)\n''',
+              '''    SandboxResource,\n    SandboxSession,\n)\n''',
+          )
+          text = Path(workspace_init).read_text(encoding="utf-8")
+          duplicate = '    "normalize_workspace_path",\n    "trusted_workspace_principal",\n    "normalize_workspace_path",\n'
+          if text.count(duplicate) != 1:\n              raise RuntimeError("workspace __all__ duplicate anchor mismatch")\n          Path(workspace_init).write_text(\n              text.replace(duplicate, '    "normalize_workspace_path",\n    "trusted_workspace_principal",\n', 1),\n              encoding="utf-8",\n          )
+
+          # Local session byte/path operations reuse existing containment and mutation
+          # guards. Make the sync runner generic instead of duplicating cancellation logic.
+          local = "linktools-ai/src/linktools/ai/workspace/_local_sandbox.py"
+          replace_once(
+              local,
+              '''from pathlib import Path\nfrom subprocess import DEVNULL, PIPE\n''',
+              '''from pathlib import Path\nfrom subprocess import DEVNULL, PIPE\nfrom typing import TypeVar\n''',
+          )
+          replace_once(
+              local,
+              '''_DANGEROUS_COMMANDS = frozenset(\n''',
+              '''_SyncResultT = TypeVar("_SyncResultT")\n\n_DANGEROUS_COMMANDS = frozenset(\n''',
+          )
+          replace_once(
+              local,
+              '''    def resource_path(self, key: str) -> str:\n''',
+              '''    async def canonicalize_path(self, path: str) -> str:\n        normalized = _normalize_path(path)\n\n        def operation() -> str:\n            self._resolve_path(normalized, allow_missing=True)\n            return normalized\n\n        return await self._run_sync(operation)\n\n    async def read_bytes(\n        self,\n        path: str,\n        *,\n        max_bytes: int | None = None,\n    ) -> bytes:\n        normalized = _normalize_path(path)\n        if max_bytes is not None and (\n            isinstance(max_bytes, bool)\n            or not isinstance(max_bytes, int)\n            or max_bytes < 0\n        ):\n            raise AIError(ErrorCode.REQUEST_FIELD_INVALID)\n\n        def operation() -> bytes:\n            target = self._file_path(normalized, write=False)\n            return _read_binary(target, normalized, max_bytes=max_bytes)\n\n        return await self._run_sync(operation)\n\n    async def _read_bytes_chunk(\n        self,\n        path: str,\n        *,\n        offset: int,\n        limit: int,\n    ) -> bytes:\n        normalized = _normalize_path(path)\n        if (\n            isinstance(offset, bool)\n            or not isinstance(offset, int)\n            or offset < 0\n            or isinstance(limit, bool)\n            or not isinstance(limit, int)\n            or limit <= 0\n        ):\n            raise AIError(ErrorCode.REQUEST_FIELD_INVALID)\n\n        def operation() -> bytes:\n            target = self._file_path(normalized, write=False)\n            return _read_binary_range(target, normalized, offset=offset, limit=limit)\n\n        return await self._run_sync(operation)\n\n    def resource_path(self, key: str) -> str:\n''',
+          )
+          replace_once(
+              local,
+              '''    async def _run_sync(self, operation: Callable[[], str]) -> str:\n''',
+              '''    async def _run_sync(\n        self,\n        operation: Callable[[], _SyncResultT],\n    ) -> _SyncResultT:\n''',
+          )
+          replace_once(
+              local,
+              '''def _read_optional_text(path: Path, logical: str) -> str | None:\n''',
+              '''def _read_binary(\n    path: Path,\n    logical: str,\n    *,\n    max_bytes: int | None,\n) -> bytes:\n    try:\n        with path.open("rb") as stream:\n            identity = _file_identity(stream.fileno())\n            size = os.fstat(stream.fileno()).st_size\n            if max_bytes is not None and size > max_bytes:\n                raise AIError(ErrorCode.REQUEST_FIELD_INVALID)\n            value = stream.read()\n            if _file_identity(stream.fileno()) != identity or _path_identity(path) != identity:\n                raise AIError(ErrorCode.STORAGE_CONFLICT)\n            return value\n    except AIError:\n        raise\n    except FileNotFoundError as error:\n        raise AIError(ErrorCode.STORAGE_NOT_FOUND) from error\n    except OSError as error:\n        raise AIError(ErrorCode.STORAGE_UNAVAILABLE) from error\n\n\ndef _read_binary_range(\n    path: Path,\n    logical: str,\n    *,\n    offset: int,\n    limit: int,\n) -> bytes:\n    try:\n        with path.open("rb") as stream:\n            identity = _file_identity(stream.fileno())\n            stream.seek(offset)\n            value = stream.read(limit)\n            if _file_identity(stream.fileno()) != identity or _path_identity(path) != identity:\n                raise AIError(ErrorCode.STORAGE_CONFLICT)\n            return value\n    except AIError:\n        raise\n    except FileNotFoundError as error:\n        raise AIError(ErrorCode.STORAGE_NOT_FOUND) from error\n    except OSError as error:\n        raise AIError(ErrorCode.STORAGE_UNAVAILABLE) from error\n\n\ndef _read_optional_text(path: Path, logical: str) -> str | None:\n''',
+          )
+
+          # Fixed Bubblewrap protocol gets path canonicalization plus bounded binary
+          # chunks. 3 MiB raw -> 4 MiB base64, safely below the 8 MiB frame bound.
+          proto = "linktools-ai/src/linktools/ai/workspace/_sandbox_protocol.py"
+          replace_once(
+              proto,
+              '''_REQUEST_FIELDS = {\n    "read_file": (\n''',
+              '''_REQUEST_FIELDS = {\n    "canonicalize_path": (frozenset({"path"}), frozenset()),\n    "read_bytes_chunk": (\n        frozenset({"path", "offset", "byte_limit"}),\n        frozenset(),\n    ),\n    "read_file": (\n''',
+          )
+          replace_once(
+              proto,
+              '''    "offset": (int,),\n    "limit": (int, type(None)),\n''',
+              '''    "offset": (int,),\n    "limit": (int, type(None)),\n    "byte_limit": (int,),\n''',
+          )
+
+          worker = "linktools-ai/src/linktools/ai/workspace/sandbox_worker.py"
+          replace_once(worker, "import argparse\n", "import argparse\nimport base64\n")
+          replace_once(
+              worker,
+              '''async def _dispatch(\n    session: _LocalSandboxSession,\n    method: str,\n    params: Mapping[str, Any],\n) -> str:\n    if method == "read_file":\n''',
+              '''async def _dispatch(\n    session: _LocalSandboxSession,\n    method: str,\n    params: Mapping[str, Any],\n) -> str:\n    if method == "canonicalize_path":\n        return await session.canonicalize_path(params["path"])\n    if method == "read_bytes_chunk":\n        value = await session._read_bytes_chunk(\n            params["path"],\n            offset=params["offset"],\n            limit=params["byte_limit"],\n        )\n        return base64.b64encode(value).decode("ascii")\n    if method == "read_file":\n''',
+          )
+
+          bubble = "linktools-ai/src/linktools/ai/workspace/_bubblewrap.py"
+          replace_once(bubble, "import asyncio\n", "import asyncio\nimport base64\n")
+          replace_once(
+              bubble,
+              '''_MAX_RESULT_CHARS = 50_000\n''',
+              '''_MAX_RESULT_CHARS = 50_000\n_BINARY_CHUNK_BYTES = 3 * 1024 * 1024\n_BINARY_RESULT_CHARS = 4 * 1024 * 1024 + 16\n''',
+          )
+          replace_once(
+              bubble,
+              '''        self._pending: dict[str, tuple[asyncio.Future[Any], bool]] = {}\n''',
+              '''        self._pending: dict[str, tuple[asyncio.Future[Any], bool, int]] = {}\n''',
+          )
+          replace_once(
+              bubble,
+              '''    def resource_path(self, key: str) -> str:\n''',
+              '''    async def canonicalize_path(self, path: str) -> str:\n        return await self._call("canonicalize_path", {"path": path})\n\n    async def read_bytes(\n        self,\n        path: str,\n        *,\n        max_bytes: int | None = None,\n    ) -> bytes:\n        if max_bytes is not None and (\n            isinstance(max_bytes, bool)\n            or not isinstance(max_bytes, int)\n            or max_bytes < 0\n        ):\n            raise AIError(ErrorCode.REQUEST_FIELD_INVALID)\n        chunks: list[bytes] = []\n        offset = 0\n        while True:\n            remaining = None if max_bytes is None else max_bytes - offset\n            request_size = _BINARY_CHUNK_BYTES if remaining is None else min(\n                _BINARY_CHUNK_BYTES,\n                remaining + 1,\n            )\n            if request_size <= 0:\n                request_size = 1\n            encoded = await self._call(\n                "read_bytes_chunk",\n                {"path": path, "offset": offset, "byte_limit": request_size},\n                max_result_chars=_BINARY_RESULT_CHARS,\n            )\n            try:\n                chunk = base64.b64decode(encoded, validate=True)\n            except (ValueError, base64.binascii.Error) as error:\n                raise AIError(ErrorCode.SANDBOX_SESSION_LOST) from error\n            if len(chunk) > request_size:\n                raise AIError(ErrorCode.SANDBOX_SESSION_LOST)\n            if max_bytes is not None and offset + len(chunk) > max_bytes:\n                raise AIError(ErrorCode.REQUEST_FIELD_INVALID)\n            chunks.append(chunk)\n            offset += len(chunk)\n            if len(chunk) < request_size:\n                return b"".join(chunks)\n\n    def resource_path(self, key: str) -> str:\n''',
+          )
+          replace_once(
+              bubble,
+              '''        sent_event: asyncio.Event | None = None,\n    ) -> str:\n''',
+              '''        sent_event: asyncio.Event | None = None,\n        max_result_chars: int = _MAX_RESULT_CHARS,\n    ) -> str:\n''',
+          )
+          replace_once(
+              bubble,
+              '''                self._pending[frame_id] = (future, business)\n''',
+              '''                self._pending[frame_id] = (future, business, max_result_chars)\n''',
+          )
+          replace_once(
+              bubble,
+              '''        future, _ = pending\n        if has_result:\n            if (\n                not isinstance(frame["result"], str)\n                or len(frame["result"]) > _MAX_RESULT_CHARS\n            ):\n''',
+              '''        future, _, max_result_chars = pending\n        if has_result:\n            if (\n                not isinstance(frame["result"], str)\n                or len(frame["result"]) > max_result_chars\n            ):\n''',
+          )
+          replace_once(
+              bubble,
+              '''        for future, _ in pending:\n''',
+              '''        for future, _, _max_result_chars in pending:\n''',
+          )
+
+          # Add focused Local byte-boundary coverage; master WorkspaceAccess tests cover
+          # the public lazy owner and durable input tests cover the higher layer.
+          test = Path("tests/ai/test_local_sandbox.py")
+          text = test.read_text(encoding="utf-8")
+          anchor = '''async def test_local_sandbox_preserves_stdout_and_stderr(tmp_path: Path) -> None:\n'''
+          addition = '''async def test_local_sandbox_reads_binary_content_and_canonicalizes_path(\n    tmp_path: Path,\n) -> None:\n    (tmp_path / "image.bin").write_bytes(b"\\x00\\xffbinary")\n    session = await LocalSandbox().open(root=tmp_path)\n    try:\n        assert await session.canonicalize_path("./image.bin") == "image.bin"\n        assert await session.read_bytes("image.bin", max_bytes=64) == b"\\x00\\xffbinary"\n        with pytest.raises(AIError) as raised:\n            await session.read_bytes("image.bin", max_bytes=2)\n        assert raised.value.code is ErrorCode.REQUEST_FIELD_INVALID\n    finally:\n        await session.close()\n\n\n''' + anchor
+          if text.count(anchor) != 1:\n              raise RuntimeError("local sandbox binary test anchor mismatch")\n          test.write_text(text.replace(anchor, addition, 1), encoding="utf-8")
+          PY
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git diff --cached --check
+          git commit -m "fix(ai): restore portable workspace attachment seams"
+          git push origin HEAD:refactor/ai-harness-capabilities
