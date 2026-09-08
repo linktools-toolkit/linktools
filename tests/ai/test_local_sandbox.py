@@ -37,9 +37,7 @@ async def test_local_sandbox_reaps_background_process_after_shell_exit(
         "import pathlib,time; time.sleep(2); "
         f"pathlib.Path({str(marker)!r}).write_text('alive')"
     )
-    command = (
-        f"{shlex.quote(sys.executable)} -c {shlex.quote(code)} &"
-    )
+    command = f"{shlex.quote(sys.executable)} -c {shlex.quote(code)} &"
     session = await LocalSandbox().open(root=tmp_path)
     try:
         await session.run_command(command, timeout_seconds=5)
@@ -61,39 +59,26 @@ async def test_local_sandbox_rejects_remote_commands(tmp_path: Path) -> None:
     assert raised.value.code is ErrorCode.AUTHORIZATION_DENIED
 
 
-async def test_bubblewrap_worker_mode_does_not_use_local_command_policy(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    def reject_local_policy(command: str) -> None:
-        raise AssertionError(f"local policy was applied to {command}")
-
-    monkeypatch.setattr(
-        "linktools.ai.workspace._local_sandbox._validate_command",
-        reject_local_policy,
-    )
+async def test_worker_session_uses_shared_command_policy(tmp_path: Path) -> None:
     session = _LocalSandboxSession(
         tmp_path,
         (),
         lock_root=tmp_path / "locks",
-        enforce_command_policy=False,
     )
     try:
-        result = await session.run_command("printf sandbox")
+        with pytest.raises(AIError) as raised:
+            await session.run_command("ssh example.invalid")
     finally:
         await session.close()
 
-    assert "exit_code: 0" in result
+    assert raised.value.code is ErrorCode.AUTHORIZATION_DENIED
 
 
-async def test_bubblewrap_worker_mode_still_rejects_invalid_command_input(
-    tmp_path: Path,
-) -> None:
+async def test_worker_session_rejects_invalid_command_input(tmp_path: Path) -> None:
     session = _LocalSandboxSession(
         tmp_path,
         (),
         lock_root=tmp_path / "locks",
-        enforce_command_policy=False,
     )
     try:
         with pytest.raises(AIError) as raised:
@@ -104,14 +89,11 @@ async def test_bubblewrap_worker_mode_still_rejects_invalid_command_input(
     assert raised.value.code is ErrorCode.REQUEST_FIELD_INVALID
 
 
-async def test_bubblewrap_worker_mode_rejects_invalid_background_command(
-    tmp_path: Path,
-) -> None:
+async def test_worker_session_rejects_invalid_background_command(tmp_path: Path) -> None:
     session = _LocalSandboxSession(
         tmp_path,
         (),
         lock_root=tmp_path / "locks",
-        enforce_command_policy=False,
     )
     try:
         with pytest.raises(AIError) as raised:
