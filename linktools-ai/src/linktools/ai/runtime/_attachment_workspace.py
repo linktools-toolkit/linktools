@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Bind the standard read_attachment tool to one Local execution run."""
+"""Bind portable attachment runtime owners to one Local execution run."""
 
 from __future__ import annotations
 
@@ -9,29 +9,35 @@ from contextvars import ContextVar
 from dataclasses import dataclass
 from typing import Any
 
+import linktools.ai.capability._workspace as workspace_runtime
 import linktools.ai.runtime._agent_executor as agent_executor_runtime
 import linktools.ai.runtime._attachment_admission as admission_runtime
 import linktools.ai.runtime._factory as factory_runtime
 import linktools.ai.runtime._local as local_runtime
 from pydantic_ai.messages import ModelResponse, ToolCallPart
 
-from ..capability import attachment_tool_contribution
-from ..core import ExecutionStatus, ToolOperationStatus
+from ..capability import WorkspaceAccess, attachment_tool_contribution
+from ..core import ExecutionStatus, ToolOperationStatus, idempotency_key_digest
 from ..errors import AIError, ErrorCode
 from ..storage import TransientObjectStore
 from ._attachment_active import AttachmentActiveSet
 from ._attachment_projection import AttachmentProjectionCapability
 from ._attachment_read import AttachmentReadRuntime
 from ._object import read_runtime_object
+from ._subagent import SubagentAttachmentRuntime
+from ._subagent_attachment import SubagentAttachmentPreparer
 from .state import ContentRef, ModelExposureEntry, PathOrigin, RuntimeDomain
+from .state._attachment_repository import AttachmentRepository
 from .state._exposure_repository import ModelExposureRepository
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(slots=True)
 class _AttachmentRunOwner:
     backend: local_runtime.LocalExecutionBackend
     execution_id: str
     tenant_id: str
+    access: WorkspaceAccess | None = None
+    subagent_bound: bool = False
 
 
 _run_owner: ContextVar[_AttachmentRunOwner | None] = ContextVar(
@@ -42,12 +48,17 @@ _attachment_reader: ContextVar[Any | None] = ContextVar(
     "linktools_ai_attachment_reader",
     default=None,
 )
+_workspace_access: ContextVar[WorkspaceAccess | None] = ContextVar(
+    "linktools_ai_attachment_workspace_access",
+    default=None,
+)
 _installed = False
 _original_prepare_start: Any = None
 _original_run: Any = None
 _original_materialize_agent: Any = None
 _original_workspace_capabilities: Any = None
 _original_workspace_tool_contributions: Any = None
+_original_workspace_for_run: Any = None
 
 
 def _binding_has_read_attachment(binding: Any) -> bool:
@@ -160,6 +171,11 @@ async def _run_with_attachment_owner(
     try:
         await _original_run(self, request, original)
     finally:
+        dispatcher = self._subagent_dispatcher
+        if owner.subagent_bound and dispatcher is not None:
+            dispatcher.release_attachment_runtime(owner.execution_id)
+        if owner.access is not None:
+            await owner.access.close()
         _run_owner.reset(token)
 
 
@@ -187,20 +203,66 @@ async def _materialize_agent_with_attachment_reader(*args: Any, **kwargs: Any):
         initial=initial,
     )
     await _restore_committed_reads(owner.backend, scope.history, active)
-    reader = AttachmentReadRuntime(
-        owner.backend,
-        execution_id=owner.execution_id,
-        tenant_id=owner.tenant_id,
-        agent_run_sequence=scope.segment_sequence,
-        on_committed=active.add_committed_read,
+
+    read_enabled = _binding_has_read_attachment(scope.binding)
+    needs_access = read_enabled or bool(scope.subagent_available)
+    if needs_access and owner.access is None:
+        owner.access = WorkspaceAccess.for_workspace(scope.context.workspace)
+    access = owner.access
+    reader = (
+        None
+        if access is None
+        else AttachmentReadRuntime(
+            owner.backend,
+            execution_id=owner.execution_id,
+            tenant_id=owner.tenant_id,
+            agent_run_sequence=scope.segment_sequence,
+            on_committed=active.add_committed_read,
+        )
     )
-    token = _attachment_reader.set(reader.read)
+
+    dispatcher = owner.backend._subagent_dispatcher
+    if scope.subagent_available:
+        if dispatcher is None or access is None or reader is None:
+            raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+        repository = AttachmentRepository(
+            owner.backend._execution.executions.state_store,
+            namespace=owner.backend._namespace,
+            tenant_id=owner.tenant_id,
+        )
+        preparer = SubagentAttachmentPreparer(repository, scope.context.workspace)
+
+        async def find_child(idempotency_key: str):
+            identity = await owner.backend._execution.idempotency.get(
+                "execution.subagent",
+                idempotency_key_digest(idempotency_key),
+                tenant_id=owner.tenant_id,
+            )
+            if identity is None:
+                return None
+            return await owner.backend._execution.executions.get(
+                identity.resource_id,
+                tenant_id=owner.tenant_id,
+            )
+
+        dispatcher.bind_attachment_runtime(
+            owner.execution_id,
+            SubagentAttachmentRuntime(
+                preparer,
+                lambda path: reader.grant(access, path),
+                find_child,
+            ),
+        )
+        owner.subagent_bound = True
+
+    reader_token = _attachment_reader.set(None if reader is None else reader.read)
+    access_token = _workspace_access.set(access)
     try:
         result = await _original_materialize_agent(*args, **kwargs)
     finally:
-        _attachment_reader.reset(token)
+        _workspace_access.reset(access_token)
+        _attachment_reader.reset(reader_token)
 
-    read_enabled = _binding_has_read_attachment(scope.binding)
     if managed is None and not read_enabled and not active.entries():
         return result
     agent, capabilities, runtime_tools, trusted_tools, trusted_mcp = result
@@ -360,22 +422,70 @@ def _runtime_projection_capability(
     )
 
 
+async def _workspace_for_run_with_shared_access(self: Any, ctx: Any):
+    if _original_workspace_for_run is None:
+        raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+    access = getattr(self, "_access", None)
+    if access is None:
+        return await _original_workspace_for_run(self, ctx)
+    current_context = getattr(access, "_run_context", None)
+    if current_context is None:
+        access._run_context = ctx
+    elif current_context is not ctx:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    return workspace_runtime._WorkspaceSandboxToolset(
+        self._sandbox,
+        self._selected_tool_names,
+        access=access,
+        attachment_reader=self._attachment_reader,
+    )
+
+
 def _workspace_capabilities_with_attachment_reader(
     workspace: Any,
     selected_tool_names: Any,
 ):
     if _original_workspace_capabilities is None:
         raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
-    reader = _attachment_reader.get()
     selected = tuple(selected_tool_names)
-    if "read_attachment" not in selected:
-        return _original_workspace_capabilities(workspace, selected)
-    if reader is None:
+    access = _workspace_access.get()
+    reader = _attachment_reader.get()
+    if access is None:
+        if "read_attachment" not in selected:
+            return _original_workspace_capabilities(workspace, selected)
+        if reader is None:
+            raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+        return _original_workspace_capabilities(
+            workspace,
+            selected,
+            attachment_reader=reader,
+        )
+    if not selected:
+        return ()
+    if "read_attachment" in selected and reader is None:
         raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
-    return _original_workspace_capabilities(
-        workspace,
-        selected,
+    unknown = frozenset(selected).difference(workspace_runtime._WORKSPACE_TOOL_NAMES)
+    if unknown:
+        raise ValueError(f"unknown workspace tools: {tuple(sorted(unknown))}")
+    ordered = tuple(
+        name for name in workspace_runtime._WORKSPACE_TOOL_NAMES if name in selected
+    )
+    sandbox = (
+        workspace.sandbox
+        if workspace.sandbox is not None
+        else workspace_runtime._LocalSandbox(workspace.root)
+    )
+    toolset = workspace_runtime._WorkspaceSandboxToolset(
+        sandbox,
+        ordered,
+        access=access,
         attachment_reader=reader,
+    )
+    return (
+        workspace_runtime.Toolset(
+            toolset,
+            id=workspace_runtime._WORKSPACE_SANDBOX_CAPABILITY_ID,
+        ),
     )
 
 
@@ -389,12 +499,13 @@ def _runtime_workspace_tool_contributions(workspace: Any):
 
 
 def install_attachment_workspace() -> None:
-    """Install the run-scoped read_attachment workspace binding exactly once."""
+    """Install portable attachment workspace/runtime binding exactly once."""
     global _installed
     global _original_materialize_agent
     global _original_prepare_start
     global _original_run
     global _original_workspace_capabilities
+    global _original_workspace_for_run
     global _original_workspace_tool_contributions
     if _installed:
         return
@@ -403,6 +514,7 @@ def install_attachment_workspace() -> None:
     _original_materialize_agent = agent_executor_runtime._materialize_agent
     _original_workspace_capabilities = agent_executor_runtime.workspace_capabilities
     _original_workspace_tool_contributions = factory_runtime.workspace_tool_contributions
+    _original_workspace_for_run = workspace_runtime._WorkspaceSandboxToolset.for_run
     local_runtime.LocalExecutionBackend.prepare_start = _prepare_start_with_attachment_owner
     local_runtime.LocalExecutionBackend._run = _run_with_attachment_owner
     agent_executor_runtime._materialize_agent = _materialize_agent_with_attachment_reader
@@ -410,6 +522,7 @@ def install_attachment_workspace() -> None:
         _workspace_capabilities_with_attachment_reader
     )
     factory_runtime.workspace_tool_contributions = _runtime_workspace_tool_contributions
+    workspace_runtime._WorkspaceSandboxToolset.for_run = _workspace_for_run_with_shared_access
     _installed = True
 
 
