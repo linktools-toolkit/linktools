@@ -3,6 +3,7 @@
 """Install Task v2 attachment integration with instance-owned coordination."""
 
 from collections.abc import Mapping
+from dataclasses import replace
 from typing import Any
 
 import linktools.ai.runtime._planner as planner_runtime
@@ -11,7 +12,7 @@ import linktools.ai.runtime._task_attachment as task_attachment
 import linktools.ai.runtime.state._codec as codec_runtime
 
 from ..errors import AIError, ErrorCode
-from ..task import DefaultTaskService, TaskGraph, TaskGraphLaunch
+from ..task import DefaultTaskService, TaskGraph, TaskGraphLaunch, TaskNode
 from ._attachment import DefaultAttachmentService
 from .state import RuntimeDomain
 from .state._attachment_codec import _entry
@@ -136,7 +137,7 @@ def _agent_validate_recovery(
 
 
 def _agent_prepare_request(self: Any, node: Any, **kwargs: Any):
-    if not task_attachment._is_v2_prepared(node):
+    if not isinstance(node, TaskNode) or not task_attachment._is_v2_prepared(node):
         return _original_agent_prepare_request(self, node, **kwargs)
     binding, request, _prepared, _target = task_attachment._derived_execution_prepared(
         self,
@@ -145,13 +146,11 @@ def _agent_prepare_request(self: Any, node: Any, **kwargs: Any):
         principal=kwargs["principal"],
         dependencies=kwargs["dependencies"],
     )
-    from dataclasses import replace
-
     return binding, replace(request, correlation=kwargs["correlation"])
 
 
 async def _agent_run_node(self: Any, node: Any, **kwargs: Any):
-    if not task_attachment._is_v2_prepared(node):
+    if not isinstance(node, TaskNode) or not task_attachment._is_v2_prepared(node):
         return await _original_agent_run_node(self, node, **kwargs)
     _binding, request, prepared, target = task_attachment._derived_execution_prepared(
         self,
@@ -172,7 +171,7 @@ async def _agent_run_node(self: Any, node: Any, **kwargs: Any):
 
 
 async def _agent_cancel_node(self: Any, node: Any, **kwargs: Any) -> None:
-    if not task_attachment._is_v2_prepared(node):
+    if not isinstance(node, TaskNode) or not task_attachment._is_v2_prepared(node):
         await _original_agent_cancel_node(self, node, **kwargs)
         return
     _binding, request, prepared, target = task_attachment._derived_execution_prepared(
