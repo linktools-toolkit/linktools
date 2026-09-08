@@ -236,7 +236,7 @@ async def compose_runtime_components(
         input_materializer = ExecutionInputMaterializer(
             workspace_access,
             workspace.policy,
-            object_store=selected_state.object_store(RuntimeDomain.EXECUTION),
+            object_store=selected_state.object_store(RuntimeDomain.RECOVERY),
             object_key_factory=object_key_factory,
             payload_policy=payload_policy,
         )
