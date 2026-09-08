@@ -218,6 +218,7 @@ def test_maintenance_accepts_lease_projected_records() -> None:
     tool_operation = ToolOperationRecord(
         "operation",
         "tenant",
+        "execution",
         "step",
         "call",
         "key",
