@@ -9,7 +9,6 @@ from contextvars import ContextVar
 from dataclasses import dataclass
 from typing import Any
 
-import linktools.ai.capability._workspace as workspace_runtime
 import linktools.ai.runtime._agent_executor as agent_executor_runtime
 import linktools.ai.runtime._attachment_admission as admission_runtime
 import linktools.ai.runtime._factory as factory_runtime
@@ -17,6 +16,7 @@ import linktools.ai.runtime._local as local_runtime
 from pydantic_ai.messages import ModelResponse, ToolCallPart
 
 from ..capability import WorkspaceAccess, attachment_tool_contribution
+from ..capability.workspace import workspace_capabilities_with_access
 from ..core import ExecutionStatus, ToolOperationStatus, idempotency_key_digest
 from ..errors import AIError, ErrorCode
 from ..storage import TransientObjectStore
@@ -58,7 +58,6 @@ _original_run: Any = None
 _original_materialize_agent: Any = None
 _original_workspace_capabilities: Any = None
 _original_workspace_tool_contributions: Any = None
-_original_workspace_for_run: Any = None
 
 
 def _binding_has_read_attachment(binding: Any) -> bool:
@@ -422,25 +421,6 @@ def _runtime_projection_capability(
     )
 
 
-async def _workspace_for_run_with_shared_access(self: Any, ctx: Any):
-    if _original_workspace_for_run is None:
-        raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
-    access = getattr(self, "_access", None)
-    if access is None:
-        return await _original_workspace_for_run(self, ctx)
-    current_context = getattr(access, "_run_context", None)
-    if current_context is None:
-        access._run_context = ctx
-    elif current_context is not ctx:
-        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-    return workspace_runtime._WorkspaceSandboxToolset(
-        self._sandbox,
-        self._selected_tool_names,
-        access=access,
-        attachment_reader=self._attachment_reader,
-    )
-
-
 def _workspace_capabilities_with_attachment_reader(
     workspace: Any,
     selected_tool_names: Any,
@@ -460,32 +440,11 @@ def _workspace_capabilities_with_attachment_reader(
             selected,
             attachment_reader=reader,
         )
-    if not selected:
-        return ()
-    if "read_attachment" in selected and reader is None:
-        raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
-    unknown = frozenset(selected).difference(workspace_runtime._WORKSPACE_TOOL_NAMES)
-    if unknown:
-        raise ValueError(f"unknown workspace tools: {tuple(sorted(unknown))}")
-    ordered = tuple(
-        name for name in workspace_runtime._WORKSPACE_TOOL_NAMES if name in selected
-    )
-    sandbox = (
-        workspace.sandbox
-        if workspace.sandbox is not None
-        else workspace_runtime._LocalSandbox(workspace.root)
-    )
-    toolset = workspace_runtime._WorkspaceSandboxToolset(
-        sandbox,
-        ordered,
+    return workspace_capabilities_with_access(
+        workspace,
+        selected,
         access=access,
         attachment_reader=reader,
-    )
-    return (
-        workspace_runtime.Toolset(
-            toolset,
-            id=workspace_runtime._WORKSPACE_SANDBOX_CAPABILITY_ID,
-        ),
     )
 
 
@@ -505,7 +464,6 @@ def install_attachment_workspace() -> None:
     global _original_prepare_start
     global _original_run
     global _original_workspace_capabilities
-    global _original_workspace_for_run
     global _original_workspace_tool_contributions
     if _installed:
         return
@@ -514,7 +472,6 @@ def install_attachment_workspace() -> None:
     _original_materialize_agent = agent_executor_runtime._materialize_agent
     _original_workspace_capabilities = agent_executor_runtime.workspace_capabilities
     _original_workspace_tool_contributions = factory_runtime.workspace_tool_contributions
-    _original_workspace_for_run = workspace_runtime._WorkspaceSandboxToolset.for_run
     local_runtime.LocalExecutionBackend.prepare_start = _prepare_start_with_attachment_owner
     local_runtime.LocalExecutionBackend._run = _run_with_attachment_owner
     agent_executor_runtime._materialize_agent = _materialize_agent_with_attachment_reader
@@ -522,7 +479,6 @@ def install_attachment_workspace() -> None:
         _workspace_capabilities_with_attachment_reader
     )
     factory_runtime.workspace_tool_contributions = _runtime_workspace_tool_contributions
-    workspace_runtime._WorkspaceSandboxToolset.for_run = _workspace_for_run_with_shared_access
     _installed = True
 
 
