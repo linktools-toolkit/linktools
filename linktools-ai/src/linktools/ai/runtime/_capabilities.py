@@ -34,7 +34,7 @@ from pydantic_ai.tools import DeferredToolRequests, RunContext, ToolDefinition
 from pydantic_ai_harness.planning import Planning
 from pydantic_ai_harness.step_persistence import StepPersistence
 
-from . import _capabilities_native as _native
+import linktools.ai.runtime._capabilities_native as _native
 from ._compaction import ExternalModelRequestObserver
 from ._harness import (
     HarnessPlanStoreAdapter,
@@ -209,8 +209,6 @@ class _RuntimeStepPersistence(StepPersistence[None]):
         ctx: RunContext[None],
         request_context: ModelRequestContext,
     ) -> ModelRequestContext:
-        # Harness' start event is emitted in wrap_model_request so it describes the
-        # actual provider request after request-time capabilities (e.g. compaction).
         return request_context
 
     async def wrap_model_request(
@@ -236,7 +234,7 @@ class _RuntimeStepPersistence(StepPersistence[None]):
         except asyncio.CancelledError as error:
             if self.model_journal is None:
                 raise
-            fact = self.model_journal.finish(ctx.run_step, status="CANCELLED")
+            self.model_journal.finish(ctx.run_step, status="CANCELLED")
             fact = self.model_journal.consume(ctx.run_step)
             await self._harness_cancelled_model_request(
                 ctx,
@@ -1019,14 +1017,6 @@ class _RuntimeStepPersistence(StepPersistence[None]):
         call: ToolCallPart,
     ) -> tuple[str, str]:
         return self._runtime_run_id(ctx), call.tool_call_id
-
-
-async def _combined_external_model_request_observer(
-    persistence: _RuntimeStepPersistence,
-    observer: ExternalModelRequestObserver | None,
-) -> ExternalModelRequestObserver:
-    del persistence, observer
-    raise AssertionError("factory only")
 
 
 def _external_observer(
