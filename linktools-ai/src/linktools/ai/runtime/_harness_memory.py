@@ -10,15 +10,12 @@ from pydantic_ai.toolsets import FilteredToolset
 from pydantic_ai_harness.memory import Memory, MemoryMutation, MemoryOperation, MemoryStore
 
 from ._harness import current_tool_operation_id
-from ._memory import RuntimeMemoryStore
 
 
 class HarnessMemoryStoreAdapter:
     """Map Harness mutation identity to the stable Runtime tool operation."""
 
-    def __init__(self, store: RuntimeMemoryStore) -> None:
-        if not isinstance(store, RuntimeMemoryStore):
-            raise TypeError("store must be RuntimeMemoryStore")
+    def __init__(self, store: MemoryStore) -> None:
         self._store = store
 
     async def read(self, path: str, *, max_chars: int):
@@ -84,7 +81,7 @@ class HarnessSelectedMemory(Memory[None]):
 
 
 def build_harness_memory(
-    store: RuntimeMemoryStore,
+    store: MemoryStore,
     *,
     selected_tool_names: tuple[str, ...],
     capability_id: str,
