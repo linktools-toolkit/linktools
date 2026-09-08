@@ -25,6 +25,7 @@ from ._runtime_history import RuntimeHistory
 from ._runtime_service import Runtime
 from ._session import DefaultSessionService
 from ._snapshot import RunSnapshot, snapshot_digest
+from ._task_attachment_install import install_task_attachments
 from .service_api import (
     ApprovalCreateRequest,
     ApprovalDecisionRequest,
@@ -95,12 +96,14 @@ install_attachment_tool_policy()
 install_attachment_admission()
 bind_admission_scope(_admission_scope)
 install_attachment_workspace()
+install_task_attachments()
 del install_attachment_tool_state
 del install_attachment_tool_policy
 del install_attachment_admission
 del bind_admission_scope
 del _admission_scope
 del install_attachment_workspace
+del install_task_attachments
 
 __all__ = [
     "Agent",
