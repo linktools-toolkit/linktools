@@ -103,6 +103,17 @@ class ModelExposureRepository:
                 if existing != candidate:
                     raise AIError(ErrorCode.STORAGE_CONFLICT)
                 return existing
+            owner_record = await transaction.get_record(owner)
+            if owner_record is None or owner_record.kind != "recovery_state":
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            guarded = await transaction.guard_record(
+                owner,
+                expected_storage_version=owner_record.storage_version,
+            )
+            if guarded is None:
+                raise AIError(ErrorCode.STORAGE_CONFLICT)
+            if guarded.kind != "recovery_state":
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             await transaction.insert_fact(
                 StoredFact(
                     stream,
@@ -131,9 +142,7 @@ class ModelExposureRepository:
             step_run_id=step_run_id,
             run_step=run_step,
         )
-        if current is None:
-            raise AIError(ErrorCode.STORAGE_CONFLICT)
-        if current != candidate:
+        if current is None or current != candidate:
             raise AIError(ErrorCode.STORAGE_CONFLICT)
         return current
 
@@ -211,8 +220,8 @@ class ModelExposureRepository:
         return record_key_digest(
             self._namespace,
             self._tenant_id,
-            RuntimeDomain.EXECUTION.value,
-            "execution",
+            RuntimeDomain.RECOVERY.value,
+            "recovery_state",
             execution_id,
         )
 
