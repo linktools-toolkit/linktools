@@ -38,6 +38,7 @@ def _binding() -> object:
     definition = SimpleNamespace(
         digest="b" * 64,
         spec=SimpleNamespace(id="default"),
+        selected_tools=(),
     )
     return SimpleNamespace(
         digest=snapshot.binding_digest,
