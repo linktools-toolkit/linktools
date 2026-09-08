@@ -31,13 +31,27 @@ def _attachment_prompt():
     )
 
 
+def _rich_prompt():
+    return ("Inspect historical input", "Return a concise result")
+
+
 def test_native_user_content_transport_is_deterministic_and_round_trips() -> None:
-    first = prepare_user_prompt(_attachment_prompt())
-    second = prepare_user_prompt(_attachment_prompt())
+    first = prepare_user_prompt(_rich_prompt())
+    second = prepare_user_prompt(_rich_prompt())
 
     assert isinstance(first, UserPromptTransport)
     assert first.codec == "pydantic-user-content-v1"
     assert first == second
+    assert _restore_user_prompt(first) == _rich_prompt()
+
+
+def test_binary_content_is_retained_as_managed_draft_before_durable_boundary() -> None:
+    first = prepare_user_prompt(_attachment_prompt())
+    second = prepare_user_prompt(_attachment_prompt())
+
+    assert isinstance(first, UserPromptTransport)
+    assert first.codec == "linktools-managed-draft"
+    assert first == second == "managed-input"
 
     restored = _restore_user_prompt(first)
     assert isinstance(restored, tuple)
@@ -98,7 +112,7 @@ def test_plain_text_is_never_interpreted_as_transport_protocol() -> None:
 
 
 def test_malformed_rich_transport_fails_closed() -> None:
-    transport = prepare_user_prompt(_attachment_prompt())
+    transport = prepare_user_prompt(_rich_prompt())
     malformed = user_prompt_transport(
         str(transport).replace('"message"', '"unexpected"', 1),
         transport.codec,
@@ -131,7 +145,7 @@ def test_uploaded_file_is_rejected_until_durable_lifecycle_is_defined() -> None:
 
 
 def test_execution_request_preserves_rich_prompt_transport_and_codec() -> None:
-    transport = prepare_user_prompt(_attachment_prompt())
+    transport = prepare_user_prompt(_rich_prompt())
     request = ExecutionRequest(
         user_prompt=transport,
         user_prompt_codec=transport.codec,
@@ -145,6 +159,4 @@ def test_execution_request_preserves_rich_prompt_transport_and_codec() -> None:
 
     assert request.user_prompt is transport
     assert request.user_prompt_codec == "pydantic-user-content-v1"
-    restored = _restore_user_prompt(request.user_prompt)
-    assert isinstance(restored, tuple)
-    assert isinstance(restored[1], BinaryContent)
+    assert _restore_user_prompt(request.user_prompt) == _rich_prompt()
