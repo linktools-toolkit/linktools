@@ -206,7 +206,10 @@ def _restore_user_prompt(value: str) -> str | tuple[UserContent, ...]:
             return draft
         if draft is None:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        return tuple(draft)
+        content = tuple(draft)
+        if len(content) == 1 and isinstance(content[0], str):
+            return content[0]
+        return content
     validate_user_prompt(value)
     codec = value.codec if isinstance(value, UserPromptTransport) else _TEXT_CODEC
     if codec == _TEXT_CODEC:
