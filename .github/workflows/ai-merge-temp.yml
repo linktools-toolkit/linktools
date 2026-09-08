@@ -1,0 +1,32 @@
+name: AI merge temp
+
+on:
+  push:
+    branches:
+      - refactor/ai-harness-capabilities
+    paths:
+      - .github/workflows/ai-merge-temp.yml
+
+permissions:
+  contents: write
+
+jobs:
+  merge:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: refactor/ai-harness-capabilities
+          fetch-depth: 0
+      - name: Merge latest master
+        shell: bash
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git fetch origin master
+          if ! git merge --no-edit origin/master; then
+            echo '--- merge conflicts ---'
+            git status --short
+            exit 1
+          fi
+          git push origin HEAD:refactor/ai-harness-capabilities
