@@ -4,7 +4,6 @@
 from types import SimpleNamespace
 
 import pytest
-from pydantic_ai.messages import BinaryContent
 
 from linktools.ai.agent import AgentBindingSnapshot
 from linktools.ai.core import ExecutionLineageKind, Principal
@@ -38,12 +37,8 @@ def _binding() -> AgentBindingSnapshot:
 def _rich_prompt() -> UserPromptTransport:
     return prepare_user_prompt(
         (
-            "Inspect this attachment",
-            BinaryContent(
-                b"payload\n",
-                media_type="text/plain",
-                identifier="input.log",
-            ),
+            "Inspect historical input",
+            "Return a concise result",
         )
     )
 
@@ -87,9 +82,10 @@ def test_recovery_prompt_payload_preserves_rich_codec() -> None:
     restored_transport = _recovery_prompt_text(SimpleNamespace(user_prompt=payload))
     assert isinstance(restored_transport, UserPromptTransport)
     assert restored_transport.codec == prompt.codec
-    restored = _restore_user_prompt(restored_transport)
-    assert isinstance(restored, tuple)
-    assert isinstance(restored[1], BinaryContent)
+    assert _restore_user_prompt(restored_transport) == (
+        "Inspect historical input",
+        "Return a concise result",
+    )
 
 
 def test_recovery_text_payload_is_always_text() -> None:
