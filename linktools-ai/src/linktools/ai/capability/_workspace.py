@@ -141,7 +141,9 @@ class _LocalSandboxSession:
         if not isinstance(path, str) or not path or "\x00" in path:
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
         relative = Path(path)
-        if relative.is_absolute() or any(part in {"", ".", ".."} for part in relative.parts):
+        if relative.is_absolute() or any(
+            part in {"", ".", ".."} for part in relative.parts
+        ):
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
         current = self._root
         try:
@@ -176,7 +178,11 @@ class _LocalSandboxSession:
         *,
         expected_hash: "str | None" = None,
     ) -> str:
-        return await self._filesystem.write_file(path, content, expected_hash=expected_hash)
+        return await self._filesystem.write_file(
+            path,
+            content,
+            expected_hash=expected_hash,
+        )
 
     async def edit_file(
         self,
@@ -252,12 +258,87 @@ class _LocalSandboxSession:
         await stack.aclose()
 
 
-class _WorkspaceToolSurface:
-    def __init__(self, session: "SandboxSession | None") -> None:
+class WorkspaceAccess:
+    """Own one SandboxSession and expose byte reads without leaking the session."""
+
+    def __init__(
+        self,
+        sandbox: Sandbox,
+        *,
+        session: "SandboxSession | None" = None,
+    ) -> None:
+        self._sandbox = sandbox
         self._session = session
+        self._lock = asyncio.Lock()
+        self._closed = False
+
+    @classmethod
+    def for_workspace(cls, workspace: Workspace) -> "WorkspaceAccess":
+        sandbox = (
+            workspace.sandbox
+            if workspace.sandbox is not None
+            else _LocalSandbox(workspace.root)
+        )
+        return cls(sandbox)
+
+    async def read_bytes(self, path: str) -> bytes:
+        async with self._lock:
+            if self._closed:
+                raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+            session = self._session
+            if session is None:
+                session = await self._sandbox.open()
+                self._session = session
+            try:
+                return await session.read_bytes(path)
+            except AttributeError as error:
+                raise AIError(ErrorCode.SANDBOX_UNAVAILABLE) from error
+
+    async def close(self) -> None:
+        await self._close(None)
+
+    def _session_for_tools(self) -> SandboxSession:
+        if self._session is None or self._closed:
+            raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+        return self._session
+
+    async def _close(self, primary_error: "BaseException | None") -> None:
+        async with self._lock:
+            if self._closed:
+                return
+            self._closed = True
+            session = self._session
+            self._session = None
+        if session is None:
+            return
+        close_task = asyncio.create_task(session.close(), name="workspace-sandbox-close")
+        try:
+            await asyncio.shield(close_task)
+        except asyncio.CancelledError:
+            if close_task.cancelled():
+                if primary_error is None:
+                    raise
+                _logger.exception("workspace sandbox cleanup failed after run failure")
+                return
+            try:
+                await close_task
+            except BaseException:  # noqa: BLE001
+                _logger.exception("workspace sandbox cleanup failed during cancellation")
+            raise
+        except BaseException:  # noqa: BLE001
+            if primary_error is None:
+                raise
+            _logger.exception("workspace sandbox cleanup failed after run failure")
+
+
+class _WorkspaceToolSurface:
+    def __init__(self, access: "WorkspaceAccess | None") -> None:
+        self._access = access
 
     def _require_session(self) -> SandboxSession:
-        return cast(SandboxSession, self._session)
+        if self._access is None:
+            raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+        return self._access._session_for_tools()
 
     async def read_file(
         self,
@@ -469,13 +550,13 @@ class _WorkspaceSandboxToolset(FunctionToolset[AgentContext[object]]):
         sandbox: Sandbox,
         selected_tool_names: tuple[str, ...],
         *,
-        session: "SandboxSession | None" = None,
+        access: "WorkspaceAccess | None" = None,
     ) -> None:
         super().__init__()
         self._sandbox = sandbox
         self._selected_tool_names = selected_tool_names
-        self._session = session
-        surface = _WorkspaceToolSurface(session)
+        self._access = access
+        surface = _WorkspaceToolSurface(access)
         for name in selected_tool_names:
             self.add_tool(_workspace_tool(surface, name))
 
@@ -491,31 +572,19 @@ class _WorkspaceSandboxToolset(FunctionToolset[AgentContext[object]]):
         return _WorkspaceSandboxToolset(
             self._sandbox,
             self._selected_tool_names,
-            session=session,
+            access=WorkspaceAccess(self._sandbox, session=session),
         )
 
     async def __aexit__(self, *args: Any) -> "bool | None":
-        if self._session is None:
+        access = self._access
+        if access is None:
             return None
-        primary_error = args[1] if len(args) > 1 and isinstance(args[1], BaseException) else None
-        close_task = asyncio.create_task(self._session.close(), name="workspace-sandbox-close")
-        try:
-            await asyncio.shield(close_task)
-        except asyncio.CancelledError:
-            if close_task.cancelled():
-                if primary_error is None:
-                    raise
-                _logger.exception("workspace sandbox cleanup failed after run failure")
-                return None
-            try:
-                await close_task
-            except BaseException:  # noqa: BLE001
-                _logger.exception("workspace sandbox cleanup failed during cancellation")
-            raise
-        except BaseException:  # noqa: BLE001
-            if primary_error is None:
-                raise
-            _logger.exception("workspace sandbox cleanup failed after run failure")
+        primary_error = (
+            args[1]
+            if len(args) > 1 and isinstance(args[1], BaseException)
+            else None
+        )
+        await access._close(primary_error)
         return None
 
 
@@ -552,7 +621,11 @@ def workspace_capabilities(
     if not selected:
         return ()
     ordered = tuple(name for name in _WORKSPACE_TOOL_NAMES if name in selected)
-    sandbox = workspace.sandbox if workspace.sandbox is not None else _LocalSandbox(workspace.root)
+    sandbox = (
+        workspace.sandbox
+        if workspace.sandbox is not None
+        else _LocalSandbox(workspace.root)
+    )
     toolset = _WorkspaceSandboxToolset(sandbox, ordered)
     return (Toolset(toolset, id=_WORKSPACE_SANDBOX_CAPABILITY_ID),)
 
@@ -584,6 +657,7 @@ __all__ = [
     "WORKSPACE_FILESYSTEM_READ_TOOL_NAMES",
     "WORKSPACE_FILESYSTEM_TOOL_NAMES",
     "WORKSPACE_SHELL_TOOL_NAMES",
+    "WorkspaceAccess",
     "workspace_capabilities",
     "workspace_tool_class",
     "workspace_tool_contributions",
