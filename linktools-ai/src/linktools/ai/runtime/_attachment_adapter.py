@@ -24,6 +24,7 @@ from pydantic_ai.models.wrapper import WrapperModel
 from pydantic_ai.settings import ModelSettings
 from pydantic_ai.usage import RequestUsage
 
+from ..core import canonical_json_bytes, canonical_sha256
 from ..errors import AIError, ErrorCode
 from ._object import read_runtime_object
 from .state import (
@@ -32,10 +33,12 @@ from .state import (
     ModelExposureEntry,
     PathOrigin,
     RuntimeDomain,
+    RuntimeRetentionMode,
     RuntimeState,
+    semantic_attachment_entry,
 )
 
-_MARKER_KEY = "linktools.ai.attachment.v1"
+_MARKER_KEY = "linktools.attachment-slot.v1"
 _EXPOSURE_METADATA_KEY = "linktools.ai.exposure_id"
 
 _ExecutionCheck = Callable[[int], Awaitable[None]]
@@ -57,10 +60,18 @@ class AttachmentContentResolver:
             domain = RuntimeDomain(content.domain)
         except ValueError as error:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
-        store = self._state.working_object_store(
-            domain,
-            owner_scope=content.owner_scope,
-        )
+        if content.owner_scope is None:
+            if (
+                self._state.plan.route(domain).retention
+                is RuntimeRetentionMode.TRANSIENT
+            ):
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            store = self._state.object_store(domain)
+        else:
+            store = self._state.working_object_store(
+                domain,
+                owner_scope=content.owner_scope,
+            )
         return await read_runtime_object(store, content.object)
 
 
@@ -73,8 +84,8 @@ class _ExposureTicket:
     suspended: bool = False
 
 
-class AttachmentModel(WrapperModel):
-    """Expand trusted attachment placeholders only at the model boundary."""
+class AttachmentRequestModel(WrapperModel):
+    """Expand trusted attachment placeholders only at one logical model step."""
 
     def __init__(
         self,
@@ -82,6 +93,7 @@ class AttachmentModel(WrapperModel):
         *,
         execution_id: str,
         step_run_id: str,
+        run_step: int,
         path_origin: PathOrigin,
         activations: Sequence[ModelExposureEntry],
         check_execution: _ExecutionCheck,
@@ -94,6 +106,8 @@ class AttachmentModel(WrapperModel):
             raise ValueError("execution_id is required")
         if not isinstance(step_run_id, str) or not step_run_id:
             raise ValueError("step_run_id is required")
+        if isinstance(run_step, bool) or not isinstance(run_step, int) or run_step < 0:
+            raise ValueError("run_step must be a non-negative integer")
         if not isinstance(path_origin, PathOrigin):
             raise TypeError("path_origin must be PathOrigin")
         values = tuple(activations)
@@ -103,6 +117,7 @@ class AttachmentModel(WrapperModel):
             raise ValueError("activations contain duplicate activation ids")
         self._execution_id = execution_id
         self._step_run_id = step_run_id
+        self._run_step = run_step
         self._path_origin = path_origin
         self._activations = {value.activation_id: value for value in values}
         self._check_execution = check_execution
@@ -110,8 +125,8 @@ class AttachmentModel(WrapperModel):
         self._commit_exposure = commit_exposure
         self._read_content = read_content
         self._lock = asyncio.Lock()
-        self._next_run_step = 1
         self._ticket: _ExposureTicket | None = None
+        self._complete = False
 
     async def count_tokens(
         self,
@@ -167,21 +182,27 @@ class AttachmentModel(WrapperModel):
     ) -> tuple[list[ModelMessage], _ExposureTicket]:
         selected = self._select_entries(messages)
         async with self._lock:
+            if self._complete:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             ticket = self._ticket
             if ticket is None:
-                ticket = _ExposureTicket(self._next_run_step, selected)
+                ticket = _ExposureTicket(self._run_step, selected)
                 self._ticket = ticket
             elif ticket.suspended:
-                selected_ids = {value.activation_id for value in selected}
                 ticket_by_id = {value.activation_id: value for value in ticket.entries}
                 if any(
-                    activation_id not in ticket_by_id
-                    or ticket_by_id[activation_id] != self._activations[activation_id]
-                    for activation_id in selected_ids
+                    value.activation_id not in ticket_by_id
+                    or ticket_by_id[value.activation_id] != value
+                    for value in selected
                 ):
-                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                    raise AIError(ErrorCode.CAPABILITY_POLICY_CONFLICT)
             elif selected != ticket.entries:
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                raise AIError(ErrorCode.CAPABILITY_POLICY_CONFLICT)
+
+            if generation and not ticket.suspended:
+                selected_ids = {value.activation_id for value in selected}
+                if selected_ids != set(self._activations):
+                    raise AIError(ErrorCode.CAPABILITY_POLICY_CONFLICT)
 
             await self._check_execution(ticket.run_step)
             await self._authorize_entries(ticket.run_step, selected)
@@ -207,10 +228,8 @@ class AttachmentModel(WrapperModel):
             if response.state == "suspended":
                 ticket.suspended = True
                 return
-            if response.state != "complete":
-                return
-            self._next_run_step = ticket.run_step + 1
-            self._ticket = None
+            if response.state == "complete":
+                self._complete = True
 
     def _select_entries(
         self,
@@ -225,12 +244,15 @@ class AttachmentModel(WrapperModel):
                 if not isinstance(part, UserPromptPart) or isinstance(part.content, str):
                     continue
                 for item in part.content:
-                    activation_id = _marker_activation_id(item)
-                    if activation_id is None or activation_id in seen:
+                    marker = _marker_value(item)
+                    if marker is None:
                         continue
+                    activation_id = marker["activation_id"]
                     entry = self._activations.get(activation_id)
-                    if entry is None:
-                        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                    if entry is None or not _marker_matches(marker, entry):
+                        raise AIError(ErrorCode.CAPABILITY_POLICY_CONFLICT)
+                    if activation_id in seen:
+                        continue
                     selected.append(entry)
                     seen.add(activation_id)
         return tuple(selected)
@@ -240,14 +262,19 @@ class AttachmentModel(WrapperModel):
         entries: Sequence[ModelExposureEntry],
     ) -> dict[str, bytes]:
         result: dict[str, bytes] = {}
+        by_content: dict[str, bytes] = {}
         for value in entries:
-            body = await self._read_content(value.entry.content)
-            reference = value.entry.content.object
-            if (
-                len(body) != reference.size
-                or hashlib.sha256(body).hexdigest() != reference.digest
-            ):
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            content_id = _content_identity(value)
+            body = by_content.get(content_id)
+            if body is None:
+                body = await self._read_content(value.entry.content)
+                reference = value.entry.content.object
+                if (
+                    len(body) != reference.size
+                    or hashlib.sha256(body).hexdigest() != reference.digest
+                ):
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                by_content[content_id] = body
             result[value.activation_id] = body
         return result
 
@@ -262,7 +289,8 @@ class AttachmentModel(WrapperModel):
         if ticket.exposure is None or ticket.bodies is None:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         selected_ids = {value.activation_id for value in selected}
-        expanded: set[str] = set()
+        seen_selected: set[str] = set()
+        expanded_content: set[str] = set()
         projected: list[ModelMessage] = []
         last_request_index = max(
             (index for index, value in enumerate(messages) if isinstance(value, ModelRequest)),
@@ -281,15 +309,22 @@ class AttachmentModel(WrapperModel):
                 content: list[UserContent] = []
                 part_changed = False
                 for item in part.content:
-                    activation_id = _marker_activation_id(item)
-                    if (
-                        activation_id is None
-                        or activation_id not in selected_ids
-                        or activation_id in expanded
-                    ):
+                    marker = _marker_value(item)
+                    if marker is None:
                         content.append(item)
                         continue
-                    activation = self._activations[activation_id]
+                    activation_id = marker["activation_id"]
+                    if activation_id not in selected_ids:
+                        content.append(item)
+                        continue
+                    activation = self._activations.get(activation_id)
+                    if activation is None or not _marker_matches(marker, activation):
+                        raise AIError(ErrorCode.CAPABILITY_POLICY_CONFLICT)
+                    seen_selected.add(activation_id)
+                    content_id = _content_identity(activation)
+                    if content_id in expanded_content:
+                        content.append(item)
+                        continue
                     content.append(
                         BinaryContent(
                             ticket.bodies[activation_id],
@@ -302,7 +337,7 @@ class AttachmentModel(WrapperModel):
                             ),
                         )
                     )
-                    expanded.add(activation_id)
+                    expanded_content.add(content_id)
                     part_changed = True
                 if part_changed:
                     parts.append(replace(part, content=tuple(content)))
@@ -322,8 +357,8 @@ class AttachmentModel(WrapperModel):
                 if changed
                 else message
             )
-        if expanded != selected_ids:
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        if seen_selected != selected_ids:
+            raise AIError(ErrorCode.CAPABILITY_POLICY_CONFLICT)
         return projected
 
     def _validate_exposure(
@@ -343,32 +378,119 @@ class AttachmentModel(WrapperModel):
 
 
 def attachment_placeholder(value: ModelExposureEntry) -> TextContent:
-    """Build the only trusted in-message marker understood by AttachmentModel."""
+    """Build the only trusted in-message marker understood by AttachmentRequestModel."""
     if not isinstance(value, ModelExposureEntry):
         raise TypeError("value must be ModelExposureEntry")
-    label = value.entry.name or value.entry.path
+    semantic = semantic_attachment_entry(value.entry)
+    description = canonical_json_bytes(
+        {
+            "path": value.entry.path,
+            "name": value.entry.name,
+            "type": value.entry.media_type,
+            "size": value.entry.content.object.size,
+        }
+    ).decode("utf-8")
     return TextContent(
-        f"[attachment: {label}]",
-        metadata={_MARKER_KEY: value.activation_id},
+        description,
+        metadata={
+            _MARKER_KEY: {
+                "activation_id": value.activation_id,
+                "source": value.source.to_json(),
+                "slot": value.slot,
+                "entry_digest": _semantic_entry_digest(semantic),
+            }
+        },
     )
 
 
-def _marker_activation_id(value: UserContent) -> str | None:
+def _marker_value(value: UserContent) -> dict[str, Any] | None:
     if not isinstance(value, TextContent):
         return None
     metadata = value.metadata
     if not isinstance(metadata, Mapping) or _MARKER_KEY not in metadata:
         return None
     if set(metadata) != {_MARKER_KEY}:
-        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-    activation_id = metadata[_MARKER_KEY]
+        raise AIError(ErrorCode.CAPABILITY_POLICY_CONFLICT)
+    marker = metadata[_MARKER_KEY]
+    if not isinstance(marker, Mapping) or set(marker) != {
+        "activation_id",
+        "source",
+        "slot",
+        "entry_digest",
+    }:
+        raise AIError(ErrorCode.CAPABILITY_POLICY_CONFLICT)
+    activation_id = marker["activation_id"]
+    source = marker["source"]
+    slot = marker["slot"]
+    entry_digest = marker["entry_digest"]
     if (
         not isinstance(activation_id, str)
         or len(activation_id) != 64
         or any(character not in "0123456789abcdef" for character in activation_id)
+        or not isinstance(source, Mapping)
+        or isinstance(slot, bool)
+        or not isinstance(slot, int)
+        or slot < 0
+        or not isinstance(entry_digest, str)
+        or len(entry_digest) != 64
+        or any(character not in "0123456789abcdef" for character in entry_digest)
     ):
-        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-    return activation_id
+        raise AIError(ErrorCode.CAPABILITY_POLICY_CONFLICT)
+    return {
+        "activation_id": activation_id,
+        "source": dict(source),
+        "slot": slot,
+        "entry_digest": entry_digest,
+    }
+
+
+def _marker_matches(marker: Mapping[str, Any], value: ModelExposureEntry) -> bool:
+    semantic = semantic_attachment_entry(value.entry)
+    return (
+        marker.get("activation_id") == value.activation_id
+        and marker.get("source") == value.source.to_json()
+        and marker.get("slot") == value.slot
+        and marker.get("entry_digest") == _semantic_entry_digest(semantic)
+    )
+
+
+def _semantic_entry_digest(value) -> str:
+    return canonical_sha256(
+        {
+            "path": value.path,
+            "name": value.name,
+            "media_type": value.media_type,
+            "presentation": {
+                "identifier": value.presentation.identifier,
+                "vendor_metadata": (
+                    None
+                    if value.presentation.vendor_metadata is None
+                    else dict(value.presentation.vendor_metadata)
+                ),
+            },
+            "digest": value.digest,
+            "size": value.size,
+        }
+    )
+
+
+def _content_identity(value: ModelExposureEntry) -> str:
+    entry = value.entry
+    return canonical_sha256(
+        {
+            "digest": entry.content.object.digest,
+            "size": entry.content.object.size,
+            "media_type": entry.media_type,
+            "presentation": {
+                "identifier": entry.presentation.identifier,
+                "vendor_metadata": (
+                    None
+                    if entry.presentation.vendor_metadata is None
+                    else dict(entry.presentation.vendor_metadata)
+                ),
+            },
+        }
+    )
 
 
 __all__: tuple[str, ...] = ()
