@@ -187,6 +187,16 @@ class _TaskRepository(Protocol):
         execution_id: str,
     ) -> TaskNodeView: ...
 
+    async def mark_recovery_required(
+        self,
+        lease: TaskLease,
+        *,
+        tenant_id: str,
+        error_code: str,
+        error_digest: str,
+        execution_id: "str | None" = None,
+    ) -> TaskNodeView: ...
+
     async def complete(
         self,
         lease: TaskLease,
@@ -515,6 +525,8 @@ class LocalTaskGraphLauncher:
                 if fingerprint != observed_fingerprint:
                     observed_fingerprint = fingerprint
                     await self._notify(run)
+                if view.status is TaskStatus.RECOVERY_REQUIRED:
+                    return
                 if view.status in _TERMINAL:
                     if self._metric_projector is not None:
                         self._metric_projector.trigger(
@@ -721,7 +733,10 @@ class LocalTaskGraphLauncher:
                 if isinstance(heartbeat_error, AIError):
                     if heartbeat_error.code in _RECOVERY_UNKNOWN_CODES:
                         await self._defer_recovery(
-                            run, node, cause=heartbeat_error
+                            run,
+                            node,
+                            lease_state,
+                            cause=heartbeat_error,
                         )
                         return
                     if heartbeat_error.code in {
@@ -738,7 +753,17 @@ class LocalTaskGraphLauncher:
             except BaseException as error:  # noqa: BLE001
                 await _stop_heartbeat(heartbeat_stop, heartbeat)
                 if isinstance(error, AIError) and error.code in _RECOVERY_UNKNOWN_CODES:
-                    await self._defer_recovery(run, node, cause=error)
+                    await self._defer_recovery(
+                        run,
+                        node,
+                        lease_state,
+                        cause=error,
+                        execution_id=(
+                            error.execution_id
+                            if isinstance(error, TaskNodeRunError)
+                            else None
+                        ),
+                    )
                     return
                 if isinstance(error, AIError) and error.code in {
                     ErrorCode.TASK_FENCE_STALE,
@@ -791,7 +816,13 @@ class LocalTaskGraphLauncher:
                         tenant_id=tenant_id,
                     ):
                         return
-                    await self._defer_recovery(run, node, cause=error)
+            await self._defer_recovery(
+                run,
+                node,
+                lease_state,
+                cause=error,
+                execution_id=completion.execution_id,
+            )
         except asyncio.CancelledError:
             if not runner_task.done():
                 runner_task.cancel()
@@ -827,7 +858,7 @@ class LocalTaskGraphLauncher:
                 if record is None or record.result_digest != completion.result_digest:
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             return True
-        if state.status in _TERMINAL:
+        if state.status in _TERMINAL or state.status is TaskStatus.RECOVERY_REQUIRED:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         return False
 
@@ -835,21 +866,39 @@ class LocalTaskGraphLauncher:
         self,
         run: _GraphRun,
         node: TaskNode,
+        lease_state: _LeaseState,
         *,
         cause: AIError,
+        execution_id: "str | None" = None,
     ) -> None:
         graph_id = run.request.graph.graph_id
-        details = dict(cause.safe_details)
-        details.setdefault("phase", "task_node_recovery")
-        details.setdefault("graph_id", graph_id)
-        details.setdefault("node_id", node.node_id)
-        details.setdefault("cause_code", cause.code.value)
-        failure = _copy_ai_error(cause, safe_details=details)
+        tenant_id = run.request.principal.tenant_id
+        digest = canonical_sha256(
+            {
+                "graph_id": graph_id,
+                "node_id": node.node_id,
+                "code": cause.code.value,
+            }
+        )
+        async with lease_state.lock:
+            await self._repository.mark_recovery_required(
+                lease_state.lease,
+                tenant_id=tenant_id,
+                error_code=cause.code.value,
+                error_digest=digest,
+                execution_id=execution_id,
+            )
         async with self._lock:
-            current = self._graphs.get((run.request.principal.tenant_id, graph_id))
+            current = self._graphs.get((tenant_id, graph_id))
             if current is run:
-                run.failure = failure
                 run.closed = True
+        _logger.warning(
+            "task graph requires recovery: graph=%s node=%s code=%s fence=%s",
+            graph_id,
+            node.node_id,
+            cause.code.value,
+            lease_state.lease.fence,
+        )
         await self._notify(run)
 
     async def _heartbeat(
