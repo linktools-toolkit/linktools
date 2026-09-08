@@ -145,7 +145,7 @@ def _decode_custom_wire_values(
 
 
 def test_custom_wire_v1_fixture_and_additive_fields() -> None:
-    value = _load_json("runtime_custom_wire_v1.json")
+    value = _load_json("runtime_custom_wire_v2.json")
     assert isinstance(value, Mapping)
     expected = _custom_wire_values()
     assert value == expected
@@ -188,15 +188,6 @@ def test_generic_v1_envelope_tolerates_additive_dataclass_fields() -> None:
     assert decoded == value
 
 
-def test_workspace_tool_semantics_match_v1_fixture(tmp_path: Path) -> None:
-    expected = _load_json("workspace_tool_semantics_v1.json")
-    actual = {
-        contribution.id: contribution.semantic_contract
-        for contribution in workspace_tool_contributions(Workspace.load(tmp_path))
-    }
-    assert actual == expected
-
-
 def test_workspace_tool_pin_excludes_runtime_capability_provenance(tmp_path: Path) -> None:
     contribution = workspace_tool_contributions(Workspace.load(tmp_path))[0]
     pin = SemanticPin(
@@ -230,7 +221,10 @@ async def test_workspace_tool_binding_restores_before_disabled_sandbox_materiali
         agents={spec.id: spec},
     )
     binding = compiler.bind(compiler.compile(spec))
-    baseline = cast(Mapping[str, object], _load_json("workspace_tool_semantics_v1.json"))
+    baseline = {
+        contribution.id: contribution.semantic_contract
+        for contribution in candidates
+    }
     assert len(binding.snapshot.selected) == 1
     pin = binding.snapshot.selected[0]
     assert pin.kind == "tool"
@@ -244,7 +238,9 @@ async def test_workspace_tool_binding_restores_before_disabled_sandbox_materiali
     ).restore(binding.snapshot)
     assert restored.snapshot == binding.snapshot
     selected = tuple(candidate.id for candidate in restored.definition.selected_tools)
-    capability = workspace_capabilities(workspace, selected)[0]
+    with pytest.raises(AIError) as missing_session:
+        workspace_capabilities(workspace, selected)
+    assert missing_session.value.code is ErrorCode.SANDBOX_SESSION_CLOSED
     with pytest.raises(AIError) as raised:
-        await capability.toolset.for_run(None)  # type: ignore[attr-defined,arg-type]
+        await workspace.sandbox.open(root=workspace.root)  # type: ignore[union-attr]
     assert raised.value.code is ErrorCode.SANDBOX_UNAVAILABLE

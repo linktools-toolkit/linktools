@@ -19,7 +19,7 @@ from linktools.ai.runtime._history import _trace_item
 from linktools.ai.runtime._metric_id import _tool_observation_id
 from linktools.ai.task import TaskEvent, TaskEventType
 from linktools.ai.task._metrics import _TaskMetricProjector
-from pydantic_ai_harness.step_persistence import StepEvent
+from linktools.ai.runtime.state import StepEvent
 
 
 class _Recorder:

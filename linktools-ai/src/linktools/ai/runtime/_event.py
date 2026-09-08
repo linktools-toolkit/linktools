@@ -22,7 +22,7 @@ from ..core import (
 )
 from ..errors import AIError, ErrorCode
 from .service_api import ExecutionEvent, ExecutionStreamEvent
-from .state._contracts import EventRepository, ExecutionRepository
+from .state import EventRepository, ExecutionRepository
 
 _logger = environ.get_logger("ai.runtime.event")
 _DEFAULT_BUFFER_BYTES = 1024 * 1024

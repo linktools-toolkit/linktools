@@ -134,15 +134,30 @@ For downstream declaration formats or custom kinds such as `worker` or `audit`, 
 
 Workspace filesystem and shell tool effects run through the public `Sandbox` / `SandboxSession` boundary. Inject a custom implementation with `Workspace(..., sandbox=...)`, `Workspace.load(..., sandbox=...)`, or `Workspace.discover(..., sandbox=...)`.
 
-When `sandbox=None`, LinkTools uses its built-in local adapter. That adapter delegates actual filesystem/process operations to the local Harness implementation, but LinkTools owns the stable model-visible workspace tool signatures, descriptions, metadata, and durable semantic pins.
+When `sandbox=None`, LinkTools uses its built-in local adapter. LinkTools owns
+the stable model-visible workspace tool signatures, descriptions, metadata, and
+durable semantic pins.
 
 A run with no selected workspace filesystem/shell tools does not open a sandbox. Otherwise the run opens exactly one `SandboxSession`; filesystem tools, foreground shell commands, and background `start/check/stop` commands share that session, which is closed when the model run succeeds, fails, or is cancelled.
 
 Use `DisabledSandbox` to keep workspace tool declarations and historical binding recovery available while making runtime workspace tool materialization fail with `SANDBOX_UNAVAILABLE`. A custom Sandbox failure does not fall back to the local host environment.
 
-Sandbox v1 virtualizes only workspace filesystem and shell tool effects. Runtime state, `AssetStore`, Skill loading, and repository-instruction discovery are not automatically moved into a remote Sandbox. A remote implementation must therefore expose the intended logical project tree itself; LinkTools does not provide project-tree synchronization for an unsynchronized remote Sandbox in v1.
+`LocalSandbox` runs with the workspace as its current directory and is an
+execution boundary, not an operating-system security boundary. On Linux,
+`BubblewrapSandbox` is an explicit deployment choice. It requires a non-root
+user, usable unprivileged namespaces, `bwrap >= 0.12.0`, and a trusted
+read-only runtime rootfs containing the same LinkTools build and Python >=
+3.10. It has no automatic Local fallback. Bubblewrap isolates only Session
+file/command execution; the host Agent, model requests, Python custom tools,
+and MCP remain outside it. Its network namespace provides Session loopback and
+no external route, but shared workspace files and explicitly shared IPC remain
+outside that guarantee.
 
-The built-in local Sandbox is an execution boundary, not a claim of container- or VM-level operating-system isolation.
+Selected local Skills are exposed as read-only `SandboxResource` directories at
+`/skills/<key>` in Bubblewrap and at their validated host location in Local
+sessions. The mapping is derived for the current run and is not persisted into
+Skill declarations. Background command state is ephemeral and is cleaned up
+with the Session; it is not a cross-run service.
 
 ## 4. Agent selection and capability policy
 
@@ -242,7 +257,13 @@ Built-in Runtime state supports in-memory, filesystem, SQLite, and SQL compositi
 
 SQLite-backed Runtime state supports the built-in durable TaskGraph scheduler without a SQLite-specific launcher or an external lock. Normal internal Task optimistic-CAS races are reread and converged by the Task domain. Durable ToolOperation terminal persistence is also lease-aware: a same-lease heartbeat racing terminal persistence is reconciled without replaying the tool effect. Genuine ownership, fence, idempotency, tool-result, effect-unknown, integrity, and storage errors remain observable. Runtime startup still does not provision or migrate database schemas; schema provisioning remains an explicit deployment step.
 
-Durable local execution and recovery are provided by Runtime state and recovery checkpoints and do not require an external workflow server.
+Durable local execution and recovery are provided by Runtime state and recovery
+checkpoints and do not require an external workflow server. Memory mutation
+receipts and per-file physical CAS sequences are committed with the Memory
+change, so delete/recreate cannot reuse an older physical version. Model
+requests use one request sequence and purpose (`agent` or `compaction`) across
+journal, trace, and optional metrics; compaction is one bounded native request
+and never rewrites the original transcript.
 
 ## 8. Execution failure diagnostics
 

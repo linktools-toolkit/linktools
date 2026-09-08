@@ -27,7 +27,7 @@ async def test_cancelled_step_flight_finishes_before_waiters_resume() -> None:
     flight = _RunDurabilityFlight(
         "run",
         "token",
-        _RunDurabilityKind.TOOL_EFFECT,
+        _RunDurabilityKind.PROJECTION,
         loop.create_future(),
     )
     store._durability_flights[flight.run_id] = flight
@@ -84,7 +84,7 @@ async def test_step_flight_fences_only_after_real_unresolved_readback() -> None:
     flight = _RunDurabilityFlight(
         "run",
         "token",
-        _RunDurabilityKind.TOOL_EFFECT,
+        _RunDurabilityKind.PROJECTION,
         loop.create_future(),
     )
     store._durability_flights[flight.run_id] = flight

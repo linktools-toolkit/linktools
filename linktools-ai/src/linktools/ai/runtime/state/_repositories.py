@@ -42,10 +42,8 @@ from ...storage import ObjectRef, StoredPayload
 from ...task import (
     TaskGraphView,
     TaskNodeView,
-    TaskResultRecord,
-    TaskTerminalRecord,
 )
-from .._tool import ToolOperationRecord
+from ._contracts import ToolOperationRecord
 from ._codec import (
     _decode_enveloped_domain,
     _encode_persisted_domain,
@@ -90,7 +88,6 @@ from ._contracts import (
     TranscriptHeadRecord,
     TranscriptOwnerDomain,
 )
-from ._durability import CommitObservation, DurableCommitState, run_durable_commit
 from ._history_index import (
     build_fork_index_node_from_roots,
 )
@@ -250,9 +247,17 @@ class _RepositoryBase:
         cursor: str | None = None,
         limit: int | None = None,
     ) -> tuple[StoredRecord, ...]:
+        if limit is not None and (
+            isinstance(limit, bool)
+            or not isinstance(limit, int)
+            or not 1 <= limit <= 1001
+        ):
+            raise AIError(ErrorCode.PAGE_LIMIT_INVALID)
         after_sort_key, after_key_digest = _decode_record_cursor(cursor)
-        return await self._store.read(
-            lambda transaction: transaction.list_records(
+        query_limit = None if limit is None else min(limit, 1000)
+
+        async def read(transaction: StateTransaction) -> tuple[StoredRecord, ...]:
+            records = await transaction.list_records(
                 RecordQuery(
                     partition_digest=(
                         self._partition(kind)
@@ -265,10 +270,36 @@ class _RepositoryBase:
                     states=states,
                     after_sort_key=after_sort_key,
                     after_key_digest=after_key_digest,
-                    limit=limit,
+                    limit=query_limit,
                 )
             )
-        )
+            if limit != 1001 or len(records) != 1000:
+                return records
+            last = records[-1]
+            probe = await transaction.list_records(
+                RecordQuery(
+                    partition_digest=(
+                        self._partition(kind)
+                        if scope is None and parent is None
+                        else None
+                    ),
+                    scope_digest=scope,
+                    parent_digest=parent,
+                    kind=kind,
+                    states=states,
+                    after_sort_key=last.sort_key,
+                    after_key_digest=last.key_digest,
+                    limit=1,
+                )
+            )
+            if probe and (
+                probe[0].sort_key,
+                probe[0].key_digest,
+            ) > (last.sort_key, last.key_digest):
+                return (*records, probe[0])
+            return records
+
+        return await self._store.read(read)
 
     async def _insert(self, record: StoredRecord) -> None:
         await self._store.mutate(lambda transaction: transaction.insert_record(record))
@@ -424,28 +455,39 @@ class OperationLedgerRepository(_RepositoryBase):
         _require_tenant(value, self._tenant_id)
 
         async def mutate(transaction: StateTransaction) -> OperationLedgerRecord:
-            key = operation_key(
-                self._namespace, self._tenant_id, self._domain.value, value.operation_id
-            )
-            existing = await transaction.get_operation(key)
-            if existing is not None:
-                current = _decode_operation(existing)
-                if _operation_matches(current, value):
-                    return current
-                raise AIError(ErrorCode.STORAGE_CONFLICT)
-            sequence = await transaction.next_sequence(
-                sequence_key(
-                    self._namespace,
-                    self._tenant_id,
-                    self._domain.value,
-                    "operation",
-                    [value.resource_kind.value, value.resource_id],
-                )
-            )
-            await transaction.insert_operation(self._stored_operation(value, sequence))
-            return _operation_record(value, sequence)
+            return await self.append_in_transaction(transaction, value)
 
         return await self._store.mutate(mutate)
+
+    async def append_in_transaction(
+        self,
+        transaction: StateTransaction,
+        value: OperationLedgerInput,
+    ) -> OperationLedgerRecord:
+        _require_tenant(value, self._tenant_id)
+        key = operation_key(
+            self._namespace,
+            self._tenant_id,
+            self._domain.value,
+            value.operation_id,
+        )
+        existing = await transaction.get_operation(key)
+        if existing is not None:
+            current = _decode_operation(existing)
+            if _operation_matches(current, value):
+                return current
+            raise AIError(ErrorCode.STORAGE_CONFLICT)
+        sequence = await transaction.next_sequence(
+            sequence_key(
+                self._namespace,
+                self._tenant_id,
+                self._domain.value,
+                "operation",
+                [value.resource_kind.value, value.resource_id],
+            )
+        )
+        await transaction.insert_operation(self._stored_operation(value, sequence))
+        return _operation_record(value, sequence)
 
     async def get(
         self, operation_id: str, *, tenant_id: str
@@ -1306,6 +1348,7 @@ class SessionRepositoryImpl(_ResourceRepository[SessionRecord]):
     ) -> tuple[int, Page[SessionRecord]]:
         if tenant_id != self._tenant_id:
             return 0, Page(())
+        _validate_page_limit(limit)
         scope = (
             None
             if owner_principal_id is None
@@ -1334,9 +1377,27 @@ class SessionRepositoryImpl(_ResourceRepository[SessionRecord]):
                     kind="session",
                     after_sort_key=after_sort_key,
                     after_key_digest=after_key_digest,
-                    limit=limit + 1,
+                    limit=min(limit + 1, 1000),
                 )
             )
+            if limit == 1000 and len(records) == 1000:
+                last = records[-1]
+                probe = await transaction.list_records(
+                    RecordQuery(
+                        partition_digest=(
+                            self._partition("session")
+                            if scope is None
+                            else None
+                        ),
+                        scope_digest=scope,
+                        kind="session",
+                        after_sort_key=last.sort_key,
+                        after_key_digest=last.key_digest,
+                        limit=1,
+                    )
+                )
+                if probe:
+                    records = (*records, probe[0])
             values = tuple(
                 [
                     await self._decode(record, SessionRecord)
@@ -3067,6 +3128,7 @@ class EventRepositoryImpl(_RepositoryBase):
     ) -> Page[ExecutionEventRecord]:
         if tenant_id != self._tenant_id:
             return Page(())
+        _validate_page_limit(limit)
         stream = stream_digest(
             self._namespace,
             self._tenant_id,
@@ -3076,9 +3138,25 @@ class EventRepositoryImpl(_RepositoryBase):
         )
         values = await self._store.read(
             lambda transaction: transaction.list_facts(
-                FactQuery(stream, after_sequence=after_sequence, limit=limit + 1)
+                FactQuery(
+                    stream,
+                    after_sequence=after_sequence,
+                    limit=min(limit + 1, 1000),
+                )
             )
         )
+        if limit == 1000 and len(values) == 1000:
+            extra = await self._store.read(
+                lambda transaction: transaction.list_facts(
+                    FactQuery(
+                        stream,
+                        after_sequence=values[-1].sequence,
+                        limit=1,
+                    )
+                )
+            )
+            if extra:
+                values = (*values, extra[0])
         items = tuple(
             ExecutionEventRecord(
                 execution_id,
@@ -3283,8 +3361,7 @@ class RecoveryCheckpointRepositoryImpl(_ResourceRepository[RecoveryCheckpoint]):
     ) -> Page[RecoveryCheckpoint]:
         if tenant_id != self._tenant_id:
             return Page(())
-        if not 1 <= limit <= 1000:
-            raise AIError(ErrorCode.PAGE_LIMIT_INVALID)
+        _validate_page_limit(limit)
 
         async def read(transaction: StateTransaction) -> Page[RecoveryCheckpoint]:
             after_sort_key, after_key_digest = _decode_record_cursor(cursor)
@@ -3294,9 +3371,22 @@ class RecoveryCheckpointRepositoryImpl(_ResourceRepository[RecoveryCheckpoint]):
                     kind="recovery_active",
                     after_sort_key=after_sort_key,
                     after_key_digest=after_key_digest,
-                    limit=limit + 1,
+                    limit=min(limit + 1, 1000),
                 )
             )
+            if limit == 1000 and len(records) == 1000:
+                last = records[-1]
+                probe = await transaction.list_records(
+                    RecordQuery(
+                        partition_digest=self._partition("recovery_active"),
+                        kind="recovery_active",
+                        after_sort_key=last.sort_key,
+                        after_key_digest=last.key_digest,
+                        limit=1,
+                    )
+                )
+                if probe:
+                    records = (*records, probe[0])
             has_more = len(records) > limit
             selected = records[:limit]
             active_values = []
@@ -3951,72 +4041,94 @@ class MemoryRepositoryImpl(_ResourceRepository[MemoryRecord]):
             identity_field="memory_id",
         )
 
-    async def put(
-        self, record: MemoryRecord, *, expected_revision: int | None
-    ) -> MemoryRecord:
-        _require_tenant(record, self._tenant_id)
-
-        async def mutate(transaction: StateTransaction) -> MemoryRecord:
-            key = self._key("memory", record.memory_id)
-            current = await transaction.get_record(key)
-            if current is None:
-                if expected_revision not in (None, 0):
-                    raise AIError(ErrorCode.STORAGE_CONFLICT)
-                await transaction.insert_record(
-                    self._stored("memory", record.memory_id, record)
-                )
-                return record
-            value = await self._decode(current, MemoryRecord)
-            if expected_revision != value.revision:
-                raise AIError(ErrorCode.STORAGE_CONFLICT)
-            await _replace_checked(
-                transaction,
-                _projected_record(self, current, record),
-                current.storage_version,
-            )
-            return record
-
-        return await self._store.mutate(mutate)
-
-    async def put_with_operation(
+    async def apply_write(
         self,
         record: MemoryRecord,
         *,
         expected_revision: int | None,
-        operation: OperationLedgerInput | None,
+        expected_storage_version: int | None,
+        operation: OperationLedgerInput,
     ) -> tuple[MemoryRecord | None, bool]:
         _require_tenant(record, self._tenant_id)
-        if operation is not None:
-            _require_tenant(operation, self._tenant_id)
-        if operation is None:
-            return await self.put(record, expected_revision=expected_revision), False
+        _require_tenant(operation, self._tenant_id)
+        if (
+            operation.resource_kind is not ResourceKind.MEMORY
+            or operation.resource_id != record.memory_id
+            or operation.operation_kind is not OperationKind.MEMORY_WRITE
+        ):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
 
         async def mutate(
             transaction: StateTransaction,
         ) -> tuple[MemoryRecord | None, bool]:
-            _, replayed = await _append_operation(transaction, self, operation)
+            operation_record, replayed = await _reserve_operation(
+                transaction,
+                self,
+                operation,
+            )
+            if replayed:
+                return None, True
+            if operation_record is None:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             key = self._key("memory", record.memory_id)
             current = await transaction.get_record(key)
-            if replayed:
-                if current is None:
-                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                return await self._decode(current, MemoryRecord), True
             if current is None:
                 if expected_revision not in (None, 0):
                     raise AIError(ErrorCode.STORAGE_CONFLICT)
-                await transaction.insert_record(
-                    self._stored("memory", record.memory_id, record)
+                if expected_storage_version not in (None, 0):
+                    raise AIError(ErrorCode.STORAGE_CONFLICT)
+                physical_version = operation_record.sequence
+                next_value = replace(
+                    record,
+                    revision=physical_version,
+                    metadata={
+                        **record.metadata,
+                        "storage_version": physical_version,
+                    },
                 )
-                return record, False
-            value = await self._decode(current, MemoryRecord)
-            if expected_revision != value.revision:
-                raise AIError(ErrorCode.STORAGE_CONFLICT)
-            await _replace_checked(
+                await transaction.insert_record(
+                    replace(
+                        self._stored("memory", record.memory_id, next_value),
+                        storage_version=physical_version,
+                    )
+                )
+            else:
+                value = await self._decode(current, MemoryRecord)
+                if (
+                    isinstance(current.storage_version, bool)
+                    or current.storage_version < 1
+                    or value.revision != current.storage_version
+                ):
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                if expected_revision != value.revision:
+                    raise AIError(ErrorCode.STORAGE_CONFLICT)
+                if (
+                    expected_storage_version is None
+                    or expected_storage_version != current.storage_version
+                ):
+                    raise AIError(ErrorCode.STORAGE_CONFLICT)
+                if operation_record.sequence != current.storage_version + 1:
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                next_value = replace(
+                    record,
+                    revision=value.revision + 1,
+                    metadata={
+                        **record.metadata,
+                        "storage_version": current.storage_version + 1,
+                    },
+                )
+                await _replace_checked(
+                    transaction,
+                    _projected_record(self, current, next_value),
+                    current.storage_version,
+                )
+            await _insert_operation(
                 transaction,
-                _projected_record(self, current, record),
-                current.storage_version,
+                self,
+                operation,
+                operation_record.sequence,
             )
-            return record, False
+            return next_value, False
 
         return await self._store.mutate(mutate)
 
@@ -4030,6 +4142,7 @@ class MemoryRepositoryImpl(_ResourceRepository[MemoryRecord]):
     ) -> Page[MemoryRecord]:
         if tenant_id != self._tenant_id:
             return Page(())
+        _validate_page_limit(limit)
         records = await self._records(
             "memory",
             scope=self._scope("memory", "memory_scope", memory_scope_digest),
@@ -4044,59 +4157,94 @@ class MemoryRepositoryImpl(_ResourceRepository[MemoryRecord]):
         )
         return Page(values, next_cursor)
 
-    async def delete(
-        self, memory_id: str, *, tenant_id: str, expected_revision: int
-    ) -> None:
-        if tenant_id != self._tenant_id:
-            raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
-
-        async def mutate(transaction: StateTransaction) -> None:
-            key = self._key("memory", memory_id)
-            current = await transaction.get_record(key)
-            if current is None:
-                raise AIError(ErrorCode.STORAGE_CONFLICT)
-            value = await self._decode(current, MemoryRecord)
-            if value.revision != expected_revision:
-                raise AIError(ErrorCode.STORAGE_CONFLICT)
-            if not await transaction.delete_record(
-                key,
-                expected_storage_version=current.storage_version,
-            ):
-                raise AIError(ErrorCode.STORAGE_CONFLICT)
-
-        await self._store.mutate(mutate)
-
-    async def delete_with_operation(
+    async def apply_delete(
         self,
         memory_id: str,
         *,
         tenant_id: str,
         expected_revision: int | None,
-        operation: OperationLedgerInput | None,
+        expected_storage_version: int | None,
+        operation: OperationLedgerInput,
     ) -> tuple[bool, bool]:
         if tenant_id != self._tenant_id:
             raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
-        if operation is not None:
-            _require_tenant(operation, self._tenant_id)
+        _require_tenant(operation, self._tenant_id)
+        if (
+            operation.resource_kind is not ResourceKind.MEMORY
+            or operation.resource_id != memory_id
+            or operation.operation_kind is not OperationKind.MEMORY_DELETE
+        ):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
 
         async def mutate(transaction: StateTransaction) -> tuple[bool, bool]:
-            replayed = False
-            if operation is not None:
-                _, replayed = await _append_operation(transaction, self, operation)
+            operation_record, replayed = await _reserve_operation(
+                transaction,
+                self,
+                operation,
+            )
+            if replayed:
+                return _memory_delete_replay_result(operation_record), True
+            if operation_record is None:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             key = self._key("memory", memory_id)
             current = await transaction.get_record(key)
-            if replayed:
-                return current is not None, True
             if current is None:
+                if expected_revision not in (None, 0) or expected_storage_version not in (
+                    None,
+                    0,
+                ):
+                    raise AIError(ErrorCode.STORAGE_CONFLICT)
+                await _insert_operation(
+                    transaction,
+                    self,
+                    operation,
+                    operation_record.sequence,
+                )
+                return False, False
+            # A zero revision represents a completed missing-read observation.
+            if expected_revision == 0 and expected_storage_version in (None, 0):
+                value = await self._decode(current, MemoryRecord)
+                if (
+                    isinstance(current.storage_version, bool)
+                    or current.storage_version < 1
+                    or value.revision != current.storage_version
+                    or operation_record.sequence != current.storage_version + 1
+                ):
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                await _insert_operation(
+                    transaction,
+                    self,
+                    operation,
+                    operation_record.sequence,
+                )
                 return False, False
             value = await self._decode(current, MemoryRecord)
-            if expected_revision is not None and value.revision != expected_revision:
+            if (
+                isinstance(current.storage_version, bool)
+                or current.storage_version < 1
+                or value.revision != current.storage_version
+            ):
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            if expected_revision is None or value.revision != expected_revision:
                 raise AIError(ErrorCode.STORAGE_CONFLICT)
+            if (
+                expected_storage_version is None
+                or current.storage_version != expected_storage_version
+            ):
+                raise AIError(ErrorCode.STORAGE_CONFLICT)
+            if operation_record.sequence != current.storage_version + 1:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             if not await transaction.delete_record(
                 key,
                 expected_storage_version=current.storage_version,
             ):
                 raise AIError(ErrorCode.STORAGE_CONFLICT)
+            await _insert_operation(
+                transaction,
+                self,
+                operation,
+                operation_record.sequence,
+            )
             return True, False
 
         return await self._store.mutate(mutate)
@@ -4143,6 +4291,7 @@ class ArtifactRepositoryImpl(_ResourceRepository[ArtifactRecord]):
     ) -> Page[ArtifactRecord]:
         if tenant_id != self._tenant_id:
             return Page(())
+        _validate_page_limit(limit)
         records = await self._records(
             "artifact",
             scope=self._scope("artifact", "execution", execution_id),
@@ -4259,6 +4408,7 @@ class ToolRepositoryImpl(_RepositoryBase):
                     error_code=None,
                     created_at=now,
                     updated_at=now,
+                    arguments_payload=request.arguments_payload,
                 )
                 await transaction.insert_record(
                     self._stored(
@@ -4520,6 +4670,30 @@ class ToolRepositoryImpl(_RepositoryBase):
             )
 
         return await self._store.read(read)
+
+    async def list_by_step_run(
+        self,
+        step_run_id: str,
+        *,
+        tenant_id: str,
+    ) -> tuple[ToolOperationRecord, ...]:
+        if tenant_id != self._tenant_id:
+            return ()
+        if not isinstance(step_run_id, str) or not step_run_id:
+            raise ValueError("step_run_id must be a non-empty string")
+        records = await self._records(
+            "tool_operation",
+            scope=self._scope("tool_operation", "step_run", step_run_id),
+        )
+        values = tuple(
+            [await self._decode(record, ToolOperationRecord) for record in records]
+        )
+        if any(
+            value.tenant_id != self._tenant_id or value.step_run_id != step_run_id
+            for value in values
+        ):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        return values
 
     async def claim(
         self, tool_operation_id: str, *, tenant_id: str, owner: str, lease_seconds: int
@@ -5174,6 +5348,25 @@ async def _append_operation(
     repository: _RepositoryBase,
     value: OperationLedgerInput,
 ) -> tuple[OperationLedgerRecord, bool]:
+    operation, replayed = await _reserve_operation(transaction, repository, value)
+    if operation is None:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    if replayed:
+        return operation, True
+    await _insert_operation(
+        transaction,
+        repository,
+        value,
+        operation.sequence,
+    )
+    return operation, False
+
+
+async def _reserve_operation(
+    transaction: StateTransaction,
+    repository: _RepositoryBase,
+    value: OperationLedgerInput,
+) -> tuple[OperationLedgerRecord | None, bool]:
     key = operation_key(
         repository._namespace,
         repository._tenant_id,
@@ -5186,13 +5379,6 @@ async def _append_operation(
         if _operation_matches(current, value):
             return current, True
         raise AIError(ErrorCode.STORAGE_CONFLICT)
-    stream = stream_digest(
-        repository._namespace,
-        repository._tenant_id,
-        repository._domain.value,
-        "operation",
-        [value.resource_kind.value, value.resource_id],
-    )
     sequence = await transaction.next_sequence(
         sequence_key(
             repository._namespace,
@@ -5202,22 +5388,85 @@ async def _append_operation(
             [value.resource_kind.value, value.resource_id],
         )
     )
+    return _operation_record(value, sequence), False
+
+
+async def _insert_operation(
+    transaction: StateTransaction,
+    repository: _RepositoryBase,
+    value: OperationLedgerInput,
+    sequence: int,
+) -> None:
+    key = operation_key(
+        repository._namespace,
+        repository._tenant_id,
+        repository._domain.value,
+        value.operation_id,
+    )
     await transaction.insert_operation(
         StoredOperation(
             key,
-            stream,
+            stream_digest(
+                repository._namespace,
+                repository._tenant_id,
+                repository._domain.value,
+                "operation",
+                [value.resource_kind.value, value.resource_id],
+            ),
             sequence,
             value.status.value,
             value.compactable,
             _domain_data(value),
         )
     )
-    return _operation_record(value, sequence), False
 
 
 def _decode_operation(value: StoredOperation) -> OperationLedgerRecord:
     candidate = _decode_enveloped_domain(value.data, OperationLedgerInput)
     return _operation_record(candidate, value.sequence)  # type: ignore[arg-type]
+
+
+def _memory_delete_replay_result(operation: OperationLedgerRecord | None) -> bool:
+    if (
+        operation is None
+        or operation.status is not OperationStatus.SUCCEEDED
+        or operation.result_ref is None
+    ):
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    try:
+        value = json.loads(operation.result_ref)
+        if (
+            not isinstance(value, dict)
+            or set(value) != {"version", "result"}
+            or isinstance(value.get("version"), bool)
+            or not isinstance(value.get("version"), int)
+            or value.get("version") < 1
+        ):
+            raise ValueError("memory delete receipt is invalid")
+        if value["version"] != 2:
+            raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
+        if not isinstance(value.get("result"), dict):
+            raise ValueError("memory delete receipt is invalid")
+        result = value["result"]
+        if (
+            set(result) != {"file", "version", "status"}
+            or not isinstance(result["file"], str)
+            or result["version"] is not None
+            or result["status"] not in {"deleted", "not_found"}
+        ):
+            raise ValueError("memory delete receipt is invalid")
+    except (KeyError, TypeError, ValueError, json.JSONDecodeError) as error:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
+    return result["status"] == "deleted"
+
+
+def _validate_page_limit(limit: int) -> None:
+    if (
+        isinstance(limit, bool)
+        or not isinstance(limit, int)
+        or not 1 <= limit <= 1000
+    ):
+        raise AIError(ErrorCode.PAGE_LIMIT_INVALID)
 
 
 def _operation_record(
@@ -5304,6 +5553,10 @@ def _tool_replay_matches(left: ToolOperationRecord, right: ToolOperationRecord) 
         and left.idempotency_key_digest == right.idempotency_key_digest
         and left.tool_name == right.tool_name
         and left.arguments_digest == right.arguments_digest
+        and _tool_argument_payloads_match(
+            left.arguments_payload,
+            right.arguments_payload,
+        )
         and left.binding_digest == right.binding_digest
         and left.replay_safe == right.replay_safe
     )
@@ -5319,10 +5572,23 @@ def _tool_admission_matches(
         and left.idempotency_key_digest == right.idempotency_key_digest
         and left.tool_name == right.tool_name
         and left.arguments_digest == right.arguments_digest
+        and _tool_argument_payloads_match(
+            left.arguments_payload,
+            right.arguments_payload,
+        )
         and left.binding_digest == right.binding_digest
         and left.replay_safe is right.replay_safe
         and left.step_run_id in {right.step_run_id, right.recovery_step_run_id}
     )
+
+
+def _tool_argument_payloads_match(
+    left: StoredPayload | None,
+    right: StoredPayload | None,
+) -> bool:
+    if right is None:
+        return left is None
+    return left is not None and left.digest == right.digest and left.size == right.size
 
 
 def _execution_replay_matches(left: ExecutionRecord, right: ExecutionRecord) -> bool:

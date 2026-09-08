@@ -6,7 +6,6 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-from pydantic_ai.exceptions import ModelRetry
 from pydantic_ai.messages import ModelRequest, ModelResponse, ToolCallPart, ToolReturnPart
 from pydantic_ai.tools import ToolDefinition
 
@@ -72,7 +71,7 @@ def _gate(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(("tool_name", "tool_class"), _TOOL_CLASSES)
-async def test_empty_path_uses_root_for_instruction_lookup_without_rewriting_args(
+async def test_empty_path_uses_root_for_instruction_lookup_and_normalizes_args(
     tmp_path: Path,
     tool_name: str,
     tool_class: str,
@@ -93,12 +92,13 @@ async def test_empty_path_uses_root_for_instruction_lookup_without_rewriting_arg
     )
 
     assert resolver.calls == [(".", frozenset())]
-    assert result is args
+    assert result == {"path": "."}
+    assert result is not args
     assert args == {"path": ""}
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("path", ("\x00", "../outside", "bad\\path", "bad|path"))
+@pytest.mark.parametrize("path", ("\x00", "../outside", "bad\\path"))
 async def test_invalid_instruction_target_is_returned_to_model_without_resolver_call(
     tmp_path: Path,
     path: str,
@@ -111,7 +111,7 @@ async def test_invalid_instruction_target_is_returned_to_model_without_resolver_
     )
     args = {"path": path}
 
-    with pytest.raises(ModelRetry) as raised:
+    with pytest.raises(AIError) as raised:
         await gate.before_tool_execute(
             SimpleNamespace(tool_call_approved=False),  # type: ignore[arg-type]
             call=ToolCallPart(
@@ -123,10 +123,12 @@ async def test_invalid_instruction_target_is_returned_to_model_without_resolver_
             args=args,
         )
 
-    assert raised.value.message == (
-        "TOOL_RETRY_REQUIRED: workspace path is invalid or outside the workspace; "
-        "use a path within the workspace root and retry"
+    expected_code = (
+        ErrorCode.AUTHORIZATION_DENIED
+        if path == "../outside"
+        else ErrorCode.REQUEST_FIELD_INVALID
     )
+    assert raised.value.code is expected_code
     assert resolver.calls == []
     assert args == {"path": path}
 

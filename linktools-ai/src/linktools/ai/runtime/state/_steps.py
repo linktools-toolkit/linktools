@@ -14,12 +14,12 @@ from uuid import uuid4
 
 from linktools.core import environ
 from pydantic_ai.messages import ModelMessage
-from pydantic_ai_harness.step_persistence import (
+
+from ._step_contracts import (
     ContinuableSnapshot,
     RunRecord,
     StepEvent,
     StepStore,
-    ToolEffectRecord,
 )
 
 from ...errors import AIError, ErrorCode
@@ -78,7 +78,6 @@ from ._store import (
     sequence_key,
     sortable_timestamp,
     stream_digest,
-    subject_digest,
 )
 from ._views import (
     count_execution_transcript_items,
@@ -104,14 +103,6 @@ class _StepArchiveBatch(Protocol):
         self,
         run: RunRecord,
         snapshot: ContinuableSnapshot,
-        *,
-        execution_id: str | None = None,
-    ) -> None: ...
-
-    async def materialize_effect(
-        self,
-        run: RunRecord,
-        effect: ToolEffectRecord,
         *,
         execution_id: str | None = None,
     ) -> None: ...
@@ -221,7 +212,6 @@ class _RunDurabilityKind(str, Enum):
     __format__ = str.__format__
     PROJECTION = "projection"
     SNAPSHOT = "snapshot"
-    TOOL_EFFECT = "tool_effect"
     RECOVERY_MATERIALIZATION = "recovery_materialization"
     RELEASE = "release"
     TERMINAL = "terminal"
@@ -374,7 +364,6 @@ class StagingStepStore(StepStore):
         self._runs: dict[str, RunRecord] = {}
         self._events: dict[str, list[StepEvent]] = {}
         self._snapshots: dict[str, list[ContinuableSnapshot]] = {}
-        self._effects: dict[str, list[ToolEffectRecord]] = {}
         self._lock = asyncio.Lock()
         self._closed = False
 
@@ -453,25 +442,6 @@ class StagingStepStore(StepStore):
             include_interrupted=include_interrupted,
         )
 
-    async def record_tool_effect(
-        self,
-        record: ToolEffectRecord,
-        *,
-        execution_id: str | None = None,
-    ) -> None:
-        del execution_id
-        self._ensure_open()
-        async with self._lock:
-            self.record_tool_effect_local(record)
-
-    async def get_tool_effect(self, *, run_id: str, tool_call_id: str) -> ToolEffectRecord | None:
-        self._ensure_open()
-        return self.get_tool_effect_local(run_id, tool_call_id)
-
-    async def list_unresolved_tool_effects(self, *, run_id: str) -> list[ToolEffectRecord]:
-        self._ensure_open()
-        return self.list_unresolved_tool_effects_local(run_id)
-
     async def release_run(
         self,
         run_id: str,
@@ -529,45 +499,11 @@ class StagingStepStore(StepStore):
         latest = values[-1]
         return latest if include_interrupted or latest.state == "complete" else None
 
-    def record_tool_effect_local(self, record: ToolEffectRecord) -> None:
-        self._ensure_open()
-        if record.run_id not in self._runs:
-            raise AIError(ErrorCode.STORAGE_NOT_FOUND)
-        values = self._effects.setdefault(record.run_id, [])
-        if record not in values:
-            values.append(record)
-
-    def get_tool_effect_local(
-        self,
-        run_id: str,
-        tool_call_id: str,
-    ) -> ToolEffectRecord | None:
-        self._ensure_open()
-        return next(
-            (
-                value
-                for value in reversed(self._effects.get(run_id, ()))
-                if value.tool_call_id == tool_call_id
-            ),
-            None,
-        )
-
-    def list_unresolved_tool_effects_local(
-        self,
-        run_id: str,
-    ) -> list[ToolEffectRecord]:
-        self._ensure_open()
-        latest: dict[str, ToolEffectRecord] = {}
-        for value in self._effects.get(run_id, ()):
-            latest[value.tool_call_id] = value
-        return [value for value in latest.values() if value.status == "started"]
-
     def release_run_local(self, run_id: str) -> None:
         self._ensure_open()
         self._runs.pop(run_id, None)
         self._events.pop(run_id, None)
         self._snapshots.pop(run_id, None)
-        self._effects.pop(run_id, None)
 
     def capture_projection_local(
         self,
@@ -643,24 +579,6 @@ class InMemoryStepArchive(StagingStepStore):
             snapshots=(snapshot,),
             execution_id=execution_id,
         )
-
-    async def materialize_effect(
-        self,
-        run: RunRecord,
-        effect: ToolEffectRecord,
-        *,
-        execution_id: str | None = None,
-    ) -> None:
-        del execution_id
-        self._ensure_open()
-        async with self._lock:
-            previous = self._runs.get(run.run_id)
-            if previous is not None and previous != run:
-                raise AIError(ErrorCode.STORAGE_CONFLICT)
-            self._runs[run.run_id] = run
-            values = self._effects.setdefault(run.run_id, [])
-            if effect not in values:
-                values.append(effect)
 
     async def resolve_transcript_message_refs(
         self,
@@ -1107,14 +1025,23 @@ class StateStepArchive(StepStore):
                 overlap=overlap,
                 stored_message_count=len(working_messages),
             )
-            origins = self._message_origins(sources)
+            projection_messages = (
+                incoming
+                if snapshot.context_messages is None
+                else tuple(snapshot.context_messages)
+            )
+            projection_sources = self._projection_sources(
+                projection_messages,
+                incoming,
+                sources,
+            )
             projection = self._history.project_context(
                 owner_id,
-                snapshot.messages,
-                origins=origins,
-                sources=sources,
+                projection_messages,
+                origins=self._message_origins(projection_sources),
+                sources=projection_sources,
             )
-            self._validate_projection_sources(projection, sources)
+            self._validate_projection_sources(projection, projection_sources)
             projection = await self._history.prepare_projection(owner_id, projection)
             prepared.append(
                 PreparedStepSnapshot(
@@ -1125,6 +1052,7 @@ class StateStepArchive(StepStore):
                         snapshot.timestamp,
                         snapshot.state,
                         projection.digest,
+                        snapshot.context_messages is not None,
                     ),
                     chunks,
                     projection,
@@ -1146,6 +1074,36 @@ class StateStepArchive(StepStore):
             0,
             target_message_count,
         )
+
+    def _projection_sources(
+        self,
+        projection_messages: Sequence[ModelMessage],
+        incoming: Sequence[ModelMessage],
+        incoming_sources: Sequence[TranscriptMessageRef | None],
+    ) -> tuple[TranscriptMessageRef | None, ...]:
+        if len(incoming) != len(incoming_sources):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        by_identity: dict[int, list[int]] = {}
+        by_signature: dict[bytes, list[int]] = {}
+        for index, message in enumerate(incoming):
+            by_identity.setdefault(id(message), []).append(index)
+            signature = _exact_message_signature(message)
+            by_signature.setdefault(signature, []).append(index)
+        used: set[int] = set()
+        result: list[TranscriptMessageRef | None] = []
+        for message in projection_messages:
+            candidates = by_identity.get(id(message), [])
+            index = next((value for value in candidates if value not in used), None)
+            if index is None:
+                signature = _exact_message_signature(message)
+                candidates = by_signature.get(signature, [])
+                index = next((value for value in candidates if value not in used), None)
+            if index is None:
+                result.append(None)
+                continue
+            used.add(index)
+            result.append(incoming_sources[index])
+        return tuple(result)
 
     def _validate_projection_sources(
         self,
@@ -1634,60 +1592,6 @@ class StateStepArchive(StepStore):
             history_head_guard=history_head_guard,
         )
 
-    async def materialize_effect(
-        self,
-        run: RunRecord,
-        effect: ToolEffectRecord,
-        *,
-        execution_id: str | None = None,
-    ) -> None:
-        self._ensure_open()
-        require_no_run_history_lock("StateStepArchive.materialize_effect")
-        await self._store.mutate(
-            lambda transaction: self._materialize_effect_in_transaction(
-                transaction,
-                run,
-                effect,
-                execution_id=execution_id,
-            )
-        )
-
-    async def _materialize_effect_in_transaction(
-        self,
-        transaction: StateTransaction,
-        run: RunRecord,
-        effect: ToolEffectRecord,
-        *,
-        execution_id: str | None = None,
-        history_head_guard: tuple[ExecutionHistoryHeadRecord, StoredRecord] | None = None,
-    ) -> None:
-        supplied_history_head_guard = history_head_guard is not None
-        history_head_guard = await self._execution_history_guard_in_transaction(
-            transaction,
-            execution_id,
-            history_head_guard,
-        )
-        if await self._has_existing_fact_in_transaction(
-            transaction,
-            run,
-            "effect",
-            effect,
-            effect.status,
-        ):
-            return
-        await self._materialize_fact_in_transaction(
-            transaction,
-            run,
-            "effect",
-            effect,
-            effect.status,
-        )
-        if history_head_guard is not None and not supplied_history_head_guard:
-            await self._advance_execution_history_head_in_transaction(
-                transaction,
-                history_head_guard,
-            )
-
     async def _materialize_fact_in_transaction(
         self,
         transaction: StateTransaction,
@@ -1701,7 +1605,6 @@ class StateStepArchive(StepStore):
         subject = _step_subject(value)
         fact_kind = {
             "snapshot": "step_snapshot",
-            "effect": "step_effect",
         }[family]
         data = _encode_step(value)
 
@@ -1798,26 +1701,6 @@ class StateStepArchive(StepStore):
             )
         )
         return any(fact.data == data and fact.state == kind for fact in existing)
-
-    async def materialize_effect_in_transaction(
-        self,
-        transaction: StateTransaction,
-        run: RunRecord,
-        effect: ToolEffectRecord,
-        *,
-        execution_id: str | None = None,
-        history_head_guard: tuple[ExecutionHistoryHeadRecord, StoredRecord] | None = None,
-    ) -> None:
-        require_no_run_history_lock(
-            "StateStepArchive.materialize_effect_in_transaction"
-        )
-        await self._materialize_effect_in_transaction(
-            transaction,
-            run,
-            effect,
-            execution_id=execution_id,
-            history_head_guard=history_head_guard,
-        )
 
     async def append_event(
         self,
@@ -1987,12 +1870,19 @@ class StateStepArchive(StepStore):
         if projection is None or projection.digest != stored.projection_digest:
             return False
         context = await self._history.load_model_context(run_id)
+        expected_messages = (
+            snapshot.messages
+            if snapshot.context_messages is None
+            else snapshot.context_messages
+        )
         return (
             stored.run_id == snapshot.run_id
             and stored.step_index == snapshot.step_index
             and stored.timestamp == snapshot.timestamp
             and stored.state == snapshot.state
-            and context.model_messages() == tuple(snapshot.messages)
+            and stored.has_context_projection
+            == (snapshot.context_messages is not None)
+            and context.model_messages() == tuple(expected_messages)
         )
 
     async def save_snapshot(
@@ -2020,68 +1910,28 @@ class StateStepArchive(StepStore):
         if not isinstance(latest, StoredStepSnapshot):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         messages = (await self._history.load_model_context(run_id)).model_messages()
+        raw_messages = tuple(
+            [message async for message in self._history.iter_raw_messages(run_id)]
+        )
+        if not raw_messages:
+            raw_messages = tuple(messages)
         run = await self.get_run(run_id=run_id)
         if run is None:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         latest = ContinuableSnapshot(
             run_id=latest.run_id,
             step_index=latest.step_index,
-            messages=list(messages),
+            messages=list(raw_messages),
             conversation_id=run.conversation_id,
             parent_run_id=run.parent_run_id,
             agent_name=run.agent_name,
             timestamp=latest.timestamp,
             state=latest.state,
+            context_messages=(
+                list(messages) if latest.has_context_projection else None
+            ),
         )
         return latest if include_interrupted or latest.state == "complete" else None
-
-    async def record_tool_effect(
-        self,
-        record: ToolEffectRecord,
-        *,
-        execution_id: str | None = None,
-    ) -> None:
-        require_no_run_history_lock("StateStepArchive.record_tool_effect")
-        await self._append(
-            record.run_id,
-            "effect",
-            record,
-            record.status,
-            execution_id=execution_id,
-        )
-
-    async def get_tool_effect(self, *, run_id: str, tool_call_id: str) -> ToolEffectRecord | None:
-        require_no_run_history_lock("StateStepArchive.get_tool_effect")
-        return await self._store.read(
-            lambda transaction: self._get_tool_effect_in_transaction(
-                transaction,
-                run_id=run_id,
-                tool_call_id=tool_call_id,
-            )
-        )
-
-    async def _get_tool_effect_in_transaction(
-        self,
-        transaction: StateTransaction,
-        *,
-        run_id: str,
-        tool_call_id: str,
-    ) -> ToolEffectRecord | None:
-        values = await transaction.list_facts(
-            FactQuery(
-                self._stream(run_id, "effect"),
-                subject_digest=subject_digest(["tool_call", tool_call_id]),
-                latest=True,
-            )
-        )
-        return None if not values else _decode_step(values[0].data)
-
-    async def list_unresolved_tool_effects(self, *, run_id: str) -> list[ToolEffectRecord]:
-        require_no_run_history_lock(
-            "StateStepArchive.list_unresolved_tool_effects"
-        )
-        values = [_decode_step(value.data) for value in await self._facts(run_id, "effect", latest_per_subject=True)]
-        return [value for value in values if value.status == "started"]
 
     async def release_run(
         self,
@@ -2101,7 +1951,7 @@ class StateStepArchive(StepStore):
             await transaction.delete_sequences(
                 tuple(
                     self._sequence(run_id, family)
-                    for family in ("event", "snapshot", "effect")
+                    for family in ("event", "snapshot")
                 )
             )
             await self._advance_execution_history_head_in_transaction(
@@ -2131,7 +1981,6 @@ class StateStepArchive(StepStore):
         fact_kind = {
             "event": "step_event",
             "snapshot": "step_snapshot",
-            "effect": "step_effect",
         }[family]
         data = _encode_step(value)
 
@@ -2361,78 +2210,6 @@ class RuntimeStepStore(StepStore):
     async def latest_snapshot(self, *, run_id: str, include_interrupted: bool = False) -> ContinuableSnapshot | None:
         await self._ensure_business()
         return await self._staging.latest_snapshot(run_id=run_id, include_interrupted=include_interrupted)
-
-    async def record_tool_effect(
-        self,
-        record: ToolEffectRecord,
-        *,
-        execution_id: str | None = None,
-    ) -> None:
-        await self._ensure_business()
-        del execution_id
-        while True:
-            completion: asyncio.Future[None] | None = None
-            recovery: StepStore | None = None
-            recovery_run: RunRecord | None = None
-            flight: _RunDurabilityFlight | None = None
-            async with self._history_lock.hold(record.run_id):
-                existing = self._durability_flights.get(record.run_id)
-                if existing is not None:
-                    completion = existing.completion
-                else:
-                    self._ensure_run_mutable(record.run_id)
-                    self._staging.record_tool_effect_local(record)
-                    recovery = self._archives.get(RuntimeDomain.RECOVERY)
-                    recovery_run = self._staging.get_run_local(record.run_id)
-                    if recovery is not None:
-                        flight = self._install_durability_flight_locked(
-                            record.run_id,
-                            _RunDurabilityKind.TOOL_EFFECT,
-                        )
-            if completion is not None:
-                await asyncio.shield(completion)
-                continue
-            if recovery is None:
-                return
-            if recovery_run is None or flight is None:
-                raise AIError(ErrorCode.STORAGE_NOT_FOUND)
-
-            async def operation(
-                target_recovery: StepStore = recovery,
-                target_run: RunRecord = recovery_run,
-                target_record: ToolEffectRecord = record,
-            ) -> None:
-                await _materialize_effect(
-                    target_recovery,
-                    target_run,
-                    target_record,
-                )
-
-            async def readback(
-                target_recovery: StepStore = recovery,
-                target_record: ToolEffectRecord = record,
-            ) -> CommitObservation[None]:
-                try:
-                    observed = await target_recovery.get_tool_effect(
-                        run_id=target_record.run_id,
-                        tool_call_id=target_record.tool_call_id,
-                    )
-                except AIError as error:
-                    return CommitObservation(DurableCommitState.UNRESOLVED, error=error)
-                if observed == target_record:
-                    return CommitObservation(DurableCommitState.COMMITTED)
-                return CommitObservation(DurableCommitState.NOT_COMMITTED)
-
-            await self._settle_durability_flight(flight, operation, readback)
-            return
-
-    async def get_tool_effect(self, *, run_id: str, tool_call_id: str) -> ToolEffectRecord | None:
-        await self._ensure_business()
-        return await self._staging.get_tool_effect(run_id=run_id, tool_call_id=tool_call_id)
-
-    async def list_unresolved_tool_effects(self, *, run_id: str) -> list[ToolEffectRecord]:
-        await self._ensure_business()
-        return await self._staging.list_unresolved_tool_effects(run_id=run_id)
 
     def read_store(self, runtime_domain: RuntimeDomain) -> StepStore:
         if runtime_domain not in self._archives:
@@ -3584,25 +3361,6 @@ async def _sync_projection(
         await target.save_snapshot(snapshot, execution_id=execution_id)
 
 
-async def _materialize_effect(
-    target: StepStore,
-    run: RunRecord,
-    effect: ToolEffectRecord,
-    *,
-    execution_id: str | None = None,
-) -> None:
-    if isinstance(target, _StepArchiveBatch):
-        await target.materialize_effect(
-            run,
-            effect,
-            execution_id=execution_id,
-        )
-        return
-    if await target.get_run(run_id=run.run_id) is None:
-        await target.register_run(run, execution_id=execution_id)
-    await target.record_tool_effect(effect, execution_id=execution_id)
-
-
 async def _reserve_sequences(
     transaction: StateTransaction,
     key: bytes,
@@ -3648,8 +3406,6 @@ def _encode_step(value: object) -> dict[str, object]:
 
 
 def _step_subject(value: object) -> bytes | None:
-    if isinstance(value, ToolEffectRecord):
-        return subject_digest(["tool_call", value.tool_call_id])
     return None
 
 

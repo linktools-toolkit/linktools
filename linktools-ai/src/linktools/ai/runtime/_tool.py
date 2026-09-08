@@ -7,9 +7,8 @@ import hashlib
 import json
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
-from datetime import datetime
 from enum import Enum
-from typing import TYPE_CHECKING, Any, Protocol
+from typing import Any, Protocol
 
 from linktools.core import environ
 from pydantic_ai.exceptions import ModelRetry, ToolFailedError, ToolRetryError
@@ -22,11 +21,12 @@ from pydantic_ai.messages import (
 from pydantic_ai.tools import RunContext, ToolDefinition
 
 from ..core import (
+    JsonValue,
     Principal,
     ResourceRef,
     ToolOperationStatus,
+    canonical_json_bytes,
     canonical_sha256,
-    validate_lease_owner,
     validate_tenant_id,
 )
 from ..errors import AIError, ErrorCode, ErrorDiagnostics
@@ -38,48 +38,29 @@ from ..storage import (
 )
 from ._message import decode_model_messages, encode_model_messages
 from ._object import RuntimeObjectKeyFactory, put_runtime_object, read_runtime_object
-from .state._contracts import ToolOperationAdmission
-from .state._durability import (
+from .state import (
     CommitObservation,
     DurableCommitState,
+    RuntimeDomain,
+    ToolOperationAdmission,
+    ToolOperationRecord,
     run_durable_commit,
 )
-from .state._plan import RuntimeDomain
-
-if TYPE_CHECKING:
-    from ._capabilities import ToolOperationDecision
 
 _logger = environ.get_logger("ai.runtime.tool")
 
 
 @dataclass(frozen=True, slots=True)
-class ToolOperationRecord:
-    tool_operation_id: str
-    tenant_id: str
-    step_run_id: str
-    tool_call_id: str
-    idempotency_key_digest: str
-    tool_name: str
-    arguments_digest: str
-    binding_digest: str
-    replay_safe: bool
-    status: ToolOperationStatus
-    owner: "str | None"
-    fence: int
-    lease_expires_at: "datetime | None"
-    error_code: "str | None"
-    created_at: datetime
-    updated_at: datetime
-    result_payload: "StoredPayload | None" = None
-    error_payload: "StoredPayload | None" = None
+class ToolOperationDecision:
+    """Admission result shared by every runtime-owned tool adapter."""
 
-    def __post_init__(self) -> None:
-        try:
-            validate_tenant_id(self.tenant_id)
-            if self.owner is not None:
-                validate_lease_owner(self.owner)
-        except AIError as error:
-            raise ValueError("tool operation lease identity is invalid") from error
+    operation_id: str
+    owner: str
+    fence: int
+    replay_safe: bool
+    cached_result: JsonValue = None
+    has_cached_result: bool = False
+    cached_error: BaseException | None = None
 
 
 class ToolStateRepository(Protocol):
@@ -112,6 +93,13 @@ class _ToolOperationRuntimeRepository(Protocol):
         *,
         tenant_id: str,
     ) -> "ToolOperationRecord | None": ...
+
+    async def list_by_step_run(
+        self,
+        step_run_id: str,
+        *,
+        tenant_id: str,
+    ) -> tuple[ToolOperationRecord, ...]: ...
 
     async def mark_effect_unknown(
         self,
@@ -249,6 +237,7 @@ class RuntimeToolOperationBridge:
         self._recovery_step_run_id = recovery_step_run_id
         self._terminal_commands = terminal_commands
         self._decisions: dict[tuple[str, str], ToolOperationDecision] = {}
+        self._decision_fingerprints: dict[tuple[str, str], tuple[str, str]] = {}
         self._lease_seconds = 60
 
     async def begin(
@@ -262,17 +251,23 @@ class RuntimeToolOperationBridge:
         if not isinstance(replay_safe, bool):
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
         key = (self._run_id(ctx), call.tool_call_id)
+        arguments_digest = canonical_sha256(args)
+        fingerprint = (tool_def.name, arguments_digest)
         prior = self._decisions.get(key)
         if prior is not None:
-            if prior.replay_safe is not replay_safe:
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            if (
+                prior.replay_safe is not replay_safe
+                or self._decision_fingerprints.get(key) != fingerprint
+            ):
+                raise AIError(ErrorCode.IDEMPOTENCY_CONFLICT)
             return prior
-        arguments_digest = canonical_sha256(args)
+        arguments_payload = await self._arguments_payload(args)
         replay_step_run_id = self._recovery_step_run_id or self._run_id(ctx)
         operation_id = canonical_sha256(
             {
                 "tenant_id": self._tenant_id,
-                "step_run_id": self._run_id(ctx),
+                "execution_id": self._execution_id,
+                "step_run_id": replay_step_run_id,
                 "tool_call_id": call.tool_call_id,
                 "tool_name": tool_def.name,
                 "arguments_digest": arguments_digest,
@@ -286,7 +281,13 @@ class RuntimeToolOperationBridge:
             recovery_step_run_id=self._recovery_step_run_id,
             tool_call_id=call.tool_call_id,
             idempotency_key_digest=canonical_sha256(
-                {"step_run_id": replay_step_run_id, "tool_call_id": call.tool_call_id}
+                {
+                    "execution_id": self._execution_id,
+                    "step_run_id": replay_step_run_id,
+                    "tool_call_id": call.tool_call_id,
+                    "tool_name": tool_def.name,
+                    "arguments_digest": arguments_digest,
+                }
             ),
             tool_name=tool_def.name,
             arguments_digest=arguments_digest,
@@ -294,6 +295,7 @@ class RuntimeToolOperationBridge:
             replay_safe=replay_safe,
             owner=self._owner,
             lease_seconds=self._lease_seconds,
+            arguments_payload=arguments_payload,
         )
         if self._terminal_commands is not None:
             existing = await self._terminal_commands.commit_tool_admission(admission)
@@ -301,6 +303,7 @@ class RuntimeToolOperationBridge:
             existing = await self._repository.admit(admission)
         decision = await self._decision_from_record(existing, replay_safe)
         self._decisions[key] = decision
+        self._decision_fingerprints[key] = fingerprint
         _logger.debug(
             "tool operation admitted: execution=%s run=%s tool=%s call=%s operation=%s status=%s",
             self._execution_id,
@@ -321,13 +324,17 @@ class RuntimeToolOperationBridge:
             tenant_id=self._tenant_id,
         )
 
+    async def list_operations(self) -> tuple[ToolOperationRecord, ...]:
+        return await self._repository.list_by_step_run(
+            self._step_run_id,
+            tenant_id=self._tenant_id,
+        )
+
     async def _decision_from_record(
         self,
         existing: ToolOperationRecord,
         replay_safe: bool,
     ) -> "ToolOperationDecision":
-        from ._capabilities import ToolOperationDecision
-
         if existing.replay_safe is not replay_safe:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         if existing.status is ToolOperationStatus.COMPLETED:
@@ -380,7 +387,16 @@ class RuntimeToolOperationBridge:
         decision: "ToolOperationDecision",
         result: Any,
     ) -> bool:
-        payload = await self._result_payload(decision, result)
+        try:
+            payload = await self._result_payload(decision, result)
+        except BaseException as error:
+            _logger.error(
+                "tool result encoding failed after execution: execution=%s operation=%s",
+                self._execution_id,
+                decision.operation_id,
+            )
+            await self.unknown(decision, error)
+            raise
 
         async def finish() -> ToolOperationRecord:
             if self._terminal_commands is not None:
@@ -812,6 +828,9 @@ class RuntimeToolOperationBridge:
         )
         return StoredPayload.object(reference)
 
+    async def _arguments_payload(self, args: dict[str, Any]) -> StoredPayload:
+        return await self._payload(canonical_json_bytes(args))
+
     async def _json_payload(self, value: dict[str, object]) -> StoredPayload:
         data = json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
         return await self._payload(data)
@@ -842,8 +861,6 @@ def _decision_type(
     *,
     fence: int,
 ) -> "ToolOperationDecision":
-    from ._capabilities import ToolOperationDecision
-
     return ToolOperationDecision(
         decision.operation_id,
         decision.owner,

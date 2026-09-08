@@ -9,7 +9,7 @@ from ..core import AuthorizationAction, AuthorizationPolicy, ExternalCallStatus
 from ..errors import AIError, ErrorCode
 from ..storage import ObjectRef
 from .service_api import ExternalSupplyRequest, ExternalSupplyResult
-from .state._contracts import ExternalCallRecord, RecoveryState
+from .state import ExternalCallRecord, RecoveryState
 
 
 class DefaultExternalService:

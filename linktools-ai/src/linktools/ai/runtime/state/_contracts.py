@@ -36,12 +36,15 @@ from ...core import (
     ResourceRef,
     SessionStatus,
     StopReason,
+    ToolOperationStatus,
     ThinkingValue,
     UsageMetrics,
     normalize_execution_mode,
     normalize_correlation,
     normalize_thinking,
     validate_agent_id,
+    validate_lease_owner,
+    validate_tenant_id,
 )
 from ...errors import AIError, ErrorCode, ErrorDiagnostics
 from ...storage import ObjectRef, StoredPayload
@@ -70,6 +73,14 @@ def _is_sha256(value: object) -> bool:
         and len(value) == 64
         and all(character in "0123456789abcdef" for character in value)
     )
+
+
+def _validate_tool_arguments_payload(
+    arguments_digest: str,
+    payload: StoredPayload | None,
+) -> None:
+    if payload is not None and payload.digest != arguments_digest:
+        raise ValueError("tool arguments payload does not match its digest")
 
 
 def _error_diagnostics_payload(diagnostics: ErrorDiagnostics) -> dict[str, JsonValue]:
@@ -304,6 +315,7 @@ class StoredStepSnapshot:
     timestamp: datetime
     state: str
     projection_digest: str
+    has_context_projection: bool = False
 
 
 class HistoryQuality(str, Enum):
@@ -681,6 +693,40 @@ class MemoryRecord:
     revision: int
     created_at: datetime
     updated_at: datetime
+
+
+@dataclass(frozen=True, slots=True)
+class ToolOperationRecord:
+    """Durable authority for one accepted model tool call."""
+
+    tool_operation_id: str
+    tenant_id: str
+    step_run_id: str
+    tool_call_id: str
+    idempotency_key_digest: str
+    tool_name: str
+    arguments_digest: str
+    binding_digest: str
+    replay_safe: bool
+    status: "ToolOperationStatus"
+    owner: str | None
+    fence: int
+    lease_expires_at: datetime | None
+    error_code: str | None
+    created_at: datetime
+    updated_at: datetime
+    arguments_payload: StoredPayload | None = None
+    result_payload: StoredPayload | None = None
+    error_payload: StoredPayload | None = None
+
+    def __post_init__(self) -> None:
+        _validate_tool_arguments_payload(self.arguments_digest, self.arguments_payload)
+        try:
+            validate_tenant_id(self.tenant_id)
+            if self.owner is not None:
+                validate_lease_owner(self.owner)
+        except AIError as error:
+            raise ValueError("tool operation lease identity is invalid") from error
 
 
 @dataclass(frozen=True, slots=True)
@@ -1541,6 +1587,10 @@ class ToolOperationAdmission:
     replay_safe: bool
     owner: str
     lease_seconds: int
+    arguments_payload: StoredPayload | None = None
+
+    def __post_init__(self) -> None:
+        _validate_tool_arguments_payload(self.arguments_digest, self.arguments_payload)
 
 
 @dataclass(frozen=True, slots=True)
@@ -1676,6 +1726,20 @@ class RecoveryCheckpointRepository(RuntimeRepository, Protocol):
 
 class OperationLedgerRepository(RuntimeRepository, Protocol):
     async def append(self, record: OperationLedgerInput) -> OperationLedgerRecord: ...
+
+    async def append_in_transaction(
+        self,
+        transaction: StateTransaction,
+        record: OperationLedgerInput,
+    ) -> OperationLedgerRecord: ...
+
+    async def get_in_transaction(
+        self,
+        transaction: StateTransaction,
+        operation_id: str,
+        *,
+        tenant_id: str,
+    ) -> OperationLedgerRecord | None: ...
     async def get(
         self, operation_id: str, *, tenant_id: str
     ) -> OperationLedgerRecord | None: ...
@@ -1803,15 +1867,13 @@ class MemoryRepository(RuntimeRepository, Protocol):
     async def get_header(
         self, memory_id: str, *, tenant_id: str
     ) -> ResourceRef | None: ...
-    async def put(
-        self, record: MemoryRecord, *, expected_revision: int | None
-    ) -> MemoryRecord: ...
-    async def put_with_operation(
+    async def apply_write(
         self,
         record: MemoryRecord,
         *,
         expected_revision: int | None,
-        operation: OperationLedgerInput | None,
+        expected_storage_version: int | None,
+        operation: OperationLedgerInput,
     ) -> tuple[MemoryRecord | None, bool]: ...
     async def get(self, memory_id: str, *, tenant_id: str) -> MemoryRecord | None: ...
     async def list(
@@ -1822,16 +1884,14 @@ class MemoryRepository(RuntimeRepository, Protocol):
         cursor: str | None,
         limit: int,
     ) -> Page[MemoryRecord]: ...
-    async def delete(
-        self, memory_id: str, *, tenant_id: str, expected_revision: int
-    ) -> None: ...
-    async def delete_with_operation(
+    async def apply_delete(
         self,
         memory_id: str,
         *,
         tenant_id: str,
         expected_revision: int | None,
-        operation: OperationLedgerInput | None,
+        expected_storage_version: int | None,
+        operation: OperationLedgerInput,
     ) -> tuple[bool, bool]: ...
 
 

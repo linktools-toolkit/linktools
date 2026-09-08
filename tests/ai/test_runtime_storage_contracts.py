@@ -29,7 +29,7 @@ from pydantic_ai.messages import ToolCallPart
 from pydantic_ai.models.test import TestModel
 from pydantic_ai.tools import RunContext, ToolDefinition
 from pydantic_ai.usage import RunUsage
-from pydantic_ai_harness.step_persistence import RunRecord
+from linktools.ai.runtime.state import RunRecord
 from sqlalchemy import event
 from sqlalchemy.dialects import mysql
 from sqlalchemy.ext.asyncio import create_async_engine
@@ -262,7 +262,6 @@ async def test_sqlite_parallel_tool_lifecycle_persists_each_terminal_effect(
             {"call_id": "call-b"},
         ]
 
-        recovery = state.steps.read_store(RuntimeDomain.RECOVERY)
         for call_id in call_ids:
             operation = await state.recovery.tools.get_by_call(
                 run_id,
@@ -272,12 +271,6 @@ async def test_sqlite_parallel_tool_lifecycle_persists_each_terminal_effect(
             assert operation is not None
             assert operation.status is ToolOperationStatus.COMPLETED
             assert operation.binding_digest == "a" * 64
-            effect = await recovery.get_tool_effect(
-                run_id=run_id,
-                tool_call_id=call_id,
-            )
-            assert effect is not None
-            assert effect.status == "completed"
     finally:
         await state.close()
 

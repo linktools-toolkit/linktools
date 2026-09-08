@@ -49,7 +49,7 @@ from linktools.ai.runtime.state._contracts import (
 )
 from linktools.ai.spec import AgentSpec
 from pydantic_ai.messages import ModelRequest, UserPromptPart
-from pydantic_ai_harness.step_persistence import ContinuableSnapshot, RunRecord
+from linktools.ai.runtime.state import ContinuableSnapshot, RunRecord
 
 
 def _binding() -> AgentBindingSnapshot:

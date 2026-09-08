@@ -30,7 +30,9 @@ class Command(BaseCommand):
             memory_scope = args.memory if args.memory is not None else workspace.workspace_id
             asyncio.run(ACPApplication.for_workspace(workspace).serve(memory_scope=memory_scope))
         except ModuleNotFoundError as error:
-            raise CommandError("ai acp requires pydantic-ai-harness and agent-client-protocol dependencies") from error
+            raise CommandError(
+                "ai acp requires the agent-client-protocol dependency"
+            ) from error
         except ValueError as error:
             raise CommandError(str(error)) from error
         return 0

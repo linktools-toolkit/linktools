@@ -27,7 +27,7 @@ from linktools.ai.workspace import DisabledSandbox
 @pytest.mark.asyncio
 async def test_disabled_sandbox_is_fail_closed() -> None:
     with pytest.raises(AIError) as error:
-        await DisabledSandbox().open()
+        await DisabledSandbox().open(root=Path("."))
     assert error.value.code is ErrorCode.SANDBOX_UNAVAILABLE
 
 

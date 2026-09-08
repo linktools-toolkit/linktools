@@ -8,7 +8,6 @@ import uuid
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
-from pathlib import Path
 from time import monotonic_ns
 from typing import Protocol, TypeVar, cast
 
@@ -16,16 +15,6 @@ from linktools.core import environ
 from pydantic import ValidationError
 from pydantic_ai.messages import ModelMessage, ModelRequest, ModelResponse, ToolCallPart, ToolReturnPart
 from pydantic_ai.tools import DeferredToolResults, ToolApproved, ToolDenied
-from pydantic_ai_harness.memory import SearchableMemoryStore
-from pydantic_ai_harness.step_persistence import (
-    ContinuableSnapshot,
-    RunRecord,
-    StepEvent,
-    StepStore,
-    ToolEffectRecord,
-    continue_run,
-    fork_run,
-)
 
 from ..agent import AgentBinding, AgentCatalog, SubagentRef
 from ..capability import AgentContext, SubagentDelegate
@@ -35,7 +24,6 @@ from ._agent_executor import (
     AgentExecutor,
     DurableBoundary,
     LiveDelta,
-    PendingToolApproval,
     _RunScope,
 )
 from ._capabilities import MEMORY_TOOL_NAMES, select_runtime_tool_names
@@ -54,7 +42,6 @@ from ..core import (
     OperationStatus,
     Principal,
     ResourceKind,
-    ResourceRef,
     SessionStatus,
     StopReason,
     ToolOperationStatus,
@@ -81,53 +68,55 @@ from ._metrics import (
     _record_storage_operation,
     _release_metric_execution_context,
 )
+from ._memory import MemoryStore
 from ._object import RuntimeObjectKeyFactory, put_runtime_object, read_runtime_object
 from ._tool import RuntimeToolOperationBridge, _ToolOperationRuntimeRepository
 from .service_api import ExecutionRequest, ToolApprovalContext
 from .state import (
-    ConversationState,
-    ConversationStateCommands,
-    ExecutionRepositoryImpl,
-    ExecutionState,
-    ExecutionTerminalSealPlan,
-    PendingApprovalContinuation,
-    RecoveryState,
-    RuntimeStateCommands,
-    RuntimeStepStore,
-    SessionRepositoryImpl,
-    StateStepArchive,
-    ToolApprovalAdmission,
-)
-from .state._contracts import (
     AgentAttemptClaim,
     ApprovalRecord,
+    ContinuableSnapshot,
     ConversationCursor,
+    ConversationState,
+    ConversationStateCommands,
+    ConversationHistoryRepositoryImpl,
+    EventRepositoryImpl,
+    ExecutionRepositoryImpl,
     ExecutionCancelRequestCommit,
     ExecutionEventAppend,
     ExecutionRecord,
     ExecutionStartClaim,
     ExecutionTerminalCommit,
     ExecutionTerminalCommitResult,
+    ExecutionState,
+    ExecutionTerminalSealPlan,
     IdempotencyRecord,
     LoadedModelContext,
+    OperationLedgerRepositoryImpl,
+    PendingApprovalContinuation,
     RecoveryCheckpoint,
+    RecoveryCheckpointRepositoryImpl,
     RecoveryCheckpointState,
     RecoveryConversationIntent,
     RecoveryExecutionInput,
     RecoveryHandoffPhase,
     RecoveryIdempotencyInput,
+    RecoveryState,
     RecoveryTerminalHandoff,
     RecoveryTerminalOutcome,
     ResultRecord,
+    RuntimeDomain,
+    RuntimeStateCommands,
+    RuntimeStepStore,
     RuntimePayloadRef,
-)
-from .state._plan import RuntimeDomain
-from .state._repositories import (
-    ConversationHistoryRepositoryImpl,
-    EventRepositoryImpl,
-    OperationLedgerRepository,
-    RecoveryCheckpointRepositoryImpl,
+    RunRecord,
+    SessionRepositoryImpl,
+    StateStepArchive,
+    StepEvent,
+    StepStore,
+    ToolApprovalAdmission,
     ToolRepositoryImpl,
+    ToolOperationRecord,
 )
 
 
@@ -245,6 +234,21 @@ class _StepLifecycle(Protocol):
     ) -> None: ...
 
 
+async def _step_messages(
+    store: StepStore,
+    run_id: str,
+    *,
+    include_interrupted: bool = False,
+) -> list[ModelMessage]:
+    snapshot = await store.latest_snapshot(
+        run_id=run_id,
+        include_interrupted=include_interrupted,
+    )
+    if snapshot is None:
+        raise LookupError(run_id)
+    return list(snapshot.messages)
+
+
 class LocalExecutionBackend:
     """Resolve immutable definitions and persist one execution lifecycle."""
 
@@ -265,7 +269,7 @@ class LocalExecutionBackend:
         tenant_id: str,
         step_reads: Mapping[RuntimeDomain, StepStore],
         step_lifecycle: _StepLifecycle,
-        memory_store_factory: "Callable[[str, str, str], SearchableMemoryStore] | None" = None,
+        memory_store_factory: "Callable[[str, str, str], MemoryStore] | None" = None,
         recovery_enabled: bool = False,
         conversation_durable: bool = False,
         handoff_contract_digest: "str | None" = None,
@@ -338,7 +342,10 @@ class LocalExecutionBackend:
             execution_repository,
             namespace=self._namespace,
             events=cast(EventRepositoryImpl, self._execution.events),
-            operations=cast(OperationLedgerRepository, self._execution.operations),
+            operations=cast(
+                OperationLedgerRepositoryImpl,
+                self._execution.operations,
+            ),
             approvals=self._recovery.approvals,
             conversation=session_repository,
             recovery=cast(RecoveryCheckpointRepositoryImpl, self._recovery.checkpoints),
@@ -1608,13 +1615,6 @@ class LocalExecutionBackend:
         )
         if existing:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        for tool_call_id in tool_call_ids:
-            effect = await archive.get_tool_effect(
-                run_id=source_run_id,
-                tool_call_id=tool_call_id,
-            )
-            if effect is not None:
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         return snapshot, batch
 
     async def _approval_records(
@@ -1907,12 +1907,6 @@ class LocalExecutionBackend:
                 )
                 if existing:
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                for tool_call_id in tool_call_ids:
-                    if await self._steps.get_tool_effect(
-                        run_id=paused.run_id,
-                        tool_call_id=tool_call_id,
-                    ) is not None:
-                        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                 approval_ids = tuple(call.approval_id for call in calls)
                 continuation = PendingApprovalContinuation(
                     batch_id=canonical_sha256(
@@ -3358,49 +3352,49 @@ class LocalExecutionBackend:
             execution_id,
         )
 
-    async def _reconcile_unresolved_tool_effects(
+    async def _reconcile_unresolved_tool_operations(
         self,
         step_run_id: str,
-        effects: list[ToolEffectRecord],
+        operations: Sequence[ToolOperationRecord],
         *,
         tenant_id: str,
     ) -> None:
-        for effect in effects:
+        for operation in operations:
             while True:
                 if self._tool_operations is None:
                     raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
-                operation = await self._tool_operations.get_by_call(
+                current = await self._tool_operations.get_by_call(
                     step_run_id,
-                    effect.tool_call_id,
+                    operation.tool_call_id,
                     tenant_id=tenant_id,
                 )
-                if operation is None:
+                if current is None:
                     raise AIError(ErrorCode.TOOL_EFFECT_UNKNOWN)
-                if operation.status in {
+                if current.status in {
                     ToolOperationStatus.COMPLETED,
                     ToolOperationStatus.FAILED,
                 }:
                     break
-                if operation.status in {
+                if current.status in {
                     ToolOperationStatus.EFFECT_UNKNOWN,
                     ToolOperationStatus.CANCELLED,
                 }:
                     raise AIError(ErrorCode.TOOL_EFFECT_UNKNOWN)
-                if operation.status is ToolOperationStatus.CLAIMED:
-                    expires = operation.lease_expires_at
+                if current.status is ToolOperationStatus.CLAIMED:
+                    expires = current.lease_expires_at
                     if expires is None:
                         raise AIError(ErrorCode.TOOL_EFFECT_UNKNOWN)
                     remaining = (expires - datetime.now(timezone.utc)).total_seconds()
                     if remaining > 0:
                         await asyncio.sleep(min(1.0, remaining))
                         continue
-                    if not operation.replay_safe:
+                    if not current.replay_safe:
                         raise AIError(ErrorCode.TOOL_EFFECT_UNKNOWN)
                 break
         _logger.info(
-            "recovery tool effects reconciled: run=%s count=%s",
+            "recovery tool operations reconciled: run=%s count=%s",
             step_run_id,
-            len(effects),
+            len(operations),
         )
 
     async def _run(self, request: ExecutionRequest, original: ExecutionRecord) -> None:
@@ -3553,11 +3547,21 @@ class LocalExecutionBackend:
                                 or current_snapshot.run_id != current_run_id
                             ):
                                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                            unresolved = await recovery_archive.list_unresolved_tool_effects(
-                                run_id=current_run_id
+                            unresolved = await self._tool_operations.list_by_step_run(
+                                current_run_id,
+                                tenant_id=current.tenant_id,
+                            )
+                            unresolved = tuple(
+                                operation
+                                for operation in unresolved
+                                if operation.status
+                                not in {
+                                    ToolOperationStatus.COMPLETED,
+                                    ToolOperationStatus.FAILED,
+                                }
                             )
                             if unresolved:
-                                await self._reconcile_unresolved_tool_effects(
+                                await self._reconcile_unresolved_tool_operations(
                                     current_run_id,
                                     unresolved,
                                     tenant_id=current.tenant_id,
@@ -3591,8 +3595,20 @@ class LocalExecutionBackend:
                             run_id=recovery_history_run_id,
                             include_interrupted=True,
                         )
-                        unresolved = await recovery_archive.list_unresolved_tool_effects(
-                            run_id=recovery_history_run_id
+                        if self._tool_operations is None:
+                            raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+                        unresolved = await self._tool_operations.list_by_step_run(
+                            recovery_history_run_id,
+                            tenant_id=current.tenant_id,
+                        )
+                        unresolved = tuple(
+                            operation
+                            for operation in unresolved
+                            if operation.status
+                            not in {
+                                ToolOperationStatus.COMPLETED,
+                                ToolOperationStatus.FAILED,
+                            }
                         )
                         if snapshot is None:
                             if recovery_run is None:
@@ -3605,7 +3621,7 @@ class LocalExecutionBackend:
                             else:
                                 raise AIError(ErrorCode.EXECUTION_HISTORY_UNAVAILABLE)
                         elif unresolved:
-                            await self._reconcile_unresolved_tool_effects(
+                            await self._reconcile_unresolved_tool_operations(
                                 recovery_history_run_id,
                                 unresolved,
                                 tenant_id=current.tenant_id,
@@ -3742,6 +3758,11 @@ class LocalExecutionBackend:
                 tenant_id=current.tenant_id,
                 owner_kind="session" if current.session_id is not None else "execution",
                 owner_id=current.session_id or current.execution_id,
+                operations=(
+                    self._conversation.operations
+                    if current.session_id is not None
+                    else self._execution.operations
+                ),
             )
             try:
                 result = await self._executor.execute(
@@ -3754,6 +3775,9 @@ class LocalExecutionBackend:
                         step_store=self._steps,
                         step_run_id=run_id,
                         segment_sequence=current.agent_run_sequence,
+                        operation_identity_run_id=(
+                            recovery_history_run_id or run_id
+                        ),
                         history_id=history_id,
                         memory_store=memory,
                         plan_store_resolver=lambda _ctx: plan_store,
@@ -3980,9 +4004,9 @@ class LocalExecutionBackend:
                         ).model_messages()
                     )
                 return list(
-                    await continue_run(
+                    await _step_messages(
                         self._step_store(RuntimeDomain.RECOVERY),
-                        run_id=recovery_run_id,
+                        recovery_run_id,
                         include_interrupted=True,
                     )
                 )
@@ -4022,7 +4046,13 @@ class LocalExecutionBackend:
                 raise
         if execution.conversation_step_run_id is not None:
             try:
-                return list(await continue_run(conversation_steps, run_id=execution.conversation_step_run_id, include_interrupted=True))
+                return list(
+                    await _step_messages(
+                        conversation_steps,
+                        execution.conversation_step_run_id,
+                        include_interrupted=True,
+                    )
+                )
             except LookupError as error:
                 raise AIError(ErrorCode.EXECUTION_HISTORY_UNAVAILABLE) from error
         if execution.base_execution_id is None:
@@ -4038,8 +4068,8 @@ class LocalExecutionBackend:
         )
         try:
             if execution.lineage_kind is ExecutionLineageKind.FORK:
-                return list(await fork_run(execution_steps, run_id=run_id))
-            return list(await continue_run(execution_steps, run_id=run_id))
+                return list(await _step_messages(execution_steps, run_id))
+            return list(await _step_messages(execution_steps, run_id))
         except LookupError as error:
             raise AIError(ErrorCode.EXECUTION_HISTORY_UNAVAILABLE) from error
 

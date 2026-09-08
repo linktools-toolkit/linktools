@@ -18,7 +18,7 @@ from pydantic_ai import Agent
 from pydantic_ai.messages import ModelMessage, ModelResponse
 from pydantic_ai.models.function import AgentInfo, FunctionModel
 from pydantic_ai.models.test import TestModel
-from pydantic_ai_harness.step_persistence import InMemoryStepStore
+from linktools.ai.runtime.state import StagingStepStore
 
 
 class _Recorder:
@@ -57,7 +57,7 @@ class _ToolOperations:
 
 
 def _persistence(
-    store: InMemoryStepStore,
+    store: StagingStepStore,
     run_id: str,
     recorder: _Recorder | None,
 ) -> _RuntimeStepPersistence:
@@ -112,7 +112,7 @@ def _trace(event) -> object:
 
 @pytest.mark.asyncio
 async def test_model_metric_and_trace_share_observation_id_and_duration() -> None:
-    store = InMemoryStepStore()
+    store = StagingStepStore()
     recorder = _Recorder()
     run_id = "metric-trace-run"
     agent = Agent(
@@ -134,7 +134,14 @@ async def test_model_metric_and_trace_share_observation_id_and_duration() -> Non
     ]
     assert len(completed) == 1
     event = completed[0]
-    expected = _model_observation_id(run_id, event.step_index)
+    expected = _model_observation_id(
+        "workspace",
+        "tenant",
+        "execution",
+        run_id,
+        1,
+        "agent",
+    )
     assert model_observations[0].observation_id == expected
     assert event.metadata["linktools.ai.observation_id"] == expected
     assert int(event.metadata["linktools.ai.duration_ns"]) >= 0
@@ -149,7 +156,7 @@ async def test_failed_model_metric_and_trace_share_observation_id_and_duration()
         del messages, info
         raise RuntimeError("boom")
 
-    store = InMemoryStepStore()
+    store = StagingStepStore()
     recorder = _Recorder()
     run_id = "metric-trace-failed-run"
     agent = Agent(
@@ -172,7 +179,14 @@ async def test_failed_model_metric_and_trace_share_observation_id_and_duration()
     ]
     assert len(failed) == 1
     event = failed[0]
-    expected = _model_observation_id(run_id, event.step_index)
+    expected = _model_observation_id(
+        "workspace",
+        "tenant",
+        "execution",
+        run_id,
+        1,
+        "agent",
+    )
     assert model_observations[0].observation_id == expected
     assert event.metadata["linktools.ai.observation_id"] == expected
     assert int(event.metadata["linktools.ai.duration_ns"]) >= 0
@@ -183,7 +197,7 @@ async def test_failed_model_metric_and_trace_share_observation_id_and_duration()
 
 @pytest.mark.asyncio
 async def test_model_trace_omits_metric_metadata_when_metrics_disabled() -> None:
-    store = InMemoryStepStore()
+    store = StagingStepStore()
     run_id = "no-metrics-run"
     agent = Agent(
         TestModel(custom_output_text="done"),

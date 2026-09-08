@@ -17,7 +17,7 @@ from linktools.ai.runtime import (
 from linktools.ai.runtime.state import ExecutionRecord
 from linktools.ai.spec import AgentSpec
 from pydantic_ai.messages import ModelRequest, UserPromptPart
-from pydantic_ai_harness.step_persistence import ContinuableSnapshot, RunRecord, StepEvent
+from linktools.ai.runtime.state import ContinuableSnapshot, RunRecord, StepEvent
 
 
 def _run() -> RunRecord:

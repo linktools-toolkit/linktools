@@ -4,7 +4,6 @@
 
 from types import SimpleNamespace
 from typing import Any
-from unittest.mock import AsyncMock
 
 import pytest
 from pydantic_ai.capabilities import CombinedCapability
@@ -13,10 +12,8 @@ from pydantic_ai.messages import ModelRequest, ModelResponse, ToolCallPart, Tool
 from pydantic_ai.models.test import TestModel
 from pydantic_ai.tools import DeferredToolRequests, RunContext, ToolDefinition
 from pydantic_ai.usage import RunUsage
-from pydantic_ai_harness.step_persistence import StepPersistence
-
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.runtime._agent_executor import AgentExecutor, _RuntimePersistenceBoundary
+from linktools.ai.runtime._agent_executor import AgentExecutor
 from linktools.ai.runtime._capabilities import (
     ToolOperationDecision,
     _RuntimeStepPersistence,
@@ -71,13 +68,13 @@ class _Bridge:
 class _Store:
     def __init__(self) -> None:
         self.snapshots: list[object] = []
-        self.effects: list[object] = []
+        self.events: list[object] = []
 
     async def save_snapshot(self, snapshot: object) -> None:
         self.snapshots.append(snapshot)
 
-    async def record_tool_effect(self, effect: object) -> None:
-        self.effects.append(effect)
+    async def append_event(self, event: object) -> None:
+        self.events.append(event)
 
 
 class _EmptyResolver:
@@ -104,9 +101,7 @@ def _approval_call(call_id: str = "approval-1") -> ToolCallPart:
 
 
 @pytest.mark.asyncio
-async def test_runtime_step_persistence_uses_last_observed_step_and_sink_once(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+async def test_runtime_step_persistence_uses_last_observed_step_and_sink_once() -> None:
     bridge = _Bridge()
     store = _Store()
     captured: list[int] = []
@@ -118,42 +113,28 @@ async def test_runtime_step_persistence_uses_last_observed_step_and_sink_once(
         deferred_pause_sink=captured.append,
     )
     node_result = object()
-    after_node = AsyncMock(return_value=node_result)
-    after_run = AsyncMock(side_effect=lambda _ctx, *, result: result)
-    monkeypatch.setattr(StepPersistence, "after_node_run", after_node)
-    monkeypatch.setattr(StepPersistence, "after_run", after_run)
-
-    ctx = SimpleNamespace(run_step=7)
+    ctx = SimpleNamespace(run_step=7, conversation_id=None)
     assert await persistence.after_node_run(
         ctx, node=object(), result=node_result  # type: ignore[arg-type]
     ) is node_result
     ctx.run_step = 0
     deferred = DeferredToolRequests(approvals=[_approval_call()])
-    result = SimpleNamespace(output=deferred)
+    result = SimpleNamespace(output=deferred, all_messages=lambda: [])
     assert await persistence.after_run(ctx, result=result) is result  # type: ignore[arg-type]
 
     assert captured == [7]
     assert store.snapshots == []
     assert bridge.calls == []
-    after_node.assert_awaited_once()
-    after_run.assert_awaited_once()
 
 
 @pytest.mark.asyncio
-async def test_runtime_step_persistence_rejects_generic_deferred_calls(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+async def test_runtime_step_persistence_rejects_generic_deferred_calls() -> None:
     persistence = _RuntimeStepPersistence(
         tool_operations=_Bridge(),
         store=_Store(),
         agent_name="agent",
         run_id="run",
         deferred_pause_sink=lambda _step: None,
-    )
-    monkeypatch.setattr(
-        StepPersistence,
-        "after_run",
-        AsyncMock(side_effect=lambda _ctx, *, result: result),
     )
     persistence._last_observed_step_index = 3
     result = SimpleNamespace(output=DeferredToolRequests(calls=[_approval_call("external")]))
@@ -163,7 +144,7 @@ async def test_runtime_step_persistence_rejects_generic_deferred_calls(
 
 
 @pytest.mark.asyncio
-async def test_ask_gate_defers_before_runtime_operation_or_harness_effect(tmp_path) -> None:
+async def test_ask_gate_defers_before_runtime_operation(tmp_path) -> None:
     bridge = _Bridge()
     store = _Store()
     persistence = _RuntimeStepPersistence(
@@ -187,7 +168,7 @@ async def test_ask_gate_defers_before_runtime_operation_or_harness_effect(tmp_pa
         ),
         trusted_tool_classes=(("read_file", "filesystem.read"),),
     )
-    combined = CombinedCapability((_RuntimePersistenceBoundary(persistence), gate))
+    combined = CombinedCapability((persistence, gate))
     call = _approval_call()
     definition = ToolDefinition(
         name="read_file",
@@ -202,7 +183,6 @@ async def test_ask_gate_defers_before_runtime_operation_or_harness_effect(tmp_pa
             args={"path": "pkg/file.txt"},
         )
     assert bridge.calls == []
-    assert store.effects == []
     assert store.snapshots == []
     assert not persistence._calls
 

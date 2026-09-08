@@ -7,7 +7,7 @@ import json
 import pytest
 from linktools.ai.capability import SkillCapability, SkillDefinition, SkillSourceRegistry
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.runtime._agent_executor import _RuntimePersistenceBoundary, _ToolPresentation
+from linktools.ai.runtime._agent_executor import _ToolPresentation
 from linktools.ai.runtime._capabilities import (
     PLAN_SAFE_METADATA_KEY,
     select_runtime_tool_names,
@@ -26,7 +26,6 @@ from linktools.ai.spec import (
 from pydantic_ai.capabilities import AbstractCapability, CapabilityOrdering, CombinedCapability
 from pydantic_ai.tools import ToolDefinition
 from pydantic_ai.toolsets import FunctionToolset, PreparedToolset, RenamedToolset
-from pydantic_ai_harness.step_persistence import StepPersistence
 
 
 def test_runtime_tool_selection_keeps_planning_outside_allow_tools() -> None:
@@ -259,7 +258,7 @@ def test_tool_presentation_is_outermost_wrapper_after_custom_toolset_wrappers() 
     assert isinstance(wrapped.wrapped, RenamedToolset)
 
 
-def test_runtime_persistence_boundary_is_outside_custom_execution_middleware() -> None:
+def test_runtime_persistence_capability_keeps_custom_execution_middleware_order() -> None:
     class CustomOutermost(AbstractCapability[object]):
         def get_ordering(self) -> CapabilityOrdering:
             return CapabilityOrdering(position="outermost")
@@ -274,12 +273,10 @@ def test_runtime_persistence_boundary_is_outside_custom_execution_middleware() -
         instruction_aware=False,
     )
     custom = CustomOutermost()
-    boundary = _RuntimePersistenceBoundary(StepPersistence())
-    combined = CombinedCapability((presentation, custom, boundary))
+    combined = CombinedCapability((presentation, custom))
 
-    assert combined.capabilities[0] is boundary
-    assert boundary.wrapped is not custom
-    assert boundary.get_ordering().wraps == (AbstractCapability,)
+    assert combined.capabilities[0] is presentation
+    assert combined.capabilities[1] is custom
 
 
 def test_planning_gate_rejects_non_boolean_plan_safe_metadata() -> None:

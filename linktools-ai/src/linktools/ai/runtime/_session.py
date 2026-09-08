@@ -13,7 +13,6 @@ from datetime import datetime, timezone
 from typing import Protocol
 
 from linktools.core import environ
-from pydantic_ai_harness.step_persistence import ContinuableSnapshot
 
 from ..core import (
     AuthorizationAction,
@@ -22,6 +21,8 @@ from ..core import (
     CursorSigner,
     ExecutionStatus,
     OperationKind,
+    OperationLedgerInput,
+    OperationLedgerRecord,
     OperationStatus,
     Page,
     Principal,
@@ -50,13 +51,12 @@ from .service_api import (
     SessionView,
     UpdateSessionRequest,
 )
-from .state._contracts import (
+from .state import (
+    ContinuableSnapshot,
     ConversationCursor,
     ConversationState,
     ExecutionRecord,
     ExecutionRepository,
-    OperationLedgerInput,
-    OperationLedgerRecord,
     SESSION_AGENT_ID_METADATA_KEY,
     SessionRecord,
 )

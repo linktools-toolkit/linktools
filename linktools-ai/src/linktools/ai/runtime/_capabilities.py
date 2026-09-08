@@ -8,7 +8,8 @@ import asyncio
 import json
 import os
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
+from datetime import datetime, timezone
 from pathlib import Path
 from time import monotonic_ns
 from typing import Any, Protocol
@@ -19,12 +20,14 @@ from pydantic_ai.capabilities import (
     AbstractCapability,
     AgentNode,
     NodeResult,
+    WrapModelRequestHandler,
     WrapToolExecuteHandler,
 )
 from pydantic_ai.exceptions import (
     ApprovalRequired,
     CallDeferred,
     ModelRetry,
+    RunCancelled,
     SkipToolExecution,
     ToolFailed,
     ToolFailedError,
@@ -37,20 +40,13 @@ from pydantic_ai.messages import (
     RetryPromptPart,
     ToolCallPart,
     ToolReturnPart,
+    UserPromptPart,
 )
-from pydantic_ai.models import Model, ModelRequestContext
+from pydantic_ai.models import ModelRequestContext
 from pydantic_ai.run import AgentRunResult
 from pydantic_ai.tools import DeferredToolRequests, RunContext, ToolDefinition
 from pydantic_ai.toolsets import AbstractToolset
-from pydantic_ai_harness.compaction import (
-    ClearToolResults,
-    DeduplicateFileReads,
-    SummarizingCompaction,
-    TieredCompaction,
-)
-from pydantic_ai_harness.memory import Memory, SearchableMemoryStore
-from pydantic_ai_harness.planning import PlanStore, Planning
-from pydantic_ai_harness.step_persistence import StepEvent, StepPersistence, StepStore
+from pydantic_ai.toolsets import FunctionToolset
 
 from ..capability import (
     SKILL_TOOL_NAMES,
@@ -59,15 +55,41 @@ from ..capability import (
     WORKSPACE_FILESYSTEM_TOOL_NAMES,
     WORKSPACE_SHELL_TOOL_NAMES,
 )
-from ..core import JsonValue, canonical_json_bytes, normalize_json_value
+from ..core import (
+    JsonValue,
+    canonical_json_bytes,
+    canonical_sha256,
+    normalize_json_value,
+)
 from ..errors import AIError, ErrorCode
 from ..workspace import (
     RepositoryInstructionDocument,
     RepositoryInstructionResolver,
     RepositoryInstructions,
     WorkspacePolicy,
+    normalize_workspace_path,
 )
-from ._metric_id import _model_observation_id, _tool_observation_id
+from ._metric_id import _tool_observation_id
+from ._compaction import (
+    ExternalModelRequestObserver,
+    RuntimeCompaction,
+)
+from ._journal import ModelRequestFact, ModelRequestJournal
+from ._memory import (
+    MemoryOperation,
+    MemoryStore,
+    memory_operation_fingerprint,
+    normalize_memory_file,
+)
+from ._plan import PlanItem, PlanOperation, RuntimePlanStore
+from .state import (
+    ContinuableSnapshot,
+    RunRecord,
+    StepEvent,
+    StepStore,
+    ToolOperationRecord,
+)
+from ._tool import ToolOperationDecision
 from ._tool_metrics import _ToolMetricContext
 
 _logger = environ.get_logger("ai.runtime.capabilities")
@@ -121,21 +143,11 @@ _SKILL_CAPABILITY_ID = "linktools-skill"
 _MEMORY_CAPABILITY_ID = "linktools-memory"
 _PLANNING_CAPABILITY_ID = "linktools-planning"
 _SUBAGENT_CAPABILITY_ID = "linktools-subagent"
+_PLAN_PROMPT_MARKER = "[linktools.plan.v1]"
 
 
 @dataclass(frozen=True, slots=True)
-class ToolOperationDecision:
-    operation_id: str
-    owner: str
-    fence: int
-    replay_safe: bool
-    cached_result: JsonValue = None
-    has_cached_result: bool = False
-    cached_error: "BaseException | None" = None
-
-
-@dataclass(frozen=True, slots=True)
-class _ToolEffectPolicy:
+class _ToolExecutionPolicy:
     replay_safe: bool
     effect_free: bool
 
@@ -143,14 +155,14 @@ class _ToolEffectPolicy:
 @dataclass
 class _ToolCallState:
     decision: ToolOperationDecision
-    policy: _ToolEffectPolicy
+    policy: _ToolExecutionPolicy
     handler_entered: bool = False
     handler_observed: bool = False
     heartbeat_observed: bool = False
     operation_terminalized: bool = False
     preserve_started: bool = False
     cached_failure: bool = False
-    effect_terminalized: bool = False
+    terminal_event_recorded: bool = False
     suppress_cancel_metric: bool = False
     metric_started_ns: int | None = None
     heartbeat_task: "asyncio.Task[None] | None" = None
@@ -177,6 +189,8 @@ class ToolOperationBridge(Protocol):
     async def existing_call_ids(
         self, tool_call_ids: Sequence[str]
     ) -> frozenset[str]: ...
+
+    async def list_operations(self) -> tuple[ToolOperationRecord, ...]: ...
 
 
 class _MissingToolOperationBridge:
@@ -213,9 +227,18 @@ class _MissingToolOperationBridge:
         del tool_call_ids
         raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
 
+    async def list_operations(self) -> tuple[ToolOperationRecord, ...]:
+        raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+
 
 @dataclass(kw_only=True, eq=False)
-class _RuntimeStepPersistence(StepPersistence[None]):
+class _RuntimeStepPersistence(AbstractCapability[None]):
+    store: StepStore = field(repr=False, compare=False)
+    execution_id: str | None = None
+    agent_name: str | None = None
+    run_id: str | None = None
+    parent_run_id: str | None = None
+    metadata: dict[str, str] = field(default_factory=dict)
     tool_operations: ToolOperationBridge = field(repr=False, compare=False)
     plan_mode: bool = False
     trusted_tool_classes: "tuple[tuple[str, str], ...]" = ()
@@ -235,6 +258,22 @@ class _RuntimeStepPersistence(StepPersistence[None]):
         repr=False,
         compare=False,
     )
+    model_journal: "ModelRequestJournal | None" = field(
+        default=None,
+        repr=False,
+        compare=False,
+    )
+    model_request_observer: "ExternalModelRequestObserver | None" = field(
+        default=None,
+        repr=False,
+        compare=False,
+    )
+    _ephemeral_plan_prompt: UserPromptPart | None = field(
+        default=None,
+        init=False,
+        repr=False,
+        compare=False,
+    )
     _calls: "dict[tuple[str, str], _ToolCallState]" = field(
         default_factory=dict,
         init=False,
@@ -247,8 +286,16 @@ class _RuntimeStepPersistence(StepPersistence[None]):
         repr=False,
         compare=False,
     )
-    _model_metric_started_ns: "dict[int, int]" = field(
-        default_factory=dict,
+    _event_sequence: int = field(default=0, init=False, repr=False, compare=False)
+    _snapshot_sequence: int = field(default=0, init=False, repr=False, compare=False)
+    _projection_source: tuple[ModelMessage, ...] | None = field(
+        default=None,
+        init=False,
+        repr=False,
+        compare=False,
+    )
+    _projection_messages: tuple[ModelMessage, ...] | None = field(
+        default=None,
         init=False,
         repr=False,
         compare=False,
@@ -259,6 +306,99 @@ class _RuntimeStepPersistence(StepPersistence[None]):
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
         _validate_trusted_tool_classes(self.trusted_tool_classes)
         _validate_trusted_mcp_selectors(self.trusted_mcp_selectors)
+        if self.model_journal is None and self.tool_metrics is not None:
+            self.model_journal = ModelRequestJournal(
+                source_namespace=self.tool_metrics.source_namespace,
+                tenant_id=self.tool_metrics.tenant_id,
+                execution_id=self.tool_metrics.execution_id,
+                step_run_id=self.tool_metrics.step_run_id,
+            )
+
+    def _effective_run_id(self, ctx: "RunContext[None]") -> str:
+        run_id = self.run_id or ctx.run_id
+        if not isinstance(run_id, str) or not run_id:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        return run_id
+
+    async def _append_event(
+        self,
+        *,
+        run_id: str,
+        kind: str,
+        step_index: int,
+        conversation_id: str | None,
+        parent_run_id: str | None,
+        agent_name: str | None,
+        tool_call_id: str | None = None,
+        tool_name: str | None = None,
+        error: str | None = None,
+        metadata: dict[str, str],
+        event_index: int,
+    ) -> None:
+        event = StepEvent(
+            run_id=run_id,
+            kind=kind,
+            step_index=step_index,
+            timestamp=datetime.now(timezone.utc),
+            conversation_id=conversation_id,
+            parent_run_id=parent_run_id,
+            agent_name=agent_name,
+            tool_call_id=tool_call_id,
+            tool_name=tool_name,
+            error=error,
+            metadata=metadata,
+            idempotency_key=(
+                f"{event_index}:{step_index}:{kind}:"
+                f"{tool_call_id or ''}"
+            ),
+            event_index=event_index,
+        )
+        if self.execution_id is None:
+            await self.store.append_event(event)
+        else:
+            await self.store.append_event(event, execution_id=self.execution_id)
+
+    async def before_run(self, ctx: "RunContext[None]") -> None:
+        run_id = self._effective_run_id(ctx)
+        if await self.store.get_run(run_id=run_id) is not None:
+            raise AIError(ErrorCode.STORAGE_CONFLICT)
+        record = RunRecord(
+            run_id=run_id,
+            conversation_id=ctx.conversation_id,
+            parent_run_id=self.parent_run_id,
+            agent_name=self.agent_name,
+            metadata=dict(self.metadata),
+        )
+        if self.execution_id is None:
+            await self.store.register_run(record)
+        else:
+            await self.store.register_run(record, execution_id=self.execution_id)
+        await self._record_runtime_event(ctx, kind="run_started")
+
+    async def on_run_error(
+        self,
+        ctx: "RunContext[None]",
+        *,
+        error: BaseException,
+    ) -> AgentRunResult[Any]:
+        messages = list(ctx.messages)
+        if messages:
+            snapshot = ContinuableSnapshot(
+                run_id=self._effective_run_id(ctx),
+                step_index=ctx.run_step,
+                messages=messages,
+                conversation_id=ctx.conversation_id,
+                parent_run_id=self.parent_run_id,
+                agent_name=self.agent_name,
+                state="interrupted",
+                context_messages=self._snapshot_context_messages(messages),
+            )
+            if self.execution_id is None:
+                await self.store.save_snapshot(snapshot)
+            else:
+                await self.store.save_snapshot(snapshot, execution_id=self.execution_id)
+        await self._record_runtime_event(ctx, kind="run_failed", error=repr(error))
+        raise error
 
     async def after_node_run(
         self,
@@ -278,6 +418,7 @@ class _RuntimeStepPersistence(StepPersistence[None]):
         result: AgentRunResult[Any],
     ) -> AgentRunResult[Any]:
         output = result.output
+        interrupted = False
         if isinstance(output, DeferredToolRequests):
             if not output.approvals or output.calls:
                 raise AIError(ErrorCode.CAPABILITY_POLICY_CONFLICT)
@@ -286,26 +427,232 @@ class _RuntimeStepPersistence(StepPersistence[None]):
             if self.deferred_pause_sink is None:
                 raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
             self.deferred_pause_sink(self._last_observed_step_index)
-        return await super().after_run(ctx, result=result)
+            interrupted = True
+        messages = list(result.all_messages())
+        if messages:
+            snapshot = ContinuableSnapshot(
+                run_id=self._effective_run_id(ctx),
+                step_index=(
+                    self._last_observed_step_index
+                    if self._last_observed_step_index is not None
+                    else ctx.run_step
+                ),
+                messages=messages,
+                conversation_id=ctx.conversation_id,
+                parent_run_id=self.parent_run_id,
+                agent_name=self.agent_name,
+                state="interrupted" if interrupted else "complete",
+                context_messages=self._snapshot_context_messages(messages),
+            )
+            if self.execution_id is None:
+                await self.store.save_snapshot(snapshot)
+            else:
+                await self.store.save_snapshot(snapshot, execution_id=self.execution_id)
+        await self._record_runtime_event(
+            ctx,
+            kind="run_interrupted" if interrupted else "run_completed",
+        )
+        return result
+
+    def remember_context_projection(
+        self,
+        source: Sequence[ModelMessage],
+        projected: Sequence[ModelMessage] | None,
+    ) -> None:
+        source_values = tuple(self._strip_ephemeral_plan_prompts(source))
+        if projected is not None:
+            self._projection_source = source_values
+            self._projection_messages = tuple(
+                self._strip_ephemeral_plan_prompts(projected)
+            )
+            return
+        current = self._projection_messages
+        if current is not None and _message_prefix(source_values, current):
+            self._projection_source = source_values
+            self._projection_messages = source_values
+            return
+        self._projection_source = None
+        self._projection_messages = None
+
+    def set_ephemeral_plan_prompt(
+        self,
+        prompt: UserPromptPart | None,
+    ) -> None:
+        self._ephemeral_plan_prompt = prompt
+
+    def _snapshot_context_messages(
+        self,
+        messages: Sequence[ModelMessage],
+    ) -> list[ModelMessage] | None:
+        source = self._projection_source
+        projected = self._projection_messages
+        if projected is None:
+            return None
+        message_values = tuple(self._strip_ephemeral_plan_prompts(messages))
+        if _message_prefix(message_values, projected):
+            return list(message_values)
+        if source is None:
+            return None
+        source_values = tuple(self._strip_ephemeral_plan_prompts(source))
+        if (
+            len(message_values) < len(source_values)
+            or message_values[: len(source_values)] != source_values
+        ):
+            return None
+        return [*projected, *message_values[len(source_values) :]]
+
+    def _capture_model_context(
+        self,
+        messages: Sequence[ModelMessage],
+    ) -> None:
+        projected = self._projection_messages
+        if projected is None:
+            return
+        message_values = tuple(self._strip_ephemeral_plan_prompts(messages))
+        if _message_prefix(message_values, projected):
+            self._projection_messages = message_values
+            self._projection_source = message_values
+            return
+        source = self._projection_source
+        if source is not None:
+            source_values = tuple(self._strip_ephemeral_plan_prompts(source))
+            if _message_prefix(message_values, source_values):
+                self._projection_messages = (
+                    *projected,
+                    *message_values[len(source_values) :],
+                )
+                return
+        self._projection_source = None
+        self._projection_messages = None
+
+    def _strip_ephemeral_plan_prompts(
+        self,
+        messages: Sequence[ModelMessage],
+    ) -> list[ModelMessage]:
+        prompt = self._ephemeral_plan_prompt
+        if prompt is None:
+            return list(messages)
+        result: list[ModelMessage] = []
+        for message in messages:
+            parts = [part for part in message.parts if part is not prompt]
+            result.append(
+                message
+                if len(parts) == len(message.parts)
+                else replace(message, parts=parts)
+            )
+        return result
 
     async def before_model_request(
         self,
         ctx: "RunContext[None]",
         request_context: ModelRequestContext,
     ) -> ModelRequestContext:
-        observed = await super().before_model_request(ctx, request_context)
-        if self.tool_metrics is not None:
-            if ctx.run_step in self._model_metric_started_ns:
+        return await super().before_model_request(ctx, request_context)
+
+    async def wrap_model_request(
+        self,
+        ctx: "RunContext[None]",
+        *,
+        request_context: ModelRequestContext,
+        handler: WrapModelRequestHandler,
+    ) -> ModelResponse:
+        if self.model_journal is not None:
+            fact = self.model_journal.begin(ctx.run_step, purpose="agent")
+            await self._record_runtime_event(
+                ctx,
+                kind="model_request_started",
+                metadata=fact.metadata(
+                    include_observation=self.tool_metrics is not None
+                ),
+            )
+        try:
+            response = await super().wrap_model_request(
+                ctx,
+                request_context=request_context,
+                handler=handler,
+            )
+        except asyncio.CancelledError as error:
+            if self.model_journal is not None:
+                fact = self.model_journal.finish(
+                    ctx.run_step,
+                    status="CANCELLED",
+                )
+                await self._record_runtime_event(
+                    ctx,
+                    kind="model_request_failed",
+                    metadata=fact.metadata(
+                        include_observation=self.tool_metrics is not None
+                    ),
+                    error=repr(error),
+                )
+                if self.model_request_observer is not None:
+                    await self.model_request_observer(
+                        ctx,
+                        fact,
+                        "cancelled",
+                        None,
+                        error,
+                    )
+            raise
+        except RunCancelled:
+            if self.model_journal is not None:
+                self.model_journal.finish(ctx.run_step, status="CANCELLED")
+            raise
+        except BaseException:
+            if self.model_journal is not None:
+                self.model_journal.finish(ctx.run_step, status="FAILED")
+            raise
+        if self.model_journal is not None:
+            self.model_journal.finish(ctx.run_step, status="SUCCEEDED")
+        return response
+
+    async def record_external_model_request(
+        self,
+        ctx: "RunContext[Any]",
+        fact: "ModelRequestFact",
+        phase: str,
+        response: ModelResponse | None,
+        error: BaseException | None,
+    ) -> None:
+        if phase == "started":
+            kind = "model_request_started"
+            metadata = fact.metadata(
+                include_observation=self.tool_metrics is not None
+            )
+            await self._record_runtime_event(
+                ctx,
+                kind=kind,
+                metadata=metadata,
+            )
+            return
+        if phase not in {"completed", "failed", "cancelled"}:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        metadata = fact.metadata(
+            include_observation=self.tool_metrics is not None
+        )
+        if phase == "completed":
+            if response is None:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            self._model_metric_started_ns[ctx.run_step] = monotonic_ns()
-        return observed
+            metadata.update(_model_usage_metadata(response))
+            await self._record_runtime_event(
+                ctx,
+                kind="model_request_completed",
+                metadata=metadata,
+            )
+            return
+        await self._record_runtime_event(
+            ctx,
+            kind="model_request_failed",
+            metadata=metadata,
+            error=None if error is None else repr(error),
+        )
 
     async def _record_runtime_event(
         self,
         ctx: "RunContext[None]",
         *,
         kind: str,
-        metadata: Mapping[str, str],
+        metadata: Mapping[str, str] | None = None,
         error: str | None = None,
         tool_call_id: str | None = None,
         tool_name: str | None = None,
@@ -322,22 +669,25 @@ class _RuntimeStepPersistence(StepPersistence[None]):
             tool_call_id=tool_call_id,
             tool_name=tool_name,
             error=error,
-            metadata=dict(metadata),
+            metadata=dict(metadata or {}),
             event_index=event_index,
         )
 
-    def _model_metric_metadata(self, ctx: "RunContext[None]") -> dict[str, str]:
+    def _consume_model_fact(
+        self,
+        ctx: "RunContext[None]",
+    ) -> "tuple[ModelRequestFact | None, dict[str, str]]":
         metadata = dict(self.metadata)
-        if self.tool_metrics is not None:
-            started = self._model_metric_started_ns.pop(ctx.run_step, None)
-            if started is None:
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            metadata[_OBSERVATION_ID_METADATA_KEY] = _model_observation_id(
-                self._effective_run_id(ctx),
-                ctx.run_step,
+        fact: ModelRequestFact | None = None
+        if self.model_journal is not None:
+            try:
+                fact = self.model_journal.consume(ctx.run_step)
+            except RuntimeError as error:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
+            metadata.update(
+                fact.metadata(include_observation=self.tool_metrics is not None)
             )
-            metadata[_DURATION_NS_METADATA_KEY] = str(monotonic_ns() - started)
-        return metadata
+        return fact, metadata
 
     async def after_model_request(
         self,
@@ -346,14 +696,22 @@ class _RuntimeStepPersistence(StepPersistence[None]):
         request_context: ModelRequestContext,
         response: ModelResponse,
     ) -> ModelResponse:
-        del request_context
-        metadata = self._model_metric_metadata(ctx)
+        self._capture_model_context(request_context.messages)
+        fact, metadata = self._consume_model_fact(ctx)
         metadata.update(_model_usage_metadata(response))
         await self._record_runtime_event(
             ctx,
             kind="model_request_completed",
             metadata=metadata,
         )
+        if fact is not None and self.model_request_observer is not None:
+            await self.model_request_observer(
+                ctx,
+                fact,
+                "completed",
+                response,
+                None,
+            )
         return response
 
     async def on_model_request_error(
@@ -363,13 +721,24 @@ class _RuntimeStepPersistence(StepPersistence[None]):
         request_context: ModelRequestContext,
         error: Exception,
     ) -> ModelResponse:
-        del request_context
+        self._capture_model_context(request_context.messages)
+        fact, metadata = self._consume_model_fact(ctx)
         await self._record_runtime_event(
             ctx,
             kind="model_request_failed",
-            metadata=self._model_metric_metadata(ctx),
+            metadata=metadata,
             error=repr(error),
         )
+        if fact is not None and self.model_request_observer is not None:
+            await self.model_request_observer(
+                ctx,
+                fact,
+                "cancelled"
+                if isinstance(error, (asyncio.CancelledError, RunCancelled))
+                else "failed",
+                None,
+                error,
+            )
         raise error
 
     async def before_tool_execute(
@@ -381,6 +750,10 @@ class _RuntimeStepPersistence(StepPersistence[None]):
         args: dict[str, Any],
     ) -> dict[str, Any]:
         del ctx, call
+        _tool_execution_policy(
+            tool_def,
+            trusted_tool_classes=self.trusted_tool_classes,
+        )
         if self.plan_mode and not tool_allowed_in_planning(
             tool_def,
             trusted_tool_classes=self.trusted_tool_classes,
@@ -401,7 +774,7 @@ class _RuntimeStepPersistence(StepPersistence[None]):
         args: dict[str, Any],
         handler: WrapToolExecuteHandler,
     ) -> Any:
-        policy = _tool_effect_policy(
+        policy = _tool_execution_policy(
             tool_def,
             trusted_tool_classes=self.trusted_tool_classes,
         )
@@ -432,10 +805,16 @@ class _RuntimeStepPersistence(StepPersistence[None]):
         except BaseException:
             self._calls.pop(key, None)
             raise
+        await self._record_runtime_event(
+            ctx,
+            kind="tool_call_started",
+            tool_call_id=call.tool_call_id,
+            tool_name=tool_def.name,
+        )
         if state.decision.cached_error is not None:
             error = state.decision.cached_error
             try:
-                await self._record_failed_effect(
+                await self._record_failed_tool(
                     ctx,
                     call=call,
                     tool_def=tool_def,
@@ -447,7 +826,7 @@ class _RuntimeStepPersistence(StepPersistence[None]):
                 if _bypasses_tool_error_hook(raised):
                     self._calls.pop(key, None)
                 raise
-            raise AssertionError("cached failure effect hook must raise")
+            raise AssertionError("cached failure tool hook must raise")
         if state.decision.has_cached_result:
             return state.decision.cached_result
 
@@ -532,7 +911,7 @@ class _RuntimeStepPersistence(StepPersistence[None]):
                 keep_call_state = False
                 self._calls.pop(key, None)
                 raise asyncio.CancelledError
-            await self._record_completed_effect(
+            await self._record_completed_tool(
                 ctx,
                 call=call,
                 tool_def=tool_def,
@@ -560,7 +939,7 @@ class _RuntimeStepPersistence(StepPersistence[None]):
                 keep_call_state = False
                 raise ToolFailed(_MODEL_EFFECT_UNKNOWN_MESSAGE) from error
             try:
-                await self._fail_known_effect(
+                await self._fail_known_tool(
                     ctx,
                     call=call,
                     tool_def=tool_def,
@@ -573,7 +952,7 @@ class _RuntimeStepPersistence(StepPersistence[None]):
                     keep_call_state = False
                     self._calls.pop(key, None)
                 raise
-            raise AssertionError("known failure effect hook must raise")
+            raise AssertionError("known failure tool hook must raise")
         except (CallDeferred, ApprovalRequired) as signal:
             if state.handler_entered and not state.policy.replay_safe and not state.policy.effect_free:
                 await self._mark_unknown(state, signal)
@@ -586,7 +965,7 @@ class _RuntimeStepPersistence(StepPersistence[None]):
                     "reason": "dynamic_deferred_unsupported",
                 },
             )
-            await self._fail_known_effect(
+            await self._fail_known_tool(
                 ctx,
                 call=call,
                 tool_def=tool_def,
@@ -669,13 +1048,6 @@ class _RuntimeStepPersistence(StepPersistence[None]):
         result: Any,
         state: _ToolCallState,
     ) -> Any:
-        run_id = self._effective_run_id(ctx)
-        await self._finish_tool_effect(
-            run_id,
-            call.tool_call_id,
-            tool_def.name,
-            "completed",
-        )
         await self._record_runtime_event(
             ctx,
             kind="tool_call_completed",
@@ -694,14 +1066,6 @@ class _RuntimeStepPersistence(StepPersistence[None]):
         error: BaseException,
         state: _ToolCallState,
     ) -> Any:
-        run_id = self._effective_run_id(ctx)
-        await self._finish_tool_effect(
-            run_id,
-            call.tool_call_id,
-            tool_def.name,
-            "failed",
-            repr(error),
-        )
         await self._record_runtime_event(
             ctx,
             kind="tool_call_failed",
@@ -767,7 +1131,7 @@ class _RuntimeStepPersistence(StepPersistence[None]):
                 ):
                     await self._mark_unknown(state, error)
                     raise ToolFailed(_MODEL_EFFECT_UNKNOWN_MESSAGE) from error
-                return await self._fail_known_effect(
+                return await self._fail_known_tool(
                     ctx,
                     call=call,
                     tool_def=tool_def,
@@ -791,7 +1155,7 @@ class _RuntimeStepPersistence(StepPersistence[None]):
             if cancelled:
                 self._calls.pop(key, None)
                 raise asyncio.CancelledError
-            return await self._record_failed_effect(
+            return await self._record_failed_tool(
                 ctx,
                 call=call,
                 tool_def=tool_def,
@@ -852,7 +1216,7 @@ class _RuntimeStepPersistence(StepPersistence[None]):
         except BaseException:  # noqa: BLE001
             _logger.exception("detached %s failed", label)
 
-    async def _fail_known_effect(
+    async def _fail_known_tool(
         self,
         ctx: "RunContext[None]",
         *,
@@ -870,12 +1234,12 @@ class _RuntimeStepPersistence(StepPersistence[None]):
         if cancelled:
             raise asyncio.CancelledError
         _logger.debug(
-            "tool effect marked failed: run=%s tool=%s call=%s",
+            "tool operation marked failed: run=%s tool=%s call=%s",
             self.run_id or ctx.run_id,
             tool_def.name,
             call.tool_call_id,
         )
-        return await self._record_failed_effect(
+        return await self._record_failed_tool(
             ctx,
             call=call,
             tool_def=tool_def,
@@ -884,7 +1248,7 @@ class _RuntimeStepPersistence(StepPersistence[None]):
             state=state,
         )
 
-    async def _record_failed_effect(
+    async def _record_failed_tool(
         self,
         ctx: "RunContext[None]",
         *,
@@ -894,7 +1258,7 @@ class _RuntimeStepPersistence(StepPersistence[None]):
         error: BaseException,
         state: _ToolCallState,
     ) -> Any:
-        if state.effect_terminalized:
+        if state.terminal_event_recorded:
             raise error
         try:
             result = await self._persist_tool_failed(
@@ -905,16 +1269,16 @@ class _RuntimeStepPersistence(StepPersistence[None]):
                 state=state,
             )
         except BaseException as raised:
-            state.effect_terminalized = True
+            state.terminal_event_recorded = True
             if raised is error:
                 model_error = _model_tool_error(error, call=call, tool_def=tool_def)
                 if model_error is not error:
                     raise model_error from error
             raise
-        state.effect_terminalized = True
+        state.terminal_event_recorded = True
         return result
 
-    async def _record_completed_effect(
+    async def _record_completed_tool(
         self,
         ctx: "RunContext[None]",
         *,
@@ -924,7 +1288,7 @@ class _RuntimeStepPersistence(StepPersistence[None]):
         result: Any,
         state: _ToolCallState,
     ) -> Any:
-        if state.effect_terminalized:
+        if state.terminal_event_recorded:
             return result
         try:
             value = await self._persist_tool_completed(
@@ -935,9 +1299,9 @@ class _RuntimeStepPersistence(StepPersistence[None]):
                 state=state,
             )
         except BaseException:
-            state.effect_terminalized = True
+            state.terminal_event_recorded = True
             raise
-        state.effect_terminalized = True
+        state.terminal_event_recorded = True
         return value
 
     async def _mark_unknown(self, state: _ToolCallState, error: BaseException) -> None:
@@ -1028,6 +1392,7 @@ class _WorkspaceToolGate(AbstractCapability[None]):
         tool_def: ToolDefinition,
         args: dict[str, Any],
     ) -> dict[str, Any]:
+        normalized_args = _normalize_workspace_tool_args(tool_def.name, args)
         del call
         if self._refresh_required:
             raise ToolFailed(
@@ -1045,9 +1410,7 @@ class _WorkspaceToolGate(AbstractCapability[None]):
             and tool_def.name in _WORKSPACE_SCOPED_TOOL_NAMES
             and tool_class in {"filesystem.read", "filesystem.write"}
         ):
-            target = args.get("path")
-            if not isinstance(target, str):
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            target = normalized_args["path"]
             subset = await self._instruction_resolver.resolve(
                 _repository_instruction_lookup_target(self._workspace_root, target),
                 exclude_sources=frozenset(self._exposure_map),
@@ -1069,7 +1432,7 @@ class _WorkspaceToolGate(AbstractCapability[None]):
                 raise ToolFailed(marker)
         if decision == "ask" and not ctx.tool_call_approved:
             raise ApprovalRequired()
-        return args
+        return normalized_args
 
     def _restore_exposure_map(self, messages: tuple[ModelMessage, ...]) -> None:
         calls: dict[tuple[str, str], list[ToolCallPart]] = {}
@@ -1200,6 +1563,23 @@ class _WorkspaceToolGate(AbstractCapability[None]):
             raise AIError(ErrorCode.PROMPT_TOO_LARGE)
 
 
+def _normalize_workspace_tool_args(
+    tool_name: str,
+    args: dict[str, Any],
+) -> dict[str, Any]:
+    if tool_name not in _WORKSPACE_SCOPED_TOOL_NAMES:
+        return args
+    target = args.get("path")
+    if not isinstance(target, str):
+        raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+    normalized = normalize_workspace_path(target)
+    if normalized == target:
+        return args
+    result = dict(args)
+    result["path"] = normalized
+    return result
+
+
 def _repository_instruction_marker(
     execution_id: str,
     subset: RepositoryInstructions,
@@ -1269,11 +1649,7 @@ def _logical_target_scope(root: Path, target: str) -> str:
     scope = relative.as_posix()
     if scope in {"", "."}:
         return "."
-    if (
-        "\\" in scope
-        or "\x00" in scope
-        or any(character in "\r\n|[]" for character in scope)
-    ):
+    if "\\" in scope or "\x00" in scope:
         raise ValueError("repository marker target scope is invalid")
     parts = scope.split("/")
     if any(part in {"", ".", ".."} for part in parts):
@@ -1292,16 +1668,41 @@ def _scope_applies_to_target(scope: str, target: str) -> bool:
     )
 
 
+def _combined_external_model_request_observer(
+    persistence: _RuntimeStepPersistence,
+    observer: ExternalModelRequestObserver | None,
+) -> ExternalModelRequestObserver:
+    async def record(
+        ctx: RunContext[Any],
+        fact: ModelRequestFact,
+        phase: str,
+        response: ModelResponse | None,
+        error: BaseException | None,
+    ) -> None:
+        await persistence.record_external_model_request(
+            ctx,
+            fact,
+            phase,
+            response,
+            error,
+        )
+        if observer is not None:
+            await observer(ctx, fact, phase, response, error)
+
+    return record
+
+
 async def compose_platform_capabilities(
     *,
     agent_name: str,
     conversation_id: "str | None",
     step_run_id: str,
+    execution_id: "str | None" = None,
     segment_sequence: "int | None",
     history_id: "str | None",
     memory_scope: "str | None",
     step_store: StepStore,
-    memory_store: "SearchableMemoryStore | None",
+    memory_store: "MemoryStore | None",
     runtime_tool_names: "tuple[str, ...]",
     plan_mode: bool,
     trusted_tool_classes: "tuple[tuple[str, str], ...]",
@@ -1310,35 +1711,44 @@ async def compose_platform_capabilities(
     parent_step_run_id: "str | None",
     tool_operations: "ToolOperationBridge | None",
     background_tasks: "set[asyncio.Task[object]]",
-    plan_store_resolver: "Callable[[RunContext[None]], PlanStore] | None",
+    plan_store_resolver: "Callable[[RunContext[None]], RuntimePlanStore] | None",
+    operation_identity_run_id: "str | None" = None,
     deferred_pause_sink: "Callable[[int], None] | None" = None,
     tool_metrics: "_ToolMetricContext | None" = None,
+    model_journal: "ModelRequestJournal | None" = None,
+    external_model_request_observer: "ExternalModelRequestObserver | None" = None,
 ) -> "tuple[AbstractCapability[None], ...]":
     _validate_compaction_target(context_target_tokens)
     _validate_trusted_tool_classes(trusted_tool_classes)
     _validate_trusted_mcp_selectors(trusted_mcp_selectors)
     capabilities: list[AbstractCapability[None]] = []
-    capabilities.append(
-        _RuntimeStepPersistence(
-            store=step_store,
-            agent_name=agent_name,
-            run_id=step_run_id,
-            parent_run_id=parent_step_run_id,
-            metadata={
-                "capability_scope": "parent",
-                "agent_name": agent_name,
-                **({} if history_id is None else {"history_id": history_id}),
-                **({} if segment_sequence is None else {"segment_sequence": str(segment_sequence)}),
-            },
-            tool_operations=tool_operations or _MissingToolOperationBridge(),
-            plan_mode=plan_mode,
-            trusted_tool_classes=trusted_tool_classes,
-            trusted_mcp_selectors=trusted_mcp_selectors,
-            background_tasks=background_tasks,
-            deferred_pause_sink=deferred_pause_sink,
-            tool_metrics=tool_metrics,
-        )
+    persistence = _RuntimeStepPersistence(
+        store=step_store,
+        execution_id=execution_id,
+        agent_name=agent_name,
+        run_id=step_run_id,
+        parent_run_id=parent_step_run_id,
+        metadata={
+            "capability_scope": "parent",
+            "agent_name": agent_name,
+            **({} if history_id is None else {"history_id": history_id}),
+            **(
+                {}
+                if segment_sequence is None
+                else {"segment_sequence": str(segment_sequence)}
+            ),
+        },
+        tool_operations=tool_operations or _MissingToolOperationBridge(),
+        plan_mode=plan_mode,
+        trusted_tool_classes=trusted_tool_classes,
+        trusted_mcp_selectors=trusted_mcp_selectors,
+        background_tasks=background_tasks,
+        deferred_pause_sink=deferred_pause_sink,
+        tool_metrics=tool_metrics,
+        model_journal=model_journal,
+        model_request_observer=external_model_request_observer,
     )
+    capabilities.append(persistence)
     selected = frozenset(runtime_tool_names)
     selected_memory = tuple(name for name in MEMORY_TOOL_NAMES if name in selected)
     if selected_memory:
@@ -1346,77 +1756,380 @@ async def compose_platform_capabilities(
             raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
         capabilities.append(
             _SelectedMemory(
-                store=memory_store,
-                namespace=memory_scope,
-                agent_name="memory",
-                inject_memory=False,
-                guidance=_memory_guidance(selected_memory),
+                memory_store,
                 selected_tool_names=selected_memory,
                 id=_MEMORY_CAPABILITY_ID,
+                operation_identity_run_id=operation_identity_run_id,
             )
         )
     if any(name in selected for name in PLANNING_TOOL_NAMES):
         if plan_store_resolver is None:
             raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
-        capabilities.append(
-            Planning(
-                id=_PLANNING_CAPABILITY_ID,
-                tools=PLANNING_TOOL_NAMES,
-                store_resolver=plan_store_resolver,
-            )
+        planning = _RuntimePlanningCapability(
+            plan_store_resolver,
+            id=_PLANNING_CAPABILITY_ID,
+            ephemeral_prompt_sink=persistence.set_ephemeral_plan_prompt,
+            operation_identity_run_id=operation_identity_run_id,
         )
+        capabilities.append(planning)
     capabilities.append(
-        _build_compaction(None)
-        if context_target_tokens is None
-        else _CompactionCapability(
+        _CompactionCapability(
             context_target_tokens,
-            step_store=step_store,
-            conversation_id=conversation_id,
-            step_run_id=step_run_id,
+            trusted_workspace_read=(
+                dict(trusted_tool_classes).get("read_file")
+                == "filesystem.read"
+            ),
+            journal=model_journal,
+            observer=_combined_external_model_request_observer(
+                persistence,
+                external_model_request_observer,
+            ),
+            projection_sink=persistence.remember_context_projection,
         )
     )
     return tuple(capabilities)
 
 
-@dataclass
-class _SelectedMemory(Memory[None]):
-    selected_tool_names: "tuple[str, ...]" = ()
+class _SelectedMemory(AbstractCapability[None]):
+    def __init__(
+        self,
+        store: MemoryStore,
+        *,
+        selected_tool_names: tuple[str, ...],
+        id: str,
+        operation_identity_run_id: str | None = None,
+    ) -> None:
+        self.id = id
+        self._store = store
+        self._selected_tool_names = selected_tool_names
+        self._operation_identity_run_id = operation_identity_run_id
 
-    def get_toolset(self) -> "AbstractToolset[None] | None":
-        toolset = super().get_toolset()
-        return None if toolset is None else toolset.filtered(
-            lambda _ctx, definition: definition.name in self.selected_tool_names
+    def get_instructions(self) -> str:
+        return _memory_guidance(self._selected_tool_names)
+
+    def get_toolset(self) -> AbstractToolset[None]:
+        toolset = FunctionToolset(id="memory")
+        if "read_memory" in self._selected_tool_names:
+            toolset.add_function(self._read_memory, name="read_memory")
+        if "search_memory" in self._selected_tool_names:
+            toolset.add_function(self._search_memory, name="search_memory")
+        if "write_memory" in self._selected_tool_names:
+            toolset.add_function(self._write_memory, name="write_memory")
+        if "delete_memory" in self._selected_tool_names:
+            toolset.add_function(self._delete_memory, name="delete_memory")
+        return toolset
+
+    async def _read_memory(self, ctx: RunContext[None], file: str) -> str:
+        normalized = _memory_file_argument(file)
+        result = await self._store.read(normalized, max_chars=65_536)
+        if result is None:
+            raise ModelRetry(
+                f"There is no memory file named {normalized!r}; search memory first."
+            )
+        suffix = "\n[truncated]" if result.truncated else ""
+        return result.content + suffix
+
+    async def _search_memory(
+        self,
+        ctx: RunContext[None],
+        query: str,
+    ) -> dict[str, object]:
+        del ctx
+        result = await self._store.search(query, limit=10)
+        return {
+            "matches": [
+                {
+                    "file": match.file,
+                    "snippet": match.snippet,
+                    "score": match.score,
+                }
+                for match in result.matches
+            ],
+            "scanned": result.scanned,
+            "truncated": result.truncated,
+        }
+
+    async def _write_memory(
+        self,
+        ctx: RunContext[None],
+        content: str,
+        file: str = "MEMORY.md",
+        old_text: str | None = None,
+    ) -> dict[str, object]:
+        normalized = _memory_file_argument(file)
+        if old_text is None and not content.strip():
+            raise ModelRetry("Nothing to write; provide content to append.")
+        operation = _memory_operation(
+            ctx,
+            "write",
+            normalized,
+            content,
+            old_text,
+            operation_identity_run_id=self._operation_identity_run_id,
         )
+        replay = await self._store.get_operation(operation)
+        if replay is not None:
+            return {
+                "file": replay.file,
+                "version": replay.version,
+                "status": replay.status,
+            }
+        current = await self._store.read(normalized, max_chars=65_536)
+        if current is not None and current.truncated:
+            raise ModelRetry("The memory file is too large to edit safely.")
+        value = "" if current is None else current.content
+        if old_text is None:
+            next_content = content
+            append = True
+            status = "created" if current is None else "appended"
+        else:
+            if not old_text or value.count(old_text) != 1:
+                raise ModelRetry("old_text must match exactly one existing passage.")
+            next_content = value.replace(old_text, content)
+            append = False
+            status = "updated"
+        mutation = await self._store.write(
+            normalized,
+            content if append else next_content,
+            expected_version=None if current is None else current.version,
+            operation=operation,
+            append=append,
+        )
+        return {
+            "file": normalized,
+            "version": mutation.version,
+            "status": status if not mutation.replayed else mutation.status,
+        }
+
+    async def _delete_memory(
+        self,
+        ctx: RunContext[None],
+        file: str,
+    ) -> dict[str, JsonValue]:
+        normalized = _memory_file_argument(file)
+        if normalized == "MEMORY.md":
+            raise ModelRetry("MEMORY.md is the main notebook; edit it instead.")
+        operation = _memory_operation(
+            ctx,
+            "delete",
+            normalized,
+            operation_identity_run_id=self._operation_identity_run_id,
+        )
+        replay = await self._store.get_operation(operation)
+        if replay is not None:
+            return {
+                "file": replay.file,
+                "version": replay.version,
+                "status": replay.status,
+            }
+        current = await self._store.read(normalized, max_chars=1)
+        mutation = await self._store.delete(
+            normalized,
+            expected_version=None if current is None else current.version,
+            operation=operation,
+        )
+        return {
+            "file": normalized,
+            "version": mutation.version,
+            "status": mutation.status,
+        }
+
+
+class _RuntimePlanningCapability(AbstractCapability[None]):
+    def __init__(
+        self,
+        store_resolver: Callable[[RunContext[None]], RuntimePlanStore],
+        *,
+        id: str,
+        ephemeral_prompt_sink: Callable[[UserPromptPart | None], None] | None = None,
+        operation_identity_run_id: str | None = None,
+    ) -> None:
+        self.id = id
+        self._store_resolver = store_resolver
+        self._ephemeral_prompt_sink = ephemeral_prompt_sink
+        self._store: RuntimePlanStore | None = None
+        self._plan_items: tuple[PlanItem, ...] = ()
+        self._plan_revision = 0
+        self._plan_loaded = False
+        self._prompt_part: UserPromptPart | None = None
+        self._operation_identity_run_id = operation_identity_run_id
+
+    async def before_run(self, ctx: RunContext[None]) -> None:
+        store = self._get_store(ctx)
+        value = await store.get_plan()
+        self._set_plan(value)
+        self._plan_loaded = True
+        _logger.debug(
+            "runtime plan loaded: owner_kind=%s owner_id=%s revision=%s items=%s",
+            store.owner_kind,
+            store.owner_id,
+            self._plan_revision,
+            len(self._plan_items),
+        )
+
+    def get_instructions(self) -> str:
+        return (
+            "Use write_plan with the complete current list when planning. "
+            "Each item has content and one of pending, in_progress, completed, "
+            "or cancelled."
+        )
+
+    def get_toolset(self) -> AbstractToolset[None]:
+        toolset = FunctionToolset(id="planning")
+        toolset.add_function(self._write_plan, name="write_plan")
+        return toolset
+
+    async def before_model_request(
+        self,
+        ctx: RunContext[None],
+        request_context: ModelRequestContext,
+    ) -> ModelRequestContext:
+        if not self._plan_loaded:
+            value = await self._get_store(ctx).get_plan()
+            self._set_plan(value)
+            self._plan_loaded = True
+        _remove_plan_prompts(
+            request_context.messages,
+            target=self._prompt_part,
+        )
+        self._prompt_part = None
+        self._publish_prompt(None)
+        if not self._plan_items:
+            return request_context
+        if not request_context.messages:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        last = request_context.messages[-1]
+        if not isinstance(last, ModelRequest):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        prompt_part = UserPromptPart(
+            content=_plan_prompt(self._plan_items, self._plan_revision),
+        )
+        request_context.messages[-1] = replace(
+            last,
+            parts=[*last.parts, prompt_part],
+        )
+        self._prompt_part = prompt_part
+        self._publish_prompt(prompt_part)
+        return request_context
+
+    async def after_model_request(
+        self,
+        ctx: RunContext[None],
+        *,
+        request_context: ModelRequestContext,
+        response: ModelResponse,
+    ) -> ModelResponse:
+        _remove_plan_prompts(ctx.messages, target=self._prompt_part)
+        if request_context.messages is not ctx.messages:
+            _remove_plan_prompts(
+                request_context.messages,
+                target=self._prompt_part,
+            )
+        self._prompt_part = None
+        self._publish_prompt(None)
+        return response
+
+    async def on_model_request_error(
+        self,
+        ctx: RunContext[None],
+        *,
+        request_context: ModelRequestContext,
+        error: Exception,
+    ) -> ModelResponse:
+        _remove_plan_prompts(ctx.messages, target=self._prompt_part)
+        if request_context.messages is not ctx.messages:
+            _remove_plan_prompts(
+                request_context.messages,
+                target=self._prompt_part,
+            )
+        self._prompt_part = None
+        self._publish_prompt(None)
+        raise error
+
+    async def _write_plan(
+        self,
+        ctx: RunContext[None],
+        items: list[dict[str, str]],
+    ) -> dict[str, object]:
+        if not isinstance(items, list):
+            raise ModelRetry("items must be a complete list.")
+        try:
+            values = []
+            for item in items:
+                if not isinstance(item, Mapping) or set(item) - {
+                    "content",
+                    "status",
+                }:
+                    raise ValueError("plan item fields are invalid")
+                values.append(
+                    PlanItem(
+                        item["content"],
+                        item.get("status", "pending"),  # type: ignore[arg-type]
+                    )
+                )
+        except (KeyError, TypeError, ValueError) as error:
+            raise ModelRetry("Each plan item needs content and an optional status.") from error
+        operation = PlanOperation(
+            _tool_call_identity(
+                ctx,
+                operation_identity_run_id=self._operation_identity_run_id,
+            ),
+            canonical_sha256(
+                {"items": [_plan_item_payload(item) for item in values]}
+            ),
+        )
+        result = await self._get_store(ctx).write_plan(
+            values,
+            operation=operation,
+        )
+        self._set_plan(result)
+        self._plan_loaded = True
+        return result
+
+    def _publish_prompt(self, prompt: UserPromptPart | None) -> None:
+        if self._ephemeral_prompt_sink is not None:
+            self._ephemeral_prompt_sink(prompt)
+
+    def _get_store(self, ctx: RunContext[None]) -> RuntimePlanStore:
+        if self._store is None:
+            store = self._store_resolver(ctx)
+            if store is None:
+                raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+            self._store = store
+        return self._store
+
+    def _set_plan(self, value: Mapping[str, object]) -> None:
+        items, revision = _plan_view(value)
+        if revision < self._plan_revision:
+            return
+        if revision == self._plan_revision and items != self._plan_items:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        self._plan_items = items
+        self._plan_revision = revision
 
 
 class _CompactionCapability(AbstractCapability[None]):
     def __init__(
         self,
-        target_tokens: int,
+        target_tokens: int | None,
         *,
-        step_store: StepStore,
-        conversation_id: "str | None",
-        step_run_id: str,
+        trusted_workspace_read: bool,
+        journal: ModelRequestJournal | None,
+        observer: ExternalModelRequestObserver | None,
+        projection_sink: (
+            "Callable[[Sequence[ModelMessage], Sequence[ModelMessage] | None], None]"
+            " | None"
+        ),
     ) -> None:
-        self._target_tokens = target_tokens
-        self._step_store = step_store
-        self._conversation_id = conversation_id
-        self._step_run_id = step_run_id
-        self._compaction = _build_compaction(target_tokens)
-
-    async def before_run(self, ctx: RunContext[None]) -> None:
-        if ctx.message_history:
-            return
-        if self._conversation_id is None:
-            return
-        try:
-            run = await self._step_store.get_run(run_id=self._step_run_id)
-            if run is None or not run.messages:
-                return
-            ctx.message_history[:] = list(run.messages)
-        except BaseException:
-            ctx.message_history[:] = []
-            raise
+        if not isinstance(trusted_workspace_read, bool):
+            raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
+        self._compaction = RuntimeCompaction(
+            target_tokens,
+            trusted_workspace_read=trusted_workspace_read,
+            journal=journal,
+            observer=observer,
+            projection_sink=projection_sink,
+        )
 
     async def before_model_request(
         self,
@@ -1431,31 +2144,147 @@ def _memory_guidance(selected_tools: "tuple[str, ...]") -> str:
     return f"Use only these memory tools when needed: {actions}."
 
 
-def _build_compaction(
-    context_target_tokens: "int | None",
-) -> AbstractCapability[None]:
-    deduplicate = DeduplicateFileReads(file_key=_workspace_file_key)
-    if context_target_tokens is None:
-        return deduplicate
-    return TieredCompaction(
-        tiers=[
-            deduplicate,
-            ClearToolResults(max_tokens=1, keep_pairs=3),
-            SummarizingCompaction(max_messages=1, keep_messages=20),
-        ],
-        target_tokens=context_target_tokens,
+def _plan_item_payload(item: PlanItem) -> dict[str, str]:
+    return {"content": item.content, "status": item.status}
+
+
+def _plan_view(value: Mapping[str, object]) -> tuple[tuple[PlanItem, ...], int]:
+    if set(value) != {"items", "revision"}:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    revision = value.get("revision")
+    raw_items = value.get("items")
+    if (
+        isinstance(revision, bool)
+        or not isinstance(revision, int)
+        or revision < 0
+        or not isinstance(raw_items, list)
+    ):
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    items: list[PlanItem] = []
+    for raw_item in raw_items:
+        if not isinstance(raw_item, Mapping):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        if set(raw_item) != {"content", "status"}:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        content = raw_item.get("content")
+        status = raw_item.get("status")
+        if not isinstance(content, str) or not isinstance(status, str):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        if status not in {
+            "pending",
+            "in_progress",
+            "completed",
+            "cancelled",
+        }:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        if not content.strip():
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        items.append(PlanItem(content, status))  # type: ignore[arg-type]
+    if revision == 0 and items:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    return tuple(items), revision
+
+
+def _plan_prompt(items: Sequence[PlanItem], revision: int) -> str:
+    payload = {
+        "revision": revision,
+        "items": [_plan_item_payload(item) for item in items],
+    }
+    return (
+        f"{_PLAN_PROMPT_MARKER}\n"
+        + json.dumps(
+            payload,
+            ensure_ascii=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        )
     )
 
 
-def _workspace_file_key(part: ToolCallPart) -> "str | None":
-    if part.tool_name != "read_file":
-        return None
+def _remove_plan_prompts(
+    messages: list[ModelMessage],
+    *,
+    target: UserPromptPart | None,
+) -> None:
+    if target is None:
+        return
+    for index, message in enumerate(messages):
+        parts = [part for part in message.parts if part is not target]
+        if len(parts) != len(message.parts):
+            messages[index] = replace(message, parts=parts)
+
+
+def _message_prefix(
+    values: Sequence[ModelMessage],
+    prefix: Sequence[ModelMessage],
+) -> bool:
+    return (
+        len(values) >= len(prefix)
+        and tuple(values[: len(prefix)]) == tuple(prefix)
+    )
+
+
+def _memory_file_argument(file: str) -> str:
+    if not isinstance(file, str):
+        raise ModelRetry("memory file must be a string")
     try:
-        arguments = part.args_as_dict()
-    except (TypeError, ValueError):
-        return None
-    path = arguments.get("path")
-    return path if isinstance(path, str) else None
+        return normalize_memory_file(file)
+    except AIError as error:
+        raise ModelRetry("memory file name is invalid") from error
+
+
+def _memory_operation(
+    ctx: RunContext[None],
+    kind: str,
+    file: str,
+    content: str | None = None,
+    old_text: str | None = None,
+    *,
+    operation_identity_run_id: str | None = None,
+) -> MemoryOperation:
+    call_id = _tool_call_identity(
+        ctx,
+        operation_identity_run_id=operation_identity_run_id,
+    )
+    append = kind == "write" and old_text is None
+    fingerprint = memory_operation_fingerprint(
+        kind,
+        file,
+        content,
+        old_text,
+        append,
+    )
+    return MemoryOperation(
+        call_id,
+        fingerprint,
+        kind,
+        file,
+        content,
+        old_text,
+        append,
+    )
+
+
+def _tool_call_identity(
+    ctx: RunContext[None],
+    *,
+    operation_identity_run_id: str | None,
+) -> str:
+    run_id = operation_identity_run_id or ctx.run_id
+    call_id = ctx.tool_call_id
+    if (
+        not isinstance(run_id, str)
+        or not run_id
+        or not isinstance(call_id, str)
+        or not call_id
+    ):
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    return canonical_sha256(
+        {
+            "run_id": run_id,
+            "tool_call_id": call_id,
+        }
+    )
 
 
 def _model_usage_metadata(response: ModelResponse) -> dict[str, str]:
@@ -1537,11 +2366,11 @@ def _trusted_tool_capability(name: str, tool_class: str) -> "str | None":
     return None
 
 
-def _tool_effect_policy(
+def _tool_execution_policy(
     tool_def: ToolDefinition,
     *,
     trusted_tool_classes: "tuple[tuple[str, str], ...]",
-) -> _ToolEffectPolicy:
+) -> _ToolExecutionPolicy:
     _validate_trusted_tool_classes(trusted_tool_classes)
     tool_class = dict(trusted_tool_classes).get(tool_def.name)
     if tool_class is not None:
@@ -1552,29 +2381,29 @@ def _tool_effect_policy(
                 safe_details={"tool_name": tool_def.name},
             )
         if tool_class in {"filesystem.read", "memory.read"}:
-            return _ToolEffectPolicy(True, True)
+            return _ToolExecutionPolicy(True, True)
         if tool_class == "memory.write":
-            return _ToolEffectPolicy(True, False)
+            return _ToolExecutionPolicy(True, False)
         if tool_class == "filesystem.write":
-            return _ToolEffectPolicy(False, False)
+            return _ToolExecutionPolicy(False, False)
         if tool_class == "shell":
-            return _ToolEffectPolicy(
+            return _ToolExecutionPolicy(
                 tool_def.name == "check_command",
                 tool_def.name == "check_command",
             )
         if tool_class == "control":
             if tool_def.name in SKILL_TOOL_NAMES:
-                return _ToolEffectPolicy(True, True)
+                return _ToolExecutionPolicy(True, True)
             if tool_def.name in PLANNING_TOOL_NAMES or tool_def.name == "delegate_task":
-                return _ToolEffectPolicy(True, False)
+                return _ToolExecutionPolicy(True, False)
             if tool_def.name == "list_subagents":
-                return _ToolEffectPolicy(True, True)
+                return _ToolExecutionPolicy(True, True)
             raise AIError(ErrorCode.CAPABILITY_POLICY_CONFLICT)
         raise AIError(ErrorCode.CAPABILITY_POLICY_CONFLICT)
     metadata = (tool_def.metadata or {}).get(_REPLAY_SAFE_METADATA_KEY, False)
     if not isinstance(metadata, bool):
         raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
-    return _ToolEffectPolicy(metadata, False)
+    return _ToolExecutionPolicy(metadata, False)
 
 
 def _durable_failure_error(

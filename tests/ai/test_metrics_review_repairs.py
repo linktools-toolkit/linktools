@@ -25,6 +25,7 @@ from linktools.ai.observe._memory import InMemoryMetricStore
 from linktools.ai.observe._query import _Accumulator
 from linktools.ai.runtime import _metric_capability as metric_capability
 from linktools.ai.runtime._metric_capability import _RuntimeModelMetricCapability
+from linktools.ai.runtime._journal import ModelRequestJournal
 from linktools.ai.task._event import TaskEvent, TaskEventType
 from linktools.ai.task._metrics import _TaskMetricProjector
 from pydantic_ai.exceptions import RunCancelled
@@ -185,10 +186,18 @@ async def test_model_metric_rejection_is_logged_without_escaping(
         route_id="default",
     )
 
+    journal = ModelRequestJournal(
+        source_namespace="workspace",
+        tenant_id="tenant",
+        execution_id="execution",
+        step_run_id="step-run",
+    )
+    capability._journal = journal
+    fact = journal.begin(0)
+    fact = journal.finish(0, status="SUCCEEDED")
     capability._record_model(
         None,
-        "attempt",
-        0,
+        fact,
         status="SUCCEEDED",
         error_code=None,
         measurements=(),

@@ -16,7 +16,7 @@ from ..storage import (
     read_object,
     runtime_object_key,
 )
-from .state._plan import RuntimeDomain
+from .state import RuntimeDomain
 
 _DIGEST = re.compile(r"[0-9a-f]{64}\Z")
 _OBJECT_DOMAINS = frozenset(

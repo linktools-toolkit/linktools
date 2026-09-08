@@ -29,15 +29,8 @@ class _Recorder:
 
 
 class _StepStore:
-    async def record_tool_effect(self, effect: Any) -> None:
-        del effect
-
     async def append_event(self, event: Any) -> None:
         del event
-
-    async def get_tool_effect(self, *, run_id: str, tool_call_id: str) -> Any:
-        del run_id, tool_call_id
-        return None
 
 
 class _Bridge:

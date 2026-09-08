@@ -3,7 +3,7 @@
 """Fault coverage for Runtime tool terminal ownership and local task waiters."""
 
 import asyncio
-from dataclasses import dataclass, field, replace
+from dataclasses import replace
 from datetime import datetime, timezone
 from types import SimpleNamespace
 from typing import Any
@@ -14,7 +14,7 @@ from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.runtime._capabilities import (
     ToolOperationDecision,
     _RuntimeStepPersistence,
-    _tool_effect_policy,
+    _tool_execution_policy,
 )
 from linktools.ai.runtime._tool import RuntimeToolOperationBridge, ToolOperationRecord
 from linktools.ai.runtime.state import ToolOperationAdmission
@@ -30,39 +30,12 @@ from pydantic_ai.usage import RunUsage
 pytestmark = pytest.mark.asyncio
 
 
-@dataclass
-class _Effect:
-    run_id: str
-    tool_call_id: str
-    status: str
-    effect_summary: str | None = None
-    idempotency_key: str | None = None
-    started_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
-
-
 class _StepStore:
     def __init__(self) -> None:
-        self.effects: list[_Effect] = []
-
-    async def record_tool_effect(self, effect: Any) -> None:
-        self.effects.append(
-            _Effect(
-                effect.run_id,
-                effect.tool_call_id,
-                effect.status,
-                effect.effect_summary,
-                effect.idempotency_key,
-            )
-        )
+        self.events: list[Any] = []
 
     async def append_event(self, event: Any) -> None:
-        del event
-
-    async def get_tool_effect(self, *, run_id: str, tool_call_id: str) -> Any:
-        for effect in reversed(self.effects):
-            if effect.run_id == run_id and effect.tool_call_id == tool_call_id:
-                return effect
-        return None
+        self.events.append(event)
 
 
 class _ToolBridge:
@@ -156,6 +129,72 @@ async def test_tool_operation_admission_uses_runtime_step_and_binding_digest() -
     assert not hasattr(repository.request, "binding_fingerprint")
 
 
+async def test_tool_operation_identity_is_scoped_to_step_run() -> None:
+    call = ToolCallPart("tool", {}, tool_call_id="call")
+    first_repository = _OperationRepository()
+    first_bridge = RuntimeToolOperationBridge(
+        first_repository,
+        object(),
+        namespace="namespace",
+        tenant_id="tenant",
+        execution_id="execution",
+        step_run_id="first-step",
+        binding_digest="binding",
+        owner="owner",
+        background_tasks=set(),
+        payload_policy=PayloadPolicy(),
+    )
+    second_repository = _OperationRepository()
+    second_bridge = RuntimeToolOperationBridge(
+        second_repository,
+        object(),
+        namespace="namespace",
+        tenant_id="tenant",
+        execution_id="execution",
+        step_run_id="second-step",
+        binding_digest="binding",
+        owner="owner",
+        background_tasks=set(),
+        payload_policy=PayloadPolicy(),
+    )
+
+    await first_bridge.begin(_context(), call, _definition(True), {}, True)
+    await second_bridge.begin(_context(), call, _definition(True), {}, True)
+
+    assert first_repository.request is not None
+    assert second_repository.request is not None
+    assert (
+        first_repository.request.tool_operation_id
+        != second_repository.request.tool_operation_id
+    )
+
+
+async def test_tool_operation_cache_rejects_changed_call_fingerprint() -> None:
+    repository = _OperationRepository()
+    bridge = RuntimeToolOperationBridge(
+        repository,
+        object(),
+        namespace="namespace",
+        tenant_id="tenant",
+        execution_id="execution",
+        step_run_id="step",
+        binding_digest="binding",
+        owner="owner",
+        background_tasks=set(),
+        payload_policy=PayloadPolicy(),
+    )
+    context = _context()
+    definition = _definition(True)
+    call = ToolCallPart("tool", {}, tool_call_id="call")
+
+    await bridge.begin(context, call, definition, {}, True)
+
+    with pytest.raises(AIError) as raised:
+        await bridge.begin(context, call, definition, {"changed": True}, True)
+
+    assert raised.value.code is ErrorCode.IDEMPOTENCY_CONFLICT
+
+
 @pytest.mark.parametrize(
     ("name", "capability_id", "tool_class", "replay_safe", "effect_free"),
     [
@@ -178,7 +217,7 @@ async def test_trusted_tool_effect_policy_matrix(
     replay_safe: bool,
     effect_free: bool,
 ) -> None:
-    policy = _tool_effect_policy(
+    policy = _tool_execution_policy(
         ToolDefinition(name=name, capability_id=capability_id),
         trusted_tool_classes=((name, tool_class),),
     )
@@ -188,7 +227,7 @@ async def test_trusted_tool_effect_policy_matrix(
 
 async def test_trusted_tool_effect_policy_rejects_spoofed_capability() -> None:
     with pytest.raises(AIError) as raised:
-        _tool_effect_policy(
+        _tool_execution_policy(
             ToolDefinition(name="read_file", capability_id="custom"),
             trusted_tool_classes=(("read_file", "filesystem.read"),),
         )
@@ -196,11 +235,11 @@ async def test_trusted_tool_effect_policy_rejects_spoofed_capability() -> None:
 
 
 async def test_custom_tool_replay_metadata_remains_explicit_opt_in() -> None:
-    safe = _tool_effect_policy(
+    safe = _tool_execution_policy(
         ToolDefinition(name="custom", metadata={"linktools.ai.replay_safe": True}),
         trusted_tool_classes=(),
     )
-    unsafe = _tool_effect_policy(ToolDefinition(name="custom"), trusted_tool_classes=())
+    unsafe = _tool_execution_policy(ToolDefinition(name="custom"), trusted_tool_classes=())
     assert (safe.replay_safe, safe.effect_free) == (True, False)
     assert (unsafe.replay_safe, unsafe.effect_free) == (False, False)
 
@@ -237,7 +276,10 @@ async def test_model_retry_is_known_failure_regardless_of_replay_safety(replay_s
             handler=handler,
         )
     assert bridge.calls == ["begin", "fail"]
-    assert [effect.status for effect in store.effects] == ["started", "failed"]
+    assert [event.kind for event in store.events] == [
+        "tool_call_started",
+        "tool_call_failed",
+    ]
 
 
 class _TaskRepository:

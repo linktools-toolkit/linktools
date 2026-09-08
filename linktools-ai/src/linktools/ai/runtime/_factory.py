@@ -9,13 +9,10 @@ import uuid
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
 from functools import partial
-from pathlib import Path
 from typing import TypeVar, cast
 
 from linktools.core import environ
-from pydantic_ai_harness.memory import SearchableMemoryStore
-
-from ..agent import AgentCatalog, AgentCompiler, AgentDefinition
+from ..agent import AgentCatalog, AgentCompiler
 from ..asset import (
     AssetKey,
     AssetPathAdapter,
@@ -39,7 +36,7 @@ from ..core import (
 from ..errors import AIError, ErrorCode
 from ..model import ModelRegistry
 from ..observe import Metrics
-from ..spec import AgentSpec, AgentSpecCodec
+from ..spec import AgentSpec
 from ..storage import ObjectStore, PayloadPolicy, StorageOverlay
 from ..task import LocalTaskGraphLauncher, TaskNodeHandler
 from ..workspace import LocalRepositoryInstructionResolver, LocalRuleCatalog, Workspace
@@ -52,7 +49,7 @@ from ._event import DefaultEventService, LiveExecutionEventBroker
 from ._execution import DefaultExecutionService
 from ._history import StepExecutionHistoryReader, StepSessionHistoryReader
 from ._local import LocalExecutionBackend
-from ._memory import RuntimeMemoryStore
+from ._memory import MemoryStore, RuntimeMemoryStore
 from ._metrics import _RuntimeMetricBuffer
 from ._object import RuntimeObjectKeyFactory
 from ._planner import DefaultTaskService, RuntimeTaskNodeRunner
@@ -393,14 +390,14 @@ def _execution_history_reader(
 def _memory_store_factory(
     workspace: Workspace,
     state: RuntimeState,
-) -> "Callable[[str, str, str, ObjectStore, bool], SearchableMemoryStore]":
+) -> "Callable[[str, str, str, ObjectStore, bool], MemoryStore]":
     def build(
         tenant_id: str,
         execution_id: str,
         memory_scope: str,
         object_store: ObjectStore,
         transient: bool,
-    ) -> SearchableMemoryStore:
+    ) -> MemoryStore:
         return RuntimeMemoryStore(
             state.memory,
             object_store=object_store,
@@ -441,7 +438,7 @@ async def _build_local_components(
     task_handlers: Sequence[TaskNodeHandler[AppT]],
     history_reader: ExecutionHistoryReader,
     session_history_reader: SessionHistoryReader,
-    memory_store_factory: "Callable[[str, str, str, ObjectStore, bool], SearchableMemoryStore] | None",
+    memory_store_factory: "Callable[[str, str, str, ObjectStore, bool], MemoryStore] | None",
     skill_sources: SkillSourceRegistry,
     grant_key: bytes,
     instruction_resolver: LocalRepositoryInstructionResolver,
@@ -481,7 +478,7 @@ async def _build_local_components(
         memory_tenant: str,
         execution_id: str,
         memory_scope: str,
-    ) -> SearchableMemoryStore:
+    ) -> MemoryStore:
         if memory_store_factory is None:
             raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
         route = state.plan.route(RuntimeDomain.MEMORY)

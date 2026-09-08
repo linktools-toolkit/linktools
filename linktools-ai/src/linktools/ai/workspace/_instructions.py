@@ -533,8 +533,6 @@ def _normalize_target_path(root: Path, value: str | Path) -> Path:
     except (ValueError, OSError) as error:
         raise AIError(ErrorCode.AGENT_INSTRUCTIONS_OUTSIDE_ROOT) from error
     logical = relative.as_posix()
-    if logical != ".":
-        _validate_relative_posix_path(logical)
     return relative
 
 

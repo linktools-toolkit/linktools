@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 """Per-request model usage projection into Runtime trace."""
 
+import asyncio
 from types import SimpleNamespace
 
 import pytest
@@ -13,12 +14,13 @@ from linktools.ai.runtime._capabilities import (
     _model_usage_metadata,
 )
 from linktools.ai.runtime._history import _trace_item
+from linktools.ai.runtime._journal import ModelRequestJournal
 from pydantic_ai import Agent, ModelRetry
 from pydantic_ai.messages import ModelMessage, ModelResponse, TextPart
 from pydantic_ai.models.function import AgentInfo, FunctionModel
 from pydantic_ai.models.test import TestModel
 from pydantic_ai.usage import RequestUsage, RunUsage
-from pydantic_ai_harness.step_persistence import InMemoryStepStore, StepEvent
+from linktools.ai.runtime.state import StagingStepStore, StepEvent
 
 
 class _ToolOperations:
@@ -91,7 +93,7 @@ def _project_usage(usage: RequestUsage) -> dict[str, object] | None:
     )
 
 
-def _persistence(store: InMemoryStepStore, run_id: str) -> _RuntimeStepPersistence:
+def _persistence(store: StagingStepStore, run_id: str) -> _RuntimeStepPersistence:
     return _RuntimeStepPersistence(
         store=store,
         agent_name="usage-test",
@@ -100,7 +102,7 @@ def _persistence(store: InMemoryStepStore, run_id: str) -> _RuntimeStepPersisten
     )
 
 
-async def _completed_usage(store: InMemoryStepStore, run_id: str) -> list[dict[str, object]]:
+async def _completed_usage(store: StagingStepStore, run_id: str) -> list[dict[str, object]]:
     events = await store.list_events(run_id=run_id)
     values = [
         _project_event(event, ordinal)
@@ -109,6 +111,43 @@ async def _completed_usage(store: InMemoryStepStore, run_id: str) -> list[dict[s
     ]
     assert all(value is not None for value in values)
     return [value for value in values if value is not None]
+
+
+@pytest.mark.asyncio
+async def test_asyncio_model_cancellation_records_failed_request() -> None:
+    store = StagingStepStore()
+
+    async def cancelled_model(
+        messages: list[ModelMessage],
+        info: AgentInfo,
+    ) -> ModelResponse:
+        del messages, info
+        raise asyncio.CancelledError
+
+    persistence = _persistence(store, "cancelled-model-run")
+    persistence.model_journal = ModelRequestJournal(
+        source_namespace="workspace",
+        tenant_id="tenant",
+        execution_id="execution",
+        step_run_id="cancelled-model-run",
+    )
+    agent = Agent(FunctionModel(cancelled_model), capabilities=[persistence])
+
+    with pytest.raises(asyncio.CancelledError):
+        await agent.run("hello")
+
+    events = await store.list_events(run_id="cancelled-model-run")
+    model_events = [
+        event.kind
+        for event in events
+        if event.kind.startswith("model_request_")
+    ]
+    assert model_events == ["model_request_started", "model_request_failed"]
+    failed = next(
+        event for event in events if event.kind == "model_request_failed"
+    )
+    assert failed.metadata["linktools.ai.request_sequence"] == "1"
+    assert failed.metadata["linktools.ai.request_purpose"] == "agent"
 
 
 def _assert_token_sum(values: list[dict[str, object]], usage: RunUsage) -> None:
@@ -259,7 +298,7 @@ def test_failed_model_response_trace_has_no_request_usage() -> None:
 
 @pytest.mark.asyncio
 async def test_model_retry_records_each_request_usage() -> None:
-    store = InMemoryStepStore()
+    store = StagingStepStore()
     agent = Agent(
         FunctionModel(_text_model),
         capabilities=[_persistence(store, "retry-run")],
@@ -284,7 +323,7 @@ async def test_model_retry_records_each_request_usage() -> None:
 
 @pytest.mark.asyncio
 async def test_tool_loop_records_usage_before_and_after_tool() -> None:
-    store = InMemoryStepStore()
+    store = StagingStepStore()
     agent = Agent(
         TestModel(),
         capabilities=[_persistence(store, "tool-run")],
@@ -304,7 +343,7 @@ async def test_tool_loop_records_usage_before_and_after_tool() -> None:
 
 @pytest.mark.asyncio
 async def test_streaming_records_completed_request_usage() -> None:
-    store = InMemoryStepStore()
+    store = StagingStepStore()
     agent = Agent(
         TestModel(custom_output_text="streamed"),
         capabilities=[_persistence(store, "stream-run")],

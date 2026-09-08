@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Project Harness step facts into Runtime trace and transcript views."""
+"""Project Runtime step facts into Runtime trace and transcript views."""
 
 import re
 import time
@@ -11,11 +11,6 @@ from typing import Protocol, runtime_checkable
 
 from linktools.core import environ
 from pydantic_ai.messages import ModelRequest, ModelResponse
-from pydantic_ai_harness.step_persistence import (
-    RunRecord,
-    StepEvent,
-    StepStore,
-)
 
 from ..core import (
     CursorPayload,
@@ -29,6 +24,7 @@ from ..core import (
     validate_persistence_namespace,
 )
 from ..errors import AIError, ErrorCode
+from ._journal import REQUEST_PURPOSE_METADATA_KEY, REQUEST_SEQUENCE_METADATA_KEY
 from .service_api import (
     ExecutionHistoryItem,
     ExecutionTraceItem,
@@ -37,12 +33,16 @@ from .service_api import (
 )
 from .state import (
     SESSION_HISTORY_VIEW_V1,
+    ContinuableSnapshot,
     ExecutionReadModelBuild,
     ExecutionReadModelRepository,
     ExecutionRecord,
     ExecutionRepository,
     LoadedContextMessage,
     RuntimeDomain,
+    RunRecord,
+    StepEvent,
+    StepStore,
     TranscriptMessageRef,
     project_execution_transcript_message,
     project_session_history_message,
@@ -792,9 +792,12 @@ class StepSessionHistoryReader:
 
 def _trace_item(record: ExecutionRecord, segment_sequence: int, depth: int, ordinal: int, event: StepEvent) -> "ExecutionTraceItem | None":
     mapping = {
-        "model_request_started": ("MODEL_REQUEST", "STARTED"), "model_request_completed": ("MODEL_RESPONSE", "SUCCEEDED"),
-        "model_request_failed": ("MODEL_RESPONSE", "FAILED"), "tool_call_started": ("TOOL_CALL", "STARTED"),
-        "tool_call_completed": ("TOOL_RESULT", "SUCCEEDED"), "tool_call_failed": ("TOOL_ERROR", "FAILED"),
+        "model_request_started": ("MODEL_REQUEST", "STARTED"),
+        "model_request_completed": ("MODEL_RESPONSE", "SUCCEEDED"),
+        "model_request_failed": ("MODEL_RESPONSE", "FAILED"),
+        "tool_call_started": ("TOOL_CALL", "STARTED"),
+        "tool_call_completed": ("TOOL_RESULT", "SUCCEEDED"),
+        "tool_call_failed": ("TOOL_ERROR", "FAILED"),
     }
     value = mapping.get(event.kind)
     if value is None:
@@ -819,6 +822,18 @@ def _trace_item(record: ExecutionRecord, segment_sequence: int, depth: int, ordi
         if not duration_ns.isdigit():
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         payload["duration_ns"] = int(duration_ns)
+    request_sequence = event.metadata.get(REQUEST_SEQUENCE_METADATA_KEY)
+    request_purpose = event.metadata.get(REQUEST_PURPOSE_METADATA_KEY)
+    if request_sequence is not None or request_purpose is not None:
+        if (
+            request_sequence is None
+            or not request_sequence.isdigit()
+            or int(request_sequence) < 1
+            or request_purpose not in {"agent", "compaction"}
+        ):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        payload["request_sequence"] = int(request_sequence)
+        payload["purpose"] = request_purpose
     if kind == "MODEL_RESPONSE":
         payload["token_usage"] = _model_token_usage(event) if status == "SUCCEEDED" else None
     if event.agent_name is not None:

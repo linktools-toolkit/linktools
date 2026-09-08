@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """Pydantic AI adapter for the vendor-neutral Skill capability."""
 
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping
 from typing import cast
 
 from pydantic_ai.capabilities import AbstractCapability
@@ -30,9 +30,15 @@ _MODEL_FAILURE_ERRORS = frozenset(
 
 
 class _PydanticSkillCapability(AbstractCapability[AgentContext[object]]):
-    def __init__(self, capability: SkillCapability) -> None:
+    def __init__(
+        self,
+        capability: SkillCapability,
+        *,
+        resource_paths: Mapping[str, str] | None = None,
+    ) -> None:
         self.id = _SKILL_CAPABILITY_ID
         self._capability = capability
+        self._resource_paths = dict(resource_paths or {})
 
     def get_instructions(
         self,
@@ -63,10 +69,13 @@ class _PydanticSkillCapability(AbstractCapability[AgentContext[object]]):
             """Load skill instructions or one relative text resource."""
             del ctx
             try:
-                return cast(
+                result = cast(
                     dict[str, str | list[str]],
                     await self._capability.load_skill(skill_id, path),
                 )
+                if path is None and skill_id in self._resource_paths:
+                    result["location"] = self._resource_paths[skill_id]
+                return result
             except AIError as error:
                 if error.code in _MODEL_RETRY_ERRORS:
                     raise ModelRetry(_skill_error_message(error.code)) from error

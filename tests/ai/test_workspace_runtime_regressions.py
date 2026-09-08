@@ -11,14 +11,18 @@ from linktools.ai.asset import (
 from linktools.ai.capability import CapabilityGroup
 from linktools.ai.model import ModelRegistry
 from linktools.ai.runtime import Runtime, RuntimeContext, RuntimeDomain, RuntimeState
+from linktools.ai.runtime._capabilities import _SelectedMemory
 from linktools.ai.runtime._memory import RuntimeMemoryStore
 from linktools.ai.spec import AgentSpec, AgentSpecCodec, MCPServerSpec, MCPServerSpecCodec
 from linktools.ai.storage import StorageOverlay
 from linktools.ai.workspace import Workspace
+from pydantic_ai.models.test import TestModel
+from pydantic_ai.tools import RunContext
+from pydantic_ai.usage import RunUsage
 
 
 @pytest.mark.asyncio
-async def test_runtime_memory_store_accepts_harness_scoped_paths() -> None:
+async def test_runtime_memory_store_uses_flat_logical_files() -> None:
     state = RuntimeState.in_memory()
     await state.initialize(namespace="memory-regression", tenant_id="tenant")
     try:
@@ -31,24 +35,89 @@ async def test_runtime_memory_store_accepts_harness_scoped_paths() -> None:
             memory_scope="workspace",
         )
         await store.write(
-            "workspace/memory/MEMORY.md",
+            "MEMORY",
             "remember commit-writer",
             expected_version=None,
         )
-        assert await store.list_paths("workspace/memory/", limit=10) == [
-            "workspace/memory/MEMORY.md"
-        ]
-        result = await store.search(
-            "workspace/memory/",
-            "commit-writer",
-            limit=10,
-            max_files=10,
-            max_chars=1_000,
-            max_file_chars=1_000,
+        result = await store.search("commit-writer", limit=10)
+        assert [match.file for match in result.matches] == ["MEMORY.md"]
+    finally:
+        await state.close()
+
+
+@pytest.mark.asyncio
+async def test_memory_capability_preserves_append_and_replace_semantics() -> None:
+    state = RuntimeState.in_memory()
+    await state.initialize(namespace="memory-capability", tenant_id="tenant")
+    try:
+        store = RuntimeMemoryStore(
+            state.memory,
+            object_store=state.object_store(RuntimeDomain.MEMORY),
+            namespace="memory-capability",
+            tenant_id="tenant",
+            execution_id="execution",
+            memory_scope="workspace",
         )
-        assert [match.path for match in result.matches] == [
-            "workspace/memory/MEMORY.md"
-        ]
+        capability = _SelectedMemory(
+            store,
+            selected_tool_names=("write_memory",),
+            id="memory",
+        )
+
+        def context(call_id: str) -> RunContext[None]:
+            return RunContext(
+                deps=None,
+                model=TestModel(),
+                usage=RunUsage(),
+                run_id="run",
+                tool_call_id=call_id,
+            )
+
+        assert (
+            await capability._write_memory(context("create"), "first")
+        )["status"] == "created"
+        assert (
+            await capability._write_memory(context("append"), "second")
+        )["status"] == "appended"
+        assert (
+            await capability._write_memory(
+                context("replace"),
+                "updated",
+                old_text="first\nsecond\n",
+            )
+        )["status"] == "updated"
+
+        result = await store.read("MEMORY.md", max_chars=100)
+        assert result is not None
+        assert result.content == "updated"
+    finally:
+        await state.close()
+
+
+@pytest.mark.asyncio
+async def test_memory_missing_delete_commits_a_not_found_receipt() -> None:
+    state = RuntimeState.in_memory()
+    await state.initialize(namespace="memory-missing-delete", tenant_id="tenant")
+    try:
+        store = RuntimeMemoryStore(
+            state.memory,
+            object_store=state.object_store(RuntimeDomain.MEMORY),
+            namespace="memory-missing-delete",
+            tenant_id="tenant",
+            execution_id="execution",
+            memory_scope="workspace",
+        )
+
+        deleted = await store.delete("notes", expected_version=None)
+
+        assert deleted.status == "not_found"
+        assert deleted.version is None
+        created = await store.write(
+            "notes",
+            "created after the missing read",
+            expected_version=None,
+        )
+        assert created.status == "created"
     finally:
         await state.close()
 

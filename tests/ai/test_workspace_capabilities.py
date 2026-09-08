@@ -22,6 +22,7 @@ from linktools.ai.runtime._capabilities import _WorkspaceToolGate
 from linktools.ai.workspace import (
     DisabledSandbox,
     RepositoryInstructions,
+    SandboxResource,
     SandboxSession,
     ToolPermissionRule,
     Workspace,
@@ -121,20 +122,16 @@ class _RecordingSandbox:
     def __init__(self) -> None:
         self.sessions: list[_RecordingSession] = []
 
-    async def open(self) -> SandboxSession:
+    async def open(
+        self,
+        *,
+        root: Path,
+        resources: tuple[SandboxResource, ...] = (),
+    ) -> SandboxSession:
+        del root, resources
         session = _RecordingSession()
         self.sessions.append(session)
         return session
-
-
-class _FixedSandbox:
-    def __init__(self, session: _RecordingSession) -> None:
-        self.session = session
-        self.opens = 0
-
-    async def open(self) -> SandboxSession:
-        self.opens += 1
-        return self.session
 
 
 class _FailingCloseSession(_RecordingSession):
@@ -221,12 +218,9 @@ def test_workspace_tool_declarations_do_not_depend_on_sandbox_selection(tmp_path
 def test_workspace_capabilities_materialize_one_sandbox_group(tmp_path: Path) -> None:
     workspace = Workspace.load(tmp_path)
 
-    capabilities = workspace_capabilities(
-        workspace,
-        ("read_file", "run_command"),
-    )
-
-    assert tuple(capability.id for capability in capabilities) == ("workspace-sandbox",)
+    with pytest.raises(AIError) as raised:
+        workspace_capabilities(workspace, ("read_file", "run_command"))
+    assert raised.value.code is ErrorCode.SANDBOX_SESSION_CLOSED
     assert workspace_capabilities(workspace, ()) == ()
 
 
@@ -257,9 +251,9 @@ async def test_workspace_runtime_tool_semantics_match_durable_contributions(tmp_
     capability = workspace_capabilities(
         workspace,
         (*WORKSPACE_FILESYSTEM_TOOL_NAMES, *WORKSPACE_SHELL_TOOL_NAMES),
+        session=await sandbox.open(root=workspace.root),
     )[0]
-    toolset = capability.toolset  # type: ignore[attr-defined]
-    run_toolset = await toolset.for_run(None)  # type: ignore[arg-type]
+    run_toolset = capability.get_toolset()
 
     assert {
         name: _semantic_contract(tool)
@@ -269,36 +263,30 @@ async def test_workspace_runtime_tool_semantics_match_durable_contributions(tmp_
 
 
 @pytest.mark.asyncio
-async def test_workspace_sandbox_provisions_distinct_sessions_per_run(tmp_path: Path) -> None:
+async def test_workspace_capability_uses_the_caller_owned_session(tmp_path: Path) -> None:
     sandbox = _RecordingSandbox()
     workspace = Workspace.load(tmp_path, sandbox=sandbox)
     capability = workspace_capabilities(
         workspace,
         ("read_file", "start_command", "check_command", "stop_command"),
+        session=await sandbox.open(root=workspace.root),
     )[0]
-    toolset = capability.toolset  # type: ignore[attr-defined]
+    toolset = capability.get_toolset()
 
-    first, second = await asyncio.gather(
-        toolset.for_run(None),  # type: ignore[arg-type]
-        toolset.for_run(None),  # type: ignore[arg-type]
-    )
-
-    assert len(sandbox.sessions) == 2
-    assert sandbox.sessions[0] is not sandbox.sessions[1]
-    await first.tools["read_file"].function("sample.txt")  # type: ignore[attr-defined]
-    await first.tools["start_command"].function("echo one")  # type: ignore[attr-defined]
-    await first.tools["check_command"].function("command")  # type: ignore[attr-defined]
-    await first.tools["stop_command"].function("command")  # type: ignore[attr-defined]
+    assert len(sandbox.sessions) == 1
+    await toolset.tools["read_file"].function("sample.txt")  # type: ignore[attr-defined]
+    await toolset.tools["start_command"].function("echo one")  # type: ignore[attr-defined]
+    await toolset.tools["check_command"].function("command")  # type: ignore[attr-defined]
+    await toolset.tools["stop_command"].function("command")  # type: ignore[attr-defined]
     assert [name for name, _, _ in sandbox.sessions[0].calls] == [
         "read_file",
         "start_command",
         "check_command",
         "stop_command",
     ]
-    assert sandbox.sessions[1].calls == []
-    await first.__aexit__(None, None, None)
-    await second.__aexit__(None, None, None)
-    assert [session.closed for session in sandbox.sessions] == [1, 1]
+    await toolset.__aexit__(None, None, None)
+    await sandbox.sessions[0].close()
+    assert [session.closed for session in sandbox.sessions] == [1]
 
 
 @pytest.mark.parametrize(
@@ -313,8 +301,13 @@ async def test_permission_rejection_has_no_sandbox_operation_side_effect(
 ) -> None:
     sandbox = _RecordingSandbox()
     workspace = Workspace.load(tmp_path, sandbox=sandbox)
-    capability = workspace_capabilities(workspace, ("read_file",))[0]
-    run_toolset = await capability.toolset.for_run(None)  # type: ignore[attr-defined,arg-type]
+    session = await sandbox.open(root=workspace.root)
+    capability = workspace_capabilities(
+        workspace,
+        ("read_file",),
+        session=session,
+    )[0]
+    run_toolset = capability.get_toolset()
     gate = _WorkspaceToolGate(
         execution_id="execution",
         workspace_root=workspace.root,
@@ -339,15 +332,20 @@ async def test_permission_rejection_has_no_sandbox_operation_side_effect(
         )
     assert sandbox.sessions[0].calls == []
     await run_toolset.__aexit__(None, None, None)
+    await session.close()
 
 
 @pytest.mark.asyncio
 async def test_custom_sandbox_does_not_fallback_to_host_filesystem(tmp_path: Path) -> None:
     sandbox = _RecordingSandbox()
     workspace = Workspace.load(tmp_path, sandbox=sandbox)
-    capability = workspace_capabilities(workspace, ("write_file",))[0]
-    toolset = capability.toolset  # type: ignore[attr-defined]
-    run_toolset = await toolset.for_run(None)  # type: ignore[arg-type]
+    session = await sandbox.open(root=workspace.root)
+    capability = workspace_capabilities(
+        workspace,
+        ("write_file",),
+        session=session,
+    )[0]
+    run_toolset = capability.get_toolset()
 
     await run_toolset.tools["write_file"].function("host.txt", "content")  # type: ignore[attr-defined]
     assert not (tmp_path / "host.txt").exists()
@@ -355,48 +353,22 @@ async def test_custom_sandbox_does_not_fallback_to_host_filesystem(tmp_path: Pat
         ("write_file", ("host.txt", "content"), {"expected_hash": None})
     ]
     await run_toolset.__aexit__(None, None, None)
+    await session.close()
 
 
 @pytest.mark.asyncio
 async def test_workspace_sandbox_close_failure_propagates_without_primary_error(tmp_path: Path) -> None:
     session = _FailingCloseSession()
-    sandbox = _FixedSandbox(session)
-    capability = workspace_capabilities(
-        Workspace.load(tmp_path, sandbox=sandbox),
-        ("read_file",),
-    )[0]
-    run_toolset = await capability.toolset.for_run(None)  # type: ignore[attr-defined,arg-type]
 
     with pytest.raises(RuntimeError, match="close failed"):
-        await run_toolset.__aexit__(None, None, None)
-    assert session.closed == 1
-
-
-@pytest.mark.asyncio
-async def test_workspace_sandbox_close_failure_does_not_replace_primary_error(tmp_path: Path) -> None:
-    session = _FailingCloseSession()
-    sandbox = _FixedSandbox(session)
-    capability = workspace_capabilities(
-        Workspace.load(tmp_path, sandbox=sandbox),
-        ("read_file",),
-    )[0]
-    run_toolset = await capability.toolset.for_run(None)  # type: ignore[attr-defined,arg-type]
-    primary = RuntimeError("primary")
-
-    assert await run_toolset.__aexit__(RuntimeError, primary, None) is None
+        await session.close()
     assert session.closed == 1
 
 
 @pytest.mark.asyncio
 async def test_workspace_sandbox_close_is_completed_during_cancellation(tmp_path: Path) -> None:
     session = _BlockingCloseSession()
-    sandbox = _FixedSandbox(session)
-    capability = workspace_capabilities(
-        Workspace.load(tmp_path, sandbox=sandbox),
-        ("read_file",),
-    )[0]
-    run_toolset = await capability.toolset.for_run(None)  # type: ignore[attr-defined,arg-type]
-    closing = asyncio.create_task(run_toolset.__aexit__(None, None, None))
+    closing = asyncio.create_task(session.close())
     await session.close_started.wait()
 
     closing.cancel()
@@ -410,9 +382,7 @@ async def test_workspace_sandbox_close_is_completed_during_cancellation(tmp_path
 @pytest.mark.asyncio
 async def test_disabled_sandbox_fails_before_workspace_tool_execution(tmp_path: Path) -> None:
     workspace = Workspace.load(tmp_path, sandbox=DisabledSandbox())
-    capability = workspace_capabilities(workspace, ("read_file",))[0]
-    toolset = capability.toolset  # type: ignore[attr-defined]
 
     with pytest.raises(AIError) as raised:
-        await toolset.for_run(None)  # type: ignore[arg-type]
+        await workspace.sandbox.open(root=workspace.root)  # type: ignore[union-attr]
     assert raised.value.code is ErrorCode.SANDBOX_UNAVAILABLE

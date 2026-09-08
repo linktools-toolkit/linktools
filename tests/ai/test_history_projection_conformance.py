@@ -58,7 +58,7 @@ from pydantic_ai.messages import (
     ThinkingPart,
     UserPromptPart,
 )
-from pydantic_ai_harness.step_persistence import (
+from linktools.ai.runtime.state import (
     ContinuableSnapshot,
     RunRecord,
     StepEvent,

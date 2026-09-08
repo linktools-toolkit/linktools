@@ -30,8 +30,7 @@ from .service_api import (
     ApprovalDecisionResult,
     ApprovalView,
 )
-from .state import ApprovalRepository, ExecutionRepository
-from .state._contracts import ApprovalRecord
+from .state import ApprovalRecord, ApprovalRepository, ExecutionRepository
 
 _logger = environ.get_logger("ai.runtime.approval")
 

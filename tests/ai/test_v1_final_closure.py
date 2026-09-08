@@ -18,6 +18,7 @@ from linktools.ai.runtime.state._codec import (
     _decode_enveloped_domain,
     _decode_step_envelope,
     _encode_step_envelope,
+    CURRENT_DATA_VERSION,
     decode_domain,
     decode_envelope,
     encode_domain,
@@ -35,7 +36,7 @@ from linktools.ai.runtime.state._contracts import (
 from linktools.ai.spec import AgentSpec
 from linktools.ai.task import TaskNode
 from pydantic_ai.messages import ModelRequest, UserPromptPart
-from pydantic_ai_harness.step_persistence import ContinuableSnapshot, RunRecord
+from linktools.ai.runtime.state import ContinuableSnapshot, RunRecord
 
 
 def _binding_snapshot() -> AgentBindingSnapshot:
@@ -283,20 +284,26 @@ def test_v1_dataclass_reader_tolerates_ordinary_shape_changes() -> None:
     assert decode_domain(encode_domain({"value": 1}), Any) == {"value": 1}
 
 
-def test_v1_envelopes_keep_exact_members() -> None:
+def test_current_envelopes_keep_exact_members() -> None:
     cursor = ConversationCursor("run")
     envelope = encode_envelope(
         {"type": wire_type_id(cursor), "payload": encode_domain(cursor)}
     )
-    assert decode_envelope(envelope).version == 1
+    assert decode_envelope(envelope).version == CURRENT_DATA_VERSION
     _assert_integrity(
-        lambda: parse_envelope({"v": 1, "value": envelope["value"], "extra": 1})
+        lambda: parse_envelope(
+            {
+                "v": CURRENT_DATA_VERSION,
+                "value": envelope["value"],
+                "extra": 1,
+            }
+        )
     )
     _assert_integrity(lambda: parse_envelope({"value": envelope["value"]}))
     _assert_integrity(
         lambda: _decode_enveloped_domain(
             {
-                "v": 1,
+                "v": CURRENT_DATA_VERSION,
                 "value": {
                     "type": "conversation_cursor",
                     "payload": encode_domain(cursor),
@@ -308,7 +315,10 @@ def test_v1_envelopes_keep_exact_members() -> None:
     )
     _assert_integrity(
         lambda: _decode_enveloped_domain(
-            {"v": 1, "value": {"payload": encode_domain(cursor)}},
+            {
+                "v": CURRENT_DATA_VERSION,
+                "value": {"payload": encode_domain(cursor)},
+            },
             ConversationCursor,
         )
     )
@@ -319,7 +329,7 @@ def test_v1_envelopes_keep_exact_members() -> None:
     _assert_integrity(
         lambda: _decode_step_envelope(
             {
-                "v": 1,
+                "v": CURRENT_DATA_VERSION,
                 "value": {
                     "type": "stored_step_snapshot",
                     "payload": encode_domain(stored),
@@ -330,12 +340,21 @@ def test_v1_envelopes_keep_exact_members() -> None:
     )
     _assert_integrity(
         lambda: _decode_step_envelope(
-            {"v": 1, "value": {"type": "stored_step_snapshot"}}
+            {
+                "v": CURRENT_DATA_VERSION,
+                "value": {"type": "stored_step_snapshot"},
+            }
         )
     )
     _assert_unsupported(
         lambda: _decode_step_envelope(
-            {"v": 1, "value": {"type": "continuable_snapshot", "payload": {}}}
+            {
+                "v": CURRENT_DATA_VERSION,
+                "value": {
+                    "type": "continuable_snapshot",
+                    "payload": {},
+                },
+            }
         )
     )
     with pytest.raises(TypeError, match="unsupported domain type: ContinuableSnapshot"):

@@ -1,9 +1,8 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Focused durable tool-effect control-flow regressions."""
+"""Focused durable tool-operation control-flow regressions."""
 
 import asyncio
-from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
 
@@ -12,7 +11,6 @@ from pydantic import BaseModel
 
 from linktools.ai.core import ToolOperationStatus
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.runtime._agent_executor import _RuntimePersistenceBoundary
 from linktools.ai.runtime._capabilities import ToolOperationDecision, _RuntimeStepPersistence
 from linktools.ai.runtime._tool import RuntimeToolOperationBridge, ToolOperationRecord
 from linktools.ai.storage import PayloadPolicy
@@ -33,32 +31,12 @@ from pydantic_ai.usage import RunUsage
 pytestmark = pytest.mark.asyncio
 
 
-@dataclass
-class _Effect:
-    run_id: str
-    tool_call_id: str
-    status: str
-    effect_summary: str | None = None
-    started_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
-    ended_at: datetime | None = None
-    idempotency_key: str | None = None
-
-
 class _StepStore:
     def __init__(self) -> None:
-        self.effects: list[_Effect] = []
-
-    async def record_tool_effect(self, effect: Any) -> None:
-        self.effects.append(_Effect(effect.run_id, effect.tool_call_id, effect.status, effect.effect_summary))
+        self.events: list[Any] = []
 
     async def append_event(self, event: Any) -> None:
-        del event
-
-    async def get_tool_effect(self, *, run_id: str, tool_call_id: str) -> Any:
-        for effect in reversed(self.effects):
-            if effect.run_id == run_id and effect.tool_call_id == tool_call_id:
-                return effect
-        return None
+        self.events.append(event)
 
 
 class _Bridge:
@@ -153,7 +131,7 @@ async def test_custom_before_hook_rejection_does_not_start_durable_effect() -> N
             del self, ctx, call, tool_def, args
             raise ModelRetry("reject before execution")
 
-    combined = CombinedCapability((_RuntimePersistenceBoundary(capability), RejectBefore()))
+    combined = CombinedCapability((capability, RejectBefore()))
 
     with pytest.raises(ModelRetry):
         await combined.before_tool_execute(
@@ -164,7 +142,7 @@ async def test_custom_before_hook_rejection_does_not_start_durable_effect() -> N
         )
 
     assert bridge.calls == []
-    assert store.effects == []
+    assert store.events == []
     assert not capability._calls
 
 
@@ -196,7 +174,7 @@ async def test_plan_admission_precedes_custom_before_hook() -> None:
             entered.append("custom")
             return args
 
-    combined = CombinedCapability((_RuntimePersistenceBoundary(capability), SideEffectBefore()))
+    combined = CombinedCapability((capability, SideEffectBefore()))
 
     with pytest.raises(AIError) as raised:
         await combined.before_tool_execute(
@@ -209,7 +187,7 @@ async def test_plan_admission_precedes_custom_before_hook() -> None:
     assert raised.value.code is ErrorCode.CAPABILITY_POLICY_CONFLICT
     assert entered == []
     assert bridge.calls == []
-    assert store.effects == []
+    assert store.events == []
     assert not capability._calls
 
 
@@ -229,7 +207,7 @@ async def test_custom_wrap_failure_is_inside_durable_effect_boundary() -> None:
             del self, ctx, call, tool_def, args, handler
             raise RuntimeError("custom middleware failed before inner handler")
 
-    combined = CombinedCapability((_RuntimePersistenceBoundary(capability), FailingWrap()))
+    combined = CombinedCapability((capability, FailingWrap()))
     await combined.before_tool_execute(
         context,
         call=call,
@@ -251,7 +229,7 @@ async def test_custom_wrap_failure_is_inside_durable_effect_boundary() -> None:
 
     assert raised.value.message == "TOOL_EFFECT_UNKNOWN: verify side effects before retry"
     assert bridge.calls == ["begin", "unknown"]
-    assert [effect.status for effect in store.effects] == ["started"]
+    assert [event.kind for event in store.events] == ["tool_call_started"]
     assert not capability._calls
 
 
@@ -282,7 +260,7 @@ async def test_replay_safe_handler_failure_reports_tool_effect_unknown() -> None
         )
     assert propagated.value is raised.value
     assert bridge.calls == ["begin"]
-    assert [effect.status for effect in store.effects] == ["started"]
+    assert [event.kind for event in store.events] == ["tool_call_started"]
     assert not capability._calls
 
 
@@ -314,7 +292,7 @@ async def test_effectful_ai_error_remains_runtime_failure(replay_safe: bool) -> 
         )
     assert propagated.value is failure
     assert bridge.calls == (["begin"] if replay_safe else ["begin", "unknown"])
-    assert [effect.status for effect in store.effects] == ["started"]
+    assert [event.kind for event in store.events] == ["tool_call_started"]
     assert not capability._calls
 
 
@@ -335,7 +313,10 @@ async def test_model_retry_is_prefixed_for_model_feedback() -> None:
 
     assert raised.value.message == "TOOL_RETRY_REQUIRED: correct the path"
     assert bridge.calls == ["begin", "fail"]
-    assert [effect.status for effect in store.effects] == ["started", "failed"]
+    assert [event.kind for event in store.events] == [
+        "tool_call_started",
+        "tool_call_failed",
+    ]
     assert not capability._calls
 
 
@@ -356,7 +337,10 @@ async def test_tool_failed_is_prefixed_for_model_feedback() -> None:
 
     assert raised.value.message == "TOOL_EXECUTION_FAILED: resource is unavailable"
     assert bridge.calls == ["begin", "fail"]
-    assert [effect.status for effect in store.effects] == ["started", "failed"]
+    assert [event.kind for event in store.events] == [
+        "tool_call_started",
+        "tool_call_failed",
+    ]
     assert not capability._calls
 
 
@@ -387,7 +371,10 @@ async def test_structured_tool_failed_error_uses_compact_json() -> None:
         == 'TOOL_EXECUTION_FAILED: {"reason":"missing","retryable":false}'
     )
     assert bridge.calls == ["begin", "fail"]
-    assert [effect.status for effect in store.effects] == ["started", "failed"]
+    assert [event.kind for event in store.events] == [
+        "tool_call_started",
+        "tool_call_failed",
+    ]
     assert not capability._calls
 
 
@@ -414,7 +401,10 @@ async def test_tool_retry_error_is_prefixed_for_model_feedback() -> None:
 
     assert raised.value.message == "TOOL_RETRY_REQUIRED: correct the path"
     assert bridge.calls == ["begin", "fail"]
-    assert [effect.status for effect in store.effects] == ["started", "failed"]
+    assert [event.kind for event in store.events] == [
+        "tool_call_started",
+        "tool_call_failed",
+    ]
     assert not capability._calls
 
 
@@ -439,7 +429,10 @@ async def test_validation_error_is_prefixed_for_replay_safe_tool() -> None:
     assert raised.value.message.startswith("TOOL_RETRY_REQUIRED: [")
     assert '"type":"int_type"' in raised.value.message
     assert bridge.calls == ["begin", "fail"]
-    assert [effect.status for effect in store.effects] == ["started", "failed"]
+    assert [event.kind for event in store.events] == [
+        "tool_call_started",
+        "tool_call_failed",
+    ]
     assert not capability._calls
 
 
@@ -467,7 +460,7 @@ async def test_historical_unknown_effect_is_model_visible_without_reexecution() 
     assert raised.value.message == "TOOL_EFFECT_UNKNOWN: verify side effects before retry"
     assert entered is False
     assert bridge.calls == ["begin"]
-    assert store.effects == []
+    assert store.events == []
     assert not capability._calls
 
 
@@ -487,7 +480,7 @@ async def test_cancellation_keeps_cancellation_control_flow() -> None:
         )
 
     assert bridge.calls == ["begin", "unknown"]
-    assert [effect.status for effect in store.effects] == ["started"]
+    assert [event.kind for event in store.events] == ["tool_call_started"]
     assert not capability._calls
 
 
@@ -536,7 +529,10 @@ async def test_skip_tool_execution_terminalizes_as_success() -> None:
 
     assert raised.value.result == result
     assert bridge.calls == ["begin", "complete"]
-    assert [effect.status for effect in store.effects] == ["started", "completed"]
+    assert [event.kind for event in store.events] == [
+        "tool_call_started",
+        "tool_call_completed",
+    ]
     assert not capability._calls
 
 
@@ -570,7 +566,10 @@ async def test_dynamic_deferral_is_explicitly_unsupported_when_effect_is_resolva
         )
     assert propagated.value is raised.value
     assert bridge.calls == ["begin", "fail"]
-    assert [effect.status for effect in store.effects] == ["started", "failed"]
+    assert [event.kind for event in store.events] == [
+        "tool_call_started",
+        "tool_call_failed",
+    ]
     assert not capability._calls
 
 
@@ -591,7 +590,7 @@ async def test_replay_unsafe_deferral_after_handler_entry_fails_closed() -> None
 
     assert raised.value.message == "TOOL_EFFECT_UNKNOWN: verify side effects before retry"
     assert bridge.calls == ["begin", "unknown"]
-    assert [effect.status for effect in store.effects] == ["started"]
+    assert [event.kind for event in store.events] == ["tool_call_started"]
     assert not capability._calls
 
 
@@ -622,7 +621,7 @@ async def test_failed_terminal_commit_error_is_not_reclassified_as_tool_effect_u
         )
     assert propagated.value is commit_error
     assert bridge.calls == ["begin", "fail"]
-    assert [effect.status for effect in store.effects] == ["started"]
+    assert [event.kind for event in store.events] == ["tool_call_started"]
     assert not capability._calls
 
 

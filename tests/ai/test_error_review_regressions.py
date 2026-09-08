@@ -14,14 +14,16 @@ from linktools.ai.capability import SkillSourceRegistry
 from linktools.ai.core import ExecutionLineageKind, ExecutionStatus, OperationStatus
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.runtime._agent_executor import AgentExecutor
-from linktools.ai.runtime._capabilities import compose_platform_capabilities
+from linktools.ai.runtime._capabilities import (
+    _CompactionCapability,
+    compose_platform_capabilities,
+)
 from linktools.ai.runtime._execution import CancelEffectOutcome, DefaultExecutionService
 from linktools.ai.runtime.service_api import CancelExecutionRequest
 from linktools.ai.runtime.state import ExecutionRecord
 from linktools.ai.spec import AgentSpec
 from linktools.ai.workspace import RepositoryInstructions, trusted_workspace_principal
-from pydantic_ai_harness.compaction import DeduplicateFileReads
-from pydantic_ai_harness.step_persistence import InMemoryStepStore
+from linktools.ai.runtime.state import StagingStepStore
 
 
 class _EmptyRepositoryInstructionResolver:
@@ -57,7 +59,7 @@ async def test_default_platform_composition_keeps_file_read_deduplication() -> N
         segment_sequence=1,
         history_id=None,
         memory_scope=None,
-        step_store=InMemoryStepStore(),
+        step_store=StagingStepStore(),
         memory_store=None,
         runtime_tool_names=(),
         plan_mode=False,
@@ -69,7 +71,7 @@ async def test_default_platform_composition_keeps_file_read_deduplication() -> N
         background_tasks=set(),
         plan_store_resolver=None,
     )
-    assert any(isinstance(capability, DeduplicateFileReads) for capability in capabilities)
+    assert any(isinstance(capability, _CompactionCapability) for capability in capabilities)
 
 
 @pytest.mark.asyncio
@@ -90,7 +92,10 @@ async def test_agent_executor_cancellation_is_not_replaced_by_usage_sink_failure
     executor._execute = cancelled  # type: ignore[method-assign]
     scope = SimpleNamespace(
         binding=SimpleNamespace(
-            definition=SimpleNamespace(spec=SimpleNamespace(usage_limits=None))
+            definition=SimpleNamespace(
+                spec=SimpleNamespace(usage_limits=None),
+                selected_tools=(),
+            )
         ),
         usage_sink=usage_sink,
         step_run_id="run",

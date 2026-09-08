@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Resolved Harness conformance for deferred and ordinary snapshots."""
+"""Deferred approval and ordinary snapshot contracts."""
 
 from pathlib import Path
 
@@ -8,12 +8,12 @@ import pytest
 from pydantic_ai import Agent
 from pydantic_ai.models.test import TestModel
 from pydantic_ai.tools import DeferredToolRequests
-from pydantic_ai_harness.step_persistence import (
+from linktools.ai.runtime.state import (
     ContinuableSnapshot,
-    InMemoryStepStore,
+    StagingStepStore,
 )
 
-from linktools.ai.runtime._agent_executor import AgentExecutor, _RuntimePersistenceBoundary
+from linktools.ai.runtime._agent_executor import AgentExecutor
 from linktools.ai.runtime._capabilities import _RuntimeStepPersistence, _WorkspaceToolGate
 from linktools.ai.workspace import (
     RepositoryInstructions,
@@ -51,7 +51,7 @@ class _Bridge:
         return frozenset()
 
 
-class _RecordingStepStore(InMemoryStepStore):
+class _RecordingStepStore(StagingStepStore):
     def __init__(self) -> None:
         super().__init__()
         self.saved_snapshots: list[ContinuableSnapshot] = []
@@ -77,8 +77,8 @@ async def _read_file(path: str) -> str:
 
 
 @pytest.mark.asyncio
-async def test_resolved_harness_never_persists_open_approval_frontier(tmp_path: Path) -> None:
-    run_id = "deferred-harness-run"
+async def test_approval_frontier_is_persisted_as_interrupted(tmp_path: Path) -> None:
+    run_id = "deferred-run"
     store = _RecordingStepStore()
     bridge = _Bridge()
     captured: list[int] = []
@@ -113,7 +113,7 @@ async def test_resolved_harness_never_persists_open_approval_frontier(tmp_path: 
     result = await agent.run(
         "read it",
         run_id=run_id,
-        capabilities=(gate, _RuntimePersistenceBoundary(persistence)),
+        capabilities=(gate, persistence),
     )
 
     assert isinstance(result.output, DeferredToolRequests)
@@ -121,13 +121,17 @@ async def test_resolved_harness_never_persists_open_approval_frontier(tmp_path: 
     assert not result.output.calls
     assert captured and len(captured) == 1 and captured[0] > 0
     assert bridge.calls == 0
-    for snapshot in store.saved_snapshots:
-        assert AgentExecutor.pending_tool_calls(snapshot.messages, run_id=run_id) == ()
+    assert store.saved_snapshots
+    assert store.saved_snapshots[-1].state == "interrupted"
+    assert AgentExecutor.pending_tool_calls(
+        store.saved_snapshots[-1].messages,
+        run_id=run_id,
+    )
 
 
 @pytest.mark.asyncio
-async def test_resolved_harness_ordinary_completed_snapshot_behavior_is_unchanged() -> None:
-    run_id = "completed-harness-run"
+async def test_ordinary_completed_snapshot_behavior_is_unchanged() -> None:
+    run_id = "completed-run"
     store = _RecordingStepStore()
     persistence = _RuntimeStepPersistence(
         tool_operations=_Bridge(),
@@ -140,7 +144,7 @@ async def test_resolved_harness_ordinary_completed_snapshot_behavior_is_unchange
     result = await agent.run(
         "finish",
         run_id=run_id,
-        capabilities=(_RuntimePersistenceBoundary(persistence),),
+        capabilities=(persistence,),
     )
 
     assert result.output == "ok"

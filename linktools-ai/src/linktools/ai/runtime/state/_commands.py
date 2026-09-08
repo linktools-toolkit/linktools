@@ -10,7 +10,8 @@ from datetime import datetime
 from typing import cast
 
 from linktools.core import environ
-from pydantic_ai_harness.step_persistence import (
+
+from ._step_contracts import (
     ContinuableSnapshot,
     RunRecord,
     StepEvent,
@@ -32,7 +33,7 @@ from ...core import (
 )
 from ...errors import AIError, ErrorCode
 from ...storage import StoredPayload
-from .._tool import ToolOperationRecord
+from ._contracts import ToolOperationRecord
 from ._contracts import (
     AgentAttemptClaim,
     ApprovalRecord,

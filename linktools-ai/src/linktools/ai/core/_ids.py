@@ -39,7 +39,7 @@ def deterministic_id(*parts: JsonValue) -> str:
 
 
 def step_conversation_id(*, namespace: str, tenant_id: str, execution_id: str) -> str:
-    """Return the execution-scoped Harness conversation identity."""
+    """Return the execution-scoped conversation identity."""
     validate_persistence_namespace(namespace)
     validate_tenant_id(tenant_id)
     validate_resource_id(execution_id)
@@ -47,7 +47,7 @@ def step_conversation_id(*, namespace: str, tenant_id: str, execution_id: str) -
 
 
 def step_run_id(*, namespace: str, tenant_id: str, execution_id: str, segment_sequence: int) -> str:
-    """Return the deterministic Harness Step identity for one execution segment."""
+    """Return the deterministic step identity for one execution segment."""
     validate_persistence_namespace(namespace)
     validate_tenant_id(tenant_id)
     validate_resource_id(execution_id)

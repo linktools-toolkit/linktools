@@ -8,8 +8,10 @@ import asyncio
 import sys
 import uuid
 from collections.abc import Awaitable, Callable, Mapping, Sequence
+from contextlib import AsyncExitStack
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
+from pathlib import Path
 from time import monotonic_ns
 from typing import TYPE_CHECKING, Any, Protocol, cast
 
@@ -27,7 +29,6 @@ from pydantic_ai.capabilities import (
     AbstractCapability,
     CapabilityOrdering,
     ReinjectSystemPrompt,
-    WrapperCapability,
 )
 from pydantic_ai.exceptions import (
     ConcurrencyLimitExceeded,
@@ -62,9 +63,6 @@ from pydantic_ai.tools import (
 )
 from pydantic_ai.toolsets import AbstractToolset, PreparedToolset
 from pydantic_ai.usage import RunUsage, UsageLimitExceeded, UsageLimits
-from pydantic_ai_harness.memory import SearchableMemoryStore
-from pydantic_ai_harness.planning import PlanStore
-from pydantic_ai_harness.step_persistence import StepPersistence, StepStore
 
 from ..agent import AgentBinding, AgentDefinition, AssistantTextOutput
 from ..capability import (
@@ -75,12 +73,14 @@ from ..capability import (
     SubagentCapability,
     SubagentDelegate,
     WORKSPACE_FILESYSTEM_TOOL_NAMES,
+    WORKSPACE_SHELL_TOOL_NAMES,
     materialize_mcp_servers,
     mcp_selector_server,
     mcp_server_selector,
     workspace_capabilities,
     workspace_tool_class,
 )
+from ..workspace import LocalSandbox, SandboxResource, SandboxSession
 from ..core import (
     ExecutionDeltaType,
     ExecutionEventType,
@@ -89,6 +89,7 @@ from ..core import (
     ResourceKind,
     ResourceRef,
     ThinkingValue,
+    ToolOperationStatus,
     UsageMetrics,
     canonical_sha256,
     normalize_json_value,
@@ -105,7 +106,7 @@ from ._capabilities import (
     SUBAGENT_TOOL_NAMES,
     ToolOperationBridge,
     _WorkspaceToolGate,
-    _tool_effect_policy,
+    _tool_execution_policy,
     compose_platform_capabilities,
     select_runtime_tool_names,
     tool_allowed_in_planning,
@@ -113,10 +114,14 @@ from ._capabilities import (
     tool_name_allowed,
 )
 from ._input import _RuntimeUserPrompt, _restore_user_prompt
+from ._journal import ModelRequestJournal
 from ._metric_capability import _RuntimeModelMetricCapability
 from ._skill_adapter import _PydanticSkillCapability
 from ._subagent_adapter import _PydanticSubagentCapability
 from ._tool_metrics import _ToolMetricContext
+from ._memory import MemoryStore
+from ._plan import RuntimePlanStore
+from .state import StepStore
 
 _logger = environ.get_logger("ai.runtime.agent_executor")
 _RUNTIME_RESERVED_TOOL_NAMES = frozenset(
@@ -185,9 +190,12 @@ class _RunScope:
     step_store: StepStore
     step_run_id: str
     segment_sequence: int
+    operation_identity_run_id: str | None = None
     history_id: str | None = None
-    memory_store: SearchableMemoryStore | None = None
-    plan_store_resolver: Callable[[PydanticRunContext[object]], PlanStore] | None = None
+    memory_store: MemoryStore | None = None
+    plan_store_resolver: Callable[[PydanticRunContext[object]], RuntimePlanStore] | None = None
+    sandbox_session: "SandboxSession | None" = None
+    skill_resource_paths: Mapping[str, str] = field(default_factory=dict)
     mode: ExecutionMode = "run"
     planning: bool = False
     thinking: ThinkingValue = False
@@ -212,6 +220,11 @@ class _RunScope:
         if self.mode == "plan" and not self.planning:
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
         if not isinstance(self.subagent_available, bool) or not isinstance(self.replace_history_system_prompt, bool):
+            raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+        if self.operation_identity_run_id is not None and (
+            not isinstance(self.operation_identity_run_id, str)
+            or not self.operation_identity_run_id
+        ):
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
         if self.event_sink is None:
             raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
@@ -314,7 +327,11 @@ class AgentExecutor:
         metric_id = uuid.uuid4().hex if self._metrics is not None else None
         try:
             try:
-                result = await self._execute(scope, run_usage=run_usage, usage_limits=usage_limits)
+                result = await self._execute_with_sandbox(
+                    scope,
+                    run_usage=run_usage,
+                    usage_limits=usage_limits,
+                )
                 return result
             except asyncio.CancelledError as error:
                 primary_error = error
@@ -407,8 +424,8 @@ class AgentExecutor:
                     ),
                 )
             )
-        except (AIError, TypeError, ValueError):
-            return
+        except Exception:
+            _logger.exception("agent metric observation rejected")
 
     def _detach_task(
         self,
@@ -432,6 +449,75 @@ class AgentExecutor:
 
         task.add_done_callback(consume)
 
+    async def _execute_with_sandbox(
+        self,
+        scope: _RunScope,
+        *,
+        run_usage: RunUsage,
+        usage_limits: UsageLimits,
+    ) -> AgentExecutionOutcome:
+        selected = tuple(
+            candidate.id
+            for candidate in scope.binding.definition.selected_tools
+            if workspace_tool_class(cast(Tool, candidate.value)) is not None
+        )
+        if not selected:
+            return await self._execute(
+                scope,
+                run_usage=run_usage,
+                usage_limits=usage_limits,
+            )
+        sandbox = scope.context.workspace.sandbox
+        backend = sandbox if sandbox is not None else LocalSandbox()
+        primary_error: BaseException | None = None
+        resources, resource_keys = await _skill_sandbox_resources(
+            scope.binding.definition,
+            self._skill_sources,
+        )
+        async with AsyncExitStack() as stack:
+            session = await backend.open(
+                root=scope.context.workspace.root,
+                resources=resources,
+            )
+            async def close_session() -> None:
+                nonlocal primary_error
+                try:
+                    await session.close()
+                except BaseException as error:
+                    if primary_error is None:
+                        if isinstance(error, asyncio.CancelledError):
+                            raise
+                        raise AIError(ErrorCode.SANDBOX_CLEANUP_FAILED) from error
+                    _logger.exception(
+                        "workspace sandbox cleanup failed after agent error: step=%s",
+                        scope.step_run_id,
+                    )
+
+            stack.push_async_callback(close_session)
+            try:
+                resource_paths = {
+                    skill_id: session.resource_path(key)
+                    for skill_id, key in resource_keys.items()
+                }
+                _logger.debug(
+                    "workspace sandbox opened for agent run: step=%s tools=%s resources=%s",
+                    scope.step_run_id,
+                    selected,
+                    tuple(resource_paths),
+                )
+                return await self._execute(
+                    replace(
+                        scope,
+                        sandbox_session=session,
+                        skill_resource_paths=resource_paths,
+                    ),
+                    run_usage=run_usage,
+                    usage_limits=usage_limits,
+                )
+            except BaseException as error:
+                primary_error = error
+                raise
+
     async def _execute(
         self,
         scope: _RunScope,
@@ -453,12 +539,19 @@ class AgentExecutor:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             deferred_step_index = step_index
 
+        model_journal = ModelRequestJournal(
+            source_namespace=scope.context.workspace.workspace_id,
+            tenant_id=scope.context.principal.tenant_id,
+            execution_id=scope.context.execution_id,
+            step_run_id=scope.step_run_id,
+        )
         agent, capabilities, runtime_tool_names, trusted_tool_classes, trusted_mcp_selectors = await _materialize_agent(
             scope,
             model=model,
             skill_sources=self._skill_sources,
             deferred_pause_sink=capture_deferred_step,
             metrics=self._metrics,
+            model_journal=model_journal,
         )
         presentation = _ToolPresentation(
             definition.ordinary_tool_policy,
@@ -479,25 +572,9 @@ class AgentExecutor:
             policy=scope.context.workspace.policy,
             trusted_tool_classes=trusted_tool_classes,
         )
-        runtime_capabilities: tuple[AbstractCapability[object], ...] = ()
-        if self._metrics is not None:
-            runtime_capabilities = (
-                _RuntimeModelMetricCapability(
-                    self._metrics,
-                    source_namespace=scope.context.workspace.workspace_id,
-                    tenant_id=scope.context.principal.tenant_id,
-                    execution_id=scope.context.execution_id,
-                    session_id=scope.context.session_id,
-                    step_run_id=scope.step_run_id,
-                    agent_id=definition.spec.id,
-                    provider=definition.model.provider,
-                    model_identity=definition.model.model_identity,
-                    route_id=definition.model.route_id,
-                ),
-            )
         capabilities = cast(
             "tuple[AbstractCapability[AgentContext[object]], ...]",
-            (presentation, gate, *runtime_capabilities, *capabilities),
+            (presentation, gate, *capabilities),
         )
         if scope.replace_history_system_prompt:
             capabilities = (*capabilities, ReinjectSystemPrompt(replace_existing=True))
@@ -566,11 +643,6 @@ class AgentExecutor:
                     or call_arguments != requested_arguments
                 ):
                     raise AIError(ErrorCode.CAPABILITY_POLICY_CONFLICT)
-                if await scope.step_store.get_tool_effect(
-                    run_id=scope.step_run_id,
-                    tool_call_id=call.tool_call_id,
-                ) is not None:
-                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                 approvals.append(
                     PendingToolApproval(
                         call.tool_call_id,
@@ -589,7 +661,17 @@ class AgentExecutor:
             )
         run = await scope.step_store.get_run(run_id=scope.step_run_id)
         snapshot = await scope.step_store.latest_snapshot(run_id=scope.step_run_id)
-        unresolved = await scope.step_store.list_unresolved_tool_effects(run_id=scope.step_run_id)
+        operations = (
+            ()
+            if scope.tool_operations is None
+            else await scope.tool_operations.list_operations()
+        )
+        unresolved = tuple(
+            operation
+            for operation in operations
+            if operation.status
+            not in {ToolOperationStatus.COMPLETED, ToolOperationStatus.FAILED}
+        )
         if run is None or snapshot is None or unresolved or run.conversation_id != scope.conversation_id:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         if binding.output_binding.mode == "text":
@@ -606,6 +688,37 @@ class AgentExecutor:
             raise AIError(ErrorCode.OUTPUT_VALIDATION_FAILED, retryable=False) from error
         usage = _usage_metrics(run_usage)
         return AgentExecutionResult(final_result.run_id, payload, final_result.all_messages(), usage)
+
+
+async def _skill_sandbox_resources(
+    definition: AgentDefinition,
+    sources: SkillSourceRegistry,
+) -> tuple[tuple[SandboxResource, ...], Mapping[str, str]]:
+    resources: dict[str, SandboxResource] = {}
+    resource_keys: dict[str, str] = {}
+    for skill in definition.skill_definitions:
+        source_ref = skill.source_ref
+        if source_ref is None:
+            continue
+        source = sources.resolve(source_ref.source_id)
+        view = await source.inspect(source_ref.root)
+        if view.location.kind != "local":
+            continue
+        source_path = Path(view.location.path)
+        key = canonical_sha256(
+            {
+                "source_id": source_ref.source_id,
+                "root": source_ref.root,
+            }
+        )
+        resource = SandboxResource(key=key, source=source_path)
+        existing = resources.get(key)
+        if existing is not None and existing.source != resource.source:
+            raise AIError(ErrorCode.CAPABILITY_CONFLICT)
+        resources[key] = resource
+        resource_keys[skill.id] = key
+    ordered = tuple(resources[key] for key in sorted(resources))
+    return ordered, resource_keys
 
 
 def _trusted_tool_classes_for_definition(
@@ -640,6 +753,7 @@ async def _materialize_agent(
     skill_sources: SkillSourceRegistry,
     deferred_pause_sink: Callable[[int], None],
     metrics: MetricRecorder | None,
+    model_journal: ModelRequestJournal,
 ) -> tuple[
     PydanticAgent[AgentContext[object], object],
     tuple[AbstractCapability[AgentContext[object]], ...],
@@ -672,7 +786,13 @@ async def _materialize_agent(
     )
 
     capabilities: list[AbstractCapability[AgentContext[object]]] = []
-    capabilities.extend(workspace_capabilities(scope.context.workspace, workspace_names))
+    capabilities.extend(
+        workspace_capabilities(
+            scope.context.workspace,
+            workspace_names,
+            session=scope.sandbox_session,
+        )
+    )
     for candidate in definition.selected_capabilities:
         if not isinstance(candidate.value, AbstractCapability):
             raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
@@ -680,7 +800,8 @@ async def _materialize_agent(
     if definition.skill_definitions:
         capabilities.append(
             _PydanticSkillCapability(
-                SkillCapability(definition.skill_definitions, skill_sources)
+                SkillCapability(definition.skill_definitions, skill_sources),
+                resource_paths=scope.skill_resource_paths,
             )
         )
     if any(name in SUBAGENT_TOOL_NAMES for name in runtime_tool_names):
@@ -725,13 +846,35 @@ async def _materialize_agent(
             agent_id=definition.spec.id,
         )
     )
+    model_metric = (
+        None
+        if metrics is None
+        else _RuntimeModelMetricCapability(
+            metrics,
+            source_namespace=scope.context.workspace.workspace_id,
+            tenant_id=scope.context.principal.tenant_id,
+            execution_id=scope.context.execution_id,
+            session_id=scope.context.session_id,
+            step_run_id=scope.step_run_id,
+            agent_id=definition.spec.id,
+            provider=definition.model.provider,
+            model_identity=definition.model.model_identity,
+            route_id=definition.model.route_id,
+            journal=model_journal,
+            external_requests=True,
+        )
+    )
+    if model_metric is not None:
+        capabilities.append(model_metric)
     platform = await compose_platform_capabilities(
         agent_name=definition.spec.id,
         conversation_id=scope.conversation_id,
         step_run_id=scope.step_run_id,
+        execution_id=scope.context.execution_id,
         segment_sequence=scope.segment_sequence,
         history_id=scope.history_id,
         memory_scope=scope.context.memory_scope,
+        operation_identity_run_id=scope.operation_identity_run_id,
         step_store=scope.step_store,
         memory_store=scope.memory_store,
         runtime_tool_names=runtime_tool_names,
@@ -745,12 +888,12 @@ async def _materialize_agent(
         plan_store_resolver=scope.plan_store_resolver,
         deferred_pause_sink=deferred_pause_sink,
         tool_metrics=tool_metrics,
-    )
-    platform = tuple(
-        _RuntimePersistenceBoundary(capability)
-        if isinstance(capability, StepPersistence)
-        else capability
-        for capability in platform
+        model_journal=model_journal,
+        external_model_request_observer=(
+            None
+            if model_metric is None
+            else model_metric.record_external_model_request
+        ),
     )
     capabilities.extend(cast("tuple[AbstractCapability[AgentContext[object]], ...]", platform))
 
@@ -848,14 +991,6 @@ def _thinking_settings(model: Model, thinking: ThinkingValue) -> ModelSettings:
     return ModelSettings(thinking=thinking)
 
 
-class _RuntimePersistenceBoundary(WrapperCapability[AgentContext[object]]):
-    def get_ordering(self) -> CapabilityOrdering:
-        return CapabilityOrdering(
-            position="outermost",
-            wraps=(AbstractCapability,),
-        )
-
-
 class _ToolPresentation(AbstractCapability[AgentContext[object]]):
     def __init__(
         self,
@@ -940,7 +1075,7 @@ class _ToolPresentation(AbstractCapability[AgentContext[object]]):
         for tool in tool_defs:
             tool_class = trusted_classes.get(tool.name)
             if tool_class is not None:
-                _tool_effect_policy(
+                _tool_execution_policy(
                     tool,
                     trusted_tool_classes=self._trusted_tool_classes,
                 )

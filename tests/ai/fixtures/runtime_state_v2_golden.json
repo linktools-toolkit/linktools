@@ -1,5 +1,5 @@
 {
-  "version": 1,
+  "version": 2,
   "wire_type_ids": [
     "approval_record",
     "agent_attempt_claim",
@@ -76,8 +76,7 @@
     "tool_operation",
     "usage_metrics",
     "run_record",
-    "step_event",
-    "tool_effect"
+    "step_event"
   ],
   "enum_wire_type_ids": [
     "approval_decision",
@@ -106,7 +105,7 @@
   ],
   "envelopes": [
     {
-      "v": 1,
+      "v": 2,
       "value": {
         "type": "conversation_cursor",
         "payload": {
@@ -120,7 +119,7 @@
       }
     },
     {
-      "v": 1,
+      "v": 2,
       "value": {
         "type": "execution_history_state",
         "payload": {
@@ -130,7 +129,7 @@
       }
     },
     {
-      "v": 1,
+      "v": 2,
       "value": {
         "type": "transcript_message_ref",
         "payload": {

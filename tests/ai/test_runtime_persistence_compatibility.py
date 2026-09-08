@@ -30,7 +30,7 @@ from linktools.ai.runtime.state._contracts import (
 from linktools.ai.spec import AgentSpec
 from linktools.ai.storage import StoredPayload
 from linktools.ai.task import TaskNode
-from pydantic_ai_harness.step_persistence import RunRecord
+from linktools.ai.runtime.state import RunRecord
 
 
 def _session() -> SessionRecord:
@@ -59,7 +59,7 @@ def _envelope(
     wire_id: str = "session_record",
 ) -> dict[str, object]:
     return {
-        "v": 1,
+        "v": 2,
         "value": {
             "type": wire_id,
             "payload": payload,
@@ -90,10 +90,10 @@ def test_current_generic_dataclass_round_trip() -> None:
     assert decode_domain(encoded, SessionRecord) == cursor
 
 
-def test_persisted_generic_writer_keeps_schema_one() -> None:
+def test_persisted_generic_writer_uses_current_schema() -> None:
     session = _session()
     payload = _encode_persisted_domain(session)
-    assert payload["schema"] == 1
+    assert payload["schema"] == 2
     assert _decode_enveloped_domain(
         _envelope(payload),
         SessionRecord,
@@ -170,7 +170,7 @@ def test_malformed_known_field_is_integrity_error() -> None:
     assert raised.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
 
 
-def test_generic_payload_without_or_with_schema_one_is_readable() -> None:
+def test_generic_payload_without_or_with_current_schema_is_readable() -> None:
     session = _session()
     with_schema = _envelope(_encode_persisted_domain(session))
     without_schema = copy.deepcopy(with_schema)
@@ -190,7 +190,7 @@ def test_malformed_generic_schema_is_integrity_error(schema: object) -> None:
 
 def test_positive_unknown_generic_schema_is_unsupported() -> None:
     payload = copy.deepcopy(_encode_persisted_domain(_session()))
-    payload["schema"] = 2
+    payload["schema"] = 3
     with pytest.raises(AIError) as raised:
         _decode_enveloped_domain(_envelope(payload), SessionRecord)
     assert raised.value.code is ErrorCode.STORAGE_VERSION_UNSUPPORTED
@@ -198,7 +198,7 @@ def test_positive_unknown_generic_schema_is_unsupported() -> None:
 
 def test_unknown_outer_version_is_unsupported() -> None:
     value = _envelope(_encode_persisted_domain(_session()))
-    value["v"] = 2
+    value["v"] = 3
     with pytest.raises(AIError) as raised:
         _decode_enveloped_domain(value, SessionRecord)
     assert raised.value.code is ErrorCode.STORAGE_VERSION_UNSUPPORTED
@@ -316,7 +316,7 @@ def test_low_level_record_shape_remains_strict() -> None:
     assert raised.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
 
 
-def test_step_persistence_keeps_schema_one_and_reads_unversioned_payload() -> None:
+def test_step_persistence_reads_current_payload() -> None:
     now = datetime(2026, 1, 1, tzinfo=timezone.utc)
     run = RunRecord(
         run_id="run",
@@ -328,7 +328,7 @@ def test_step_persistence_keeps_schema_one_and_reads_unversioned_payload() -> No
     )
     current = _decode_step_envelope(
         {
-            "v": 1,
+            "v": 2,
             "value": {
                 "type": wire_type_id(run),
                 "payload": _encode_persisted_domain(run),

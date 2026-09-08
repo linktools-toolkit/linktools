@@ -5,10 +5,7 @@
 from __future__ import annotations
 
 import asyncio
-import uuid
 from datetime import datetime, timezone
-from time import monotonic_ns
-from typing import Any
 
 from linktools.core import environ
 from openai import (
@@ -39,11 +36,11 @@ from pydantic_ai.usage import UsageLimitExceeded
 from ..capability import AgentContext
 from ..errors import AIError, ErrorCode
 from ..observe import MetricMeasurement, MetricRecorder, Observation
-from ._metric_id import _model_observation_id
 from ._metrics import (
     _bind_metric_execution_context,
     _metric_correlation,
 )
+from ._journal import ModelRequestFact, ModelRequestJournal
 
 _logger = environ.get_logger("ai.runtime.model_metrics")
 
@@ -64,6 +61,8 @@ class _RuntimeModelMetricCapability(AbstractCapability[AgentContext[object]]):
         provider: str,
         model_identity: str,
         route_id: str,
+        journal: ModelRequestJournal | None = None,
+        external_requests: bool = False,
     ) -> None:
         self._recorder = recorder
         self._source_namespace = source_namespace
@@ -75,6 +74,15 @@ class _RuntimeModelMetricCapability(AbstractCapability[AgentContext[object]]):
         self._provider = provider
         self._model_identity = model_identity
         self._route_id = route_id
+        if not isinstance(external_requests, bool):
+            raise TypeError("external_requests must be bool")
+        self._external_requests = external_requests
+        self._journal = journal or ModelRequestJournal(
+            source_namespace=source_namespace,
+            tenant_id=tenant_id,
+            execution_id=execution_id,
+            step_run_id=step_run_id,
+        )
 
     async def before_run(
         self,
@@ -93,60 +101,89 @@ class _RuntimeModelMetricCapability(AbstractCapability[AgentContext[object]]):
         request_context: ModelRequestContext,
         handler: WrapModelRequestHandler,
     ) -> ModelResponse:
+        if self._external_requests:
+            return await handler(request_context)
         run_context = None if ctx is None else ctx.deps
-        attempt_id = (
-            uuid.uuid4().hex
-            if ctx is None
-            else _model_observation_id(self._step_run_id, ctx.run_step)
-        )
-        started = monotonic_ns()
+        step_index = 0 if ctx is None else ctx.run_step
+        fact = self._journal.begin(step_index, purpose="agent")
         try:
             response = await handler(request_context)
         except asyncio.CancelledError:
+            fact = self._journal.finish(step_index, status="CANCELLED")
             self._record_model(
                 run_context,
-                attempt_id,
-                started,
+                fact,
                 status="CANCELLED",
                 error_code=None,
                 measurements=(),
             )
             raise
         except RunCancelled as error:
+            fact = self._journal.finish(step_index, status="CANCELLED")
             self._record_model(
                 run_context,
-                attempt_id,
-                started,
+                fact,
                 status="CANCELLED",
                 error_code=_model_error_code(error),
                 measurements=(),
             )
             raise
         except Exception as error:
+            fact = self._journal.finish(step_index, status="FAILED")
             self._record_model(
                 run_context,
-                attempt_id,
-                started,
+                fact,
                 status="FAILED",
                 error_code=_model_error_code(error),
                 measurements=(),
             )
             raise
+        fact = self._journal.finish(step_index, status="SUCCEEDED")
         self._record_model(
             run_context,
-            attempt_id,
-            started,
+            fact,
             status="SUCCEEDED",
             error_code=None,
             measurements=_provider_usage_measurements(response),
         )
         return response
 
+    async def record_external_model_request(
+        self,
+        ctx: PydanticRunContext[AgentContext[object]],
+        fact: ModelRequestFact,
+        phase: str,
+        response: ModelResponse | None,
+        error: BaseException | None,
+    ) -> None:
+        if phase == "started":
+            return
+        if phase not in {"completed", "failed", "cancelled"}:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        if phase == "completed":
+            if response is None:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            self._record_model(
+                ctx.deps,
+                fact,
+                status="SUCCEEDED",
+                error_code=None,
+                measurements=_provider_usage_measurements(response),
+            )
+            return
+        exception = error if isinstance(error, Exception) else None
+        self._record_model(
+            ctx.deps,
+            fact,
+            status="CANCELLED" if phase == "cancelled" else "FAILED",
+            error_code=None if exception is None else _model_error_code(exception),
+            measurements=(),
+        )
+
     def _record_model(
         self,
         run_context: AgentContext[object] | None,
-        attempt_id: str,
-        started: int,
+        fact: ModelRequestFact,
         *,
         status: str,
         error_code: str | None,
@@ -155,7 +192,7 @@ class _RuntimeModelMetricCapability(AbstractCapability[AgentContext[object]]):
         try:
             observation = Observation(
                 version=1,
-                observation_id=attempt_id,
+                observation_id=fact.observation_id,
                 kind="linktools.model.request",
                 occurred_at=datetime.now(timezone.utc),
                 source_namespace=self._source_namespace,
@@ -167,6 +204,8 @@ class _RuntimeModelMetricCapability(AbstractCapability[AgentContext[object]]):
                     execution_id=self._execution_id,
                     session_id=self._session_id,
                     step_run_id=self._step_run_id,
+                    request_sequence=fact.request_sequence,
+                    request_purpose=fact.purpose,
                 ),
                 dimensions={
                     "agent_id": self._agent_id,
@@ -175,7 +214,7 @@ class _RuntimeModelMetricCapability(AbstractCapability[AgentContext[object]]):
                     "route_id": self._route_id,
                 },
                 measurements=(
-                    MetricMeasurement("latency_ns", 1, monotonic_ns() - started),
+                    MetricMeasurement("latency_ns", 1, fact.duration_ns or 0),
                     *measurements,
                 ),
             )
