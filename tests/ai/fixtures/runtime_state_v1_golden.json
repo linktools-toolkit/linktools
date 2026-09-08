@@ -79,6 +79,7 @@
     "step_event",
     "tool_effect",
     "attachment_entry_v1",
+    "attachment_result_v1",
     "path_origin_v1",
     "attachment_upload_v1",
     "input_prepare_v1",
