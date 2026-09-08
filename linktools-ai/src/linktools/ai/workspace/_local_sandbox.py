@@ -2207,23 +2207,66 @@ def _command_result(state: _ProcessState, *, status: str | None = None) -> str:
         or ("running" if not state.wait_task.done() else "exited")
     )
     code = state.process.returncode
-    stdout = "".join(state.stdout)
-    stderr = "".join(state.stderr)
-    sections: list[str] = []
-    if stdout:
-        sections.append(f"[stdout]\n{stdout}")
-    if stderr:
-        sections.append(f"[stderr]\n{stderr}")
-    value = (
+    header = (
         f"command_id: {state.command_id}\n"
         f"status: {actual_status}\n"
         f"exit_code: {'' if code is None else code}"
     )
-    if sections:
-        value += "\n" + "\n\n".join(sections)
-    if state.output_incomplete:
-        return _bound_output_with_marker(value, "\n[output incomplete]")
-    return _bound_output(value)
+    return _render_command_output(
+        header,
+        "".join(state.stdout),
+        "".join(state.stderr),
+        incomplete=state.output_incomplete,
+    )
+
+
+def _render_command_output(
+    header: str,
+    stdout: str,
+    stderr: str,
+    *,
+    incomplete: bool,
+) -> str:
+    channels = [
+        ("[stdout]\n", stdout),
+        ("[stderr]\n", stderr),
+    ]
+    channels = [(label, value) for label, value in channels if value]
+    body = "\n\n".join(label + value for label, value in channels)
+    full = header if not body else f"{header}\n{body}"
+    truncated = incomplete or len(full) > _MAX_RENDERED_CHARS
+    if not truncated:
+        return full
+
+    suffix = "\n[output incomplete]"
+    if not channels:
+        return header + suffix
+    fixed = (
+        len(header)
+        + 1
+        + sum(len(label) for label, _value in channels)
+        + 2 * (len(channels) - 1)
+        + len(suffix)
+    )
+    available = max(0, _MAX_RENDERED_CHARS - fixed)
+    if len(channels) == 1:
+        budgets = [min(len(channels[0][1]), available)]
+    else:
+        first = min(len(channels[0][1]), available // 2)
+        second = min(len(channels[1][1]), available - first)
+        remaining = available - first - second
+        if remaining and first < len(channels[0][1]):
+            extra = min(remaining, len(channels[0][1]) - first)
+            first += extra
+            remaining -= extra
+        if remaining and second < len(channels[1][1]):
+            second += min(remaining, len(channels[1][1]) - second)
+        budgets = [first, second]
+    rendered = []
+    for (label, value), budget in zip(channels, budgets, strict=True):
+        visible = value if len(value) <= budget else value[-budget:] if budget else ""
+        rendered.append(label + visible)
+    return header + "\n" + "\n\n".join(rendered) + suffix
 
 
 __all__ = ["LocalSandbox"]

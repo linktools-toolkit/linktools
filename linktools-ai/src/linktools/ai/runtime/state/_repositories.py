@@ -119,21 +119,6 @@ ValueT = TypeVar("ValueT")
 _RECOVERY_PAGE_SIZE = 128
 _INDEX_ROOT_READ_LIMIT = 64
 _ACTIVE_RECORD_UNSET = object()
-_MAX_RECORD_SORT_KEY_CHARS = 128
-
-
-def _record_sort_key(identity: object, value: object) -> str:
-    if not isinstance(value, MemoryRecord):
-        return sortable_identity(identity)
-    path = value.metadata.get("path")
-    if (
-        not isinstance(path, str)
-        or not path
-        or not path.isascii()
-        or len(path) > _MAX_RECORD_SORT_KEY_CHARS
-    ):
-        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-    return path
 
 
 class _RepositoryBase:
@@ -211,7 +196,7 @@ class _RepositoryBase:
             scope,
             parent,
             kind,
-            _record_sort_key(identity, value),
+            sortable_identity(identity),
             state,
             0,
             lease_owner,
@@ -4054,6 +4039,38 @@ class MemoryRepositoryImpl(_ResourceRepository[MemoryRecord]):
             resource_kind=ResourceKind.MEMORY,
             value_type=MemoryRecord,
             identity_field="memory_id",
+        )
+
+    def _stored(
+        self,
+        kind: str,
+        identity: object,
+        value: object,
+        *,
+        scope: bytes | None = None,
+        parent: bytes | None = None,
+        state: str | None = None,
+    ) -> StoredRecord:
+        if kind != "memory" or not isinstance(value, MemoryRecord):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        path = value.metadata.get("path")
+        if (
+            not isinstance(path, str)
+            or not path
+            or not path.isascii()
+            or len(path) > 128
+        ):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        return replace(
+            super()._stored(
+                kind,
+                identity,
+                value,
+                scope=scope,
+                parent=parent,
+                state=state,
+            ),
+            sort_key=path,
         )
 
     async def apply_write(

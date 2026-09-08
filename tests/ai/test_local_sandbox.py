@@ -50,6 +50,27 @@ async def test_local_sandbox_preserves_stdout_and_stderr(tmp_path: Path) -> None
     assert "[stderr]\nstderr-value" in result
 
 
+async def test_local_sandbox_truncation_preserves_stderr_and_status(
+    tmp_path: Path,
+) -> None:
+    session = await LocalSandbox().open(root=tmp_path)
+    command = _python_command(
+        "import sys;sys.stdout.write('x' * 60000);sys.stderr.write('stderr-tail')"
+    )
+    try:
+        result = await session.run_command(command, timeout_seconds=5)
+    finally:
+        await session.close()
+
+    assert len(result) <= 50_000
+    assert "command_id:" in result
+    assert "status: exited" in result
+    assert "exit_code: 0" in result
+    assert "[stdout]" in result
+    assert "[stderr]\nstderr-tail" in result
+    assert result.endswith("[output incomplete]")
+
+
 async def test_local_sandbox_reaps_background_process_after_shell_exit(
     tmp_path: Path,
 ) -> None:
