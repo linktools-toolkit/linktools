@@ -1,0 +1,143 @@
+name: Apply subagent observability implementation v7
+
+on:
+  push:
+    branches:
+      - feat/ai-subagent-observability
+    paths:
+      - .github/workflows/ai-subagent-observability-apply-v7.yml
+
+permissions:
+  contents: write
+
+env:
+  PIP_DISABLE_PIP_VERSION_CHECK: "1"
+  PYTHONUNBUFFERED: "1"
+
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: feat/ai-subagent-observability
+          fetch-depth: 0
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.10'
+      - name: Apply implementation
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import textwrap
+
+          source = Path(".github/workflows/ai-subagent-observability-apply-v6.yml").read_text()
+          block = source.split("          python - <<'PY'\n", 1)[1].split("\n          PY\n", 1)[0]
+          exec(compile(textwrap.dedent(block), "subagent-observability-apply-v6", "exec"))
+
+          path = Path("linktools-ai/src/linktools/ai/runtime/_execution.py")
+          value = path.read_text()
+          old = '''            view = _execution_view(execution)
+            while True:
+                waiter = self._local_waiter
+                owns_execution = waiter is not None and waiter.owns_execution(
+                    execution_id,
+                    tenant_id=principal.tenant_id,
+                )
+                if view.status in {
+                    ExecutionStatus.SUCCEEDED,
+                    ExecutionStatus.FAILED,
+                    ExecutionStatus.CANCELLED,
+                }:
+                    if owns_execution:
+                        _logger.debug(
+                            "execution wait awaiting local terminal worker: execution=%s",
+                            execution_id,
+                        )
+                        await waiter.wait_terminal(
+                            execution_id,
+                            tenant_id=principal.tenant_id,
+                        )
+                        view = await self.inspect(execution_id, principal=principal)
+                        continue
+'''
+          new = '''            status = execution.status
+            while True:
+                waiter = self._local_waiter
+                owns_execution = waiter is not None and waiter.owns_execution(
+                    execution_id,
+                    tenant_id=principal.tenant_id,
+                )
+                if status in {
+                    ExecutionStatus.SUCCEEDED,
+                    ExecutionStatus.FAILED,
+                    ExecutionStatus.CANCELLED,
+                }:
+                    if owns_execution:
+                        _logger.debug(
+                            "execution wait awaiting local terminal worker: execution=%s",
+                            execution_id,
+                        )
+                        await waiter.wait_terminal(
+                            execution_id,
+                            tenant_id=principal.tenant_id,
+                        )
+                        execution = await self._load_authorized(
+                            execution_id,
+                            principal,
+                            AuthorizationAction.EXECUTION_READ,
+                        )
+                        status = execution.status
+                        continue
+'''
+          if value.count(old) != 1:
+              raise RuntimeError(f"expected one wait projection block, got {value.count(old)}")
+          value = value.replace(old, new, 1)
+          old_tail = '''                view = await self.inspect(execution_id, principal=principal)
+
+        try:
+'''
+          new_tail = '''                execution = await self._load_authorized(
+                    execution_id,
+                    principal,
+                    AuthorizationAction.EXECUTION_READ,
+                )
+                status = execution.status
+
+        try:
+'''
+          if value.count(old_tail) != 1:
+              raise RuntimeError(f"expected one wait refresh tail, got {value.count(old_tail)}")
+          path.write_text(value.replace(old_tail, new_tail, 1))
+          PY
+      - name: Install tooling
+        run: |
+          python -m pip install --quiet --upgrade pip
+          python -m pip install --quiet -U -r requirements.txt
+          python manage.py install --editable --quiet
+      - name: Run targeted tests
+        run: |
+          python -m pytest -q \
+            tests/ai/test_subagent_execution_tree.py \
+            tests/ai/test_skill_subagent_final_refactor.py \
+            tests/ai/test_execution_context_durability.py \
+            tests/ai/test_local_execution_recovery.py \
+            tests/ai/test_runtime_metrics.py
+      - name: Run linktools-ai gate
+        run: python manage.py check linktools-ai
+      - name: Commit implementation
+        shell: bash
+        run: |
+          rm .github/workflows/ai-subagent-observability-apply.yml
+          rm .github/workflows/ai-subagent-observability-apply-v2.yml
+          rm .github/workflows/ai-subagent-observability-apply-v3.yml
+          rm .github/workflows/ai-subagent-observability-apply-v4.yml
+          rm .github/workflows/ai-subagent-observability-apply-v5.yml
+          rm .github/workflows/ai-subagent-observability-apply-v6.yml
+          rm .github/workflows/ai-subagent-observability-apply-v7.yml
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -m "feat(ai): track subagent execution lineage"
+          git push origin HEAD:feat/ai-subagent-observability
