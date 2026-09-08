@@ -1,0 +1,127 @@
+# This workflow will upload a Python Package using Twine when a release is created
+# For more information see: https://docs.github.com/en/actions/automating-builds-and-tests/building-and-testing-python#publishing-to-package-registries
+
+# This workflow uses actions that are not certified by GitHub.
+# They are provided by a third-party and are governed by
+# separate terms of service, privacy policy, and support
+# documentation.
+
+name: Upload Python Package
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Release version (e.g. v1.2.3)'
+        required: true
+
+permissions:
+  contents: write
+
+env:
+  PIP_DISABLE_PIP_VERSION_CHECK: "1"
+  PYTHONUNBUFFERED: "1"
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v7
+    - name: Validate version
+      run: |
+        VERSION="${{ inputs.version }}"
+        if ! [[ "$VERSION" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(rc[0-9]+)?$ ]]; then
+          echo "::error::Invalid version format: $VERSION (expected vX.Y.Z or vX.Y.ZrcN, e.g. v1.2.3 or v1.2.3rc0)"
+          exit 1
+        fi
+        if git ls-remote --exit-code --tags origin "refs/tags/$VERSION" >/dev/null 2>&1; then
+          echo "::error::Tag $VERSION already exists"
+          exit 1
+        fi
+
+  checks:
+    needs: validate
+    uses: ./.github/workflows/python-check.yml
+
+  deploy:
+    needs:
+      - validate
+      - checks
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v7
+
+    # build frida.min.js
+    - name: Set up Node
+      if: ${{ !env.ACT }}
+      uses: actions/setup-node@v7
+      with:
+        node-version: 20
+    - name: Build frida scripts
+      if: ${{ !env.ACT }}
+      run: cd linktools-mobile/agents/frida && npm install && npm run build
+
+    # build android-tools.apk
+    - name: Set up JDK 17
+      if: ${{ !env.ACT }}
+      uses: actions/setup-java@v6
+      with:
+        distribution: temurin
+        java-version: 17
+    - name: Setup Android SDK
+      if: ${{ !env.ACT }}
+      uses: android-actions/setup-android@v4
+    - name: Build android tools
+      if: ${{ !env.ACT }}
+      run: cd linktools-mobile/agents/android && ./gradlew --no-daemon :tools:buildTools
+
+    # build python package
+    - name: Set up Python
+      uses: actions/setup-python@v7
+      with:
+        python-version: '3.10'
+    - name: Install dependencies
+      run: |
+        python -m pip install --quiet --upgrade pip
+        python -m pip install --quiet -U -r requirements.txt
+    - name: Install projects
+      run: python manage.py install --editable --quiet
+    - name: Clean package
+      run: python manage.py clean
+    - name: Build package
+      run: VERSION=${{ inputs.version }} RELEASE=true python manage.py build
+    - name: Verify package
+      run: VERSION=${{ inputs.version }} RELEASE=true python manage.py verify
+
+    # publish python package
+    - name: Publish package
+      if: ${{ !env.ACT }}
+      uses: pypa/gh-action-pypi-publish@release/v1
+      with:
+        user: __token__
+        password: ${{ secrets.PYPI_API_TOKEN }}
+        packages_dir: dist/
+
+    # commit and push artifacts (fast-forward, no tag yet)
+    - name: Commit files
+      if: ${{ !env.ACT }}
+      run: |
+        git config user.name github-actions[bot]
+        git config user.email github-actions[bot]@users.noreply.github.com
+        git add linktools*/linktools.yml \
+                linktools-mobile/src/linktools/assets/frida.js \
+                linktools-mobile/src/linktools/assets/frida-*.js \
+                linktools-mobile/src/linktools/assets/android-tools.*
+        git commit -m "Auto commit artifacts (${{ inputs.version }})"
+        git push origin HEAD:master
+
+    # tag and release only after artifacts are pushed, so they match exactly
+    - name: Create tag and release
+      if: ${{ !env.ACT }}
+      env:
+        GH_TOKEN: ${{ github.token }}
+      run: |
+        git tag ${{ inputs.version }}
+        git push origin ${{ inputs.version }}
+        gh release create ${{ inputs.version }} --generate-notes dist/*
