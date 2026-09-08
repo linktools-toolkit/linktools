@@ -9,8 +9,10 @@ from dataclasses import dataclass
 from typing import Any
 
 import linktools.ai.runtime._agent_executor as agent_executor_runtime
+import linktools.ai.runtime._factory as factory_runtime
 import linktools.ai.runtime._local as local_runtime
 
+from ..capability import attachment_tool_contribution
 from ..errors import AIError, ErrorCode
 from ._attachment_read import AttachmentReadRuntime
 
@@ -34,6 +36,7 @@ _installed = False
 _original_run: Any = None
 _original_materialize_agent: Any = None
 _original_workspace_capabilities: Any = None
+_original_workspace_tool_contributions: Any = None
 
 
 async def _run_with_attachment_owner(
@@ -95,22 +98,34 @@ def _workspace_capabilities_with_attachment_reader(
     )
 
 
+def _runtime_workspace_tool_contributions(workspace: Any):
+    if _original_workspace_tool_contributions is None:
+        raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+    return (
+        *_original_workspace_tool_contributions(workspace),
+        attachment_tool_contribution(workspace),
+    )
+
+
 def install_attachment_workspace() -> None:
     """Install the run-scoped read_attachment workspace binding exactly once."""
     global _installed
     global _original_materialize_agent
     global _original_run
     global _original_workspace_capabilities
+    global _original_workspace_tool_contributions
     if _installed:
         return
     _original_run = local_runtime.LocalExecutionBackend._run
     _original_materialize_agent = agent_executor_runtime._materialize_agent
     _original_workspace_capabilities = agent_executor_runtime.workspace_capabilities
+    _original_workspace_tool_contributions = factory_runtime.workspace_tool_contributions
     local_runtime.LocalExecutionBackend._run = _run_with_attachment_owner
     agent_executor_runtime._materialize_agent = _materialize_agent_with_attachment_reader
     agent_executor_runtime.workspace_capabilities = (
         _workspace_capabilities_with_attachment_reader
     )
+    factory_runtime.workspace_tool_contributions = _runtime_workspace_tool_contributions
     _installed = True
 
 
