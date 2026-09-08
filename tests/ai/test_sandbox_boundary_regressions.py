@@ -7,19 +7,13 @@ from pathlib import Path
 
 import pytest
 from linktools.ai.capability import workspace_capabilities
-from linktools.ai.runtime._compaction import (
-    _SUMMARY_MARKER,
-    _is_context_summary,
-    _insert_summary,
-    _protected_message_indexes,
-    _summary_candidate,
-)
+from linktools.ai.runtime._compaction import RuntimeCompaction
 from linktools.ai.workspace import SandboxResource, Workspace
 from linktools.ai.workspace._bubblewrap import _build_bwrap_args
-from pydantic_ai.messages import ModelRequest, UserPromptPart
 from pydantic_ai.models.test import TestModel
 from pydantic_ai.tools import RunContext
 from pydantic_ai.usage import RunUsage
+from pydantic_ai_harness.compaction import DeduplicateFileReads, TieredCompaction
 
 
 def _context() -> RunContext[None]:
@@ -90,52 +84,17 @@ async def test_cancelled_close_propagates_without_primary_failure(tmp_path: Path
         await session.close()
 
 
-def test_context_summary_replaces_prior_summary_generations() -> None:
-    messages = [
-        ModelRequest(parts=[UserPromptPart(f"message-{index}")])
-        for index in range(30)
-    ]
-    for index in (8, 15, 20):
-        messages[index] = ModelRequest(
-            parts=[UserPromptPart(f"{_SUMMARY_MARKER}\nold-{index}")],
-            metadata={"linktools.ai.context_summary": {"source_indexes": [index]}},
-        )
-
-    protected = _protected_message_indexes(messages)
-    candidate = _summary_candidate(messages, protected)
-
-    assert candidate is not None
-    retained = [
-        message
-        for index, message in enumerate(messages)
-        if index not in candidate.indices
-    ]
-    replacement = ModelRequest(
-        parts=[UserPromptPart(f"{_SUMMARY_MARKER}\nnew")],
-        metadata={"linktools.ai.context_summary": {"source_indexes": []}},
-    )
-    projected = _insert_summary(messages, candidate.indices, replacement)
-
-    assert len(retained) >= 20
-    assert sum(_is_context_summary(message) for message in projected) == 1
-
-
-def test_context_summary_keeps_protected_standalone_instruction() -> None:
-    messages = [
-        ModelRequest(parts=[UserPromptPart(f"message-{index}")])
-        for index in range(30)
-    ]
-    messages[0] = ModelRequest(
-        instructions="retain this instruction",
-        parts=[UserPromptPart("old context")],
+def test_runtime_compaction_uses_harness_strategies() -> None:
+    compaction = RuntimeCompaction(
+        4096,
+        trusted_workspace_read=True,
+        journal=None,
+        observer=None,
+        projection_sink=None,
     )
 
-    protected = _protected_message_indexes(messages)
-    candidate = _summary_candidate(messages, protected)
-
-    assert candidate is not None
-    assert 0 in protected
-    assert 0 not in candidate.indices
+    assert isinstance(compaction._dedupe, DeduplicateFileReads)
+    assert isinstance(compaction._tiered, TieredCompaction)
 
 
 def test_bubblewrap_hidden_mount_overrides_workspace_resource_bind(
