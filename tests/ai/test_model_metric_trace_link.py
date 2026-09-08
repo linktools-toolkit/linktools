@@ -211,6 +211,55 @@ async def test_output_retry_metric_lineage_uses_pydantic_retry_state() -> None:
     assert model_observations[1].correlation["linktools.output_retry_index"] == 1
     assert model_observations[2].correlation["linktools.output_retry_index"] == 2
 
+    events = await store.list_events(run_id=run_id)
+    started = [event for event in events if event.kind == "model_request_started"]
+    completed = [event for event in events if event.kind == "model_request_completed"]
+    assert [
+        event.metadata.get("linktools.ai.output_retry_index") for event in started
+    ] == [None, "1", "2"]
+    assert [
+        event.metadata.get("linktools.ai.output_retry_index") for event in completed
+    ] == [None, "1", "2"]
+    assert [
+        _trace(event).payload.get("output_retry_index") for event in started
+    ] == [None, 1, 2]
+    assert [
+        _trace(event).payload.get("output_retry_index") for event in completed
+    ] == [None, 1, 2]
+    assert [event.metadata["linktools.ai.observation_id"] for event in completed] == [
+        value.observation_id for value in model_observations
+    ]
+
+
+@pytest.mark.asyncio
+async def test_output_retry_trace_lineage_does_not_require_metrics() -> None:
+    store = InMemoryStepStore()
+    run_id = "output-retry-no-metrics-run"
+    agent = Agent(
+        TestModel(custom_output_text="done"),
+        capabilities=[_persistence(store, run_id, None)],
+        retries={"output": 1},
+    )
+
+    @agent.output_validator
+    def retry_once(ctx: RunContext[None], output: str) -> str:
+        if ctx.retry == 0:
+            raise ModelRetry("retry output")
+        return output
+
+    result = await agent.run("hello")
+
+    assert result.output == "done"
+    events = await store.list_events(run_id=run_id)
+    completed = [event for event in events if event.kind == "model_request_completed"]
+    assert [
+        event.metadata.get("linktools.ai.output_retry_index") for event in completed
+    ] == [None, "1"]
+    assert [
+        _trace(event).payload.get("output_retry_index") for event in completed
+    ] == [None, 1]
+    assert all("linktools.ai.observation_id" not in event.metadata for event in completed)
+
 
 @pytest.mark.asyncio
 async def test_model_trace_omits_metric_metadata_when_metrics_disabled() -> None:
@@ -231,3 +280,4 @@ async def test_model_trace_omits_metric_metadata_when_metrics_disabled() -> None
     assert len(completed) == 1
     assert "linktools.ai.observation_id" not in completed[0].metadata
     assert "linktools.ai.duration_ns" not in completed[0].metadata
+    assert "linktools.ai.output_retry_index" not in completed[0].metadata
