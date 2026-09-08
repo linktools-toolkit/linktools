@@ -92,6 +92,7 @@ async def test_missing_write_parent_is_known_failure_not_effect_unknown(
             usage=RunUsage(),
             run_id="run",
         )
+        await persistence.before_run(context)
         args = {"path": "missing/report.txt", "content": "report"}
         call = ToolCallPart("write_file", args, tool_call_id="call")
         await persistence.before_tool_execute(
