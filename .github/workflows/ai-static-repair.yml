@@ -19,7 +19,7 @@ jobs:
       - uses: actions/setup-python@v7
         with:
           python-version: '3.10'
-      - name: Apply exact static repairs
+      - name: Apply exact repairs
         shell: bash
         run: |
           python - <<'PY'
@@ -49,6 +49,7 @@ jobs:
               '',
           )
           Path('linktools-ai/src/linktools/ai/capability/workspace.py').unlink()
+
           replace_once(
               'linktools-ai/src/linktools/ai/runtime/_agent_executor.py',
               'from ._input import _RuntimeUserPrompt, _restore_user_prompt\n',
@@ -79,6 +80,44 @@ jobs:
               '    ToolOperationAdmission,\n    ToolOperationRecord,\n    run_durable_commit,\n',
               '    ToolOperationAdmission,\n    ToolOperationRecord,\n    WorkspaceToolCallBinding,\n    WorkspaceToolCallBindingStore,\n    run_durable_commit,\n',
           )
+
+          replace_once(
+              'linktools-ai/src/linktools/ai/workspace/__init__.py',
+              '    SandboxResource,\n    SandboxSession,\n)\n',
+              '    SandboxResource,\n    SandboxSession,\n    normalize_workspace_path as normalize_workspace_input_path,\n)\n',
+          )
+          replace_once(
+              'linktools-ai/src/linktools/ai/workspace/__init__.py',
+              '    "normalize_workspace_path",\n    "trusted_workspace_principal",\n',
+              '    "normalize_workspace_input_path",\n    "normalize_workspace_path",\n    "trusted_workspace_principal",\n',
+          )
+          replace_once(
+              'linktools-ai/src/linktools/ai/runtime/_capabilities_native.py',
+              '    WorkspacePolicy,\n    normalize_workspace_path,\n)',
+              '    WorkspacePolicy,\n    normalize_workspace_input_path,\n)',
+          )
+          replace_once(
+              'linktools-ai/src/linktools/ai/runtime/_capabilities_native.py',
+              '    normalized = normalize_workspace_path(target)\n',
+              '    normalized = normalize_workspace_input_path(target)\n',
+          )
+
+          replace_once(
+              'linktools-ai/src/linktools/ai/workspace/_local_sandbox.py',
+              '        return frozenset(values)\n\n    async def read_file(\n',
+              '''        return frozenset(values)\n\n    async def canonicalize_path(self, path: str) -> str:\n        normalized = _normalize_path(path)\n\n        def operation() -> str:\n            target = self._resolve_path(normalized, allow_missing=True)\n            return _relative(self._root, target)\n\n        return await self._run_sync(operation)\n\n    async def read_bytes(\n        self,\n        path: str,\n        *,\n        max_bytes: int | None = None,\n    ) -> bytes:\n        normalized = _normalize_path(path)\n        if max_bytes is not None and (\n            not isinstance(max_bytes, int)\n            or isinstance(max_bytes, bool)\n            or max_bytes < 0\n        ):\n            raise AIError(ErrorCode.REQUEST_FIELD_INVALID)\n\n        def operation() -> bytes:\n            target = self._file_path(normalized, write=False)\n            try:\n                info = target.stat()\n                if not stat.S_ISREG(info.st_mode):\n                    raise AIError(ErrorCode.REQUEST_FIELD_INVALID)\n                if max_bytes is not None and info.st_size > max_bytes:\n                    raise AIError(ErrorCode.REQUEST_FIELD_INVALID)\n                return target.read_bytes()\n            except AIError:\n                raise\n            except FileNotFoundError as error:\n                raise AIError(ErrorCode.STORAGE_NOT_FOUND) from error\n            except OSError as error:\n                raise AIError(ErrorCode.STORAGE_UNAVAILABLE) from error\n\n        return await self._run_sync(operation)\n\n    async def read_file(\n''',
+          )
+
+          replace_once(
+              'tests/ai/test_runtime_approval_recovery.py',
+              'from linktools.ai.spec import AgentSpec\n',
+              'from linktools.ai.spec import AgentSpec\nfrom linktools.ai.storage import StoredPayload\n',
+          )
+          replace_once(
+              'tests/ai/test_spec_capability_refactor.py',
+              'from pydantic_ai.toolsets import FunctionToolset, PreparedToolset, RenamedToolset\n',
+              'from pydantic_ai.toolsets import FunctionToolset, PreparedToolset, RenamedToolset\nfrom pydantic_ai_harness.step_persistence import StepPersistence\n',
+          )
           PY
       - name: Install tooling
         shell: bash
@@ -95,9 +134,13 @@ jobs:
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           git add -A linktools-ai/src/linktools/ai/capability \
                      linktools-ai/src/linktools/ai/runtime/_agent_executor.py \
+                     linktools-ai/src/linktools/ai/runtime/_capabilities_native.py \
                      linktools-ai/src/linktools/ai/runtime/_execution.py \
                      linktools-ai/src/linktools/ai/runtime/_local.py \
-                     linktools-ai/src/linktools/ai/runtime/_tool.py
+                     linktools-ai/src/linktools/ai/runtime/_tool.py \
+                     linktools-ai/src/linktools/ai/workspace \
+                     tests/ai/test_runtime_approval_recovery.py \
+                     tests/ai/test_spec_capability_refactor.py
           git diff --cached --check
           git commit -m 'fix(ai): restore merged runtime contracts'
           git push origin HEAD:refactor/ai-harness-capabilities
