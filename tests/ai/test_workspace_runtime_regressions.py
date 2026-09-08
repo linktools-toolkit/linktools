@@ -11,18 +11,16 @@ from linktools.ai.asset import (
 from linktools.ai.capability import CapabilityGroup
 from linktools.ai.model import ModelRegistry
 from linktools.ai.runtime import Runtime, RuntimeContext, RuntimeDomain, RuntimeState
-from linktools.ai.runtime._capabilities import _SelectedMemory
+from linktools.ai.runtime._harness_memory import build_harness_memory
 from linktools.ai.runtime._memory import RuntimeMemoryStore
 from linktools.ai.spec import AgentSpec, AgentSpecCodec, MCPServerSpec, MCPServerSpecCodec
 from linktools.ai.storage import StorageOverlay
 from linktools.ai.workspace import Workspace
-from pydantic_ai.models.test import TestModel
-from pydantic_ai.tools import RunContext
-from pydantic_ai.usage import RunUsage
+from pydantic_ai_harness.memory import Memory
 
 
 @pytest.mark.asyncio
-async def test_runtime_memory_store_uses_flat_logical_files() -> None:
+async def test_runtime_memory_store_implements_harness_path_storage() -> None:
     state = RuntimeState.in_memory()
     await state.initialize(namespace="memory-regression", tenant_id="tenant")
     try:
@@ -34,19 +32,24 @@ async def test_runtime_memory_store_uses_flat_logical_files() -> None:
             execution_id="execution",
             memory_scope="workspace",
         )
-        await store.write(
-            "MEMORY",
+        created = await store.write(
+            "memory/MEMORY.md",
             "remember commit-writer",
             expected_version=None,
         )
-        result = await store.search("commit-writer", limit=10)
-        assert [match.file for match in result.matches] == ["MEMORY.md"]
+
+        assert created.version is not None
+        assert created.existed is False
+        assert await store.list_paths("memory/", limit=10) == ["memory/MEMORY.md"]
+        stored = await store.read("memory/MEMORY.md", max_chars=100)
+        assert stored is not None
+        assert stored.content == "remember commit-writer"
     finally:
         await state.close()
 
 
 @pytest.mark.asyncio
-async def test_memory_capability_preserves_append_and_replace_semantics() -> None:
+async def test_memory_capability_is_harness_owned_over_runtime_state() -> None:
     state = RuntimeState.in_memory()
     await state.initialize(namespace="memory-capability", tenant_id="tenant")
     try:
@@ -58,44 +61,27 @@ async def test_memory_capability_preserves_append_and_replace_semantics() -> Non
             execution_id="execution",
             memory_scope="workspace",
         )
-        capability = _SelectedMemory(
+        capability = build_harness_memory(
             store,
-            selected_tool_names=("write_memory",),
-            id="memory",
+            selected_tool_names=(
+                "delete_memory",
+                "read_memory",
+                "search_memory",
+                "write_memory",
+            ),
+            capability_id="linktools-memory",
         )
 
-        def context(call_id: str) -> RunContext[None]:
-            return RunContext(
-                deps=None,
-                model=TestModel(),
-                usage=RunUsage(),
-                run_id="run",
-                tool_call_id=call_id,
-            )
-
-        assert (
-            await capability._write_memory(context("create"), "first")
-        )["status"] == "created"
-        assert (
-            await capability._write_memory(context("append"), "second")
-        )["status"] == "appended"
-        assert (
-            await capability._write_memory(
-                context("replace"),
-                "updated",
-                old_text="first\nsecond\n",
-            )
-        )["status"] == "updated"
-
-        result = await store.read("MEMORY.md", max_chars=100)
-        assert result is not None
-        assert result.content == "updated"
+        assert isinstance(capability, Memory)
+        assert capability.id == "linktools-memory"
+        assert capability.inject_memory is False
+        assert capability.store is not store
     finally:
         await state.close()
 
 
 @pytest.mark.asyncio
-async def test_memory_missing_delete_commits_a_not_found_receipt() -> None:
+async def test_memory_missing_delete_uses_harness_mutation_contract() -> None:
     state = RuntimeState.in_memory()
     await state.initialize(namespace="memory-missing-delete", tenant_id="tenant")
     try:
@@ -108,24 +94,24 @@ async def test_memory_missing_delete_commits_a_not_found_receipt() -> None:
             memory_scope="workspace",
         )
 
-        deleted = await store.delete("notes", expected_version=None)
+        deleted = await store.delete("memory/notes.md", expected_version=None)
 
-        assert deleted.status == "not_found"
         assert deleted.version is None
+        assert deleted.existed is False
+        assert deleted.replayed is False
         created = await store.write(
-            "notes",
+            "memory/notes.md",
             "created after the missing read",
             expected_version=None,
         )
-        assert created.status == "created"
+        assert created.version is not None
+        assert created.existed is False
     finally:
         await state.close()
 
 
 @pytest.mark.asyncio
-async def test_memory_sequence_gap_after_stale_missing_delete_stays_writable(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+async def test_memory_store_remains_writable_across_missing_delete_receipts() -> None:
     state = RuntimeState.in_memory()
     await state.initialize(namespace="memory-sequence-gap", tenant_id="tenant")
     try:
@@ -137,38 +123,34 @@ async def test_memory_sequence_gap_after_stale_missing_delete_stays_writable(
             execution_id="execution",
             memory_scope="workspace",
         )
+
+        first_delete = await store.delete("memory/notes.md", expected_version=None)
+        second_delete = await store.delete("memory/notes.md", expected_version=None)
+        assert first_delete.existed is False
+        assert second_delete.existed is False
+
         created = await store.write(
-            "notes",
-            "created concurrently",
+            "memory/notes.md",
+            "created",
             expected_version=None,
         )
-        original_record = store._record
-
-        async def missing_record(file: str) -> None:
-            del file
-            return None
-
-        monkeypatch.setattr(store, "_record", missing_record)
-        first_delete = await store.delete("notes", expected_version=None)
-        second_delete = await store.delete("notes", expected_version=None)
-        monkeypatch.setattr(store, "_record", original_record)
-
-        assert first_delete.status == "not_found"
-        assert second_delete.status == "not_found"
-        current = await store.read("notes", max_chars=100)
+        current = await store.read("memory/notes.md", max_chars=100)
         assert current is not None
         assert current.version == created.version
-        assert current.content == "created concurrently\n"
+        assert current.content == "created"
 
         updated = await store.write(
-            "notes",
-            "updated after sequence gaps",
+            "memory/notes.md",
+            "updated",
             expected_version=current.version,
-            append=False,
         )
-        assert updated.status == "updated"
-        deleted = await store.delete("notes", expected_version=updated.version)
-        assert deleted.status == "deleted"
+        assert updated.existed is True
+        deleted = await store.delete(
+            "memory/notes.md",
+            expected_version=updated.version,
+        )
+        assert deleted.existed is True
+        assert await store.read("memory/notes.md", max_chars=100) is None
     finally:
         await state.close()
 
