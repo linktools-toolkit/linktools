@@ -79,4 +79,23 @@ async def test_harness_summary_request_uses_runtime_journal_and_observer() -> No
     assert projections[-1][1] is not None
     assert len(request_context.messages) < len(messages)
     with pytest.raises(RuntimeError, match="missing"):
-        journal.current(ctx.run_step)
+        journal.current(observed[-1][1].request_sequence)
+
+
+def test_journal_keeps_agent_and_compaction_requests_distinct_on_same_step() -> None:
+    journal = ModelRequestJournal(
+        source_namespace="workspace",
+        tenant_id="tenant",
+        execution_id="execution",
+        step_run_id="run",
+    )
+    agent = journal.begin(3, purpose="agent")
+    compaction = journal.begin(3, purpose="compaction")
+
+    assert agent.request_sequence != compaction.request_sequence
+    assert agent.observation_id != compaction.observation_id
+    journal.finish(compaction.request_sequence, status="SUCCEEDED")
+    assert journal.consume(compaction.request_sequence).purpose == "compaction"
+    assert journal.current(agent.request_sequence) == agent
+    journal.finish(agent.request_sequence, status="SUCCEEDED")
+    assert journal.consume(agent.request_sequence).purpose == "agent"

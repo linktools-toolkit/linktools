@@ -106,10 +106,12 @@ class _RuntimeModelMetricCapability(AbstractCapability[AgentContext[object]]):
         run_context = None if ctx is None else ctx.deps
         step_index = 0 if ctx is None else ctx.run_step
         fact = self._journal.begin(step_index, purpose="agent")
+        request_sequence = fact.request_sequence
         try:
             response = await handler(request_context)
         except asyncio.CancelledError:
-            fact = self._journal.finish(step_index, status="CANCELLED")
+            fact = self._journal.finish(request_sequence, status="CANCELLED")
+            self._journal.consume(request_sequence)
             self._record_model(
                 run_context,
                 fact,
@@ -119,7 +121,8 @@ class _RuntimeModelMetricCapability(AbstractCapability[AgentContext[object]]):
             )
             raise
         except RunCancelled as error:
-            fact = self._journal.finish(step_index, status="CANCELLED")
+            fact = self._journal.finish(request_sequence, status="CANCELLED")
+            self._journal.consume(request_sequence)
             self._record_model(
                 run_context,
                 fact,
@@ -129,7 +132,8 @@ class _RuntimeModelMetricCapability(AbstractCapability[AgentContext[object]]):
             )
             raise
         except Exception as error:
-            fact = self._journal.finish(step_index, status="FAILED")
+            fact = self._journal.finish(request_sequence, status="FAILED")
+            self._journal.consume(request_sequence)
             self._record_model(
                 run_context,
                 fact,
@@ -138,7 +142,8 @@ class _RuntimeModelMetricCapability(AbstractCapability[AgentContext[object]]):
                 measurements=(),
             )
             raise
-        fact = self._journal.finish(step_index, status="SUCCEEDED")
+        fact = self._journal.finish(request_sequence, status="SUCCEEDED")
+        self._journal.consume(request_sequence)
         self._record_model(
             run_context,
             fact,

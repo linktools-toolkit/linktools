@@ -122,6 +122,12 @@ class _RuntimeStepPersistence(StepPersistence[None]):
         repr=False,
         compare=False,
     )
+    _model_request_tokens: dict[int, int] = field(
+        default_factory=dict,
+        init=False,
+        repr=False,
+        compare=False,
+    )
 
     def __post_init__(self) -> None:
         if not isinstance(self.plan_mode, bool):
@@ -222,11 +228,14 @@ class _RuntimeStepPersistence(StepPersistence[None]):
         request_context: ModelRequestContext,
         handler: WrapModelRequestHandler,
     ) -> ModelResponse:
-        fact = (
-            None
-            if self.model_journal is None
-            else self.model_journal.begin(ctx.run_step, purpose="agent")
-        )
+        fact = None
+        request_sequence: int | None = None
+        if self.model_journal is not None:
+            if ctx.run_step in self._model_request_tokens:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            fact = self.model_journal.begin(ctx.run_step, purpose="agent")
+            request_sequence = fact.request_sequence
+            self._model_request_tokens[ctx.run_step] = request_sequence
         start_metadata = (
             {}
             if fact is None
@@ -236,10 +245,12 @@ class _RuntimeStepPersistence(StepPersistence[None]):
         try:
             response = await handler(request_context)
         except asyncio.CancelledError as error:
-            if self.model_journal is None:
+            if self.model_journal is None or request_sequence is None:
                 raise
-            self.model_journal.finish(ctx.run_step, status="CANCELLED")
-            fact = self.model_journal.consume(ctx.run_step)
+            self.model_journal.finish(request_sequence, status="CANCELLED")
+            fact = self.model_journal.consume(request_sequence)
+            if self._model_request_tokens.pop(ctx.run_step, None) != request_sequence:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
             await self._harness_cancelled_model_request(
                 ctx,
                 request_context,
@@ -248,15 +259,15 @@ class _RuntimeStepPersistence(StepPersistence[None]):
             )
             raise AssertionError("Harness cancellation hook must re-raise")
         except RunCancelled:
-            if self.model_journal is not None:
-                self.model_journal.finish(ctx.run_step, status="CANCELLED")
+            if self.model_journal is not None and request_sequence is not None:
+                self.model_journal.finish(request_sequence, status="CANCELLED")
             raise
         except BaseException:
-            if self.model_journal is not None:
-                self.model_journal.finish(ctx.run_step, status="FAILED")
+            if self.model_journal is not None and request_sequence is not None:
+                self.model_journal.finish(request_sequence, status="FAILED")
             raise
-        if self.model_journal is not None:
-            self.model_journal.finish(ctx.run_step, status="SUCCEEDED")
+        if self.model_journal is not None and request_sequence is not None:
+            self.model_journal.finish(request_sequence, status="SUCCEEDED")
         return response
 
     async def _harness_before_model_request(
@@ -390,13 +401,16 @@ class _RuntimeStepPersistence(StepPersistence[None]):
     ) -> ModelRequestFact | None:
         if self.model_journal is None:
             return None
+        request_sequence = self._model_request_tokens.pop(ctx.run_step, None)
+        if request_sequence is None:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         try:
-            fact = self.model_journal.current(ctx.run_step)
-        except RuntimeError:
-            return None
+            fact = self.model_journal.current(request_sequence)
+        except RuntimeError as error:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
         if fact.duration_ns is None:
-            self.model_journal.finish(ctx.run_step, status=status)
-        return self.model_journal.consume(ctx.run_step)
+            self.model_journal.finish(request_sequence, status=status)
+        return self.model_journal.consume(request_sequence)
 
     async def record_external_model_request(
         self,

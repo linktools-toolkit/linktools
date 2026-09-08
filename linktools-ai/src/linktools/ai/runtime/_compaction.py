@@ -88,8 +88,8 @@ class _ObservedCompactionModel(WrapperModel):
         model_settings: ModelSettings | None,
         model_request_parameters: ModelRequestParameters,
     ) -> ModelResponse:
-        step_index = self._ctx.run_step
-        fact = self._journal.begin(step_index, purpose="compaction")
+        fact = self._journal.begin(self._ctx.run_step, purpose="compaction")
+        request_sequence = fact.request_sequence
         await self._observer(self._ctx, fact, "started", None, None)
         try:
             response = await self.wrapped.request(
@@ -98,8 +98,8 @@ class _ObservedCompactionModel(WrapperModel):
                 model_request_parameters,
             )
         except asyncio.CancelledError as error:
-            fact = self._journal.finish(step_index, status="CANCELLED")
-            self._journal.consume(step_index)
+            fact = self._journal.finish(request_sequence, status="CANCELLED")
+            self._journal.consume(request_sequence)
             await self._observer(
                 self._ctx,
                 fact,
@@ -109,8 +109,8 @@ class _ObservedCompactionModel(WrapperModel):
             )
             raise
         except BaseException as error:
-            fact = self._journal.finish(step_index, status="FAILED")
-            self._journal.consume(step_index)
+            fact = self._journal.finish(request_sequence, status="FAILED")
+            self._journal.consume(request_sequence)
             await self._observer(
                 self._ctx,
                 fact,
@@ -119,8 +119,8 @@ class _ObservedCompactionModel(WrapperModel):
                 error,
             )
             raise
-        fact = self._journal.finish(step_index, status="SUCCEEDED")
-        self._journal.consume(step_index)
+        fact = self._journal.finish(request_sequence, status="SUCCEEDED")
+        self._journal.consume(request_sequence)
         await self._observer(
             self._ctx,
             fact,

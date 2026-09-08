@@ -63,11 +63,6 @@ class ModelRequestJournal:
         *,
         purpose: ModelRequestPurpose = "agent",
     ) -> ModelRequestFact:
-        current = self._facts.get(step_index)
-        if current is not None and current.duration_ns is None:
-            if current.purpose != purpose:
-                raise ValueError("a step cannot have two active request purposes")
-            return current
         sequence = self._next_sequence
         self._next_sequence += 1
         fact = ModelRequestFact(
@@ -84,17 +79,17 @@ class ModelRequestJournal:
             ),
             started_ns=monotonic_ns(),
         )
-        self._facts[step_index] = fact
+        self._facts[sequence] = fact
         return fact
 
     def finish(
         self,
-        step_index: int,
+        request_sequence: int,
         *,
         status: str,
         duration_ns: int | None = None,
     ) -> ModelRequestFact:
-        fact = self._facts.get(step_index)
+        fact = self._facts.get(request_sequence)
         if fact is None:
             raise RuntimeError("model request fact is missing")
         if fact.duration_ns is not None:
@@ -105,18 +100,18 @@ class ModelRequestJournal:
             duration_ns=max(0, elapsed if duration_ns is None else duration_ns),
             status=status,
         )
-        self._facts[step_index] = return_value
+        self._facts[request_sequence] = return_value
         return return_value
 
-    def current(self, step_index: int) -> ModelRequestFact:
+    def current(self, request_sequence: int) -> ModelRequestFact:
         try:
-            return self._facts[step_index]
+            return self._facts[request_sequence]
         except KeyError as error:
             raise RuntimeError("model request fact is missing") from error
 
-    def consume(self, step_index: int) -> ModelRequestFact:
+    def consume(self, request_sequence: int) -> ModelRequestFact:
         try:
-            return self._facts.pop(step_index)
+            return self._facts.pop(request_sequence)
         except KeyError as error:
             raise RuntimeError("model request fact is missing") from error
 
