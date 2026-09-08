@@ -10,13 +10,13 @@ from contextvars import ContextVar
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Iterator, cast
 
+import linktools.ai.runtime._attachment as attachment_runtime
+import linktools.ai.runtime._execution as execution_runtime
+import linktools.ai.runtime._local as local_runtime
 from pydantic_ai.messages import BinaryContent, UserContent
 
 from ..core import canonical_sha256, idempotency_key_digest
 from ..errors import AIError, ErrorCode
-from . import _attachment as attachment_runtime
-from . import _execution as execution_runtime
-from . import _local as local_runtime
 from ._attachment import DefaultAttachmentService, InputPreparer
 from ._input import (
     UserPromptTransport,
@@ -46,9 +46,9 @@ from .state._attachment_repository import (
 from .state._repositories import replace_checked
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping, Sequence
+    from collections.abc import Sequence
 
-    from ..core import JsonValue, Principal
+    from ..core import Principal
     from .service_api import ExecutionRequest
     from .state import ExecutionRecord
     from .state._contracts import (
@@ -512,9 +512,11 @@ async def _prepare_runtime_input(
     scope: str,
     idempotency_key: str,
 ) -> PreparedInput | None:
-    service = _runtime_attachment_service(runtime)
     draft = managed_user_prompt_draft(user_prompt)
     raw_prompt = draft if draft is not None else _restore_user_prompt(user_prompt)
+    if not attachments and draft is None:
+        return None
+    service = _runtime_attachment_service(runtime)
     preparer = InputPreparer(
         service._repository,
         service._state,
