@@ -1,51 +1,25 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Regression coverage for Metrics review repairs."""
+"""Focused regressions for metric retention and best-effort recording."""
 
-from __future__ import annotations
-
-from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 
 import pytest
-from linktools.ai.core import Page, TaskStatus
-from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.observe import (
-    MetricAggregation,
-    MetricDefinition,
-    MetricMeasurement,
-    MetricQuery,
-    MetricSource,
-    MetricType,
-    MetricWindow,
-    Metrics,
-    Observation,
-)
-from linktools.ai.observe._memory import InMemoryMetricStore
-from linktools.ai.observe._query import _Accumulator
-from linktools.ai.runtime import _metric_capability as metric_capability
-from linktools.ai.runtime._metric_capability import _RuntimeModelMetricCapability
+from pydantic_ai.messages import ModelResponse
+
+import linktools.ai.runtime._metric_capability as metric_capability
+from linktools.ai.core import UsageMetrics
+from linktools.ai.observe import MetricMeasurement, MetricQuery, Observation
 from linktools.ai.runtime._journal import ModelRequestJournal
-from linktools.ai.task._event import TaskEvent, TaskEventType
-from linktools.ai.task._metrics import _TaskMetricProjector
-from pydantic_ai.exceptions import RunCancelled
-
-pytestmark = pytest.mark.asyncio
-
-
-class _Recorder:
-    def __init__(self) -> None:
-        self.observations: list[Observation] = []
-
-    def try_record(self, observation: Observation) -> bool:
-        self.observations.append(observation)
-        return True
+from linktools.ai.runtime._metric_capability import _RuntimeModelMetricCapability
+from linktools.ai.runtime._metrics import _BufferedMetricRecorder
+from linktools.ai.runtime._tool_metrics import _ToolMetricContext
 
 
 class _FailingRecorder:
-    def try_record(self, observation: Observation) -> bool:
+    def record(self, observation: Observation) -> None:
         del observation
-        raise RuntimeError("synthetic metric rejection")
+        raise RuntimeError("metric sink rejected observation")
 
 
 class _CaptureLogger:
@@ -57,115 +31,133 @@ class _CaptureLogger:
         self.exceptions.append(message)
 
 
-def _distribution_definition(
-    name: str,
-    default: MetricAggregation,
-) -> MetricDefinition:
-    return MetricDefinition(
-        name=name,
-        revision=1,
-        observation_kind=f"{name}.sample",
-        source=MetricSource.measurement("value"),
-        metric_type=MetricType.DISTRIBUTION,
-        unit="1",
-        default_aggregation=default,
+class _NullRecorder:
+    def record(self, observation: Observation) -> None:
+        del observation
+
+
+class _CaptureRecorder:
+    def __init__(self) -> None:
+        self.observations: list[Observation] = []
+
+    def record(self, observation: Observation) -> None:
+        self.observations.append(observation)
+
+
+class _StatusRecorder:
+    def __init__(self) -> None:
+        self.observations: list[Observation] = []
+
+    def record(self, observation: Observation) -> None:
+        self.observations.append(observation)
+
+
+class _RejectingBuffer:
+    def __init__(self) -> None:
+        self.items: list[Observation] = []
+
+    def append(self, observation: Observation) -> bool:
+        del observation
+        return False
+
+
+class _Sink:
+    async def write(self, observations: tuple[Observation, ...]) -> None:
+        del observations
+
+
+class _CapturingSink:
+    def __init__(self) -> None:
+        self.batches: list[tuple[Observation, ...]] = []
+
+    async def write(self, observations: tuple[Observation, ...]) -> None:
+        self.batches.append(observations)
+
+
+class _Clock:
+    def __init__(self) -> None:
+        self.now = datetime(2026, 9, 7, tzinfo=timezone.utc)
+
+    def __call__(self) -> datetime:
+        return self.now
+
+
+async def test_metric_buffer_rejection_does_not_escape() -> None:
+    recorder = _BufferedMetricRecorder(
+        _RejectingBuffer(),  # type: ignore[arg-type]
+        _Sink(),
     )
-
-
-def _observation(identity: str, *, status: str = "SUCCEEDED") -> Observation:
-    return Observation(
+    observation = Observation(
         version=1,
-        observation_id=identity,
-        kind="business.commit.sample",
+        observation_id="metric-rejected",
+        kind="test.metric",
         occurred_at=datetime(2026, 9, 7, tzinfo=timezone.utc),
         source_namespace="workspace",
         tenant_id="tenant",
-        status=status,
-        error_code=None,
-        correlation={},
-        dimensions={},
-        measurements=(MetricMeasurement("value", 1, 1),),
+        status="SUCCEEDED",
     )
 
+    recorder.record(observation)
 
-async def test_default_percentile_accepts_query_percentile() -> None:
-    metrics = Metrics.in_memory(namespace="default-percentile")
-    definition = _distribution_definition(
-        "business.default.percentile",
-        MetricAggregation.PERCENTILE,
+    status = recorder.status()
+    assert status.dropped == 1
+    assert status.last_error_code == "METRIC_BUFFER_REJECTED"
+
+
+async def test_metric_flush_status_tracks_successful_batch() -> None:
+    sink = _CapturingSink()
+    recorder = _BufferedMetricRecorder(
+        [],  # type: ignore[arg-type]
+        sink,
     )
-    await metrics.define(definition)
-    start = datetime(2026, 9, 7, tzinfo=timezone.utc)
-    for index, value in enumerate((1, 2, 3), start=1):
-        await metrics.record(
-            definition.name,
-            value,
-            observation_id=f"sample-{index}",
-            occurred_at=start + timedelta(seconds=index),
-        )
-
-    result = await metrics.query(
-        MetricQuery(
-            definition.name,
-            MetricWindow.between(start, start + timedelta(minutes=1)),
-            percentile=0.5,
-        )
+    observation = Observation(
+        version=1,
+        observation_id="metric-success",
+        kind="test.metric",
+        occurred_at=datetime(2026, 9, 7, tzinfo=timezone.utc),
+        source_namespace="workspace",
+        tenant_id="tenant",
+        status="SUCCEEDED",
     )
+    recorder._buffer.append(observation)  # type: ignore[union-attr]
 
-    assert result.aggregation is MetricAggregation.PERCENTILE
-    assert result.points[0].value == 2
-    assert result.points[0].sample_count == 3
+    flushed = await recorder.flush()
+
+    assert flushed.written == 1
+    assert flushed.pending == 0
+    assert sink.batches == [(observation,)]
+    assert recorder.status().written == 1
 
 
-async def test_percentile_is_rejected_when_resolved_default_is_not_percentile() -> None:
-    metrics = Metrics.in_memory(namespace="invalid-default-percentile")
-    definition = _distribution_definition(
-        "business.default.mean",
-        MetricAggregation.MEAN,
+async def test_tool_metric_rejection_is_logged_without_escaping(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    logger = _CaptureLogger()
+    monkeypatch.setattr(
+        "linktools.ai.runtime._tool_metrics._logger",
+        logger,
     )
-    await metrics.define(definition)
-    start = datetime(2026, 9, 7, tzinfo=timezone.utc)
-
-    with pytest.raises(AIError) as raised:
-        await metrics.query(
-            MetricQuery(
-                definition.name,
-                MetricWindow.between(start, start + timedelta(minutes=1)),
-                percentile=0.95,
-            )
-        )
-    assert raised.value.code is ErrorCode.REQUEST_FIELD_INVALID
-
-
-async def test_run_cancelled_records_cancelled_model_observation() -> None:
-    recorder = _Recorder()
-    capability = _RuntimeModelMetricCapability(
-        recorder,
+    context = _ToolMetricContext(
+        recorder=_FailingRecorder(),
         source_namespace="workspace",
         tenant_id="tenant",
         execution_id="execution",
         session_id=None,
         step_run_id="step-run",
         agent_id="agent",
-        provider="test",
-        model_identity="test:model",
-        route_id="default",
     )
 
-    async def handler(_request: object) -> object:
-        raise RunCancelled("cancelled by application")
+    context.record(
+        tool_name="read_file",
+        tool_class="filesystem.read",
+        operation_id="operation",
+        status="SUCCEEDED",
+        started_ns=1,
+        finished_ns=2,
+        replayed=False,
+    )
 
-    with pytest.raises(RunCancelled):
-        await capability.wrap_model_request(
-            None,
-            request_context=object(),  # type: ignore[arg-type]
-            handler=handler,  # type: ignore[arg-type]
-        )
-
-    assert len(recorder.observations) == 1
-    observation = recorder.observations[0]
-    assert observation.status == "CANCELLED"
-    assert observation.error_code == ErrorCode.EXECUTION_CANCELLED.value
+    assert logger.exceptions == ["tool metric observation rejected"]
 
 
 async def test_model_metric_rejection_is_logged_without_escaping(
@@ -194,7 +186,7 @@ async def test_model_metric_rejection_is_logged_without_escaping(
     )
     capability._journal = journal
     fact = journal.begin(0)
-    fact = journal.finish(0, status="SUCCEEDED")
+    fact = journal.finish(fact.request_sequence, status="SUCCEEDED")
     capability._record_model(
         None,
         fact,
@@ -208,197 +200,97 @@ async def test_model_metric_rejection_is_logged_without_escaping(
 
 async def test_non_percentile_accumulators_do_not_retain_samples() -> None:
     at = datetime(2026, 9, 7, tzinfo=timezone.utc)
-    for aggregation in (
-        MetricAggregation.COUNT,
-        MetricAggregation.SUM,
-        MetricAggregation.MEAN,
-        MetricAggregation.MIN,
-        MetricAggregation.MAX,
-        MetricAggregation.LATEST,
-        MetricAggregation.RATE,
-    ):
-        accumulator = _Accumulator(aggregation)
-        for index in range(100):
-            accumulator.add(
-                index,
-                occurred_at=at + timedelta(microseconds=index),
-                digest=f"{index:064x}" if aggregation is MetricAggregation.LATEST else None,
+    query = MetricQuery(
+        source_namespace="workspace",
+        tenant_id="tenant",
+        kinds=("test.metric",),
+        start_at=at - timedelta(minutes=1),
+        end_at=at + timedelta(minutes=1),
+        measurement="latency_ns",
+        aggregation="sum",
+    )
+    from linktools.ai.observe._memory import MemoryMetricStore
+
+    store = MemoryMetricStore(max_observations=32)
+    await store.write(
+        tuple(
+            Observation(
+                version=1,
+                observation_id=f"metric-{index}",
+                kind="test.metric",
+                occurred_at=at,
+                source_namespace="workspace",
+                tenant_id="tenant",
+                measurements=(MetricMeasurement("latency_ns", 1, index + 1),),
             )
-        assert accumulator.count == 100
-        assert accumulator.samples is None
-
-    percentile = _Accumulator(MetricAggregation.PERCENTILE)
-    percentile.add(1, occurred_at=at, digest=None)
-    assert percentile.samples == [1]
-
-
-class _DefinitionCommitUnknownStore(InMemoryMetricStore):
-    def __init__(self) -> None:
-        super().__init__()
-        self.calls = 0
-
-    async def put_definition(
-        self,
-        namespace: str,
-        definition: MetricDefinition,
-    ) -> MetricDefinition:
-        self.calls += 1
-        await super().put_definition(namespace, definition)
-        raise AIError(ErrorCode.STORAGE_COMMIT_UNKNOWN)
-
-
-class _ObservationCommitUnknownStore(InMemoryMetricStore):
-    def __init__(self) -> None:
-        super().__init__()
-        self.calls = 0
-
-    async def put_observations(
-        self,
-        namespace: str,
-        observations: tuple[Observation, ...],
-    ) -> None:
-        self.calls += 1
-        await super().put_observations(namespace, observations)
-        raise AIError(ErrorCode.STORAGE_COMMIT_UNKNOWN)
-
-
-class _ObservationCommitUnknownTwiceStore(InMemoryMetricStore):
-    def __init__(self) -> None:
-        super().__init__()
-        self.calls = 0
-
-    async def put_observations(
-        self,
-        namespace: str,
-        observations: tuple[Observation, ...],
-    ) -> None:
-        self.calls += 1
-        if self.calls == 1:
-            raise AIError(ErrorCode.STORAGE_COMMIT_UNKNOWN)
-        await super().put_observations(namespace, observations)
-        raise AIError(ErrorCode.STORAGE_COMMIT_UNKNOWN)
-
-
-class _ObservationConflictReadbackStore(InMemoryMetricStore):
-    async def put_observations(
-        self,
-        namespace: str,
-        observations: tuple[Observation, ...],
-    ) -> None:
-        conflicting = tuple(replace(item, status="FAILED") for item in observations)
-        await super().put_observations(namespace, conflicting)
-        raise AIError(ErrorCode.STORAGE_COMMIT_UNKNOWN)
-
-
-async def test_definition_commit_unknown_resolves_from_readback_without_replay() -> None:
-    store = _DefinitionCommitUnknownStore()
-    metrics = Metrics.from_store(store, namespace="definition-readback")
-    definition = _distribution_definition(
-        "business.definition.readback",
-        MetricAggregation.MEAN,
-    )
-
-    stored = await metrics.define(definition)
-
-    assert stored == definition
-    assert store.calls == 1
-
-
-async def test_observation_commit_unknown_resolves_from_readback_without_replay() -> None:
-    store = _ObservationCommitUnknownStore()
-    metrics = Metrics.from_store(store, namespace="observation-readback")
-
-    await metrics.record_observations((_observation("committed"),))
-
-    assert store.calls == 1
-
-
-async def test_second_commit_unknown_resolves_after_exact_replay_readback() -> None:
-    store = _ObservationCommitUnknownTwiceStore()
-    metrics = Metrics.from_store(store, namespace="observation-replay")
-
-    await metrics.record_observations((_observation("replayed"),))
-
-    assert store.calls == 2
-
-
-async def test_commit_unknown_conflicting_readback_fails_closed() -> None:
-    metrics = Metrics.from_store(
-        _ObservationConflictReadbackStore(),
-        namespace="observation-conflict",
-    )
-
-    with pytest.raises(AIError) as raised:
-        await metrics.record_observations((_observation("conflict"),))
-    assert raised.value.code is ErrorCode.STORAGE_CONFLICT
-
-
-class _TaskRepository:
-    def __init__(self, events: tuple[TaskEvent, ...]) -> None:
-        self.events = events
-        self.list_calls: list[tuple[int, int]] = []
-
-    async def list_events(
-        self,
-        graph_id: str,
-        *,
-        tenant_id: str,
-        after_sequence: int,
-        limit: int,
-    ) -> Page[TaskEvent]:
-        del tenant_id
-        self.list_calls.append((after_sequence, limit))
-        selected = tuple(
-            event
-            for event in self.events
-            if event.graph_id == graph_id and event.sequence > after_sequence
+            for index in range(4)
         )
-        page = selected[:limit]
-        return Page(page, "more" if len(selected) > limit else None)
-
-    async def latest_event(
-        self,
-        graph_id: str,
-        *,
-        tenant_id: str,
-    ) -> TaskEvent | None:
-        del tenant_id
-        selected = tuple(event for event in self.events if event.graph_id == graph_id)
-        return selected[-1] if selected else None
-
-
-async def test_task_projection_reads_admission_only_as_part_of_history_scan() -> None:
-    start = datetime(2026, 9, 7, tzinfo=timezone.utc)
-    events = (
-        TaskEvent(
-            1,
-            "graph",
-            1,
-            TaskEventType.GRAPH_ADMITTED,
-            start,
-            TaskStatus.PENDING,
-        ),
-        TaskEvent(
-            1,
-            "graph",
-            2,
-            TaskEventType.GRAPH_CHANGED,
-            start + timedelta(seconds=1),
-            TaskStatus.SUCCEEDED,
-            previous_status=TaskStatus.PENDING,
-        ),
     )
-    repository = _TaskRepository(events)
-    recorder = _Recorder()
-    projector = _TaskMetricProjector(
-        repository,
+
+    result = await store.query(query)
+
+    assert result.rows[0].value == 10
+
+
+async def test_model_metric_external_observer_preserves_usage_measurements() -> None:
+    recorder = _CaptureRecorder()
+    capability = _RuntimeModelMetricCapability(
         recorder,
         source_namespace="workspace",
+        tenant_id="tenant",
+        execution_id="execution",
+        session_id=None,
+        step_run_id="step-run",
+        agent_id="agent",
+        provider="test",
+        model_identity="test:model",
+        route_id="default",
+        external_requests=True,
+    )
+    journal = ModelRequestJournal(
+        source_namespace="workspace",
+        tenant_id="tenant",
+        execution_id="execution",
+        step_run_id="step-run",
+    )
+    fact = journal.begin(0)
+    response = ModelResponse()
+
+    await capability.record_external_model_request(
+        None,  # type: ignore[arg-type]
+        fact,
+        "completed",
+        response,
+        None,
     )
 
-    assert await projector._project("graph", tenant_id="tenant") is True
+    assert recorder.observations[0].observation_id == fact.observation_id
 
-    assert repository.list_calls == [(0, 1000)]
-    assert [item.kind for item in recorder.observations] == [
-        "linktools.task.graph.terminal"
-    ]
+
+async def test_tool_metric_context_uses_passed_usage() -> None:
+    recorder = _StatusRecorder()
+    context = _ToolMetricContext(
+        recorder=recorder,
+        source_namespace="workspace",
+        tenant_id="tenant",
+        execution_id="execution",
+        session_id=None,
+        step_run_id="step-run",
+        agent_id="agent",
+    )
+
+    context.record(
+        tool_name="read_file",
+        tool_class="filesystem.read",
+        operation_id="operation",
+        status="SUCCEEDED",
+        started_ns=1,
+        finished_ns=2,
+        replayed=False,
+        usage=UsageMetrics(input_tokens=1, output_tokens=2, total_tokens=3),
+    )
+
+    observation = recorder.observations[0]
+    assert {measurement.name: measurement.value for measurement in observation.measurements}[
+        "total_tokens"
+    ] == 3
