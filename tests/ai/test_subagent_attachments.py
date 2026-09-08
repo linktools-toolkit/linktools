@@ -59,7 +59,8 @@ class _RouteBinding:
         self._models = models
         self.route_id = route_id
         self.model_identity = f"test:{route_id}"
-        self.fingerprint = ("a" if route_id == "parent" else "b") * 64
+        fingerprint = {"parent": "a", "child": "b", "default": "c"}[route_id]
+        self.fingerprint = fingerprint * 64
         self.semantic_payload: dict[str, JsonValue] = {
             "provider": "test",
             "model": route_id,
@@ -76,7 +77,7 @@ class _RouteBinding:
             del info
             if route_id == "parent":
                 models.parent_seen.append(list(messages))
-            else:
+            elif route_id == "child":
                 models.child_seen.append(list(messages))
             return ModelResponse(parts=[TextPart("ok")])
 
@@ -84,6 +85,9 @@ class _RouteBinding:
             messages: list[ModelMessage],
             info: AgentInfo,
         ) -> AsyncIterator[str | dict[int, DeltaToolCall]]:
+            if route_id == "default":
+                yield "default"
+                return
             if route_id == "child":
                 models.child_seen.append(list(messages))
                 if not _contains_binary(messages, models.body):
@@ -131,7 +135,7 @@ class _SubagentModels:
         return self
 
     def resolve(self, route_id: str) -> _RouteBinding:
-        if route_id not in {"parent", "child"}:
+        if route_id not in {"default", "parent", "child"}:
             raise AIError(ErrorCode.MODEL_CONNECTION_NOT_FOUND)
         return _RouteBinding(self, route_id)
 
@@ -145,7 +149,7 @@ class _SubagentModels:
         if resolved is None:
             candidate = payload.get("model")
             resolved = candidate if isinstance(candidate, str) else None
-        if resolved not in {"parent", "child"}:
+        if resolved not in {"default", "parent", "child"}:
             raise AIError(ErrorCode.MODEL_CONNECTION_NOT_FOUND)
         expected = {"provider": "test", "model": resolved}
         if dict(payload) != expected:
