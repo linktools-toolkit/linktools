@@ -25,6 +25,8 @@ from linktools.ai.runtime.state import (
 )
 from linktools.ai.storage import ObjectRef
 
+_BODY_DIGEST = "230d8358dc8e8890b4c58deeb62912ee2f20357ae92a5cc861b98e68fe31acb5"
+
 
 def _entry(path: str, *, name: str) -> AttachmentEntry:
     return AttachmentEntry(
@@ -35,7 +37,7 @@ def _entry(path: str, *, name: str) -> AttachmentEntry:
         ContentRef(
             "execution",
             "input-prepare:" + "c" * 64,
-            ObjectRef("memory", "body", "a" * 64, 4),
+            ObjectRef("memory", "body", _BODY_DIGEST, 4),
         ),
     )
 
@@ -110,7 +112,7 @@ def test_attachment_placeholder_uses_exact_trusted_metadata_shape() -> None:
     placeholder = attachment_placeholder(activation)
 
     assert isinstance(placeholder, TextContent)
-    assert json.loads(placeholder.text) == {
+    assert json.loads(placeholder.content) == {
         "path": activation.entry.path,
         "name": "screen.png",
         "type": "image/png",
@@ -207,7 +209,7 @@ async def test_tampered_slot_metadata_is_rejected_before_content_read() -> None:
     marker = dict(placeholder.metadata["linktools.attachment-slot.v1"])
     marker["entry_digest"] = canonical_sha256("tampered")
     tampered = TextContent(
-        placeholder.text,
+        placeholder.content,
         metadata={"linktools.attachment-slot.v1": marker},
     )
     reads: list[str] = []
