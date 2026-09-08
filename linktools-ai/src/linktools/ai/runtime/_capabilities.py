@@ -42,6 +42,7 @@ from ._harness import (
     bind_tool_operation_id,
     reset_tool_operation_id,
 )
+from ._harness_memory import build_harness_memory
 from ._journal import ModelRequestFact, ModelRequestJournal
 from ._memory import MemoryStore
 from ._plan import RuntimePlanStore
@@ -1069,6 +1070,7 @@ async def compose_platform_capabilities(
     model_journal: ModelRequestJournal | None = None,
     external_model_request_observer: ExternalModelRequestObserver | None = None,
 ) -> tuple[AbstractCapability[None], ...]:
+    del operation_identity_run_id
     _native._validate_compaction_target(context_target_tokens)
     _native._validate_trusted_tool_classes(trusted_tool_classes)
     _native._validate_trusted_mcp_selectors(trusted_mcp_selectors)
@@ -1106,11 +1108,10 @@ async def compose_platform_capabilities(
         if memory_store is None or memory_scope is None:
             raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
         capabilities.append(
-            _native._SelectedMemory(
+            build_harness_memory(
                 memory_store,
                 selected_tool_names=selected_memory,
-                id=_MEMORY_CAPABILITY_ID,
-                operation_identity_run_id=operation_identity_run_id,
+                capability_id=_MEMORY_CAPABILITY_ID,
             )
         )
     if any(name in selected for name in PLANNING_TOOL_NAMES):
