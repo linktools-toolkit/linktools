@@ -13,7 +13,7 @@ from linktools.ai.workspace import LocalSandbox, Workspace
 from pydantic_ai.exceptions import ModelRetry
 from pydantic_ai.messages import ToolCallPart
 from pydantic_ai.models.test import TestModel
-from pydantic_ai.tools import RunContext
+from pydantic_ai.tools import RunContext, ToolDefinition
 from pydantic_ai.usage import RunUsage
 
 
@@ -73,7 +73,11 @@ async def test_missing_write_parent_is_known_failure_not_effect_unknown(
             session=session,
         )[0]
         tool = workspace_capability.get_toolset().tools["write_file"]
-        definition = tool.tool_def
+        definition = ToolDefinition(
+            name="write_file",
+            capability_id="workspace-sandbox",
+            metadata={"linktools.ai.workspace_tool_class": "filesystem.write"},
+        )
         bridge = _Bridge()
         persistence = _RuntimeStepPersistence(
             store=StagingStepStore(),
