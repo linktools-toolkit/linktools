@@ -51,6 +51,7 @@ def _execution_request_digest(request: ExecutionRequest) -> str:
         base_execution_id=None,
         parent_execution_id=None,
         root_execution_id=None,
+        parent_invocation_id=None,
         lineage_kind=ExecutionLineageKind.RUN,
     )
 

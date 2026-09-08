@@ -33,6 +33,7 @@ _FRAMEWORK_CORRELATION_KEYS = frozenset(
         "tool_call_id",
         "parent_execution_id",
         "root_execution_id",
+        "parent_invocation_id",
         "graph_id",
         "node_id",
         "fence",
@@ -507,6 +508,7 @@ def _record_execution_terminal(
         session_id=session_id,
         parent_execution_id=execution.parent_execution_id,
         root_execution_id=execution.root_execution_id,
+        parent_invocation_id=execution.parent_invocation_id,
     )
     _try_record(
         recorder,

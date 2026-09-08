@@ -5329,6 +5329,7 @@ def _execution_replay_matches(left: ExecutionRecord, right: ExecutionRecord) -> 
         and left.binding_digest == right.binding_digest
         and left.parent_execution_id == right.parent_execution_id
         and left.root_execution_id == right.root_execution_id
+        and left.parent_invocation_id == right.parent_invocation_id
         and left.source_execution_id == right.source_execution_id
         and left.base_execution_id == right.base_execution_id
         and left.lineage_kind is right.lineage_kind

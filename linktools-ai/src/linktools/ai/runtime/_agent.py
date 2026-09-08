@@ -18,6 +18,7 @@ from .service_api import (
     ExecutionResult,
     ExecutionStreamEvent,
     ExecutionTraceItem,
+    ExecutionTreeEvent,
     ReplayEvaluationRequest,
     RunEvaluationRequest,
     SessionHistoryItem,
@@ -51,6 +52,17 @@ class Execution(Generic[AppT]):
             self.execution_id,
             principal=self._principal,
             after_sequence=after_sequence,
+        )
+
+    def stream_tree(
+        self,
+        *,
+        after_sequences: "Mapping[str, int] | None" = None,
+    ) -> AsyncIterator[ExecutionTreeEvent]:
+        return self._runtime.execution.stream_tree(
+            self.execution_id,
+            principal=self._principal,
+            after_sequences=after_sequences,
         )
 
     async def cancel(

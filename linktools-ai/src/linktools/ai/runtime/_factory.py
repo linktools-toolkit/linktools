@@ -50,6 +50,7 @@ from ._coordinator import _LocalRuntimeCoordinator
 from ._evaluation import DefaultEvaluationService
 from ._event import DefaultEventService, LiveExecutionEventBroker
 from ._execution import DefaultExecutionService
+from ._execution_tree import ExecutionTreeBroker, ExecutionTreeStreamer
 from ._history import StepExecutionHistoryReader, StepSessionHistoryReader
 from ._input import ExecutionInputMaterializer
 from ._local import LocalExecutionBackend
@@ -514,7 +515,13 @@ async def _build_local_components(
         storage_contract_factory=storage_contract_factory,
         session_execution_ready=session_execution_ready,
     )
-    dispatcher = SubagentDispatcher(catalog, compiler, execution)
+    execution_tree_broker = ExecutionTreeBroker()
+    dispatcher = SubagentDispatcher(
+        catalog,
+        compiler,
+        execution,
+        child_observer=execution_tree_broker,
+    )
     executor = AgentExecutor(
         skill_sources,
         instruction_resolver=instruction_resolver,
@@ -664,6 +671,9 @@ async def _build_local_components(
             authorization,
             backend.worker_failure,
             live_broker,
+        )
+        execution.bind_tree_streamer(
+            ExecutionTreeStreamer(execution, event, execution_tree_broker)
         )
         artifact = DefaultArtifactService(
             state.artifact,

@@ -4,7 +4,7 @@
 
 import asyncio
 from collections.abc import Sequence
-from typing import cast
+from typing import Protocol, cast
 
 from linktools.core import environ
 
@@ -25,6 +25,10 @@ from .service_api import CancelExecutionRequest, ExecutionRequest, ExecutionResu
 _logger = environ.get_logger("ai.runtime.subagent")
 
 
+class _ChildExecutionObserver(Protocol):
+    def publish(self, root_execution_id: str, child_execution_id: str) -> None: ...
+
+
 class SubagentDispatcher:
     """Compile and run one-level child executions for a root execution."""
 
@@ -33,10 +37,12 @@ class SubagentDispatcher:
         catalog: AgentCatalog,
         compiler: AgentCompiler,
         execution: DefaultExecutionService,
+        child_observer: _ChildExecutionObserver | None = None,
     ) -> None:
         self._catalog = catalog
         self._compiler = compiler
         self._execution = execution
+        self._child_observer = child_observer
         self._detached_tasks: set[asyncio.Task[object]] = set()
         self._background_failures: dict[str, AIError] = {}
 
@@ -151,7 +157,10 @@ class SubagentDispatcher:
             user_prompt=user_prompt,
             files=files,
             idempotency_key=idempotency_key,
+            invocation_id=invocation_id,
         )
+        if self._child_observer is not None:
+            self._child_observer.publish(root_execution_id, child.execution_id)
         return await self._wait_child(
             child.execution_id,
             parent_execution_id=parent_execution_id,
@@ -171,6 +180,7 @@ class SubagentDispatcher:
         user_prompt: str,
         files: tuple[str, ...],
         idempotency_key: str,
+        invocation_id: str,
     ):
         child = await self._execution.replay_subagent(
             agent_id=ref.id,
@@ -182,6 +192,7 @@ class SubagentDispatcher:
             mode=child_mode,
             parent_execution_id=parent_execution_id,
             root_execution_id=root_execution_id,
+            parent_invocation_id=invocation_id,
         )
         if child is not None:
             return child
@@ -206,6 +217,7 @@ class SubagentDispatcher:
                 request,
                 parent_execution_id=parent_execution_id,
                 root_execution_id=root_execution_id,
+                parent_invocation_id=invocation_id,
             )
         except AIError as error:
             if error.code is not ErrorCode.IDEMPOTENCY_CONFLICT:
@@ -220,6 +232,7 @@ class SubagentDispatcher:
             mode=child_mode,
             parent_execution_id=parent_execution_id,
             root_execution_id=root_execution_id,
+            parent_invocation_id=invocation_id,
         )
         if replay is None:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
