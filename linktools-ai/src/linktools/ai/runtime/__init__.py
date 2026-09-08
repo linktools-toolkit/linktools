@@ -8,6 +8,7 @@ from ._approval import DefaultApprovalService
 from ._artifact import DefaultArtifactService
 from ._attachment_admission import install_attachment_admission
 from ._attachment_tool_state import install_attachment_tool_state
+from ._attachment_workspace import install_attachment_workspace
 from ._context import RuntimeContext
 from ._evaluation import DefaultEvaluationService
 from ._event import DefaultEventService, ExecutionDelta, LiveExecutionEventBroker
@@ -89,8 +90,10 @@ from .state import (
 
 install_attachment_tool_state()
 install_attachment_admission()
+install_attachment_workspace()
 del install_attachment_tool_state
 del install_attachment_admission
+del install_attachment_workspace
 
 __all__ = [
     "Agent",
