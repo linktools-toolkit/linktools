@@ -17,7 +17,7 @@ from ..core import JsonValue, Principal, canonical_sha256, validate_idempotency_
 from ..errors import AIError, ErrorCode
 from ..storage import ObjectRef
 from ._input import _encode_user_content, input_intent_digest
-from ._object import RuntimeObjectKeyFactory
+from ._object import RuntimeObjectKeyFactory, read_runtime_object
 from .service_api import AttachmentInfo
 from .state import (
     AttachmentEntry,
@@ -35,6 +35,7 @@ from .state import (
     PathOrigin,
     PreparedInput,
     RuntimeDomain,
+    RuntimeRetentionMode,
     input_v2_digest,
     managed_attachment_locator,
     managed_attachment_path,
@@ -282,12 +283,19 @@ class InputPreparer:
                         or upload.descriptor.path != source.path
                     ):
                         raise AIError(ErrorCode.AUTHORIZATION_DENIED)
+                    content = await _retain_content_for_prepare(
+                        self._state,
+                        self._object_key_factory,
+                        upload.held_content,
+                        tenant_id=principal.tenant_id,
+                        owner_scope=owner_scope,
+                    )
                     entry = AttachmentEntry(
                         managed_attachment_path("p", owner_key, slot_id),
                         upload.descriptor.name,
                         upload.descriptor.media_type,
                         upload.descriptor.presentation,
-                        upload.held_content,
+                        content,
                     )
                     next_record = replace(
                         current,
@@ -619,6 +627,36 @@ def _vendor_metadata(value: object) -> Mapping[str, JsonValue] | None:
     if not isinstance(value, Mapping) or any(not isinstance(key, str) for key in value):
         raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
     return cast(Mapping[str, JsonValue], value)
+
+
+async def _retain_content_for_prepare(
+    state: "RuntimeState",
+    factory: RuntimeObjectKeyFactory,
+    content: ContentRef,
+    *,
+    tenant_id: str,
+    owner_scope: str,
+) -> ContentRef:
+    try:
+        source_domain = RuntimeDomain(content.domain)
+    except ValueError as error:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
+    if state.plan.route(source_domain).retention is not RuntimeRetentionMode.TRANSIENT:
+        return content
+    if content.owner_scope is None:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    source = state.working_object_store(
+        source_domain,
+        owner_scope=content.owner_scope,
+    )
+    body = await read_runtime_object(source, content.object)
+    return await _store_content(
+        state,
+        factory,
+        body,
+        tenant_id=tenant_id,
+        owner_scope=owner_scope,
+    )
 
 
 async def _store_content(
