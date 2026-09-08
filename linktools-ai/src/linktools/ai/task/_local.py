@@ -796,6 +796,7 @@ class LocalTaskGraphLauncher:
                             raise
                 return
             await _stop_heartbeat(heartbeat_stop, heartbeat)
+            recovery_error: AIError | None = None
             async with lease_state.lock:
                 try:
                     await self._repository.complete(
@@ -816,11 +817,14 @@ class LocalTaskGraphLauncher:
                         tenant_id=tenant_id,
                     ):
                         return
+                    recovery_error = error
+            if recovery_error is None:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             await self._defer_recovery(
                 run,
                 node,
                 lease_state,
-                cause=error,
+                cause=recovery_error,
                 execution_id=completion.execution_id,
             )
         except asyncio.CancelledError:
