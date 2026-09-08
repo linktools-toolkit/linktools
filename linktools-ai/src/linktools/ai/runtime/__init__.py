@@ -6,7 +6,8 @@ from ..errors import ErrorDiagnostics
 from ._agent import Agent, Execution, Session
 from ._approval import DefaultApprovalService
 from ._artifact import DefaultArtifactService
-from ._attachment_admission import install_attachment_admission
+from ._attachment_admission import _admission_scope, install_attachment_admission
+from ._attachment_context import bind_admission_scope
 from ._attachment_tool_state import install_attachment_tool_state
 from ._attachment_workspace import install_attachment_workspace
 from ._context import RuntimeContext
@@ -90,9 +91,12 @@ from .state import (
 
 install_attachment_tool_state()
 install_attachment_admission()
+bind_admission_scope(_admission_scope)
 install_attachment_workspace()
 del install_attachment_tool_state
 del install_attachment_admission
+del bind_admission_scope
+del _admission_scope
 del install_attachment_workspace
 
 __all__ = [
