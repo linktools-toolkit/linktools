@@ -38,6 +38,7 @@ from ..storage import (
 )
 from ._message import decode_model_messages, encode_model_messages
 from ._object import RuntimeObjectKeyFactory, put_runtime_object, read_runtime_object
+from .state._attachments import AttachmentResult
 from .state._contracts import ToolOperationAdmission
 from .state._durability import (
     CommitObservation,
@@ -72,6 +73,7 @@ class ToolOperationRecord:
     updated_at: datetime
     result_payload: "StoredPayload | None" = None
     error_payload: "StoredPayload | None" = None
+    attachment_result: "AttachmentResult | None" = None
 
     def __post_init__(self) -> None:
         try:
@@ -80,6 +82,13 @@ class ToolOperationRecord:
                 validate_lease_owner(self.owner)
         except AIError as error:
             raise ValueError("tool operation lease identity is invalid") from error
+        if self.attachment_result is not None:
+            if not isinstance(self.attachment_result, AttachmentResult):
+                raise TypeError("tool operation attachment_result is invalid")
+            if self.status is not ToolOperationStatus.COMPLETED:
+                raise ValueError(
+                    "tool operation attachment_result requires COMPLETED status"
+                )
 
 
 class ToolStateRepository(Protocol):
