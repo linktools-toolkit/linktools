@@ -146,7 +146,7 @@ class AttachmentReadRuntime:
         path: str,
     ) -> AttachmentEntry:
         try:
-            kind, owner_key, _slot = managed_attachment_locator(path)
+            kind, owner_key, slot = managed_attachment_locator(path)
         except (TypeError, ValueError) as error:
             raise AIError(ErrorCode.AUTHORIZATION_DENIED) from error
         if kind == "p":
@@ -157,6 +157,8 @@ class AttachmentReadRuntime:
                 raise AIError(ErrorCode.AUTHORIZATION_DENIED)
             return entries[0]
         if kind == "e":
+            if slot != 0:
+                raise AIError(ErrorCode.AUTHORIZATION_DENIED)
             source = await self._repository.get_source_by_key(
                 owner_key,
                 tenant_id=self._tenant_id,
@@ -219,7 +221,7 @@ class AttachmentReadRuntime:
             reference = ObjectRef(store.store_id, key, created.digest, created.size)
         return ContentRef(
             RuntimeDomain.EXECUTION.value,
-            owner_scope if isinstance(store, TransientObjectStore) else None,
+            owner_scope,
             reference,
         )
 
