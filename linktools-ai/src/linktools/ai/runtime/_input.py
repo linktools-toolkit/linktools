@@ -28,7 +28,7 @@ from ..workspace import WorkspacePolicy, normalize_workspace_path
 from ._input_contract import (
     CanonicalUserInput,
     UserPromptInput,
-    _validate_content,
+    validate_user_content,
     validate_user_input,
 )
 
@@ -166,6 +166,8 @@ class ExecutionInputMaterializer:
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
         if len(direct_binary) + len(files) > self._policy.max_binary_input_parts:
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+        if not files:
+            return canonical, await self.store(canonical, tenant_id=tenant_id)
 
         bodies: dict[str, BinaryContent] = {}
         for path in files:
@@ -188,7 +190,7 @@ class ExecutionInputMaterializer:
             materialized: CanonicalUserInput = (canonical, *additions)
         else:
             materialized = (*canonical, *additions)
-        _validate_content(materialized)
+        validate_user_content(materialized)
         stored = await self.store(materialized, tenant_id=tenant_id)
         _logger.info(
             "execution input materialized: files=%s distinct_files=%s binary_bytes=%s",
@@ -222,7 +224,7 @@ class ExecutionInputMaterializer:
             reference = await put_runtime_object(
                 self._object_store,
                 self._object_key_factory,
-                RuntimeDomain.EXECUTION,
+                RuntimeDomain.RECOVERY,
                 tenant_id,
                 body,
             )
@@ -291,17 +293,6 @@ def _require_canonical_files(value: Sequence[str]) -> tuple[str, ...]:
         if canonical != path:
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
     return files
-
-
-def _require_user_content_sequence(
-    value: _UserPromptInput,
-) -> tuple[UserContent, ...]:
-    if not isinstance(value, Sequence) or isinstance(value, (str, bytes, bytearray)):
-        raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
-    content = tuple(value)
-    if not content:
-        raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
-    return content
 
 
 def _binary_parts(content: Sequence[UserContent]) -> tuple[BinaryContent, ...]:
@@ -390,7 +381,7 @@ def _decode_user_content(payload: dict[str, JsonValue]) -> tuple[UserContent, ..
     if isinstance(part.content, str):
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     content = tuple(cast(Sequence[UserContent], part.content))
-    _validate_content(content)
+    validate_user_content(content)
     return content
 
 
