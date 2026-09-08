@@ -3,6 +3,7 @@
 """Capability loading, tool adaptation, and runtime materialization contracts."""
 
 from ._context import AgentContext
+from ._effect import ToolEffectNotAppliedError
 from ._group import (
     CapabilityContribution,
     CapabilityGroup,
@@ -59,6 +60,7 @@ __all__ = [
     "SkillSourceRegistry",
     "SubagentCapability",
     "SubagentDelegate",
+    "ToolEffectNotAppliedError",
     "WORKSPACE_FILESYSTEM_READ_TOOL_NAMES",
     "WORKSPACE_FILESYSTEM_TOOL_NAMES",
     "WORKSPACE_SHELL_TOOL_NAMES",
