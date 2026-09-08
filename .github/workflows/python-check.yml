@@ -25,6 +25,13 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
+      - name: Export source workspace
+        uses: actions/upload-artifact@v4
+        with:
+          name: ai-runtime-source-${{ github.run_id }}
+          path: .
+          include-hidden-files: true
+          retention-days: 1
       - name: Run static compatibility scan
         shell: bash
         run: |
