@@ -182,18 +182,19 @@ class HarnessStepStoreAdapter:
         self._external_event_offset: dict[str, int] = {}
 
     async def register_run(self, record: HarnessRunRecord) -> None:
-        await self._store.register_run(
-            RunRecord(
-                run_id=record.run_id,
-                conversation_id=record.conversation_id,
-                parent_run_id=record.parent_run_id,
-                agent_name=record.agent_name,
-                metadata=dict(record.metadata),
-                started_at=record.started_at,
-                registration_id=record.registration_id,
-            ),
-            execution_id=self._execution_id,
+        value = RunRecord(
+            run_id=record.run_id,
+            conversation_id=record.conversation_id,
+            parent_run_id=record.parent_run_id,
+            agent_name=record.agent_name,
+            metadata=dict(record.metadata),
+            started_at=record.started_at,
+            registration_id=record.registration_id,
         )
+        if self._execution_id is None:
+            await self._store.register_run(value)
+        else:
+            await self._store.register_run(value, execution_id=self._execution_id)
 
     async def get_run(self, *, run_id: str) -> HarnessRunRecord | None:
         record = await self._store.get_run(run_id=run_id)
@@ -223,7 +224,7 @@ class HarnessStepStoreAdapter:
             if event.kind == "run_completed" and event.run_id in self._interrupted_runs
             else event.kind
         )
-        await self._store.append_event(
+        await self._append_step_event(
             StepEvent(
                 run_id=event.run_id,
                 kind=cast(object, kind),  # type: ignore[arg-type]
@@ -238,8 +239,7 @@ class HarnessStepStoreAdapter:
                 metadata=dict(event.metadata),
                 idempotency_key=event.idempotency_key,
                 event_index=harness_index * _EVENT_INDEX_STRIDE,
-            ),
-            execution_id=self._execution_id,
+            )
         )
 
     async def list_events(self, *, run_id: str) -> list[HarnessStepEvent]:
@@ -271,7 +271,7 @@ class HarnessStepStoreAdapter:
             if snapshot.run_id in self._interrupted_runs
             else snapshot.state
         )
-        await self._store.save_snapshot(
+        await self._save_step_snapshot(
             ContinuableSnapshot(
                 run_id=snapshot.run_id,
                 step_index=snapshot.step_index,
@@ -283,8 +283,7 @@ class HarnessStepStoreAdapter:
                 state=state,
                 idempotency_key=snapshot.idempotency_key,
                 context_messages=self.snapshot_context_messages(snapshot.messages),
-            ),
-            execution_id=self._execution_id,
+            )
         )
 
     async def latest_snapshot(
@@ -341,7 +340,7 @@ class HarnessStepStoreAdapter:
         agent_name: str | None,
     ) -> None:
         values = list(messages)
-        await self._store.save_snapshot(
+        await self._save_step_snapshot(
             ContinuableSnapshot(
                 run_id=run_id,
                 step_index=step_index,
@@ -352,8 +351,7 @@ class HarnessStepStoreAdapter:
                 state="interrupted",
                 idempotency_key=f"pause:{step_index}:{len(values)}",
                 context_messages=self.snapshot_context_messages(values),
-            ),
-            execution_id=self._execution_id,
+            )
         )
 
     async def append_runtime_event(
@@ -377,7 +375,7 @@ class HarnessStepStoreAdapter:
         self._external_event_offset[run_id] = offset
         request_sequence = metadata.get("linktools.ai.request_sequence", "")
         request_purpose = metadata.get("linktools.ai.request_purpose", "")
-        await self._store.append_event(
+        await self._append_step_event(
             StepEvent(
                 run_id=run_id,
                 kind=cast(object, kind),  # type: ignore[arg-type]
@@ -394,9 +392,23 @@ class HarnessStepStoreAdapter:
                     f"{tool_call_id or ''}"
                 ),
                 event_index=last * _EVENT_INDEX_STRIDE + offset,
-            ),
-            execution_id=self._execution_id,
+            )
         )
+
+    async def _append_step_event(self, event: StepEvent) -> None:
+        if self._execution_id is None:
+            await self._store.append_event(event)
+        else:
+            await self._store.append_event(event, execution_id=self._execution_id)
+
+    async def _save_step_snapshot(self, snapshot: ContinuableSnapshot) -> None:
+        if self._execution_id is None:
+            await self._store.save_snapshot(snapshot)
+        else:
+            await self._store.save_snapshot(
+                snapshot,
+                execution_id=self._execution_id,
+            )
 
     def remember_context_projection(
         self,
