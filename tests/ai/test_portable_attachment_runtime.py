@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
+import asyncio
 from collections.abc import Mapping
 from pathlib import Path
 
@@ -51,6 +52,20 @@ class _TextModels:
         return _TextModelBinding()
 
 
+def _await_chain(value: object) -> str:
+    parts: list[str] = []
+    current = value
+    seen: set[int] = set()
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        frame = getattr(current, "cr_frame", None) or getattr(current, "ag_frame", None)
+        if frame is not None:
+            code = frame.f_code
+            parts.append(f"{Path(code.co_filename).name}:{frame.f_lineno}:{code.co_name}")
+        current = getattr(current, "cr_await", None) or getattr(current, "ag_await", None)
+    return " -> ".join(parts)
+
+
 @pytest.mark.asyncio
 async def test_managed_path_admission_replays_without_source_read(tmp_path: Path) -> None:
     source = tmp_path / "evidence.txt"
@@ -64,12 +79,21 @@ async def test_managed_path_admission_replays_without_source_read(tmp_path: Path
         models=_TextModels(),  # type: ignore[arg-type]
         state=state,
     ) as runtime:
-        first = await runtime.agent("default").run(
+        pending = await runtime.agent("default").start(
             "inspect the attachment",
             attachments=("evidence.txt",),
             idempotency_key=key,
-            timeout_seconds=10,
         )
+        await asyncio.sleep(1)
+        current_task = asyncio.current_task()
+        chains = sorted(
+            f"{task.get_name()}={_await_chain(task.get_coro())}"
+            for task in asyncio.all_tasks()
+            if task is not current_task and not task.done()
+        )
+        pytest.fail("managed execution task snapshot: " + " || ".join(chains))
+
+        first = await pending.wait(timeout_seconds=10)
         assert first.status is ExecutionStatus.SUCCEEDED
 
         execution = await state.execution.executions.get(
