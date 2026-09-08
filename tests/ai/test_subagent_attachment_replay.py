@@ -6,7 +6,12 @@ from types import SimpleNamespace
 
 import pytest
 
-from linktools.ai.core import ExecutionStatus, Principal, UsageMetrics
+from linktools.ai.core import (
+    ExecutionStatus,
+    Principal,
+    UsageMetrics,
+    canonical_sha256,
+)
 from linktools.ai.runtime._subagent import SubagentAttachmentRuntime, SubagentDispatcher
 from linktools.ai.runtime._subagent_attachment import SubagentAttachmentPreparer
 from linktools.ai.runtime.service_api import ExecutionHandle, ExecutionResult
@@ -111,11 +116,12 @@ class _ExecutionService:
         principal: Principal,
     ) -> ExecutionResult:
         del principal
+        output = {"ok": True}
         return ExecutionResult(
             execution_id,
             ExecutionStatus.SUCCEEDED,
-            {"ok": True},
-            None,
+            output,
+            canonical_sha256(output),
             UsageMetrics(),
             None,
             {},
