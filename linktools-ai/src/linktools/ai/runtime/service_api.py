@@ -992,6 +992,7 @@ __all__ = [
     "ExecutionService",
     "ExecutionStreamEvent",
     "ExecutionTraceItem",
+    "ExecutionTreeEvent",
     "ExecutionView",
     "ExternalService",
     "ExternalSupplyRequest",
