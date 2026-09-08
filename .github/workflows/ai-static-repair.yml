@@ -42,37 +42,20 @@ jobs:
           text = path.read_text(encoding='utf-8')
           attrs = set(re.findall(r'_native\.([A-Za-z_][A-Za-z0-9_]*)', text))
           expected = {
-              'MEMORY_READ_TOOL_NAMES',
-              'MEMORY_TOOL_NAMES',
-              'PLANNING_TOOL_NAMES',
-              'PLAN_SAFE_METADATA_KEY',
-              'SUBAGENT_TOOL_NAMES',
-              'WORKSPACE_FILESYSTEM_READ_TOOL_NAMES',
-              'WORKSPACE_FILESYSTEM_TOOL_NAMES',
-              'WORKSPACE_SHELL_TOOL_NAMES',
-              'ToolOperationBridge',
-              'ToolOperationDecision',
-              '_CompactionCapability',
-              '_DURATION_NS_METADATA_KEY',
-              '_MEMORY_CAPABILITY_ID',
-              '_MODEL_EFFECT_UNKNOWN_MESSAGE',
-              '_MissingToolOperationBridge',
-              '_OBSERVATION_ID_METADATA_KEY',
-              '_PLANNING_CAPABILITY_ID',
-              '_ToolCallState',
-              '_WorkspaceToolGate',
-              '_bypasses_tool_error_hook',
-              '_model_usage_metadata',
-              '_repository_instruction_marker',
-              '_tool_execution_policy',
-              '_tool_observation_id',
-              '_validate_trusted_mcp_selectors',
-              '_validate_trusted_tool_classes',
-              'monotonic_ns',
-              'select_runtime_tool_names',
-              'tool_allowed_in_planning',
-              'tool_is_control',
-              'tool_name_allowed',
+              'MEMORY_READ_TOOL_NAMES', 'MEMORY_TOOL_NAMES', 'PLANNING_TOOL_NAMES',
+              'PLAN_SAFE_METADATA_KEY', 'SUBAGENT_TOOL_NAMES',
+              'WORKSPACE_FILESYSTEM_READ_TOOL_NAMES', 'WORKSPACE_FILESYSTEM_TOOL_NAMES',
+              'WORKSPACE_SHELL_TOOL_NAMES', 'ToolOperationBridge', 'ToolOperationDecision',
+              '_CompactionCapability', '_DURATION_NS_METADATA_KEY', '_MEMORY_CAPABILITY_ID',
+              '_MODEL_EFFECT_UNKNOWN_MESSAGE', '_MissingToolOperationBridge',
+              '_OBSERVATION_ID_METADATA_KEY', '_PLANNING_CAPABILITY_ID', '_ToolCallState',
+              '_WorkspaceToolGate', '_bypasses_tool_error_hook', '_durable_failure_error',
+              '_logger', '_model_tool_error', '_model_usage_metadata',
+              '_repository_instruction_marker', '_tool_execution_policy',
+              '_tool_observation_id', '_validate_compaction_target',
+              '_validate_trusted_mcp_selectors', '_validate_trusted_tool_classes',
+              'monotonic_ns', 'select_runtime_tool_names', 'tool_allowed_in_planning',
+              'tool_is_control', 'tool_name_allowed',
           }
           if attrs != expected:
               raise SystemExit(f'unexpected _native attributes: {sorted(attrs ^ expected)}')
@@ -80,28 +63,42 @@ jobs:
           old_import = 'import linktools.ai.runtime._capabilities_native as _native\n'
           if text.count(old_import) != 1:
               raise SystemExit('native module import changed unexpectedly')
-          explicit_import = '''from ._platform_capabilities import (\n    MEMORY_READ_TOOL_NAMES,\n    MEMORY_TOOL_NAMES,\n    PLANNING_TOOL_NAMES,\n    PLAN_SAFE_METADATA_KEY,\n    SUBAGENT_TOOL_NAMES,\n    WORKSPACE_FILESYSTEM_READ_TOOL_NAMES,\n    WORKSPACE_FILESYSTEM_TOOL_NAMES,\n    WORKSPACE_SHELL_TOOL_NAMES,\n    ToolOperationBridge,\n    ToolOperationDecision,\n    _CompactionCapability,\n    _DURATION_NS_METADATA_KEY,\n    _MEMORY_CAPABILITY_ID,\n    _MODEL_EFFECT_UNKNOWN_MESSAGE,\n    _MissingToolOperationBridge,\n    _OBSERVATION_ID_METADATA_KEY,\n    _PLANNING_CAPABILITY_ID,\n    _ToolCallState,\n    _WorkspaceToolGate,\n    _bypasses_tool_error_hook,\n    _model_usage_metadata,\n    _repository_instruction_marker,\n    _tool_execution_policy,\n    _validate_trusted_mcp_selectors,\n    _validate_trusted_tool_classes,\n    select_runtime_tool_names,\n    tool_allowed_in_planning,\n    tool_is_control,\n    tool_name_allowed,\n)\nfrom ._metric_id import _tool_observation_id\n'''
+          explicit_import = '''from ._platform_capabilities import (\n    MEMORY_READ_TOOL_NAMES,\n    MEMORY_TOOL_NAMES,\n    PLANNING_TOOL_NAMES,\n    PLAN_SAFE_METADATA_KEY,\n    SUBAGENT_TOOL_NAMES,\n    WORKSPACE_FILESYSTEM_READ_TOOL_NAMES,\n    WORKSPACE_FILESYSTEM_TOOL_NAMES,\n    WORKSPACE_SHELL_TOOL_NAMES,\n    ToolOperationBridge,\n    ToolOperationDecision,\n    _CompactionCapability,\n    _DURATION_NS_METADATA_KEY,\n    _MEMORY_CAPABILITY_ID,\n    _MODEL_EFFECT_UNKNOWN_MESSAGE,\n    _MissingToolOperationBridge,\n    _OBSERVATION_ID_METADATA_KEY,\n    _PLANNING_CAPABILITY_ID,\n    _ToolCallState,\n    _WorkspaceToolGate,\n    _bypasses_tool_error_hook,\n    _durable_failure_error,\n    _model_tool_error,\n    _model_usage_metadata,\n    _repository_instruction_marker,\n    _tool_execution_policy,\n    _validate_compaction_target,\n    _validate_trusted_mcp_selectors,\n    _validate_trusted_tool_classes,\n    select_runtime_tool_names,\n    tool_allowed_in_planning,\n    tool_is_control,\n    tool_name_allowed,\n)\nfrom ._metric_id import _tool_observation_id\n'''
           text = text.replace(old_import, explicit_import)
 
           start = text.index('MEMORY_TOOL_NAMES = _native.MEMORY_TOOL_NAMES\n')
           end_marker = '_MODEL_EFFECT_UNKNOWN_MESSAGE = _native._MODEL_EFFECT_UNKNOWN_MESSAGE\n'
           end = text.index(end_marker, start) + len(end_marker)
           text = text[:start] + text[end:]
+          text = text.replace('_native._logger', '_logger')
           text = text.replace('_native.', '')
 
-          import_anchor = 'from pathlib import Path\n' if 'from pathlib import Path\n' in text else None
-          if 'monotonic_ns()' in text and 'from time import monotonic_ns\n' not in text:
-              typing_anchor = 'from typing import Any, cast\n'
-              if text.count(typing_anchor) != 1:
-                  raise SystemExit('typing import anchor changed unexpectedly')
-              text = text.replace(typing_anchor, 'from time import monotonic_ns\n' + typing_anchor)
+          typing_anchor = 'from typing import Any, cast\n'
+          if text.count(typing_anchor) != 1:
+              raise SystemExit('typing import anchor changed unexpectedly')
+          text = text.replace(
+              typing_anchor,
+              'from time import monotonic_ns\n' + typing_anchor,
+          )
+          pydantic_anchor = 'from pydantic import ValidationError\n'
+          if text.count(pydantic_anchor) != 1:
+              raise SystemExit('pydantic import anchor changed unexpectedly')
+          text = text.replace(
+              pydantic_anchor,
+              'from linktools.core import environ\n' + pydantic_anchor,
+          )
+          logger_anchor = 'from ..errors import AIError, ErrorCode\n\n'
+          if text.count(logger_anchor) != 1:
+              raise SystemExit('logger anchor changed unexpectedly')
+          text = text.replace(
+              logger_anchor,
+              logger_anchor + '_logger = environ.get_logger("ai.runtime.capabilities")\n\n',
+          )
 
           if '_native.' in text or '_capabilities_native' in text:
               raise SystemExit('native proxy reference remains in capability composition')
           path.write_text(text, encoding='utf-8')
           PY
-          git mv linktools-ai/src/linktools/ai/runtime/_platform_capabilities.py /tmp/_platform_capabilities.py
-          git mv /tmp/_platform_capabilities.py linktools-ai/src/linktools/ai/runtime/_platform_capabilities.py
           if grep -R --line-number --exclude-dir='__pycache__' '_capabilities_native\|_native\.' linktools-ai/src tests/ai; then
             echo 'stale native capability reference remains' >&2
             exit 1
