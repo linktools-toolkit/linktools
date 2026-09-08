@@ -2,12 +2,13 @@
 # -*- coding: utf-8 -*-
 """Adapt one opened workspace session to Pydantic AI tools."""
 
-from collections.abc import Sequence
+from collections.abc import Awaitable, Sequence
 from typing import Any, cast
 
 from linktools.core import environ
 from pydantic_ai import Tool
 from pydantic_ai.capabilities import AbstractCapability
+from pydantic_ai.exceptions import ModelRetry
 from pydantic_ai.toolsets import FunctionToolset
 
 from ..errors import AIError, ErrorCode
@@ -60,6 +61,29 @@ _WORKSPACE_TOOL_CLASSES = {
 }
 _WORKSPACE_METADATA_KEY = "linktools.ai.workspace_tool_class"
 _WORKSPACE_SANDBOX_CAPABILITY_ID = "workspace-sandbox"
+_MODEL_CORRECTABLE_ERRORS = {
+    ErrorCode.REQUEST_FIELD_INVALID,
+    ErrorCode.STORAGE_NOT_FOUND,
+    ErrorCode.STORAGE_CONFLICT,
+    ErrorCode.AUTHORIZATION_DENIED,
+}
+_MODEL_ERROR_MESSAGES = {
+    ErrorCode.REQUEST_FIELD_INVALID: (
+        "The workspace tool arguments or target are invalid. Correct them and retry."
+    ),
+    ErrorCode.STORAGE_NOT_FOUND: (
+        "The requested workspace path does not exist, or its parent directory is missing. "
+        "Correct the path and retry."
+    ),
+    ErrorCode.STORAGE_CONFLICT: (
+        "The workspace changed since it was read. Read the target again and retry with "
+        "the current hash."
+    ),
+    ErrorCode.AUTHORIZATION_DENIED: (
+        "The requested workspace path or command is not allowed. Choose an allowed target "
+        "or command and retry."
+    ),
+}
 _logger = environ.get_logger("ai.capability.workspace")
 
 
@@ -72,6 +96,15 @@ class _WorkspaceToolSurface:
             raise RuntimeError("workspace sandbox session is not open")
         return self._session
 
+    @staticmethod
+    async def _call(operation: Awaitable[str]) -> str:
+        try:
+            return await operation
+        except AIError as error:
+            if error.code not in _MODEL_CORRECTABLE_ERRORS:
+                raise
+            raise ModelRetry(_MODEL_ERROR_MESSAGES[error.code]) from error
+
     async def read_file(
         self,
         path: str,
@@ -79,10 +112,18 @@ class _WorkspaceToolSurface:
         offset: int = 0,
         limit: int | None = None,
     ) -> str:
-        return await self._require_session().read_file(
-            path,
-            offset=offset,
-            limit=limit,
+        """Read a text file with line numbers.
+
+        Args:
+            path: File path relative to the root directory.
+            offset: Zero-based line offset to start reading from.
+            limit: Maximum number of lines to return (default: 2000).
+
+        Returns:
+            File content with line numbers, plus metadata header.
+        """
+        return await self._call(
+            self._require_session().read_file(path, offset=offset, limit=limit)
         )
 
     async def write_file(
@@ -92,10 +133,23 @@ class _WorkspaceToolSurface:
         *,
         expected_hash: str | None = None,
     ) -> str:
-        return await self._require_session().write_file(
-            path,
-            content,
-            expected_hash=expected_hash,
+        """Create or overwrite a file with conflict detection.
+
+        Args:
+            path: File path relative to the root directory.
+            content: The text content to write.
+            expected_hash: If provided, the write is rejected when the file exists
+                and its current hash doesn't match (optimistic concurrency).
+
+        Returns:
+            Confirmation message with new hash.
+        """
+        return await self._call(
+            self._require_session().write_file(
+                path,
+                content,
+                expected_hash=expected_hash,
+            )
         )
 
     async def edit_file(
@@ -106,15 +160,40 @@ class _WorkspaceToolSurface:
         *,
         expected_hash: str | None = None,
     ) -> str:
-        return await self._require_session().edit_file(
-            path,
-            old_text,
-            new_text,
-            expected_hash=expected_hash,
+        """Edit a file by exact string replacement with conflict detection.
+
+        The old_text must appear exactly once in the file. Include surrounding
+        context lines to ensure uniqueness.
+
+        Args:
+            path: File path relative to the root directory.
+            old_text: The exact text to find (must appear exactly once).
+            new_text: The replacement text.
+            expected_hash: If provided, rejects the edit when the file's
+                current hash doesn't match (optimistic concurrency).
+
+        Returns:
+            Summary with new hash for subsequent operations.
+        """
+        return await self._call(
+            self._require_session().edit_file(
+                path,
+                old_text,
+                new_text,
+                expected_hash=expected_hash,
+            )
         )
 
     async def list_directory(self, path: str = ".") -> str:
-        return await self._require_session().list_directory(path)
+        """List the contents of a directory.
+
+        Args:
+            path: Directory path relative to the root directory.
+
+        Returns:
+            A newline-separated listing with type indicators and sizes.
+        """
+        return await self._call(self._require_session().list_directory(path))
 
     async def search_files(
         self,
@@ -123,20 +202,60 @@ class _WorkspaceToolSurface:
         path: str = ".",
         include_glob: str | None = None,
     ) -> str:
-        return await self._require_session().search_files(
-            pattern,
-            path=path,
-            include_glob=include_glob,
+        """Search file contents using a regular expression.
+
+        Args:
+            pattern: Regex pattern to search for.
+            path: Directory to search in, relative to the root directory.
+            include_glob: If provided, only search files matching this glob (e.g. '*.py').
+
+        Returns:
+            str: Matching lines formatted as file:line_number:text.
+        """
+        return await self._call(
+            self._require_session().search_files(
+                pattern,
+                path=path,
+                include_glob=include_glob,
+            )
         )
 
     async def find_files(self, pattern: str, *, path: str = ".") -> str:
-        return await self._require_session().find_files(pattern, path=path)
+        """Find files by glob pattern (name matching, not content search).
+
+        Args:
+            pattern: Glob pattern to match, relative to `path` (e.g. '*.py',
+                '**/*.json'). Absolute patterns are rejected.
+            path: Directory to search in, relative to the root directory.
+
+        Returns:
+            Newline-separated list of matching file paths relative to root.
+        """
+        return await self._call(
+            self._require_session().find_files(pattern, path=path)
+        )
 
     async def create_directory(self, path: str) -> str:
-        return await self._require_session().create_directory(path)
+        """Create a directory and any missing parents.
+
+        Args:
+            path: Directory path relative to the root directory.
+
+        Returns:
+            Confirmation message.
+        """
+        return await self._call(self._require_session().create_directory(path))
 
     async def file_info(self, path: str) -> str:
-        return await self._require_session().file_info(path)
+        """Get metadata about a file or directory.
+
+        Args:
+            path: File or directory path relative to the root directory.
+
+        Returns:
+            Formatted metadata including size, type, and permissions.
+        """
+        return await self._call(self._require_session().file_info(path))
 
     async def run_command(
         self,
@@ -144,19 +263,57 @@ class _WorkspaceToolSurface:
         *,
         timeout_seconds: float | None = None,
     ) -> str:
-        return await self._require_session().run_command(
-            command,
-            timeout_seconds=timeout_seconds,
+        """Execute a shell command and return its output.
+
+        Args:
+            command: The shell command to run.
+            timeout_seconds: Maximum seconds to wait (default: 30).
+
+        Returns:
+            Labeled stdout/stderr output with exit code on non-zero exit.
+        """
+        return await self._call(
+            self._require_session().run_command(
+                command,
+                timeout_seconds=timeout_seconds,
+            )
         )
 
     async def start_command(self, command: str) -> str:
-        return await self._require_session().start_command(command)
+        """Start a long-running command in the background (e.g. a server or watcher).
+
+        Callers MUST call `stop_command(command_id)` when done to terminate the
+        process and clean up temporary output files.
+
+        Args:
+            command: The shell command to run in the background.
+
+        Returns:
+            A message containing the unique command ID for later check/stop calls.
+        """
+        return await self._call(self._require_session().start_command(command))
 
     async def check_command(self, command_id: str) -> str:
-        return await self._require_session().check_command(command_id)
+        """Check the status and recent output of a background command.
+
+        Args:
+            command_id: The ID returned by start_command.
+
+        Returns:
+            Status and recent output of the background command.
+        """
+        return await self._call(self._require_session().check_command(command_id))
 
     async def stop_command(self, command_id: str) -> str:
-        return await self._require_session().stop_command(command_id)
+        """Stop a background command and return its final output.
+
+        Args:
+            command_id: The ID returned by start_command.
+
+        Returns:
+            Final output and exit status of the stopped command.
+        """
+        return await self._call(self._require_session().stop_command(command_id))
 
 
 class _WorkspaceSandboxToolset(FunctionToolset[AgentContext[object]]):
