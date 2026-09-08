@@ -4,6 +4,7 @@
 
 import hashlib
 import mimetypes
+from collections.abc import Awaitable, Callable
 from pathlib import PurePosixPath
 from typing import TYPE_CHECKING
 
@@ -29,6 +30,8 @@ if TYPE_CHECKING:
     from ._local import LocalExecutionBackend
     from .state import ExecutionRecord
 
+_AttachmentCommitted = Callable[[str, AttachmentResult], Awaitable[None]]
+
 
 class AttachmentReadRuntime:
     """Resolve read_attachment against one live Execution and its frozen facts."""
@@ -40,6 +43,7 @@ class AttachmentReadRuntime:
         execution_id: str,
         tenant_id: str,
         agent_run_sequence: int,
+        on_committed: _AttachmentCommitted | None = None,
     ) -> None:
         if not isinstance(execution_id, str) or not execution_id:
             raise ValueError("execution_id is required")
@@ -55,6 +59,7 @@ class AttachmentReadRuntime:
         self._execution_id = execution_id
         self._tenant_id = tenant_id
         self._agent_run_sequence = agent_run_sequence
+        self._on_committed = on_committed
         self._repository = AttachmentRepository(
             backend._execution.executions.state_store,
             namespace=backend._namespace,
@@ -75,7 +80,7 @@ class AttachmentReadRuntime:
         if cached is not None:
             entry, body = cached
             _verify_body(entry, body)
-            return _result(entry)
+            return self._result(entry)
         if not isinstance(path, str) or not path:
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
         if path.startswith("virtual:"):
@@ -124,7 +129,20 @@ class AttachmentReadRuntime:
                 body = await self._read_content(entry.content)
         _verify_body(entry, body)
         self._cache[path] = (entry, body)
-        return _result(entry)
+        return self._result(entry)
+
+    def _result(self, entry: AttachmentEntry) -> dict[str, JsonValue]:
+        return attachment_tool_return(
+            {
+                "status": "read",
+                "path": entry.path,
+                "name": entry.name,
+                "media_type": entry.media_type,
+                "size": entry.content.object.size,
+            },
+            AttachmentResult(1, entry),
+            on_committed=self._on_committed,
+        )
 
     async def _execution(self) -> "ExecutionRecord":
         execution = await self._backend._execution.executions.get(
@@ -258,19 +276,6 @@ def _verify_body(entry: AttachmentEntry, body: bytes) -> None:
         or hashlib.sha256(body).hexdigest() != reference.digest
     ):
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-
-
-def _result(entry: AttachmentEntry) -> dict[str, JsonValue]:
-    return attachment_tool_return(
-        {
-            "status": "read",
-            "path": entry.path,
-            "name": entry.name,
-            "media_type": entry.media_type,
-            "size": entry.content.object.size,
-        },
-        AttachmentResult(1, entry),
-    )
 
 
 __all__ = ["AttachmentReadRuntime"]
