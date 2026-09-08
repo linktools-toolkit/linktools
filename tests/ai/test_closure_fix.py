@@ -115,6 +115,7 @@ class _OperationRepository:
         return ToolOperationRecord(
             tool_operation_id=request.tool_operation_id,
             tenant_id=request.tenant_id,
+            execution_id=request.execution_id,
             step_run_id=request.step_run_id,
             tool_call_id=request.tool_call_id,
             idempotency_key_digest=request.idempotency_key_digest,
@@ -162,6 +163,7 @@ async def test_tool_operation_admission_uses_runtime_step_and_binding_digest() -
         True,
     )
     assert repository.request is not None
+    assert repository.request.execution_id == "execution"
     assert repository.request.step_run_id == "runtime-step"
     assert repository.request.binding_digest == "binding"
     assert not hasattr(repository.request, "binding_fingerprint")
