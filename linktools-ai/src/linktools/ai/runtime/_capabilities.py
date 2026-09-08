@@ -76,17 +76,6 @@ _MEMORY_CAPABILITY_ID = _native._MEMORY_CAPABILITY_ID
 _PLANNING_CAPABILITY_ID = _native._PLANNING_CAPABILITY_ID
 _MODEL_EFFECT_UNKNOWN_MESSAGE = _native._MODEL_EFFECT_UNKNOWN_MESSAGE
 
-    async def effective_args(
-        self,
-        ctx: "RunContext[None]",
-        call: ToolCallPart,
-        tool_def: ToolDefinition,
-        args: dict[str, Any],
-    ) -> dict[str, Any]:
-        del ctx, call, tool_def
-        return args
-
-
 @dataclass(kw_only=True, eq=False)
 class _RuntimeStepPersistence(StepPersistence[None]):
     """Use Harness for graph persistence while LinkTools owns durable tool effects."""
@@ -556,7 +545,7 @@ class _RuntimeStepPersistence(StepPersistence[None]):
                 reset_tool_operation_id(token)
 
         handler_task = asyncio.create_task(
-            tracked_handler(args),
+            tracked_handler(effective_args),
             name=f"tool-handler-{call.tool_call_id}",
         )
         heartbeat_task = asyncio.create_task(

@@ -2,8 +2,10 @@
 # -*- coding: utf-8 -*-
 """Adapt one opened workspace session to Pydantic AI tools."""
 
-from collections.abc import Awaitable, Sequence
-from typing import Any, cast
+import asyncio
+from collections.abc import Awaitable, Mapping, Sequence
+from pathlib import Path
+from typing import Any, Protocol, cast
 
 from linktools.core import environ
 from pydantic_ai import Tool
@@ -12,7 +14,13 @@ from pydantic_ai.exceptions import ModelRetry
 from pydantic_ai.toolsets import FunctionToolset
 
 from ..errors import AIError, ErrorCode
-from ..workspace import SandboxSession, Workspace
+from ..workspace import (
+    LocalSandbox,
+    Sandbox,
+    SandboxSession,
+    Workspace,
+    normalize_workspace_path,
+)
 from ._context import AgentContext
 from ._group import (
     CapabilityContribution,
@@ -92,6 +100,93 @@ _MODEL_ERROR_MESSAGES = {
     ),
 }
 _logger = environ.get_logger("ai.capability.workspace")
+
+
+class _WorkspaceAccessBackend(Protocol):
+    async def open(self) -> SandboxSession: ...
+
+
+class _BoundWorkspaceAccessBackend:
+    def __init__(self, sandbox: Sandbox, root: Path) -> None:
+        self._sandbox = sandbox
+        self._root = root
+
+    async def open(self) -> SandboxSession:
+        return await self._sandbox.open(root=self._root)
+
+
+class WorkspaceAccess:
+    """Own one lazy SandboxSession for durable path and byte access."""
+
+    def __init__(
+        self,
+        backend: _WorkspaceAccessBackend,
+        *,
+        session: SandboxSession | None = None,
+    ) -> None:
+        self._backend = backend
+        self._session = session
+        self._lock = asyncio.Lock()
+        self._closed = False
+
+    @classmethod
+    def for_workspace(cls, workspace: Workspace) -> "WorkspaceAccess":
+        sandbox = workspace.sandbox if workspace.sandbox is not None else LocalSandbox()
+        return cls(_BoundWorkspaceAccessBackend(sandbox, workspace.root))
+
+    async def _ensure_session(self) -> SandboxSession:
+        async with self._lock:
+            if self._closed:
+                raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+            if self._session is None:
+                self._session = await self._backend.open()
+            return self._session
+
+    async def canonicalize_path(self, path: str) -> str:
+        session = await self._ensure_session()
+        return normalize_workspace_path(await session.canonicalize_path(path))
+
+    async def read_bytes(
+        self,
+        path: str,
+        *,
+        max_bytes: int | None = None,
+    ) -> bytes:
+        session = await self._ensure_session()
+        return await session.read_bytes(path, max_bytes=max_bytes)
+
+    async def close(self) -> None:
+        async with self._lock:
+            if self._closed:
+                return
+            self._closed = True
+            session = self._session
+            self._session = None
+        if session is not None:
+            await session.close()
+
+
+def workspace_tool_path_fields(tool: Tool[Any]) -> tuple[str, ...]:
+    metadata = tool.tool_def.metadata or {}
+    return workspace_tool_path_fields_from_metadata(metadata)
+
+
+def workspace_tool_path_fields_from_metadata(
+    metadata: Mapping[str, object] | None,
+) -> tuple[str, ...]:
+    value = None if metadata is None else metadata.get(_WORKSPACE_PATH_FIELDS_KEY)
+    if not isinstance(value, (list, tuple)):
+        return ()
+    return tuple(item for item in value if isinstance(item, str))
+
+
+def workspace_tool_path_metadata(fields: Sequence[str]) -> dict[str, object]:
+    values = tuple(fields)
+    if not values or any(not isinstance(field, str) or not field for field in values):
+        raise ValueError("workspace path fields must be non-empty strings")
+    if len(values) != len(set(values)):
+        raise ValueError("workspace path fields must be unique")
+    return {_WORKSPACE_PATH_FIELDS_KEY: list(values)}
 
 
 class _WorkspaceToolSurface:
@@ -420,11 +515,14 @@ def _workspace_tool(surface: _WorkspaceToolSurface, name: str) -> Tool[Any]:
         if name in WORKSPACE_FILESYSTEM_TOOL_NAMES
         else "shell"
     )
+    metadata: dict[str, object] = {_WORKSPACE_METADATA_KEY: tool_class}
+    if tool_class in {"filesystem.read", "filesystem.write"}:
+        metadata.update(workspace_tool_path_metadata(("path",)))
     return Tool(
         cast(Any, getattr(surface, name)),
         takes_ctx=False,
         name=name,
-        metadata={_WORKSPACE_METADATA_KEY: tool_class},
+        metadata=metadata,
     )
 
 

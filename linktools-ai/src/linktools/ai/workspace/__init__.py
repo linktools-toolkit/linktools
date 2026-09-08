@@ -25,7 +25,6 @@ from ._sandbox import (
     Sandbox,
     SandboxResource,
     SandboxSession,
-    normalize_workspace_path,
 )
 
 __all__ = [
@@ -47,5 +46,4 @@ __all__ = [
     "WorkspaceToolPermissionPolicy",
     "normalize_workspace_path",
     "trusted_workspace_principal",
-    "normalize_workspace_path",
 ]

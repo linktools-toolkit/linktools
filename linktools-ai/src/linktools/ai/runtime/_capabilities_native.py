@@ -158,6 +158,14 @@ class ToolOperationBridge(Protocol):
 
     async def list_operations(self) -> tuple[ToolOperationRecord, ...]: ...
 
+    async def effective_args(
+        self,
+        ctx: RunContext[None],
+        call: ToolCallPart,
+        tool_def: ToolDefinition,
+        args: dict[str, Any],
+    ) -> dict[str, Any]: ...
+
 
 class _MissingToolOperationBridge:
     async def begin(
@@ -196,6 +204,16 @@ class _MissingToolOperationBridge:
 
     async def list_operations(self) -> tuple[ToolOperationRecord, ...]:
         raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+
+    async def effective_args(
+        self,
+        ctx: RunContext[None],
+        call: ToolCallPart,
+        tool_def: ToolDefinition,
+        args: dict[str, Any],
+    ) -> dict[str, Any]:
+        del ctx, call, tool_def
+        return args
 
 
 class _WorkspaceToolGate(AbstractCapability[None]):
