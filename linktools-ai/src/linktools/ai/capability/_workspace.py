@@ -5,7 +5,7 @@
 import asyncio
 import stat
 import sys
-from collections.abc import Sequence
+from collections.abc import Awaitable, Callable, Sequence
 from contextlib import AsyncExitStack
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
@@ -32,12 +32,16 @@ if TYPE_CHECKING:
     from pydantic_ai_harness.filesystem import FileSystemToolset
     from pydantic_ai_harness.shell import ShellToolset
 
+AttachmentReader = Callable[["WorkspaceAccess", str], Awaitable[dict[str, Any]]]
+SessionOpener = Callable[[], Awaitable[SandboxSession]]
+
 WORKSPACE_FILESYSTEM_TOOL_NAMES = (
     "create_directory",
     "edit_file",
     "file_info",
     "find_files",
     "list_directory",
+    "read_attachment",
     "read_file",
     "search_files",
     "write_file",
@@ -46,6 +50,7 @@ WORKSPACE_FILESYSTEM_READ_TOOL_NAMES = (
     "file_info",
     "find_files",
     "list_directory",
+    "read_attachment",
     "read_file",
     "search_files",
 )
@@ -259,16 +264,20 @@ class _LocalSandboxSession:
 
 
 class WorkspaceAccess:
-    """Own one SandboxSession and expose byte reads without leaking the session."""
+    """Lazily own one SandboxSession without exposing it across module boundaries."""
 
     def __init__(
         self,
         sandbox: Sandbox,
         *,
         session: "SandboxSession | None" = None,
+        opener: "SessionOpener | None" = None,
     ) -> None:
+        if session is not None and opener is not None:
+            raise ValueError("WorkspaceAccess accepts either session or opener")
         self._sandbox = sandbox
         self._session = session
+        self._opener = opener or sandbox.open
         self._lock = asyncio.Lock()
         self._closed = False
 
@@ -281,26 +290,28 @@ class WorkspaceAccess:
         )
         return cls(sandbox)
 
-    async def read_bytes(self, path: str) -> bytes:
+    async def _ensure_session(self) -> SandboxSession:
         async with self._lock:
             if self._closed:
                 raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
             session = self._session
             if session is None:
-                session = await self._sandbox.open()
+                session = await self._opener()
                 self._session = session
-            try:
-                return await session.read_bytes(path)
-            except AttributeError as error:
-                raise AIError(ErrorCode.SANDBOX_UNAVAILABLE) from error
+            return session
+
+    async def read_bytes(self, path: str) -> bytes:
+        session = await self._ensure_session()
+        try:
+            return await session.read_bytes(path)
+        except AttributeError as error:
+            raise AIError(ErrorCode.SANDBOX_UNAVAILABLE) from error
 
     async def close(self) -> None:
         await self._close(None)
 
-    def _session_for_tools(self) -> SandboxSession:
-        if self._session is None or self._closed:
-            raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
-        return self._session
+    async def _session_for_tools(self) -> SandboxSession:
+        return await self._ensure_session()
 
     async def _close(self, primary_error: "BaseException | None") -> None:
         async with self._lock:
@@ -332,13 +343,24 @@ class WorkspaceAccess:
 
 
 class _WorkspaceToolSurface:
-    def __init__(self, access: "WorkspaceAccess | None") -> None:
+    def __init__(
+        self,
+        access: "WorkspaceAccess | None",
+        attachment_reader: "AttachmentReader | None" = None,
+    ) -> None:
         self._access = access
+        self._attachment_reader = attachment_reader
 
-    def _require_session(self) -> SandboxSession:
+    async def _require_session(self) -> SandboxSession:
         if self._access is None:
             raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
-        return self._access._session_for_tools()
+        return await self._access._session_for_tools()
+
+    async def read_attachment(self, path: str) -> dict[str, Any]:
+        """Read an authorized attachment and make it available to the next model step."""
+        if self._access is None or self._attachment_reader is None:
+            raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+        return await self._attachment_reader(self._access, path)
 
     async def read_file(
         self,
@@ -347,17 +369,9 @@ class _WorkspaceToolSurface:
         offset: int = 0,
         limit: "int | None" = None,
     ) -> str:
-        """Read a text file with line numbers.
-
-        Args:
-            path: File path relative to the root directory.
-            offset: Zero-based line offset to start reading from.
-            limit: Maximum number of lines to return (default: 2000).
-
-        Returns:
-            File content with line numbers, plus metadata header.
-        """
-        return await self._require_session().read_file(path, offset=offset, limit=limit)
+        """Read a text file with line numbers."""
+        session = await self._require_session()
+        return await session.read_file(path, offset=offset, limit=limit)
 
     async def write_file(
         self,
@@ -366,22 +380,9 @@ class _WorkspaceToolSurface:
         *,
         expected_hash: "str | None" = None,
     ) -> str:
-        """Create or overwrite a file with conflict detection.
-
-        Args:
-            path: File path relative to the root directory.
-            content: The text content to write.
-            expected_hash: If provided, the write is rejected when the file exists
-                and its current hash doesn't match (optimistic concurrency).
-
-        Returns:
-            Confirmation message with new hash.
-        """
-        return await self._require_session().write_file(
-            path,
-            content,
-            expected_hash=expected_hash,
-        )
+        """Create or overwrite a file with conflict detection."""
+        session = await self._require_session()
+        return await session.write_file(path, content, expected_hash=expected_hash)
 
     async def edit_file(
         self,
@@ -391,22 +392,9 @@ class _WorkspaceToolSurface:
         *,
         expected_hash: "str | None" = None,
     ) -> str:
-        """Edit a file by exact string replacement with conflict detection.
-
-        The old_text must appear exactly once in the file. Include surrounding
-        context lines to ensure uniqueness.
-
-        Args:
-            path: File path relative to the root directory.
-            old_text: The exact text to find (must appear exactly once).
-            new_text: The replacement text.
-            expected_hash: If provided, rejects the edit when the file's
-                current hash doesn't match (optimistic concurrency).
-
-        Returns:
-            Summary with new hash for subsequent operations.
-        """
-        return await self._require_session().edit_file(
+        """Edit a file by exact string replacement with conflict detection."""
+        session = await self._require_session()
+        return await session.edit_file(
             path,
             old_text,
             new_text,
@@ -414,15 +402,9 @@ class _WorkspaceToolSurface:
         )
 
     async def list_directory(self, path: str = ".") -> str:
-        """List the contents of a directory.
-
-        Args:
-            path: Directory path relative to the root directory.
-
-        Returns:
-            A newline-separated listing with type indicators and sizes.
-        """
-        return await self._require_session().list_directory(path)
+        """List the contents of a directory."""
+        session = await self._require_session()
+        return await session.list_directory(path)
 
     async def search_files(
         self,
@@ -431,17 +413,9 @@ class _WorkspaceToolSurface:
         path: str = ".",
         include_glob: "str | None" = None,
     ) -> str:
-        """Search file contents using a regular expression.
-
-        Args:
-            pattern: Regex pattern to search for.
-            path: Directory to search in, relative to the root directory.
-            include_glob: If provided, only search files matching this glob (e.g. '*.py').
-
-        Returns:
-            str: Matching lines formatted as file:line_number:text.
-        """
-        return await self._require_session().search_files(
+        """Search file contents using a regular expression."""
+        session = await self._require_session()
+        return await session.search_files(
             pattern,
             path=path,
             include_glob=include_glob,
@@ -453,39 +427,19 @@ class _WorkspaceToolSurface:
         *,
         path: str = ".",
     ) -> str:
-        """Find files by glob pattern (name matching, not content search).
-
-        Args:
-            pattern: Glob pattern to match, relative to `path` (e.g. '*.py',
-                '**/*.json'). Absolute patterns are rejected.
-            path: Directory to search in, relative to the root directory.
-
-        Returns:
-            Newline-separated list of matching file paths relative to root.
-        """
-        return await self._require_session().find_files(pattern, path=path)
+        """Find files by glob pattern."""
+        session = await self._require_session()
+        return await session.find_files(pattern, path=path)
 
     async def create_directory(self, path: str) -> str:
-        """Create a directory and any missing parents.
-
-        Args:
-            path: Directory path relative to the root directory.
-
-        Returns:
-            Confirmation message.
-        """
-        return await self._require_session().create_directory(path)
+        """Create a directory and any missing parents."""
+        session = await self._require_session()
+        return await session.create_directory(path)
 
     async def file_info(self, path: str) -> str:
-        """Get metadata about a file or directory.
-
-        Args:
-            path: File or directory path relative to the root directory.
-
-        Returns:
-            Formatted metadata including size, type, and permissions.
-        """
-        return await self._require_session().file_info(path)
+        """Get metadata about a file or directory."""
+        session = await self._require_session()
+        return await session.file_info(path)
 
     async def run_command(
         self,
@@ -493,55 +447,24 @@ class _WorkspaceToolSurface:
         *,
         timeout_seconds: "float | None" = None,
     ) -> str:
-        """Execute a shell command and return its output.
-
-        Args:
-            command: The shell command to run.
-            timeout_seconds: Maximum seconds to wait (default: 30).
-
-        Returns:
-            Labeled stdout/stderr output with exit code on non-zero exit.
-        """
-        return await self._require_session().run_command(
-            command,
-            timeout_seconds=timeout_seconds,
-        )
+        """Execute a shell command and return its output."""
+        session = await self._require_session()
+        return await session.run_command(command, timeout_seconds=timeout_seconds)
 
     async def start_command(self, command: str) -> str:
-        """Start a long-running command in the background (e.g. a server or watcher).
-
-        Callers MUST call `stop_command(command_id)` when done to terminate the
-        process and clean up temporary output files.
-
-        Args:
-            command: The shell command to run in the background.
-
-        Returns:
-            A message containing the unique command ID for later check/stop calls.
-        """
-        return await self._require_session().start_command(command)
+        """Start a long-running command in the background."""
+        session = await self._require_session()
+        return await session.start_command(command)
 
     async def check_command(self, command_id: str) -> str:
-        """Check the status and recent output of a background command.
-
-        Args:
-            command_id: The ID returned by start_command.
-
-        Returns:
-            Status and recent output of the background command.
-        """
-        return await self._require_session().check_command(command_id)
+        """Check the status and recent output of a background command."""
+        session = await self._require_session()
+        return await session.check_command(command_id)
 
     async def stop_command(self, command_id: str) -> str:
-        """Stop a background command and return its final output.
-
-        Args:
-            command_id: The ID returned by start_command.
-
-        Returns:
-            Final output and exit status of the stopped command.
-        """
-        return await self._require_session().stop_command(command_id)
+        """Stop a background command and return its final output."""
+        session = await self._require_session()
+        return await session.stop_command(command_id)
 
 
 class _WorkspaceSandboxToolset(FunctionToolset[AgentContext[object]]):
@@ -551,12 +474,14 @@ class _WorkspaceSandboxToolset(FunctionToolset[AgentContext[object]]):
         selected_tool_names: tuple[str, ...],
         *,
         access: "WorkspaceAccess | None" = None,
+        attachment_reader: "AttachmentReader | None" = None,
     ) -> None:
         super().__init__()
         self._sandbox = sandbox
         self._selected_tool_names = selected_tool_names
         self._access = access
-        surface = _WorkspaceToolSurface(access)
+        self._attachment_reader = attachment_reader
+        surface = _WorkspaceToolSurface(access, attachment_reader)
         for name in selected_tool_names:
             self.add_tool(_workspace_tool(surface, name))
 
@@ -564,15 +489,17 @@ class _WorkspaceSandboxToolset(FunctionToolset[AgentContext[object]]):
         self,
         ctx: "PydanticRunContext[AgentContext[object]]",
     ) -> "_WorkspaceSandboxToolset":
-        session = (
-            await self._sandbox._open_for_run(ctx)
-            if isinstance(self._sandbox, _LocalSandbox)
-            else await self._sandbox.open()
-        )
+        async def open_session() -> SandboxSession:
+            if isinstance(self._sandbox, _LocalSandbox):
+                return await self._sandbox._open_for_run(ctx)
+            return await self._sandbox.open()
+
+        access = WorkspaceAccess(self._sandbox, opener=open_session)
         return _WorkspaceSandboxToolset(
             self._sandbox,
             self._selected_tool_names,
-            access=WorkspaceAccess(self._sandbox, session=session),
+            access=access,
+            attachment_reader=self._attachment_reader,
         )
 
     async def __aexit__(self, *args: Any) -> "bool | None":
@@ -612,8 +539,10 @@ def workspace_tool_contributions(
 def workspace_capabilities(
     workspace: Workspace,
     selected_tool_names: Sequence[str],
+    *,
+    attachment_reader: "AttachmentReader | None" = None,
 ) -> "tuple[AbstractCapability[AgentContext[object]], ...]":
-    """Materialize the selected workspace tools through one per-run SandboxSession."""
+    """Materialize selected workspace tools through one lazy per-run SandboxSession."""
     selected = frozenset(selected_tool_names)
     unknown = selected.difference(_WORKSPACE_TOOL_NAMES)
     if unknown:
@@ -626,7 +555,11 @@ def workspace_capabilities(
         if workspace.sandbox is not None
         else _LocalSandbox(workspace.root)
     )
-    toolset = _WorkspaceSandboxToolset(sandbox, ordered)
+    toolset = _WorkspaceSandboxToolset(
+        sandbox,
+        ordered,
+        attachment_reader=attachment_reader,
+    )
     return (Toolset(toolset, id=_WORKSPACE_SANDBOX_CAPABILITY_ID),)
 
 
