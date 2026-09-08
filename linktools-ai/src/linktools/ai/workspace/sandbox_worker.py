@@ -548,7 +548,12 @@ def main(argv: list[str] | None = None) -> int:
     arguments = parser.parse_args(argv)
     try:
         return asyncio.run(main_async(arguments))
-    except BaseException:
+    except BaseException as error:
+        print(
+            f"sandbox worker failed: {type(error).__name__}: {error}",
+            file=sys.stderr,
+            flush=True,
+        )
         return WORKER_EXIT_SESSION_FAILED
 
 

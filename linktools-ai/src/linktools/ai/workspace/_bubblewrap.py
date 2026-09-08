@@ -575,7 +575,7 @@ class _BubblewrapSandboxSession:
             chunk = await stderr.read(4096)
             if not chunk:
                 return
-            _logger.debug(
+            _logger.warning(
                 "bubblewrap guardian stderr: %s",
                 chunk[:4096].decode("utf-8", "replace"),
             )
