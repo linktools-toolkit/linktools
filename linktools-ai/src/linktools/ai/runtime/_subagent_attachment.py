@@ -39,6 +39,36 @@ class SubagentAttachmentPreparer:
         self._repository = repository
         self._workspace = workspace
 
+    async def adopted(
+        self,
+        task: str,
+        attachments: Sequence[str],
+        *,
+        idempotency_key: str,
+    ) -> bool:
+        paths = _paths(attachments)
+        owner_key = self._repository.prepare_key(
+            "execution.subagent",
+            idempotency_key,
+        )
+        current = await self._repository.get_prepare(
+            owner_key,
+            tenant_id=self._repository._tenant_id,
+        )
+        if current is None:
+            return False
+        if current.intent_digest != input_intent_digest(task, paths):
+            raise AIError(ErrorCode.IDEMPOTENCY_CONFLICT)
+        if current.status == "ADOPTED":
+            if current.target is None or current.input is not None or current.slots:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            return True
+        if current.status == "ABORTED":
+            raise _stable_prepare_error(current.error_code)
+        if current.status not in {"PREPARING", "READY"}:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        return False
+
     async def prepare(
         self,
         task: str,
