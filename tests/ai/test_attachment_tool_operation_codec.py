@@ -11,11 +11,10 @@ from linktools.ai.runtime.state import (
     AttachmentResult,
     ContentRef,
     RuntimeDomain,
-    decode_domain,
-    encode_domain,
     iter_runtime_object_refs,
     managed_attachment_path,
 )
+from linktools.ai.runtime.state._codec import decode_domain, encode_domain
 from linktools.ai.storage import ObjectRef, StoredPayload
 
 
