@@ -22,113 +22,284 @@ jobs:
       - name: Apply F5 request identity repair
         shell: bash
         run: |
-          python - <<'PY'
-          from pathlib import Path
-
-          def replace_once(path: str, old: str, new: str) -> None:
-              file = Path(path)
-              text = file.read_text(encoding='utf-8')
-              count = text.count(old)
-              if count != 1:
-                  raise SystemExit(f'{path}: expected one match, found {count}: {old!r}')
-              file.write_text(text.replace(old, new, 1), encoding='utf-8')
-
-          journal = 'linktools-ai/src/linktools/ai/runtime/_journal.py'
-          replace_once(
-              journal,
-              '''        current = self._facts.get(step_index)\n        if current is not None and current.duration_ns is None:\n            if current.purpose != purpose:\n                raise ValueError("a step cannot have two active request purposes")\n            return current\n        sequence = self._next_sequence\n''',
-              '''        sequence = self._next_sequence\n''',
-          )
-          replace_once(
-              journal,
-              '        self._facts[step_index] = fact\n        return fact\n\n    def finish(\n        self,\n        step_index: int,\n',
-              '        self._facts[sequence] = fact\n        return fact\n\n    def finish(\n        self,\n        request_sequence: int,\n',
-          )
-          replace_once(
-              journal,
-              '''        fact = self._facts.get(step_index)\n        if fact is None:\n            raise RuntimeError("model request fact is missing")\n''',
-              '''        fact = self._facts.get(request_sequence)\n        if fact is None:\n            raise RuntimeError("model request fact is missing")\n''',
-          )
-          replace_once(
-              journal,
-              '''        self._facts[step_index] = return_value\n        return return_value\n\n    def current(self, step_index: int) -> ModelRequestFact:\n        try:\n            return self._facts[step_index]\n        except KeyError as error:\n            raise RuntimeError("model request fact is missing") from error\n\n    def consume(self, step_index: int) -> ModelRequestFact:\n        try:\n            return self._facts.pop(step_index)\n''',
-              '''        self._facts[request_sequence] = return_value\n        return return_value\n\n    def current(self, request_sequence: int) -> ModelRequestFact:\n        try:\n            return self._facts[request_sequence]\n        except KeyError as error:\n            raise RuntimeError("model request fact is missing") from error\n\n    def consume(self, request_sequence: int) -> ModelRequestFact:\n        try:\n            return self._facts.pop(request_sequence)\n''',
-          )
-
-          compaction = 'linktools-ai/src/linktools/ai/runtime/_compaction.py'
-          replace_once(
-              compaction,
-              '''        step_index = self._ctx.run_step\n        fact = self._journal.begin(step_index, purpose="compaction")\n        await self._observer(self._ctx, fact, "started", None, None)\n''',
-              '''        fact = self._journal.begin(self._ctx.run_step, purpose="compaction")\n        request_sequence = fact.request_sequence\n        await self._observer(self._ctx, fact, "started", None, None)\n''',
-          )
-          for status in ('CANCELLED', 'FAILED', 'SUCCEEDED'):
-              replace_once(
-                  compaction,
-                  f'            fact = self._journal.finish(step_index, status="{status}")\n            self._journal.consume(step_index)\n' if status != 'SUCCEEDED' else f'        fact = self._journal.finish(step_index, status="{status}")\n        self._journal.consume(step_index)\n',
-                  f'            fact = self._journal.finish(request_sequence, status="{status}")\n            self._journal.consume(request_sequence)\n' if status != 'SUCCEEDED' else f'        fact = self._journal.finish(request_sequence, status="{status}")\n        self._journal.consume(request_sequence)\n',
-              )
-
-          metrics = 'linktools-ai/src/linktools/ai/runtime/_metric_capability.py'
-          replace_once(
-              metrics,
-              '''        fact = self._journal.begin(step_index, purpose="agent")\n        try:\n''',
-              '''        fact = self._journal.begin(step_index, purpose="agent")\n        request_sequence = fact.request_sequence\n        try:\n''',
-          )
-          replace_once(
-              metrics,
-              '''            fact = self._journal.finish(step_index, status="CANCELLED")\n            self._record_model(\n''',
-              '''            fact = self._journal.finish(request_sequence, status="CANCELLED")\n            self._journal.consume(request_sequence)\n            self._record_model(\n''',
-          )
-          replace_once(
-              metrics,
-              '''            fact = self._journal.finish(step_index, status="CANCELLED")\n            self._record_model(\n''',
-              '''            fact = self._journal.finish(request_sequence, status="CANCELLED")\n            self._journal.consume(request_sequence)\n            self._record_model(\n''',
-          )
-          replace_once(
-              metrics,
-              '''            fact = self._journal.finish(step_index, status="FAILED")\n            self._record_model(\n''',
-              '''            fact = self._journal.finish(request_sequence, status="FAILED")\n            self._journal.consume(request_sequence)\n            self._record_model(\n''',
-          )
-          replace_once(
-              metrics,
-              '''        fact = self._journal.finish(step_index, status="SUCCEEDED")\n        self._record_model(\n''',
-              '''        fact = self._journal.finish(request_sequence, status="SUCCEEDED")\n        self._journal.consume(request_sequence)\n        self._record_model(\n''',
-          )
-
-          capabilities = 'linktools-ai/src/linktools/ai/runtime/_capabilities.py'
-          replace_once(
-              capabilities,
-              '''    _last_observed_step_index: int | None = field(\n        default=None,\n        init=False,\n        repr=False,\n        compare=False,\n    )\n''',
-              '''    _last_observed_step_index: int | None = field(\n        default=None,\n        init=False,\n        repr=False,\n        compare=False,\n    )\n    _model_request_tokens: dict[int, int] = field(\n        default_factory=dict,\n        init=False,\n        repr=False,\n        compare=False,\n    )\n''',
-          )
-          replace_once(
-              capabilities,
-              '''        fact = (\n            None\n            if self.model_journal is None\n            else self.model_journal.begin(ctx.run_step, purpose="agent")\n        )\n''',
-              '''        fact = None\n        request_sequence: int | None = None\n        if self.model_journal is not None:\n            if ctx.run_step in self._model_request_tokens:\n                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)\n            fact = self.model_journal.begin(ctx.run_step, purpose="agent")\n            request_sequence = fact.request_sequence\n            self._model_request_tokens[ctx.run_step] = request_sequence\n''',
-          )
-          replace_once(
-              capabilities,
-              '''            if self.model_journal is None:\n                raise\n            self.model_journal.finish(ctx.run_step, status="CANCELLED")\n            fact = self.model_journal.consume(ctx.run_step)\n            await self._harness_cancelled_model_request(\n''',
-              '''            if self.model_journal is None or request_sequence is None:\n                raise\n            self.model_journal.finish(request_sequence, status="CANCELLED")\n            fact = self.model_journal.consume(request_sequence)\n            if self._model_request_tokens.pop(ctx.run_step, None) != request_sequence:\n                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error\n            await self._harness_cancelled_model_request(\n''',
-          )
-          replace_once(
-              capabilities,
-              '''        except RunCancelled:\n            if self.model_journal is not None:\n                self.model_journal.finish(ctx.run_step, status="CANCELLED")\n            raise\n        except BaseException:\n            if self.model_journal is not None:\n                self.model_journal.finish(ctx.run_step, status="FAILED")\n            raise\n        if self.model_journal is not None:\n            self.model_journal.finish(ctx.run_step, status="SUCCEEDED")\n''',
-              '''        except RunCancelled:\n            if self.model_journal is not None and request_sequence is not None:\n                self.model_journal.finish(request_sequence, status="CANCELLED")\n            raise\n        except BaseException:\n            if self.model_journal is not None and request_sequence is not None:\n                self.model_journal.finish(request_sequence, status="FAILED")\n            raise\n        if self.model_journal is not None and request_sequence is not None:\n            self.model_journal.finish(request_sequence, status="SUCCEEDED")\n''',
-          )
-          replace_once(
-              capabilities,
-              '''        if self.model_journal is None:\n            return None\n        try:\n            fact = self.model_journal.current(ctx.run_step)\n        except RuntimeError:\n            return None\n        if fact.duration_ns is None:\n            self.model_journal.finish(ctx.run_step, status=status)\n        return self.model_journal.consume(ctx.run_step)\n''',
-              '''        if self.model_journal is None:\n            return None\n        request_sequence = self._model_request_tokens.pop(ctx.run_step, None)\n        if request_sequence is None:\n            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)\n        try:\n            fact = self.model_journal.current(request_sequence)\n        except RuntimeError as error:\n            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error\n        if fact.duration_ns is None:\n            self.model_journal.finish(request_sequence, status=status)\n        return self.model_journal.consume(request_sequence)\n''',
-          )
-
-          test = 'tests/ai/test_compaction_harness_observability.py'
-          replace_once(
-              test,
-              '''    with pytest.raises(RuntimeError, match="missing"):\n        journal.current(ctx.run_step)\n''',
-              '''    with pytest.raises(RuntimeError, match="missing"):\n        journal.current(observed[-1][1].request_sequence)\n\n\ndef test_journal_keeps_agent_and_compaction_requests_distinct_on_same_step() -> None:\n    journal = ModelRequestJournal(\n        source_namespace="workspace",\n        tenant_id="tenant",\n        execution_id="execution",\n        step_run_id="run",\n    )\n    agent = journal.begin(3, purpose="agent")\n    compaction = journal.begin(3, purpose="compaction")\n\n    assert agent.request_sequence != compaction.request_sequence\n    assert agent.observation_id != compaction.observation_id\n    journal.finish(compaction.request_sequence, status="SUCCEEDED")\n    assert journal.consume(compaction.request_sequence).purpose == "compaction"\n    assert journal.current(agent.request_sequence) == agent\n    journal.finish(agent.request_sequence, status="SUCCEEDED")\n    assert journal.consume(agent.request_sequence).purpose == "agent"\n''',
-          )
-          PY
+          cat > /tmp/f5.patch <<'PATCH'
+          diff --git a/linktools-ai/src/linktools/ai/runtime/_journal.py b/linktools-ai/src/linktools/ai/runtime/_journal.py
+          --- a/linktools-ai/src/linktools/ai/runtime/_journal.py
+          +++ b/linktools-ai/src/linktools/ai/runtime/_journal.py
+          @@ -58,12 +58,6 @@ class ModelRequestJournal:
+                   *,
+                   purpose: ModelRequestPurpose = "agent",
+               ) -> ModelRequestFact:
+          -        current = self._facts.get(step_index)
+          -        if current is not None and current.duration_ns is None:
+          -            if current.purpose != purpose:
+          -                raise ValueError("a step cannot have two active request purposes")
+          -            return current
+                   sequence = self._next_sequence
+                   self._next_sequence += 1
+                   fact = ModelRequestFact(
+          @@ -81,17 +75,17 @@ class ModelRequestJournal:
+                       ),
+                       started_ns=monotonic_ns(),
+                   )
+          -        self._facts[step_index] = fact
+          +        self._facts[sequence] = fact
+                   return fact
+               
+               def finish(
+                   self,
+          -        step_index: int,
+          +        request_sequence: int,
+                   *,
+                   status: str,
+                   duration_ns: int | None = None,
+               ) -> ModelRequestFact:
+          -        fact = self._facts.get(step_index)
+          +        fact = self._facts.get(request_sequence)
+                   if fact is None:
+                       raise RuntimeError("model request fact is missing")
+                   if fact.duration_ns is not None:
+          @@ -104,18 +98,18 @@ class ModelRequestJournal:
+                       duration_ns=max(0, elapsed if duration_ns is None else duration_ns),
+                       status=status,
+                   )
+          -        self._facts[step_index] = return_value
+          +        self._facts[request_sequence] = return_value
+                   return return_value
+               
+          -    def current(self, step_index: int) -> ModelRequestFact:
+          +    def current(self, request_sequence: int) -> ModelRequestFact:
+                   try:
+          -            return self._facts[step_index]
+          +            return self._facts[request_sequence]
+                   except KeyError as error:
+                       raise RuntimeError("model request fact is missing") from error
+               
+          -    def consume(self, step_index: int) -> ModelRequestFact:
+          +    def consume(self, request_sequence: int) -> ModelRequestFact:
+                   try:
+          -            return self._facts.pop(step_index)
+          +            return self._facts.pop(request_sequence)
+                   except KeyError as error:
+                       raise RuntimeError("model request fact is missing") from error
+          diff --git a/linktools-ai/src/linktools/ai/runtime/_compaction.py b/linktools-ai/src/linktools/ai/runtime/_compaction.py
+          --- a/linktools-ai/src/linktools/ai/runtime/_compaction.py
+          +++ b/linktools-ai/src/linktools/ai/runtime/_compaction.py
+          @@ -77,8 +77,8 @@ class _ObservedCompactionModel(WrapperModel):
+                   model_settings: ModelSettings | None,
+                   model_request_parameters: ModelRequestParameters,
+               ) -> ModelResponse:
+          -        step_index = self._ctx.run_step
+          -        fact = self._journal.begin(step_index, purpose="compaction")
+          +        fact = self._journal.begin(self._ctx.run_step, purpose="compaction")
+          +        request_sequence = fact.request_sequence
+                   await self._observer(self._ctx, fact, "started", None, None)
+                   try:
+                       response = await self.wrapped.request(
+          @@ -88,8 +88,8 @@ class _ObservedCompactionModel(WrapperModel):
+                           model_request_parameters,
+                       )
+                   except asyncio.CancelledError as error:
+          -            fact = self._journal.finish(step_index, status="CANCELLED")
+          -            self._journal.consume(step_index)
+          +            fact = self._journal.finish(request_sequence, status="CANCELLED")
+          +            self._journal.consume(request_sequence)
+                       await self._observer(
+                           self._ctx,
+                           fact,
+          @@ -100,8 +100,8 @@ class _ObservedCompactionModel(WrapperModel):
+                       )
+                       raise
+                   except BaseException as error:
+          -            fact = self._journal.finish(step_index, status="FAILED")
+          -            self._journal.consume(step_index)
+          +            fact = self._journal.finish(request_sequence, status="FAILED")
+          +            self._journal.consume(request_sequence)
+                       await self._observer(
+                           self._ctx,
+                           fact,
+          @@ -112,8 +112,8 @@ class _ObservedCompactionModel(WrapperModel):
+                       )
+                       raise
+          -        fact = self._journal.finish(step_index, status="SUCCEEDED")
+          -        self._journal.consume(step_index)
+          +        fact = self._journal.finish(request_sequence, status="SUCCEEDED")
+          +        self._journal.consume(request_sequence)
+                   await self._observer(
+                       self._ctx,
+                       fact,
+          diff --git a/linktools-ai/src/linktools/ai/runtime/_metric_capability.py b/linktools-ai/src/linktools/ai/runtime/_metric_capability.py
+          --- a/linktools-ai/src/linktools/ai/runtime/_metric_capability.py
+          +++ b/linktools-ai/src/linktools/ai/runtime/_metric_capability.py
+          @@ -103,10 +103,12 @@ class _RuntimeModelMetricCapability(AbstractCapability[AgentContext[object]]):
+                   run_context = None if ctx is None else ctx.deps
+                   step_index = 0 if ctx is None else ctx.run_step
+                   fact = self._journal.begin(step_index, purpose="agent")
+          +        request_sequence = fact.request_sequence
+                   try:
+                       response = await handler(request_context)
+                   except asyncio.CancelledError:
+          -            fact = self._journal.finish(step_index, status="CANCELLED")
+          +            fact = self._journal.finish(request_sequence, status="CANCELLED")
+          +            self._journal.consume(request_sequence)
+                       self._record_model(
+                           run_context,
+                           fact,
+          @@ -116,7 +118,8 @@ class _RuntimeModelMetricCapability(AbstractCapability[AgentContext[object]]):
+                       )
+                       raise
+                   except RunCancelled as error:
+          -            fact = self._journal.finish(step_index, status="CANCELLED")
+          +            fact = self._journal.finish(request_sequence, status="CANCELLED")
+          +            self._journal.consume(request_sequence)
+                       self._record_model(
+                           run_context,
+                           fact,
+          @@ -126,7 +129,8 @@ class _RuntimeModelMetricCapability(AbstractCapability[AgentContext[object]]):
+                       )
+                       raise
+                   except Exception as error:
+          -            fact = self._journal.finish(step_index, status="FAILED")
+          +            fact = self._journal.finish(request_sequence, status="FAILED")
+          +            self._journal.consume(request_sequence)
+                       self._record_model(
+                           run_context,
+                           fact,
+          @@ -136,7 +140,8 @@ class _RuntimeModelMetricCapability(AbstractCapability[AgentContext[object]]):
+                       )
+                       raise
+          -        fact = self._journal.finish(step_index, status="SUCCEEDED")
+          +        fact = self._journal.finish(request_sequence, status="SUCCEEDED")
+          +        self._journal.consume(request_sequence)
+                   self._record_model(
+                       run_context,
+                       fact,
+          diff --git a/linktools-ai/src/linktools/ai/runtime/_capabilities.py b/linktools-ai/src/linktools/ai/runtime/_capabilities.py
+          --- a/linktools-ai/src/linktools/ai/runtime/_capabilities.py
+          +++ b/linktools-ai/src/linktools/ai/runtime/_capabilities.py
+          @@ -119,6 +119,13 @@ class _RuntimeStepPersistence(StepPersistence[None]):
+                   repr=False,
+                   compare=False,
+               )
+          +    _model_request_tokens: dict[int, int] = field(
+          +        default_factory=dict,
+          +        init=False,
+          +        repr=False,
+          +        compare=False,
+          +    )
+          +
+               def __post_init__(self) -> None:
+                   if not isinstance(self.plan_mode, bool):
+                       raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+          @@ -211,11 +218,14 @@ class _RuntimeStepPersistence(StepPersistence[None]):
+                   request_context: ModelRequestContext,
+                   handler: WrapModelRequestHandler,
+               ) -> ModelResponse:
+          -        fact = (
+          -            None
+          -            if self.model_journal is None
+          -            else self.model_journal.begin(ctx.run_step, purpose="agent")
+          -        )
+          +        fact = None
+          +        request_sequence: int | None = None
+          +        if self.model_journal is not None:
+          +            if ctx.run_step in self._model_request_tokens:
+          +                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+          +            fact = self.model_journal.begin(ctx.run_step, purpose="agent")
+          +            request_sequence = fact.request_sequence
+          +            self._model_request_tokens[ctx.run_step] = request_sequence
+                   start_metadata = (
+                       {}
+                       if fact is None
+          @@ -228,10 +238,12 @@ class _RuntimeStepPersistence(StepPersistence[None]):
+                   try:
+                       response = await handler(request_context)
+                   except asyncio.CancelledError as error:
+          -            if self.model_journal is None:
+          +            if self.model_journal is None or request_sequence is None:
+                           raise
+          -            self.model_journal.finish(ctx.run_step, status="CANCELLED")
+          -            fact = self.model_journal.consume(ctx.run_step)
+          +            self.model_journal.finish(request_sequence, status="CANCELLED")
+          +            fact = self.model_journal.consume(request_sequence)
+          +            if self._model_request_tokens.pop(ctx.run_step, None) != request_sequence:
+          +                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
+                       await self._harness_cancelled_model_request(
+                           ctx,
+                           request_context,
+          @@ -241,15 +253,15 @@ class _RuntimeStepPersistence(StepPersistence[None]):
+                       )
+                       raise AssertionError("Harness cancellation hook must re-raise")
+                   except RunCancelled:
+          -            if self.model_journal is not None:
+          -                self.model_journal.finish(ctx.run_step, status="CANCELLED")
+          +            if self.model_journal is not None and request_sequence is not None:
+          +                self.model_journal.finish(request_sequence, status="CANCELLED")
+                       raise
+                   except BaseException:
+          -            if self.model_journal is not None:
+          -                self.model_journal.finish(ctx.run_step, status="FAILED")
+          +            if self.model_journal is not None and request_sequence is not None:
+          +                self.model_journal.finish(request_sequence, status="FAILED")
+                       raise
+          -        if self.model_journal is not None:
+          -            self.model_journal.finish(ctx.run_step, status="SUCCEEDED")
+          +        if self.model_journal is not None and request_sequence is not None:
+          +            self.model_journal.finish(request_sequence, status="SUCCEEDED")
+                   return response
+               
+               async def _harness_before_model_request(
+          @@ -363,14 +375,16 @@ class _RuntimeStepPersistence(StepPersistence[None]):
+               ) -> ModelRequestFact | None:
+                   if self.model_journal is None:
+                       return None
+          +        request_sequence = self._model_request_tokens.pop(ctx.run_step, None)
+          +        if request_sequence is None:
+          +            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                   try:
+          -            fact = self.model_journal.current(ctx.run_step)
+          -        except RuntimeError:
+          -            return None
+          +            fact = self.model_journal.current(request_sequence)
+          +        except RuntimeError as error:
+          +            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
+                   if fact.duration_ns is None:
+          -            self.model_journal.finish(ctx.run_step, status=status)
+          -        return self.model_journal.consume(ctx.run_step)
+          +            self.model_journal.finish(request_sequence, status=status)
+          +        return self.model_journal.consume(request_sequence)
+          
+               async def record_external_model_request(
+          diff --git a/tests/ai/test_compaction_harness_observability.py b/tests/ai/test_compaction_harness_observability.py
+          --- a/tests/ai/test_compaction_harness_observability.py
+          +++ b/tests/ai/test_compaction_harness_observability.py
+          @@ -80,4 +80,24 @@ async def test_harness_summary_request_uses_runtime_journal_and_observer() -> No
+                   assert len(request_context.messages) < len(messages)
+                   with pytest.raises(RuntimeError, match="missing"):
+          -        journal.current(ctx.run_step)
+          +        journal.current(observed[-1][1].request_sequence)
+          +
+          +
+          +def test_journal_keeps_agent_and_compaction_requests_distinct_on_same_step() -> None:
+          +    journal = ModelRequestJournal(
+          +        source_namespace="workspace",
+          +        tenant_id="tenant",
+          +        execution_id="execution",
+          +        step_run_id="run",
+          +    )
+          +    agent = journal.begin(3, purpose="agent")
+          +    compaction = journal.begin(3, purpose="compaction")
+          +
+          +    assert agent.request_sequence != compaction.request_sequence
+          +    assert agent.observation_id != compaction.observation_id
+          +    journal.finish(compaction.request_sequence, status="SUCCEEDED")
+          +    assert journal.consume(compaction.request_sequence).purpose == "compaction"
+          +    assert journal.current(agent.request_sequence) == agent
+          +    journal.finish(agent.request_sequence, status="SUCCEEDED")
+          +    assert journal.consume(agent.request_sequence).purpose == "agent"
+          PATCH
+          git apply --check /tmp/f5.patch
+          git apply /tmp/f5.patch
       - name: Install tooling
         shell: bash
         run: |
