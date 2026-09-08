@@ -2,9 +2,12 @@
 # -*- coding: utf-8 -*-
 
 import asyncio
+from datetime import datetime, timezone
 
 import pytest
 
+from linktools.ai.agent import AgentBindingSnapshot
+from linktools.ai.agent._output import bind_output
 from linktools.ai.core import canonical_sha256
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.runtime import RuntimeState
@@ -17,8 +20,68 @@ from linktools.ai.runtime.state import (
     PathOrigin,
     managed_attachment_path,
 )
+from linktools.ai.runtime.state._contracts import (
+    RecoveryCheckpoint,
+    RecoveryCheckpointState,
+    RecoveryExecutionInput,
+    RecoveryHandoffPhase,
+    RecoveryIdempotencyInput,
+)
 from linktools.ai.runtime.state._exposure_repository import ModelExposureRepository
+from linktools.ai.spec import AgentSpec
 from linktools.ai.storage import ObjectRef
+
+
+def _binding() -> AgentBindingSnapshot:
+    output = bind_output()
+    return AgentBindingSnapshot(
+        version=1,
+        agent_spec=AgentSpec("default"),
+        model={"route_id": "default", "model_identity": "test:model"},
+        selected=(),
+        subagents=(),
+        output_mode=output.mode,
+        output_schema=output.schema_definition,
+        binding_digest="a" * 64,
+    )
+
+
+def _checkpoint(execution_id: str) -> RecoveryCheckpoint:
+    now = datetime.now(timezone.utc)
+    return RecoveryCheckpoint(
+        execution_id,
+        "default",
+        RecoveryExecutionInput(
+            user_prompt="prompt",
+            user_prompt_codec="text",
+            principal_id="owner",
+            principal_kind="user",
+            session_id=None,
+            memory_scope=None,
+            binding_digest="a" * 64,
+            lineage_kind="run",
+            parent_execution_id=None,
+            root_execution_id=execution_id,
+            source_execution_id=None,
+            base_execution_id=None,
+            conversation_step_run_id=None,
+            idempotency=RecoveryIdempotencyInput("scope", "key", "digest"),
+            mode="run",
+            planning=False,
+            thinking=False,
+            binding=_binding(),
+        ),
+        None,
+        0,
+        RecoveryCheckpointState.ADMITTED,
+        RecoveryHandoffPhase.NONE,
+        None,
+        None,
+        None,
+        0,
+        now,
+        now,
+    )
 
 
 def _entry(owner: str, *, digest: str = "a" * 64) -> AttachmentEntry:
@@ -49,6 +112,7 @@ async def test_model_exposure_fact_is_semantically_idempotent() -> None:
     state = RuntimeState.in_memory()
     await state.initialize(namespace="exposure-test", tenant_id="default")
     try:
+        await state.recovery.checkpoints.create(_checkpoint("execution"))
         repository = ModelExposureRepository(
             state.recovery.checkpoints.state_store,
             namespace="exposure-test",
@@ -93,6 +157,7 @@ async def test_model_exposure_same_subject_rejects_semantic_drift() -> None:
     state = RuntimeState.in_memory()
     await state.initialize(namespace="exposure-test", tenant_id="default")
     try:
+        await state.recovery.checkpoints.create(_checkpoint("execution"))
         repository = ModelExposureRepository(
             state.recovery.checkpoints.state_store,
             namespace="exposure-test",
