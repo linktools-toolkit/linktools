@@ -52,7 +52,7 @@ jobs:
           replace_once(
               'linktools-ai/src/linktools/ai/runtime/_agent_executor.py',
               'from ._input import _RuntimeUserPrompt, _restore_user_prompt\n',
-              'from ._input import CanonicalUserInput, _RuntimeUserPrompt, _restore_user_prompt\n',
+              'from ._input import CanonicalUserInput\n',
           )
           replace_once(
               'linktools-ai/src/linktools/ai/runtime/_agent_executor.py',
