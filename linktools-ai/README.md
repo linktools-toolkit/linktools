@@ -258,12 +258,12 @@ Built-in Runtime state supports in-memory, filesystem, SQLite, and SQL compositi
 SQLite-backed Runtime state supports the built-in durable TaskGraph scheduler without a SQLite-specific launcher or an external lock. Normal internal Task optimistic-CAS races are reread and converged by the Task domain. Durable ToolOperation terminal persistence is also lease-aware: a same-lease heartbeat racing terminal persistence is reconciled without replaying the tool effect. Genuine ownership, fence, idempotency, tool-result, effect-unknown, integrity, and storage errors remain observable. Runtime startup still does not provision or migrate database schemas; schema provisioning remains an explicit deployment step.
 
 Durable local execution and recovery are provided by Runtime state and recovery
-checkpoints and do not require an external workflow server. Memory mutation
-receipts and per-file physical CAS sequences are committed with the Memory
-change, so delete/recreate cannot reuse an older physical version. Model
-requests use one request sequence and purpose (`agent` or `compaction`) across
-journal, trace, and optional metrics; compaction is one bounded native request
-and never rewrites the original transcript.
+checkpoints and do not require an external workflow server. Harness provides the
+Planning, Memory, StepPersistence, and context-compaction capability behavior,
+while LinkTools remains the durable owner of plans, Memory records and mutation
+receipts, execution history, and the raw transcript. Memory content continues to
+persist through `MemoryState` and `ObjectStore`. Compaction only rewrites the
+request context projection; it never rewrites the raw transcript.
 
 ## 8. Execution failure diagnostics
 
