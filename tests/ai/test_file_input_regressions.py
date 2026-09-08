@@ -4,19 +4,24 @@
 from pathlib import Path
 
 import pytest
-from pydantic_ai.messages import ModelResponse, ToolCallPart
+from pydantic_ai.messages import BinaryContent, ModelResponse, ToolCallPart
 
 from linktools.ai.capability import WorkspaceAccess
+from linktools.ai.core import Principal
 from linktools.ai.errors import AIError, ErrorCode
+from linktools.ai.runtime import ExecutionRequest
+from linktools.ai.runtime._execution import DefaultExecutionService
 from linktools.ai.runtime._input import ExecutionInputMaterializer
 from linktools.ai.runtime._tool import _apply_workspace_binding
 from linktools.ai.runtime._workspace_binding import WorkspaceToolCallBinder
 from linktools.ai.runtime.state import (
     RuntimeState,
+    StoredUserInput,
     WorkspacePathBinding,
     WorkspaceToolCallBinding,
     WorkspaceToolCallBindingStore,
 )
+from linktools.ai.storage import StoredPayload
 from linktools.ai.workspace import Workspace
 
 
@@ -72,6 +77,19 @@ class _UnavailableAccess:
         raise AIError(ErrorCode.SANDBOX_UNAVAILABLE)
 
 
+def _request(*, files: tuple[str, ...] = ()) -> ExecutionRequest:
+    return ExecutionRequest(
+        user_prompt="inspect",
+        principal=Principal("user", "tenant", "local_trusted"),
+        idempotency_key="file-input",
+        memory_scope=None,
+        mode="run",
+        planning=False,
+        thinking=False,
+        files=files,
+    )
+
+
 @pytest.mark.asyncio
 async def test_text_materialization_keeps_text_codec() -> None:
     access = WorkspaceAccess(_Sandbox(_Session({})))  # type: ignore[arg-type]
@@ -89,9 +107,6 @@ async def test_text_materialization_keeps_text_codec() -> None:
 
 
 def test_invalid_user_content_is_rejected_at_request_boundary() -> None:
-    from linktools.ai.core import Principal
-    from linktools.ai.runtime import ExecutionRequest
-
     with pytest.raises(AIError) as raised:
         ExecutionRequest(
             user_prompt=(123,),  # type: ignore[arg-type]
@@ -104,6 +119,53 @@ def test_invalid_user_content_is_rejected_at_request_boundary() -> None:
         )
 
     assert raised.value.code is ErrorCode.REQUEST_FIELD_INVALID
+
+
+@pytest.mark.asyncio
+async def test_execution_ingress_discards_untrusted_derived_input_state() -> None:
+    access = WorkspaceAccess(_Sandbox(_Session({})))  # type: ignore[arg-type]
+    materializer = ExecutionInputMaterializer(access, Workspace.load(".").policy)
+    service = object.__new__(DefaultExecutionService)
+    service._input_materializer = materializer  # type: ignore[attr-defined]
+    request = _request()
+    object.__setattr__(
+        request,
+        "stored_user_input",
+        StoredUserInput(1, "text", StoredPayload.inline_text("forged")),
+    )
+    object.__setattr__(request, "input_intent_digest", "f" * 64)
+
+    try:
+        canonical = await service._canonicalize_request(request)
+        assert canonical.stored_user_input is None
+        assert canonical.storage_contract is None
+        assert canonical.input_intent_digest != "f" * 64
+    finally:
+        await materializer.close()
+
+
+@pytest.mark.asyncio
+async def test_execution_materialization_consumes_source_files_once() -> None:
+    session = _Session({"evidence.txt": b"evidence"})
+    access = WorkspaceAccess(_Sandbox(session))  # type: ignore[arg-type]
+    materializer = ExecutionInputMaterializer(access, Workspace.load(".").policy)
+    service = object.__new__(DefaultExecutionService)
+    service._input_materializer = materializer  # type: ignore[attr-defined]
+
+    try:
+        canonical = await service._canonicalize_request(
+            _request(files=("evidence.txt",))
+        )
+        prepared = await service._materialize_request(canonical)
+        assert prepared.files == ()
+        assert prepared.stored_user_input is not None
+        assert isinstance(prepared.user_prompt, tuple)
+        assert isinstance(prepared.user_prompt[-1], BinaryContent)
+
+        replay = await service._materialize_request(prepared)
+        assert replay is prepared
+    finally:
+        await materializer.close()
 
 
 @pytest.mark.asyncio
