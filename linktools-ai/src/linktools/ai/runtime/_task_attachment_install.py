@@ -1,0 +1,283 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""Install Task v2 attachment integration with instance-owned coordination."""
+
+from collections.abc import Mapping
+from typing import Any
+
+import linktools.ai.runtime._planner as planner_runtime
+import linktools.ai.runtime._runtime_service as runtime_service
+import linktools.ai.runtime._task_attachment as task_attachment
+import linktools.ai.runtime.state._codec as codec_runtime
+
+from ..errors import AIError, ErrorCode
+from ..task import DefaultTaskService, TaskGraph, TaskGraphLaunch
+from ._attachment import DefaultAttachmentService
+from .state import RuntimeDomain
+from .state._attachment_codec import _entry
+from .state._codec import _decode_domain
+from .state._contracts import ExecutionStartReservation
+from .state._repositories import ExecutionRepositoryImpl
+
+_installed = False
+_original_runtime_init: Any = None
+_original_admit_graph: Any = None
+_original_arm_graph: Any = None
+_original_runner_handler: Any = None
+_original_agent_normalize: Any = None
+_original_agent_validate_recovery: Any = None
+_original_agent_prepare_request: Any = None
+_original_agent_run_node: Any = None
+_original_agent_cancel_node: Any = None
+_original_reserve_start: Any = None
+_original_iter_object_refs: Any = None
+
+
+async def _runtime_admit_graph(
+    self: runtime_service.Runtime,
+    graph: TaskGraph,
+    *,
+    principal: Any,
+    idempotency_key: str,
+    limits: Any,
+    correlation: Any,
+):
+    coordinator = self.__dict__.get("_task_attachment_coordinator")
+    if coordinator is None or not any(
+        task_attachment._is_v2_draft(node) for node in graph.nodes
+    ):
+        return await _original_admit_graph(
+            self,
+            graph,
+            principal=principal,
+            idempotency_key=idempotency_key,
+            limits=limits,
+            correlation=correlation,
+        )
+    resolved = self._resolve_principal(principal)
+    prepared = await coordinator.prepare_graph(
+        graph,
+        principal=resolved,
+        idempotency_key=idempotency_key,
+    )
+    return await _original_admit_graph(
+        self,
+        prepared,
+        principal=resolved,
+        idempotency_key=idempotency_key,
+        limits=limits,
+        correlation=correlation,
+    )
+
+
+async def _task_arm_graph(
+    self: DefaultTaskService,
+    launch: TaskGraphLaunch,
+) -> None:
+    coordinator = self.__dict__.get("_task_attachment_coordinator")
+    if coordinator is not None:
+        await coordinator.confirm_launch(launch)
+    await _original_arm_graph(self, launch)
+
+
+def _runtime_init(self: runtime_service.Runtime, *args: Any, **kwargs: Any) -> None:
+    _original_runtime_init(self, *args, **kwargs)
+    attachment_service = self.attachments
+    task_runtime = self._task_node_runtime
+    if not isinstance(attachment_service, DefaultAttachmentService) or not isinstance(
+        task_runtime,
+        planner_runtime.RuntimeTaskNodeRunner,
+    ):
+        return
+    coordinator = task_attachment._TaskAttachmentCoordinator(
+        self.task,
+        task_runtime,
+        attachment_service,
+        self.workspace,
+    )
+    self.__dict__["_task_attachment_coordinator"] = coordinator
+    self.task.__dict__["_task_attachment_coordinator"] = coordinator
+
+
+def _runner_handler(
+    self: planner_runtime.RuntimeTaskNodeRunner,
+    task_type: str,
+    task_version: int,
+):
+    if task_type == task_attachment._AGENT_TASK_TYPE and task_version == 2:
+        return self._agent
+    return _original_runner_handler(self, task_type, task_version)
+
+
+def _agent_normalize(self: Any, body: Mapping[str, Any]) -> dict[str, Any]:
+    if body.get("stage") is None:
+        return _original_agent_normalize(self, body)
+    if body.get("stage") != "prepared":
+        raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+    return task_attachment._normalized_prepared_body(body)
+
+
+def _agent_validate_recovery(
+    self: Any,
+    body: Mapping[str, Any],
+    *,
+    graph_id: str,
+    node_id: str,
+) -> dict[str, Any]:
+    if body.get("stage") is None:
+        return _original_agent_validate_recovery(
+            self,
+            body,
+            graph_id=graph_id,
+            node_id=node_id,
+        )
+    del graph_id, node_id
+    return task_attachment._normalized_prepared_body(body)
+
+
+def _agent_prepare_request(self: Any, node: Any, **kwargs: Any):
+    if not task_attachment._is_v2_prepared(node):
+        return _original_agent_prepare_request(self, node, **kwargs)
+    binding, request, _prepared, _target = task_attachment._derived_execution_prepared(
+        self,
+        node,
+        graph_id=kwargs["graph_id"],
+        principal=kwargs["principal"],
+        dependencies=kwargs["dependencies"],
+    )
+    from dataclasses import replace
+
+    return binding, replace(request, correlation=kwargs["correlation"])
+
+
+async def _agent_run_node(self: Any, node: Any, **kwargs: Any):
+    if not task_attachment._is_v2_prepared(node):
+        return await _original_agent_run_node(self, node, **kwargs)
+    _binding, request, prepared, target = task_attachment._derived_execution_prepared(
+        self,
+        node,
+        graph_id=kwargs["graph_id"],
+        principal=kwargs["principal"],
+        dependencies=kwargs["dependencies"],
+    )
+    with task_attachment.admission_scope(
+        task_attachment.ManagedAdmission(
+            "execution.run",
+            request.idempotency_key,
+            prepared,
+            source_target=target,
+        )
+    ):
+        return await _original_agent_run_node(self, node, **kwargs)
+
+
+async def _agent_cancel_node(self: Any, node: Any, **kwargs: Any) -> None:
+    if not task_attachment._is_v2_prepared(node):
+        await _original_agent_cancel_node(self, node, **kwargs)
+        return
+    _binding, request, prepared, target = task_attachment._derived_execution_prepared(
+        self,
+        node,
+        graph_id=kwargs["graph_id"],
+        principal=kwargs["principal"],
+        dependencies=kwargs["dependencies"],
+    )
+    with task_attachment.admission_scope(
+        task_attachment.ManagedAdmission(
+            "execution.run",
+            request.idempotency_key,
+            prepared,
+            source_target=target,
+        )
+    ):
+        await _original_agent_cancel_node(self, node, **kwargs)
+
+
+async def _reserve_start(
+    self: ExecutionRepositoryImpl,
+    reservation: ExecutionStartReservation,
+):
+    return await task_attachment._reserve_start_from_adopted_source(self, reservation)
+
+
+def _iter_object_refs(value: object, domain: RuntimeDomain, codec: Any):
+    if isinstance(value, Mapping) and value.get("$dataclass") == "task_node":
+        fields = value.get("fields")
+        if isinstance(fields, Mapping):
+            input_value = fields.get("input")
+            try:
+                decoded = _decode_domain(input_value, Any, codec, persisted=True)
+            except AIError:
+                decoded = None
+            if (
+                isinstance(decoded, Mapping)
+                and decoded.get("type") == task_attachment._AGENT_TASK_TYPE
+                and decoded.get("version") == 2
+                and decoded.get("stage") == "prepared"
+            ):
+                manifest = decoded.get("attachment_manifest")
+                if isinstance(manifest, list):
+                    for raw in manifest:
+                        entry = _entry(raw)
+                        try:
+                            yield RuntimeDomain(entry.content.domain), entry.content.object
+                        except ValueError as error:
+                            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
+    yield from _original_iter_object_refs(value, domain, codec)
+
+
+def install_task_attachments() -> None:
+    """Install Task v2 attachment integration exactly once."""
+    global _installed
+    global _original_runtime_init
+    global _original_admit_graph
+    global _original_arm_graph
+    global _original_runner_handler
+    global _original_agent_normalize
+    global _original_agent_validate_recovery
+    global _original_agent_prepare_request
+    global _original_agent_run_node
+    global _original_agent_cancel_node
+    global _original_reserve_start
+    global _original_iter_object_refs
+    if _installed:
+        return
+
+    _original_runtime_init = runtime_service.Runtime.__init__
+    _original_admit_graph = runtime_service.Runtime._admit_graph
+    _original_arm_graph = DefaultTaskService._arm_graph
+    _original_runner_handler = planner_runtime.RuntimeTaskNodeRunner._handler
+    _original_agent_normalize = planner_runtime._AgentTaskNodeHandler.normalize
+    _original_agent_validate_recovery = planner_runtime._AgentTaskNodeHandler.validate_recovery
+    _original_agent_prepare_request = planner_runtime._AgentTaskNodeHandler._prepare_request
+    _original_agent_run_node = planner_runtime._AgentTaskNodeHandler.run_node
+    _original_agent_cancel_node = planner_runtime._AgentTaskNodeHandler.cancel_node
+    _original_reserve_start = ExecutionRepositoryImpl.reserve_start
+    _original_iter_object_refs = codec_runtime._iter_runtime_object_refs
+
+    task_attachment._original_reserve_start = _original_reserve_start
+    task_attachment._original_runtime_init = _original_runtime_init
+    task_attachment._original_admit_graph = _original_admit_graph
+    task_attachment._original_arm_graph = _original_arm_graph
+    task_attachment._original_runner_handler = _original_runner_handler
+    task_attachment._original_agent_normalize = _original_agent_normalize
+    task_attachment._original_agent_validate_recovery = _original_agent_validate_recovery
+    task_attachment._original_agent_prepare_request = _original_agent_prepare_request
+    task_attachment._original_agent_run_node = _original_agent_run_node
+    task_attachment._original_agent_cancel_node = _original_agent_cancel_node
+
+    runtime_service.Runtime.__init__ = _runtime_init
+    runtime_service.Runtime._admit_graph = _runtime_admit_graph
+    DefaultTaskService._arm_graph = _task_arm_graph
+    planner_runtime.RuntimeTaskNodeRunner._handler = _runner_handler
+    planner_runtime._AgentTaskNodeHandler.normalize = _agent_normalize
+    planner_runtime._AgentTaskNodeHandler.validate_recovery = _agent_validate_recovery
+    planner_runtime._AgentTaskNodeHandler._prepare_request = _agent_prepare_request
+    planner_runtime._AgentTaskNodeHandler.run_node = _agent_run_node
+    planner_runtime._AgentTaskNodeHandler.cancel_node = _agent_cancel_node
+    ExecutionRepositoryImpl.reserve_start = _reserve_start
+    codec_runtime._iter_runtime_object_refs = _iter_object_refs
+    _installed = True
+
+
+__all__ = ["install_task_attachments"]
