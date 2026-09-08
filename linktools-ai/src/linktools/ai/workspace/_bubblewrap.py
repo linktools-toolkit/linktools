@@ -527,6 +527,7 @@ class _BubblewrapSandboxSession:
             await _abort_guardian(
                 self._process,
                 allow_session_failure=True,
+                allow_signaled_exit=True,
             )
         except Exception as error:
             self._lost_cleanup_error = error
@@ -534,6 +535,7 @@ class _BubblewrapSandboxSession:
 
     async def _close_impl(self) -> None:
         try:
+            guardian_handled = False
             lost_cleanup = self._lost_cleanup_task
             if lost_cleanup is not None and lost_cleanup is not asyncio.current_task():
                 await asyncio.shield(lost_cleanup)
@@ -541,13 +543,15 @@ class _BubblewrapSandboxSession:
                     raise AIError(
                         ErrorCode.SANDBOX_CLEANUP_FAILED,
                     ) from self._lost_cleanup_error
-            stdin = self._process.stdin
-            if stdin is not None and not stdin.is_closing():
-                stdin.close()
-            await _wait_guardian(
-                self._process,
-                allow_session_failure=True,
-            )
+                guardian_handled = True
+            if not guardian_handled:
+                stdin = self._process.stdin
+                if stdin is not None and not stdin.is_closing():
+                    stdin.close()
+                await _wait_guardian(
+                    self._process,
+                    allow_session_failure=True,
+                )
             await self._fail_pending(ErrorCode.SANDBOX_SESSION_CLOSED)
             await self._stop_background_tasks()
             async with self._state_lock:
@@ -936,6 +940,7 @@ async def _abort_guardian(
     process: asyncio.subprocess.Process,
     *,
     allow_session_failure: bool = True,
+    allow_signaled_exit: bool = False,
 ) -> None:
     stdin = process.stdin
     if stdin is not None and not stdin.is_closing():
@@ -945,6 +950,12 @@ async def _abort_guardian(
             asyncio.shield(process.wait()),
             _CLOSE_TIMEOUT_SECONDS,
         )
+        if (
+            allow_signaled_exit
+            and process.returncode is not None
+            and process.returncode < 0
+        ):
+            return
         _validate_guardian_exit(
             process,
             allow_session_failure=allow_session_failure,
