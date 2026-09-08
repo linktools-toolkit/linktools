@@ -38,78 +38,51 @@ jobs:
 
           path = Path("linktools-ai/src/linktools/ai/runtime/_execution.py")
           value = path.read_text()
-          old = '''            view = _execution_view(execution)
-            while True:
-                waiter = self._local_waiter
-                owns_execution = waiter is not None and waiter.owns_execution(
-                    execution_id,
-                    tenant_id=principal.tenant_id,
-                )
-                if view.status in {
-                    ExecutionStatus.SUCCEEDED,
-                    ExecutionStatus.FAILED,
-                    ExecutionStatus.CANCELLED,
-                }:
-                    if owns_execution:
-                        _logger.debug(
-                            "execution wait awaiting local terminal worker: execution=%s",
-                            execution_id,
-                        )
-                        await waiter.wait_terminal(
-                            execution_id,
-                            tenant_id=principal.tenant_id,
-                        )
-                        view = await self.inspect(execution_id, principal=principal)
-                        continue
-'''
-          new = '''            status = execution.status
-            while True:
-                waiter = self._local_waiter
-                owns_execution = waiter is not None and waiter.owns_execution(
-                    execution_id,
-                    tenant_id=principal.tenant_id,
-                )
-                if status in {
-                    ExecutionStatus.SUCCEEDED,
-                    ExecutionStatus.FAILED,
-                    ExecutionStatus.CANCELLED,
-                }:
-                    if owns_execution:
-                        _logger.debug(
-                            "execution wait awaiting local terminal worker: execution=%s",
-                            execution_id,
-                        )
-                        await waiter.wait_terminal(
-                            execution_id,
-                            tenant_id=principal.tenant_id,
-                        )
-                        execution = await self._load_authorized(
-                            execution_id,
-                            principal,
-                            AuthorizationAction.EXECUTION_READ,
-                        )
-                        status = execution.status
-                        continue
-'''
-          if value.count(old) != 1:
-              raise RuntimeError(f"expected one wait projection block, got {value.count(old)}")
-          value = value.replace(old, new, 1)
-          old_tail = '''                view = await self.inspect(execution_id, principal=principal)
-
-        try:
-'''
-          new_tail = '''                execution = await self._load_authorized(
-                    execution_id,
-                    principal,
-                    AuthorizationAction.EXECUTION_READ,
-                )
-                status = execution.status
-
-        try:
-'''
-          if value.count(old_tail) != 1:
-              raise RuntimeError(f"expected one wait refresh tail, got {value.count(old_tail)}")
-          path.write_text(value.replace(old_tail, new_tail, 1))
+          marker = "    @_consumed_query\n    async def wait("
+          start = value.index(marker)
+          end = value.index("\n    async def run_and_wait(", start)
+          segment = value[start:end]
+          if segment.count("            view = _execution_view(execution)\n") != 1:
+              raise RuntimeError("expected one initial wait view projection")
+          segment = segment.replace(
+              "            view = _execution_view(execution)\n",
+              "            status = execution.status\n",
+              1,
+          )
+          if segment.count("                if view.status in {\n") != 1:
+              raise RuntimeError("expected one wait status condition")
+          segment = segment.replace(
+              "                if view.status in {\n",
+              "                if status in {\n",
+              1,
+          )
+          refresh = "                        view = await self.inspect(execution_id, principal=principal)\n"
+          if segment.count(refresh) != 1:
+              raise RuntimeError("expected one terminal wait refresh")
+          segment = segment.replace(
+              refresh,
+              "                        execution = await self._load_authorized(\n"
+              "                            execution_id,\n"
+              "                            principal,\n"
+              "                            AuthorizationAction.EXECUTION_READ,\n"
+              "                        )\n"
+              "                        status = execution.status\n",
+              1,
+          )
+          refresh = "                view = await self.inspect(execution_id, principal=principal)\n"
+          if segment.count(refresh) != 1:
+              raise RuntimeError("expected one polling wait refresh")
+          segment = segment.replace(
+              refresh,
+              "                execution = await self._load_authorized(\n"
+              "                    execution_id,\n"
+              "                    principal,\n"
+              "                    AuthorizationAction.EXECUTION_READ,\n"
+              "                )\n"
+              "                status = execution.status\n",
+              1,
+          )
+          path.write_text(value[:start] + segment + value[end:])
           PY
       - name: Install tooling
         run: |
