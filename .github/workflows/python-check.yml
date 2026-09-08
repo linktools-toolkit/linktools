@@ -73,3 +73,138 @@ jobs:
           python manage.py install --editable --quiet
       - name: Run checks
         run: python manage.py check --skip-compatibility
+
+  ai_floor:
+    name: linktools-ai SDK floors
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.10'
+      - name: Install pinned SDK environment
+        run: |
+          python -m pip install --quiet --upgrade pip
+          python -m pip install --quiet -U -r requirements.txt
+          python -m pip install --quiet \
+            'pydantic-ai-slim[mcp,openai]==2.40.0' \
+            'pydantic-ai-harness==0.29.0'
+          python manage.py install --editable --quiet
+      - name: Verify pinned SDK versions
+        run: |
+          python - <<'PY'
+          import importlib.metadata as metadata
+          import pydantic_ai
+
+          assert pydantic_ai.__version__ == "2.40.0"
+          assert metadata.version("pydantic-ai-harness") == "0.29.0"
+          PY
+      - name: Run linktools-ai checks
+        run: python manage.py check linktools-ai
+      - name: Build linktools-ai
+        run: python manage.py build linktools-ai
+      - name: Verify linktools-ai package
+        run: python manage.py verify linktools-ai
+
+  ai_local_platform:
+    name: LocalSandbox on ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-latest
+          - macos-latest
+          - windows-latest
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.10'
+      - name: Install LocalSandbox verification environment
+        run: |
+          python -m pip install --quiet --upgrade pip
+          python -m pip install --quiet -U -r requirements.txt
+          python manage.py install linktools linktools-ai --editable --quiet
+      - name: Run cross-platform LocalSandbox acceptance
+        run: python -m pytest -q tests/ai/test_local_sandbox_platform.py
+
+  ai_bubblewrap:
+    name: Real non-root Bubblewrap task
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.11'
+      - name: Install build and sandbox prerequisites
+        run: |
+          python -m pip install --quiet --upgrade pip
+          python -m pip install --quiet -U -r requirements.txt
+          python manage.py install --editable --quiet
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y \
+            build-essential curl debootstrap libcap-dev meson ninja-build pkg-config xz-utils
+      - name: Enable Linux user namespaces for Bubblewrap
+        shell: bash
+        run: |
+          set -euo pipefail
+          current_userns="$(sysctl -n kernel.unprivileged_userns_clone 2>/dev/null || true)"
+          if [ -n "$current_userns" ] && [ "$current_userns" != "1" ]; then
+            sudo sysctl -w kernel.unprivileged_userns_clone=1
+          fi
+          current_apparmor="$(sysctl -n kernel.apparmor_restrict_unprivileged_userns 2>/dev/null || true)"
+          if [ -n "$current_apparmor" ] && [ "$current_apparmor" != "0" ]; then
+            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          fi
+      - name: Build Bubblewrap 0.12.0
+        shell: bash
+        run: |
+          set -euo pipefail
+          archive="$RUNNER_TEMP/bubblewrap-0.12.0.tar.xz"
+          source_root="$RUNNER_TEMP/bubblewrap-0.12.0"
+          install_root="$RUNNER_TEMP/bubblewrap-install"
+          curl --fail --location --silent --show-error \
+            https://github.com/containers/bubblewrap/releases/download/v0.12.0/bubblewrap-0.12.0.tar.xz \
+            --output "$archive"
+          echo "9760d007363e3abba7c747489910f9f82d9fca53ba3bd3282e396fa3c97a3314  $archive" | \
+            sha256sum --check --strict
+          tar -xJf "$archive" -C "$RUNNER_TEMP"
+          meson setup "$source_root/_build" "$source_root" \
+            --prefix="$install_root" -Dman=disabled -Dselinux=disabled
+          meson compile -C "$source_root/_build"
+          meson install -C "$source_root/_build"
+          "$install_root/bin/bwrap" --version
+          echo "LINKTOOLS_BWRAP_EXECUTABLE=$install_root/bin/bwrap" >> "$GITHUB_ENV"
+      - name: Build the runtime rootfs from release artifacts
+        shell: bash
+        run: |
+          set -euo pipefail
+          python manage.py build linktools linktools-ai
+          wheelhouse="$RUNNER_TEMP/bubblewrap-wheelhouse"
+          runtime_root="$RUNNER_TEMP/bubblewrap-runtime-root"
+          mkdir -p "$wheelhouse"
+          python -m pip download --dest "$wheelhouse" --only-binary=:all: \
+            dist/linktools-*.whl dist/linktools_ai-*.whl
+          sudo debootstrap --variant=minbase \
+            --include=python3,python3-pip,ca-certificates \
+            bookworm "$runtime_root" http://deb.debian.org/debian
+          sudo mkdir -p \
+            "$runtime_root/workspace" \
+            "$runtime_root/skills" \
+            "$runtime_root/__linktools_locks" \
+            "$runtime_root/home/sandbox"
+          sudo mkdir -p "$runtime_root/tmp/linktools-wheelhouse"
+          sudo cp "$wheelhouse"/*.whl "$runtime_root/tmp/linktools-wheelhouse/"
+          sudo chroot "$runtime_root" /usr/bin/python3 -m pip install \
+            --break-system-packages --no-index \
+            --find-links=/tmp/linktools-wheelhouse linktools linktools-ai
+          sudo chroot "$runtime_root" /usr/bin/python3 -I -c \
+            'import linktools.ai.workspace.sandbox_worker'
+          sudo chmod a-w "$runtime_root"
+          echo "LINKTOOLS_BWRAP_RUNTIME_ROOT=$runtime_root" >> "$GITHUB_ENV"
+      - name: Run real non-root Bubblewrap acceptance
+        run: |
+          test "$(id -u)" -ne 0
+          LINKTOOLS_REQUIRE_BUBBLEWRAP=1 \
+            python -m pytest -q tests/ai/test_bubblewrap_integration.py
