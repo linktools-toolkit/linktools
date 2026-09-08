@@ -206,6 +206,7 @@ async def test_output_retry_metric_lineage_uses_pydantic_retry_state() -> None:
         value for value in recorder.observations if value.kind == "linktools.model.request"
     ]
     assert len(model_observations) == 3
+    assert len({value.observation_id for value in model_observations}) == 3
     assert "linktools.output_retry_index" not in model_observations[0].correlation
     assert model_observations[1].correlation["linktools.output_retry_index"] == 1
     assert model_observations[2].correlation["linktools.output_retry_index"] == 2
