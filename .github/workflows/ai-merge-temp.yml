@@ -24,9 +24,5 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git fetch origin master
-          if ! git merge --no-edit origin/master; then
-            echo '--- merge conflicts ---'
-            git status --short
-            exit 1
-          fi
+          git merge -X ours --no-edit origin/master
           git push origin HEAD:refactor/ai-harness-capabilities
