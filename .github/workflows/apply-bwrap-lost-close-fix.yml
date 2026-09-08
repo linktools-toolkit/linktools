@@ -1,0 +1,138 @@
+name: Apply Bubblewrap lost-session close fix
+
+on:
+  push:
+    branches:
+      - fix/ai-native-capabilities-v4-review
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: fix/ai-native-capabilities-v4-review
+      - name: Apply exact lost-session cleanup fix
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          path = Path("linktools-ai/src/linktools/ai/workspace/_bubblewrap.py")
+          text = path.read_text(encoding="utf-8")
+
+          old = (
+              "            await _abort_guardian(\n"
+              "                self._process,\n"
+              "                allow_session_failure=True,\n"
+              "            )\n"
+          )
+          new = (
+              "            await _abort_guardian(\n"
+              "                self._process,\n"
+              "                allow_session_failure=True,\n"
+              "                allow_signaled_exit=True,\n"
+              "            )\n"
+          )
+          if text.count(old) != 1:
+              raise SystemExit("lost guardian cleanup call shape changed")
+          text = text.replace(old, new, 1)
+
+          old = (
+              "            lost_cleanup = self._lost_cleanup_task\n"
+              "            if lost_cleanup is not None and lost_cleanup is not asyncio.current_task():\n"
+              "                await asyncio.shield(lost_cleanup)\n"
+              "                if self._lost_cleanup_error is not None:\n"
+              "                    raise AIError(\n"
+              "                        ErrorCode.SANDBOX_CLEANUP_FAILED,\n"
+              "                    ) from self._lost_cleanup_error\n"
+              "            stdin = self._process.stdin\n"
+              "            if stdin is not None and not stdin.is_closing():\n"
+              "                stdin.close()\n"
+              "            await _wait_guardian(\n"
+              "                self._process,\n"
+              "                allow_session_failure=True,\n"
+              "            )\n"
+          )
+          new = (
+              "            guardian_handled = False\n"
+              "            lost_cleanup = self._lost_cleanup_task\n"
+              "            if lost_cleanup is not None and lost_cleanup is not asyncio.current_task():\n"
+              "                await asyncio.shield(lost_cleanup)\n"
+              "                if self._lost_cleanup_error is not None:\n"
+              "                    raise AIError(\n"
+              "                        ErrorCode.SANDBOX_CLEANUP_FAILED,\n"
+              "                    ) from self._lost_cleanup_error\n"
+              "                guardian_handled = True\n"
+              "            if not guardian_handled:\n"
+              "                stdin = self._process.stdin\n"
+              "                if stdin is not None and not stdin.is_closing():\n"
+              "                    stdin.close()\n"
+              "                await _wait_guardian(\n"
+              "                    self._process,\n"
+              "                    allow_session_failure=True,\n"
+              "                )\n"
+          )
+          if text.count(old) != 1:
+              raise SystemExit("close implementation shape changed")
+          text = text.replace(old, new, 1)
+
+          old = (
+              "async def _abort_guardian(\n"
+              "    process: asyncio.subprocess.Process,\n"
+              "    *,\n"
+              "    allow_session_failure: bool = True,\n"
+              ") -> None:\n"
+          )
+          new = (
+              "async def _abort_guardian(\n"
+              "    process: asyncio.subprocess.Process,\n"
+              "    *,\n"
+              "    allow_session_failure: bool = True,\n"
+              "    allow_signaled_exit: bool = False,\n"
+              ") -> None:\n"
+          )
+          if text.count(old) != 1:
+              raise SystemExit("abort guardian signature shape changed")
+          text = text.replace(old, new, 1)
+
+          old = (
+              "        _validate_guardian_exit(\n"
+              "            process,\n"
+              "            allow_session_failure=allow_session_failure,\n"
+              "        )\n"
+              "        return\n"
+              "    except asyncio.TimeoutError:\n"
+          )
+          new = (
+              "        if (\n"
+              "            allow_signaled_exit\n"
+              "            and process.returncode is not None\n"
+              "            and process.returncode < 0\n"
+              "        ):\n"
+              "            return\n"
+              "        _validate_guardian_exit(\n"
+              "            process,\n"
+              "            allow_session_failure=allow_session_failure,\n"
+              "        )\n"
+              "        return\n"
+              "    except asyncio.TimeoutError:\n"
+          )
+          if text.count(old) != 1:
+              raise SystemExit("abort guardian graceful wait shape changed")
+          text = text.replace(old, new, 1)
+
+          path.write_text(text, encoding="utf-8")
+          PY
+      - name: Commit fix and remove this workflow
+        run: |
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git rm .github/workflows/apply-bwrap-lost-close-fix.yml
+          git add linktools-ai/src/linktools/ai/workspace/_bubblewrap.py
+          git diff --cached --check
+          git commit -m 'fix(ai): close lost bubblewrap sessions cleanly'
+          git push origin HEAD:fix/ai-native-capabilities-v4-review
