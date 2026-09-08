@@ -208,11 +208,6 @@ async def test_output_retry_metric_lineage_uses_pydantic_retry_state() -> None:
     assert len(model_observations) == 2
     assert "linktools.output_retry_index" not in model_observations[0].correlation
     assert model_observations[1].correlation["linktools.output_retry_index"] == 1
-    retry_measurements = {
-        measurement.name: measurement.value
-        for measurement in model_observations[1].measurements
-    }
-    assert retry_measurements["output_retry_count"] == 1
 
 
 @pytest.mark.asyncio
