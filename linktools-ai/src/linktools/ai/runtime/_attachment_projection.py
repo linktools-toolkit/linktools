@@ -7,7 +7,7 @@ from dataclasses import replace
 from typing import Any
 
 from pydantic_ai import ModelRequestContext, RunContext
-from pydantic_ai.capabilities import AbstractCapability
+from pydantic_ai.capabilities import AbstractCapability, CapabilityOrdering
 from pydantic_ai.messages import ModelMessage, ModelRequest, TextContent, UserContent, UserPromptPart
 
 from ..core import canonical_sha256
@@ -22,6 +22,7 @@ from ._attachment_adapter import (
 from ._input import _decode_user_content
 from .state import (
     AttachmentEntry,
+    ContentRef,
     InputAttachmentPart,
     InputNativePart,
     InputTextPart,
@@ -36,7 +37,7 @@ from .state import (
 _ExecutionCheck = Callable[[int], Awaitable[None]]
 _EntryAuthorization = Callable[[int, tuple[ModelExposureEntry, ...]], Awaitable[None]]
 _ExposureCommit = Callable[[int, tuple[ModelExposureEntry, ...]], Awaitable[ModelExposure]]
-_ContentRead = Callable[[Any], Awaitable[bytes]]
+_ContentRead = Callable[[ContentRef], Awaitable[bytes]]
 
 
 class AttachmentProjectionCapability(AbstractCapability[Any]):
@@ -73,6 +74,9 @@ class AttachmentProjectionCapability(AbstractCapability[Any]):
         self._authorize_entries = authorize_entries
         self._commit_exposure = commit_exposure
         self._read_content = read_content
+
+    def get_ordering(self) -> CapabilityOrdering:
+        return CapabilityOrdering(position="innermost")
 
     async def before_model_request(
         self,
@@ -216,7 +220,12 @@ def _prepare_current_messages(
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     normalized[last_request] = replace(
         request,
-        parts=(*request.parts, UserPromptPart(content=tuple(attachment_placeholder(value) for value in missing))),
+        parts=(
+            *request.parts,
+            UserPromptPart(
+                content=tuple(attachment_placeholder(value) for value in missing)
+            ),
+        ),
     )
     return normalized
 
