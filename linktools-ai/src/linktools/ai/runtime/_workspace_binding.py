@@ -173,6 +173,8 @@ class WorkspaceToolCallBinder:
                 fields=fields,
             )
         except AIError as error:
+            if error.code is not ErrorCode.REQUEST_FIELD_INVALID:
+                raise
             return WorkspaceToolCallBinding(
                 1,
                 execution_id,
@@ -203,7 +205,7 @@ class WorkspaceToolCallBinder:
         result: list[WorkspacePathBinding] = []
         for field in fields:
             if field not in arguments:
-                raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+                continue
             value = arguments[field]
             if isinstance(value, str):
                 values = (value,)
