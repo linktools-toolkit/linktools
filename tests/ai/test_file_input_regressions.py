@@ -47,13 +47,22 @@ class _Sandbox:
 
 class _BindingStore:
     def __init__(self) -> None:
-        self.values: dict[tuple[str, str], WorkspaceToolCallBinding] = {}
+        self.values: dict[tuple[str, str, str], WorkspaceToolCallBinding] = {}
 
-    async def get(self, step_run_id: str, tool_call_id: str):  # type: ignore[no-untyped-def]
-        return self.values.get((step_run_id, tool_call_id))
+    async def get(  # type: ignore[no-untyped-def]
+        self,
+        execution_id: str,
+        step_run_id: str,
+        tool_call_id: str,
+    ):
+        return self.values.get((execution_id, step_run_id, tool_call_id))
 
     async def store(self, binding: WorkspaceToolCallBinding) -> WorkspaceToolCallBinding:
-        self.values[(binding.step_run_id, binding.tool_call_id)] = binding
+        self.values[(
+            binding.execution_id,
+            binding.step_run_id,
+            binding.tool_call_id,
+        )] = binding
         return binding
 
 
@@ -113,7 +122,7 @@ async def test_workspace_binding_allows_omitted_default_path() -> None:
         path_fields={"list_directory": ("path",)},
     )
 
-    binding = store.values[("step", "call")]
+    binding = store.values[("execution", "step", "call")]
     assert binding.paths == ()
     assert binding.error_code is None
     effective = await _apply_workspace_binding(
@@ -153,9 +162,7 @@ async def test_workspace_binding_does_not_freeze_transient_sandbox_failure() -> 
 
 
 @pytest.mark.asyncio
-async def test_workspace_binding_fact_is_accepted_by_storage_maintenance(
-    tmp_path: Path,
-) -> None:
+async def test_workspace_binding_lifetime_is_execution_scoped(tmp_path: Path) -> None:
     state = RuntimeState.filesystem(tmp_path / "state")
     await state.initialize(namespace="workspace", tenant_id="tenant")
     try:
@@ -164,19 +171,22 @@ async def test_workspace_binding_fact_is_accepted_by_storage_maintenance(
             namespace="workspace",
             tenant_id="tenant",
         )
-        await store.store(
-            WorkspaceToolCallBinding(
-                1,
-                "execution",
-                "step",
-                "call",
-                "read_file",
-                "a" * 64,
-                (WorkspacePathBinding("/path", "a.txt"),),
-                None,
-            )
+        binding = WorkspaceToolCallBinding(
+            1,
+            "execution",
+            "step",
+            "call",
+            "read_file",
+            "a" * 64,
+            (WorkspacePathBinding("/path", "a.txt"),),
+            None,
         )
+        await store.store(binding)
+        assert await store.get("execution", "step", "call") == binding
+        await state.maintenance.inspect_objects()
 
+        await store.release_execution("execution")
+        assert await store.get("execution", "step", "call") is None
         await state.maintenance.inspect_objects()
     finally:
         await state.close()
