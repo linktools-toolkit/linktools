@@ -19,11 +19,14 @@ jobs:
       - uses: actions/setup-python@v7
         with:
           python-version: '3.10'
+      - name: Fetch master reference
+        run: git fetch origin master --depth=1
       - name: Apply exact repairs
         shell: bash
         run: |
           python - <<'PY'
           from pathlib import Path
+          import subprocess
 
           def replace_once(path: str, old: str, new: str) -> None:
               file = Path(path)
@@ -50,16 +53,61 @@ jobs:
           )
           Path('linktools-ai/src/linktools/ai/capability/workspace.py').unlink()
 
+          agent_path = 'linktools-ai/src/linktools/ai/runtime/_agent_executor.py'
           replace_once(
-              'linktools-ai/src/linktools/ai/runtime/_agent_executor.py',
+              agent_path,
+              '    NodeResult,\n    ReinjectSystemPrompt,\n)',
+              '    NodeResult,\n    ReinjectSystemPrompt,\n    WrapperCapability,\n)',
+          )
+          replace_once(
+              agent_path,
+              'from pydantic_ai.usage import RunUsage, UsageLimitExceeded, UsageLimits\n',
+              'from pydantic_ai.usage import RunUsage, UsageLimitExceeded, UsageLimits\nfrom pydantic_ai_harness.step_persistence import StepPersistence\n',
+          )
+          replace_once(
+              agent_path,
               'from ._input import _RuntimeUserPrompt, _restore_user_prompt\n',
               'from ._input import CanonicalUserInput\n',
           )
           replace_once(
-              'linktools-ai/src/linktools/ai/runtime/_agent_executor.py',
+              agent_path,
               'from ._plan import RuntimePlanStore\nfrom .state import StepStore\n',
               'from ._plan import RuntimePlanStore\nfrom ._workspace_binding import WorkspaceToolCallBinder\nfrom .state import StepStore\n',
           )
+          master_agent = subprocess.check_output(
+              ['git', 'show', 'origin/master:linktools-ai/src/linktools/ai/runtime/_agent_executor.py'],
+              text=True,
+          )
+          start = master_agent.index('class _RuntimePersistenceBoundary')
+          end = master_agent.index('\n\nclass _ToolPresentation', start)
+          boundary = master_agent[start:end]
+          agent_file = Path(agent_path)
+          agent_text = agent_file.read_text(encoding='utf-8')
+          if 'class _RuntimePersistenceBoundary' in agent_text:
+              raise SystemExit('runtime persistence boundary unexpectedly already exists')
+          marker = 'class _ToolPresentation(AbstractCapability[AgentContext[object]]):'
+          if agent_text.count(marker) != 1:
+              raise SystemExit('tool presentation marker is not unique')
+          agent_file.write_text(
+              agent_text.replace(marker, boundary + '\n\n\n' + marker, 1),
+              encoding='utf-8',
+          )
+          replace_once(
+              agent_path,
+              '            metrics=self._metrics,\n            model_journal=model_journal,\n',
+              '            metrics=self._metrics,\n            workspace_binder=self._workspace_binder,\n            workspace_path_fields=workspace_path_fields,\n            model_journal=model_journal,\n',
+          )
+          replace_once(
+              agent_path,
+              '    deferred_pause_sink: Callable[[int], None],\n    metrics: MetricRecorder | None,\n    model_journal: ModelRequestJournal,\n',
+              '    deferred_pause_sink: Callable[[int], None],\n    metrics: MetricRecorder | None,\n    workspace_binder: WorkspaceToolCallBinder | None,\n    workspace_path_fields: Callable[[], Mapping[str, tuple[str, ...]]],\n    model_journal: ModelRequestJournal,\n',
+          )
+          replace_once(
+              agent_path,
+              '    capabilities.extend(cast("tuple[AbstractCapability[AgentContext[object]], ...]", platform))\n',
+              '''    platform = tuple(\n        _RuntimePersistenceBoundary(\n            capability,\n            workspace_binder=workspace_binder,\n            execution_id=scope.context.execution_id,\n            step_run_id=scope.step_run_id,\n            path_fields_provider=workspace_path_fields,\n        )\n        if isinstance(capability, StepPersistence)\n        else capability\n        for capability in platform\n    )\n    capabilities.extend(cast("tuple[AbstractCapability[AgentContext[object]], ...]", platform))\n''',
+          )
+
           replace_once(
               'linktools-ai/src/linktools/ai/runtime/_execution.py',
               '    ResultRecord,\n    RuntimeDomain,\n    SessionRepository,\n',
