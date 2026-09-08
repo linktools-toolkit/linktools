@@ -9,6 +9,7 @@ from ..core import Page, Principal
 from ._event import TaskEvent
 from ._graph import (
     CancelGraphRequest,
+    RecoverGraphRequest,
     TaskGraphHandle,
     TaskGraphLaunch,
     TaskGraphRequest,
@@ -67,6 +68,12 @@ class TaskApi(TaskQueryApi, Protocol):
         request: TaskGraphRequest,
         *,
         timeout_seconds: "float | None" = None,
+    ) -> TaskGraphResult: ...
+
+    async def recover_graph(
+        self,
+        graph_id: str,
+        request: RecoverGraphRequest,
     ) -> TaskGraphResult: ...
 
     async def cancel_graph(
