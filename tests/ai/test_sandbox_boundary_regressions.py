@@ -93,7 +93,7 @@ def test_runtime_compaction_uses_harness_strategies() -> None:
         projection_sink=None,
     )
 
-    assert isinstance(compaction._dedupe, DeduplicateFileReads)
+    assert isinstance(compaction._deduplicate, DeduplicateFileReads)
     assert isinstance(compaction._tiered, TieredCompaction)
 
 
