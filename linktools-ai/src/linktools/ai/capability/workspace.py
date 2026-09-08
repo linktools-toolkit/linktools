@@ -3,7 +3,7 @@
 """Public workspace capability adapters shared with Runtime integrations."""
 
 from collections.abc import Sequence
-from typing import Any
+from typing import TYPE_CHECKING
 
 from pydantic_ai.capabilities import AbstractCapability, Toolset
 
@@ -19,11 +19,17 @@ from ._workspace import (
     _WorkspaceSandboxToolset,
 )
 
+if TYPE_CHECKING:
+    from pydantic_ai import RunContext as PydanticRunContext
+
 
 class _SharedWorkspaceSandboxToolset(_WorkspaceSandboxToolset):
     """Materialize workspace tools around one Runtime-owned WorkspaceAccess."""
 
-    async def for_run(self, ctx):  # type: ignore[no-untyped-def]
+    async def for_run(
+        self,
+        ctx: "PydanticRunContext[AgentContext[object]]",
+    ) -> "_SharedWorkspaceSandboxToolset":
         access = self._access
         if access is None:
             raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
@@ -38,7 +44,6 @@ class _SharedWorkspaceSandboxToolset(_WorkspaceSandboxToolset):
             access=access,
             attachment_reader=self._attachment_reader,
         )
-
 
 
 def workspace_capabilities_with_access(
