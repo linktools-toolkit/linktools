@@ -190,7 +190,6 @@ class _RunScope:
     step_store: StepStore
     step_run_id: str
     segment_sequence: int
-    operation_identity_run_id: str | None = None
     history_id: str | None = None
     memory_store: MemoryStore | None = None
     plan_store_resolver: Callable[[PydanticRunContext[object]], RuntimePlanStore] | None = None
@@ -220,11 +219,6 @@ class _RunScope:
         if self.mode == "plan" and not self.planning:
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
         if not isinstance(self.subagent_available, bool) or not isinstance(self.replace_history_system_prompt, bool):
-            raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
-        if self.operation_identity_run_id is not None and (
-            not isinstance(self.operation_identity_run_id, str)
-            or not self.operation_identity_run_id
-        ):
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
         if self.event_sink is None:
             raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
@@ -874,7 +868,6 @@ async def _materialize_agent(
         segment_sequence=scope.segment_sequence,
         history_id=scope.history_id,
         memory_scope=scope.context.memory_scope,
-        operation_identity_run_id=scope.operation_identity_run_id,
         step_store=scope.step_store,
         memory_store=scope.memory_store,
         runtime_tool_names=runtime_tool_names,
