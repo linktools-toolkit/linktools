@@ -14,8 +14,7 @@ from linktools.ai.workspace import LocalSandbox
 pytestmark = pytest.mark.asyncio
 
 
-def _python_command(code: str) -> str:
-    arguments = [sys.executable, "-c", code]
+def _command(arguments: list[str]) -> str:
     if sys.platform == "win32":
         return subprocess.list2cmdline(arguments)
     return shlex.join(arguments)
@@ -23,10 +22,13 @@ def _python_command(code: str) -> str:
 
 async def test_local_sandbox_runs_python_in_shared_workspace(tmp_path: Path) -> None:
     marker = tmp_path / "platform-marker.txt"
-    command = _python_command(
-        "from pathlib import Path; "
-        "Path('platform-marker.txt').write_text('ok', encoding='utf-8')"
+    script = tmp_path / "platform-runner.py"
+    script.write_text(
+        "from pathlib import Path\n"
+        "Path('platform-marker.txt').write_text('ok', encoding='utf-8')\n",
+        encoding="utf-8",
     )
+    command = _command([sys.executable, script.name])
     session = await LocalSandbox().open(root=tmp_path)
     try:
         result = await session.run_command(command, timeout_seconds=10)
