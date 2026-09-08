@@ -93,7 +93,9 @@ async def test_managed_path_admission_replays_without_source_read(tmp_path: Path
         assert preparation.input is None
         assert preparation.target is not None
         assert preparation.target.at.resource == "state:execution"
-        assert preparation.target.at.key == first.execution_id
+        assert preparation.target.at.key == repository._key(
+            "execution", first.execution_id
+        ).hex()
 
         checkpoint = await state.recovery.checkpoints.get(
             first.execution_id,
