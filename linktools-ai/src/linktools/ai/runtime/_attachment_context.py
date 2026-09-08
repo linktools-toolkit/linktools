@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from typing import Callable, Iterator
 
 from ..errors import AIError, ErrorCode
-from .state import PreparedInput
+from .state import InputTarget, PreparedInput
 
 
 @dataclass(frozen=True, slots=True)
@@ -15,6 +15,7 @@ class ManagedAdmission:
     scope: str
     idempotency_key: str
     prepared: PreparedInput
+    source_target: InputTarget | None = None
 
 
 _ScopeFactory = Callable[[ManagedAdmission], AbstractContextManager[None]]
