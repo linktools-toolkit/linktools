@@ -13,7 +13,7 @@ from linktools.ai.workspace._bubblewrap import _build_bwrap_args
 from pydantic_ai.models.test import TestModel
 from pydantic_ai.tools import RunContext
 from pydantic_ai.usage import RunUsage
-from pydantic_ai_harness.compaction import DeduplicateFileReads, TieredCompaction
+from pydantic_ai_harness.compaction import DeduplicateFileReads
 
 
 def _context() -> RunContext[None]:
@@ -84,7 +84,7 @@ async def test_cancelled_close_propagates_without_primary_failure(tmp_path: Path
         await session.close()
 
 
-def test_runtime_compaction_uses_harness_strategies() -> None:
+def test_runtime_compaction_uses_harness_deduplication() -> None:
     compaction = RuntimeCompaction(
         4096,
         trusted_workspace_read=True,
@@ -94,7 +94,7 @@ def test_runtime_compaction_uses_harness_strategies() -> None:
     )
 
     assert isinstance(compaction._deduplicate, DeduplicateFileReads)
-    assert isinstance(compaction._tiered, TieredCompaction)
+    assert compaction._target_tokens == 4096
 
 
 def test_bubblewrap_hidden_mount_overrides_workspace_resource_bind(
