@@ -486,6 +486,18 @@ async def _build_local_components(
     _require_state_identity(state, namespace=namespace, tenant_id=tenant_id)
     metric_buffer = None if metrics is None else _RuntimeMetricBuffer(metrics)
     metric_source_namespace = None if metric_buffer is None else namespace
+
+    async def release_execution_handoff(
+        execution_id: str,
+        *,
+        tenant_id: str,
+    ) -> None:
+        await state.retention.release_execution_handoff(
+            execution_id,
+            tenant_id=tenant_id,
+        )
+        await workspace_binding_store.release_execution(execution_id)
+
     execution = DefaultExecutionService(
         state.execution,
         state.object_store(RuntimeDomain.EXECUTION),
@@ -494,7 +506,7 @@ async def _build_local_components(
         catalog=catalog,
         compiler=compiler,
         history_reader=history_reader,
-        release_terminal=state.retention.release_execution_handoff,
+        release_terminal=release_execution_handoff,
         instruction_resolver=instruction_resolver,
         object_key_factory=object_key_factory,
         payload_policy=payload_policy,
