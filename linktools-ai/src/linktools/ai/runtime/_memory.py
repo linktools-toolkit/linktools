@@ -275,7 +275,11 @@ class RuntimeMemoryStore:
             limit=_MAX_LIST_SCAN_RECORDS + 1
         )
         if has_more or len(records) > _MAX_LIST_SCAN_RECORDS:
-            raise RuntimeError("memory path listing exceeds bounded scan capacity")
+            raise AIError(
+                ErrorCode.STORAGE_UNAVAILABLE,
+                safe_details={"reason": "memory_listing_capacity"},
+                retryable=False,
+            )
         paths: list[str] = []
         for record in records:
             path = record.metadata.get("path")
