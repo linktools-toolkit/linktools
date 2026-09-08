@@ -39,7 +39,6 @@ from .state import MemoryRecord, MemoryState, RuntimeDomain
 
 _logger = environ.get_logger("ai.runtime.memory")
 _MAX_CONTENT_CHARS = 65_536
-_MAX_LIST_SCAN_RECORDS = 10_000
 _MEMORY_VERSION = re.compile(r"m2:[0-9a-f]{64}")
 _STORE_SEGMENT = re.compile(r"[A-Za-z0-9_.-]{1,200}")
 
@@ -271,24 +270,17 @@ class RuntimeMemoryStore:
         normalized_prefix = _normalize_prefix(prefix)
         if not isinstance(limit, int) or isinstance(limit, bool) or limit <= 0:
             raise ValueError("limit must be positive")
-        records, _ = await self._list_records(limit=limit)
-        paths = _record_paths(records)
-        if not paths or all(path.startswith(normalized_prefix) for path in paths):
-            return paths[:limit]
-        records, has_more = await self._list_records(
-            limit=_MAX_LIST_SCAN_RECORDS + 1
+        page = await self._state.records.list(
+            tenant_id=self._tenant_id,
+            memory_scope_digest=self._memory_scope_digest,
+            prefix=normalized_prefix,
+            cursor=None,
+            limit=limit,
         )
-        if has_more or len(records) > _MAX_LIST_SCAN_RECORDS:
-            raise AIError(
-                ErrorCode.STORAGE_UNAVAILABLE,
-                safe_details={"reason": "memory_listing_capacity"},
-                retryable=False,
-            )
-        return [
-            path
-            for path in _record_paths(records)
-            if path.startswith(normalized_prefix)
-        ][:limit]
+        paths = _record_paths(list(page.items))
+        if any(not path.startswith(normalized_prefix) for path in paths):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        return paths
 
     async def _get_receipt(
         self,
@@ -359,34 +351,6 @@ class RuntimeMemoryStore:
                 f"operation id {operation.id!r} conflicted with an existing mutation"
             )
         return MemoryConflictError("memory version conflict")
-
-    async def _list_records(
-        self,
-        *,
-        limit: int | None,
-    ) -> tuple[list[MemoryRecord], bool]:
-        records: list[MemoryRecord] = []
-        cursor: str | None = None
-        has_more = False
-        while limit is None or len(records) < limit:
-            page_limit = 200 if limit is None else min(200, limit - len(records))
-            page = await self._state.records.list(
-                tenant_id=self._tenant_id,
-                memory_scope_digest=self._memory_scope_digest,
-                cursor=cursor,
-                limit=page_limit,
-            )
-            records.extend(page.items)
-            if page.next_cursor is None:
-                break
-            if page.next_cursor == cursor or not page.items:
-                has_more = True
-                break
-            if limit is not None and len(records) >= limit:
-                has_more = True
-                break
-            cursor = page.next_cursor
-        return records if limit is None else records[:limit], has_more
 
     async def _record(self, logical_path: str) -> MemoryRecord | None:
         record = await self._state.records.get(

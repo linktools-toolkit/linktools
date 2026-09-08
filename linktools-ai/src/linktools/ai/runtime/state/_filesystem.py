@@ -83,6 +83,7 @@ class _RecordQueryIndexKey:
     scope_digest: bytes | None
     parent_digest: bytes | None
     states: frozenset[str] | None
+    sort_key_prefix: str | None
 
 
 class _FilesystemCache:
@@ -142,6 +143,7 @@ class _FilesystemCache:
             query.scope_digest,
             query.parent_digest,
             query.states,
+            query.sort_key_prefix,
         )
         cached = self._record_query_indexes.get(index_key)
         if cached is None or cached[0] != self._record_cache_generation:
@@ -2524,6 +2526,10 @@ def _matches_record(record: StoredRecord, query: RecordQuery) -> bool:
         and (query.scope_digest is None or record.scope_digest == query.scope_digest)
         and (query.parent_digest is None or record.parent_digest == query.parent_digest)
         and (query.kind is None or record.kind == query.kind)
+        and (
+            query.sort_key_prefix is None
+            or record.sort_key.startswith(query.sort_key_prefix)
+        )
         and (query.states is None or record.state in query.states)
     )
 

@@ -244,6 +244,7 @@ class _RepositoryBase:
         scope: bytes | None = None,
         parent: bytes | None = None,
         states: frozenset[str] | None = None,
+        sort_key_prefix: str | None = None,
         cursor: str | None = None,
         limit: int | None = None,
     ) -> tuple[StoredRecord, ...]:
@@ -268,6 +269,7 @@ class _RepositoryBase:
                     parent_digest=parent,
                     kind=kind,
                     states=states,
+                    sort_key_prefix=sort_key_prefix,
                     after_sort_key=after_sort_key,
                     after_key_digest=after_key_digest,
                     limit=query_limit,
@@ -287,6 +289,7 @@ class _RepositoryBase:
                     parent_digest=parent,
                     kind=kind,
                     states=states,
+                    sort_key_prefix=sort_key_prefix,
                     after_sort_key=last.sort_key,
                     after_key_digest=last.key_digest,
                     limit=1,
@@ -4168,6 +4171,7 @@ class MemoryRepositoryImpl(_ResourceRepository[MemoryRecord]):
         *,
         tenant_id: str,
         memory_scope_digest: str,
+        prefix: str,
         cursor: str | None,
         limit: int,
     ) -> Page[MemoryRecord]:
@@ -4177,6 +4181,7 @@ class MemoryRepositoryImpl(_ResourceRepository[MemoryRecord]):
         records = await self._records(
             "memory",
             scope=self._scope("memory", "memory_scope", memory_scope_digest),
+            sort_key_prefix=prefix or None,
             cursor=cursor,
             limit=limit + 1,
         )

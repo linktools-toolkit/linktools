@@ -2052,6 +2052,7 @@ class MemoryRepository(RuntimeRepository, Protocol):
         *,
         tenant_id: str,
         memory_scope_digest: str,
+        prefix: str,
         cursor: str | None,
         limit: int,
     ) -> Page[MemoryRecord]: ...

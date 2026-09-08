@@ -423,6 +423,7 @@ class RecordQuery:
     parent_digest: bytes | None = None
     kind: str | None = None
     states: frozenset[str] | None = None
+    sort_key_prefix: str | None = None
     after_sort_key: str | None = None
     after_key_digest: bytes | None = None
     limit: int | None = None
@@ -444,6 +445,13 @@ class RecordQuery:
             or any(character in self.kind for character in "/\\")
         ):
             raise ValueError("record kind contains a path separator")
+        if self.sort_key_prefix is not None and (
+            not isinstance(self.sort_key_prefix, str)
+            or not self.sort_key_prefix
+            or len(self.sort_key_prefix) > 128
+            or not self.sort_key_prefix.isascii()
+        ):
+            raise ValueError("record sort key prefix must contain 1..128 ASCII characters")
         if (self.after_sort_key is None) != (self.after_key_digest is None):
             raise ValueError("record cursor requires both sort key and key digest")
         if self.after_sort_key is not None:

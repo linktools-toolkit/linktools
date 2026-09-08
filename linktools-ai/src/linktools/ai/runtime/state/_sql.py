@@ -701,6 +701,10 @@ class _SqlTransaction:
             conditions.append(table.c.kind == query.kind)
         if query.states is not None:
             conditions.append(table.c.state.in_(tuple(query.states)))
+        if query.sort_key_prefix is not None:
+            conditions.append(
+                table.c.sort_key.startswith(query.sort_key_prefix, autoescape=True)
+            )
         if query.after_sort_key is not None and query.after_key_digest is not None:
             conditions.append(
                 or_(
