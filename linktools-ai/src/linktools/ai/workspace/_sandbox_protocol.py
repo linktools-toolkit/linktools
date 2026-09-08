@@ -23,7 +23,6 @@ WORKER_EXIT_OK = 0
 WORKER_EXIT_SESSION_FAILED = 1
 WORKER_EXIT_CLEANUP_FAILED = 2
 MAX_FRAME_BYTES = 8 * 1024 * 1024
-_SIZE_CHECK_REQUEST_ID = "0" * 32
 _REQUEST_FIELDS = {
     "read_file": (
         frozenset({"path"}),
@@ -91,7 +90,7 @@ def validate_request_params(
     method: str,
     params: Mapping[str, Any],
 ) -> None:
-    """Validate the fixed fields and value types for one worker operation."""
+    """Validate the fixed fields and value types for one sandbox operation."""
     if not isinstance(method, str):
         raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
     schema = _REQUEST_FIELDS.get(method)
@@ -118,21 +117,8 @@ def validate_request_params(
 
 
 def validate_request_size(method: str, params: Mapping[str, Any]) -> None:
-    """Apply the protocol input bound before a Local operation can mutate."""
+    """Validate semantic request shape without applying an IPC frame limit."""
     validate_request_params(method, params)
-    try:
-        encode_frame(
-            {
-                "version": PROTOCOL_VERSION,
-                "request_id": _SIZE_CHECK_REQUEST_ID,
-                "method": method,
-                "params": dict(params),
-            }
-        )
-    except AIError:
-        raise
-    except (SandboxProtocolError, UnicodeError) as error:
-        raise AIError(ErrorCode.REQUEST_FIELD_INVALID) from error
 
 
 async def read_frame(reader: asyncio.StreamReader) -> dict[str, Any] | None:
