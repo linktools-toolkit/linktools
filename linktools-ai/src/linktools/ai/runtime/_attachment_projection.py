@@ -38,6 +38,7 @@ _ExecutionCheck = Callable[[int], Awaitable[None]]
 _EntryAuthorization = Callable[[int, tuple[ModelExposureEntry, ...]], Awaitable[None]]
 _ExposureCommit = Callable[[int, tuple[ModelExposureEntry, ...]], Awaitable[ModelExposure]]
 _ContentRead = Callable[[ContentRef], Awaitable[bytes]]
+_EXPOSURE_METADATA_KEY = "linktools.ai.exposure_id"
 
 
 class AttachmentProjectionCapability(AbstractCapability[Any]):
@@ -87,6 +88,18 @@ class AttachmentProjectionCapability(AbstractCapability[Any]):
             request_context.messages,
             self._activations,
         )
+        await self._check_execution(ctx.run_step)
+        await self._authorize_entries(ctx.run_step, self._activations)
+        exposure = await self._commit_exposure(ctx.run_step, self._activations)
+        _validate_committed_exposure(
+            exposure,
+            execution_id=self._execution_id,
+            step_run_id=self._step_run_id,
+            run_step=ctx.run_step,
+            path_origin=self._path_origin,
+            entries=self._activations,
+        )
+        messages = _with_exposure_metadata(messages, exposure.exposure_id)
         model = request_context.model
         if isinstance(model, AttachmentRequestModel):
             model = model.wrapped
@@ -228,6 +241,52 @@ def _prepare_current_messages(
         ),
     )
     return normalized
+
+
+def _with_exposure_metadata(
+    messages: Sequence[ModelMessage],
+    exposure_id: str,
+) -> list[ModelMessage]:
+    values = list(messages)
+    index = next(
+        (
+            current
+            for current in range(len(values) - 1, -1, -1)
+            if isinstance(values[current], ModelRequest)
+        ),
+        -1,
+    )
+    if index < 0:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    request = values[index]
+    if not isinstance(request, ModelRequest):
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    metadata = dict(request.metadata or {})
+    current = metadata.get(_EXPOSURE_METADATA_KEY)
+    if current not in {None, exposure_id}:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    metadata[_EXPOSURE_METADATA_KEY] = exposure_id
+    values[index] = replace(request, metadata=metadata)
+    return values
+
+
+def _validate_committed_exposure(
+    exposure: ModelExposure,
+    *,
+    execution_id: str,
+    step_run_id: str,
+    run_step: int,
+    path_origin: PathOrigin,
+    entries: tuple[ModelExposureEntry, ...],
+) -> None:
+    if (
+        exposure.execution_id != execution_id
+        or exposure.step_run_id != step_run_id
+        or exposure.run_step != run_step
+        or exposure.path_origin != path_origin
+        or exposure.entries != entries
+    ):
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
 
 
 __all__: tuple[str, ...] = ()
