@@ -7,10 +7,14 @@ from pathlib import Path
 
 import pytest
 from linktools.ai.capability import workspace_capabilities, workspace_tool_contributions
+from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.workspace import LocalSandbox, Workspace
+from linktools.ai.workspace._sandbox_protocol import (
+    MAX_FRAME_BYTES,
+    encode_frame,
+    validate_request_size,
+)
 from pydantic_ai.exceptions import ModelRetry
-
-pytestmark = pytest.mark.asyncio
 
 
 def _golden_contract() -> dict[str, object]:
@@ -18,12 +22,30 @@ def _golden_contract() -> dict[str, object]:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
-async def test_workspace_tool_semantics_match_frozen_golden(tmp_path: Path) -> None:
+def test_workspace_tool_semantics_match_frozen_golden(tmp_path: Path) -> None:
     contributions = workspace_tool_contributions(Workspace.load(tmp_path))
     actual = {item.id: item.semantic_contract for item in contributions}
     assert actual == _golden_contract()
 
 
+def test_local_semantic_validation_is_not_limited_by_ipc_frame() -> None:
+    content = "x" * (MAX_FRAME_BYTES + 1)
+    params = {"path": "large.txt", "content": content, "expected_hash": None}
+
+    validate_request_size("write_file", params)
+    with pytest.raises(AIError) as raised:
+        encode_frame(
+            {
+                "version": 1,
+                "request_id": "request",
+                "method": "write_file",
+                "params": params,
+            }
+        )
+    assert raised.value.code is ErrorCode.TOOL_ARGUMENTS_TOO_LARGE
+
+
+@pytest.mark.asyncio
 async def test_workspace_missing_read_is_model_retry(tmp_path: Path) -> None:
     workspace = Workspace.load(tmp_path)
     session = await LocalSandbox().open(root=workspace.root)
@@ -40,6 +62,7 @@ async def test_workspace_missing_read_is_model_retry(tmp_path: Path) -> None:
         await session.close()
 
 
+@pytest.mark.asyncio
 async def test_workspace_pre_effect_write_failure_is_model_retry(tmp_path: Path) -> None:
     workspace = Workspace.load(tmp_path)
     session = await LocalSandbox().open(root=workspace.root)
@@ -60,6 +83,7 @@ async def test_workspace_pre_effect_write_failure_is_model_retry(tmp_path: Path)
         await session.close()
 
 
+@pytest.mark.asyncio
 async def test_workspace_denied_shell_command_is_model_retry(tmp_path: Path) -> None:
     workspace = Workspace.load(tmp_path)
     session = await LocalSandbox().open(root=workspace.root)
