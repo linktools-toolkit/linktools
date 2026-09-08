@@ -269,17 +269,18 @@ class _LocalSandboxSession:
 
 
 class WorkspaceAccess:
-    """Lazily own one SandboxSession and expose the public byte-read boundary."""
+    """Own one SandboxSession and expose the public byte-read boundary."""
 
     def __init__(
         self,
         sandbox: Sandbox,
         *,
         run_context: "PydanticRunContext[AgentContext[object]] | None" = None,
+        session: "SandboxSession | None" = None,
     ) -> None:
         self._sandbox = sandbox
         self._run_context = run_context
-        self._session: SandboxSession | None = None
+        self._session = session
         self._lock = asyncio.Lock()
         self._closed = False
 
@@ -590,14 +591,12 @@ class _WorkspaceSandboxToolset(FunctionToolset[AgentContext[object]]):
         selected_tool_names: tuple[str, ...],
         *,
         access: "WorkspaceAccess | None" = None,
-        run_context: "PydanticRunContext[AgentContext[object]] | None" = None,
         attachment_reader: "AttachmentReader | None" = None,
     ) -> None:
         super().__init__()
         self._sandbox = sandbox
         self._selected_tool_names = selected_tool_names
         self._access = access
-        self._run_context = run_context
         self._attachment_reader = attachment_reader
         surface = _WorkspaceToolSurface(access, attachment_reader)
         for name in selected_tool_names:
@@ -607,11 +606,19 @@ class _WorkspaceSandboxToolset(FunctionToolset[AgentContext[object]]):
         self,
         ctx: "PydanticRunContext[AgentContext[object]]",
     ) -> "_WorkspaceSandboxToolset":
+        if "read_attachment" not in self._selected_tool_names:
+            session = (
+                await self._sandbox._open_for_run(ctx)
+                if isinstance(self._sandbox, _LocalSandbox)
+                else await self._sandbox.open()
+            )
+            access = WorkspaceAccess(self._sandbox, session=session)
+        else:
+            access = WorkspaceAccess(self._sandbox, run_context=ctx)
         return _WorkspaceSandboxToolset(
             self._sandbox,
             self._selected_tool_names,
-            access=WorkspaceAccess(self._sandbox, run_context=ctx),
-            run_context=ctx,
+            access=access,
             attachment_reader=self._attachment_reader,
         )
 
@@ -672,7 +679,7 @@ def workspace_capabilities(
     *,
     attachment_reader: "AttachmentReader | None" = None,
 ) -> "tuple[AbstractCapability[AgentContext[object]], ...]":
-    """Materialize selected workspace tools through one lazy per-run SandboxSession."""
+    """Materialize selected workspace tools through one per-run SandboxSession."""
     selected = frozenset(selected_tool_names)
     unknown = selected.difference(_WORKSPACE_TOOL_NAMES)
     if unknown:
