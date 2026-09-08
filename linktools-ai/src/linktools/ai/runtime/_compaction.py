@@ -151,8 +151,6 @@ class RuntimeCompaction:
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
         if not isinstance(trusted_workspace_read, bool):
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
-        if (journal is None) != (observer is None):
-            raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
         self._target_tokens = target_tokens
         self._journal = journal
         self._observer = observer
