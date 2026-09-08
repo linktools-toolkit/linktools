@@ -11,6 +11,7 @@ from ._attachment import _path_origin, _stable_prepare_error
 from ._input import input_intent_digest
 from .state import (
     AttachmentEntry,
+    ExecutionRecord,
     InputAttachmentPart,
     InputPrepareRecord,
     InputPrepareSlot,
@@ -48,8 +49,6 @@ class SubagentAttachmentPreparer:
         grant: _Grant,
     ) -> PreparedInput:
         paths = _paths(attachments)
-        if not paths:
-            raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
         intent_digest = input_intent_digest(task, paths)
         origin = _path_origin(self._workspace)
         candidate = InputPrepareRecord(
@@ -113,26 +112,13 @@ class SubagentAttachmentPreparer:
             )
 
         manifest = tuple(item.entry for item in current.slots)
-        by_path = {path: index for index, path in enumerate(unique_paths)}
-        prompt = InputV2(
-            2,
-            (
-                InputTextPart("text", task),
-                *(InputAttachmentPart("attachment", by_path[path]) for path in paths),
-            ),
-            (),
-            (),
-        )
-        if len(manifest) != len(unique_paths):
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        prepared = PreparedInput(
-            1,
-            "linktools-input-v2",
-            prompt,
+        prepared = self._prepared(
+            task,
+            paths,
             manifest,
-            intent_digest,
-            input_v2_digest(prompt, manifest),
-            origin,
+            intent_digest=intent_digest,
+            input_digest=None,
+            origin=origin,
         )
         ready = InputPrepareRecord(
             1,
@@ -152,6 +138,65 @@ class SubagentAttachmentPreparer:
         if committed.input is None:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         return committed.input
+
+    def replay(
+        self,
+        task: str,
+        attachments: Sequence[str],
+        execution: ExecutionRecord,
+    ) -> PreparedInput:
+        """Rebuild the child lightweight input from its adopted Execution truth."""
+        paths = _paths(attachments)
+        if (
+            not execution.attachment_manifest
+            or execution.input_digest is None
+            or execution.path_origin is None
+        ):
+            raise AIError(ErrorCode.IDEMPOTENCY_CONFLICT)
+        return self._prepared(
+            task,
+            paths,
+            execution.attachment_manifest,
+            intent_digest=input_intent_digest(task, paths),
+            input_digest=execution.input_digest,
+            origin=execution.path_origin,
+        )
+
+    @staticmethod
+    def _prepared(
+        task: str,
+        paths: tuple[str, ...],
+        manifest: tuple[AttachmentEntry, ...],
+        *,
+        intent_digest: str,
+        input_digest: str | None,
+        origin,
+    ) -> PreparedInput:
+        unique_paths = tuple(dict.fromkeys(paths))
+        if len(manifest) != len(unique_paths):
+            raise AIError(ErrorCode.IDEMPOTENCY_CONFLICT)
+        by_path = {path: index for index, path in enumerate(unique_paths)}
+        prompt = InputV2(
+            2,
+            (
+                InputTextPart("text", task),
+                *(InputAttachmentPart("attachment", by_path[path]) for path in paths),
+            ),
+            (),
+            (),
+        )
+        calculated = input_v2_digest(prompt, manifest)
+        if input_digest is not None and input_digest != calculated:
+            raise AIError(ErrorCode.IDEMPOTENCY_CONFLICT)
+        return PreparedInput(
+            1,
+            "linktools-input-v2",
+            prompt,
+            manifest,
+            intent_digest,
+            calculated,
+            origin,
+        )
 
 
 def _paths(value: Sequence[str]) -> tuple[str, ...]:
