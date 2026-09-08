@@ -38,6 +38,7 @@ _ExecutionCheck = Callable[[int], Awaitable[None]]
 _EntryAuthorization = Callable[[int, tuple[ModelExposureEntry, ...]], Awaitable[None]]
 _ExposureCommit = Callable[[int, tuple[ModelExposureEntry, ...]], Awaitable[ModelExposure]]
 _ContentRead = Callable[[ContentRef], Awaitable[bytes]]
+_ActivationProvider = Callable[[], Sequence[ModelExposureEntry]]
 _EXPOSURE_METADATA_KEY = "linktools.ai.exposure_id"
 
 
@@ -55,6 +56,7 @@ class AttachmentProjectionCapability(AbstractCapability[Any]):
         authorize_entries: _EntryAuthorization,
         commit_exposure: _ExposureCommit,
         read_content: _ContentRead,
+        activation_provider: _ActivationProvider | None = None,
     ) -> None:
         if not isinstance(execution_id, str) or not execution_id:
             raise ValueError("execution_id is required")
@@ -62,15 +64,12 @@ class AttachmentProjectionCapability(AbstractCapability[Any]):
             raise ValueError("step_run_id is required")
         if not isinstance(path_origin, PathOrigin):
             raise TypeError("path_origin must be PathOrigin")
-        values = tuple(activations)
-        if any(not isinstance(value, ModelExposureEntry) for value in values):
-            raise TypeError("activations must contain ModelExposureEntry values")
-        if len({value.activation_id for value in values}) != len(values):
-            raise ValueError("activations contain duplicate activation ids")
+        values = _validate_activations(activations)
         self._execution_id = execution_id
         self._step_run_id = step_run_id
         self._path_origin = path_origin
         self._activations = values
+        self._activation_provider = activation_provider
         self._check_execution = check_execution
         self._authorize_entries = authorize_entries
         self._commit_exposure = commit_exposure
@@ -79,25 +78,32 @@ class AttachmentProjectionCapability(AbstractCapability[Any]):
     def get_ordering(self) -> CapabilityOrdering:
         return CapabilityOrdering(position="innermost")
 
+    def _current_activations(self) -> tuple[ModelExposureEntry, ...]:
+        provider = self._activation_provider
+        return self._activations if provider is None else _validate_activations(provider())
+
     async def before_model_request(
         self,
         ctx: RunContext[Any],
         request_context: ModelRequestContext,
     ) -> ModelRequestContext:
+        activations = self._current_activations()
+        if not activations:
+            return request_context
         messages = _prepare_current_messages(
             request_context.messages,
-            self._activations,
+            activations,
         )
         await self._check_execution(ctx.run_step)
-        await self._authorize_entries(ctx.run_step, self._activations)
-        exposure = await self._commit_exposure(ctx.run_step, self._activations)
+        await self._authorize_entries(ctx.run_step, activations)
+        exposure = await self._commit_exposure(ctx.run_step, activations)
         _validate_committed_exposure(
             exposure,
             execution_id=self._execution_id,
             step_run_id=self._step_run_id,
             run_step=ctx.run_step,
             path_origin=self._path_origin,
-            entries=self._activations,
+            entries=activations,
         )
         messages = _with_exposure_metadata(messages, exposure.exposure_id)
         model = request_context.model
@@ -109,7 +115,7 @@ class AttachmentProjectionCapability(AbstractCapability[Any]):
             step_run_id=self._step_run_id,
             run_step=ctx.run_step,
             path_origin=self._path_origin,
-            activations=self._activations,
+            activations=activations,
             check_execution=self._check_execution,
             authorize_entries=self._authorize_entries,
             commit_exposure=self._commit_exposure,
@@ -120,6 +126,17 @@ class AttachmentProjectionCapability(AbstractCapability[Any]):
             messages=messages,
             model=wrapped,
         )
+
+
+def _validate_activations(
+    values: Sequence[ModelExposureEntry],
+) -> tuple[ModelExposureEntry, ...]:
+    result = tuple(values)
+    if any(not isinstance(value, ModelExposureEntry) for value in result):
+        raise TypeError("activations must contain ModelExposureEntry values")
+    if len({value.activation_id for value in result}) != len(result):
+        raise ValueError("activations contain duplicate activation ids")
+    return result
 
 
 def initial_attachment_prompt(
