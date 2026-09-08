@@ -1,4 +1,4 @@
-name: Temporary AI static repair
+name: Temporary AI capability repair
 
 on:
   push:
@@ -19,145 +19,109 @@ jobs:
       - uses: actions/setup-python@v7
         with:
           python-version: '3.10'
-      - name: Apply F5 request identity repair
+      - name: Clarify LinkTools capability ownership
         shell: bash
         run: |
           python - <<'PY'
+          import re
           from pathlib import Path
 
-          def replace_exact(path: str, old: str, new: str, *, expected: int = 1) -> None:
-              file = Path(path)
-              text = file.read_text(encoding='utf-8')
-              count = text.count(old)
-              if count != expected:
-                  raise SystemExit(f'{path}: expected {expected} matches, found {count}: {old!r}')
-              file.write_text(text.replace(old, new), encoding='utf-8')
+          source = Path('linktools-ai/src/linktools/ai/runtime/_capabilities_native.py')
+          target = Path('linktools-ai/src/linktools/ai/runtime/_platform_capabilities.py')
+          if not source.is_file() or target.exists():
+              raise SystemExit('unexpected platform capability module state')
+          source.rename(target)
+          platform = target.read_text(encoding='utf-8')
+          old_doc = '"""LinkTools-only capability semantics not provided by Harness."""'
+          new_doc = '"""LinkTools-owned platform capability semantics not provided by Harness."""'
+          if platform.count(old_doc) != 1:
+              raise SystemExit('platform capability docstring changed unexpectedly')
+          target.write_text(platform.replace(old_doc, new_doc), encoding='utf-8')
 
-          journal = 'linktools-ai/src/linktools/ai/runtime/_journal.py'
-          replace_exact(
-              journal,
-              '''        current = self._facts.get(step_index)\n        if current is not None and current.duration_ns is None:\n            if current.purpose != purpose:\n                raise ValueError("a step cannot have two active request purposes")\n            return current\n        sequence = self._next_sequence\n''',
-              '''        sequence = self._next_sequence\n''',
-          )
-          replace_exact(
-              journal,
-              '        self._facts[step_index] = fact\n        return fact\n\n    def finish(\n        self,\n        step_index: int,\n',
-              '        self._facts[sequence] = fact\n        return fact\n\n    def finish(\n        self,\n        request_sequence: int,\n',
-          )
-          replace_exact(
-              journal,
-              '''        fact = self._facts.get(step_index)\n        if fact is None:\n            raise RuntimeError("model request fact is missing")\n''',
-              '''        fact = self._facts.get(request_sequence)\n        if fact is None:\n            raise RuntimeError("model request fact is missing")\n''',
-          )
-          replace_exact(
-              journal,
-              '''        self._facts[step_index] = return_value\n        return return_value\n\n    def current(self, step_index: int) -> ModelRequestFact:\n        try:\n            return self._facts[step_index]\n        except KeyError as error:\n            raise RuntimeError("model request fact is missing") from error\n\n    def consume(self, step_index: int) -> ModelRequestFact:\n        try:\n            return self._facts.pop(step_index)\n''',
-              '''        self._facts[request_sequence] = return_value\n        return return_value\n\n    def current(self, request_sequence: int) -> ModelRequestFact:\n        try:\n            return self._facts[request_sequence]\n        except KeyError as error:\n            raise RuntimeError("model request fact is missing") from error\n\n    def consume(self, request_sequence: int) -> ModelRequestFact:\n        try:\n            return self._facts.pop(request_sequence)\n''',
-          )
+          path = Path('linktools-ai/src/linktools/ai/runtime/_capabilities.py')
+          text = path.read_text(encoding='utf-8')
+          attrs = set(re.findall(r'_native\.([A-Za-z_][A-Za-z0-9_]*)', text))
+          expected = {
+              'MEMORY_READ_TOOL_NAMES',
+              'MEMORY_TOOL_NAMES',
+              'PLANNING_TOOL_NAMES',
+              'PLAN_SAFE_METADATA_KEY',
+              'SUBAGENT_TOOL_NAMES',
+              'WORKSPACE_FILESYSTEM_READ_TOOL_NAMES',
+              'WORKSPACE_FILESYSTEM_TOOL_NAMES',
+              'WORKSPACE_SHELL_TOOL_NAMES',
+              'ToolOperationBridge',
+              'ToolOperationDecision',
+              '_CompactionCapability',
+              '_DURATION_NS_METADATA_KEY',
+              '_MEMORY_CAPABILITY_ID',
+              '_MODEL_EFFECT_UNKNOWN_MESSAGE',
+              '_MissingToolOperationBridge',
+              '_OBSERVATION_ID_METADATA_KEY',
+              '_PLANNING_CAPABILITY_ID',
+              '_ToolCallState',
+              '_WorkspaceToolGate',
+              '_bypasses_tool_error_hook',
+              '_model_usage_metadata',
+              '_repository_instruction_marker',
+              '_tool_execution_policy',
+              '_tool_observation_id',
+              '_validate_trusted_mcp_selectors',
+              '_validate_trusted_tool_classes',
+              'monotonic_ns',
+              'select_runtime_tool_names',
+              'tool_allowed_in_planning',
+              'tool_is_control',
+              'tool_name_allowed',
+          }
+          if attrs != expected:
+              raise SystemExit(f'unexpected _native attributes: {sorted(attrs ^ expected)}')
 
-          compaction = 'linktools-ai/src/linktools/ai/runtime/_compaction.py'
-          replace_exact(
-              compaction,
-              '''        step_index = self._ctx.run_step\n        fact = self._journal.begin(step_index, purpose="compaction")\n        await self._observer(self._ctx, fact, "started", None, None)\n''',
-              '''        fact = self._journal.begin(self._ctx.run_step, purpose="compaction")\n        request_sequence = fact.request_sequence\n        await self._observer(self._ctx, fact, "started", None, None)\n''',
-          )
-          replace_exact(
-              compaction,
-              '            fact = self._journal.finish(step_index, status="CANCELLED")\n            self._journal.consume(step_index)\n',
-              '            fact = self._journal.finish(request_sequence, status="CANCELLED")\n            self._journal.consume(request_sequence)\n',
-          )
-          replace_exact(
-              compaction,
-              '            fact = self._journal.finish(step_index, status="FAILED")\n            self._journal.consume(step_index)\n',
-              '            fact = self._journal.finish(request_sequence, status="FAILED")\n            self._journal.consume(request_sequence)\n',
-          )
-          replace_exact(
-              compaction,
-              '        fact = self._journal.finish(step_index, status="SUCCEEDED")\n        self._journal.consume(step_index)\n',
-              '        fact = self._journal.finish(request_sequence, status="SUCCEEDED")\n        self._journal.consume(request_sequence)\n',
-          )
+          old_import = 'import linktools.ai.runtime._capabilities_native as _native\n'
+          if text.count(old_import) != 1:
+              raise SystemExit('native module import changed unexpectedly')
+          explicit_import = '''from ._platform_capabilities import (\n    MEMORY_READ_TOOL_NAMES,\n    MEMORY_TOOL_NAMES,\n    PLANNING_TOOL_NAMES,\n    PLAN_SAFE_METADATA_KEY,\n    SUBAGENT_TOOL_NAMES,\n    WORKSPACE_FILESYSTEM_READ_TOOL_NAMES,\n    WORKSPACE_FILESYSTEM_TOOL_NAMES,\n    WORKSPACE_SHELL_TOOL_NAMES,\n    ToolOperationBridge,\n    ToolOperationDecision,\n    _CompactionCapability,\n    _DURATION_NS_METADATA_KEY,\n    _MEMORY_CAPABILITY_ID,\n    _MODEL_EFFECT_UNKNOWN_MESSAGE,\n    _MissingToolOperationBridge,\n    _OBSERVATION_ID_METADATA_KEY,\n    _PLANNING_CAPABILITY_ID,\n    _ToolCallState,\n    _WorkspaceToolGate,\n    _bypasses_tool_error_hook,\n    _model_usage_metadata,\n    _repository_instruction_marker,\n    _tool_execution_policy,\n    _validate_trusted_mcp_selectors,\n    _validate_trusted_tool_classes,\n    select_runtime_tool_names,\n    tool_allowed_in_planning,\n    tool_is_control,\n    tool_name_allowed,\n)\nfrom ._metric_id import _tool_observation_id\n'''
+          text = text.replace(old_import, explicit_import)
 
-          metrics = 'linktools-ai/src/linktools/ai/runtime/_metric_capability.py'
-          replace_exact(
-              metrics,
-              '        fact = self._journal.begin(step_index, purpose="agent")\n        try:\n',
-              '        fact = self._journal.begin(step_index, purpose="agent")\n        request_sequence = fact.request_sequence\n        try:\n',
-          )
-          replace_exact(
-              metrics,
-              '            fact = self._journal.finish(step_index, status="CANCELLED")\n            self._record_model(\n',
-              '            fact = self._journal.finish(request_sequence, status="CANCELLED")\n            self._journal.consume(request_sequence)\n            self._record_model(\n',
-              expected=2,
-          )
-          replace_exact(
-              metrics,
-              '            fact = self._journal.finish(step_index, status="FAILED")\n            self._record_model(\n',
-              '            fact = self._journal.finish(request_sequence, status="FAILED")\n            self._journal.consume(request_sequence)\n            self._record_model(\n',
-          )
-          replace_exact(
-              metrics,
-              '        fact = self._journal.finish(step_index, status="SUCCEEDED")\n        self._record_model(\n',
-              '        fact = self._journal.finish(request_sequence, status="SUCCEEDED")\n        self._journal.consume(request_sequence)\n        self._record_model(\n',
-          )
+          start = text.index('MEMORY_TOOL_NAMES = _native.MEMORY_TOOL_NAMES\n')
+          end_marker = '_MODEL_EFFECT_UNKNOWN_MESSAGE = _native._MODEL_EFFECT_UNKNOWN_MESSAGE\n'
+          end = text.index(end_marker, start) + len(end_marker)
+          text = text[:start] + text[end:]
+          text = text.replace('_native.', '')
 
-          capabilities = 'linktools-ai/src/linktools/ai/runtime/_capabilities.py'
-          replace_exact(
-              capabilities,
-              '''    _last_observed_step_index: int | None = field(\n        default=None,\n        init=False,\n        repr=False,\n        compare=False,\n    )\n''',
-              '''    _last_observed_step_index: int | None = field(\n        default=None,\n        init=False,\n        repr=False,\n        compare=False,\n    )\n    _model_request_tokens: dict[int, int] = field(\n        default_factory=dict,\n        init=False,\n        repr=False,\n        compare=False,\n    )\n''',
-          )
-          replace_exact(
-              capabilities,
-              '''        fact = (\n            None\n            if self.model_journal is None\n            else self.model_journal.begin(ctx.run_step, purpose="agent")\n        )\n''',
-              '''        fact = None\n        request_sequence: int | None = None\n        if self.model_journal is not None:\n            if ctx.run_step in self._model_request_tokens:\n                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)\n            fact = self.model_journal.begin(ctx.run_step, purpose="agent")\n            request_sequence = fact.request_sequence\n            self._model_request_tokens[ctx.run_step] = request_sequence\n''',
-          )
-          replace_exact(
-              capabilities,
-              '''            if self.model_journal is None:\n                raise\n            self.model_journal.finish(ctx.run_step, status="CANCELLED")\n            fact = self.model_journal.consume(ctx.run_step)\n            await self._harness_cancelled_model_request(\n''',
-              '''            if self.model_journal is None or request_sequence is None:\n                raise\n            self.model_journal.finish(request_sequence, status="CANCELLED")\n            fact = self.model_journal.consume(request_sequence)\n            if self._model_request_tokens.pop(ctx.run_step, None) != request_sequence:\n                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error\n            await self._harness_cancelled_model_request(\n''',
-          )
-          replace_exact(
-              capabilities,
-              '''        except RunCancelled:\n            if self.model_journal is not None:\n                self.model_journal.finish(ctx.run_step, status="CANCELLED")\n            raise\n        except BaseException:\n            if self.model_journal is not None:\n                self.model_journal.finish(ctx.run_step, status="FAILED")\n            raise\n        if self.model_journal is not None:\n            self.model_journal.finish(ctx.run_step, status="SUCCEEDED")\n''',
-              '''        except RunCancelled:\n            if self.model_journal is not None and request_sequence is not None:\n                self.model_journal.finish(request_sequence, status="CANCELLED")\n            raise\n        except BaseException:\n            if self.model_journal is not None and request_sequence is not None:\n                self.model_journal.finish(request_sequence, status="FAILED")\n            raise\n        if self.model_journal is not None and request_sequence is not None:\n            self.model_journal.finish(request_sequence, status="SUCCEEDED")\n''',
-          )
-          replace_exact(
-              capabilities,
-              '''        if self.model_journal is None:\n            return None\n        try:\n            fact = self.model_journal.current(ctx.run_step)\n        except RuntimeError:\n            return None\n        if fact.duration_ns is None:\n            self.model_journal.finish(ctx.run_step, status=status)\n        return self.model_journal.consume(ctx.run_step)\n''',
-              '''        if self.model_journal is None:\n            return None\n        request_sequence = self._model_request_tokens.pop(ctx.run_step, None)\n        if request_sequence is None:\n            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)\n        try:\n            fact = self.model_journal.current(request_sequence)\n        except RuntimeError as error:\n            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error\n        if fact.duration_ns is None:\n            self.model_journal.finish(request_sequence, status=status)\n        return self.model_journal.consume(request_sequence)\n''',
-          )
+          import_anchor = 'from pathlib import Path\n' if 'from pathlib import Path\n' in text else None
+          if 'monotonic_ns()' in text and 'from time import monotonic_ns\n' not in text:
+              typing_anchor = 'from typing import Any, cast\n'
+              if text.count(typing_anchor) != 1:
+                  raise SystemExit('typing import anchor changed unexpectedly')
+              text = text.replace(typing_anchor, 'from time import monotonic_ns\n' + typing_anchor)
 
-          test = 'tests/ai/test_compaction_harness_observability.py'
-          replace_exact(
-              test,
-              '''    with pytest.raises(RuntimeError, match="missing"):\n        journal.current(ctx.run_step)\n''',
-              '''    with pytest.raises(RuntimeError, match="missing"):\n        journal.current(observed[-1][1].request_sequence)\n\n\ndef test_journal_keeps_agent_and_compaction_requests_distinct_on_same_step() -> None:\n    journal = ModelRequestJournal(\n        source_namespace="workspace",\n        tenant_id="tenant",\n        execution_id="execution",\n        step_run_id="run",\n    )\n    agent = journal.begin(3, purpose="agent")\n    compaction = journal.begin(3, purpose="compaction")\n\n    assert agent.request_sequence != compaction.request_sequence\n    assert agent.observation_id != compaction.observation_id\n    journal.finish(compaction.request_sequence, status="SUCCEEDED")\n    assert journal.consume(compaction.request_sequence).purpose == "compaction"\n    assert journal.current(agent.request_sequence) == agent\n    journal.finish(agent.request_sequence, status="SUCCEEDED")\n    assert journal.consume(agent.request_sequence).purpose == "agent"\n''',
-          )
+          if '_native.' in text or '_capabilities_native' in text:
+              raise SystemExit('native proxy reference remains in capability composition')
+          path.write_text(text, encoding='utf-8')
           PY
+          git mv linktools-ai/src/linktools/ai/runtime/_platform_capabilities.py /tmp/_platform_capabilities.py
+          git mv /tmp/_platform_capabilities.py linktools-ai/src/linktools/ai/runtime/_platform_capabilities.py
+          if grep -R --line-number --exclude-dir='__pycache__' '_capabilities_native\|_native\.' linktools-ai/src tests/ai; then
+            echo 'stale native capability reference remains' >&2
+            exit 1
+          fi
       - name: Install tooling
         shell: bash
         run: |
           python -m pip install --quiet --upgrade pip
           python -m pip install --quiet -U -r requirements.txt
           python manage.py install --editable --quiet
-      - name: Validate F5
+      - name: Validate ownership repair
         shell: bash
         run: |
-          python -m pytest -q -p no:cacheprovider \
-            tests/ai/test_compaction_harness_observability.py \
-            tests/ai/test_model_metric_trace_link.py \
-            tests/ai/test_model_usage_trace.py
           python manage.py check linktools-ai
-      - name: Commit F5
+      - name: Commit ownership repair
         shell: bash
         run: |
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git add linktools-ai/src/linktools/ai/runtime/_journal.py \
-                  linktools-ai/src/linktools/ai/runtime/_compaction.py \
-                  linktools-ai/src/linktools/ai/runtime/_metric_capability.py \
-                  linktools-ai/src/linktools/ai/runtime/_capabilities.py \
-                  tests/ai/test_compaction_harness_observability.py
+          git add -A linktools-ai/src/linktools/ai/runtime
           git diff --cached --check
-          git commit -m 'fix(ai): isolate model request journal identities'
+          git commit -m 'refactor(ai): clarify platform capability ownership'
           git push origin HEAD:refactor/ai-harness-capabilities
