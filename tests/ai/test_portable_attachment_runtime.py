@@ -5,13 +5,21 @@ from collections.abc import AsyncIterator, Mapping
 from pathlib import Path
 
 import pytest
-from pydantic_ai.messages import ModelMessage, ModelResponse, TextPart
+from pydantic_ai.messages import (
+    BinaryContent,
+    ModelMessage,
+    ModelRequest,
+    ModelResponse,
+    TextPart,
+    UserPromptPart,
+)
 from pydantic_ai.models.function import AgentInfo, FunctionModel
 
-from linktools.ai.core import ExecutionStatus, JsonValue
+from linktools.ai.core import ExecutionStatus, JsonValue, step_run_id
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.runtime import Runtime, RuntimeState
 from linktools.ai.runtime.state._attachment_repository import AttachmentRepository
+from linktools.ai.runtime.state._exposure_repository import ModelExposureRepository
 from linktools.ai.workspace import Workspace
 
 
@@ -65,6 +73,66 @@ class _TextModels:
         ):
             raise AIError(ErrorCode.MODEL_CONNECTION_NOT_FOUND)
         return _TextModelBinding()
+
+
+class _CaptureBinding(_TextModelBinding):
+    def __init__(self, seen: list[list[ModelMessage]]) -> None:
+        self._seen = seen
+
+    def materialize(self) -> FunctionModel:
+        seen = self._seen
+
+        async def request(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+            del info
+            seen.append(list(messages))
+            return ModelResponse(parts=[TextPart("ok")])
+
+        async def stream(
+            messages: list[ModelMessage], info: AgentInfo
+        ) -> AsyncIterator[str]:
+            del info
+            seen.append(list(messages))
+            yield "ok"
+
+        return FunctionModel(function=request, stream_function=stream)
+
+
+class _CaptureModels(_TextModels):
+    def __init__(self) -> None:
+        self.seen: list[list[ModelMessage]] = []
+
+    def resolve(self, route_id: str) -> _CaptureBinding:
+        if route_id != "default":
+            raise AssertionError(route_id)
+        return _CaptureBinding(self.seen)
+
+    def restore(
+        self,
+        payload: Mapping[str, JsonValue],
+        *,
+        route_id: str | None = None,
+    ) -> _CaptureBinding:
+        if (
+            route_id not in {None, "default"}
+            or dict(payload) != _TextModelBinding.semantic_payload
+        ):
+            raise AIError(ErrorCode.MODEL_CONNECTION_NOT_FOUND)
+        return _CaptureBinding(self.seen)
+
+
+def _contains_binary(messages: list[ModelMessage], body: bytes) -> bool:
+    for message in messages:
+        if not isinstance(message, ModelRequest):
+            continue
+        for part in message.parts:
+            if not isinstance(part, UserPromptPart) or isinstance(part.content, str):
+                continue
+            if any(
+                isinstance(item, BinaryContent) and item.data == body
+                for item in part.content
+            ):
+                return True
+    return False
 
 
 @pytest.mark.asyncio
@@ -122,3 +190,53 @@ async def test_managed_path_admission_replays_without_source_read(tmp_path: Path
         )
         assert replayed.execution_id == first.execution_id
         assert replayed.status is ExecutionStatus.SUCCEEDED
+
+
+@pytest.mark.asyncio
+async def test_direct_binary_is_exposed_only_at_model_boundary(tmp_path: Path) -> None:
+    body = b"direct-image-body"
+    workspace = Workspace.load(tmp_path, workspace_id="portable-binary")
+    state = RuntimeState.in_memory()
+    models = _CaptureModels()
+
+    async with Runtime.open(
+        workspace,
+        models=models,  # type: ignore[arg-type]
+        state=state,
+    ) as runtime:
+        result = await runtime.agent("default").run(
+            (
+                "inspect this image",
+                BinaryContent(body, media_type="image/png", identifier="evidence"),
+            ),
+            idempotency_key="direct-binary-key",
+            timeout_seconds=10,
+        )
+
+        assert result.status is ExecutionStatus.SUCCEEDED
+        assert any(_contains_binary(messages, body) for messages in models.seen)
+
+        execution = await state.execution.executions.get(
+            result.execution_id,
+            tenant_id="default",
+        )
+        assert execution is not None
+        assert len(execution.attachment_manifest) == 1
+        run_id = step_run_id(
+            namespace=workspace.workspace_id,
+            tenant_id="default",
+            execution_id=result.execution_id,
+            segment_sequence=execution.agent_run_sequence,
+        )
+        exposure = await ModelExposureRepository(
+            state.recovery.checkpoints.state_store,
+            namespace=workspace.workspace_id,
+            tenant_id="default",
+        ).get(
+            execution_id=result.execution_id,
+            step_run_id=run_id,
+            run_step=1,
+        )
+        assert exposure is not None
+        assert len(exposure.entries) == 1
+        assert exposure.entries[0].entry == execution.attachment_manifest[0]
