@@ -27,7 +27,11 @@ from linktools.ai.core import (
 )
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.runtime import Runtime, RuntimeState
-from linktools.ai.runtime.state import managed_attachment_path
+from linktools.ai.runtime.state import (
+    RuntimeDomain,
+    managed_attachment_path,
+    record_key_digest,
+)
 from linktools.ai.runtime.state._attachment_repository import AttachmentRepository
 from linktools.ai.runtime.state._exposure_repository import ModelExposureRepository
 from linktools.ai.workspace import DisabledSandbox, Workspace
@@ -423,12 +427,13 @@ async def test_virtual_read_attachment_does_not_open_disabled_sandbox(
         sandbox=DisabledSandbox(),
     )
     state = RuntimeState.in_memory()
-    repository = AttachmentRepository(
-        state.execution.executions.state_store,
-        namespace=workspace.workspace_id,
-        tenant_id="default",
-    )
-    prepare_owner = repository.prepare_key("execution.run", key)
+    prepare_owner = record_key_digest(
+        workspace.workspace_id,
+        "default",
+        RuntimeDomain.EXECUTION.value,
+        "input_prepare",
+        ["execution.run", key],
+    ).hex()
     managed_path = managed_attachment_path("p", prepare_owner, 0)
     models = _ReadAttachmentModels(managed_path, body)
     principal = Principal("reader", "default", "local_trusted")
