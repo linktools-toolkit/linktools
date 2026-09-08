@@ -17,6 +17,8 @@ from linktools.ai.runtime.state._contracts import (
     RecoveryExecutionInput,
     RecoveryHandoffPhase,
     RecoveryIdempotencyInput,
+    RuntimeStorageContract,
+    StoredUserInput,
 )
 from linktools.ai.runtime.state._store import (
     StoredRecord,
@@ -24,6 +26,7 @@ from linktools.ai.runtime.state._store import (
     record_key_digest,
 )
 from linktools.ai.spec import AgentSpec
+from linktools.ai.storage import StoredPayload
 
 
 def _binding() -> AgentBindingSnapshot:
@@ -50,8 +53,7 @@ def _checkpoint(
         execution_id,
         "tenant",
         RecoveryExecutionInput(
-            user_prompt="prompt",
-            user_prompt_codec="text",
+            user_input=StoredUserInput(1, "text", StoredPayload.inline_text("prompt")),
             principal_id="owner",
             principal_kind="user",
             session_id=None,
@@ -68,12 +70,12 @@ def _checkpoint(
             planning=False,
             thinking=False,
             binding=_binding(),
+            storage_contract=RuntimeStorageContract(1, (), (), ()),
         ),
         "run-1" if state is RecoveryCheckpointState.ACTIVE else None,
         1 if state is RecoveryCheckpointState.ACTIVE else 0,
         state,
         RecoveryHandoffPhase.NONE,
-        None,
         None,
         None,
         revision,

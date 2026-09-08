@@ -161,7 +161,6 @@ class DefaultEvaluationService:
                     binding_digest,
                     ExecutionRequest(
                         user_prompt=f"evaluation:{request.dataset_digest}",
-                        user_prompt_codec="text",
                         principal=request.principal,
                         idempotency_key=f"evaluation:{request.idempotency_key}",
                         memory_scope=request.memory_scope,
@@ -272,7 +271,6 @@ class DefaultEvaluationService:
                 binding_digest,
                 ExecutionRequest(
                     user_prompt=f"replay:{record.evaluation_id}",
-                    user_prompt_codec="text",
                     principal=request.principal,
                     idempotency_key=request.idempotency_key,
                     memory_scope=request.memory_scope,

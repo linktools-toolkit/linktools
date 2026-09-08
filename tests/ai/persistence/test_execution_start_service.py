@@ -129,7 +129,6 @@ def _request(
 ) -> ExecutionRequest:
     return ExecutionRequest(
         user_prompt=prompt,
-        user_prompt_codec="text",
         principal=principal,
         idempotency_key=idempotency_key,
         memory_scope=memory_scope,

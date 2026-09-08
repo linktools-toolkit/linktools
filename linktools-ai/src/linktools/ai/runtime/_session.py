@@ -35,6 +35,7 @@ from ..core import (
     validate_agent_id,
 )
 from ..errors import AIError, ErrorCode
+from ..capability import WorkspaceAccess
 from .service_api import (
     CancelExecutionRequest,
     CloseSessionRequest,
@@ -136,6 +137,7 @@ class DefaultSessionService:
         history_reader: SessionHistoryReader,
         transcript_store: "_SessionTranscriptStore | None" = None,
         release_terminal: _SessionReleaseCallback | None = None,
+        workspace_access: WorkspaceAccess | None = None,
     ) -> None:
         self._conversation = conversation
         self._executions = executions
@@ -145,6 +147,7 @@ class DefaultSessionService:
         self._history_reader = history_reader
         self._transcript_store = transcript_store
         self._release_terminal = release_terminal or _no_release_terminal
+        self._workspace_access = workspace_access
         self._handoff_states: dict[tuple[str, str], _SessionHandoffState] = {}
         self._handoff_condition = asyncio.Condition()
 
@@ -157,6 +160,7 @@ class DefaultSessionService:
             raise AIError(ErrorCode.AGENT_ID_INVALID) from error
         if any(key.startswith("linktools.ai.") for key in request.metadata):
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+        cwd = await self._canonicalize_cwd(request.cwd)
         resource = ResourceRef(
             ResourceKind.SESSION, request.session_id, request.principal.tenant_id, request.principal.principal_id
         )
@@ -168,7 +172,7 @@ class DefaultSessionService:
                 "principal_id": request.principal.principal_id,
                 "session_id": request.session_id,
                 "agent_id": agent_id,
-                "cwd": request.cwd,
+                "cwd": cwd,
                 "metadata": dict(request.metadata),
             }
         )
@@ -180,7 +184,7 @@ class DefaultSessionService:
             status=SessionStatus.OPEN,
             revision=0,
             resource_generation=0,
-            cwd=request.cwd,
+            cwd=cwd,
             metadata=dict(request.metadata),
             created_at=now,
             updated_at=now,
@@ -363,7 +367,6 @@ class DefaultSessionService:
                 raise AIError(ErrorCode.SESSION_BINDING_MISMATCH)
             execution_request = ExecutionRequest(
                 user_prompt=request.user_prompt,
-                user_prompt_codec=request.user_prompt_codec,
                 principal=request.principal,
                 idempotency_key=request.idempotency_key,
                 memory_scope=request.memory_scope,
@@ -371,6 +374,7 @@ class DefaultSessionService:
                 planning=request.planning,
                 thinking=request.thinking,
                 correlation=request.correlation,
+                files=request.files,
             )
             try:
                 return await self._execution.run_for_session(
@@ -406,8 +410,17 @@ class DefaultSessionService:
                     "source": session_id,
                     "target": request.new_session_id,
                     "agent_id": resolved_agent_id,
-                    "cwd": request.cwd,
+                    "cwd": (
+                        source.cwd
+                        if request.cwd is None
+                        else await self._canonicalize_cwd(request.cwd)
+                    ),
                 }
+            )
+            target_cwd = (
+                source.cwd
+                if request.cwd is None
+                else await self._canonicalize_cwd(request.cwd)
             )
             now = datetime.now(timezone.utc)
             target_metadata = dict(source.metadata)
@@ -419,7 +432,7 @@ class DefaultSessionService:
                 status=SessionStatus.OPEN,
                 revision=0,
                 resource_generation=0,
-                cwd=source.cwd if request.cwd is None else request.cwd,
+                cwd=target_cwd,
                 metadata=target_metadata,
                 created_at=now,
                 updated_at=now,
@@ -470,6 +483,11 @@ class DefaultSessionService:
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
         if any(key.startswith("linktools.ai.") for key in request.metadata):
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+        requested_cwd = (
+            current.cwd
+            if request.cwd is None
+            else await self._canonicalize_cwd(request.cwd)
+        )
         digest = canonical_sha256(
             {
                 "action": "session.update",
@@ -478,10 +496,9 @@ class DefaultSessionService:
                 "session_id": session_id,
                 "expected_revision": request.expected_revision,
                 "metadata": request.metadata,
-                "cwd": request.cwd,
+                "cwd": requested_cwd,
             }
         )
-        requested_cwd = request.cwd if request.cwd is not None else current.cwd
         now = datetime.now(timezone.utc)
         next_record = replace(
             current,
@@ -509,6 +526,18 @@ class DefaultSessionService:
         )
         _logger.debug("session updated: session=%s revision=%s", session_id, updated.revision)
         return await self._view(updated, request.principal)
+
+    async def _canonicalize_cwd(self, value: str | None) -> str | None:
+        if value is None:
+            return None
+        if self._workspace_access is None:
+            raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+        try:
+            return await self._workspace_access.canonicalize_path(value)
+        except AIError:
+            raise
+        except (TypeError, ValueError) as error:
+            raise AIError(ErrorCode.REQUEST_FIELD_INVALID) from error
 
     async def close(self, session_id: str, request: CloseSessionRequest) -> SessionView:
         async with self._session_consumer(session_id, request.principal.tenant_id):

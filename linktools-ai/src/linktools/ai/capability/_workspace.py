@@ -30,12 +30,18 @@ WORKSPACE_FILESYSTEM_TOOL_NAMES = (
     "search_files",
     "write_file",
 )
-WORKSPACE_FILESYSTEM_READ_TOOL_NAMES = (
+_BASE_WORKSPACE_FILESYSTEM_READ_TOOL_NAMES = (
     "file_info",
     "find_files",
     "list_directory",
     "read_file",
     "search_files",
+)
+WORKSPACE_FILESYSTEM_TOOL_NAMES = (
+    *_BASE_WORKSPACE_FILESYSTEM_TOOL_NAMES,
+)
+WORKSPACE_FILESYSTEM_READ_TOOL_NAMES = (
+    *_BASE_WORKSPACE_FILESYSTEM_READ_TOOL_NAMES,
 )
 WORKSPACE_SHELL_TOOL_NAMES = (
     "check_command",
@@ -60,6 +66,7 @@ _WORKSPACE_TOOL_CLASSES = {
     **{name: "shell" for name in WORKSPACE_SHELL_TOOL_NAMES},
 }
 _WORKSPACE_METADATA_KEY = "linktools.ai.workspace_tool_class"
+_WORKSPACE_PATH_FIELDS_KEY = "linktools.ai.workspace_path_fields"
 _WORKSPACE_SANDBOX_CAPABILITY_ID = "workspace-sandbox"
 _MODEL_CORRECTABLE_ERRORS = {
     ErrorCode.REQUEST_FIELD_INVALID,
@@ -425,7 +432,11 @@ __all__ = [
     "WORKSPACE_FILESYSTEM_READ_TOOL_NAMES",
     "WORKSPACE_FILESYSTEM_TOOL_NAMES",
     "WORKSPACE_SHELL_TOOL_NAMES",
+    "WorkspaceAccess",
     "workspace_capabilities",
     "workspace_tool_class",
+    "workspace_tool_path_fields",
+    "workspace_tool_path_fields_from_metadata",
+    "workspace_tool_path_metadata",
     "workspace_tool_contributions",
 ]

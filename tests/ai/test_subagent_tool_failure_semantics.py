@@ -88,9 +88,11 @@ async def test_subagent_adapter_returns_child_failure_to_parent_model() -> None:
         ref: SubagentRef,
         task: str,
         *,
+        files: tuple[str, ...],
         invocation_id: str,
     ) -> "dict[str, object]":
         del ref, task, invocation_id
+        assert files == ()
         raise AIError(ErrorCode.TOOL_EXECUTION_FAILED, safe_details=details)
 
     capability = _PydanticSubagentCapability(

@@ -20,23 +20,22 @@ from ..agent import (
 )
 from ..capability import CapabilityGroup
 from ..core import (
+    CorrelationData,
     ExecutionMode,
     JsonValue,
     Principal,
     PrincipalKind,
-    CorrelationData,
     SessionStatus,
     TaskStatus,
     ThinkingValue,
-    normalize_execution_mode,
     normalize_correlation,
+    normalize_execution_mode,
     normalize_thinking,
     overlay_correlation,
     validate_agent_id,
     validate_idempotency_key,
     validate_memory_scope,
     validate_resource_id,
-    validate_user_prompt,
 )
 from ..errors import AIError, ErrorCode
 from ..model import ModelRegistry
@@ -54,7 +53,7 @@ from ..task import (
 from ..workspace import Workspace
 from ._agent import Agent, Execution, Session
 from ._context import RuntimeContext
-from ._input import UserPromptTransport
+from ._input import CanonicalUserInput, task_prompt_draft
 from ._metrics import (
     RuntimeMetricFlushResult,
     RuntimeMetricStatus,
@@ -139,6 +138,18 @@ def _overlay_request_correlation(
         return overlay_correlation(base, overlay)
     except (TypeError, ValueError) as error:
         raise AIError(ErrorCode.REQUEST_FIELD_INVALID) from error
+
+
+def _request_files(value: Sequence[str]) -> tuple[str, ...]:
+    if not isinstance(value, Sequence) or isinstance(
+        value,
+        (str, bytes, bytearray),
+    ):
+        raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+    result = tuple(value)
+    if any(not isinstance(item, str) or not item for item in result):
+        raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+    return result
 
 
 class Runtime(Generic[AppT]):
@@ -344,8 +355,9 @@ class Runtime(Generic[AppT]):
     async def _start_for_agent(
         self,
         agent_digest: str,
-        user_prompt: UserPromptTransport,
+        user_prompt: CanonicalUserInput,
         *,
+        files: Sequence[str],
         output: "type[BaseModel] | None",
         principal: "Principal | None",
         session_id: "str | None",
@@ -359,7 +371,7 @@ class Runtime(Generic[AppT]):
         self._ensure_open()
         resolved_principal = self._resolve_principal(principal)
         effective_correlation = _overlay_request_correlation(self.correlation, correlation)
-        validate_user_prompt(str(user_prompt))
+        resolved_files = _request_files(files)
         definition = self._catalog.definition(agent_digest)
         resolved_mode, resolved_planning, resolved_thinking = _execution_policy(
             definition,
@@ -371,8 +383,7 @@ class Runtime(Generic[AppT]):
             self._compiler.bind(definition, output=output)
         )
         request = ExecutionRequest(
-            user_prompt=str(user_prompt),
-            user_prompt_codec=user_prompt.codec,
+            user_prompt=user_prompt,
             principal=resolved_principal,
             idempotency_key=idempotency_key or secrets.token_urlsafe(32),
             memory_scope=_validate_memory_scope(memory_scope),
@@ -380,6 +391,7 @@ class Runtime(Generic[AppT]):
             planning=resolved_planning,
             thinking=resolved_thinking,
             correlation=effective_correlation,
+            files=resolved_files,
         )
         if session_id is None:
             handle = await self.execution.run(binding.digest, request)
@@ -390,13 +402,13 @@ class Runtime(Generic[AppT]):
             resume_request = ResumeSessionRequest(
                 principal=resolved_principal,
                 user_prompt=request.user_prompt,
-                user_prompt_codec=request.user_prompt_codec,
                 idempotency_key=request.idempotency_key,
                 memory_scope=request.memory_scope,
                 mode=request.mode,
                 planning=request.planning,
                 thinking=request.thinking,
                 correlation=effective_correlation,
+                files=request.files,
             )
             handle = await self.session.resume(
                 definition.spec.id,
@@ -440,19 +452,20 @@ class Runtime(Generic[AppT]):
         self,
         binding_digest: str,
         execution_id: str,
-        user_prompt: UserPromptTransport,
+        user_prompt: CanonicalUserInput,
         *,
+        files: Sequence[str],
         principal: Principal,
         idempotency_key: "str | None",
         correlation: "Mapping[str, object] | None" = None,
     ) -> "Execution[AppT]":
         self._ensure_open()
         request = RetryExecutionRequest(
-            str(user_prompt),
-            user_prompt.codec,
-            principal,
-            idempotency_key or secrets.token_urlsafe(32),
-            _request_correlation(correlation),
+            user_prompt=user_prompt,
+            principal=principal,
+            idempotency_key=idempotency_key or secrets.token_urlsafe(32),
+            correlation=_request_correlation(correlation),
+            files=_request_files(files),
         )
         handle = await self.execution.retry(binding_digest, execution_id, request)
         return Execution(self, handle.execution_id, binding_digest, principal)
@@ -461,19 +474,20 @@ class Runtime(Generic[AppT]):
         self,
         binding_digest: str,
         execution_id: str,
-        user_prompt: UserPromptTransport,
+        user_prompt: CanonicalUserInput,
         *,
+        files: Sequence[str],
         principal: Principal,
         idempotency_key: "str | None",
         correlation: "Mapping[str, object] | None" = None,
     ) -> "Execution[AppT]":
         self._ensure_open()
         request = ForkExecutionRequest(
-            str(user_prompt),
-            user_prompt.codec,
-            principal,
-            idempotency_key or secrets.token_urlsafe(32),
-            _request_correlation(correlation),
+            user_prompt=user_prompt,
+            principal=principal,
+            idempotency_key=idempotency_key or secrets.token_urlsafe(32),
+            correlation=_request_correlation(correlation),
+            files=_request_files(files),
         )
         handle = await self.execution.fork(binding_digest, execution_id, request)
         return Execution(self, handle.execution_id, binding_digest, principal)
@@ -622,7 +636,7 @@ class Runtime(Generic[AppT]):
         self,
         agent_digest: str,
         node_id: str,
-        user_prompt: UserPromptTransport,
+        user_prompt: CanonicalUserInput,
         *,
         dependencies: tuple[str, ...],
         budget_cost: int,
@@ -638,19 +652,19 @@ class Runtime(Generic[AppT]):
             thinking=thinking,
         )
         binding = self._bind_agent(agent_digest, output=output)
+        task_input: JsonValue = {
+            "type": "linktools.ai.agent",
+            "version": 1,
+            "binding": binding.snapshot.to_payload(),
+            "user_prompt": task_prompt_draft(user_prompt),
+            "mode": "run",
+            "planning": resolved_planning,
+            "thinking": resolved_thinking,
+        }
         return TaskNode(
             node_id,
             dependencies,
-            input={
-                "type": "linktools.ai.agent",
-                "version": 1,
-                "binding": binding.snapshot.to_payload(),
-                "user_prompt": str(user_prompt),
-                "user_prompt_codec": user_prompt.codec,
-                "mode": "run",
-                "planning": resolved_planning,
-                "thinking": resolved_thinking,
-            },
+            input=task_input,
             budget_cost=budget_cost,
         )
 

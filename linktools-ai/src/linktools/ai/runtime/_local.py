@@ -5,11 +5,11 @@
 import asyncio
 import json
 import uuid
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Collection, Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from time import monotonic_ns
-from typing import Protocol, TypeVar, cast
+from typing import TYPE_CHECKING, Protocol, TypeVar, cast
 
 from linktools.core import environ
 from pydantic import ValidationError
@@ -27,7 +27,7 @@ from ._agent_executor import (
     _RunScope,
 )
 from ._capabilities import MEMORY_TOOL_NAMES, select_runtime_tool_names
-from ._input import UserPromptTransport, user_prompt_transport
+from ._input import CanonicalUserInput, ExecutionInputMaterializer
 from ._plan import RuntimePlanStore
 from ..core import (
     ApprovalStatus,
@@ -145,6 +145,9 @@ class _SubagentDispatcher(Protocol):
 
 
 _logger = environ.get_logger("ai.runtime.local")
+
+if TYPE_CHECKING:
+    from .state import StoredUserInput
 
 
 _CheckpointT = TypeVar("_CheckpointT")
@@ -272,7 +275,12 @@ class LocalExecutionBackend:
         memory_store_factory: "Callable[[str, str, str], MemoryStore] | None" = None,
         recovery_enabled: bool = False,
         conversation_durable: bool = False,
-        handoff_contract_digest: "str | None" = None,
+        input_materializer: ExecutionInputMaterializer | None = None,
+        workspace_binding_store: WorkspaceToolCallBindingStore | None = None,
+        storage_contract: RuntimeStorageContract | None = None,
+        storage_contract_factory: (
+            "Callable[[Collection[RuntimeDomain]], RuntimeStorageContract] | None"
+        ) = None,
         subagent_dispatcher: "_SubagentDispatcher | None" = None,
         live_broker: "LiveExecutionEventBroker | None" = None,
         payload_policy: "PayloadPolicy | None" = None,
@@ -296,7 +304,10 @@ class LocalExecutionBackend:
         self._memory_store_factory = memory_store_factory
         self._recovery_enabled = recovery_enabled
         self._conversation_durable = conversation_durable
-        self._handoff_contract_digest = handoff_contract_digest
+        self._input_materializer = input_materializer
+        self._workspace_binding_store = workspace_binding_store
+        self._storage_contract = storage_contract
+        self._storage_contract_factory = storage_contract_factory
         self._subagent_dispatcher = subagent_dispatcher
         self._live_broker = live_broker or LiveExecutionEventBroker()
         self._payload_policy = payload_policy or PayloadPolicy()
@@ -687,6 +698,26 @@ class LocalExecutionBackend:
             raise cancellation
         return committed
 
+    async def _stored_user_input(self, request: ExecutionRequest) -> "StoredUserInput":
+        if request.stored_user_input is not None:
+            if request.files:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            return request.stored_user_input
+        if self._input_materializer is None:
+            raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+        return await self._input_materializer.store(
+            request.user_prompt,
+            tenant_id=request.principal.tenant_id,
+        )
+
+    async def _restore_user_input(
+        self,
+        recovery_input: RecoveryExecutionInput,
+    ) -> CanonicalUserInput:
+        if self._input_materializer is None:
+            raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+        return await self._input_materializer.restore(recovery_input.user_input)
+
     async def prepare_start(
         self,
         request: ExecutionRequest,
@@ -699,10 +730,15 @@ class LocalExecutionBackend:
         binding = self._catalog.binding(execution.binding_digest)
         if execution.binding != binding.snapshot:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        storage_contract = self._require_storage_contract(execution.session_id)
+        if (
+            request.storage_contract is not None
+            and request.storage_contract != storage_contract
+        ):
+            raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
         now = datetime.now(timezone.utc)
         recovery_input = RecoveryExecutionInput(
-            user_prompt=_recovery_prompt_payload(request.user_prompt),
-            user_prompt_codec=request.user_prompt_codec,
+            user_input=await self._stored_user_input(request),
             principal_id=request.principal.principal_id,
             principal_kind=request.principal.kind,
             session_id=execution.session_id,
@@ -724,6 +760,7 @@ class LocalExecutionBackend:
             thinking=execution.thinking,
             binding=execution.binding,
             repository_instructions=execution.repository_instructions,
+            storage_contract=storage_contract,
             correlation=execution.correlation,
         )
         candidate = RecoveryCheckpoint(
@@ -735,7 +772,6 @@ class LocalExecutionBackend:
             state=RecoveryCheckpointState.ADMITTED,
             handoff_phase=RecoveryHandoffPhase.NONE,
             terminal_handoff=None,
-            handoff_contract_digest=None,
             pending_operation_id=None,
             revision=0,
             created_at=now,
@@ -874,6 +910,12 @@ class LocalExecutionBackend:
             if checkpoint is None or checkpoint.state is RecoveryCheckpointState.COMPLETED:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             self._validate_recovery_identity(execution, checkpoint.input)
+            request = replace(
+                request,
+                user_prompt=await self._restore_user_input(checkpoint.input),
+                files=(),
+                stored_user_input=checkpoint.input.user_input,
+            )
         current = await self._execution.executions.get(
             execution.execution_id,
             tenant_id=execution.tenant_id,
@@ -961,6 +1003,10 @@ class LocalExecutionBackend:
             or execution.correlation != recovery_input.correlation
         ):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        if recovery_input.storage_contract != self._require_storage_contract(
+            execution.session_id
+        ):
+            raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
 
     async def abort_start(self, execution: ExecutionRecord) -> None:
         current = await self._execution.executions.get(
@@ -2164,6 +2210,10 @@ class LocalExecutionBackend:
 
     async def _reconcile_checkpoint(self, checkpoint: RecoveryCheckpoint) -> None:
         recovery_input = checkpoint.input
+        if recovery_input.storage_contract != self._require_storage_contract(
+            recovery_input.session_id
+        ):
+            raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
         if (
             recovery_input.session_id is not None
             and self._workspace.policy.tool_permissions.requires_approval
@@ -2211,12 +2261,11 @@ class LocalExecutionBackend:
             return
         self._catalog.binding(recovery_input.binding_digest)
         if checkpoint.handoff_phase is not RecoveryHandoffPhase.NONE:
-            if (
-                self._handoff_contract_digest is None
-                or checkpoint.handoff_contract_digest != self._handoff_contract_digest
+            if recovery_input.storage_contract != self._require_storage_contract(
+                recovery_input.session_id
             ):
                 _logger.error("recovery handoff contract mismatch: execution=%s", checkpoint.execution_id)
-                raise AIError(ErrorCode.STORAGE_DEPENDENCY_NOT_READY)
+                raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
             await self._reconcile_handoff(checkpoint)
             return
         if execution is None:
@@ -2297,8 +2346,7 @@ class LocalExecutionBackend:
         else:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         request = ExecutionRequest(
-            user_prompt=_recovery_prompt_text(recovery_input),
-            user_prompt_codec=recovery_input.user_prompt_codec,
+            user_prompt=await self._restore_user_input(recovery_input),
             principal=principal,
             idempotency_key=f"recovery:{checkpoint.execution_id}",
             memory_scope=recovery_input.memory_scope,
@@ -2314,6 +2362,24 @@ class LocalExecutionBackend:
             checkpoint.tenant_id,
             checkpoint.execution_id,
         )
+
+    def _require_storage_contract(
+        self,
+        session_id: str | None = None,
+    ) -> RuntimeStorageContract:
+        factory = getattr(self, "_storage_contract_factory", None)
+        if factory is not None:
+            domains = {
+                RuntimeDomain.EXECUTION,
+                RuntimeDomain.RECOVERY,
+            }
+            if session_id is not None:
+                domains.add(RuntimeDomain.CONVERSATION)
+            return factory(tuple(domains))
+        storage_contract = getattr(self, "_storage_contract", None)
+        if storage_contract is None:
+            raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+        return storage_contract
 
     async def _reconcile_session_recovery(
         self,
@@ -2829,7 +2895,7 @@ class LocalExecutionBackend:
             raise
 
     async def _advance_handoff(self, checkpoint: RecoveryCheckpoint, phase: RecoveryHandoffPhase) -> RecoveryCheckpoint:
-        if checkpoint.terminal_handoff is None or checkpoint.handoff_contract_digest is None:
+        if checkpoint.terminal_handoff is None:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         current_rank = _HANDOFF_PHASE_RANK.get(checkpoint.handoff_phase)
         requested_rank = _HANDOFF_PHASE_RANK.get(phase)
@@ -2861,7 +2927,7 @@ class LocalExecutionBackend:
             if current is None:
                 raise
             same_handoff = (
-                current.handoff_contract_digest == checkpoint.handoff_contract_digest
+                current.input.storage_contract == checkpoint.input.storage_contract
                 and current.terminal_handoff == checkpoint.terminal_handoff
             )
             current_rank = _HANDOFF_PHASE_RANK.get(current.handoff_phase, -1)
@@ -3650,6 +3716,7 @@ class LocalExecutionBackend:
                     )
                     else None
                 ),
+                workspace_binding_store=self._workspace_binding_store,
             ) if tool_repository is not None else None
             loaded_context = LoadedModelContext(())
             session_history_source = (
@@ -3693,11 +3760,7 @@ class LocalExecutionBackend:
                     checkpoint,
                     fallback_history=history,
                 )
-            run_user_prompt = (
-                None
-                if resumed_approval_attempt
-                else user_prompt_transport(request.user_prompt, request.user_prompt_codec)
-            )
+            run_user_prompt = None if resumed_approval_attempt else request.user_prompt
 
             async def sink(emission: "LiveDelta | DurableBoundary") -> None:
                 if isinstance(emission, LiveDelta):
@@ -3963,7 +4026,6 @@ class LocalExecutionBackend:
             checkpoint,
             state=RecoveryCheckpointState.COMPLETED,
             handoff_phase=RecoveryHandoffPhase.NONE,
-            handoff_contract_digest=checkpoint.handoff_contract_digest,
             pending_approval=None,
             revision=checkpoint.revision + 1,
             updated_at=datetime.now(timezone.utc),
@@ -4580,14 +4642,11 @@ class LocalExecutionBackend:
                     run_id or recovery_checkpoint.step_run_id,
                     conversation,
                 )
-                if self._handoff_contract_digest is None:
-                    raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
                 prepared = replace(
                     recovery_checkpoint,
                     state=RecoveryCheckpointState.HANDOFF,
                     handoff_phase=RecoveryHandoffPhase.PREPARED,
                     terminal_handoff=handoff,
-                    handoff_contract_digest=self._handoff_contract_digest,
                     pending_approval=None,
                     revision=recovery_checkpoint.revision + 1,
                     updated_at=now,
@@ -4786,7 +4845,6 @@ class LocalExecutionBackend:
             state=RecoveryCheckpointState.COMPLETED,
             handoff_phase=RecoveryHandoffPhase.COMPLETED,
             terminal_handoff=None,
-            handoff_contract_digest=None,
             pending_operation_id=None,
             pending_approval=None,
             revision=checkpoint.revision + 1,
@@ -5036,45 +5094,6 @@ class LocalExecutionBackend:
         )
 
 
-def _recovery_prompt_payload(value: str) -> StoredPayload:
-    if isinstance(value, UserPromptTransport) and value.codec != "text":
-        return StoredPayload.inline_json(
-            {"codec": value.codec, "value": str(value)}
-        )
-    return StoredPayload.inline_text(str(value))
-
-
-def _recovery_prompt_text(recovery_input: RecoveryExecutionInput) -> str:
-    payload = recovery_input.user_prompt
-    if not isinstance(payload, StoredPayload) or payload.kind != "inline":
-        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-    try:
-        decoded = payload.decode()
-    except (TypeError, ValueError) as error:
-        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
-    if payload.encoding == "utf-8":
-        if not isinstance(decoded, str):
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        try:
-            return user_prompt_transport(decoded, "text")
-        except AIError as error:
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
-    if payload.encoding != "json" or not isinstance(decoded, dict):
-        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-    if set(decoded) != {"codec", "value"}:
-        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-    codec = decoded.get("codec")
-    value = decoded.get("value")
-    if not isinstance(codec, str) or not isinstance(value, str):
-        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-    try:
-        return user_prompt_transport(value, codec)
-    except AIError as error:
-        if error.code is ErrorCode.STORAGE_VERSION_UNSUPPORTED:
-            raise
-        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
-
-
 def _terminal_record(
     record: ExecutionRecord,
     status: ExecutionStatus,
@@ -5126,7 +5145,6 @@ def _admission_matches(existing: RecoveryCheckpoint, candidate: RecoveryCheckpoi
         and existing.state is RecoveryCheckpointState.ADMITTED
         and existing.handoff_phase is RecoveryHandoffPhase.NONE
         and existing.terminal_handoff is None
-        and existing.handoff_contract_digest is None
         and existing.pending_operation_id is None
     )
 

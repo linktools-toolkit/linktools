@@ -6,7 +6,7 @@ import asyncio
 import hashlib
 import os
 import uuid
-from collections.abc import Awaitable, Callable, Sequence
+from collections.abc import Awaitable, Callable, Collection, Sequence
 from dataclasses import dataclass
 from functools import partial
 from typing import TypeVar, cast
@@ -25,6 +25,7 @@ from ..capability import (
     CapabilityGroup,
     LocalSkillResourceSource,
     SkillSourceRegistry,
+    WorkspaceAccess,
     workspace_tool_contributions,
 )
 from ..core import (
@@ -48,6 +49,7 @@ from ._evaluation import DefaultEvaluationService
 from ._event import DefaultEventService, LiveExecutionEventBroker
 from ._execution import DefaultExecutionService
 from ._history import StepExecutionHistoryReader, StepSessionHistoryReader
+from ._input import ExecutionInputMaterializer
 from ._local import LocalExecutionBackend
 from ._memory import MemoryStore, RuntimeMemoryStore
 from ._metrics import _RuntimeMetricBuffer
@@ -55,6 +57,7 @@ from ._object import RuntimeObjectKeyFactory
 from ._planner import DefaultTaskService, RuntimeTaskNodeRunner
 from ._session import DefaultSessionService
 from ._subagent import SubagentDispatcher
+from ._workspace_binding import WorkspaceToolCallBinder
 from .service_api import ExecutionHistoryReader, SessionHistoryReader
 from .state import (
     ExecutionReadModelRepository,
@@ -64,7 +67,9 @@ from .state import (
     RuntimeState,
     RuntimeStatePlan,
     RuntimeStateRoute,
+    RuntimeStorageContract,
     StateStepArchive,
+    WorkspaceToolCallBindingStore,
 )
 
 AppT = TypeVar("AppT")
@@ -114,6 +119,7 @@ async def compose_runtime_components(
 
     owned_workspace_assets: tuple[AssetStore, DirectoryAssetBackend] | None = None
     selected_state: RuntimeState | None = None
+    workspace_access: WorkspaceAccess | None = None
     initialized = False
     try:
         if workspace_groups:
@@ -224,6 +230,19 @@ async def compose_runtime_components(
         )
         object_key_factory = RuntimeObjectKeyFactory(workspace.workspace_id)
         payload_policy = PayloadPolicy()
+        workspace_access = WorkspaceAccess.for_workspace(workspace)
+        input_materializer = ExecutionInputMaterializer(
+            workspace_access,
+            workspace.policy,
+            object_store=selected_state.object_store(RuntimeDomain.RECOVERY),
+            object_key_factory=object_key_factory,
+            payload_policy=payload_policy,
+        )
+        workspace_binding_store = WorkspaceToolCallBindingStore(
+            selected_state.recovery.checkpoints.state_store,
+            namespace=workspace.workspace_id,
+            tenant_id=effective_tenant_id,
+        )
         session_execution_ready = (
             not workspace.policy.tool_permissions.requires_approval
             or selected_state.plan.route(RuntimeDomain.CONVERSATION).retention
@@ -261,6 +280,12 @@ async def compose_runtime_components(
             instruction_resolver=instruction_resolver,
             object_key_factory=object_key_factory,
             payload_policy=payload_policy,
+            input_materializer=input_materializer,
+            workspace_binding_store=workspace_binding_store,
+            storage_contract=selected_state.storage_contract(
+                {RuntimeDomain.EXECUTION, RuntimeDomain.RECOVERY}
+            ),
+            storage_contract_factory=selected_state.storage_contract,
             session_execution_ready=session_execution_ready,
             metrics=metrics,
             owned_workspace_close=owned_workspace_close,
@@ -270,6 +295,8 @@ async def compose_runtime_components(
             if initialized and selected_state is not None:
                 await selected_state.close()
         finally:
+            if workspace_access is not None:
+                await workspace_access.close()
             if owned_workspace_assets is not None:
                 await _close_owned_workspace_assets(*owned_workspace_assets)
         raise
@@ -444,6 +471,10 @@ async def _build_local_components(
     instruction_resolver: LocalRepositoryInstructionResolver,
     object_key_factory: RuntimeObjectKeyFactory,
     payload_policy: PayloadPolicy,
+    input_materializer: ExecutionInputMaterializer,
+    workspace_binding_store: WorkspaceToolCallBindingStore,
+    storage_contract: "RuntimeStorageContract",
+    storage_contract_factory: "Callable[[Collection[RuntimeDomain]], RuntimeStorageContract]",
     session_execution_ready: bool,
     metrics: "Metrics | None",
     owned_workspace_close: "Callable[[], Awaitable[None]] | None" = None,
@@ -453,6 +484,18 @@ async def _build_local_components(
     _require_state_identity(state, namespace=namespace, tenant_id=tenant_id)
     metric_buffer = None if metrics is None else _RuntimeMetricBuffer(metrics)
     metric_source_namespace = None if metric_buffer is None else namespace
+
+    async def release_execution_handoff(
+        execution_id: str,
+        *,
+        tenant_id: str,
+    ) -> None:
+        await state.retention.release_execution_handoff(
+            execution_id,
+            tenant_id=tenant_id,
+        )
+        await workspace_binding_store.release_execution(execution_id)
+
     execution = DefaultExecutionService(
         state.execution,
         state.object_store(RuntimeDomain.EXECUTION),
@@ -461,10 +504,12 @@ async def _build_local_components(
         catalog=catalog,
         compiler=compiler,
         history_reader=history_reader,
-        release_terminal=state.retention.release_execution_handoff,
+        release_terminal=release_execution_handoff,
         instruction_resolver=instruction_resolver,
         object_key_factory=object_key_factory,
         payload_policy=payload_policy,
+        input_materializer=input_materializer,
+        storage_contract_factory=storage_contract_factory,
         session_execution_ready=session_execution_ready,
     )
     dispatcher = SubagentDispatcher(catalog, compiler, execution)
@@ -472,6 +517,10 @@ async def _build_local_components(
         skill_sources,
         instruction_resolver=instruction_resolver,
         metrics=metric_buffer,
+        workspace_binder=WorkspaceToolCallBinder(
+            workspace_binding_store,
+            input_materializer.access,
+        ),
     )
 
     def build_memory_store(
@@ -532,7 +581,10 @@ async def _build_local_components(
                 state.plan.route(RuntimeDomain.CONVERSATION).retention
                 is RuntimeRetentionMode.DURABLE
             ),
-            handoff_contract_digest=state.handoff_contract_digest,
+            input_materializer=input_materializer,
+            workspace_binding_store=workspace_binding_store,
+            storage_contract=storage_contract,
+            storage_contract_factory=storage_contract_factory,
             subagent_dispatcher=dispatcher,
             live_broker=live_broker,
             payload_policy=payload_policy,
@@ -560,6 +612,7 @@ async def _build_local_components(
             history_reader=session_history_reader,
             transcript_store=state.steps.read_store(RuntimeDomain.CONVERSATION),
             release_terminal=state.retention.release_session,
+            workspace_access=input_materializer.access,
         )
         task_runner = RuntimeTaskNodeRunner(
             execution,
@@ -629,6 +682,7 @@ async def _build_local_components(
             execution.preflight_close,
             backend.close,
         ]
+        close_actions.append(input_materializer.close)
         if metric_buffer is not None:
             close_actions.append(metric_buffer.close)
         close_actions.append(state.close)

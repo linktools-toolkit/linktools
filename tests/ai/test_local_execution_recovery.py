@@ -15,8 +15,10 @@ from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.runtime import ExecutionRequest
 from linktools.ai.runtime._execution import CancelEffectOutcome, ExecutionStartIdentity
 from linktools.ai.runtime._local import LocalExecutionBackend, _is_infrastructure_error
-from linktools.ai.runtime.state import ExecutionRecord
+from linktools.ai.runtime.state import ExecutionRecord, RuntimeStorageContract
 from linktools.ai.spec import AgentSpec
+from linktools.ai.storage import StoredPayload
+from linktools.ai.runtime.state import StoredUserInput
 
 
 def _binding_snapshot() -> AgentBindingSnapshot:
@@ -38,6 +40,7 @@ def _binding() -> object:
     definition = SimpleNamespace(
         digest="b" * 64,
         spec=SimpleNamespace(id="default"),
+        selected_tools=(),
     )
     return SimpleNamespace(
         digest=snapshot.binding_digest,
@@ -49,13 +52,17 @@ def _binding() -> object:
 def _request() -> ExecutionRequest:
     return ExecutionRequest(
         user_prompt="prompt",
-        user_prompt_codec="text",
         principal=Principal("owner", "tenant"),
         idempotency_key="idempotency",
         memory_scope=None,
         mode="run",
         planning=False,
         thinking=False,
+        stored_user_input=StoredUserInput(
+            1,
+            "text",
+            StoredPayload.inline_text("prompt"),
+        ),
     )
 
 
@@ -127,6 +134,7 @@ def _backend() -> LocalExecutionBackend:
     backend._accepting = True
     backend._recovery_enabled = False
     backend._tenant_id = "tenant"
+    backend._storage_contract = RuntimeStorageContract(1, (), (), ())
     backend._namespace = "test"
     backend._tasks = {}
     backend._captured_usage = {}
@@ -163,7 +171,7 @@ async def test_prepare_start_persists_exact_binding_and_execution_policy() -> No
     assert checkpoint is not None
     assert checkpoint.input.binding_digest == execution.binding_digest
     assert checkpoint.input.binding == execution.binding
-    assert checkpoint.input.user_prompt_codec == "text"
+    assert checkpoint.input.user_input.codec == "text"
     assert checkpoint.input.mode == execution.mode
     assert checkpoint.input.planning is execution.planning
     assert checkpoint.input.thinking == execution.thinking

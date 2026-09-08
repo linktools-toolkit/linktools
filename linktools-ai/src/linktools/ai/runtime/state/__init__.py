@@ -80,11 +80,14 @@ from ._contracts import (
     RecoveryTerminalOutcome,
     ResultRecord,
     RuntimePayloadRef,
+    RuntimeStorageContract,
+    RuntimeStorageResource,
     SessionForkResultRecord,
     SessionRecord,
     SessionRepository,
     SESSION_AGENT_ID_METADATA_KEY,
     StoredStepSnapshot,
+    StoredUserInput,
     TaskAdmissionRepository,
     TaskState,
     ToolApprovalAdmission,
@@ -98,6 +101,8 @@ from ._contracts import (
     TranscriptSeekDimension,
     TranscriptSeekRecord,
     TranscriptSpanRef,
+    WorkspacePathBinding,
+    WorkspaceToolCallBinding,
 )
 from ._durability import (
     CommitObservation,
@@ -193,6 +198,10 @@ from ._views import (
     project_execution_transcript_message,
     project_session_history_message,
 )
+from ._workspace_bindings import (
+    WorkspaceToolCallBindingStore,
+    workspace_tool_call_binding_subject_digest,
+)
 
 __all__ = [
     "CURRENT_DATA_VERSION",
@@ -287,6 +296,8 @@ __all__ = [
     "ResultRecord",
     "RuntimeDomain",
     "RuntimePayloadRef",
+    "RuntimeStorageContract",
+    "RuntimeStorageResource",
     "RuntimeRetentionMode",
     "RuntimeState",
     "RuntimeStateCommands",
@@ -296,6 +307,7 @@ __all__ = [
     "StagingStepStore",
     "RuntimeStorageInspection",
     "RuntimeStorageMaintenance",
+    "WorkspaceToolCallBindingStore",
     "SessionForkResultRecord",
     "SessionRecord",
     "SessionRepository",
@@ -315,6 +327,7 @@ __all__ = [
     "StoredOperation",
     "StoredRecord",
     "StoredStepSnapshot",
+    "StoredUserInput",
     "TaskAdmissionRepository",
     "TaskState",
     "ToolApprovalAdmission",
@@ -334,6 +347,8 @@ __all__ = [
     "TranscriptSeekDimension",
     "TranscriptSeekRecord",
     "TranscriptSpanRef",
+    "WorkspacePathBinding",
+    "WorkspaceToolCallBinding",
     "alias_digest",
     "build_runtime_sql_metadata",
     "count_execution_transcript_items",
@@ -364,4 +379,5 @@ __all__ = [
     "stream_digest",
     "subject_digest",
     "wire_type_id",
+    "workspace_tool_call_binding_subject_digest",
 ]

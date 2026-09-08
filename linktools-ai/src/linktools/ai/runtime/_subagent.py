@@ -3,13 +3,21 @@
 """Runtime-owned one-level subagent dispatch and cancellation."""
 
 import asyncio
+from collections.abc import Sequence
 from typing import cast
 
 from linktools.core import environ
+
 from ..agent import AgentCatalog, AgentCompiler
-from ..core import ExecutionMode, ExecutionStatus, JsonValue, Principal, canonical_sha256
-from ..errors import AIError, ErrorCode
 from ..capability import SubagentDelegate
+from ..core import (
+    ExecutionMode,
+    ExecutionStatus,
+    JsonValue,
+    Principal,
+    canonical_sha256,
+)
+from ..errors import AIError, ErrorCode
 from ..spec import SubagentRef
 from ._execution import DefaultExecutionService
 from .service_api import CancelExecutionRequest, ExecutionRequest, ExecutionResult
@@ -78,6 +86,7 @@ class SubagentDispatcher:
             ref: SubagentRef,
             task: str,
             *,
+            files: tuple[str, ...],
             invocation_id: str,
         ) -> "dict[str, JsonValue]":
             expected = allowed.get(ref.id)
@@ -91,6 +100,7 @@ class SubagentDispatcher:
                 ref=ref,
                 mode=mode,
                 user_prompt=task,
+                files=files,
                 invocation_id=invocation_id,
             )
 
@@ -106,11 +116,22 @@ class SubagentDispatcher:
         ref: SubagentRef,
         mode: ExecutionMode,
         user_prompt: str,
+        files: Sequence[str] = (),
         invocation_id: str,
     ) -> "dict[str, JsonValue]":
         if not isinstance(ref, SubagentRef):
             raise TypeError("ref must be SubagentRef")
         if not isinstance(invocation_id, str) or not invocation_id.strip():
+            raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+        if not isinstance(files, Sequence) or isinstance(
+            files,
+            (str, bytes, bytearray),
+        ):
+            raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+        files = tuple(files)
+        if any(
+            not isinstance(path, str) or not path for path in files
+        ):
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
         child_mode: ExecutionMode = "plan" if mode == "plan" else "run"
         idempotency_key = "subagent:" + canonical_sha256(
@@ -120,9 +141,41 @@ class SubagentDispatcher:
                 "invocation_id": invocation_id,
             }
         )
+        child = await self._dispatch(
+            parent_execution_id=parent_execution_id,
+            root_execution_id=root_execution_id,
+            memory_scope=memory_scope,
+            principal=principal,
+            ref=ref,
+            child_mode=child_mode,
+            user_prompt=user_prompt,
+            files=files,
+            idempotency_key=idempotency_key,
+        )
+        return await self._wait_child(
+            child.execution_id,
+            parent_execution_id=parent_execution_id,
+            principal=principal,
+            ref=ref,
+        )
+
+    async def _dispatch(
+        self,
+        *,
+        parent_execution_id: str,
+        root_execution_id: str,
+        memory_scope: "str | None",
+        principal: Principal,
+        ref: SubagentRef,
+        child_mode: ExecutionMode,
+        user_prompt: str,
+        files: tuple[str, ...],
+        idempotency_key: str,
+    ):
         child = await self._execution.replay_subagent(
             agent_id=ref.id,
             user_prompt=user_prompt,
+            files=files,
             principal=principal,
             idempotency_key=idempotency_key,
             memory_scope=memory_scope,
@@ -130,57 +183,69 @@ class SubagentDispatcher:
             parent_execution_id=parent_execution_id,
             root_execution_id=root_execution_id,
         )
-        if child is None:
-            definition = self._catalog.root_definition(ref.id)
-            binding = self._catalog.register_binding(
-                self._compiler.bind_subagent(definition)
+        if child is not None:
+            return child
+        definition = self._catalog.root_definition(ref.id)
+        binding = self._catalog.register_binding(
+            self._compiler.bind_subagent(definition)
+        )
+        child_planning = True if child_mode == "plan" else definition.spec.planning
+        request = ExecutionRequest(
+            user_prompt=user_prompt,
+            principal=principal,
+            idempotency_key=idempotency_key,
+            memory_scope=memory_scope,
+            mode=child_mode,
+            planning=child_planning,
+            thinking=definition.spec.thinking,
+            files=files,
+        )
+        try:
+            return await self._execution.start_subagent(
+                binding.digest,
+                request,
+                parent_execution_id=parent_execution_id,
+                root_execution_id=root_execution_id,
             )
-            child_planning = True if child_mode == "plan" else definition.spec.planning
-            request = ExecutionRequest(
-                user_prompt=user_prompt,
-                user_prompt_codec="text",
-                principal=principal,
-                idempotency_key=idempotency_key,
-                memory_scope=memory_scope,
-                mode=child_mode,
-                planning=child_planning,
-                thinking=definition.spec.thinking,
-            )
-            try:
-                child = await self._execution.start_subagent(
-                    binding.digest,
-                    request,
-                    parent_execution_id=parent_execution_id,
-                    root_execution_id=root_execution_id,
-                )
-            except AIError as error:
-                if error.code is not ErrorCode.IDEMPOTENCY_CONFLICT:
-                    raise
-                child = await self._execution.replay_subagent(
-                    agent_id=ref.id,
-                    user_prompt=user_prompt,
-                    principal=principal,
-                    idempotency_key=idempotency_key,
-                    memory_scope=memory_scope,
-                    mode=child_mode,
-                    parent_execution_id=parent_execution_id,
-                    root_execution_id=root_execution_id,
-                )
-                if child is None:
-                    raise
+        except AIError as error:
+            if error.code is not ErrorCode.IDEMPOTENCY_CONFLICT:
+                raise
+        replay = await self._execution.replay_subagent(
+            agent_id=ref.id,
+            user_prompt=user_prompt,
+            files=files,
+            principal=principal,
+            idempotency_key=idempotency_key,
+            memory_scope=memory_scope,
+            mode=child_mode,
+            parent_execution_id=parent_execution_id,
+            root_execution_id=root_execution_id,
+        )
+        if replay is None:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        return replay
+
+    async def _wait_child(
+        self,
+        execution_id: str,
+        *,
+        parent_execution_id: str,
+        principal: Principal,
+        ref: SubagentRef,
+    ) -> "dict[str, JsonValue]":
         try:
             result = await self._execution.wait(
-                child.execution_id,
+                execution_id,
                 principal=principal,
             )
         except BaseException as primary:  # noqa: BLE001
             cleanup = asyncio.create_task(
                 self.cancel_child(
-                    child.execution_id,
+                    execution_id,
                     parent_execution_id=parent_execution_id,
                     principal=principal,
                 ),
-                name=f"ai-subagent-cleanup-{child.execution_id}",
+                name=f"ai-subagent-cleanup-{execution_id}",
             )
             if isinstance(primary, asyncio.CancelledError):
                 self._detach(
@@ -199,11 +264,11 @@ class SubagentDispatcher:
             except BaseException:  # noqa: BLE001
                 _logger.exception(
                     "subagent child cleanup failed: execution=%s",
-                    child.execution_id,
+                    execution_id,
                 )
                 raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED) from primary
             raise
-        self._background_failures.pop(child.execution_id, None)
+        self._background_failures.pop(execution_id, None)
         if result.status is ExecutionStatus.SUCCEEDED:
             return _subagent_result(result)
         if result.status in {ExecutionStatus.FAILED, ExecutionStatus.CANCELLED}:

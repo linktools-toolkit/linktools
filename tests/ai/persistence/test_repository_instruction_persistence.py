@@ -22,6 +22,8 @@ from linktools.ai.runtime.state._codec import decode_domain, encode_domain
 from linktools.ai.runtime.state._contracts import (
     RecoveryExecutionInput,
     RecoveryIdempotencyInput,
+    RuntimeStorageContract,
+    StoredUserInput,
 )
 from linktools.ai.spec import AgentSpec
 from linktools.ai.storage import ObjectRef, StoredPayload
@@ -83,8 +85,7 @@ def _execution(repository_instructions: RuntimePayloadRef | None) -> ExecutionRe
 def _recovery(repository_instructions: RuntimePayloadRef | None) -> RecoveryExecutionInput:
     binding = _binding()
     return RecoveryExecutionInput(
-        user_prompt="prompt",
-        user_prompt_codec="text",
+        user_input=StoredUserInput(1, "text", StoredPayload.inline_text("prompt")),
         principal_id="principal",
         principal_kind="service",
         session_id=None,
@@ -101,6 +102,7 @@ def _recovery(repository_instructions: RuntimePayloadRef | None) -> RecoveryExec
         planning=False,
         thinking=False,
         binding=binding,
+        storage_contract=RuntimeStorageContract(1, (), (), ()),
         repository_instructions=repository_instructions,
     )
 
@@ -147,7 +149,6 @@ def test_older_v1_recovery_state_defaults_pending_approval_to_none() -> None:
         state=RecoveryCheckpointState.ACTIVE,
         handoff_phase=RecoveryHandoffPhase.NONE,
         terminal_handoff=None,
-        handoff_contract_digest=None,
         pending_operation_id=None,
         revision=1,
         updated_at=now,
@@ -169,7 +170,6 @@ def test_pending_approval_recovery_state_round_trips_without_schema_version_bump
         state=RecoveryCheckpointState.WAITING,
         handoff_phase=RecoveryHandoffPhase.NONE,
         terminal_handoff=None,
-        handoff_contract_digest=None,
         pending_operation_id=None,
         revision=2,
         updated_at=now,

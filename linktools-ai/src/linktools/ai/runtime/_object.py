@@ -76,7 +76,7 @@ async def put_runtime_object(
 
 async def read_runtime_object(store: ObjectStore, reference: ObjectRef) -> bytes:
     if reference.store_id != store.store_id:
-        raise AIError(ErrorCode.STORAGE_DEPENDENCY_NOT_READY)
+        raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
     return await read_object(store, reference.key, expected_digest=reference.digest, expected_size=reference.size)
 
 

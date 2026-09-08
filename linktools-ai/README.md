@@ -235,6 +235,17 @@ A Session owns conversation continuity and the stable Agent id. Every new execut
 
 User prompt transport is also durable: plain text uses the `text` codec, while supported native Pydantic user content uses the v1 durable user-content codec. Unsupported external file lifecycle objects fail closed instead of being guessed or silently converted.
 
+Execution file input uses the same durable boundary:
+
+```python
+result = await agent.run(
+    "分析这些截图",
+    files=("screenshots/overview.png", "screenshots/details.png"),
+)
+```
+
+The Sandbox canonicalizes each logical path before reading it. The first model request receives the files as `BinaryContent`; each distinct logical file is read at most once, and the captured bytes are recovered from Runtime state rather than the Workspace path. `Agent.task()` remains a generic TaskGraph API and does not accept `files`; delegated subagents use the same `files=` execution input.
+
 ## 7. Runtime state
 
 `Runtime.open()` accepts an explicit `RuntimeState` when the application owns storage selection:
@@ -264,6 +275,20 @@ while LinkTools remains the durable owner of plans, Memory records and mutation
 receipts, execution history, and the raw transcript. Memory content continues to
 persist through `MemoryState` and `ObjectStore`. Compaction only rewrites the
 request context projection; it never rewrites the raw transcript.
+
+### Workspace relocation
+
+Use an explicit logical `workspace_id` when a Workspace must survive a physical move:
+
+```python
+workspace = Workspace.load(
+    "/new/project",
+    workspace_id="workspace-prod-01",
+)
+state = RuntimeState.filesystem("/new/runtime-state")
+```
+
+`Workspace.root`, Runtime state paths, SQLite paths, and SQL endpoints are deployment locations only. Runtime persistence stores logical Workspace paths and a location-independent storage contract, so `Runtime.open()` performs normal recovery after a consistent Workspace, state, and ObjectStore restore. The logical ObjectStore `store_id` and storage topology must remain unchanged; a separate `Runtime.restore()` migration step is not required.
 
 ## 8. Execution failure diagnostics
 

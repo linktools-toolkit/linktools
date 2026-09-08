@@ -76,6 +76,16 @@ _MEMORY_CAPABILITY_ID = _native._MEMORY_CAPABILITY_ID
 _PLANNING_CAPABILITY_ID = _native._PLANNING_CAPABILITY_ID
 _MODEL_EFFECT_UNKNOWN_MESSAGE = _native._MODEL_EFFECT_UNKNOWN_MESSAGE
 
+    async def effective_args(
+        self,
+        ctx: "RunContext[None]",
+        call: ToolCallPart,
+        tool_def: ToolDefinition,
+        args: dict[str, Any],
+    ) -> dict[str, Any]:
+        del ctx, call, tool_def
+        return args
+
 
 @dataclass(kw_only=True, eq=False)
 class _RuntimeStepPersistence(StepPersistence[None]):
@@ -467,6 +477,12 @@ class _RuntimeStepPersistence(StepPersistence[None]):
         policy = _tool_execution_policy(
             tool_def,
             trusted_tool_classes=self.trusted_tool_classes,
+        )
+        effective_args_method = getattr(self.tool_operations, "effective_args", None)
+        effective_args = (
+            args
+            if effective_args_method is None
+            else await effective_args_method(ctx, call, tool_def, args)
         )
         try:
             decision = await self.tool_operations.begin(

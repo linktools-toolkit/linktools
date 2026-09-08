@@ -10,7 +10,7 @@ from pydantic import BaseModel
 from pydantic_ai.messages import UserContent
 
 from ..core import JsonValue, Page, Principal, ThinkingValue
-from ._input import prepare_user_prompt
+from ._input import validate_user_input
 from .service_api import (
     CancelExecutionResult,
     EvaluationHandle,
@@ -70,13 +70,15 @@ class Execution(Generic[AppT]):
         self,
         user_prompt: "str | Sequence[UserContent]",
         *,
+        files: Sequence[str] = (),
         idempotency_key: "str | None" = None,
         correlation: "Mapping[str, object] | None" = None,
     ) -> "Execution[AppT]":
         return await self._runtime._retry_execution(
             self._binding_digest,
             self.execution_id,
-            prepare_user_prompt(user_prompt),
+            validate_user_input(user_prompt),
+            files=files,
             principal=self._principal,
             idempotency_key=idempotency_key,
             correlation=correlation,
@@ -86,13 +88,15 @@ class Execution(Generic[AppT]):
         self,
         user_prompt: "str | Sequence[UserContent]",
         *,
+        files: Sequence[str] = (),
         idempotency_key: "str | None" = None,
         correlation: "Mapping[str, object] | None" = None,
     ) -> "Execution[AppT]":
         return await self._runtime._fork_execution(
             self._binding_digest,
             self.execution_id,
-            prepare_user_prompt(user_prompt),
+            validate_user_input(user_prompt),
+            files=files,
             principal=self._principal,
             idempotency_key=idempotency_key,
             correlation=correlation,
@@ -150,6 +154,7 @@ class Session(Generic[AppT]):
         self,
         user_prompt: "str | Sequence[UserContent]",
         *,
+        files: Sequence[str] = (),
         output: "type[BaseModel] | None" = None,
         principal: "Principal | None" = None,
         idempotency_key: "str | None" = None,
@@ -160,7 +165,8 @@ class Session(Generic[AppT]):
     ) -> "Execution[AppT]":
         return await self._runtime._start_for_agent(
             self._agent_digest,
-            prepare_user_prompt(user_prompt),
+            validate_user_input(user_prompt),
+            files=files,
             output=output,
             principal=principal or self._principal,
             session_id=self.session_id,
@@ -176,6 +182,7 @@ class Session(Generic[AppT]):
         self,
         user_prompt: "str | Sequence[UserContent]",
         *,
+        files: Sequence[str] = (),
         output: "type[BaseModel] | None" = None,
         principal: "Principal | None" = None,
         idempotency_key: "str | None" = None,
@@ -187,6 +194,7 @@ class Session(Generic[AppT]):
     ) -> ExecutionResult:
         execution = await self.start(
             user_prompt,
+            files=files,
             output=output,
             principal=principal,
             idempotency_key=idempotency_key,
@@ -201,6 +209,7 @@ class Session(Generic[AppT]):
         self,
         user_prompt: "str | Sequence[UserContent]",
         *,
+        files: Sequence[str] = (),
         output: "type[BaseModel] | None" = None,
         principal: "Principal | None" = None,
         idempotency_key: "str | None" = None,
@@ -211,7 +220,8 @@ class Session(Generic[AppT]):
     ) -> ExecutionResult:
         execution = await self._runtime._start_for_agent(
             self._agent_digest,
-            prepare_user_prompt(user_prompt),
+            validate_user_input(user_prompt),
+            files=files,
             output=output,
             principal=principal or self._principal,
             session_id=self.session_id,
@@ -302,6 +312,7 @@ class Agent(Generic[AppT]):
         self,
         user_prompt: "str | Sequence[UserContent]",
         *,
+        files: Sequence[str] = (),
         output: "type[BaseModel] | None" = None,
         principal: "Principal | None" = None,
         session_id: "str | None" = None,
@@ -313,7 +324,8 @@ class Agent(Generic[AppT]):
     ) -> "Execution[AppT]":
         return await self._runtime._start_for_agent(
             self._agent_digest,
-            prepare_user_prompt(user_prompt),
+            validate_user_input(user_prompt),
+            files=files,
             output=output,
             principal=principal,
             session_id=session_id,
@@ -329,6 +341,7 @@ class Agent(Generic[AppT]):
         self,
         user_prompt: "str | Sequence[UserContent]",
         *,
+        files: Sequence[str] = (),
         output: "type[BaseModel] | None" = None,
         principal: "Principal | None" = None,
         session_id: "str | None" = None,
@@ -341,6 +354,7 @@ class Agent(Generic[AppT]):
     ) -> ExecutionResult:
         execution = await self.start(
             user_prompt,
+            files=files,
             output=output,
             principal=principal,
             session_id=session_id,
@@ -356,6 +370,7 @@ class Agent(Generic[AppT]):
         self,
         user_prompt: "str | Sequence[UserContent]",
         *,
+        files: Sequence[str] = (),
         output: "type[BaseModel] | None" = None,
         principal: "Principal | None" = None,
         session_id: "str | None" = None,
@@ -367,7 +382,8 @@ class Agent(Generic[AppT]):
     ) -> ExecutionResult:
         execution = await self._runtime._start_for_agent(
             self._agent_digest,
-            prepare_user_prompt(user_prompt),
+            validate_user_input(user_prompt),
+            files=files,
             output=output,
             principal=principal,
             session_id=session_id,
@@ -447,7 +463,7 @@ class Agent(Generic[AppT]):
         return self._runtime._task_for_agent(
             self._agent_digest,
             node_id,
-            prepare_user_prompt(user_prompt),
+            validate_user_input(user_prompt),
             dependencies=dependencies,
             budget_cost=budget_cost,
             output=output,
