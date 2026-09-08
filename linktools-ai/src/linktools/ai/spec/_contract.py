@@ -100,6 +100,7 @@ class AgentSpec:
     usage_limits: "AgentUsageLimits | None" = None
     planning: bool = False
     thinking: ThinkingValue = False
+    output_retries: int = 1
     description: "str | None" = None
     preload_skills: "tuple[str, ...]" = ()
     _extensions: Mapping[str, JsonValue] = field(default_factory=dict, repr=False, compare=False, hash=False)
@@ -112,7 +113,7 @@ class AgentSpec:
         if not isinstance(self.model, str) or not self.model.strip():
             raise ValueError("agent model must be a non-empty string")
         if not isinstance(self.system_prompt, str):
-            raise TypeError("agent system prompt must be a string")
+            raise TypeError("agent system_prompt must be a string")
         if isinstance(self.instructions, (str, bytes, bytearray)) or not isinstance(self.instructions, Sequence):
             raise TypeError("agent instructions must be a string array")
         instructions = tuple(self.instructions)
@@ -122,6 +123,10 @@ class AgentSpec:
             raise TypeError("agent usage_limits must be AgentUsageLimits or None")
         if not isinstance(self.planning, bool):
             raise TypeError("agent planning must be bool")
+        if not isinstance(self.output_retries, int) or isinstance(self.output_retries, bool):
+            raise TypeError("agent output_retries must be an integer")
+        if self.output_retries < 0:
+            raise ValueError("agent output_retries cannot be negative")
         if self.description is not None and (
             not isinstance(self.description, str) or not 1 <= len(self.description) <= 1024
         ):
@@ -145,8 +150,8 @@ class AgentSpec:
             extensions = ImmutableJsonMapping(self._extensions)
         except (TypeError, ValueError) as error:
             raise TypeError("agent extensions must be JSON values") from error
-        if "preload_skills" in extensions:
-            raise ValueError("preload_skills is a reserved agent field")
+        if "preload_skills" in extensions or "output_retries" in extensions:
+            raise ValueError("agent extensions contain a reserved field")
         object.__setattr__(self, "instructions", instructions)
         object.__setattr__(self, "allow_tools", canonical_selectors(self.allow_tools, field_name="allow_tools", mcp=True))
         object.__setattr__(self, "allow_skills", allow_skills)
