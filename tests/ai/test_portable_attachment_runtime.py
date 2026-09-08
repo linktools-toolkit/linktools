@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-from collections.abc import Mapping
+from collections.abc import AsyncIterator, Mapping
 from pathlib import Path
 
 import pytest
@@ -20,6 +20,13 @@ async def _text_model(messages: list[ModelMessage], info: AgentInfo) -> ModelRes
     return ModelResponse(parts=[TextPart("ok")])
 
 
+async def _stream_text_model(
+    messages: list[ModelMessage], info: AgentInfo
+) -> AsyncIterator[str]:
+    del messages, info
+    yield "ok"
+
+
 class _TextModelBinding:
     route_id = "default"
     provider = "test"
@@ -31,7 +38,10 @@ class _TextModelBinding:
     }
 
     def materialize(self) -> FunctionModel:
-        return FunctionModel(_text_model)
+        return FunctionModel(
+            function=_text_model,
+            stream_function=_stream_text_model,
+        )
 
 
 class _TextModels:
