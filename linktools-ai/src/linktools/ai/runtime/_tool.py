@@ -337,6 +337,7 @@ class RuntimeToolOperationBridge:
         except (TypeError, ValueError) as error:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
         binding = await self._workspace_binding_store.get(
+            self._execution_id,
             self._run_id(ctx),
             call.tool_call_id,
         )
