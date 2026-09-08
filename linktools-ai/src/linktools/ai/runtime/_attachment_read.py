@@ -34,7 +34,7 @@ _AttachmentCommitted = Callable[[str, AttachmentResult], Awaitable[None]]
 
 
 class AttachmentReadRuntime:
-    """Resolve read_attachment against one live Execution and its frozen facts."""
+    """Resolve attachment grants and read_attachment against one live Execution."""
 
     def __init__(
         self,
@@ -68,65 +68,71 @@ class AttachmentReadRuntime:
         self._object_keys = RuntimeObjectKeyFactory(backend._namespace)
         self._cache: dict[str, tuple[AttachmentEntry, bytes]] = {}
 
+    async def grant(
+        self,
+        access: WorkspaceAccess,
+        path: str,
+    ) -> AttachmentEntry:
+        """Authorize one path for delegation, freezing ordinary paths without activation."""
+        if not isinstance(access, WorkspaceAccess):
+            raise TypeError("access must be WorkspaceAccess")
+        execution = await self._execution()
+        if not isinstance(path, str) or not path:
+            raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+        cached = self._cache.get(path)
+        if cached is not None:
+            entry, body = cached
+            _verify_body(entry, body)
+            return entry
+        if path.startswith("virtual:"):
+            return await self._managed_entry(execution, path)
+        relative, media_type = _ordinary_path(path)
+        source = await self._repository.get_source(
+            self._execution_id,
+            relative,
+            tenant_id=self._tenant_id,
+        )
+        if source is not None:
+            return source.entry
+        body = await access.read_bytes(relative)
+        if not body:
+            raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+        owner_key = self._repository.source_key(self._execution_id, relative)
+        content = await self._store_content(
+            body,
+            owner_scope=f"attachment-source:{owner_key}",
+        )
+        candidate = AttachmentSourceRecord(
+            1,
+            self._execution_id,
+            relative,
+            AttachmentEntry(
+                managed_attachment_path("e", owner_key, 0),
+                PurePosixPath(relative).name,
+                media_type,
+                AttachmentPresentation(None, None),
+                content,
+            ),
+        )
+        _key, source = await self._repository.freeze_source(candidate)
+        if source == candidate:
+            entry = candidate.entry
+            _verify_body(entry, body)
+            self._cache[path] = (entry, body)
+            return entry
+        return source.entry
+
     async def read(
         self,
         access: WorkspaceAccess,
         path: str,
     ) -> dict[str, JsonValue]:
-        if not isinstance(access, WorkspaceAccess):
-            raise TypeError("access must be WorkspaceAccess")
-        execution = await self._execution()
+        entry = await self.grant(access, path)
         cached = self._cache.get(path)
-        if cached is not None:
-            entry, body = cached
-            _verify_body(entry, body)
-            return self._result(entry)
-        if not isinstance(path, str) or not path:
-            raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
-        if path.startswith("virtual:"):
-            entry = await self._managed_entry(execution, path)
-            body = await self._read_content(entry.content)
+        if cached is not None and cached[0] == entry:
+            body = cached[1]
         else:
-            relative, media_type = _ordinary_path(path)
-            source = await self._repository.get_source(
-                self._execution_id,
-                relative,
-                tenant_id=self._tenant_id,
-            )
-            if source is None:
-                body = await access.read_bytes(relative)
-                if not body:
-                    raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
-                owner_key = self._repository.source_key(
-                    self._execution_id,
-                    relative,
-                )
-                content = await self._store_content(
-                    body,
-                    owner_scope=f"attachment-source:{owner_key}",
-                )
-                candidate = AttachmentSourceRecord(
-                    1,
-                    self._execution_id,
-                    relative,
-                    AttachmentEntry(
-                        managed_attachment_path("e", owner_key, 0),
-                        PurePosixPath(relative).name,
-                        media_type,
-                        AttachmentPresentation(None, None),
-                        content,
-                    ),
-                )
-                _key, source = await self._repository.freeze_source(candidate)
-                if source == candidate:
-                    entry = candidate.entry
-                    _verify_body(entry, body)
-                else:
-                    entry = source.entry
-                    body = await self._read_content(entry.content)
-            else:
-                entry = source.entry
-                body = await self._read_content(entry.content)
+            body = await self._read_content(entry.content)
         _verify_body(entry, body)
         self._cache[path] = (entry, body)
         return self._result(entry)
