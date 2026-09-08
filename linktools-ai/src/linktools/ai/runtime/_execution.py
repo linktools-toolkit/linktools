@@ -362,16 +362,15 @@ class DefaultExecutionService:
             if request.files:
                 raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
             return request
-        canonical, stored = await self._input_materializer.materialize(
+        canonical = await self._input_materializer.materialize(
             request.user_prompt,
             request.files,
-            tenant_id=request.principal.tenant_id,
         )
         return replace(
             request,
             user_prompt=canonical,
             files=(),
-            stored_user_input=stored,
+            stored_user_input=None,
         )
 
     def _storage_contract(
@@ -924,8 +923,6 @@ class DefaultExecutionService:
         if session_id is not None and not self._session_execution_ready:
             raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
 
-        request = await self._materialize_request(request)
-
         repository_instructions = None
         if self._instruction_resolver is not None:
             if lineage_kind is ExecutionLineageKind.SUBAGENT:
@@ -1043,6 +1040,7 @@ class DefaultExecutionService:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             return ExecutionHandle(reservation.execution.execution_id)
         execution_id = reservation.execution.execution_id
+        request = await self._materialize_request(request)
         await self._prepare_and_launch(
             request,
             reservation.execution,
