@@ -28,11 +28,13 @@ from linktools.ai.workspace import Workspace
 class _Session:
     def __init__(self, values: dict[str, bytes]) -> None:
         self.values = values
+        self.reads: list[str] = []
 
     async def canonicalize_path(self, path: str) -> str:
         return path
 
     async def read_bytes(self, path: str, *, max_bytes: int | None = None) -> bytes:
+        self.reads.append(path)
         value = self.values[path]
         if max_bytes is not None and len(value) > max_bytes:
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
@@ -95,11 +97,8 @@ async def test_text_materialization_keeps_text_codec() -> None:
     access = WorkspaceAccess(_Sandbox(_Session({})))  # type: ignore[arg-type]
     materializer = ExecutionInputMaterializer(access, Workspace.load(".").policy)
     try:
-        canonical, stored = await materializer.materialize(
-            "plain text",
-            (),
-            tenant_id="tenant",
-        )
+        canonical = await materializer.materialize("plain text", ())
+        stored = await materializer.store(canonical, tenant_id="tenant")
         assert canonical == "plain text"
         assert stored.codec == "text"
     finally:
@@ -158,12 +157,16 @@ async def test_execution_materialization_consumes_source_files_once() -> None:
         )
         prepared = await service._materialize_request(canonical)
         assert prepared.files == ()
-        assert prepared.stored_user_input is not None
+        assert prepared.stored_user_input is None
         assert isinstance(prepared.user_prompt, tuple)
         assert isinstance(prepared.user_prompt[-1], BinaryContent)
+        assert session.reads == ["evidence.txt"]
 
         replay = await service._materialize_request(prepared)
-        assert replay is prepared
+        assert replay.user_prompt == prepared.user_prompt
+        assert replay.files == ()
+        assert replay.stored_user_input is None
+        assert session.reads == ["evidence.txt"]
     finally:
         await materializer.close()
 
