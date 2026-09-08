@@ -25,8 +25,11 @@ from linktools.ai.runtime.state._contracts import (
     ExecutionRecord,
     RecoveryExecutionInput,
     RecoveryIdempotencyInput,
+    RuntimeStorageContract,
+    StoredUserInput,
 )
 from linktools.ai.spec import AgentSpec
+from linktools.ai.storage import StoredPayload
 
 
 def _binding() -> AgentBindingSnapshot:
@@ -74,8 +77,7 @@ def _execution(*, correlation: dict[str, str | int]) -> ExecutionRecord:
 def _recovery_input(*, correlation: dict[str, str | int]) -> RecoveryExecutionInput:
     binding = _binding()
     return RecoveryExecutionInput(
-        user_prompt="hello",
-        user_prompt_codec="text",
+        user_input=StoredUserInput(1, "text", StoredPayload.inline_text("hello")),
         principal_id="user",
         principal_kind="user",
         session_id=None,
@@ -96,6 +98,7 @@ def _recovery_input(*, correlation: dict[str, str | int]) -> RecoveryExecutionIn
         planning=False,
         thinking=False,
         binding=binding,
+        storage_contract=RuntimeStorageContract(1, (), (), ()),
         correlation=correlation,
     )
 
@@ -104,6 +107,7 @@ def _backend(execution: ExecutionRecord) -> LocalExecutionBackend:
     backend = object.__new__(LocalExecutionBackend)
     backend._accepting = True
     backend._tenant_id = execution.tenant_id
+    backend._storage_contract = RuntimeStorageContract(1, (), (), ())
     backend._catalog = SimpleNamespace(
         binding=lambda digest: SimpleNamespace(
             snapshot=execution.binding,
@@ -119,7 +123,6 @@ async def test_local_start_accepts_matching_durable_correlation() -> None:
     backend = _backend(execution)
     request = ExecutionRequest(
         user_prompt="hello",
-        user_prompt_codec="text",
         principal=Principal("user", "tenant"),
         idempotency_key="execution-correlation-start-0001",
         memory_scope=None,
@@ -138,7 +141,6 @@ async def test_local_start_rejects_correlation_drift_from_durable_execution() ->
     backend = _backend(execution)
     request = ExecutionRequest(
         user_prompt="hello",
-        user_prompt_codec="text",
         principal=Principal("user", "tenant"),
         idempotency_key="execution-correlation-start-0001",
         memory_scope=None,

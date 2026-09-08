@@ -42,8 +42,6 @@ from ...storage import ObjectRef, StoredPayload
 from ...task import (
     TaskGraphView,
     TaskNodeView,
-    TaskResultRecord,
-    TaskTerminalRecord,
 )
 from .._tool import ToolOperationRecord
 from ._codec import (
@@ -90,7 +88,6 @@ from ._contracts import (
     TranscriptHeadRecord,
     TranscriptOwnerDomain,
 )
-from ._durability import CommitObservation, DurableCommitState, run_durable_commit
 from ._history_index import (
     build_fork_index_node_from_roots,
 )
@@ -3902,7 +3899,6 @@ class RecoveryCheckpointRepositoryImpl(_ResourceRepository[RecoveryCheckpoint]):
             state.state,
             state.handoff_phase,
             state.terminal_handoff,
-            state.handoff_contract_digest,
             state.pending_operation_id,
             state.revision,
             admission.created_at,
@@ -5361,7 +5357,6 @@ def _recovery_state_record(value: RecoveryCheckpoint) -> RecoveryStateRecord:
         value.state,
         value.handoff_phase,
         value.terminal_handoff,
-        value.handoff_contract_digest,
         value.pending_operation_id,
         value.revision,
         value.updated_at,

@@ -30,9 +30,12 @@ from linktools.ai.runtime.state._contracts import (
     ExecutionRecord,
     RecoveryExecutionInput,
     RecoveryIdempotencyInput,
+    RuntimeStorageContract,
+    StoredUserInput,
 )
 from linktools.ai.spec import AgentSpec
 from linktools.ai.storage import StorageOverlay
+from linktools.ai.storage import StoredPayload
 from linktools.ai.workspace import Workspace
 from pydantic import BaseModel
 
@@ -131,8 +134,7 @@ def _recovery(
 ) -> RecoveryExecutionInput:
     selected = binding or _binding()
     return RecoveryExecutionInput(
-        user_prompt="prompt",
-        user_prompt_codec="text",
+        user_input=StoredUserInput(1, "text", StoredPayload.inline_text("prompt")),
         principal_id="principal",
         principal_kind="service",
         session_id=None,
@@ -149,6 +151,7 @@ def _recovery(
         planning=False,
         thinking=False,
         binding=selected,
+        storage_contract=RuntimeStorageContract(1, (), (), ()),
     )
 
 

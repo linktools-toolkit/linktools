@@ -15,9 +15,12 @@ class _ByteSession:
         self.reads: list[str] = []
         self.closed = 0
 
-    async def read_bytes(self, path: str) -> bytes:
+    async def read_bytes(self, path: str, *, max_bytes: int | None = None) -> bytes:
         self.reads.append(path)
-        return self._values[path]
+        value = self._values[path]
+        if max_bytes is not None and len(value) > max_bytes:
+            raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+        return value
 
     async def close(self) -> None:
         self.closed += 1

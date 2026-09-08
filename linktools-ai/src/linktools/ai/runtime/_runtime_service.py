@@ -36,7 +36,6 @@ from ..core import (
     validate_idempotency_key,
     validate_memory_scope,
     validate_resource_id,
-    validate_user_prompt,
 )
 from ..errors import AIError, ErrorCode
 from ..model import ModelRegistry
@@ -54,7 +53,7 @@ from ..task import (
 from ..workspace import Workspace
 from ._agent import Agent, Execution, Session
 from ._context import RuntimeContext
-from ._input import UserPromptTransport, _restore_user_prompt, task_prompt_draft
+from ._input import CanonicalUserInput, task_prompt_draft
 from ._metrics import (
     RuntimeMetricFlushResult,
     RuntimeMetricStatus,
@@ -63,8 +62,6 @@ from ._metrics import (
 from .service_api import (
     ApprovalService,
     ArtifactService,
-    AttachmentInfo,
-    AttachmentService,
     CancelExecutionRequest,
     CancelExecutionResult,
     CloseSessionRequest,
@@ -126,29 +123,6 @@ class _RuntimeMetricControl(Protocol):
     ) -> RuntimeMetricFlushResult: ...
 
 
-class _UnavailableAttachmentService:
-    async def upload(
-        self,
-        data: bytes,
-        *,
-        media_type: str,
-        name: str | None = None,
-        principal: Principal,
-        idempotency_key: str,
-    ) -> AttachmentInfo:
-        del data, media_type, name, principal, idempotency_key
-        raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
-
-    async def release(
-        self,
-        path: str,
-        *,
-        principal: Principal,
-    ) -> None:
-        del path, principal
-        raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
-
-
 def _request_correlation(value: "Mapping[str, object] | None") -> CorrelationData:
     try:
         return normalize_correlation(value)
@@ -166,8 +140,11 @@ def _overlay_request_correlation(
         raise AIError(ErrorCode.REQUEST_FIELD_INVALID) from error
 
 
-def _attachment_paths(value: Sequence[str]) -> tuple[str, ...]:
-    if isinstance(value, (str, bytes, bytearray)):
+def _request_files(value: Sequence[str]) -> tuple[str, ...]:
+    if not isinstance(value, Sequence) or isinstance(
+        value,
+        (str, bytes, bytearray),
+    ):
         raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
     result = tuple(value)
     if any(not isinstance(item, str) or not item for item in result):
@@ -189,7 +166,6 @@ class Runtime(Generic[AppT]):
         approval: ApprovalService,
         event: EventService,
         artifact: ArtifactService,
-        attachments: "AttachmentService | None" = None,
         *,
         workspace: Workspace,
         context: RuntimeContext[AppT],
@@ -225,9 +201,6 @@ class Runtime(Generic[AppT]):
         self.approval = approval
         self.event = event
         self.artifact = artifact
-        self.attachments: AttachmentService = (
-            attachments if attachments is not None else _UnavailableAttachmentService()
-        )
         self._workspace = workspace
         self._context = context
         self._default_principal = Principal(
@@ -382,9 +355,9 @@ class Runtime(Generic[AppT]):
     async def _start_for_agent(
         self,
         agent_digest: str,
-        user_prompt: UserPromptTransport,
+        user_prompt: CanonicalUserInput,
         *,
-        attachments: Sequence[str],
+        files: Sequence[str],
         output: "type[BaseModel] | None",
         principal: "Principal | None",
         session_id: "str | None",
@@ -398,8 +371,7 @@ class Runtime(Generic[AppT]):
         self._ensure_open()
         resolved_principal = self._resolve_principal(principal)
         effective_correlation = _overlay_request_correlation(self.correlation, correlation)
-        resolved_attachments = _attachment_paths(attachments)
-        validate_user_prompt(str(user_prompt))
+        resolved_files = _request_files(files)
         definition = self._catalog.definition(agent_digest)
         resolved_mode, resolved_planning, resolved_thinking = _execution_policy(
             definition,
@@ -411,8 +383,7 @@ class Runtime(Generic[AppT]):
             self._compiler.bind(definition, output=output)
         )
         request = ExecutionRequest(
-            user_prompt=str(user_prompt),
-            user_prompt_codec=user_prompt.codec,
+            user_prompt=user_prompt,
             principal=resolved_principal,
             idempotency_key=idempotency_key or secrets.token_urlsafe(32),
             memory_scope=_validate_memory_scope(memory_scope),
@@ -420,7 +391,7 @@ class Runtime(Generic[AppT]):
             planning=resolved_planning,
             thinking=resolved_thinking,
             correlation=effective_correlation,
-            attachments=resolved_attachments,
+            files=resolved_files,
         )
         if session_id is None:
             handle = await self.execution.run(binding.digest, request)
@@ -431,14 +402,13 @@ class Runtime(Generic[AppT]):
             resume_request = ResumeSessionRequest(
                 principal=resolved_principal,
                 user_prompt=request.user_prompt,
-                user_prompt_codec=request.user_prompt_codec,
                 idempotency_key=request.idempotency_key,
                 memory_scope=request.memory_scope,
                 mode=request.mode,
                 planning=request.planning,
                 thinking=request.thinking,
                 correlation=effective_correlation,
-                attachments=request.attachments,
+                files=request.files,
             )
             handle = await self.session.resume(
                 definition.spec.id,
@@ -482,21 +452,20 @@ class Runtime(Generic[AppT]):
         self,
         binding_digest: str,
         execution_id: str,
-        user_prompt: UserPromptTransport,
+        user_prompt: CanonicalUserInput,
         *,
-        attachments: Sequence[str],
+        files: Sequence[str],
         principal: Principal,
         idempotency_key: "str | None",
         correlation: "Mapping[str, object] | None" = None,
     ) -> "Execution[AppT]":
         self._ensure_open()
         request = RetryExecutionRequest(
-            user_prompt=str(user_prompt),
-            user_prompt_codec=user_prompt.codec,
+            user_prompt=user_prompt,
             principal=principal,
             idempotency_key=idempotency_key or secrets.token_urlsafe(32),
             correlation=_request_correlation(correlation),
-            attachments=_attachment_paths(attachments),
+            files=_request_files(files),
         )
         handle = await self.execution.retry(binding_digest, execution_id, request)
         return Execution(self, handle.execution_id, binding_digest, principal)
@@ -505,21 +474,20 @@ class Runtime(Generic[AppT]):
         self,
         binding_digest: str,
         execution_id: str,
-        user_prompt: UserPromptTransport,
+        user_prompt: CanonicalUserInput,
         *,
-        attachments: Sequence[str],
+        files: Sequence[str],
         principal: Principal,
         idempotency_key: "str | None",
         correlation: "Mapping[str, object] | None" = None,
     ) -> "Execution[AppT]":
         self._ensure_open()
         request = ForkExecutionRequest(
-            user_prompt=str(user_prompt),
-            user_prompt_codec=user_prompt.codec,
+            user_prompt=user_prompt,
             principal=principal,
             idempotency_key=idempotency_key or secrets.token_urlsafe(32),
             correlation=_request_correlation(correlation),
-            attachments=_attachment_paths(attachments),
+            files=_request_files(files),
         )
         handle = await self.execution.fork(binding_digest, execution_id, request)
         return Execution(self, handle.execution_id, binding_digest, principal)
@@ -668,9 +636,8 @@ class Runtime(Generic[AppT]):
         self,
         agent_digest: str,
         node_id: str,
-        user_prompt: UserPromptTransport,
+        user_prompt: CanonicalUserInput,
         *,
-        attachments: Sequence[str],
         dependencies: tuple[str, ...],
         budget_cost: int,
         output: "type[BaseModel] | None",
@@ -685,30 +652,15 @@ class Runtime(Generic[AppT]):
             thinking=thinking,
         )
         binding = self._bind_agent(agent_digest, output=output)
-        resolved_attachments = _attachment_paths(attachments)
-        if resolved_attachments:
-            task_input: JsonValue = {
-                "type": "linktools.ai.agent",
-                "version": 2,
-                "stage": "draft",
-                "binding": binding.snapshot.to_payload(),
-                "prompt": task_prompt_draft(_restore_user_prompt(user_prompt)),
-                "attachments": list(resolved_attachments),
-                "mode": "run",
-                "planning": resolved_planning,
-                "thinking": resolved_thinking,
-            }
-        else:
-            task_input = {
-                "type": "linktools.ai.agent",
-                "version": 1,
-                "binding": binding.snapshot.to_payload(),
-                "user_prompt": str(user_prompt),
-                "user_prompt_codec": user_prompt.codec,
-                "mode": "run",
-                "planning": resolved_planning,
-                "thinking": resolved_thinking,
-            }
+        task_input: JsonValue = {
+            "type": "linktools.ai.agent",
+            "version": 1,
+            "binding": binding.snapshot.to_payload(),
+            "user_prompt": task_prompt_draft(user_prompt),
+            "mode": "run",
+            "planning": resolved_planning,
+            "thinking": resolved_thinking,
+        }
         return TaskNode(
             node_id,
             dependencies,
@@ -1011,7 +963,6 @@ async def _open_runtime(
             components.approval,
             components.event,
             components.artifact,
-            components.attachments,
             workspace=workspace,
             context=context,
             close_callback=components.close_callback,

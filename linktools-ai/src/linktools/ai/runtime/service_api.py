@@ -4,7 +4,9 @@
 
 from collections.abc import AsyncIterator, Mapping, Sequence
 from dataclasses import dataclass, field
-from typing import Protocol
+from typing import TYPE_CHECKING, Protocol
+
+from pydantic_ai.messages import UserContent
 
 from ..core import (
     ApprovalDecision,
@@ -27,7 +29,6 @@ from ..core import (
     validate_idempotency_key,
     validate_memory_scope,
     validate_resource_id,
-    validate_user_prompt,
 )
 from ..errors import AIError, ErrorCode, ErrorDiagnostics
 from ..storage import ObjectRef
@@ -40,9 +41,11 @@ from ..task import (
     TaskGraphSnapshot,
     TaskGraphView,
 )
+from ._input_contract import validate_user_input
 from ._snapshot import RunSnapshot
 
-_INPUT_CODECS = frozenset({"text", "pydantic-user-content-v1", "linktools-input-v2"})
+if TYPE_CHECKING:
+    from .state import RuntimeStorageContract, StoredUserInput
 
 
 def _request_correlation(value: Mapping[str, object] | None) -> CorrelationData:
@@ -52,33 +55,21 @@ def _request_correlation(value: Mapping[str, object] | None) -> CorrelationData:
         raise AIError(ErrorCode.REQUEST_FIELD_INVALID) from error
 
 
-def _request_attachments(value: Sequence[str]) -> tuple[str, ...]:
-    if isinstance(value, (str, bytes, bytearray)):
+def _request_files(value: Sequence[str]) -> tuple[str, ...]:
+    if not isinstance(value, Sequence) or isinstance(
+        value,
+        (str, bytes, bytearray),
+    ):
         raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
-    attachments = tuple(value)
-    if any(not isinstance(item, str) or not item for item in attachments):
+    files = tuple(value)
+    if any(not isinstance(item, str) or not item for item in files):
         raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
-    return attachments
-
-
-def _validate_input_request(
-    user_prompt: str,
-    user_prompt_codec: str,
-    attachments: Sequence[str],
-) -> tuple[str, ...]:
-    validate_user_prompt(user_prompt)
-    if user_prompt_codec not in _INPUT_CODECS:
-        raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
-    normalized = _request_attachments(attachments)
-    if user_prompt_codec == "linktools-input-v2" and normalized:
-        raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
-    return normalized
+    return files
 
 
 @dataclass(frozen=True, slots=True)
 class ExecutionRequest:
-    user_prompt: str
-    user_prompt_codec: str
+    user_prompt: "str | Sequence[UserContent]"
     principal: Principal
     idempotency_key: str
     memory_scope: "str | None"
@@ -86,14 +77,26 @@ class ExecutionRequest:
     planning: bool
     thinking: ThinkingValue
     correlation: CorrelationData = field(default_factory=dict)
-    attachments: tuple[str, ...] = ()
+    files: tuple[str, ...] = ()
+    input_intent_digest: "str | None" = field(
+        default=None,
+        compare=False,
+        repr=False,
+    )
+    stored_user_input: "StoredUserInput | None" = field(
+        default=None,
+        compare=False,
+        repr=False,
+    )
+    storage_contract: "RuntimeStorageContract | None" = field(
+        default=None,
+        compare=False,
+        repr=False,
+    )
 
     def __post_init__(self) -> None:
-        attachments = _validate_input_request(
-            self.user_prompt,
-            self.user_prompt_codec,
-            self.attachments,
-        )
+        object.__setattr__(self, "user_prompt", validate_user_input(self.user_prompt))
+        files = _request_files(self.files)
         validate_idempotency_key(self.idempotency_key)
         if self.memory_scope is not None:
             validate_memory_scope(self.memory_scope)
@@ -104,47 +107,39 @@ class ExecutionRequest:
         object.__setattr__(self, "mode", mode)
         object.__setattr__(self, "thinking", thinking)
         object.__setattr__(self, "correlation", _request_correlation(self.correlation))
-        object.__setattr__(self, "attachments", attachments)
+        object.__setattr__(self, "files", files)
 
 
 @dataclass(frozen=True, slots=True)
 class RetryExecutionRequest:
-    user_prompt: str
-    user_prompt_codec: str
+    user_prompt: "str | Sequence[UserContent]"
     principal: Principal
     idempotency_key: str
     correlation: CorrelationData = field(default_factory=dict)
-    attachments: tuple[str, ...] = ()
+    files: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
-        attachments = _validate_input_request(
-            self.user_prompt,
-            self.user_prompt_codec,
-            self.attachments,
-        )
+        object.__setattr__(self, "user_prompt", validate_user_input(self.user_prompt))
+        files = _request_files(self.files)
         validate_idempotency_key(self.idempotency_key)
         object.__setattr__(self, "correlation", _request_correlation(self.correlation))
-        object.__setattr__(self, "attachments", attachments)
+        object.__setattr__(self, "files", files)
 
 
 @dataclass(frozen=True, slots=True)
 class ForkExecutionRequest:
-    user_prompt: str
-    user_prompt_codec: str
+    user_prompt: "str | Sequence[UserContent]"
     principal: Principal
     idempotency_key: str
     correlation: CorrelationData = field(default_factory=dict)
-    attachments: tuple[str, ...] = ()
+    files: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
-        attachments = _validate_input_request(
-            self.user_prompt,
-            self.user_prompt_codec,
-            self.attachments,
-        )
+        object.__setattr__(self, "user_prompt", validate_user_input(self.user_prompt))
+        files = _request_files(self.files)
         validate_idempotency_key(self.idempotency_key)
         object.__setattr__(self, "correlation", _request_correlation(self.correlation))
-        object.__setattr__(self, "attachments", attachments)
+        object.__setattr__(self, "files", files)
 
 
 @dataclass(frozen=True, slots=True)
@@ -394,22 +389,18 @@ class ListSessionRequest:
 @dataclass(frozen=True, slots=True)
 class ResumeSessionRequest:
     principal: Principal
-    user_prompt: str
-    user_prompt_codec: str
+    user_prompt: "str | Sequence[UserContent]"
     idempotency_key: str
     memory_scope: "str | None"
     mode: ExecutionMode
     planning: bool
     thinking: ThinkingValue
     correlation: CorrelationData = field(default_factory=dict)
-    attachments: tuple[str, ...] = ()
+    files: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
-        attachments = _validate_input_request(
-            self.user_prompt,
-            self.user_prompt_codec,
-            self.attachments,
-        )
+        object.__setattr__(self, "user_prompt", validate_user_input(self.user_prompt))
+        files = _request_files(self.files)
         validate_idempotency_key(self.idempotency_key)
         if self.memory_scope is not None:
             validate_memory_scope(self.memory_scope)
@@ -420,7 +411,7 @@ class ResumeSessionRequest:
         object.__setattr__(self, "mode", mode)
         object.__setattr__(self, "thinking", thinking)
         object.__setattr__(self, "correlation", _request_correlation(self.correlation))
-        object.__setattr__(self, "attachments", attachments)
+        object.__setattr__(self, "files", files)
 
 
 @dataclass(frozen=True, slots=True)
@@ -681,27 +672,6 @@ class ArtifactDownload:
     expires_at: str
 
 
-@dataclass(frozen=True, slots=True)
-class AttachmentInfo:
-    path: str
-    name: str | None
-    media_type: str
-    size: int
-
-    def __post_init__(self) -> None:
-        if (
-            not isinstance(self.path, str)
-            or not self.path
-            or self.name is not None and (not isinstance(self.name, str) or not self.name)
-            or not isinstance(self.media_type, str)
-            or not self.media_type
-            or isinstance(self.size, bool)
-            or not isinstance(self.size, int)
-            or self.size <= 0
-        ):
-            raise ValueError("attachment info is invalid")
-
-
 class ExecutionHistoryService(Protocol):
     async def trace(
         self,
@@ -934,25 +904,6 @@ class ArtifactService(Protocol):
     ) -> ArtifactDownload: ...
 
 
-class AttachmentService(Protocol):
-    async def upload(
-        self,
-        data: bytes,
-        *,
-        media_type: str,
-        name: str | None = None,
-        principal: Principal,
-        idempotency_key: str,
-    ) -> AttachmentInfo: ...
-
-    async def release(
-        self,
-        path: str,
-        *,
-        principal: Principal,
-    ) -> None: ...
-
-
 __all__ = [
     "ApprovalContextReader",
     "ApprovalContinuation",
@@ -964,8 +915,6 @@ __all__ = [
     "ArtifactDownload",
     "ArtifactService",
     "ArtifactView",
-    "AttachmentInfo",
-    "AttachmentService",
     "CancelExecutionRequest",
     "CancelExecutionResult",
     "CancelGraphRequest",

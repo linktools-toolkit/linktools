@@ -14,6 +14,7 @@ from linktools.ai.runtime._capabilities import (
     tool_allowed_in_planning,
     tool_name_allowed,
 )
+from linktools.ai.runtime._workspace_binding import WorkspaceToolCallBinder
 from linktools.ai.spec import (
     AgentSpec,
     AgentSpecCodec,
@@ -24,6 +25,7 @@ from linktools.ai.spec import (
     SkillSpecCodec,
 )
 from pydantic_ai.capabilities import AbstractCapability, CapabilityOrdering, CombinedCapability
+from pydantic_ai.messages import ModelResponse, ToolCallPart
 from pydantic_ai.tools import ToolDefinition
 from pydantic_ai.toolsets import FunctionToolset, PreparedToolset, RenamedToolset
 from pydantic_ai_harness.step_persistence import StepPersistence
@@ -280,6 +282,74 @@ def test_runtime_persistence_boundary_is_outside_custom_execution_middleware() -
     assert combined.capabilities[0] is boundary
     assert boundary.wrapped is not custom
     assert boundary.get_ordering().wraps == (AbstractCapability,)
+
+
+@pytest.mark.asyncio
+async def test_runtime_persistence_boundary_binds_before_snapshot() -> None:
+    events: list[str] = []
+
+    class RecordingPersistence(StepPersistence[object]):
+        async def after_node_run(self, ctx, *, node, result):  # type: ignore[no-untyped-def]
+            del ctx, node
+            events.append("snapshot")
+            return result
+
+    class RecordingBinder:
+        async def bind_messages(self, messages, **kwargs):  # type: ignore[no-untyped-def]
+            del messages, kwargs
+            events.append("binding")
+
+        async def validate_messages(self, messages, **kwargs):  # type: ignore[no-untyped-def]
+            del messages, kwargs
+
+    boundary = _RuntimePersistenceBoundary(
+        RecordingPersistence(),
+        workspace_binder=RecordingBinder(),  # type: ignore[arg-type]
+        execution_id="execution",
+        step_run_id="step",
+        path_fields_provider=lambda: {},
+    )
+
+    class Context:
+        messages = []
+
+    await boundary.after_node_run(
+        Context(),  # type: ignore[arg-type]
+        node=object(),  # type: ignore[arg-type]
+        result=object(),  # type: ignore[arg-type]
+    )
+
+    assert events == ["binding", "snapshot"]
+
+
+@pytest.mark.asyncio
+async def test_workspace_binding_validation_rejects_missing_durable_binding() -> None:
+    class MissingBindingStore:
+        async def get(self, step_run_id, tool_call_id):  # type: ignore[no-untyped-def]
+            del step_run_id, tool_call_id
+            return None
+
+    binder = WorkspaceToolCallBinder(MissingBindingStore(), object())  # type: ignore[arg-type]
+    message = ModelResponse(
+        parts=[
+            ToolCallPart(
+                "read_file",
+                {"path": "/old/workspace/file.txt"},
+                tool_call_id="call",
+            )
+        ],
+        run_id="step",
+    )
+
+    with pytest.raises(AIError) as raised:
+        await binder.validate_messages(
+            (message,),
+            execution_id="execution",
+            step_run_id="step",
+            path_fields={"read_file": ("path",)},
+        )
+
+    assert raised.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
 
 
 def test_planning_gate_rejects_non_boolean_plan_safe_metadata() -> None:

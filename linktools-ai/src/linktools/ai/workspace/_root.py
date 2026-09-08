@@ -18,6 +18,20 @@ if TYPE_CHECKING:
 
 _STORAGE_DIR_NAME = ".linktools"
 
+
+def normalize_workspace_path(path: str) -> str:
+    """Validate one canonical workspace-relative POSIX path."""
+    if not isinstance(path, str) or not path:
+        raise ValueError("workspace path must be a non-empty string")
+    if "\\" in path or "\x00" in path or "//" in path or path.startswith("/"):
+        raise ValueError("workspace path must be canonical relative POSIX")
+    if path == ".":
+        return path
+    parts = path.split("/")
+    if any(part in {"", ".", ".."} for part in parts):
+        raise ValueError("workspace path contains a non-canonical component")
+    return path
+
 PermissionDecision = Literal["allow", "ask", "deny"]
 _PERMISSION_DECISION_RANK: Mapping[PermissionDecision, int] = {
     "allow": 0,
@@ -131,6 +145,8 @@ class WorkspacePolicy:
     max_repository_instruction_documents: int = 128
     max_repository_instruction_bytes: int = 256 * 1024
     max_preloaded_skill_bytes: int = 256 * 1024
+    max_binary_input_parts: int = 32
+    max_binary_input_bytes: int = 64 * 1024 * 1024
 
     def validate(self) -> None:
         if (
@@ -146,6 +162,8 @@ class WorkspacePolicy:
             self.max_repository_instruction_documents,
             self.max_repository_instruction_bytes,
             self.max_preloaded_skill_bytes,
+            self.max_binary_input_parts,
+            self.max_binary_input_bytes,
         )
         if any(
             not isinstance(value, int) or isinstance(value, bool) or value < 1
@@ -292,5 +310,6 @@ __all__ = [
     "WorkspacePolicy",
     "WorkspaceToolPermissionPolicy",
     "load_config",
+    "normalize_workspace_path",
     "trusted_workspace_principal",
 ]

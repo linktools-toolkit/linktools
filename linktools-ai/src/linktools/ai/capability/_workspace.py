@@ -3,9 +3,10 @@
 """Workspace tool semantics and Sandbox-backed runtime adaptation."""
 
 import asyncio
+import os
 import stat
 import sys
-from collections.abc import Awaitable, Callable, Sequence
+from collections.abc import Mapping, Sequence
 from contextlib import AsyncExitStack
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
@@ -18,7 +19,12 @@ from pydantic_ai_harness.filesystem import FileSystem
 from pydantic_ai_harness.shell import LLM_API_KEY_ENV_PATTERNS, Shell
 
 from ..errors import AIError, ErrorCode
-from ..workspace import Sandbox, SandboxSession, Workspace
+from ..workspace import (
+    Sandbox,
+    SandboxSession,
+    Workspace,
+    normalize_workspace_path,
+)
 from ._context import AgentContext
 from ._group import (
     CapabilityContribution,
@@ -31,8 +37,6 @@ if TYPE_CHECKING:
     from pydantic_ai.toolsets import ToolsetTool
     from pydantic_ai_harness.filesystem import FileSystemToolset
     from pydantic_ai_harness.shell import ShellToolset
-
-AttachmentReader = Callable[["WorkspaceAccess", str], Awaitable[dict[str, Any]]]
 
 _BASE_WORKSPACE_FILESYSTEM_TOOL_NAMES = (
     "create_directory",
@@ -53,11 +57,9 @@ _BASE_WORKSPACE_FILESYSTEM_READ_TOOL_NAMES = (
 )
 WORKSPACE_FILESYSTEM_TOOL_NAMES = (
     *_BASE_WORKSPACE_FILESYSTEM_TOOL_NAMES,
-    "read_attachment",
 )
 WORKSPACE_FILESYSTEM_READ_TOOL_NAMES = (
     *_BASE_WORKSPACE_FILESYSTEM_READ_TOOL_NAMES,
-    "read_attachment",
 )
 WORKSPACE_SHELL_TOOL_NAMES = (
     "check_command",
@@ -71,6 +73,7 @@ _LEGACY_WORKSPACE_TOOL_NAMES = (
 )
 _WORKSPACE_TOOL_NAMES = (*WORKSPACE_FILESYSTEM_TOOL_NAMES, *WORKSPACE_SHELL_TOOL_NAMES)
 _WORKSPACE_METADATA_KEY = "linktools.ai.workspace_tool_class"
+_WORKSPACE_PATH_FIELDS_KEY = "linktools.ai.workspace_path_fields"
 _WORKSPACE_SANDBOX_CAPABILITY_ID = "workspace-sandbox"
 _logger = environ.get_logger("ai.capability.workspace")
 
@@ -151,24 +154,53 @@ class _LocalSandboxSession:
         )
         return cast(str, result)
 
-    async def read_bytes(self, path: str) -> bytes:
+    async def canonicalize_path(self, path: str) -> str:
         if not isinstance(path, str) or not path or "\x00" in path:
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
-        relative = Path(path)
-        if relative.is_absolute() or any(
-            part in {"", ".", ".."} for part in relative.parts
+        root = os.fspath(self._root)
+        candidate = os.path.abspath(
+            path if os.path.isabs(path) else os.path.join(root, path)
+        )
+        try:
+            relative = os.path.relpath(candidate, root)
+            if relative == os.pardir or relative.startswith(os.pardir + os.sep):
+                raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+            return normalize_workspace_path(
+                "." if relative == os.curdir else Path(relative).as_posix()
+            )
+        except (AIError, ValueError, OSError) as error:
+            raise AIError(ErrorCode.REQUEST_FIELD_INVALID) from error
+
+    async def read_bytes(
+        self,
+        path: str,
+        *,
+        max_bytes: "int | None" = None,
+    ) -> bytes:
+        if max_bytes is not None and (
+            isinstance(max_bytes, bool)
+            or not isinstance(max_bytes, int)
+            or max_bytes < 0
         ):
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+        try:
+            relative = normalize_workspace_path(path)
+        except (TypeError, ValueError) as error:
+            raise AIError(ErrorCode.REQUEST_FIELD_INVALID) from error
         current = self._root
         try:
-            for part in relative.parts:
+            for part in Path(relative).parts:
+                if part == ".":
+                    continue
                 current = current / part
                 info = current.lstat()
                 if stat.S_ISLNK(info.st_mode):
                     raise AIError(ErrorCode.AUTHORIZATION_DENIED)
-            resolved = current.resolve(strict=True)
-            resolved.relative_to(self._root)
-            if not stat.S_ISREG(resolved.stat().st_mode):
+            resolved = current
+            info = resolved.stat()
+            if not stat.S_ISREG(info.st_mode):
+                raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+            if max_bytes is not None and info.st_size > max_bytes:
                 raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
             return resolved.read_bytes()
         except AIError:
@@ -306,10 +338,22 @@ class WorkspaceAccess:
                 self._session = session
             return session
 
-    async def read_bytes(self, path: str) -> bytes:
+    async def canonicalize_path(self, path: str) -> str:
         session = await self._ensure_session()
         try:
-            return await session.read_bytes(path)
+            return normalize_workspace_path(await session.canonicalize_path(path))
+        except AttributeError as error:
+            raise AIError(ErrorCode.SANDBOX_UNAVAILABLE) from error
+
+    async def read_bytes(
+        self,
+        path: str,
+        *,
+        max_bytes: "int | None" = None,
+    ) -> bytes:
+        session = await self._ensure_session()
+        try:
+            return await session.read_bytes(path, max_bytes=max_bytes)
         except AttributeError as error:
             raise AIError(ErrorCode.SANDBOX_UNAVAILABLE) from error
 
@@ -352,10 +396,8 @@ class _WorkspaceToolSurface:
     def __init__(
         self,
         access: "WorkspaceAccess | None",
-        attachment_reader: "AttachmentReader | None" = None,
     ) -> None:
         self._access = access
-        self._attachment_reader = attachment_reader
 
     async def _require_session(self) -> SandboxSession:
         if self._access is None:
@@ -570,20 +612,6 @@ class _WorkspaceToolSurface:
         session = await self._require_session()
         return await session.stop_command(command_id)
 
-    async def read_attachment(self, path: str) -> dict[str, Any]:
-        """Read an authorized attachment for use in the next model request.
-
-        Args:
-            path: Workspace-relative file path or an authorized managed attachment path.
-
-        Returns:
-            JSON-serializable attachment metadata and successful read status.
-        """
-        if self._access is None or self._attachment_reader is None:
-            raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
-        return await self._attachment_reader(self._access, path)
-
-
 class _WorkspaceSandboxToolset(FunctionToolset[AgentContext[object]]):
     def __init__(
         self,
@@ -591,14 +619,12 @@ class _WorkspaceSandboxToolset(FunctionToolset[AgentContext[object]]):
         selected_tool_names: tuple[str, ...],
         *,
         access: "WorkspaceAccess | None" = None,
-        attachment_reader: "AttachmentReader | None" = None,
     ) -> None:
         super().__init__()
         self._sandbox = sandbox
         self._selected_tool_names = selected_tool_names
         self._access = access
-        self._attachment_reader = attachment_reader
-        surface = _WorkspaceToolSurface(access, attachment_reader)
+        surface = _WorkspaceToolSurface(access)
         for name in selected_tool_names:
             self.add_tool(_workspace_tool(surface, name))
 
@@ -606,20 +632,16 @@ class _WorkspaceSandboxToolset(FunctionToolset[AgentContext[object]]):
         self,
         ctx: "PydanticRunContext[AgentContext[object]]",
     ) -> "_WorkspaceSandboxToolset":
-        if "read_attachment" not in self._selected_tool_names:
-            session = (
-                await self._sandbox._open_for_run(ctx)
-                if isinstance(self._sandbox, _LocalSandbox)
-                else await self._sandbox.open()
-            )
-            access = WorkspaceAccess(self._sandbox, session=session)
-        else:
-            access = WorkspaceAccess(self._sandbox, run_context=ctx)
+        session = (
+            await self._sandbox._open_for_run(ctx)
+            if isinstance(self._sandbox, _LocalSandbox)
+            else await self._sandbox.open()
+        )
+        access = WorkspaceAccess(self._sandbox, session=session)
         return _WorkspaceSandboxToolset(
             self._sandbox,
             self._selected_tool_names,
             access=access,
-            attachment_reader=self._attachment_reader,
         )
 
     async def __aexit__(self, *args: Any) -> "bool | None":
@@ -656,28 +678,9 @@ def workspace_tool_contributions(
     return tuple(result)
 
 
-def attachment_tool_contribution(
-    workspace: Workspace,
-) -> CapabilityContribution[object]:
-    """Return the new read_attachment compiler candidate without changing old pins."""
-    del workspace
-    surface = _WorkspaceToolSurface(None)
-    name = "read_attachment"
-    tool = _workspace_tool(surface, name)
-    semantic = contribution_semantic_contract("tool", name, tool)
-    return CapabilityContribution(
-        "tool",
-        name,
-        capability_fingerprint("tool", name, semantic),
-        tool,
-    )
-
-
 def workspace_capabilities(
     workspace: Workspace,
     selected_tool_names: Sequence[str],
-    *,
-    attachment_reader: "AttachmentReader | None" = None,
 ) -> "tuple[AbstractCapability[AgentContext[object]], ...]":
     """Materialize selected workspace tools through one per-run SandboxSession."""
     selected = frozenset(selected_tool_names)
@@ -686,8 +689,6 @@ def workspace_capabilities(
         raise ValueError(f"unknown workspace tools: {tuple(sorted(unknown))}")
     if not selected:
         return ()
-    if "read_attachment" in selected and attachment_reader is None:
-        raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
     ordered = tuple(name for name in _WORKSPACE_TOOL_NAMES if name in selected)
     sandbox = (
         workspace.sandbox
@@ -697,7 +698,6 @@ def workspace_capabilities(
     toolset = _WorkspaceSandboxToolset(
         sandbox,
         ordered,
-        attachment_reader=attachment_reader,
     )
     return (Toolset(toolset, id=_WORKSPACE_SANDBOX_CAPABILITY_ID),)
 
@@ -706,6 +706,32 @@ def workspace_tool_class(tool: Tool) -> "str | None":
     metadata = tool.tool_def.metadata or {}
     value = metadata.get(_WORKSPACE_METADATA_KEY)
     return value if isinstance(value, str) else None
+
+
+def workspace_tool_path_fields(tool: Tool) -> tuple[str, ...]:
+    """Return the trusted Workspace path fields carried by a built-in tool."""
+    metadata = tool.tool_def.metadata or {}
+    return workspace_tool_path_fields_from_metadata(metadata)
+
+
+def workspace_tool_path_fields_from_metadata(
+    metadata: Mapping[str, object] | None,
+) -> tuple[str, ...]:
+    """Read capability-owned trusted path fields from a tool definition."""
+    value = {} if metadata is None else metadata.get(_WORKSPACE_PATH_FIELDS_KEY)
+    if not isinstance(value, list | tuple):
+        return ()
+    return tuple(item for item in value if isinstance(item, str))
+
+
+def workspace_tool_path_metadata(fields: Sequence[str]) -> dict[str, object]:
+    """Create metadata for a capability-owned trusted path surface."""
+    values = tuple(fields)
+    if not values or any(not isinstance(field, str) or not field for field in values):
+        raise ValueError("workspace path fields must be non-empty strings")
+    if len(values) != len(set(values)):
+        raise ValueError("workspace path fields must be unique")
+    return {_WORKSPACE_PATH_FIELDS_KEY: list(values)}
 
 
 def _workspace_tool(surface: _WorkspaceToolSurface, name: str) -> Tool:
@@ -717,12 +743,10 @@ def _workspace_tool(surface: _WorkspaceToolSurface, name: str) -> Tool:
         else "shell"
     )
     function = getattr(surface, name)
-    return Tool(
-        function,
-        takes_ctx=False,
-        name=name,
-        metadata={_WORKSPACE_METADATA_KEY: tool_class},
-    )
+    metadata: dict[str, object] = {_WORKSPACE_METADATA_KEY: tool_class}
+    if tool_class in {"filesystem.read", "filesystem.write"}:
+        metadata.update(workspace_tool_path_metadata(("path",)))
+    return Tool(function, takes_ctx=False, name=name, metadata=metadata)
 
 
 __all__ = [
@@ -730,8 +754,10 @@ __all__ = [
     "WORKSPACE_FILESYSTEM_TOOL_NAMES",
     "WORKSPACE_SHELL_TOOL_NAMES",
     "WorkspaceAccess",
-    "attachment_tool_contribution",
     "workspace_capabilities",
     "workspace_tool_class",
+    "workspace_tool_path_fields",
+    "workspace_tool_path_fields_from_metadata",
+    "workspace_tool_path_metadata",
     "workspace_tool_contributions",
 ]

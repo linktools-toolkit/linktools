@@ -1,397 +1,340 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Runtime-owned canonical transport for Pydantic AI user content."""
+"""Canonical execution input and workspace file materialization."""
 
-import base64
 import hashlib
 import json
+import mimetypes
 from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import TypeAlias, cast
+from pathlib import Path
+from typing import TYPE_CHECKING, TypeAlias, cast
 
+from linktools.core import environ
 from pydantic_ai import ModelMessagesTypeAdapter
 from pydantic_ai.messages import (
     BinaryContent,
     ModelRequest,
-    UploadedFile,
     UserContent,
     UserPromptPart,
 )
 
-from ..core import JsonValue, canonical_json_bytes, normalize_json_value, validate_user_prompt
+from ..capability import WorkspaceAccess
+from ..core import JsonValue, canonical_json_bytes, normalize_json_value
 from ..errors import AIError, ErrorCode
-from .state import (
-    InputAttachmentPart,
-    InputNativePart,
-    InputSource,
-    InputTextPart,
-    InputV2,
-    PreparedInput,
+from ..storage import ObjectStore, PayloadPolicy, StoredPayload, payload_fits_inline
+from ..workspace import WorkspacePolicy, normalize_workspace_path
+from ._input_contract import (
+    CanonicalUserInput,
+    UserPromptInput,
+    _validate_content,
+    validate_user_input,
 )
+
+if TYPE_CHECKING:
+    from ._object import RuntimeObjectKeyFactory
+    from .state import StoredUserInput
 
 _TEXT_CODEC = "text"
 _USER_CONTENT_CODEC = "pydantic-user-content-v1"
-_PORTABLE_INPUT_CODEC = "linktools-input-v2"
-_MANAGED_DRAFT_CODEC = "linktools-managed-draft"
 _WIRE_TIMESTAMP = datetime(1970, 1, 1, tzinfo=timezone.utc)
-
-_UserPromptInput: TypeAlias = str | Sequence[UserContent]
-_RuntimeUserPrompt: TypeAlias = str
+_UserPromptInput = UserPromptInput
 DraftPrompt: TypeAlias = JsonValue
 TaskPrompt: TypeAlias = JsonValue
+_logger = environ.get_logger("ai.runtime.input")
 
 
-class UserPromptTransport(str):
-    """Internal prompt value carrying a durable codec or an in-memory draft."""
+@dataclass(frozen=True, slots=True)
+class InputIntent:
+    """The replay identity of an input before any file body is read."""
 
-    __slots__ = ("codec", "draft")
+    prompt: DraftPrompt
+    files: tuple[str, ...]
 
-    def __new__(
-        cls,
-        value: str,
-        codec: str,
-        draft: "_UserPromptInput | None" = None,
-    ) -> "UserPromptTransport":
-        if not isinstance(value, str) or not isinstance(codec, str) or not codec:
-            raise TypeError("user prompt transport is invalid")
-        if draft is not None and codec != _MANAGED_DRAFT_CODEC:
-            raise TypeError("only managed draft transport can retain raw prompt content")
-        instance = str.__new__(cls, value)
-        instance.codec = codec
-        instance.draft = draft
-        return instance
-
-    def __add__(self, other: object) -> "UserPromptTransport":
-        if not isinstance(other, str):
-            return NotImplemented
-        if self.draft is None:
-            return UserPromptTransport(str.__add__(self, other), self.codec)
-        if isinstance(self.draft, str):
-            draft: _UserPromptInput = self.draft + other
-        else:
-            draft = (*tuple(self.draft), other)
-        return UserPromptTransport(
-            str.__add__(self, other),
-            self.codec,
-            draft,
-        )
+    @property
+    def digest(self) -> str:
+        return hashlib.sha256(
+            canonical_json_bytes(
+                {
+                    "version": 1,
+                    "prompt": self.prompt,
+                    "files": list(self.files),
+                }
+            )
+        ).hexdigest()
 
 
-def prepare_user_prompt(value: _UserPromptInput) -> UserPromptTransport:
-    """Prepare legacy durable transport or retain a binary-bearing in-memory draft."""
-    if isinstance(value, str):
-        validate_user_prompt(value)
-        return UserPromptTransport(value, _TEXT_CODEC)
-    content = _require_user_content_sequence(value)
-    if any(isinstance(item, UploadedFile) for item in content):
+def input_intent(value: _UserPromptInput, files: Sequence[str]) -> InputIntent:
+    canonical = validate_user_input(value)
+    normalized_files = _require_files(files)
+    return InputIntent(_draft_prompt(canonical), normalized_files)
+
+
+def task_prompt_draft(value: _UserPromptInput) -> TaskPrompt:
+    """Encode generic task input while rejecting body-persistent binaries."""
+    canonical = validate_user_input(value)
+    if isinstance(canonical, str):
+        return {"kind": "text", "text": canonical}
+    if any(isinstance(item, BinaryContent) for item in canonical):
         raise AIError(
             ErrorCode.REQUEST_FIELD_INVALID,
             safe_details={
                 "field": "user_prompt",
-                "reason": "uploaded_file_not_durable",
+                "reason": "binary_content_not_supported_for_task",
             },
         )
-    if any(isinstance(item, BinaryContent) for item in content):
-        _draft_prompt(content)
-        return UserPromptTransport(
-            "managed-input",
-            _MANAGED_DRAFT_CODEC,
-            content,
+    return {
+        "kind": "pydantic-user-content-v1",
+        "value": _encode_user_content(canonical),
+    }
+
+
+def decode_user_content_payload(value: Mapping[str, JsonValue]) -> tuple[UserContent, ...]:
+    return _decode_user_content(cast(dict[str, JsonValue], value))
+
+
+class ExecutionInputMaterializer:
+    """Own every Workspace file read used to admit an execution."""
+
+    def __init__(
+        self,
+        access: WorkspaceAccess,
+        policy: WorkspacePolicy,
+        *,
+        object_store: ObjectStore | None = None,
+        object_key_factory: "RuntimeObjectKeyFactory | None" = None,
+        payload_policy: PayloadPolicy | None = None,
+    ) -> None:
+        if not isinstance(access, WorkspaceAccess):
+            raise TypeError("access must be WorkspaceAccess")
+        policy.validate()
+        self._access = access
+        self._policy = policy
+        self._object_store = object_store
+        self._object_key_factory = object_key_factory
+        self._payload_policy = payload_policy or PayloadPolicy()
+        self._mime = mimetypes.MimeTypes(filenames=())
+
+    async def close(self) -> None:
+        await self._access.close()
+
+    @property
+    def access(self) -> WorkspaceAccess:
+        return self._access
+
+    async def canonicalize_files(self, files: Sequence[str]) -> tuple[str, ...]:
+        raw_files = _require_files(files)
+        result: list[str] = []
+        for path in raw_files:
+            try:
+                canonical = normalize_workspace_path(
+                    await self._access.canonicalize_path(path)
+                )
+            except (AIError, TypeError, ValueError) as error:
+                if isinstance(error, AIError):
+                    raise
+                raise AIError(
+                    ErrorCode.REQUEST_FIELD_INVALID,
+                    safe_details={"field": "files", "reason": "path_invalid"},
+                ) from error
+            result.append(canonical)
+        return tuple(result)
+
+    def intent(
+        self,
+        value: _UserPromptInput,
+        canonical_files: Sequence[str],
+    ) -> InputIntent:
+        files = _require_canonical_files(canonical_files)
+        return input_intent(value, files)
+
+    async def materialize(
+        self,
+        value: _UserPromptInput,
+        canonical_files: Sequence[str],
+        *,
+        tenant_id: str,
+    ) -> tuple[CanonicalUserInput, "StoredUserInput"]:
+        canonical = validate_user_input(value)
+        files = _require_canonical_files(canonical_files)
+        direct_binary = _binary_parts(canonical)
+        if len(direct_binary) > self._policy.max_binary_input_parts:
+            raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+        total_bytes = sum(len(item.data) for item in direct_binary)
+        if total_bytes > self._policy.max_binary_input_bytes:
+            raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+        if len(direct_binary) + len(files) > self._policy.max_binary_input_parts:
+            raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+
+        bodies: dict[str, BinaryContent] = {}
+        for path in files:
+            if path not in bodies:
+                media_type = self._media_type(path)
+                remaining = self._policy.max_binary_input_bytes - total_bytes
+                if remaining < 0:
+                    raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+                body = await self._access.read_bytes(path, max_bytes=remaining)
+                total_bytes += len(body)
+                if total_bytes > self._policy.max_binary_input_bytes:
+                    raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+                bodies[path] = BinaryContent(
+                    data=body,
+                    media_type=media_type,
+                    identifier=Path(path).name,
+                )
+        additions = tuple(bodies[path] for path in files)
+        if isinstance(canonical, str):
+            materialized: CanonicalUserInput = (canonical, *additions)
+        else:
+            materialized = (*canonical, *additions)
+        _validate_content(materialized)
+        stored = await self.store(materialized, tenant_id=tenant_id)
+        _logger.info(
+            "execution input materialized: files=%s distinct_files=%s binary_bytes=%s",
+            len(files),
+            len(bodies),
+            total_bytes,
         )
-    payload = _encode_user_content(content)
-    wire = canonical_json_bytes(payload).decode("utf-8")
-    validate_user_prompt(wire)
-    return UserPromptTransport(wire, _USER_CONTENT_CODEC)
+        return materialized, stored
 
+    async def store(
+        self,
+        value: CanonicalUserInput,
+        *,
+        tenant_id: str,
+    ) -> "StoredUserInput":
+        from .state import StoredUserInput
 
-def managed_user_prompt_draft(
-    value: UserPromptTransport,
-) -> "_UserPromptInput | None":
-    """Return binary-bearing raw content before any durable request is constructed."""
-    if not isinstance(value, UserPromptTransport):
-        raise TypeError("value must be UserPromptTransport")
-    if value.codec == _MANAGED_DRAFT_CODEC:
-        if value.draft is None:
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        return value.draft
-    if value.draft is not None:
-        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-    return None
+        canonical = validate_user_input(value)
+        if isinstance(canonical, str):
+            return StoredUserInput(1, _TEXT_CODEC, StoredPayload.inline_text(canonical))
+        payload = StoredPayload.inline_json(_encode_user_content(canonical))
+        if not payload_fits_inline(payload, self._payload_policy):
+            if self._object_store is None or self._object_key_factory is None:
+                raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+            body = canonical_json_bytes(cast(JsonValue, payload.value))
+            from ._object import RuntimeObjectKeyFactory, put_runtime_object
+            from .state import RuntimeDomain
 
+            if not isinstance(self._object_key_factory, RuntimeObjectKeyFactory):
+                raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+            reference = await put_runtime_object(
+                self._object_store,
+                self._object_key_factory,
+                RuntimeDomain.EXECUTION,
+                tenant_id,
+                body,
+            )
+            payload = StoredPayload.object(reference)
+        return StoredUserInput(1, _USER_CONTENT_CODEC, payload)
 
-def input_intent_digest(
-    value: _UserPromptInput,
-    attachments: Sequence[str] = (),
-) -> str:
-    """Return the pre-import semantic intent digest without embedding binary bodies."""
-    raw_attachments = _require_attachment_paths(attachments)
-    draft = _draft_prompt(value)
-    return hashlib.sha256(
-        canonical_json_bytes(
-            {
-                "version": 1,
-                "prompt": draft,
-                "attachments": list(raw_attachments),
-            }
-        )
-    ).hexdigest()
+    async def restore(self, value: "StoredUserInput") -> CanonicalUserInput:
+        from .state import StoredUserInput
 
+        if not isinstance(value, StoredUserInput) or value.version != 1:
+            raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
+        payload = value.payload
+        if payload.kind == "object":
+            if self._object_store is None or payload.ref is None:
+                raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+            from ._object import read_runtime_object
 
-def task_prompt_draft(value: _UserPromptInput) -> TaskPrompt:
-    """Encode the in-memory Agent Task v2 prompt without persistence semantics."""
-    if isinstance(value, str):
-        validate_user_prompt(value)
-        return {"kind": "text", "text": value}
-    content = _require_user_content_sequence(value)
-    result: list[JsonValue] = []
-    for item in content:
-        if isinstance(item, UploadedFile):
+            raw = await read_runtime_object(self._object_store, payload.ref)
+            try:
+                decoded = json.loads(raw.decode("utf-8"))
+            except (UnicodeDecodeError, json.JSONDecodeError) as error:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
+        else:
+            decoded = payload.decode()
+        if value.codec == _TEXT_CODEC:
+            if not isinstance(decoded, str):
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            validate_user_input(decoded)
+            return decoded
+        if value.codec != _USER_CONTENT_CODEC or not isinstance(decoded, Mapping):
+            raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
+        return _decode_user_content(cast(dict[str, JsonValue], decoded))
+
+    def _media_type(self, path: str) -> str:
+        media_type, _ = self._mime.guess_type(path, strict=False)
+        if not media_type:
             raise AIError(
                 ErrorCode.REQUEST_FIELD_INVALID,
                 safe_details={
-                    "field": "user_prompt",
-                    "reason": "uploaded_file_not_durable",
+                    "field": "files",
+                    "reason": "media_type_unknown",
                 },
             )
-        if isinstance(item, str):
-            result.append({"kind": "text", "text": item})
-            continue
-        if isinstance(item, BinaryContent):
-            if not item.data or not isinstance(item.media_type, str) or not item.media_type:
-                raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
-            result.append(
-                {
-                    "kind": "binary",
-                    "data_b64": base64.b64encode(item.data).decode("ascii"),
-                    "media_type": item.media_type,
-                    "identifier": item.identifier,
-                    "vendor_metadata": _json_object_or_none(item.vendor_metadata),
-                }
-            )
-            continue
-        result.append(
-            {
-                "kind": "native",
-                "codec": _USER_CONTENT_CODEC,
-                "value": _encode_user_content((item,)),
-            }
-        )
+        return media_type
+
+
+def _require_files(value: Sequence[str]) -> tuple[str, ...]:
+    if not isinstance(value, Sequence) or isinstance(
+        value,
+        (str, bytes, bytearray),
+    ):
+        raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+    result = tuple(value)
+    if any(not isinstance(item, str) or not item for item in result):
+        raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
     return result
 
 
-def prepared_user_prompt_transport(value: PreparedInput) -> UserPromptTransport:
-    """Encode a frozen managed input without serializing any attachment body."""
-    if not isinstance(value, PreparedInput):
-        raise TypeError("value must be PreparedInput")
-    wire = canonical_json_bytes(_input_v2_to_json(value.user_prompt)).decode("utf-8")
-    validate_user_prompt(wire)
-    return UserPromptTransport(wire, _PORTABLE_INPUT_CODEC)
+def _require_canonical_files(value: Sequence[str]) -> tuple[str, ...]:
+    files = _require_files(value)
+    for path in files:
+        try:
+            canonical = normalize_workspace_path(path)
+        except (TypeError, ValueError) as error:
+            raise AIError(ErrorCode.REQUEST_FIELD_INVALID) from error
+        if canonical != path:
+            raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+    return files
 
 
-def user_prompt_transport(value: str, codec: str = _TEXT_CODEC) -> UserPromptTransport:
-    """Restore an internal prompt transport after a durable boundary."""
-    validate_user_prompt(value)
-    if codec not in {_TEXT_CODEC, _USER_CONTENT_CODEC, _PORTABLE_INPUT_CODEC}:
-        raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
-    if codec == _PORTABLE_INPUT_CODEC:
-        _decode_input_v2_wire(value)
-    return UserPromptTransport(value, codec)
+def _require_user_content_sequence(
+    value: _UserPromptInput,
+) -> tuple[UserContent, ...]:
+    if not isinstance(value, Sequence) or isinstance(value, (str, bytes, bytearray)):
+        raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+    content = tuple(value)
+    if not content:
+        raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+    return content
 
 
-def _restore_user_prompt(value: str) -> str | tuple[UserContent, ...]:
-    """Restore legacy durable text transport or an in-memory managed draft."""
-    if isinstance(value, UserPromptTransport) and value.codec == _MANAGED_DRAFT_CODEC:
-        draft = managed_user_prompt_draft(value)
-        if isinstance(draft, str):
-            return draft
-        if draft is None:
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        content = tuple(draft)
-        if len(content) == 1 and isinstance(content[0], str):
-            return content[0]
-        return content
-    validate_user_prompt(value)
-    codec = value.codec if isinstance(value, UserPromptTransport) else _TEXT_CODEC
-    if codec == _TEXT_CODEC:
-        return str(value)
-    if codec == _USER_CONTENT_CODEC:
-        return _decode_user_content_wire(str(value))
-    if codec == _PORTABLE_INPUT_CODEC:
-        raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
-    raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
-
-
-def _restore_input_v2(value: str) -> InputV2:
-    """Restore one canonical managed-input transport for the attachment pipeline."""
-    validate_user_prompt(value)
-    return _decode_input_v2_wire(value)
+def _binary_parts(content: Sequence[UserContent]) -> tuple[BinaryContent, ...]:
+    return tuple(item for item in content if isinstance(item, BinaryContent))
 
 
 def _draft_prompt(value: _UserPromptInput) -> DraftPrompt:
-    if isinstance(value, str):
-        validate_user_prompt(value)
-        return {"kind": "text", "text": value}
-    content = _require_user_content_sequence(value)
-    draft: list[JsonValue] = []
-    for item in content:
-        if isinstance(item, UploadedFile):
-            raise AIError(
-                ErrorCode.REQUEST_FIELD_INVALID,
-                safe_details={
-                    "field": "user_prompt",
-                    "reason": "uploaded_file_not_durable",
-                },
-            )
+    canonical = validate_user_input(value)
+    if isinstance(canonical, str):
+        return {"kind": "text", "text": canonical}
+    result: list[JsonValue] = []
+    for item in canonical:
         if isinstance(item, str):
-            draft.append({"kind": "text", "text": item})
-            continue
-        if isinstance(item, BinaryContent):
-            if not item.data or not isinstance(item.media_type, str) or not item.media_type:
-                raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
-            vendor_metadata = _json_object_or_none(item.vendor_metadata)
-            draft.append(
+            result.append({"kind": "text", "text": item})
+        elif isinstance(item, BinaryContent):
+            result.append(
                 {
                     "kind": "binary",
                     "digest": hashlib.sha256(item.data).hexdigest(),
                     "size": len(item.data),
                     "media_type": item.media_type,
                     "identifier": item.identifier,
-                    "vendor_metadata": vendor_metadata,
+                    "vendor_metadata": _json_object_or_none(item.vendor_metadata),
                 }
             )
-            continue
-        draft.append(
-            {
-                "kind": "native",
-                "codec": _USER_CONTENT_CODEC,
-                "value": _encode_user_content((item,)),
-            }
-        )
-    return draft
-
-
-def _input_v2_to_json(value: InputV2) -> dict[str, JsonValue]:
-    if not isinstance(value, InputV2):
-        raise TypeError("value must be InputV2")
-    parts: list[JsonValue] = []
-    for part in value.parts:
-        if isinstance(part, InputTextPart):
-            parts.append({"kind": "text", "text": part.text})
-        elif isinstance(part, InputNativePart):
-            parts.append(
+        else:
+            result.append(
                 {
                     "kind": "native",
                     "codec": _USER_CONTENT_CODEC,
-                    "value": dict(part.value),
+                    "value": _encode_user_content((item,)),
                 }
             )
-        elif isinstance(part, InputAttachmentPart):
-            parts.append({"kind": "attachment", "index": part.index})
-        else:
-            raise TypeError("InputV2 contains an unsupported part")
-    return {
-        "version": 2,
-        "parts": parts,
-        "available": list(value.available),
-        "sources": [
-            {"relative": source.relative, "index": source.index}
-            for source in value.sources
-        ],
-    }
-
-
-def _decode_input_v2_wire(value: str) -> InputV2:
-    try:
-        payload = json.loads(value, object_pairs_hook=_reject_duplicate_keys)
-        normalized = normalize_json_value(payload)
-    except (json.JSONDecodeError, TypeError, ValueError) as error:
-        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
-    if not isinstance(normalized, dict) or canonical_json_bytes(normalized) != value.encode("utf-8"):
-        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-    if set(normalized) != {"version", "parts", "available", "sources"}:
-        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-    version = normalized["version"]
-    parts_value = normalized["parts"]
-    available_value = normalized["available"]
-    sources_value = normalized["sources"]
-    if version != 2 or isinstance(version, bool):
-        raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
-    if (
-        not isinstance(parts_value, list)
-        or not isinstance(available_value, list)
-        or not isinstance(sources_value, list)
-    ):
-        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-    try:
-        parts = tuple(_decode_input_part(item) for item in parts_value)
-        available = tuple(_strict_nonnegative_int(item) for item in available_value)
-        sources = tuple(_decode_input_source(item) for item in sources_value)
-        result = InputV2(2, parts, available, sources)
-    except AIError:
-        raise
-    except (TypeError, ValueError, KeyError) as error:
-        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
-    if _input_v2_to_json(result) != normalized:
-        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-    return result
-
-
-def _decode_input_part(
-    value: JsonValue,
-) -> InputTextPart | InputNativePart | InputAttachmentPart:
-    if not isinstance(value, Mapping):
-        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-    kind = value.get("kind")
-    if kind == "text":
-        if set(value) != {"kind", "text"} or not isinstance(value.get("text"), str):
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        return InputTextPart("text", cast(str, value["text"]))
-    if kind == "attachment":
-        if set(value) != {"kind", "index"}:
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        return InputAttachmentPart(
-            "attachment", _strict_nonnegative_int(value["index"])
-        )
-    if kind == "native":
-        if (
-            set(value) != {"kind", "codec", "value"}
-            or value.get("codec") != _USER_CONTENT_CODEC
-        ):
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        native = value.get("value")
-        if not isinstance(native, Mapping):
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        return InputNativePart(
-            "native",
-            _USER_CONTENT_CODEC,
-            cast(Mapping[str, JsonValue], native),
-        )
-    raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
-
-
-def _decode_input_source(value: JsonValue) -> InputSource:
-    if not isinstance(value, Mapping) or set(value) != {"relative", "index"}:
-        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-    relative = value.get("relative")
-    if not isinstance(relative, str):
-        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-    return InputSource(relative, _strict_nonnegative_int(value["index"]))
-
-
-def _strict_nonnegative_int(value: object) -> int:
-    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
-        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-    return value
-
-
-def _reject_duplicate_keys(
-    pairs: list[tuple[str, JsonValue]],
-) -> dict[str, JsonValue]:
-    result: dict[str, JsonValue] = {}
-    for key, item in pairs:
-        if key in result:
-            raise ValueError(f"duplicate JSON key: {key}")
-        result[key] = item
     return result
 
 
@@ -405,43 +348,6 @@ def _json_object_or_none(value: object) -> JsonValue:
     if not isinstance(normalized, dict):
         raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
     return normalized
-
-
-def _require_attachment_paths(value: Sequence[str]) -> tuple[str, ...]:
-    if isinstance(value, (str, bytes, bytearray)):
-        raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
-    result = tuple(value)
-    if any(not isinstance(item, str) or not item for item in result):
-        raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
-    return result
-
-
-def _require_user_content_sequence(value: _UserPromptInput) -> tuple[UserContent, ...]:
-    if not isinstance(value, Sequence) or isinstance(value, (str, bytes, bytearray)):
-        raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
-    content = tuple(value)
-    if not content:
-        raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
-    return content
-
-
-def _decode_user_content_wire(value: str) -> tuple[UserContent, ...]:
-    try:
-        payload, end = json.JSONDecoder().raw_decode(value)
-    except json.JSONDecodeError as error:
-        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
-    payload_text = value[:end]
-    try:
-        normalized = normalize_json_value(payload)
-    except (TypeError, ValueError) as error:
-        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
-    if not isinstance(normalized, dict):
-        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-    if canonical_json_bytes(normalized) != payload_text.encode("utf-8"):
-        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-    content = _decode_user_content(normalized)
-    suffix = value[end:]
-    return (*content, suffix) if suffix else content
 
 
 def _encode_user_content(content: Sequence[UserContent]) -> dict[str, JsonValue]:
@@ -468,28 +374,32 @@ def _encode_user_content(content: Sequence[UserContent]) -> dict[str, JsonValue]
 
 
 def _decode_user_content(payload: dict[str, JsonValue]) -> tuple[UserContent, ...]:
-    if set(payload) != {"message"}:
-        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-    message = payload["message"]
-    if not isinstance(message, dict):
+    if set(payload) != {"message"} or not isinstance(payload["message"], dict):
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     try:
-        raw = canonical_json_bytes([message])
-        messages = ModelMessagesTypeAdapter.validate_json(raw)
+        messages = ModelMessagesTypeAdapter.validate_json(
+            canonical_json_bytes([payload["message"]])
+        )
     except (TypeError, ValueError) as error:
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
     if len(messages) != 1 or not isinstance(messages[0], ModelRequest):
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-    request = messages[0]
-    if len(request.parts) != 1 or not isinstance(request.parts[0], UserPromptPart):
+    part = messages[0].parts[0] if len(messages[0].parts) == 1 else None
+    if not isinstance(part, UserPromptPart) or part.timestamp != _WIRE_TIMESTAMP:
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-    part = request.parts[0]
-    if part.timestamp != _WIRE_TIMESTAMP or isinstance(part.content, str):
+    if isinstance(part.content, str):
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     content = tuple(cast(Sequence[UserContent], part.content))
-    if not content or any(isinstance(item, UploadedFile) for item in content):
-        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    _validate_content(content)
     return content
 
 
-__all__: tuple[str, ...] = ()
+__all__ = [
+    "CanonicalUserInput",
+    "ExecutionInputMaterializer",
+    "InputIntent",
+    "decode_user_content_payload",
+    "input_intent",
+    "task_prompt_draft",
+    "validate_user_input",
+]

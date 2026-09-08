@@ -107,7 +107,6 @@ class _Resolver:
 def _request(key: str) -> ExecutionRequest:
     return ExecutionRequest(
         user_prompt="work",
-        user_prompt_codec="text",
         principal=Principal("owner", "tenant"),
         idempotency_key=key,
         memory_scope="scope",

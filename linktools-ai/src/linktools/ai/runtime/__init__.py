@@ -6,17 +6,11 @@ from ..errors import ErrorDiagnostics
 from ._agent import Agent, Execution, Session
 from ._approval import DefaultApprovalService
 from ._artifact import DefaultArtifactService
-from ._attachment_admission import _admission_scope, install_attachment_admission
-from ._attachment_context import bind_admission_scope
-from ._attachment_policy import install_attachment_tool_policy
-from ._attachment_tool_state import install_attachment_tool_state
-from ._attachment_workspace import install_attachment_workspace
 from ._context import RuntimeContext
 from ._evaluation import DefaultEvaluationService
 from ._event import DefaultEventService, ExecutionDelta, LiveExecutionEventBroker
 from ._execution import DefaultExecutionService
 from ._history_service import DefaultExecutionHistoryService
-from ._input import user_prompt_transport
 from ._local import LocalExecutionBackend
 from ._metrics import RuntimeMetricFlushResult, RuntimeMetricStatus
 from ._object import RuntimeObjectKeyFactory, put_runtime_object, read_runtime_object
@@ -25,7 +19,6 @@ from ._runtime_history import RuntimeHistory
 from ._runtime_service import Runtime
 from ._session import DefaultSessionService
 from ._snapshot import RunSnapshot, snapshot_digest
-from ._task_attachment_install import install_task_attachments
 from .service_api import (
     ApprovalCreateRequest,
     ApprovalDecisionRequest,
@@ -35,8 +28,6 @@ from .service_api import (
     ArtifactDownload,
     ArtifactService,
     ArtifactView,
-    AttachmentInfo,
-    AttachmentService,
     CancelExecutionRequest,
     CancelExecutionResult,
     CancelGraphRequest,
@@ -82,28 +73,14 @@ from .service_api import (
     UpdateSessionRequest,
 )
 from .state import (
-    RestoreManifest,
-    RestorePlan,
     RuntimeDomain,
     RuntimeRetentionMode,
     RuntimeState,
     RuntimeStatePlan,
     RuntimeStateRoute,
+    RuntimeStorageContract,
+    StoredUserInput,
 )
-
-install_attachment_tool_state()
-install_attachment_tool_policy()
-install_attachment_admission()
-bind_admission_scope(_admission_scope)
-install_attachment_workspace()
-install_task_attachments()
-del install_attachment_tool_state
-del install_attachment_tool_policy
-del install_attachment_admission
-del bind_admission_scope
-del _admission_scope
-del install_attachment_workspace
-del install_task_attachments
 
 __all__ = [
     "Agent",
@@ -117,8 +94,6 @@ __all__ = [
     "ArtifactDownload",
     "ArtifactService",
     "ArtifactView",
-    "AttachmentInfo",
-    "AttachmentService",
     "CancelExecutionRequest",
     "CancelExecutionResult",
     "CancelGraphRequest",
@@ -162,8 +137,6 @@ __all__ = [
     "LocalExecutionBackend",
     "Page",
     "ReplayEvaluationRequest",
-    "RestoreManifest",
-    "RestorePlan",
     "ResumeSessionRequest",
     "RetryExecutionRequest",
     "RunEvaluationRequest",
@@ -179,11 +152,13 @@ __all__ = [
     "RuntimeState",
     "RuntimeStatePlan",
     "RuntimeStateRoute",
+    "RuntimeStorageContract",
     "RuntimeTaskNodeRunner",
     "SessionHistoryItem",
     "SessionHistoryReader",
     "SessionService",
     "SessionView",
+    "StoredUserInput",
     "TaskEvent",
     "TaskEventType",
     "TaskService",
@@ -192,5 +167,4 @@ __all__ = [
     "put_runtime_object",
     "read_runtime_object",
     "snapshot_digest",
-    "user_prompt_transport",
 ]

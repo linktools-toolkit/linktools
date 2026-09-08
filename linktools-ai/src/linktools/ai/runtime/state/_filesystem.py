@@ -944,7 +944,7 @@ class FilesystemStateStorageGroup:
             except (OSError, ValueError) as error:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
             if not self._manifest_matches(actual, expected):
-                raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         else:
             _write_json(manifest, expected)
             _write_text(self._metadata_root / "generation", "0")
@@ -990,7 +990,6 @@ class FilesystemStateStorageGroup:
         return {
             "format": "linktools-ai-state-group",
             "version": 1,
-            "transaction_root": self._transaction_root.as_posix(),
             "namespace_digest": _digest(self._namespace),
             "tenant_digest": _digest(self._tenant_id),
             "members": [
@@ -998,7 +997,13 @@ class FilesystemStateStorageGroup:
                     "runtime_domain": member._runtime_domain,
                     "relative_path": member.root.relative_to(self._transaction_root).as_posix(),
                 }
-                for member in sorted(self._members, key=lambda value: value.root.as_posix())
+                for member in sorted(
+                    self._members,
+                    key=lambda value: (
+                        value._runtime_domain,
+                        value.root.relative_to(self._transaction_root).as_posix(),
+                    ),
+                )
             ],
         }
 
@@ -1328,7 +1333,7 @@ class FilesystemStateStore:
         except (OSError, ValueError) as error:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
         if actual != self._expected_manifest():
-            raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         generation = self._root / "generation"
         if not generation.is_file():
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)

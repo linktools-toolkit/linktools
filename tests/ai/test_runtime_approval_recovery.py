@@ -46,10 +46,13 @@ from linktools.ai.runtime.state._contracts import (
     RecoveryCheckpoint,
     RecoveryExecutionInput,
     RecoveryIdempotencyInput,
+    RuntimeStorageContract,
+    StoredUserInput,
 )
 from linktools.ai.spec import AgentSpec
 from pydantic_ai.messages import ModelRequest, UserPromptPart
 from pydantic_ai_harness.step_persistence import ContinuableSnapshot, RunRecord
+from linktools.ai.storage import StoredPayload
 
 
 def _binding() -> AgentBindingSnapshot:
@@ -94,8 +97,7 @@ def _execution(now: datetime, *, agent_run_sequence: int = 1) -> ExecutionRecord
 
 def _recovery_input() -> RecoveryExecutionInput:
     return RecoveryExecutionInput(
-        user_prompt="prompt",
-        user_prompt_codec="text",
+        user_input=StoredUserInput(1, "text", StoredPayload.inline_text("prompt")),
         principal_id="owner",
         principal_kind="user",
         session_id=None,
@@ -112,6 +114,7 @@ def _recovery_input() -> RecoveryExecutionInput:
         planning=False,
         thinking=False,
         binding=_binding(),
+        storage_contract=RuntimeStorageContract(1, (), (), ()),
     )
 
 
@@ -210,7 +213,6 @@ async def _enter_wait(
         1,
         RecoveryCheckpointState.ACTIVE,
         RecoveryHandoffPhase.NONE,
-        None,
         None,
         None,
         0,

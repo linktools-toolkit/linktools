@@ -7,7 +7,6 @@ from enum import Enum
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from ...core import canonical_sha256
 from ...errors import AIError, ErrorCode
 
 if TYPE_CHECKING:
@@ -168,29 +167,6 @@ class RuntimeStateRoute:
         if engine.dialect.name == "sqlite" and engine.url.database in {None, "", ":memory:"}:
             raise ValueError("external SQL route requires durable SQLite or external SQL")
         return cls._create(kind=_RuntimeStateBackendKind.SQL, retention=RuntimeRetentionMode.DURABLE, engine=engine)
-
-    @property
-    def route_identity(self) -> str:
-        if self._kind in {_RuntimeStateBackendKind.FILESYSTEM, _RuntimeStateBackendKind.SQLITE}:
-            payload = {
-                "kind": self.kind,
-                "path": self.path.as_posix() if self.path is not None else None,
-            }
-        elif self._kind is _RuntimeStateBackendKind.SQL:
-            if self.engine is None:
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            payload = {
-                "kind": self.kind,
-                "dialect": self.engine.dialect.name,
-                "driver": self.engine.dialect.driver,
-                "host": self.engine.url.host,
-                "port": self.engine.url.port,
-                "database": self.engine.url.database,
-            }
-        else:
-            payload = {"kind": self.kind, "retention": self.retention.value}
-        return canonical_sha256(payload)
-
 
 @dataclass(frozen=True, slots=True)
 class RuntimeStatePlan:

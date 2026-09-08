@@ -38,6 +38,7 @@ from ...core import (
     StopReason,
     ThinkingValue,
     UsageMetrics,
+    canonical_sha256,
     normalize_execution_mode,
     normalize_correlation,
     normalize_thinking,
@@ -57,9 +58,8 @@ from ...task import (
     TaskResultRecord,
     TaskTerminalRecord,
 )
-from ._attachments import AttachmentEntry
-from ._plan import RuntimeDomain
-from ._relocation import PathOrigin
+from ...workspace import normalize_workspace_path
+from ._plan import RuntimeDomain, RuntimeRetentionMode
 
 if TYPE_CHECKING:
     from .._tool import ToolStateRepository
@@ -80,28 +80,6 @@ def _error_diagnostics_payload(diagnostics: ErrorDiagnostics) -> dict[str, JsonV
         "exception_message": diagnostics.exception_message,
         "cause_digest": diagnostics.cause_digest,
     }
-
-
-def _managed_input_fields(
-    attachment_manifest: Sequence[AttachmentEntry],
-    input_digest: str | None,
-    path_origin: PathOrigin | None,
-) -> tuple[AttachmentEntry, ...]:
-    manifest = tuple(attachment_manifest)
-    if any(not isinstance(item, AttachmentEntry) for item in manifest):
-        raise TypeError("attachment manifest contains an invalid value")
-    if not manifest:
-        if input_digest is not None or path_origin is not None:
-            raise ValueError("legacy input cannot carry managed input metadata")
-        return ()
-    if not _is_sha256(input_digest):
-        raise ValueError("managed input digest must be lowercase SHA-256")
-    if not isinstance(path_origin, PathOrigin):
-        raise TypeError("managed input requires PathOrigin")
-    paths = tuple(item.path for item in manifest)
-    if len(paths) != len(set(paths)):
-        raise ValueError("attachment manifest contains duplicate paths")
-    return manifest
 
 
 @dataclass(frozen=True, slots=True)
@@ -180,6 +158,181 @@ class TranscriptOwnerDomain(str, Enum):
 class RuntimePayloadRef:
     payload: StoredPayload
     source_domain: RuntimeDomain | None
+
+
+@dataclass(frozen=True, slots=True)
+class StoredUserInput:
+    version: int
+    codec: str
+    payload: StoredPayload
+
+    def __post_init__(self) -> None:
+        if self.version != 1:
+            raise ValueError("stored user input version must be 1")
+        if self.codec not in {"text", "pydantic-user-content-v1"}:
+            raise ValueError("stored user input codec is invalid")
+        if not isinstance(self.payload, StoredPayload):
+            raise TypeError("stored user input payload is invalid")
+
+    @property
+    def digest(self) -> str:
+        return canonical_sha256(
+            {
+                "version": self.version,
+                "codec": self.codec,
+                "payload_digest": self.payload.digest,
+                "payload_size": self.payload.size,
+            }
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class WorkspacePathBinding:
+    pointer: str
+    relative: str
+
+    def __post_init__(self) -> None:
+        if (
+            not isinstance(self.pointer, str)
+            or not self.pointer.startswith("/")
+            or self.pointer == "/"
+            or "//" in self.pointer
+        ):
+            raise ValueError("workspace path binding is invalid")
+        try:
+            normalized = normalize_workspace_path(self.relative)
+        except (TypeError, ValueError) as error:
+            raise ValueError("workspace path binding is invalid") from error
+        if normalized != self.relative:
+            raise ValueError("workspace path binding is not canonical")
+
+
+@dataclass(frozen=True, slots=True)
+class WorkspaceToolCallBinding:
+    version: int
+    execution_id: str
+    step_run_id: str
+    tool_call_id: str
+    tool_name: str
+    arguments_digest: str
+    paths: tuple[WorkspacePathBinding, ...]
+    error_code: str | None
+
+    def __post_init__(self) -> None:
+        if self.version != 1:
+            raise ValueError("workspace tool binding version must be 1")
+        if not all(
+            isinstance(value, str) and value
+            for value in (
+                self.execution_id,
+                self.step_run_id,
+                self.tool_call_id,
+                self.tool_name,
+            )
+        ):
+            raise ValueError("workspace tool binding identity is invalid")
+        if not _is_sha256(self.arguments_digest):
+            raise ValueError("workspace tool binding digest is invalid")
+        paths = tuple(self.paths)
+        if any(not isinstance(path, WorkspacePathBinding) for path in paths):
+            raise TypeError("workspace tool binding paths are invalid")
+        pointers = tuple(path.pointer for path in paths)
+        if len(pointers) != len(set(pointers)):
+            raise ValueError("workspace tool binding pointers are duplicated")
+        if self.error_code is not None:
+            if not isinstance(self.error_code, str) or not self.error_code:
+                raise ValueError("workspace tool binding error is invalid")
+            if paths:
+                raise ValueError("invalid workspace tool binding cannot contain paths")
+        object.__setattr__(self, "paths", paths)
+
+
+@dataclass(frozen=True, slots=True)
+class RuntimeStorageResource:
+    domain: RuntimeDomain
+    backend: str
+    retention: RuntimeRetentionMode
+    object_store_id: str | None
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.domain, RuntimeDomain):
+            raise TypeError("storage resource domain is invalid")
+        if not isinstance(self.backend, str) or not self.backend:
+            raise ValueError("storage resource backend is required")
+        if not isinstance(self.retention, RuntimeRetentionMode):
+            raise TypeError("storage resource retention is invalid")
+        if self.object_store_id is not None and (
+            not isinstance(self.object_store_id, str) or not self.object_store_id
+        ):
+            raise ValueError("storage resource object store id is invalid")
+
+
+@dataclass(frozen=True, slots=True)
+class RuntimeStorageContract:
+    version: int
+    resources: tuple[RuntimeStorageResource, ...]
+    state_groups: tuple[tuple[str, ...], ...]
+    object_groups: tuple[tuple[str, ...], ...]
+
+    def __post_init__(self) -> None:
+        if self.version != 1:
+            raise ValueError("storage contract version must be 1")
+        resources = tuple(self.resources)
+        if any(not isinstance(item, RuntimeStorageResource) for item in resources):
+            raise TypeError("storage contract resources are invalid")
+        domains = tuple(item.domain.value for item in resources)
+        if domains != tuple(sorted(domains)) or len(domains) != len(set(domains)):
+            raise ValueError("storage contract resources must be sorted and unique")
+        state_groups = _normalize_storage_groups(self.state_groups)
+        object_groups = _normalize_storage_groups(self.object_groups)
+        resource_domains = frozenset(domains)
+        if any(
+            not set(group) <= resource_domains
+            for group in (*state_groups, *object_groups)
+        ):
+            raise ValueError("storage contract groups reference unknown domains")
+        object.__setattr__(self, "resources", resources)
+        object.__setattr__(self, "state_groups", state_groups)
+        object.__setattr__(self, "object_groups", object_groups)
+
+    @property
+    def digest(self) -> str:
+        return canonical_sha256(
+            {
+                "version": self.version,
+                "resources": [
+                    {
+                        "domain": item.domain.value,
+                        "backend": item.backend,
+                        "retention": item.retention.value,
+                        "object_store_id": item.object_store_id,
+                    }
+                    for item in self.resources
+                ],
+                "state_groups": [list(group) for group in self.state_groups],
+                "object_groups": [list(group) for group in self.object_groups],
+            }
+        )
+
+
+def _normalize_storage_groups(
+    groups: Sequence[Sequence[str]],
+) -> tuple[tuple[str, ...], ...]:
+    result = tuple(tuple(sorted(group)) for group in groups)
+    if any(
+        not group
+        or any(not isinstance(item, str) or not item for item in group)
+        for group in result
+    ):
+        raise ValueError("storage contract groups are invalid")
+    if any(len(group) != len(set(group)) for group in result):
+        raise ValueError("storage contract group members are duplicated")
+    if result != tuple(sorted(result)):
+        raise ValueError("storage contract groups must be sorted")
+    members = tuple(item for group in result for item in group)
+    if len(members) != len(set(members)):
+        raise ValueError("storage contract group domains are duplicated")
+    return result
 
 
 @dataclass(frozen=True, slots=True)
@@ -397,6 +550,15 @@ class SessionRecord:
             raise ValueError("active execution identifier cannot be empty")
         if self.status is SessionStatus.CLOSED and self.active_execution_id is not None:
             raise ValueError("closed session cannot have an active execution")
+        if self.cwd is not None:
+            try:
+                normalized_cwd = normalize_workspace_path(self.cwd)
+            except (TypeError, ValueError) as error:
+                raise ValueError(
+                    "session cwd must be a canonical workspace path"
+                ) from error
+            if normalized_cwd != self.cwd:
+                raise ValueError("session cwd must be canonical")
         if self.history_quality not in {"complete", "conservative"}:
             raise ValueError("session history quality summary is invalid")
 
@@ -495,9 +657,6 @@ class ExecutionRecord:
     result: ResultRecord | None = None
     repository_instructions: RuntimePayloadRef | None = None
     error_diagnostics: ErrorDiagnostics | None = None
-    attachment_manifest: tuple[AttachmentEntry, ...] = ()
-    input_digest: str | None = None
-    path_origin: PathOrigin | None = None
     correlation: Mapping[str, str | int] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
@@ -510,15 +669,6 @@ class ExecutionRecord:
         object.__setattr__(self, "mode", mode)
         object.__setattr__(self, "thinking", thinking)
         object.__setattr__(self, "correlation", normalize_correlation(self.correlation))
-        object.__setattr__(
-            self,
-            "attachment_manifest",
-            _managed_input_fields(
-                self.attachment_manifest,
-                self.input_digest,
-                self.path_origin,
-            ),
-        )
         if (
             not isinstance(self.binding, AgentBindingSnapshot)
             or self.binding.binding_digest != self.binding_digest
@@ -897,7 +1047,6 @@ class RecoveryCheckpoint:
     state: RecoveryCheckpointState
     handoff_phase: RecoveryHandoffPhase
     terminal_handoff: RecoveryTerminalHandoff | None
-    handoff_contract_digest: str | None
     pending_operation_id: str | None
     revision: int
     created_at: datetime
@@ -950,10 +1099,7 @@ class RecoveryCheckpoint:
                 "terminal recovery checkpoint cannot retain approval continuation"
             )
         if self.handoff_phase is RecoveryHandoffPhase.NONE:
-            if (
-                self.terminal_handoff is not None
-                or self.handoff_contract_digest is not None
-            ):
+            if self.terminal_handoff is not None:
                 raise ValueError(
                     "unprepared recovery checkpoint cannot contain a handoff"
                 )
@@ -964,8 +1110,8 @@ class RecoveryCheckpoint:
         elif self.handoff_phase is RecoveryHandoffPhase.COMPLETED:
             if self.state is not RecoveryCheckpointState.COMPLETED:
                 raise ValueError("completed recovery checkpoint must be completed")
-        elif self.terminal_handoff is None or self.handoff_contract_digest is None:
-            raise ValueError("prepared recovery checkpoint requires a handoff contract")
+        elif self.terminal_handoff is None:
+            raise ValueError("prepared recovery checkpoint requires a terminal handoff")
         elif self.state is not RecoveryCheckpointState.HANDOFF:
             raise ValueError(
                 "active recovery checkpoint handoff must be in handoff state"
@@ -1008,7 +1154,6 @@ class RecoveryStateRecord:
     state: RecoveryCheckpointState
     handoff_phase: RecoveryHandoffPhase
     terminal_handoff: RecoveryTerminalHandoff | None
-    handoff_contract_digest: str | None
     pending_operation_id: str | None
     revision: int
     updated_at: datetime
@@ -1037,8 +1182,7 @@ class RecoveryHandoffPhase(str, Enum):
 
 @dataclass(frozen=True, slots=True)
 class RecoveryExecutionInput:
-    user_prompt: StoredPayload | str
-    user_prompt_codec: str
+    user_input: StoredUserInput
     principal_id: str
     principal_kind: str
     session_id: str | None
@@ -1055,20 +1199,15 @@ class RecoveryExecutionInput:
     planning: bool
     thinking: ThinkingValue
     binding: AgentBindingSnapshot
+    storage_contract: RuntimeStorageContract
     repository_instructions: RuntimePayloadRef | None = None
-    attachment_manifest: tuple[AttachmentEntry, ...] = ()
-    input_digest: str | None = None
-    path_origin: PathOrigin | None = None
     correlation: Mapping[str, str | int] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
-        prompt = self.user_prompt
-        if isinstance(prompt, str):
-            object.__setattr__(self, "user_prompt", StoredPayload.inline_text(prompt))
-        elif not isinstance(prompt, StoredPayload):
-            raise TypeError("recovery prompt payload is invalid")
-        if not isinstance(self.user_prompt_codec, str) or not self.user_prompt_codec:
-            raise TypeError("recovery prompt codec is required")
+        if not isinstance(self.user_input, StoredUserInput):
+            raise TypeError("recovery user input is invalid")
+        if not isinstance(self.storage_contract, RuntimeStorageContract):
+            raise TypeError("recovery storage contract is invalid")
         mode = normalize_execution_mode(self.mode)
         thinking = normalize_thinking(self.thinking)
         if not isinstance(self.planning, bool):
@@ -1078,19 +1217,6 @@ class RecoveryExecutionInput:
         object.__setattr__(self, "mode", mode)
         object.__setattr__(self, "thinking", thinking)
         object.__setattr__(self, "correlation", normalize_correlation(self.correlation))
-        object.__setattr__(
-            self,
-            "attachment_manifest",
-            _managed_input_fields(
-                self.attachment_manifest,
-                self.input_digest,
-                self.path_origin,
-            ),
-        )
-        if bool(self.attachment_manifest) != (
-            self.user_prompt_codec == "linktools-input-v2"
-        ):
-            raise ValueError("recovery prompt codec does not match managed input metadata")
         if (
             not isinstance(self.binding, AgentBindingSnapshot)
             or self.binding.binding_digest != self.binding_digest
@@ -1098,13 +1224,6 @@ class RecoveryExecutionInput:
             raise ValueError(
                 "recovery binding snapshot does not match execution identity"
             )
-
-    def prompt_text(self) -> str:
-        value = self.user_prompt.decode()
-        if not isinstance(value, str):
-            raise ValueError("recovery prompt payload is not text")  # noqa: TRY004
-        return value
-
 
 @dataclass(frozen=True, slots=True)
 class RecoveryIdempotencyInput:

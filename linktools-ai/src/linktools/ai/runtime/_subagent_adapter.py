@@ -11,10 +11,15 @@ from pydantic_ai.exceptions import ModelRetry, ToolFailed
 from pydantic_ai.tools import RunContext as PydanticRunContext
 from pydantic_ai.toolsets import FunctionToolset
 
-from ..capability import AgentContext, SubagentCapability
+from ..capability import (
+    AgentContext,
+    SUBAGENT_CAPABILITY_ID,
+    SubagentCapability,
+    workspace_tool_path_metadata,
+)
 from ..errors import AIError, ErrorCode
 
-_SUBAGENT_CAPABILITY_ID = "linktools-subagent"
+_SUBAGENT_CAPABILITY_ID = SUBAGENT_CAPABILITY_ID
 _MODEL_CORRECTABLE_ERRORS = frozenset(
     {
         ErrorCode.CAPABILITY_RESOLUTION_INVALID,
@@ -48,14 +53,14 @@ class _PydanticSubagentCapability(AbstractCapability[AgentContext[object]]):
             del ctx
             return await self._capability.list_subagents()
 
-        @toolset.tool
+        @toolset.tool(metadata=workspace_tool_path_metadata(("files",)))
         async def delegate_task(
             ctx: PydanticRunContext[AgentContext[object]],
             subagent_id: str,
             task: str,
-            attachments: tuple[str, ...] = (),
+            files: tuple[str, ...] = (),
         ) -> "dict[str, PydanticJsonValue]":
-            """Delegate one task and an explicit attachment subset to a selected subagent."""
+            """Delegate one task and an explicit file subset to a selected subagent."""
             if not ctx.tool_call_id:
                 raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
             try:
@@ -64,7 +69,7 @@ class _PydanticSubagentCapability(AbstractCapability[AgentContext[object]]):
                     await self._capability.delegate_task(
                         subagent_id,
                         task,
-                        attachments=attachments,
+                        files=files,
                         invocation_id=ctx.tool_call_id,
                     ),
                 )
@@ -73,7 +78,7 @@ class _PydanticSubagentCapability(AbstractCapability[AgentContext[object]]):
                     raise ToolFailed("subagent execution failed; adapt and continue") from error
                 if error.code not in _MODEL_CORRECTABLE_ERRORS:
                     raise
-                raise ModelRetry("requested subagent, task, or attachments are invalid") from error
+                raise ModelRetry("requested subagent, task, or files are invalid") from error
 
         return toolset
 

@@ -9,6 +9,8 @@ from ..core import JsonValue
 from ..errors import AIError, ErrorCode
 from ..spec import SubagentRef
 
+SUBAGENT_CAPABILITY_ID = "linktools-subagent"
+
 
 class SubagentDelegate(Protocol):
     async def __call__(
@@ -16,7 +18,7 @@ class SubagentDelegate(Protocol):
         ref: "SubagentRef",
         task: str,
         *,
-        attachments: tuple[str, ...],
+        files: tuple[str, ...],
         invocation_id: str,
     ) -> "dict[str, JsonValue]": ...
 
@@ -80,7 +82,7 @@ class SubagentCapability:
         subagent_id: str,
         task: str,
         *,
-        attachments: Sequence[str] = (),
+        files: Sequence[str] = (),
         invocation_id: str,
     ) -> "dict[str, JsonValue]":
         if not isinstance(subagent_id, str) or not subagent_id.strip():
@@ -89,9 +91,12 @@ class SubagentCapability:
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
         if not isinstance(invocation_id, str) or not invocation_id.strip():
             raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
-        if isinstance(attachments, (str, bytes, bytearray)):
+        if not isinstance(files, Sequence) or isinstance(
+            files,
+            (str, bytes, bytearray),
+        ):
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
-        paths = tuple(attachments)
+        paths = tuple(files)
         if any(not isinstance(path, str) or not path for path in paths):
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
         ref = self._by_id.get(subagent_id)
@@ -103,7 +108,7 @@ class SubagentCapability:
         result = await self._delegate(
             ref,
             task.strip(),
-            attachments=paths,
+            files=paths,
             invocation_id=invocation_id,
         )
         if not isinstance(result, dict):
@@ -111,4 +116,4 @@ class SubagentCapability:
         return result
 
 
-__all__ = ["SubagentCapability", "SubagentDelegate"]
+__all__ = ["SUBAGENT_CAPABILITY_ID", "SubagentCapability", "SubagentDelegate"]

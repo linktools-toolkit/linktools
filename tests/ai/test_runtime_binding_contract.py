@@ -9,14 +9,16 @@ import pytest
 from linktools.ai.agent import AgentBindingSnapshot, AgentCatalog, AgentCompiler
 from linktools.ai.agent._output import bind_output
 from linktools.ai.core import ExecutionLineageKind, ExecutionStatus
-from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.model import ModelRegistry
 from linktools.ai.runtime.state._contracts import (
     ExecutionRecord,
     RecoveryExecutionInput,
     RecoveryIdempotencyInput,
+    RuntimeStorageContract,
+    StoredUserInput,
 )
 from linktools.ai.spec import AgentSpec
+from linktools.ai.storage import StoredPayload
 from pydantic import (
     BaseModel,
     ConfigDict,
@@ -122,8 +124,7 @@ def _recovery(
     thinking: bool = False,
 ) -> RecoveryExecutionInput:
     return RecoveryExecutionInput(
-        user_prompt="prompt",
-        user_prompt_codec="text",
+        user_input=StoredUserInput(1, "text", StoredPayload.inline_text("prompt")),
         principal_id="principal",
         principal_kind="service",
         session_id=None,
@@ -140,6 +141,7 @@ def _recovery(
         planning=planning,
         thinking=thinking,
         binding=_snapshot(binding_digest=binding_digest) if binding is None else binding,
+        storage_contract=RuntimeStorageContract(1, (), (), ()),
     )
 
 

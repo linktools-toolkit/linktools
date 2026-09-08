@@ -35,6 +35,8 @@ from linktools.ai.runtime.state._contracts import (
     RecoveryExecutionInput,
     RecoveryHandoffPhase,
     RecoveryIdempotencyInput,
+    RuntimeStorageContract,
+    StoredUserInput,
 )
 from linktools.ai.spec import AgentSpec, SubagentRef
 from linktools.ai.storage import StoredPayload
@@ -169,8 +171,7 @@ def test_recovery_checkpoint_enforces_v1_execution_identity() -> None:
     now = datetime.now(timezone.utc)
     snapshot = _binding_snapshot(digest="c" * 64)
     recovery_input = RecoveryExecutionInput(
-        user_prompt="prompt",
-        user_prompt_codec="text",
+        user_input=StoredUserInput(1, "text", StoredPayload.inline_text("prompt")),
         principal_id="principal",
         principal_kind="user",
         session_id=None,
@@ -187,6 +188,7 @@ def test_recovery_checkpoint_enforces_v1_execution_identity() -> None:
         planning=False,
         thinking=False,
         binding=snapshot,
+        storage_contract=RuntimeStorageContract(1, (), (), ()),
     )
 
     def checkpoint(
@@ -203,7 +205,6 @@ def test_recovery_checkpoint_enforces_v1_execution_identity() -> None:
             state=state,
             handoff_phase=RecoveryHandoffPhase.NONE,
             terminal_handoff=None,
-            handoff_contract_digest=None,
             pending_operation_id=None,
             revision=0,
             created_at=now,
@@ -221,8 +222,7 @@ def test_recovery_input_requires_exact_binding_digest_and_mode_contract() -> Non
     snapshot = _binding_snapshot(digest="d" * 64)
     with pytest.raises(ValueError):
         RecoveryExecutionInput(
-            user_prompt="prompt",
-            user_prompt_codec="text",
+            user_input=StoredUserInput(1, "text", StoredPayload.inline_text("prompt")),
             principal_id="principal",
             principal_kind="user",
             session_id=None,
@@ -239,11 +239,11 @@ def test_recovery_input_requires_exact_binding_digest_and_mode_contract() -> Non
             planning=False,
             thinking=False,
             binding=snapshot,
+            storage_contract=RuntimeStorageContract(1, (), (), ()),
         )
     with pytest.raises(ValueError):
         RecoveryExecutionInput(
-            user_prompt="prompt",
-            user_prompt_codec="text",
+            user_input=StoredUserInput(1, "text", StoredPayload.inline_text("prompt")),
             principal_id="principal",
             principal_kind="user",
             session_id=None,
@@ -260,6 +260,7 @@ def test_recovery_input_requires_exact_binding_digest_and_mode_contract() -> Non
             planning=False,
             thinking=False,
             binding=snapshot,
+            storage_contract=RuntimeStorageContract(1, (), (), ()),
         )
 
 
@@ -311,13 +312,12 @@ def test_contextual_classification_fields_stay_concise() -> None:
 def test_memory_scope_rejects_noncanonical_values(value: str) -> None:
     with pytest.raises(AIError) as error:
         ExecutionRequest(
-            "prompt",
-            "text",
-            trusted_workspace_principal("workspace"),
-            "request",
-            value,
-            "run",
-            False,
-            False,
+            user_prompt="prompt",
+            principal=trusted_workspace_principal("workspace"),
+            idempotency_key="request-key",
+            memory_scope=value,
+            mode="run",
+            planning=False,
+            thinking=False,
         )
     assert error.value.code is ErrorCode.REQUEST_FIELD_INVALID

@@ -173,7 +173,6 @@ async def test_session_resume_preserves_mode_planning_and_thinking() -> None:
         ResumeSessionRequest(
             principal=trusted_workspace_principal("tenant"),
             user_prompt="prompt",
-            user_prompt_codec="text",
             idempotency_key="resume-modes",
             memory_scope=None,
             mode="plan",
@@ -189,7 +188,7 @@ async def test_session_resume_preserves_mode_planning_and_thinking() -> None:
     assert capture.request.mode == "plan"
     assert capture.request.planning is True
     assert capture.request.thinking == "high"
-    assert capture.request.user_prompt_codec == "text"
+    assert capture.request.user_prompt == "prompt"
 
 
 @pytest.mark.asyncio

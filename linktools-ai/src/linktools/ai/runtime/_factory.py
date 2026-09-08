@@ -6,16 +6,15 @@ import asyncio
 import hashlib
 import os
 import uuid
-from collections.abc import Awaitable, Callable, Sequence
+from collections.abc import Awaitable, Callable, Collection, Sequence
 from dataclasses import dataclass
 from functools import partial
-from pathlib import Path
 from typing import TypeVar, cast
 
 from linktools.core import environ
 from pydantic_ai_harness.memory import SearchableMemoryStore
 
-from ..agent import AgentCatalog, AgentCompiler, AgentDefinition
+from ..agent import AgentCatalog, AgentCompiler
 from ..asset import (
     AssetKey,
     AssetPathAdapter,
@@ -28,6 +27,7 @@ from ..capability import (
     CapabilityGroup,
     LocalSkillResourceSource,
     SkillSourceRegistry,
+    WorkspaceAccess,
     workspace_tool_contributions,
 )
 from ..core import (
@@ -39,19 +39,19 @@ from ..core import (
 from ..errors import AIError, ErrorCode
 from ..model import ModelRegistry
 from ..observe import Metrics
-from ..spec import AgentSpec, AgentSpecCodec
+from ..spec import AgentSpec
 from ..storage import ObjectStore, PayloadPolicy, StorageOverlay
 from ..task import LocalTaskGraphLauncher, TaskNodeHandler
 from ..workspace import LocalRepositoryInstructionResolver, LocalRuleCatalog, Workspace
 from ._agent_executor import AgentExecutor
 from ._approval import DefaultApprovalService
 from ._artifact import DefaultArtifactService
-from ._attachment import DefaultAttachmentService
 from ._coordinator import _LocalRuntimeCoordinator
 from ._evaluation import DefaultEvaluationService
 from ._event import DefaultEventService, LiveExecutionEventBroker
 from ._execution import DefaultExecutionService
 from ._history import StepExecutionHistoryReader, StepSessionHistoryReader
+from ._input import ExecutionInputMaterializer
 from ._local import LocalExecutionBackend
 from ._memory import RuntimeMemoryStore
 from ._metrics import _RuntimeMetricBuffer
@@ -59,6 +59,7 @@ from ._object import RuntimeObjectKeyFactory
 from ._planner import DefaultTaskService, RuntimeTaskNodeRunner
 from ._session import DefaultSessionService
 from ._subagent import SubagentDispatcher
+from ._workspace_binding import WorkspaceToolCallBinder
 from .service_api import ExecutionHistoryReader, SessionHistoryReader
 from .state import (
     ExecutionReadModelRepository,
@@ -68,9 +69,10 @@ from .state import (
     RuntimeState,
     RuntimeStatePlan,
     RuntimeStateRoute,
+    RuntimeStorageContract,
     StateStepArchive,
+    WorkspaceToolCallBindingStore,
 )
-from .state._attachment_repository import AttachmentRepository
 
 AppT = TypeVar("AppT")
 _logger = environ.get_logger("ai.runtime.factory")
@@ -87,7 +89,6 @@ class _RuntimeComponents:
     approval: DefaultApprovalService
     event: DefaultEventService
     artifact: DefaultArtifactService
-    attachments: DefaultAttachmentService
     tenant_id: str
     close_callback: Callable[[], Awaitable[None]]
     local_coordinator: _LocalRuntimeCoordinator
@@ -120,6 +121,7 @@ async def compose_runtime_components(
 
     owned_workspace_assets: tuple[AssetStore, DirectoryAssetBackend] | None = None
     selected_state: RuntimeState | None = None
+    workspace_access: WorkspaceAccess | None = None
     initialized = False
     try:
         if workspace_groups:
@@ -230,6 +232,19 @@ async def compose_runtime_components(
         )
         object_key_factory = RuntimeObjectKeyFactory(workspace.workspace_id)
         payload_policy = PayloadPolicy()
+        workspace_access = WorkspaceAccess.for_workspace(workspace)
+        input_materializer = ExecutionInputMaterializer(
+            workspace_access,
+            workspace.policy,
+            object_store=selected_state.object_store(RuntimeDomain.EXECUTION),
+            object_key_factory=object_key_factory,
+            payload_policy=payload_policy,
+        )
+        workspace_binding_store = WorkspaceToolCallBindingStore(
+            selected_state.recovery.checkpoints.state_store,
+            namespace=workspace.workspace_id,
+            tenant_id=effective_tenant_id,
+        )
         session_execution_ready = (
             not workspace.policy.tool_permissions.requires_approval
             or selected_state.plan.route(RuntimeDomain.CONVERSATION).retention
@@ -267,6 +282,12 @@ async def compose_runtime_components(
             instruction_resolver=instruction_resolver,
             object_key_factory=object_key_factory,
             payload_policy=payload_policy,
+            input_materializer=input_materializer,
+            workspace_binding_store=workspace_binding_store,
+            storage_contract=selected_state.storage_contract(
+                {RuntimeDomain.EXECUTION, RuntimeDomain.RECOVERY}
+            ),
+            storage_contract_factory=selected_state.storage_contract,
             session_execution_ready=session_execution_ready,
             metrics=metrics,
             owned_workspace_close=owned_workspace_close,
@@ -276,6 +297,8 @@ async def compose_runtime_components(
             if initialized and selected_state is not None:
                 await selected_state.close()
         finally:
+            if workspace_access is not None:
+                await workspace_access.close()
             if owned_workspace_assets is not None:
                 await _close_owned_workspace_assets(*owned_workspace_assets)
         raise
@@ -450,6 +473,10 @@ async def _build_local_components(
     instruction_resolver: LocalRepositoryInstructionResolver,
     object_key_factory: RuntimeObjectKeyFactory,
     payload_policy: PayloadPolicy,
+    input_materializer: ExecutionInputMaterializer,
+    workspace_binding_store: WorkspaceToolCallBindingStore,
+    storage_contract: "RuntimeStorageContract",
+    storage_contract_factory: "Callable[[Collection[RuntimeDomain]], RuntimeStorageContract]",
     session_execution_ready: bool,
     metrics: "Metrics | None",
     owned_workspace_close: "Callable[[], Awaitable[None]] | None" = None,
@@ -471,23 +498,19 @@ async def _build_local_components(
         instruction_resolver=instruction_resolver,
         object_key_factory=object_key_factory,
         payload_policy=payload_policy,
+        input_materializer=input_materializer,
+        storage_contract_factory=storage_contract_factory,
         session_execution_ready=session_execution_ready,
-    )
-    attachment_repository = AttachmentRepository(
-        state.execution.executions.state_store,
-        namespace=namespace,
-        tenant_id=tenant_id,
-    )
-    attachments = DefaultAttachmentService(
-        attachment_repository,
-        state,
-        object_key_factory,
     )
     dispatcher = SubagentDispatcher(catalog, compiler, execution)
     executor = AgentExecutor(
         skill_sources,
         instruction_resolver=instruction_resolver,
         metrics=metric_buffer,
+        workspace_binder=WorkspaceToolCallBinder(
+            workspace_binding_store,
+            input_materializer.access,
+        ),
     )
 
     def build_memory_store(
@@ -548,7 +571,10 @@ async def _build_local_components(
                 state.plan.route(RuntimeDomain.CONVERSATION).retention
                 is RuntimeRetentionMode.DURABLE
             ),
-            handoff_contract_digest=state.handoff_contract_digest,
+            input_materializer=input_materializer,
+            workspace_binding_store=workspace_binding_store,
+            storage_contract=storage_contract,
+            storage_contract_factory=storage_contract_factory,
             subagent_dispatcher=dispatcher,
             live_broker=live_broker,
             payload_policy=payload_policy,
@@ -576,6 +602,7 @@ async def _build_local_components(
             history_reader=session_history_reader,
             transcript_store=state.steps.read_store(RuntimeDomain.CONVERSATION),
             release_terminal=state.retention.release_session,
+            workspace_access=input_materializer.access,
         )
         task_runner = RuntimeTaskNodeRunner(
             execution,
@@ -645,6 +672,7 @@ async def _build_local_components(
             execution.preflight_close,
             backend.close,
         ]
+        close_actions.append(input_materializer.close)
         if metric_buffer is not None:
             close_actions.append(metric_buffer.close)
         close_actions.append(state.close)
@@ -675,7 +703,6 @@ async def _build_local_components(
         approval=approval,
         event=event,
         artifact=artifact,
-        attachments=attachments,
         tenant_id=tenant_id,
         close_callback=coordinator.close,
         local_coordinator=local_coordinator,
