@@ -26,7 +26,7 @@ from collections import deque
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from pathlib import Path
-from subprocess import DEVNULL, PIPE, STDOUT
+from subprocess import DEVNULL, PIPE
 
 from filelock import FileLock
 from linktools.core import environ
@@ -235,15 +235,11 @@ class _LocalSandboxSession:
         resources: tuple[SandboxResource, ...],
         *,
         lock_root: Path | None = None,
-        enforce_command_policy: bool = True,
     ) -> None:
-        if not isinstance(enforce_command_policy, bool):
-            raise TypeError("enforce_command_policy must be a bool")
         self._root = root
         self._resources = {resource.key: resource.source.resolve() for resource in resources}
         self._lock_root = lock_root or root / ".linktools" / "locks"
         self._environment = _command_environment()
-        self._enforce_command_policy = enforce_command_policy
         self._state = "OPEN"
         self._state_lock = asyncio.Lock()
         self._close_task: asyncio.Task[None] | None = None
@@ -598,8 +594,7 @@ class _LocalSandboxSession:
             {"command": command, "timeout_seconds": timeout_seconds},
         )
         _validate_command_input(command)
-        if self._enforce_command_policy:
-            _validate_command(command)
+        _validate_command(command)
         timeout = _command_timeout(timeout_seconds)
         await self._ensure_open()
         process = await self._start_process(command)
@@ -639,8 +634,7 @@ class _LocalSandboxSession:
     async def start_command(self, command: str) -> str:
         validate_request_size("start_command", {"command": command})
         _validate_command_input(command)
-        if self._enforce_command_policy:
-            _validate_command(command)
+        _validate_command(command)
         await self._ensure_open()
         async with self._process_lock:
             if len(self._processes) + self._starting_background >= 256:
@@ -899,12 +893,13 @@ class _LocalSandboxSession:
             "env": environment,
             "stdin": DEVNULL,
             "stdout": PIPE,
-            "stderr": STDOUT,
+            "stderr": PIPE,
         }
         if os.name == "nt":
             process_kwargs["creationflags"] = 0x00000004
         else:
             process_kwargs["start_new_session"] = True
+
         async def create_process() -> asyncio.subprocess.Process:
             if os.name == "nt":
                 return await asyncio.create_subprocess_exec(
@@ -974,9 +969,13 @@ class _LocalSandboxSession:
                 raise AIError(ErrorCode.SANDBOX_UNAVAILABLE) from error
         command_id = uuid.uuid4().hex
         state = _ProcessState(command_id, command, process, job=job)
-        state.reader_task = asyncio.create_task(
-            _read_process_output(state),
-            name=f"sandbox-output-{command_id}",
+        state.stdout_reader_task = asyncio.create_task(
+            _read_process_output(state, "stdout"),
+            name=f"sandbox-stdout-{command_id}",
+        )
+        state.stderr_reader_task = asyncio.create_task(
+            _read_process_output(state, "stderr"),
+            name=f"sandbox-stderr-{command_id}",
         )
         state.wait_task = asyncio.create_task(
             _wait_process(state),
@@ -1033,6 +1032,7 @@ class _LocalSandboxSession:
     async def _forget_process(self, command_id: str) -> None:
         async with self._process_lock:
             self._processes.pop(command_id, None)
+
 
 async def _stop_process(state: "_ProcessState", *, force: bool) -> None:
     async with state.stop_lock:
@@ -1124,15 +1124,24 @@ class _ProcessState:
         self.command_id = command_id
         self.command = command
         self.process = process
-        self.output: deque[str] = deque()
-        self.output_chars = 0
+        self.stdout: deque[str] = deque()
+        self.stderr: deque[str] = deque()
+        self.stdout_chars = 0
+        self.stderr_chars = 0
         self.output_incomplete = False
-        self.output_decoder = codecs.getincrementaldecoder("utf-8")(
+        self.stdout_decoder = codecs.getincrementaldecoder("utf-8")(
+            errors="replace"
+        )
+        self.stderr_decoder = codecs.getincrementaldecoder("utf-8")(
             errors="replace"
         )
         self.final_status: str | None = None
-        self.reader_task: asyncio.Task[None] = asyncio.current_task()  # replaced below
-        self.wait_task: asyncio.Task[None] = asyncio.current_task()  # replaced below
+        current = asyncio.current_task()
+        if current is None:
+            raise RuntimeError("process state requires an asyncio task")
+        self.stdout_reader_task: asyncio.Task[None] = current  # replaced below
+        self.stderr_reader_task: asyncio.Task[None] = current  # replaced below
+        self.wait_task: asyncio.Task[None] = current  # replaced below
         self.stop_lock = asyncio.Lock()
         self.job = job
         try:
@@ -1148,43 +1157,63 @@ class _ProcessState:
             self.process_session_id = None
 
 
-async def _read_process_output(state: _ProcessState) -> None:
-    stream = state.process.stdout
+async def _read_process_output(state: _ProcessState, channel: str) -> None:
+    if channel == "stdout":
+        stream = state.process.stdout
+        decoder = state.stdout_decoder
+    elif channel == "stderr":
+        stream = state.process.stderr
+        decoder = state.stderr_decoder
+    else:
+        raise ValueError("unknown process output channel")
     if stream is None:
         return
     try:
         while True:
             chunk = await stream.read(4096)
             if not chunk:
-                text = state.output_decoder.decode(b"", final=True)
+                text = decoder.decode(b"", final=True)
                 if "\ufffd" in text:
                     state.output_incomplete = True
-                _append_process_output(state, text)
+                _append_process_output(state, channel, text)
                 return
-            text = state.output_decoder.decode(chunk)
+            text = decoder.decode(chunk)
             if "\ufffd" in text:
                 state.output_incomplete = True
-            _append_process_output(state, text)
+            _append_process_output(state, channel, text)
     except asyncio.CancelledError:
         raise
     except OSError:
         state.output_incomplete = True
 
 
-def _append_process_output(state: _ProcessState, text: str) -> None:
+def _append_process_output(state: _ProcessState, channel: str, text: str) -> None:
     if not text:
         return
-    state.output.append(text)
-    state.output_chars += len(text)
-    while state.output_chars > _MAX_OUTPUT_CHARS and state.output:
-        removed = state.output.popleft()
-        excess = state.output_chars - _MAX_OUTPUT_CHARS
+    if channel == "stdout":
+        output = state.stdout
+        state.stdout_chars += len(text)
+        chars = state.stdout_chars
+    elif channel == "stderr":
+        output = state.stderr
+        state.stderr_chars += len(text)
+        chars = state.stderr_chars
+    else:
+        raise ValueError("unknown process output channel")
+    output.append(text)
+    while chars > _MAX_OUTPUT_CHARS and output:
+        removed = output.popleft()
+        excess = chars - _MAX_OUTPUT_CHARS
         if len(removed) <= excess:
-            state.output_chars -= len(removed)
+            chars -= len(removed)
         else:
-            state.output.appendleft(removed[excess:])
-            state.output_chars -= excess
+            output.appendleft(removed[excess:])
+            chars -= excess
         state.output_incomplete = True
+    if channel == "stdout":
+        state.stdout_chars = chars
+    else:
+        state.stderr_chars = chars
 
 
 async def _wait_process(state: _ProcessState) -> None:
@@ -1200,14 +1229,22 @@ async def _wait_process(state: _ProcessState) -> None:
         if group_cleanup_needed:
             _signal_process_group_if_owned(state, signal.SIGTERM)
             await _wait_for_process_group(state, signal.SIGKILL)
-        if not state.reader_task.done():
+        reader_tasks = (state.stdout_reader_task, state.stderr_reader_task)
+        pending_readers = tuple(task for task in reader_tasks if not task.done())
+        if pending_readers:
             try:
-                await asyncio.wait_for(state.reader_task, 2.0)
+                await asyncio.wait_for(
+                    asyncio.gather(
+                        *(asyncio.shield(task) for task in pending_readers)
+                    ),
+                    2.0,
+                )
             except asyncio.TimeoutError:
                 state.output_incomplete = True
                 _signal_process_group_if_owned(state, signal.SIGKILL)
-                state.reader_task.cancel()
-                await asyncio.gather(state.reader_task, return_exceptions=True)
+                for task in pending_readers:
+                    task.cancel()
+                await asyncio.gather(*pending_readers, return_exceptions=True)
             except OSError:
                 state.output_incomplete = True
         await state.process.wait()
@@ -2170,13 +2207,20 @@ def _command_result(state: _ProcessState, *, status: str | None = None) -> str:
         or ("running" if not state.wait_task.done() else "exited")
     )
     code = state.process.returncode
-    output = "".join(state.output)
+    stdout = "".join(state.stdout)
+    stderr = "".join(state.stderr)
+    sections: list[str] = []
+    if stdout:
+        sections.append(f"[stdout]\n{stdout}")
+    if stderr:
+        sections.append(f"[stderr]\n{stderr}")
     value = (
         f"command_id: {state.command_id}\n"
         f"status: {actual_status}\n"
-        f"exit_code: {'' if code is None else code}\n"
-        f"output:\n{output}"
+        f"exit_code: {'' if code is None else code}"
     )
+    if sections:
+        value += "\n" + "\n\n".join(sections)
     if state.output_incomplete:
         return _bound_output_with_marker(value, "\n[output incomplete]")
     return _bound_output(value)
