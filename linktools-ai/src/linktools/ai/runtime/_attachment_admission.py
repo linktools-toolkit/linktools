@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Runtime integration for managed input admission and projection."""
+"""Runtime integration for managed input admission and model projection."""
 
 from __future__ import annotations
 
@@ -8,19 +8,24 @@ import secrets
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, replace
-from typing import TYPE_CHECKING, Iterator, cast
+from typing import TYPE_CHECKING, Iterator
 
+import linktools.ai.runtime._agent_executor as agent_executor_runtime
 import linktools.ai.runtime._attachment as attachment_runtime
 import linktools.ai.runtime._execution as execution_runtime
 import linktools.ai.runtime._local as local_runtime
-from pydantic_ai.messages import BinaryContent, UserContent
+from pydantic_ai.messages import UserContent
 
-from ..core import canonical_sha256, idempotency_key_digest
+from ..core import ExecutionStatus, canonical_sha256, idempotency_key_digest
 from ..errors import AIError, ErrorCode
+from ..storage import TransientObjectStore
 from ._attachment import DefaultAttachmentService, InputPreparer
+from ._attachment_projection import (
+    AttachmentProjectionCapability,
+    initial_attachment_prompt,
+)
 from ._input import (
     UserPromptTransport,
-    _decode_user_content,
     _restore_input_v2,
     _restore_user_prompt,
     input_intent_digest,
@@ -30,11 +35,13 @@ from ._input import (
 from ._object import read_runtime_object
 from ._runtime_service import Runtime
 from .state import (
-    AttachmentEntry,
+    ContentRef,
     ExecutionRepositoryImpl,
     InputPrepareRecord,
     InputTarget,
     Locator,
+    ModelExposureEntry,
+    PathOrigin,
     PreparedInput,
     RuntimeDomain,
     managed_attachment_locator,
@@ -43,6 +50,7 @@ from .state._attachment_repository import (
     AttachmentRepository,
     _project_owner_record,
 )
+from .state._exposure_repository import ModelExposureRepository
 from .state._repositories import replace_checked
 
 if TYPE_CHECKING:
@@ -66,12 +74,21 @@ class _ManagedAdmission:
     prepared: PreparedInput
 
 
+@dataclass(frozen=True, slots=True)
+class _ManagedProjection:
+    backend: local_runtime.LocalExecutionBackend
+    execution_id: str
+    path_origin: PathOrigin
+    activations: tuple[ModelExposureEntry, ...]
+    prompt: str | tuple[UserContent, ...]
+
+
 _managed_admission: ContextVar[_ManagedAdmission | None] = ContextVar(
     "linktools_ai_managed_attachment_admission",
     default=None,
 )
-_model_prompt: ContextVar[tuple[UserContent, ...] | None] = ContextVar(
-    "linktools_ai_managed_model_prompt",
+_managed_projection: ContextVar[_ManagedProjection | None] = ContextVar(
+    "linktools_ai_managed_attachment_projection",
     default=None,
 )
 _installed = False
@@ -81,6 +98,7 @@ _original_prepare_start = local_runtime.LocalExecutionBackend.prepare_start
 _original_validate_recovery_identity = local_runtime.LocalExecutionBackend._validate_recovery_identity
 _original_run = local_runtime.LocalExecutionBackend._run
 _original_user_prompt_transport = local_runtime.user_prompt_transport
+_original_materialize_agent = agent_executor_runtime._materialize_agent
 _original_start_for_agent = Runtime._start_for_agent
 _original_retry_execution = Runtime._retry_execution
 _original_fork_execution = Runtime._fork_execution
@@ -168,7 +186,6 @@ async def _adopt_prepare_in_transaction(
     owner_key: str,
     prepared: PreparedInput,
     *,
-    execution_id: str,
     execution_record_key: str,
 ) -> None:
     stored = await transaction.get_record(bytes.fromhex(owner_key))
@@ -242,7 +259,6 @@ async def _managed_reserve_start(
             attachments,
             owner_key,
             prepared,
-            execution_id=result.execution.execution_id,
             execution_record_key=execution_record_key,
         )
         return result
@@ -261,6 +277,8 @@ def _validate_managed_request(
     if request.user_prompt_codec != "linktools-input-v2":
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     prompt = _restore_input_v2(request.user_prompt)
+    if execution.input_digest is None:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     from .state import input_v2_digest
 
     if input_v2_digest(prompt, execution.attachment_manifest) != execution.input_digest:
@@ -343,7 +361,7 @@ async def _managed_prepare_start(
             identity.request_digest,
             now,
         ),
-        recovery_checkpoint=candidate if self._recovery_enabled else None,
+        recovery_checkpoint=candidate,
         session_id=execution.session_id,
         expected_cursor=expected,
     )
@@ -368,65 +386,6 @@ def _managed_validate_recovery_identity(
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
 
 
-async def _read_attachment_body(
-    backend: local_runtime.LocalExecutionBackend,
-    entry: AttachmentEntry,
-) -> bytes:
-    try:
-        domain = RuntimeDomain(entry.content.domain)
-    except ValueError as error:
-        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
-    if domain is RuntimeDomain.EXECUTION:
-        store = backend._execution_objects
-    elif domain is RuntimeDomain.RECOVERY:
-        store = backend._recovery_objects
-    else:
-        raise AIError(ErrorCode.STORAGE_DEPENDENCY_NOT_READY)
-    return await read_runtime_object(store, entry.content.object)
-
-
-async def _project_model_prompt(
-    backend: local_runtime.LocalExecutionBackend,
-    execution: "ExecutionRecord",
-    user_prompt: str,
-) -> tuple[UserContent, ...]:
-    prompt = _restore_input_v2(user_prompt)
-    if execution.input_digest is None:
-        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-    from .state import input_v2_digest
-
-    if input_v2_digest(prompt, execution.attachment_manifest) != execution.input_digest:
-        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-    projected: list[UserContent] = []
-    loaded: dict[int, BinaryContent] = {}
-    for part in prompt.parts:
-        if part.kind == "text":
-            projected.append(cast("UserContent", part.text))
-            continue
-        if part.kind == "native":
-            projected.extend(_decode_user_content(dict(part.value)))
-            continue
-        if part.kind != "attachment" or part.index >= len(execution.attachment_manifest):
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        content = loaded.get(part.index)
-        if content is None:
-            entry = execution.attachment_manifest[part.index]
-            body = await _read_attachment_body(backend, entry)
-            content = BinaryContent(
-                body,
-                media_type=entry.media_type,
-                identifier=entry.presentation.identifier,
-                vendor_metadata=(
-                    None
-                    if entry.presentation.vendor_metadata is None
-                    else dict(entry.presentation.vendor_metadata)
-                ),
-            )
-            loaded[part.index] = content
-        projected.append(content)
-    return tuple(projected)
-
-
 async def _managed_run(
     self: local_runtime.LocalExecutionBackend,
     request: "ExecutionRequest",
@@ -436,21 +395,169 @@ async def _managed_run(
         await _original_run(self, request, original)
         return
     _validate_managed_request(request, original)
-    prompt = await _project_model_prompt(self, original, request.user_prompt)
-    token = _model_prompt.set(prompt)
+    if original.path_origin is None:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    repository = AttachmentRepository(
+        self._execution.executions.state_store,
+        namespace=self._namespace,
+        tenant_id=original.tenant_id,
+    )
+    prompt, activations = initial_attachment_prompt(
+        _restore_input_v2(request.user_prompt),
+        original.attachment_manifest,
+        execution_id=original.execution_id,
+        execution_record_key=repository._key("execution", original.execution_id).hex(),
+    )
+    projection = _ManagedProjection(
+        self,
+        original.execution_id,
+        original.path_origin,
+        activations,
+        prompt,
+    )
+    token = _managed_projection.set(projection)
     try:
         await _original_run(self, request, original)
     finally:
-        _model_prompt.reset(token)
+        _managed_projection.reset(token)
 
 
 def _managed_user_prompt_transport(value: str, codec: str = "text") -> UserPromptTransport:
     if codec != "linktools-input-v2":
         return _original_user_prompt_transport(value, codec)
-    prompt = _model_prompt.get()
-    if prompt is None:
+    projection = _managed_projection.get()
+    if projection is None:
         return _original_user_prompt_transport(value, codec)
-    return UserPromptTransport("managed-input", "linktools-managed-draft", prompt)
+    return UserPromptTransport(
+        "managed-input",
+        "linktools-managed-draft",
+        projection.prompt,
+    )
+
+
+async def _managed_materialize_agent(*args, **kwargs):
+    result = await _original_materialize_agent(*args, **kwargs)
+    projection = _managed_projection.get()
+    if projection is None or not projection.activations:
+        return result
+    scope = args[0] if args else kwargs.get("scope")
+    if scope is None or scope.context.execution_id != projection.execution_id:
+        return result
+    capability = _projection_capability(projection, scope)
+    agent, capabilities, runtime_tools, trusted_tools, trusted_mcp = result
+    return (
+        agent,
+        (*capabilities, capability),
+        runtime_tools,
+        trusted_tools,
+        trusted_mcp,
+    )
+
+
+def _projection_capability(projection: _ManagedProjection, scope) -> AttachmentProjectionCapability:
+    backend = projection.backend
+    tenant_id = scope.context.principal.tenant_id
+    execution_repository = backend._execution.executions
+    attachment_repository = AttachmentRepository(
+        execution_repository.state_store,
+        namespace=backend._namespace,
+        tenant_id=tenant_id,
+    )
+    execution_record_key = attachment_repository._key(
+        "execution", projection.execution_id
+    ).hex()
+    source = Locator("state:execution", "records", execution_record_key)
+    authorized = {value.activation_id: value for value in projection.activations}
+    exposures = ModelExposureRepository(
+        backend._recovery.checkpoints.state_store,
+        namespace=backend._namespace,
+        tenant_id=tenant_id,
+    )
+
+    async def current_execution():
+        current = await execution_repository.get(
+            projection.execution_id,
+            tenant_id=tenant_id,
+        )
+        if current is None:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        if current.status in {ExecutionStatus.CANCELLING, ExecutionStatus.CANCELLED}:
+            raise AIError(ErrorCode.EXECUTION_CANCELLED)
+        if current.status is not ExecutionStatus.STARTED:
+            raise AIError(ErrorCode.STORAGE_CONFLICT)
+        if (
+            current.agent_run_sequence != scope.segment_sequence
+            or current.attachment_manifest
+            != tuple(value.entry for value in sorted(authorized.values(), key=lambda value: value.slot))
+            and current.attachment_manifest != projection.backend._execution_snapshot_manifest
+            if hasattr(projection.backend, "_execution_snapshot_manifest")
+            else False
+        ):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        if current.path_origin != projection.path_origin:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        return current
+
+    async def check_execution(run_step: int) -> None:
+        if isinstance(run_step, bool) or not isinstance(run_step, int) or run_step < 0:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        await current_execution()
+
+    async def authorize_entries(
+        run_step: int,
+        entries: tuple[ModelExposureEntry, ...],
+    ) -> None:
+        del run_step
+        current = await current_execution()
+        for value in entries:
+            if authorized.get(value.activation_id) != value or value.source != source:
+                raise AIError(ErrorCode.CAPABILITY_POLICY_CONFLICT)
+            if value.slot >= len(current.attachment_manifest):
+                raise AIError(ErrorCode.CAPABILITY_POLICY_CONFLICT)
+            if current.attachment_manifest[value.slot] != value.entry:
+                raise AIError(ErrorCode.CAPABILITY_POLICY_CONFLICT)
+
+    async def commit_exposure(
+        run_step: int,
+        entries: tuple[ModelExposureEntry, ...],
+    ):
+        return await exposures.put(
+            execution_id=projection.execution_id,
+            step_run_id=scope.step_run_id,
+            run_step=run_step,
+            path_origin=projection.path_origin,
+            entries=entries,
+        )
+
+    async def read_content(content: ContentRef) -> bytes:
+        try:
+            domain = RuntimeDomain(content.domain)
+        except ValueError as error:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
+        if domain is RuntimeDomain.EXECUTION:
+            store = backend._execution_objects
+        elif domain is RuntimeDomain.RECOVERY:
+            store = backend._recovery_objects
+        else:
+            raise AIError(ErrorCode.STORAGE_DEPENDENCY_NOT_READY)
+        if isinstance(store, TransientObjectStore):
+            if content.owner_scope is None:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            store = store.scoped(
+                f"runtime:{domain.value}:{content.owner_scope}"
+            )
+        return await read_runtime_object(store, content.object)
+
+    return AttachmentProjectionCapability(
+        execution_id=projection.execution_id,
+        step_run_id=scope.step_run_id,
+        path_origin=projection.path_origin,
+        activations=projection.activations,
+        check_execution=check_execution,
+        authorize_entries=authorize_entries,
+        commit_exposure=commit_exposure,
+        read_content=read_content,
+    )
 
 
 def _runtime_attachment_service(runtime: Runtime) -> DefaultAttachmentService:
@@ -728,6 +835,7 @@ def install_attachment_admission() -> None:
     )
     local_runtime.LocalExecutionBackend._run = _managed_run
     local_runtime.user_prompt_transport = _managed_user_prompt_transport
+    agent_executor_runtime._materialize_agent = _managed_materialize_agent
     Runtime._start_for_agent = _managed_start_for_agent
     Runtime._retry_execution = _managed_retry_execution
     Runtime._fork_execution = _managed_fork_execution
