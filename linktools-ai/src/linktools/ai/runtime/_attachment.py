@@ -446,7 +446,7 @@ class _InputPlan:
     ) -> None:
         self.prompt_parts = prompt_parts
         self.available_keys = available_keys
-        self.source_relatives = source_relatives
+        self.source_relatives = tuple(dict.fromkeys(source_relatives))
         self.unique_sources = unique_sources
 
 
