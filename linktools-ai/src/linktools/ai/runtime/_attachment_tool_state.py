@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Awaitable, Callable
 from dataclasses import replace
 from typing import Any
 
@@ -20,6 +21,8 @@ from .state._durability import CommitObservation, DurableCommitState, run_durabl
 from .state._repositories import ToolRepositoryImpl
 from .state._store import StateGroupTransaction, StateTransaction
 
+_AttachmentCommitted = Callable[[str, AttachmentResult], Awaitable[None]]
+
 _installed = False
 _original_complete = RuntimeToolOperationBridge.complete
 _original_complete_payload = ToolRepositoryImpl.complete_payload
@@ -30,19 +33,27 @@ _original_commit_tool_terminal = commands_runtime.RuntimeStateCommands.commit_to
 class _AttachmentToolReturn(dict[str, JsonValue]):
     """Private model-visible dict carrying one trusted attachment activation fact."""
 
-    def __init__(self, value: dict[str, JsonValue], result: AttachmentResult) -> None:
+    def __init__(
+        self,
+        value: dict[str, JsonValue],
+        result: AttachmentResult,
+        on_committed: _AttachmentCommitted | None,
+    ) -> None:
         super().__init__(value)
         if not isinstance(result, AttachmentResult):
             raise TypeError("result must be AttachmentResult")
         self.attachment_result = result
+        self.on_committed = on_committed
 
 
 def attachment_tool_return(
     value: dict[str, JsonValue],
     result: AttachmentResult,
+    *,
+    on_committed: _AttachmentCommitted | None = None,
 ) -> dict[str, JsonValue]:
     """Build the private successful read_attachment result consumed by ToolOperation."""
-    return _AttachmentToolReturn(value, result)
+    return _AttachmentToolReturn(value, result, on_committed)
 
 
 async def _complete_tool(
@@ -118,6 +129,8 @@ async def _complete_tool(
         background_tasks=self._background_tasks,
     )
     if committed.state is DurableCommitState.COMMITTED:
+        if result.on_committed is not None:
+            await result.on_committed(decision.operation_id, attachment_result)
         return committed.cancelled
     if committed.state is DurableCommitState.NOT_COMMITTED:
         if committed.error is not None:
