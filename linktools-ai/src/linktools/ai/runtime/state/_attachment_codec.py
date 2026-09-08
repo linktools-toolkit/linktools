@@ -4,6 +4,7 @@
 
 import sys
 from collections.abc import Iterator, Mapping
+from dataclasses import fields
 from types import MappingProxyType
 from typing import Any, cast
 
@@ -13,6 +14,7 @@ from ...storage import ObjectRef
 from ._attachments import (
     AttachmentEntry,
     AttachmentPresentation,
+    AttachmentResult,
     AttachmentSemanticEntry,
     AttachmentSourceRecord,
     AttachmentUploadRecord,
@@ -49,6 +51,7 @@ from ._relocation import Locator, PathOrigin
 
 _ATTACHMENT_VALUE_WIRE_TYPES = (
     ("attachment_entry_v1", AttachmentEntry),
+    ("attachment_result_v1", AttachmentResult),
     ("path_origin_v1", PathOrigin),
 )
 _ATTACHMENT_OWNER_WIRE_TYPES = (
@@ -86,6 +89,7 @@ def install_attachment_codec() -> None:
             **dict(_V1_DATACLASS_ENCODERS),
             "execution_record": _encode_execution_record,
             "recovery_execution_input": _encode_recovery_execution_input,
+            "tool_operation": _encode_tool_operation,
             "attachment_entry_v1": _encode_entry,
             "attachment_upload_v1": _encode_upload,
             "input_prepare_v1": _encode_prepare,
@@ -131,6 +135,15 @@ def install_attachment_codec() -> None:
                     persisted=True,
                 )
                 yield _content_ref(cast(AttachmentEntry, decoded).content)
+                return
+            if wire_id == "attachment_result_v1" and target is AttachmentResult:
+                decoded = _decode_domain(
+                    value,
+                    AttachmentResult,
+                    current_codec,
+                    persisted=True,
+                )
+                yield _content_ref(cast(AttachmentResult, decoded).entry.content)
                 return
             if wire_id in _ATTACHMENT_OWNER_WIRE_IDS and target is not None:
                 decoded = _decode_domain(
@@ -193,6 +206,27 @@ def _encode_recovery_execution_input(
         encoded.pop("attachment_manifest", None)
         encoded.pop("input_digest", None)
         encoded.pop("path_origin", None)
+    return encoded
+
+
+def _encode_tool_operation(
+    value: object,
+    codec: Any,
+    persisted: bool,
+) -> Mapping[str, JsonValue]:
+    target = _V1_DOMAIN_TYPES.get("tool_operation")
+    if target is None or not isinstance(value, target):
+        raise TypeError("tool_operation received the wrong type")
+    encoded = {
+        field.name: _encode_domain(
+            getattr(value, field.name),
+            codec,
+            persisted=persisted,
+        )
+        for field in fields(value)
+    }
+    if getattr(value, "attachment_result", None) is None:
+        encoded.pop("attachment_result", None)
     return encoded
 
 
