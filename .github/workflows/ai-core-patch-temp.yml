@@ -1,0 +1,31 @@
+name: AI core patch temp
+
+on:
+  push:
+    branches:
+      - refactor/ai-harness-capabilities
+    paths:
+      - .github/workflows/ai-core-patch-temp.yml
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: refactor/ai-harness-capabilities
+      - name: Apply core attachment patch
+        shell: bash
+        run: |
+          echo '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' | base64 -d | gzip -d > /tmp/patch.py
+          python /tmp/patch.py
+          python -m compileall -q linktools-ai/src/linktools/ai/runtime/_capabilities.py linktools-ai/src/linktools/ai/runtime/_capabilities_native.py linktools-ai/src/linktools/ai/capability/_workspace.py linktools-ai/src/linktools/ai/workspace/_sandbox.py
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -A
+          git diff --cached --check
+          git commit -m 'fix(ai): restore portable workspace contracts'
+          git push origin HEAD:refactor/ai-harness-capabilities
