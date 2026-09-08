@@ -575,7 +575,7 @@ class _BubblewrapSandboxSession:
             chunk = await stderr.read(4096)
             if not chunk:
                 return
-            _logger.warning(
+            _logger.debug(
                 "bubblewrap guardian stderr: %s",
                 chunk[:4096].decode("utf-8", "replace"),
             )
@@ -797,6 +797,8 @@ def _build_bwrap_args(
         "--new-session",
         "--die-with-parent",
         "--as-pid-1",
+        "--cap-drop",
+        "ALL",
         "--ro-bind",
         str(runtime_root),
         "/",
