@@ -39,6 +39,7 @@ from .state import MemoryRecord, MemoryState, RuntimeDomain
 
 _logger = environ.get_logger("ai.runtime.memory")
 _MAX_CONTENT_CHARS = 65_536
+_MAX_LIST_SCAN_RECORDS = 10_000
 _MEMORY_VERSION = re.compile(r"m2:[0-9a-f]{64}")
 _STORE_SEGMENT = re.compile(r"[A-Za-z0-9_.-]{1,200}")
 
@@ -270,7 +271,11 @@ class RuntimeMemoryStore:
         normalized_prefix = _normalize_prefix(prefix)
         if not isinstance(limit, int) or isinstance(limit, bool) or limit <= 0:
             raise ValueError("limit must be positive")
-        records, _ = await self._list_records(limit=None)
+        records, has_more = await self._list_records(
+            limit=_MAX_LIST_SCAN_RECORDS + 1
+        )
+        if has_more or len(records) > _MAX_LIST_SCAN_RECORDS:
+            raise RuntimeError("memory path listing exceeds bounded scan capacity")
         paths: list[str] = []
         for record in records:
             path = record.metadata.get("path")
