@@ -6,6 +6,7 @@ from typing import Any
 
 import pytest
 
+from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.runtime._memory import RuntimeMemoryStore
 
 pytestmark = pytest.mark.asyncio
@@ -36,5 +37,9 @@ async def test_list_paths_fails_closed_when_scan_budget_is_exceeded() -> None:
 
     store._list_records = list_records  # type: ignore[method-assign]
 
-    with pytest.raises(RuntimeError, match="bounded scan capacity"):
+    with pytest.raises(AIError) as raised:
         await store.list_paths("memory", limit=10)
+
+    assert raised.value.code is ErrorCode.STORAGE_UNAVAILABLE
+    assert raised.value.safe_details == {"reason": "memory_listing_capacity"}
+    assert raised.value.retryable is False
