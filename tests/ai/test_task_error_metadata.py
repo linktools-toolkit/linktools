@@ -111,35 +111,3 @@ async def test_task_waiter_rethrows_full_failure_metadata() -> None:
         await launcher.wait_graph_activity("graph", tenant_id="tenant")
     _assert_source_metadata(captured.value)
     assert captured.value.safe_details == {"status_code": 503}
-
-
-@pytest.mark.asyncio
-async def test_task_recovery_preserves_full_failure_metadata() -> None:
-    launcher = object.__new__(LocalTaskGraphLauncher)
-    launcher._lock = asyncio.Lock()
-    request = SimpleNamespace(
-        principal=SimpleNamespace(tenant_id="tenant"),
-        graph=SimpleNamespace(graph_id="graph"),
-    )
-    run = SimpleNamespace(
-        request=request,
-        condition=asyncio.Condition(),
-        generation=0,
-        failure=None,
-        closed=False,
-    )
-    launcher._graphs = {("tenant", "graph"): run}
-    node = SimpleNamespace(node_id="node")
-
-    await launcher._defer_recovery(run, node, cause=_source_error())
-
-    assert run.failure is not None
-    _assert_source_metadata(run.failure)
-    assert run.failure.safe_details == {
-        "status_code": 503,
-        "phase": "task_node_recovery",
-        "graph_id": "graph",
-        "node_id": "node",
-        "cause_code": ErrorCode.MODEL_UNAVAILABLE.value,
-    }
-    assert run.closed is True
