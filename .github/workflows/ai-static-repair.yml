@@ -1,4 +1,4 @@
-name: Temporary AI capability repair
+name: Temporary AI memory repair
 
 on:
   push:
@@ -19,106 +19,131 @@ jobs:
       - uses: actions/setup-python@v7
         with:
           python-version: '3.10'
-      - name: Clarify LinkTools capability ownership
+      - name: Push memory prefix into StateStore queries
         shell: bash
         run: |
           python - <<'PY'
-          import re
           from pathlib import Path
 
-          source = Path('linktools-ai/src/linktools/ai/runtime/_capabilities_native.py')
-          target = Path('linktools-ai/src/linktools/ai/runtime/_platform_capabilities.py')
-          if not source.is_file() or target.exists():
-              raise SystemExit('unexpected platform capability module state')
-          source.rename(target)
-          platform = target.read_text(encoding='utf-8')
-          old_doc = '"""LinkTools-only capability semantics not provided by Harness."""'
-          new_doc = '"""LinkTools-owned platform capability semantics not provided by Harness."""'
-          if platform.count(old_doc) != 1:
-              raise SystemExit('platform capability docstring changed unexpectedly')
-          target.write_text(platform.replace(old_doc, new_doc), encoding='utf-8')
+          def replace_exact(path: str, old: str, new: str, *, expected: int = 1) -> None:
+              file = Path(path)
+              text = file.read_text(encoding='utf-8')
+              count = text.count(old)
+              if count != expected:
+                  raise SystemExit(f'{path}: expected {expected} matches, found {count}: {old!r}')
+              file.write_text(text.replace(old, new), encoding='utf-8')
 
-          path = Path('linktools-ai/src/linktools/ai/runtime/_capabilities.py')
-          text = path.read_text(encoding='utf-8')
-          attrs = set(re.findall(r'_native\.([A-Za-z_][A-Za-z0-9_]*)', text))
-          expected = {
-              'MEMORY_READ_TOOL_NAMES', 'MEMORY_TOOL_NAMES', 'PLANNING_TOOL_NAMES',
-              'PLAN_SAFE_METADATA_KEY', 'SUBAGENT_TOOL_NAMES',
-              'WORKSPACE_FILESYSTEM_READ_TOOL_NAMES', 'WORKSPACE_FILESYSTEM_TOOL_NAMES',
-              'WORKSPACE_SHELL_TOOL_NAMES', 'ToolOperationBridge', 'ToolOperationDecision',
-              '_CompactionCapability', '_DURATION_NS_METADATA_KEY', '_MEMORY_CAPABILITY_ID',
-              '_MODEL_EFFECT_UNKNOWN_MESSAGE', '_MissingToolOperationBridge',
-              '_OBSERVATION_ID_METADATA_KEY', '_PLANNING_CAPABILITY_ID', '_ToolCallState',
-              '_WorkspaceToolGate', '_bypasses_tool_error_hook', '_durable_failure_error',
-              '_logger', '_model_tool_error', '_model_usage_metadata',
-              '_repository_instruction_marker', '_tool_execution_policy',
-              '_tool_observation_id', '_validate_compaction_target',
-              '_validate_trusted_mcp_selectors', '_validate_trusted_tool_classes',
-              'monotonic_ns', 'select_runtime_tool_names', 'tool_allowed_in_planning',
-              'tool_is_control', 'tool_name_allowed',
-          }
-          if attrs != expected:
-              raise SystemExit(f'unexpected _native attributes: {sorted(attrs ^ expected)}')
-
-          old_import = 'import linktools.ai.runtime._capabilities_native as _native\n'
-          if text.count(old_import) != 1:
-              raise SystemExit('native module import changed unexpectedly')
-          explicit_import = '''from ._platform_capabilities import (\n    MEMORY_READ_TOOL_NAMES,\n    MEMORY_TOOL_NAMES,\n    PLANNING_TOOL_NAMES,\n    PLAN_SAFE_METADATA_KEY,\n    SUBAGENT_TOOL_NAMES,\n    WORKSPACE_FILESYSTEM_READ_TOOL_NAMES,\n    WORKSPACE_FILESYSTEM_TOOL_NAMES,\n    WORKSPACE_SHELL_TOOL_NAMES,\n    ToolOperationBridge,\n    ToolOperationDecision,\n    _CompactionCapability,\n    _DURATION_NS_METADATA_KEY,\n    _MEMORY_CAPABILITY_ID,\n    _MODEL_EFFECT_UNKNOWN_MESSAGE,\n    _MissingToolOperationBridge,\n    _OBSERVATION_ID_METADATA_KEY,\n    _PLANNING_CAPABILITY_ID,\n    _ToolCallState,\n    _WorkspaceToolGate,\n    _bypasses_tool_error_hook,\n    _durable_failure_error,\n    _model_tool_error,\n    _model_usage_metadata,\n    _repository_instruction_marker,\n    _tool_execution_policy,\n    _validate_compaction_target,\n    _validate_trusted_mcp_selectors,\n    _validate_trusted_tool_classes,\n    select_runtime_tool_names,\n    tool_allowed_in_planning,\n    tool_is_control,\n    tool_name_allowed,\n)\nfrom ._metric_id import _tool_observation_id\n'''
-          text = text.replace(old_import, explicit_import)
-
-          start = text.index('MEMORY_TOOL_NAMES = _native.MEMORY_TOOL_NAMES\n')
-          end_marker = '_MODEL_EFFECT_UNKNOWN_MESSAGE = _native._MODEL_EFFECT_UNKNOWN_MESSAGE\n'
-          end = text.index(end_marker, start) + len(end_marker)
+          memory = Path('linktools-ai/src/linktools/ai/runtime/_memory.py')
+          text = memory.read_text(encoding='utf-8')
+          text = text.replace('_MAX_LIST_SCAN_RECORDS = 10_000\n', '')
+          start = text.index('    async def list_paths(self, prefix: str = "", *, limit: int) -> list[str]:\n')
+          end = text.index('    async def _get_receipt(\n', start)
+          text = text[:start] + '''    async def list_paths(self, prefix: str = "", *, limit: int) -> list[str]:\n        normalized_prefix = _normalize_prefix(prefix)\n        if not isinstance(limit, int) or isinstance(limit, bool) or limit <= 0:\n            raise ValueError("limit must be positive")\n        page = await self._state.records.list(\n            tenant_id=self._tenant_id,\n            memory_scope_digest=self._memory_scope_digest,\n            prefix=normalized_prefix,\n            cursor=None,\n            limit=limit,\n        )\n        paths = _record_paths(list(page.items))\n        if any(not path.startswith(normalized_prefix) for path in paths):\n            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)\n        return paths\n\n''' + text[end:]
+          start = text.index('    async def _list_records(\n')
+          end = text.index('    async def _record(\n', start)
           text = text[:start] + text[end:]
-          text = text.replace('_native._logger', '_logger')
-          text = text.replace('_native.', '')
+          if '_MAX_LIST_SCAN_RECORDS' in text or '_list_records(' in text:
+              raise SystemExit('legacy memory listing scan remains')
+          memory.write_text(text, encoding='utf-8')
 
-          typing_anchor = 'from typing import Any, cast\n'
-          if text.count(typing_anchor) != 1:
-              raise SystemExit('typing import anchor changed unexpectedly')
-          text = text.replace(
-              typing_anchor,
-              'from time import monotonic_ns\n' + typing_anchor,
-          )
-          pydantic_anchor = 'from pydantic import ValidationError\n'
-          if text.count(pydantic_anchor) != 1:
-              raise SystemExit('pydantic import anchor changed unexpectedly')
-          text = text.replace(
-              pydantic_anchor,
-              'from linktools.core import environ\n' + pydantic_anchor,
-          )
-          logger_anchor = 'from ..errors import AIError, ErrorCode\n\n'
-          if text.count(logger_anchor) != 1:
-              raise SystemExit('logger anchor changed unexpectedly')
-          text = text.replace(
-              logger_anchor,
-              logger_anchor + '_logger = environ.get_logger("ai.runtime.capabilities")\n\n',
+          replace_exact(
+              'linktools-ai/src/linktools/ai/runtime/state/_contracts.py',
+              '''        memory_scope_digest: str,\n        cursor: str | None,\n        limit: int,\n    ) -> Page[MemoryRecord]: ...\n''',
+              '''        memory_scope_digest: str,\n        prefix: str,\n        cursor: str | None,\n        limit: int,\n    ) -> Page[MemoryRecord]: ...\n''',
           )
 
-          if '_native.' in text or '_capabilities_native' in text:
-              raise SystemExit('native proxy reference remains in capability composition')
-          path.write_text(text, encoding='utf-8')
+          repositories = 'linktools-ai/src/linktools/ai/runtime/state/_repositories.py'
+          replace_exact(
+              repositories,
+              '''        states: frozenset[str] | None = None,\n        cursor: str | None = None,\n''',
+              '''        states: frozenset[str] | None = None,\n        sort_key_prefix: str | None = None,\n        cursor: str | None = None,\n''',
+          )
+          replace_exact(
+              repositories,
+              '''                    kind=kind,\n                    states=states,\n                    after_sort_key=''',
+              '''                    kind=kind,\n                    states=states,\n                    sort_key_prefix=sort_key_prefix,\n                    after_sort_key=''',
+              expected=2,
+          )
+          replace_exact(
+              repositories,
+              '''        memory_scope_digest: str,\n        cursor: str | None,\n        limit: int,\n    ) -> Page[MemoryRecord]:\n''',
+              '''        memory_scope_digest: str,\n        prefix: str,\n        cursor: str | None,\n        limit: int,\n    ) -> Page[MemoryRecord]:\n''',
+          )
+          replace_exact(
+              repositories,
+              '''            "memory",\n            scope=self._scope("memory", "memory_scope", memory_scope_digest),\n            cursor=cursor,\n            limit=limit + 1,\n''',
+              '''            "memory",\n            scope=self._scope("memory", "memory_scope", memory_scope_digest),\n            sort_key_prefix=prefix or None,\n            cursor=cursor,\n            limit=limit + 1,\n''',
+          )
+
+          store = 'linktools-ai/src/linktools/ai/runtime/state/_store.py'
+          replace_exact(
+              store,
+              '''    kind: str | None = None\n    states: frozenset[str] | None = None\n    after_sort_key: str | None = None\n''',
+              '''    kind: str | None = None\n    states: frozenset[str] | None = None\n    sort_key_prefix: str | None = None\n    after_sort_key: str | None = None\n''',
+          )
+          replace_exact(
+              store,
+              '''            raise ValueError("record kind contains a path separator")\n        if (self.after_sort_key is None) != (self.after_key_digest is None):\n''',
+              '''            raise ValueError("record kind contains a path separator")\n        if self.sort_key_prefix is not None and (\n            not isinstance(self.sort_key_prefix, str)\n            or not self.sort_key_prefix\n            or len(self.sort_key_prefix) > 128\n            or not self.sort_key_prefix.isascii()\n        ):\n            raise ValueError("record sort key prefix must contain 1..128 ASCII characters")\n        if (self.after_sort_key is None) != (self.after_key_digest is None):\n''',
+          )
+
+          state_memory = 'linktools-ai/src/linktools/ai/runtime/state/_memory.py'
+          replace_exact(
+              state_memory,
+              '''    if query.kind is not None and record.kind != query.kind:\n        return False\n    return query.states is None or record.state in query.states\n''',
+              '''    if query.kind is not None and record.kind != query.kind:\n        return False\n    if query.sort_key_prefix is not None and not record.sort_key.startswith(\n        query.sort_key_prefix\n    ):\n        return False\n    return query.states is None or record.state in query.states\n''',
+          )
+
+          filesystem = 'linktools-ai/src/linktools/ai/runtime/state/_filesystem.py'
+          replace_exact(
+              filesystem,
+              '''    parent_digest: bytes | None\n    states: frozenset[str] | None\n''',
+              '''    parent_digest: bytes | None\n    states: frozenset[str] | None\n    sort_key_prefix: str | None\n''',
+          )
+          replace_exact(
+              filesystem,
+              '''            query.parent_digest,\n            query.states,\n        )\n''',
+              '''            query.parent_digest,\n            query.states,\n            query.sort_key_prefix,\n        )\n''',
+          )
+          replace_exact(
+              filesystem,
+              '''        and (query.kind is None or record.kind == query.kind)\n        and (query.states is None or record.state in query.states)\n''',
+              '''        and (query.kind is None or record.kind == query.kind)\n        and (\n            query.sort_key_prefix is None\n            or record.sort_key.startswith(query.sort_key_prefix)\n        )\n        and (query.states is None or record.state in query.states)\n''',
+          )
+
+          sql = 'linktools-ai/src/linktools/ai/runtime/state/_sql.py'
+          replace_exact(
+              sql,
+              '''        if query.states is not None:\n            conditions.append(table.c.state.in_(tuple(query.states)))\n        if query.after_sort_key is not None and query.after_key_digest is not None:\n''',
+              '''        if query.states is not None:\n            conditions.append(table.c.state.in_(tuple(query.states)))\n        if query.sort_key_prefix is not None:\n            conditions.append(\n                table.c.sort_key.startswith(query.sort_key_prefix, autoescape=True)\n            )\n        if query.after_sort_key is not None and query.after_key_digest is not None:\n''',
+          )
+
+          Path('tests/ai/test_memory_bounded_listing.py').write_text('''#!/usr/bin/env python3\n# -*- coding: utf-8 -*-\n"""Runtime memory listing must keep prefix queries bounded at the repository."""\n\nfrom datetime import datetime, timezone\nfrom types import SimpleNamespace\nfrom typing import Any\n\nimport pytest\n\nfrom linktools.ai.errors import AIError, ErrorCode\nfrom linktools.ai.runtime._memory import RuntimeMemoryStore\nfrom linktools.ai.runtime.state._contracts import MemoryRecord\nfrom linktools.ai.runtime.state._memory import MemoryStateStorageGroup, MemoryStateStore\nfrom linktools.ai.runtime.state._repositories import MemoryRepositoryImpl\nfrom linktools.ai.storage import StoredPayload\n\npytestmark = pytest.mark.asyncio\n\n\nclass _RecordingMemoryRepository:\n    def __init__(self, paths: tuple[str, ...]) -> None:\n        self._paths = paths\n        self.calls: list[dict[str, Any]] = []\n\n    async def list(self, **kwargs: Any) -> Any:\n        self.calls.append(dict(kwargs))\n        limit = kwargs["limit"]\n        return SimpleNamespace(\n            items=tuple(\n                SimpleNamespace(metadata={"path": path})\n                for path in self._paths[:limit]\n            ),\n            next_cursor=None,\n        )\n\n\ndef _runtime_store(records: _RecordingMemoryRepository) -> RuntimeMemoryStore:\n    store = object.__new__(RuntimeMemoryStore)\n    store._state = SimpleNamespace(records=records)\n    store._tenant_id = "tenant"\n    store._memory_scope_digest = "scope-digest"\n    return store\n\n\nasync def test_list_paths_pushes_prefix_and_limit_to_repository_once() -> None:\n    records = _RecordingMemoryRepository(("memory/a.md",))\n    store = _runtime_store(records)\n\n    assert await store.list_paths("memory", limit=10) == ["memory/a.md"]\n    assert records.calls == [\n        {\n            "tenant_id": "tenant",\n            "memory_scope_digest": "scope-digest",\n            "prefix": "memory/",\n            "cursor": None,\n            "limit": 10,\n        }\n    ]\n\n\nasync def test_list_paths_fails_closed_if_repository_breaks_prefix_contract() -> None:\n    records = _RecordingMemoryRepository(("archive/a.md",))\n    store = _runtime_store(records)\n\n    with pytest.raises(AIError) as raised:\n        await store.list_paths("memory", limit=10)\n\n    assert raised.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR\n    assert len(records.calls) == 1\n\n\nasync def test_memory_repository_projects_logical_path_as_sort_key() -> None:\n    repository = MemoryRepositoryImpl(\n        MemoryStateStore(MemoryStateStorageGroup()),\n        namespace="memory-ordering",\n        tenant_id="tenant",\n    )\n    now = datetime.now(timezone.utc)\n    value = MemoryRecord(\n        "memory-id",\n        "tenant",\n        "scope-digest",\n        StoredPayload.inline_text("content"),\n        {"path": "memory/z.md"},\n        1,\n        now,\n        now,\n    )\n\n    stored = repository._stored("memory", value.memory_id, value)\n\n    assert stored.sort_key == "memory/z.md"\n\n\nasync def test_memory_repository_applies_prefix_before_limit() -> None:\n    state = MemoryStateStore(MemoryStateStorageGroup())\n    await state.initialize()\n    try:\n        repository = MemoryRepositoryImpl(\n            state,\n            namespace="memory-prefix",\n            tenant_id="tenant",\n        )\n        now = datetime.now(timezone.utc)\n        values = tuple(\n            MemoryRecord(\n                memory_id,\n                "tenant",\n                "scope-digest",\n                StoredPayload.inline_text("content"),\n                {"path": path},\n                1,\n                now,\n                now,\n            )\n            for memory_id, path in (\n                ("archive-a", "archive/a.md"),\n                ("memory-a", "memory/a.md"),\n                ("memory-b", "memory/b.md"),\n            )\n        )\n        stored = tuple(\n            repository._stored("memory", value.memory_id, value)\n            for value in values\n        )\n        await state.mutate(lambda transaction: transaction.insert_records(stored))\n\n        first = await repository.list(\n            tenant_id="tenant",\n            memory_scope_digest="scope-digest",\n            prefix="memory/",\n            cursor=None,\n            limit=1,\n        )\n        assert [value.metadata["path"] for value in first.items] == ["memory/a.md"]\n        assert first.next_cursor is not None\n\n        second = await repository.list(\n            tenant_id="tenant",\n            memory_scope_digest="scope-digest",\n            prefix="memory/",\n            cursor=first.next_cursor,\n            limit=10,\n        )\n        assert [value.metadata["path"] for value in second.items] == ["memory/b.md"]\n    finally:\n        await state.close()\n''', encoding='utf-8')
           PY
-          if grep -R --line-number --exclude-dir='__pycache__' '_capabilities_native\|_native\.' linktools-ai/src tests/ai; then
-            echo 'stale native capability reference remains' >&2
-            exit 1
-          fi
       - name: Install tooling
         shell: bash
         run: |
           python -m pip install --quiet --upgrade pip
           python -m pip install --quiet -U -r requirements.txt
           python manage.py install --editable --quiet
-      - name: Validate ownership repair
+      - name: Validate bounded memory listing
         shell: bash
         run: |
+          python -m pytest -q -p no:cacheprovider tests/ai/test_memory_bounded_listing.py
           python manage.py check linktools-ai
-      - name: Commit ownership repair
+      - name: Commit bounded memory listing
         shell: bash
         run: |
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git add -A linktools-ai/src/linktools/ai/runtime
+          git add linktools-ai/src/linktools/ai/runtime/_memory.py \
+                  linktools-ai/src/linktools/ai/runtime/state/_contracts.py \
+                  linktools-ai/src/linktools/ai/runtime/state/_repositories.py \
+                  linktools-ai/src/linktools/ai/runtime/state/_store.py \
+                  linktools-ai/src/linktools/ai/runtime/state/_memory.py \
+                  linktools-ai/src/linktools/ai/runtime/state/_filesystem.py \
+                  linktools-ai/src/linktools/ai/runtime/state/_sql.py \
+                  tests/ai/test_memory_bounded_listing.py
           git diff --cached --check
-          git commit -m 'refactor(ai): clarify platform capability ownership'
+          git commit -m 'fix(ai): bound memory prefix listing'
           git push origin HEAD:refactor/ai-harness-capabilities
