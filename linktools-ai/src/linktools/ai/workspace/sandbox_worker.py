@@ -45,7 +45,6 @@ async def main_async(arguments: argparse.Namespace) -> int:
         Path("/workspace"),
         resources,
         lock_root=Path(arguments.lock_root),
-        enforce_command_policy=False,
     )
     reader, writer = await _stdio_streams()
     write_lock = asyncio.Lock()
