@@ -70,11 +70,11 @@ async def test_binary_content_is_stored_with_fixed_wire_timestamp() -> None:
         canonical_files = await materializer.canonicalize_files(
             ("evidence.txt", "evidence.txt")
         )
-        canonical, stored = await materializer.materialize(
+        canonical = await materializer.materialize(
             ("Inspect this file",),
             canonical_files,
-            tenant_id="tenant",
         )
+        stored = await materializer.store(canonical, tenant_id="tenant")
         assert len(session.reads) == 1
         assert canonical[0] == "Inspect this file"
         assert isinstance(canonical[1], BinaryContent)
@@ -90,7 +90,7 @@ async def test_unknown_file_media_type_fails_before_read() -> None:
     try:
         files = await materializer.canonicalize_files(("evidence.unknown",))
         with pytest.raises(AIError) as raised:
-            await materializer.materialize("Inspect this file", files, tenant_id="tenant")
+            await materializer.materialize("Inspect this file", files)
         assert raised.value.code is ErrorCode.REQUEST_FIELD_INVALID
         assert raised.value.safe_details == {
             "field": "files",
