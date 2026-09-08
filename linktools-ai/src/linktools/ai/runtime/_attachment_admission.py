@@ -35,6 +35,7 @@ from ._input import (
 from ._object import read_runtime_object
 from ._runtime_service import Runtime
 from .state import (
+    AttachmentEntry,
     ContentRef,
     ExecutionRepositoryImpl,
     InputPrepareRecord,
@@ -79,6 +80,8 @@ class _ManagedProjection:
     backend: local_runtime.LocalExecutionBackend
     execution_id: str
     path_origin: PathOrigin
+    input_digest: str
+    manifest: tuple[AttachmentEntry, ...]
     activations: tuple[ModelExposureEntry, ...]
     prompt: str | tuple[UserContent, ...]
 
@@ -395,7 +398,7 @@ async def _managed_run(
         await _original_run(self, request, original)
         return
     _validate_managed_request(request, original)
-    if original.path_origin is None:
+    if original.path_origin is None or original.input_digest is None:
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     repository = AttachmentRepository(
         self._execution.executions.state_store,
@@ -412,6 +415,8 @@ async def _managed_run(
         self,
         original.execution_id,
         original.path_origin,
+        original.input_digest,
+        original.attachment_manifest,
         activations,
         prompt,
     )
@@ -485,16 +490,13 @@ def _projection_capability(projection: _ManagedProjection, scope) -> AttachmentP
             raise AIError(ErrorCode.EXECUTION_CANCELLED)
         if current.status is not ExecutionStatus.STARTED:
             raise AIError(ErrorCode.STORAGE_CONFLICT)
-        if (
-            current.agent_run_sequence != scope.segment_sequence
-            or current.attachment_manifest
-            != tuple(value.entry for value in sorted(authorized.values(), key=lambda value: value.slot))
-            and current.attachment_manifest != projection.backend._execution_snapshot_manifest
-            if hasattr(projection.backend, "_execution_snapshot_manifest")
-            else False
-        ):
+        if current.agent_run_sequence != scope.segment_sequence:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        if current.path_origin != projection.path_origin:
+        if (
+            current.attachment_manifest != projection.manifest
+            or current.input_digest != projection.input_digest
+            or current.path_origin != projection.path_origin
+        ):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         return current
 
@@ -507,7 +509,8 @@ def _projection_capability(projection: _ManagedProjection, scope) -> AttachmentP
         run_step: int,
         entries: tuple[ModelExposureEntry, ...],
     ) -> None:
-        del run_step
+        if isinstance(run_step, bool) or not isinstance(run_step, int) or run_step < 0:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         current = await current_execution()
         for value in entries:
             if authorized.get(value.activation_id) != value or value.source != source:
@@ -543,9 +546,7 @@ def _projection_capability(projection: _ManagedProjection, scope) -> AttachmentP
         if isinstance(store, TransientObjectStore):
             if content.owner_scope is None:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            store = store.scoped(
-                f"runtime:{domain.value}:{content.owner_scope}"
-            )
+            store = store.scoped(f"runtime:{domain.value}:{content.owner_scope}")
         return await read_runtime_object(store, content.object)
 
     return AttachmentProjectionCapability(
