@@ -27,6 +27,7 @@ from ..core import (
     ToolOperationStatus,
     canonical_sha256,
     validate_lease_owner,
+    validate_resource_id,
     validate_tenant_id,
 )
 from ..errors import AIError, ErrorCode, ErrorDiagnostics
@@ -56,6 +57,7 @@ _logger = environ.get_logger("ai.runtime.tool")
 class ToolOperationRecord:
     tool_operation_id: str
     tenant_id: str
+    execution_id: str
     step_run_id: str
     tool_call_id: str
     idempotency_key_digest: str
@@ -76,16 +78,20 @@ class ToolOperationRecord:
     def __post_init__(self) -> None:
         try:
             validate_tenant_id(self.tenant_id)
+            validate_resource_id(self.execution_id)
             if self.owner is not None:
                 validate_lease_owner(self.owner)
         except AIError as error:
-            raise ValueError("tool operation lease identity is invalid") from error
+            raise ValueError("tool operation identity is invalid") from error
 
 
 class ToolStateRepository(Protocol):
     async def admit(self, request: ToolOperationAdmission) -> ToolOperationRecord: ...
     async def reserve(self, record: ToolOperationRecord) -> ToolOperationRecord: ...
     async def get_operation(self, tool_operation_id: str, *, tenant_id: str) -> "ToolOperationRecord | None": ...
+    async def list_by_execution(
+        self, execution_id: str, *, tenant_id: str
+    ) -> tuple[ToolOperationRecord, ...]: ...
     async def claim(self, tool_operation_id: str, *, tenant_id: str, owner: str, lease_seconds: int) -> ToolOperationRecord: ...
     async def renew(self, tool_operation_id: str, *, tenant_id: str, owner: str, fence: int, lease_seconds: int) -> ToolOperationRecord: ...
     async def fail(self, tool_operation_id: str, *, tenant_id: str, owner: str, fence: int, error_code: str) -> ToolOperationRecord: ...
@@ -96,6 +102,10 @@ class _ToolOperationRuntimeRepository(Protocol):
     async def admit(self, request: ToolOperationAdmission) -> ToolOperationRecord: ...
 
     async def has_by_step_run(self, step_run_id: str, *, tenant_id: str) -> bool: ...
+
+    async def list_by_execution(
+        self, execution_id: str, *, tenant_id: str
+    ) -> tuple[ToolOperationRecord, ...]: ...
 
     async def existing_call_ids(
         self,
@@ -240,7 +250,7 @@ class RuntimeToolOperationBridge:
         self._recovery_objects = recovery_objects
         self._object_keys = RuntimeObjectKeyFactory(namespace)
         self._tenant_id = validate_tenant_id(tenant_id)
-        self._execution_id = execution_id
+        self._execution_id = validate_resource_id(execution_id)
         self._step_run_id = step_run_id
         self._binding_digest = binding_digest
         self._owner = owner
@@ -272,6 +282,7 @@ class RuntimeToolOperationBridge:
         operation_id = canonical_sha256(
             {
                 "tenant_id": self._tenant_id,
+                "execution_id": self._execution_id,
                 "step_run_id": self._run_id(ctx),
                 "tool_call_id": call.tool_call_id,
                 "tool_name": tool_def.name,
@@ -281,12 +292,17 @@ class RuntimeToolOperationBridge:
         )
         admission = ToolOperationAdmission(
             tenant_id=self._tenant_id,
+            execution_id=self._execution_id,
             tool_operation_id=operation_id,
             step_run_id=self._run_id(ctx),
             recovery_step_run_id=self._recovery_step_run_id,
             tool_call_id=call.tool_call_id,
             idempotency_key_digest=canonical_sha256(
-                {"step_run_id": replay_step_run_id, "tool_call_id": call.tool_call_id}
+                {
+                    "execution_id": self._execution_id,
+                    "step_run_id": replay_step_run_id,
+                    "tool_call_id": call.tool_call_id,
+                }
             ),
             tool_name=tool_def.name,
             arguments_digest=arguments_digest,
@@ -299,6 +315,8 @@ class RuntimeToolOperationBridge:
             existing = await self._terminal_commands.commit_tool_admission(admission)
         else:
             existing = await self._repository.admit(admission)
+        if existing.execution_id != self._execution_id:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         decision = await self._decision_from_record(existing, replay_safe)
         self._decisions[key] = decision
         _logger.debug(
@@ -328,7 +346,7 @@ class RuntimeToolOperationBridge:
     ) -> "ToolOperationDecision":
         from ._capabilities import ToolOperationDecision
 
-        if existing.replay_safe is not replay_safe:
+        if existing.execution_id != self._execution_id or existing.replay_safe is not replay_safe:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         if existing.status is ToolOperationStatus.COMPLETED:
             return ToolOperationDecision(
@@ -463,6 +481,11 @@ class RuntimeToolOperationBridge:
             )
             if observed is None:
                 return CommitObservation(DurableCommitState.NOT_COMMITTED)
+            if observed.execution_id != self._execution_id:
+                return CommitObservation(
+                    DurableCommitState.PARTIAL_INTEGRITY_ERROR,
+                    error=AIError(ErrorCode.STORAGE_INTEGRITY_ERROR),
+                )
             if observed.status is ToolOperationStatus.EFFECT_UNKNOWN:
                 if (
                     observed.owner != decision.owner
@@ -733,6 +756,11 @@ class RuntimeToolOperationBridge:
             )
             if observed is None:
                 return CommitObservation(DurableCommitState.NOT_COMMITTED)
+            if observed.execution_id != self._execution_id:
+                return CommitObservation(
+                    DurableCommitState.PARTIAL_INTEGRITY_ERROR,
+                    error=AIError(ErrorCode.STORAGE_INTEGRITY_ERROR),
+                )
             if observed.status is expected_status:
                 if observed.owner != decision.owner or observed.fence != decision.fence:
                     return CommitObservation(
