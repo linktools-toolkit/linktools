@@ -31,6 +31,7 @@ def _record(
     return ToolOperationRecord(
         tool_operation_id="tool-operation",
         tenant_id="tenant",
+        execution_id="execution",
         step_run_id="step-run",
         tool_call_id="tool-call",
         idempotency_key_digest=canonical_sha256({"call": "tool-call"}),
@@ -57,6 +58,7 @@ def _record(
 def _admission(*, owner: str = "tool-owner") -> ToolOperationAdmission:
     return ToolOperationAdmission(
         tenant_id="tenant",
+        execution_id="execution",
         tool_operation_id="tool-operation",
         step_run_id="step-run",
         recovery_step_run_id=None,
@@ -90,8 +92,17 @@ async def test_sqlite_materializes_convergent_tool_repository(tmp_path) -> None:
             repository.admit(request),
         )
         assert first.tool_operation_id == second.tool_operation_id
+        assert first.execution_id == second.execution_id == request.execution_id
         assert first.owner == second.owner == request.owner
         assert first.fence == second.fence == 1
+        assert await repository.list_by_execution(
+            request.execution_id,
+            tenant_id=request.tenant_id,
+        ) == (first,)
+        assert await repository.list_by_execution(
+            "other-execution",
+            tenant_id=request.tenant_id,
+        ) == ()
 
         renewed = await repository.renew(
             request.tool_operation_id,
@@ -148,8 +159,6 @@ async def test_tool_repository_does_not_retry_semantic_conflict() -> None:
 
     assert raised.value.code is ErrorCode.TOOL_OPERATION_CONFLICT
     assert attempts == 1
-
-
 
 
 class _GroupTransaction:
@@ -373,6 +382,7 @@ async def test_tool_bridge_preserves_result_conflict_instead_of_integrity_error(
     bridge = object.__new__(RuntimeToolOperationBridge)
     bridge._repository = _ReadbackRepository(observed)
     bridge._tenant_id = "tenant"
+    bridge._execution_id = "execution"
     bridge._background_tasks = set()
     decision = SimpleNamespace(
         operation_id="tool-operation",
@@ -406,6 +416,7 @@ async def test_tool_bridge_requires_terminal_owner_and_fence_identity() -> None:
     bridge = object.__new__(RuntimeToolOperationBridge)
     bridge._repository = _ReadbackRepository(observed)
     bridge._tenant_id = "tenant"
+    bridge._execution_id = "execution"
     bridge._background_tasks = set()
     decision = SimpleNamespace(
         operation_id="tool-operation",
