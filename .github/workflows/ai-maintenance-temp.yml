@@ -1,0 +1,88 @@
+name: AI maintenance temp
+
+on:
+  push:
+    branches:
+      - refactor/ai-harness-capabilities
+    paths:
+      - .github/workflows/ai-maintenance-temp.yml
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: refactor/ai-harness-capabilities
+      - name: Apply reviewed source cleanup
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          def replace_once(path: str, old: str, new: str) -> None:
+              target = Path(path)
+              text = target.read_text(encoding="utf-8")
+              count = text.count(old)
+              if count != 1:
+                  raise RuntimeError(f"expected one match in {path}, found {count}")
+              target.write_text(text.replace(old, new, 1), encoding="utf-8")
+
+          replace_once(
+              "linktools-ai/src/linktools/ai/runtime/_local.py",
+              """                        segment_sequence=current.agent_run_sequence,\n                        operation_identity_run_id=(\n                            recovery_history_run_id or run_id\n                        ),\n                        history_id=history_id,\n""",
+              """                        segment_sequence=current.agent_run_sequence,\n                        history_id=history_id,\n""",
+          )
+
+          repositories = "linktools-ai/src/linktools/ai/runtime/state/_repositories.py"
+          replace_once(
+              repositories,
+              """_ACTIVE_RECORD_UNSET = object()\n\n\nclass _RepositoryBase:\n""",
+              """_ACTIVE_RECORD_UNSET = object()\n_MAX_RECORD_SORT_KEY_CHARS = 128\n\n\ndef _record_sort_key(identity: object, value: object) -> str:\n    if not isinstance(value, MemoryRecord):\n        return sortable_identity(identity)\n    path = value.metadata.get(\"path\")\n    if (\n        not isinstance(path, str)\n        or not path\n        or not path.isascii()\n        or len(path) > _MAX_RECORD_SORT_KEY_CHARS\n    ):\n        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)\n    return path\n\n\nclass _RepositoryBase:\n""",
+          )
+          replace_once(
+              repositories,
+              """            kind,\n            sortable_identity(identity),\n            state,\n""",
+              """            kind,\n            _record_sort_key(identity, value),\n            state,\n""",
+          )
+
+          materializer = "linktools-ai/src/linktools/ai/runtime/state/_materializer.py"
+          replace_once(
+              materializer,
+              "from ._memory_repository import MemoryPathRepository\n",
+              "",
+          )
+          replace_once(
+              materializer,
+              """        bundles[RuntimeDomain.MEMORY][\"records\"] = MemoryPathRepository(\n            stores[RuntimeDomain.MEMORY],\n            namespace=namespace,\n            tenant_id=tenant_id,\n        )\n""",
+              "",
+          )
+
+          Path("linktools-ai/src/linktools/ai/runtime/state/_memory_repository.py").unlink()
+
+          test_path = "tests/ai/test_memory_bounded_listing.py"
+          replace_once(
+              test_path,
+              "from linktools.ai.runtime.state._memory_repository import MemoryPathRepository\n",
+              "from linktools.ai.runtime.state._repositories import MemoryRepositoryImpl\n",
+          )
+          replace_once(
+              test_path,
+              """    repository = MemoryPathRepository(\n""",
+              """    repository = MemoryRepositoryImpl(\n""",
+          )
+          replace_once(
+              test_path,
+              "def test_memory_repository_projects_logical_path_as_sort_key() -> None:\n",
+              "async def test_memory_repository_projects_logical_path_as_sort_key() -> None:\n",
+          )
+          PY
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git diff --cached --check
+          git commit -m "refactor(ai): centralize memory path ordering"
+          git push origin HEAD:refactor/ai-harness-capabilities
