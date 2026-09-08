@@ -60,7 +60,11 @@ WORKSPACE_FILESYSTEM_TOOL_NAMES = _native.WORKSPACE_FILESYSTEM_TOOL_NAMES
 WORKSPACE_SHELL_TOOL_NAMES = _native.WORKSPACE_SHELL_TOOL_NAMES
 ToolOperationBridge = _native.ToolOperationBridge
 ToolOperationDecision = _native.ToolOperationDecision
+_CompactionCapability = _native._CompactionCapability
+_MissingToolOperationBridge = _native._MissingToolOperationBridge
 _WorkspaceToolGate = _native._WorkspaceToolGate
+_model_usage_metadata = _native._model_usage_metadata
+_repository_instruction_marker = _native._repository_instruction_marker
 _tool_execution_policy = _native._tool_execution_policy
 
 select_runtime_tool_names = _native.select_runtime_tool_names
@@ -308,7 +312,7 @@ class _RuntimeStepPersistence(StepPersistence[None]):
     ) -> ModelResponse:
         self._runtime_store.capture_model_context(request_context.messages)
         fact = self._consume_model_fact(ctx, status="SUCCEEDED")
-        metadata = _native._model_usage_metadata(response)
+        metadata = _model_usage_metadata(response)
         if fact is not None:
             metadata.update(
                 fact.metadata(include_observation=self.tool_metrics is not None)
@@ -409,7 +413,7 @@ class _RuntimeStepPersistence(StepPersistence[None]):
         if phase == "completed":
             if response is None:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            metadata.update(_native._model_usage_metadata(response))
+            metadata.update(_model_usage_metadata(response))
         await self._runtime_store.append_runtime_event(
             run_id=self._runtime_run_id(ctx),
             kind=(
@@ -436,11 +440,11 @@ class _RuntimeStepPersistence(StepPersistence[None]):
         args: dict[str, Any],
     ) -> dict[str, Any]:
         del ctx, call
-        _native._tool_execution_policy(
+        _tool_execution_policy(
             tool_def,
             trusted_tool_classes=self.trusted_tool_classes,
         )
-        if self.plan_mode and not _native.tool_allowed_in_planning(
+        if self.plan_mode and not tool_allowed_in_planning(
             tool_def,
             trusted_tool_classes=self.trusted_tool_classes,
             trusted_mcp_selectors=self.trusted_mcp_selectors,
@@ -460,7 +464,7 @@ class _RuntimeStepPersistence(StepPersistence[None]):
         args: dict[str, Any],
         handler: WrapToolExecuteHandler,
     ) -> Any:
-        policy = _native._tool_execution_policy(
+        policy = _tool_execution_policy(
             tool_def,
             trusted_tool_classes=self.trusted_tool_classes,
         )
@@ -1091,7 +1095,7 @@ async def compose_platform_capabilities(
                 else {"segment_sequence": str(segment_sequence)}
             ),
         },
-        tool_operations=tool_operations or _native._MissingToolOperationBridge(),
+        tool_operations=tool_operations or _MissingToolOperationBridge(),
         plan_mode=plan_mode,
         trusted_tool_classes=trusted_tool_classes,
         trusted_mcp_selectors=trusted_mcp_selectors,
@@ -1132,7 +1136,7 @@ async def compose_platform_capabilities(
             )
         )
     capabilities.append(
-        _native._CompactionCapability(
+        _CompactionCapability(
             context_target_tokens,
             trusted_workspace_read=(
                 dict(trusted_tool_classes).get("read_file") == "filesystem.read"
@@ -1146,10 +1150,6 @@ async def compose_platform_capabilities(
         )
     )
     return tuple(capabilities)
-
-
-def __getattr__(name: str) -> object:
-    return getattr(_native, name)
 
 
 __all__ = [
