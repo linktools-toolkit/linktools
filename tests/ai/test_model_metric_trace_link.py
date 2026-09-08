@@ -14,7 +14,7 @@ from linktools.ai.runtime._history import _trace_item
 from linktools.ai.runtime._metric_capability import _RuntimeModelMetricCapability
 from linktools.ai.runtime._metric_id import _model_observation_id
 from linktools.ai.runtime._tool_metrics import _ToolMetricContext
-from pydantic_ai import Agent
+from pydantic_ai import Agent, ModelRetry, RunContext
 from pydantic_ai.messages import ModelMessage, ModelResponse
 from pydantic_ai.models.function import AgentInfo, FunctionModel
 from pydantic_ai.models.test import TestModel
@@ -179,6 +179,40 @@ async def test_failed_model_metric_and_trace_share_observation_id_and_duration()
     trace = _trace(event)
     assert trace.payload["observation_id"] == expected
     assert trace.payload["duration_ns"] == int(event.metadata["linktools.ai.duration_ns"])
+
+
+@pytest.mark.asyncio
+async def test_output_retry_metric_lineage_uses_pydantic_retry_state() -> None:
+    store = InMemoryStepStore()
+    recorder = _Recorder()
+    run_id = "output-retry-metric-run"
+    agent = Agent(
+        TestModel(custom_output_text="done"),
+        deps_type=object,
+        capabilities=[_model_metrics(recorder, run_id), _persistence(store, run_id, recorder)],
+        retries={"output": 1},
+    )
+
+    @agent.output_validator
+    def retry_once(ctx: RunContext[object], output: str) -> str:
+        if ctx.retry == 0:
+            raise ModelRetry("retry output")
+        return output
+
+    result = await agent.run("hello", deps=SimpleNamespace(correlation={}))
+
+    assert result.output == "done"
+    model_observations = [
+        value for value in recorder.observations if value.kind == "linktools.model.request"
+    ]
+    assert len(model_observations) == 2
+    assert "linktools.output_retry_index" not in model_observations[0].correlation
+    assert model_observations[1].correlation["linktools.output_retry_index"] == 1
+    retry_measurements = {
+        measurement.name: measurement.value
+        for measurement in model_observations[1].measurements
+    }
+    assert retry_measurements["output_retry_count"] == 1
 
 
 @pytest.mark.asyncio
