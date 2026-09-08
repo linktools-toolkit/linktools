@@ -14,6 +14,7 @@ import linktools.ai.runtime.state._codec as codec_runtime
 from ..errors import AIError, ErrorCode
 from ..task import DefaultTaskService, TaskGraph, TaskGraphLaunch, TaskNode
 from ._attachment import DefaultAttachmentService
+from ._input import managed_user_prompt_draft, task_prompt_draft
 from .state import RuntimeDomain
 from .state._attachment_codec import _entry
 from .state._codec import _decode_domain
@@ -23,6 +24,7 @@ from .state._repositories import ExecutionRepositoryImpl
 _installed = False
 _original_runtime_init: Any = None
 _original_admit_graph: Any = None
+_original_task_for_agent: Any = None
 _original_arm_graph: Any = None
 _original_runner_handler: Any = None
 _original_agent_normalize: Any = None
@@ -68,6 +70,44 @@ async def _runtime_admit_graph(
         idempotency_key=idempotency_key,
         limits=limits,
         correlation=correlation,
+    )
+
+
+def _runtime_task_for_agent(self: runtime_service.Runtime, *args: Any, **kwargs: Any):
+    node = _original_task_for_agent(self, *args, **kwargs)
+    user_prompt = args[2] if len(args) > 2 else kwargs.get("user_prompt")
+    attachments = kwargs.get("attachments", ())
+    if attachments or user_prompt is None:
+        return node
+    try:
+        draft = managed_user_prompt_draft(user_prompt)
+    except TypeError:
+        return node
+    if draft is None:
+        return node
+    value = node.input
+    if (
+        not isinstance(value, Mapping)
+        or value.get("type") != task_attachment._AGENT_TASK_TYPE
+        or value.get("version") != 1
+    ):
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    required = {"binding", "mode", "planning", "thinking"}
+    if not required.issubset(value):
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    return replace(
+        node,
+        input={
+            "type": task_attachment._AGENT_TASK_TYPE,
+            "version": 2,
+            "stage": "draft",
+            "binding": value["binding"],
+            "prompt": task_prompt_draft(draft),
+            "attachments": [],
+            "mode": value["mode"],
+            "planning": value["planning"],
+            "thinking": value["thinking"],
+        },
     )
 
 
@@ -230,6 +270,7 @@ def install_task_attachments() -> None:
     global _installed
     global _original_runtime_init
     global _original_admit_graph
+    global _original_task_for_agent
     global _original_arm_graph
     global _original_runner_handler
     global _original_agent_normalize
@@ -244,6 +285,7 @@ def install_task_attachments() -> None:
 
     _original_runtime_init = runtime_service.Runtime.__init__
     _original_admit_graph = runtime_service.Runtime._admit_graph
+    _original_task_for_agent = runtime_service.Runtime._task_for_agent
     _original_arm_graph = DefaultTaskService._arm_graph
     _original_runner_handler = planner_runtime.RuntimeTaskNodeRunner._handler
     _original_agent_normalize = planner_runtime._AgentTaskNodeHandler.normalize
@@ -267,6 +309,7 @@ def install_task_attachments() -> None:
 
     runtime_service.Runtime.__init__ = _runtime_init
     runtime_service.Runtime._admit_graph = _runtime_admit_graph
+    runtime_service.Runtime._task_for_agent = _runtime_task_for_agent
     DefaultTaskService._arm_graph = _task_arm_graph
     planner_runtime.RuntimeTaskNodeRunner._handler = _runner_handler
     planner_runtime._AgentTaskNodeHandler.normalize = _agent_normalize
