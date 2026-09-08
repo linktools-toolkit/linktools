@@ -49,7 +49,7 @@ def workspace_tool_call_binding_subject_digest(
 
 
 class WorkspaceToolCallBindingStore:
-    """Persist and read trusted workspace path bindings as StateStore facts."""
+    """Persist trusted path bindings for the lifetime of one execution."""
 
     def __init__(
         self,
@@ -63,26 +63,32 @@ class WorkspaceToolCallBindingStore:
         self._store = store
         self._namespace = namespace
         self._tenant_id = tenant_id
-        self._stream = stream_digest(
-            namespace,
-            tenant_id,
+
+    def _owner(self, execution_id: str) -> bytes:
+        return record_key_digest(
+            self._namespace,
+            self._tenant_id,
             RuntimeDomain.RECOVERY.value,
             _BINDING_RELATION,
-            _BINDING_VERSION,
+            ["v1", execution_id],
         )
-        self._owner = record_key_digest(
-            namespace,
-            tenant_id,
+
+    def _stream(self, execution_id: str) -> bytes:
+        return stream_digest(
+            self._namespace,
+            self._tenant_id,
             RuntimeDomain.RECOVERY.value,
             _BINDING_RELATION,
-            _BINDING_VERSION,
+            ["v1", execution_id],
         )
-        self._sequence = sequence_key(
-            namespace,
-            tenant_id,
+
+    def _sequence(self, execution_id: str) -> bytes:
+        return sequence_key(
+            self._namespace,
+            self._tenant_id,
             RuntimeDomain.RECOVERY.value,
             _BINDING_RELATION,
-            _BINDING_VERSION,
+            ["v1", execution_id],
         )
 
     async def store(
@@ -98,11 +104,14 @@ class WorkspaceToolCallBindingStore:
             binding.tool_call_id,
         )
         encoded = _encode_binding(binding)
+        stream = self._stream(binding.execution_id)
+        owner_key = self._owner(binding.execution_id)
+        sequence_key_value = self._sequence(binding.execution_id)
 
         async def mutate(transaction: StateTransaction) -> WorkspaceToolCallBinding:
-            owner = await _ensure_owner(transaction, self)
+            owner = await _ensure_owner(transaction, self, binding.execution_id)
             facts = await transaction.list_facts(
-                FactQuery(self._stream, subject_digest=subject, latest=True)
+                FactQuery(stream, subject_digest=subject, latest=True)
             )
             if facts:
                 existing = _decode_binding(facts[0])
@@ -110,16 +119,16 @@ class WorkspaceToolCallBindingStore:
                     raise AIError(ErrorCode.STORAGE_CONFLICT)
                 return existing
             if await transaction.guard_record(
-                self._owner,
+                owner_key,
                 expected_storage_version=owner.storage_version,
             ) is None:
                 raise AIError(ErrorCode.STORAGE_CONFLICT)
-            sequence = await transaction.reserve_sequence(self._sequence, 1)
+            sequence = await transaction.reserve_sequence(sequence_key_value, 1)
             await transaction.insert_fact(
                 StoredFact(
-                    self._stream,
+                    stream,
                     sequence,
-                    self._owner,
+                    owner_key,
                     _BINDING_KIND,
                     subject,
                     binding.error_code,
@@ -129,13 +138,18 @@ class WorkspaceToolCallBindingStore:
             return binding
 
         stored = await self._store.mutate(mutate)
-        readback = await self.get(binding.step_run_id, binding.tool_call_id)
+        readback = await self.get(
+            binding.execution_id,
+            binding.step_run_id,
+            binding.tool_call_id,
+        )
         if readback != stored:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         return readback
 
     async def get(
         self,
+        execution_id: str,
         step_run_id: str,
         tool_call_id: str,
     ) -> WorkspaceToolCallBinding | None:
@@ -145,10 +159,11 @@ class WorkspaceToolCallBindingStore:
             step_run_id,
             tool_call_id,
         )
+        stream = self._stream(execution_id)
 
         async def read(transaction: StateTransaction) -> WorkspaceToolCallBinding | None:
             facts = await transaction.list_facts(
-                FactQuery(self._stream, subject_digest=subject, latest=True)
+                FactQuery(stream, subject_digest=subject, latest=True)
             )
             if not facts:
                 return None
@@ -156,7 +171,8 @@ class WorkspaceToolCallBindingStore:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             binding = _decode_binding(facts[0])
             if (
-                binding.step_run_id != step_run_id
+                binding.execution_id != execution_id
+                or binding.step_run_id != step_run_id
                 or binding.tool_call_id != tool_call_id
             ):
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -164,15 +180,38 @@ class WorkspaceToolCallBindingStore:
 
         return await self._store.read(read)
 
+    async def release_execution(self, execution_id: str) -> None:
+        if not isinstance(execution_id, str) or not execution_id:
+            raise ValueError("execution_id is required")
+        owner_key = self._owner(execution_id)
+        sequence_key_value = self._sequence(execution_id)
+
+        async def mutate(transaction: StateTransaction) -> None:
+            owner = await transaction.get_record(owner_key)
+            if owner is None:
+                return
+            _validate_owner(owner)
+            await transaction.delete_fact_streams(owner_key)
+            await transaction.delete_sequence(sequence_key_value)
+            if not await transaction.delete_record(
+                owner_key,
+                expected_storage_version=owner.storage_version,
+            ):
+                raise AIError(ErrorCode.STORAGE_CONFLICT)
+
+        await self._store.mutate(mutate)
+
 
 async def _ensure_owner(
     transaction: StateTransaction,
     store: WorkspaceToolCallBindingStore,
+    execution_id: str,
 ) -> StoredRecord:
-    owner = await transaction.get_record(store._owner)
+    owner_key = store._owner(execution_id)
+    owner = await transaction.get_record(owner_key)
     if owner is None:
         owner = StoredRecord(
-            store._owner,
+            owner_key,
             partition_digest(
                 store._namespace,
                 store._tenant_id,
@@ -182,7 +221,7 @@ async def _ensure_owner(
             None,
             None,
             _BINDING_KIND,
-            sortable_id("v1"),
+            sortable_id(execution_id),
             "active",
             0,
             None,
@@ -192,9 +231,13 @@ async def _ensure_owner(
         )
         await transaction.insert_record(owner)
         return owner
+    _validate_owner(owner)
+    return owner
+
+
+def _validate_owner(owner: StoredRecord) -> None:
     if owner.kind != _BINDING_KIND or owner.data != {"version": _BINDING_VERSION}:
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-    return owner
 
 
 def _encode_binding(binding: WorkspaceToolCallBinding) -> dict[str, JsonValue]:
