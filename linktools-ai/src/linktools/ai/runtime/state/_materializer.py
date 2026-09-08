@@ -38,6 +38,7 @@ from ._contracts import (
 from ._filesystem import FilesystemStateStorageGroup, FilesystemStateStore
 from ._maintenance import RuntimeStorageMaintenance
 from ._memory import MemoryStateStorageGroup, MemoryStateStore
+from ._memory_repository import MemoryPathRepository
 from ._plan import (
     RuntimeDomain,
     RuntimeRetentionMode,
@@ -296,6 +297,11 @@ async def materialize_runtime_state(
             for domain in RuntimeDomain
             if domain is not RuntimeDomain.TASK
         }
+        bundles[RuntimeDomain.MEMORY]["records"] = MemoryPathRepository(
+            stores[RuntimeDomain.MEMORY],
+            namespace=namespace,
+            tenant_id=tenant_id,
+        )
         bundles[RuntimeDomain.RECOVERY]["approvals"] = ApprovalAdmissionRepositoryImpl(
             stores[RuntimeDomain.RECOVERY],
             namespace=namespace,
