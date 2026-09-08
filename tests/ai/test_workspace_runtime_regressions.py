@@ -123,6 +123,57 @@ async def test_memory_missing_delete_commits_a_not_found_receipt() -> None:
 
 
 @pytest.mark.asyncio
+async def test_memory_sequence_gap_after_stale_missing_delete_stays_writable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    state = RuntimeState.in_memory()
+    await state.initialize(namespace="memory-sequence-gap", tenant_id="tenant")
+    try:
+        store = RuntimeMemoryStore(
+            state.memory,
+            object_store=state.object_store(RuntimeDomain.MEMORY),
+            namespace="memory-sequence-gap",
+            tenant_id="tenant",
+            execution_id="execution",
+            memory_scope="workspace",
+        )
+        created = await store.write(
+            "notes",
+            "created concurrently",
+            expected_version=None,
+        )
+        original_record = store._record
+
+        async def missing_record(file: str) -> None:
+            del file
+            return None
+
+        monkeypatch.setattr(store, "_record", missing_record)
+        first_delete = await store.delete("notes", expected_version=None)
+        second_delete = await store.delete("notes", expected_version=None)
+        monkeypatch.setattr(store, "_record", original_record)
+
+        assert first_delete.status == "not_found"
+        assert second_delete.status == "not_found"
+        current = await store.read("notes", max_chars=100)
+        assert current is not None
+        assert current.version == created.version
+        assert current.content == "created concurrently\n"
+
+        updated = await store.write(
+            "notes",
+            "updated after sequence gaps",
+            expected_version=current.version,
+            append=False,
+        )
+        assert updated.status == "updated"
+        deleted = await store.delete("notes", expected_version=updated.version)
+        assert deleted.status == "deleted"
+    finally:
+        await state.close()
+
+
+@pytest.mark.asyncio
 async def test_workspace_store_loads_kind_scoped_declarations(tmp_path) -> None:
     assets_root = tmp_path / ".linktools"
     agent_path = assets_root / "agents" / "default"
