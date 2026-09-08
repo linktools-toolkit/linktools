@@ -113,7 +113,7 @@ async def test_runtime_step_persistence_uses_last_observed_step_and_sink_once() 
         deferred_pause_sink=captured.append,
     )
     node_result = object()
-    ctx = SimpleNamespace(run_step=7, conversation_id=None)
+    ctx = SimpleNamespace(run_step=7, conversation_id=None, messages=[])
     assert await persistence.after_node_run(
         ctx, node=object(), result=node_result  # type: ignore[arg-type]
     ) is node_result
@@ -123,7 +123,10 @@ async def test_runtime_step_persistence_uses_last_observed_step_and_sink_once() 
     assert await persistence.after_run(ctx, result=result) is result  # type: ignore[arg-type]
 
     assert captured == [7]
-    assert store.snapshots == []
+    assert len(store.snapshots) == 1
+    snapshot = store.snapshots[0]
+    assert getattr(snapshot, "state") == "interrupted"
+    assert getattr(snapshot, "step_index") == 7
     assert bridge.calls == []
 
 
