@@ -54,6 +54,7 @@ from ..workspace import (
 )
 from ._compaction import ExternalModelRequestObserver, RuntimeCompaction
 from ._journal import ModelRequestJournal
+from ._metric_id import _tool_observation_id
 from ._tool import ToolOperationDecision
 from .state import ToolOperationRecord
 
