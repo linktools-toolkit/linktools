@@ -152,10 +152,20 @@ async def test_bubblewrap_guardian_loss_is_observable(tmp_path: Path) -> None:
 
     workspace_root = tmp_path / "workspace"
     workspace_root.mkdir()
+    marker = workspace_root / "guardian-loss-marker.txt"
+    code = (
+        "import pathlib,time; time.sleep(2); "
+        "pathlib.Path('guardian-loss-marker.txt').write_text('alive', encoding='utf-8')"
+    )
     session = await BubblewrapSandbox(
         runtime_root=Path(runtime_root_value),
         bwrap_executable=Path(executable_value),
     ).open(root=workspace_root)
+    started = await session.start_command(
+        f"/usr/bin/python3 -c {shlex.quote(code)}"
+    )
+    assert re.search(r"command_id: [A-Za-z0-9._-]+", started)
+
     process = session._process
     process.kill()
     await process.wait()
@@ -166,3 +176,6 @@ async def test_bubblewrap_guardian_loss_is_observable(tmp_path: Path) -> None:
         assert raised.value.code is ErrorCode.SANDBOX_SESSION_LOST
     finally:
         await session.close()
+
+    await asyncio.sleep(2.2)
+    assert not marker.exists()
