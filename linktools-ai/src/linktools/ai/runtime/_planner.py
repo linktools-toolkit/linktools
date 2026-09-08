@@ -45,7 +45,7 @@ from ..task import (
     TaskNodeRunResult,
     TaskResultRecord,
 )
-from ._input import user_prompt_transport
+from ._input import decode_user_content_payload
 from ._object import RuntimeObjectKeyFactory, put_runtime_object, read_runtime_object
 from .service_api import (
     CancelExecutionRequest,
@@ -65,7 +65,6 @@ _AGENT_BODY_FIELDS = frozenset(
     {
         "binding",
         "user_prompt",
-        "user_prompt_codec",
         "mode",
         "planning",
         "thinking",
@@ -141,19 +140,32 @@ class _AgentTaskNodeHandler:
     def normalize(self, input: Mapping[str, JsonValue]) -> Mapping[str, JsonValue]:
         if set(input) != _AGENT_BODY_FIELDS:
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
-        base_user_prompt = input.get("user_prompt")
-        user_prompt_codec = input.get("user_prompt_codec")
+        raw_user_prompt = input.get("user_prompt")
         mode = input.get("mode")
         planning = input.get("planning")
         thinking = input.get("thinking")
         if (
-            not isinstance(base_user_prompt, str)
-            or not isinstance(user_prompt_codec, str)
+            not isinstance(raw_user_prompt, Mapping)
             or not isinstance(planning, bool)
         ):
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
         try:
-            transport = user_prompt_transport(base_user_prompt, user_prompt_codec)
+            kind = raw_user_prompt.get("kind")
+            if kind == "text":
+                if set(raw_user_prompt) != {"kind", "text"}:
+                    raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+                base_user_prompt: str | tuple[object, ...] = cast(
+                    str, raw_user_prompt["text"]
+                )
+            elif kind == "pydantic-user-content-v1":
+                if set(raw_user_prompt) != {"kind", "value"}:
+                    raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+                value = raw_user_prompt.get("value")
+                if not isinstance(value, Mapping):
+                    raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+                base_user_prompt = decode_user_content_payload(value)
+            else:
+                raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
             resolved_mode = normalize_execution_mode(mode)
             resolved_thinking = normalize_thinking(thinking)
             snapshot = AgentBindingSnapshot.from_payload(input.get("binding"))
@@ -165,11 +177,11 @@ class _AgentTaskNodeHandler:
         if binding.snapshot != snapshot or binding.digest != snapshot.binding_digest:
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
         validate_agent_id(binding.definition.spec.id)
-        validate_user_prompt(str(transport))
+        if isinstance(base_user_prompt, str):
+            validate_user_prompt(base_user_prompt)
         return {
             "binding": binding.snapshot.to_payload(),
-            "user_prompt": str(transport),
-            "user_prompt_codec": transport.codec,
+            "user_prompt": raw_user_prompt,
             "mode": "run",
             "planning": planning,
             "thinking": resolved_thinking,
@@ -381,23 +393,34 @@ class _AgentTaskNodeHandler:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         snapshot = AgentBindingSnapshot.from_payload(normalized["binding"])
         binding = self._catalog.register_binding(self._compiler.restore(snapshot))
-        base_user_prompt = user_prompt_transport(
-            cast(str, normalized["user_prompt"]),
-            cast(str, normalized["user_prompt_codec"]),
-        )
+        raw_user_prompt = cast(Mapping[str, JsonValue], normalized["user_prompt"])
+        if raw_user_prompt.get("kind") == "text":
+            base_user_prompt: str | tuple[object, ...] = cast(
+                str, raw_user_prompt["text"]
+            )
+        else:
+            value = raw_user_prompt.get("value")
+            if not isinstance(value, Mapping):
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            base_user_prompt = decode_user_content_payload(value)
         dependency_payload = {
             dependency_id: dependencies[dependency_id].output
             for dependency_id in sorted(node.dependencies)
         }
         if dependency_payload:
-            effective_user_prompt = (
-                base_user_prompt
-                + "\n\nUpstream task results (JSON, keyed by task id):\n"
+            dependency_text = (
+                "\n\nUpstream task results (JSON, keyed by task id):\n"
                 + _canonical_json(dependency_payload)
+            )
+            effective_user_prompt = (
+                base_user_prompt + dependency_text
+                if isinstance(base_user_prompt, str)
+                else (*base_user_prompt, dependency_text)
             )
         else:
             effective_user_prompt = base_user_prompt
-        validate_user_prompt(effective_user_prompt)
+        if isinstance(effective_user_prompt, str):
+            validate_user_prompt(effective_user_prompt)
         idempotency_key = canonical_sha256(
             {
                 "version": 1,
@@ -416,8 +439,7 @@ class _AgentTaskNodeHandler:
             }
         )
         return binding.digest, ExecutionRequest(
-            user_prompt=str(effective_user_prompt),
-            user_prompt_codec=effective_user_prompt.codec,
+            user_prompt=effective_user_prompt,
             principal=principal,
             idempotency_key=idempotency_key,
             memory_scope=None,

@@ -11,7 +11,6 @@ from ...core import (
     ApprovalStatus,
     OperationKind,
     OperationLedgerInput,
-    OperationLedgerRecord,
     OperationStatus,
     ResourceKind,
     operation_replay_matches,

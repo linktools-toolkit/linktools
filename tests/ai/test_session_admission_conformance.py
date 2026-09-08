@@ -357,7 +357,6 @@ async def test_rejected_admission_terminalizes_pending_start() -> None:
                 "session",
                 ExecutionRequest(
                     user_prompt="hello",
-                    user_prompt_codec="text",
                     principal=Principal("owner", "tenant"),
                     idempotency_key="rejected-start",
                     memory_scope=None,

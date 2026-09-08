@@ -3070,7 +3070,6 @@ def _recovery_completion_predecessor(
             state=target.state,
             handoff_phase=target.handoff_phase,
             terminal_handoff=target.terminal_handoff,
-            handoff_contract_digest=target.handoff_contract_digest,
             pending_operation_id=target.pending_operation_id,
             revision=target.revision,
             updated_at=target.updated_at,

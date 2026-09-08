@@ -1,23 +1,18 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-from types import SimpleNamespace
+from inspect import Parameter, signature
 
 import pytest
 from pydantic_ai.messages import BinaryContent
 
 from linktools.ai.agent import AgentBindingSnapshot
 from linktools.ai.core import ExecutionLineageKind, Principal
-from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.runtime import ExecutionRequest
 from linktools.ai.runtime._execution import _request_digest
-from linktools.ai.runtime._input import (
-    UserPromptTransport,
-    _restore_user_prompt,
-    prepare_user_prompt,
-    user_prompt_transport,
-)
-from linktools.ai.runtime._local import _recovery_prompt_payload, _recovery_prompt_text
+from linktools.ai.runtime._input import input_intent
+from linktools.ai.runtime.state import StoredUserInput
+from linktools.ai.runtime.state._contracts import RecoveryExecutionInput
 from linktools.ai.spec import AgentSpec
 from linktools.ai.storage import StoredPayload
 
@@ -35,23 +30,9 @@ def _binding() -> AgentBindingSnapshot:
     )
 
 
-def _rich_prompt() -> UserPromptTransport:
-    return prepare_user_prompt(
-        (
-            "Inspect this attachment",
-            BinaryContent(
-                b"payload\n",
-                media_type="text/plain",
-                identifier="input.log",
-            ),
-        )
-    )
-
-
-def _request(prompt: str, *, codec: str) -> ExecutionRequest:
+def _request(prompt: str) -> ExecutionRequest:
     return ExecutionRequest(
         user_prompt=prompt,
-        user_prompt_codec=codec,
         principal=Principal("user", "tenant", "service"),
         idempotency_key="same-key",
         memory_scope=None,
@@ -74,61 +55,48 @@ def _execution_request_digest(request: ExecutionRequest) -> str:
     )
 
 
-def test_recovery_prompt_payload_preserves_rich_codec() -> None:
-    prompt = _rich_prompt()
+def test_input_intent_ignores_file_body_and_keeps_logical_paths() -> None:
+    first = input_intent("Inspect", ("evidence.txt",))
+    second = input_intent("Inspect", ("evidence.txt",))
 
-    payload = _recovery_prompt_payload(prompt)
-
-    assert payload.encoding == "json"
-    assert payload.decode() == {
-        "codec": "pydantic-user-content-v1",
-        "value": str(prompt),
-    }
-    restored_transport = _recovery_prompt_text(SimpleNamespace(user_prompt=payload))
-    assert isinstance(restored_transport, UserPromptTransport)
-    assert restored_transport.codec == prompt.codec
-    restored = _restore_user_prompt(restored_transport)
-    assert isinstance(restored, tuple)
-    assert isinstance(restored[1], BinaryContent)
+    assert first == second
+    assert first.files == ("evidence.txt",)
+    assert len(first.digest) == 64
 
 
-def test_recovery_text_payload_is_always_text() -> None:
-    value = "linktools.ai:user-content:v1:" + "0" * 64 + "\n{}"
-    payload = StoredPayload.inline_text(value)
-
-    transport = _recovery_prompt_text(SimpleNamespace(user_prompt=payload))
-
-    assert isinstance(transport, UserPromptTransport)
-    assert transport.codec == "text"
-    assert _restore_user_prompt(transport) == value
-
-
-def test_recovery_unknown_prompt_codec_is_unsupported() -> None:
-    payload = StoredPayload.inline_json(
-        {"codec": "future-user-content-v2", "value": "payload"}
+def test_stored_user_input_has_one_versioned_owner() -> None:
+    stored = StoredUserInput(
+        1,
+        "text",
+        StoredPayload.inline_text("prompt"),
     )
 
-    with pytest.raises(AIError) as raised:
-        _recovery_prompt_text(SimpleNamespace(user_prompt=payload))
-
-    assert raised.value.code is ErrorCode.STORAGE_VERSION_UNSUPPORTED
+    assert stored.digest == StoredUserInput(1, "text", stored.payload).digest
 
 
-def test_explicit_text_codec_keeps_request_digest_identity() -> None:
-    value = '{"message":{"kind":"request"}}'
-    first = _request(value, codec="text")
-    second_transport = user_prompt_transport(value, "text")
-    second = _request(second_transport, codec=second_transport.codec)
-
-    assert _execution_request_digest(second) == _execution_request_digest(first)
+def test_recovery_input_requires_storage_contract() -> None:
+    parameter = signature(RecoveryExecutionInput).parameters["storage_contract"]
+    assert parameter.default is Parameter.empty
 
 
-def test_prompt_codec_participates_in_request_digest_identity() -> None:
-    rich = _rich_prompt()
-    rich_request = _request(rich, codec=rich.codec)
-    same_bytes_as_text = _request(str(rich), codec="text")
+def test_text_request_digest_is_stable() -> None:
+    first = _request('{"message":{"kind":"request"}}')
+    second = _request('{"message":{"kind":"request"}}')
 
-    assert str(rich_request.user_prompt) == same_bytes_as_text.user_prompt
-    assert _execution_request_digest(rich_request) != _execution_request_digest(
-        same_bytes_as_text
-    )
+    assert _execution_request_digest(first) == _execution_request_digest(second)
+
+
+def test_binary_input_intent_contains_metadata_without_body() -> None:
+    value = (BinaryContent(b"body", media_type="text/plain", identifier="a.txt"),)
+
+    intent = input_intent(value, ())
+
+    assert intent.prompt[0]["kind"] == "binary"
+    assert intent.prompt[0]["size"] == 4
+    assert intent.prompt[0]["media_type"] == "text/plain"
+    assert intent.prompt[0]["identifier"] == "a.txt"
+
+
+def test_stored_user_input_does_not_accept_unknown_codec() -> None:
+    with pytest.raises(ValueError):
+        StoredUserInput(1, "legacy", StoredPayload.inline_text("prompt"))

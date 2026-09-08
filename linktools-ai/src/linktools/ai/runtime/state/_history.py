@@ -1764,6 +1764,8 @@ class TranscriptRepository:
             return value
         if payload.ref is None or self._object_store is None:
             raise ValueError("object transcript payload has no reader")
+        if payload.ref.store_id != self._object_store.store_id:
+            raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
         data = bytearray()
         async for chunk in self._object_store.open(payload.ref.key):
             data.extend(chunk)

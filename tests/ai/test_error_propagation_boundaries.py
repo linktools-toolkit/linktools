@@ -16,7 +16,11 @@ from linktools.ai.runtime._agent_executor import _execution_error
 from linktools.ai.runtime._execution import DefaultExecutionService
 from linktools.ai.runtime._local import LocalExecutionBackend
 from linktools.ai.runtime._subagent import SubagentDispatcher
-from linktools.ai.runtime.state import RecoveryCheckpointState, RecoveryHandoffPhase
+from linktools.ai.runtime.state import (
+    RecoveryCheckpointState,
+    RecoveryHandoffPhase,
+    RuntimeStorageContract,
+)
 from linktools.ai.task._service_impl import DefaultTaskService
 
 
@@ -238,6 +242,7 @@ async def test_recovery_start_unknown_uses_execution_error_domain() -> None:
     backend._execution = SimpleNamespace(executions=Executions())
     backend._catalog = SimpleNamespace(binding=lambda _digest: object())
     backend._conversation_durable = False
+    backend._storage_contract = RuntimeStorageContract(1, (), (), ())
     recovery_input = SimpleNamespace(
         principal_id="principal",
         principal_kind="user",
@@ -254,6 +259,7 @@ async def test_recovery_start_unknown_uses_execution_error_domain() -> None:
         binding="snapshot",
         repository_instructions=None,
         correlation={},
+        storage_contract=RuntimeStorageContract(1, (), (), ()),
     )
     checkpoint = SimpleNamespace(
         execution_id="execution",

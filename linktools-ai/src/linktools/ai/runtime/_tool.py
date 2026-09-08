@@ -21,6 +21,7 @@ from pydantic_ai.messages import (
 )
 from pydantic_ai.tools import RunContext, ToolDefinition
 
+from ..capability import workspace_tool_path_fields_from_metadata
 from ..core import (
     Principal,
     ResourceRef,
@@ -38,7 +39,7 @@ from ..storage import (
 )
 from ._message import decode_model_messages, encode_model_messages
 from ._object import RuntimeObjectKeyFactory, put_runtime_object, read_runtime_object
-from .state._contracts import ToolOperationAdmission
+from .state._contracts import ToolOperationAdmission, WorkspaceToolCallBinding
 from .state._durability import (
     CommitObservation,
     DurableCommitState,
@@ -48,6 +49,7 @@ from .state._plan import RuntimeDomain
 
 if TYPE_CHECKING:
     from ._capabilities import ToolOperationDecision
+    from .state import WorkspaceToolCallBindingStore
 
 _logger = environ.get_logger("ai.runtime.tool")
 
@@ -235,6 +237,7 @@ class RuntimeToolOperationBridge:
         payload_policy: PayloadPolicy,
         recovery_step_run_id: "str | None" = None,
         terminal_commands: "_ToolTerminalCommands | None" = None,
+        workspace_binding_store: "WorkspaceToolCallBindingStore | None" = None,
     ) -> None:
         self._repository = repository
         self._recovery_objects = recovery_objects
@@ -248,6 +251,7 @@ class RuntimeToolOperationBridge:
         self._payload_policy = payload_policy
         self._recovery_step_run_id = recovery_step_run_id
         self._terminal_commands = terminal_commands
+        self._workspace_binding_store = workspace_binding_store
         self._decisions: dict[tuple[str, str], ToolOperationDecision] = {}
         self._lease_seconds = 60
 
@@ -267,7 +271,10 @@ class RuntimeToolOperationBridge:
             if prior.replay_safe is not replay_safe:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             return prior
-        arguments_digest = canonical_sha256(args)
+        try:
+            arguments_digest = canonical_sha256(call.args_as_dict())
+        except (TypeError, ValueError) as error:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
         replay_step_run_id = self._recovery_step_run_id or self._run_id(ctx)
         operation_id = canonical_sha256(
             {
@@ -311,6 +318,46 @@ class RuntimeToolOperationBridge:
             "cached" if decision.has_cached_result or decision.cached_error is not None else "claimed",
         )
         return decision
+
+    async def effective_args(
+        self,
+        ctx: RunContext[None],
+        call: ToolCallPart,
+        tool_def: ToolDefinition,
+        args: dict[str, Any],
+    ) -> dict[str, Any]:
+        fields = workspace_tool_path_fields_from_metadata(tool_def.metadata)
+        if not fields:
+            return args
+        if self._workspace_binding_store is None:
+            raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+        try:
+            raw_args = call.args_as_dict()
+            arguments_digest = canonical_sha256(raw_args)
+        except (TypeError, ValueError) as error:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
+        binding = await self._workspace_binding_store.get(
+            self._execution_id,
+            self._run_id(ctx),
+            call.tool_call_id,
+        )
+        if binding is None:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        if (
+            binding.execution_id != self._execution_id
+            or binding.step_run_id != self._run_id(ctx)
+            or binding.tool_call_id != call.tool_call_id
+            or binding.tool_name != tool_def.name
+            or binding.arguments_digest != arguments_digest
+        ):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        if binding.error_code is not None:
+            try:
+                code = ErrorCode(binding.error_code)
+            except ValueError as error:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
+            raise AIError(code)
+        return await _apply_workspace_binding(args, raw_args, fields, binding)
 
     async def existing_call_ids(
         self, tool_call_ids: Sequence[str]
@@ -835,6 +882,60 @@ class RuntimeToolOperationBridge:
     def _run_id(self, ctx: RunContext[None]) -> str:
         del ctx
         return self._step_run_id
+
+
+def _workspace_pointer(field: str, index: int | None = None) -> str:
+    pointer = "/" + field.replace("~", "~0").replace("/", "~1")
+    return pointer if index is None else f"{pointer}/{index}"
+
+
+async def _apply_workspace_binding(
+    args: dict[str, Any],
+    raw_args: dict[str, Any],
+    fields: Sequence[str],
+    binding: WorkspaceToolCallBinding,
+) -> dict[str, Any]:
+    by_pointer = {path.pointer: path.relative for path in binding.paths}
+    effective = dict(args)
+    expected: set[str] = set()
+    for field in fields:
+        if field not in raw_args:
+            continue
+        raw_value = raw_args[field]
+        if isinstance(raw_value, str):
+            pointers = (_workspace_pointer(field),)
+        elif isinstance(raw_value, Sequence) and not isinstance(
+            raw_value,
+            (str, bytes, bytearray),
+        ):
+            pointers = tuple(
+                _workspace_pointer(field, index)
+                for index in range(len(raw_value))
+            )
+        else:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        if any(pointer not in by_pointer for pointer in pointers):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        expected.update(pointers)
+        replacements = tuple(by_pointer[pointer] for pointer in pointers)
+        value = args.get(field)
+        if isinstance(raw_value, str):
+            if not isinstance(value, str):
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            effective[field] = replacements[0]
+        elif isinstance(value, tuple):
+            if len(value) != len(replacements):
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            effective[field] = replacements
+        elif isinstance(value, list):
+            if len(value) != len(replacements):
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            effective[field] = list(replacements)
+        else:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    if expected != set(by_pointer):
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    return effective
 
 
 def _decision_type(

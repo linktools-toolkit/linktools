@@ -12,6 +12,15 @@ class Sandbox(Protocol):
 
 
 class SandboxSession(Protocol):
+    async def canonicalize_path(self, path: str) -> str: ...
+
+    async def read_bytes(
+        self,
+        path: str,
+        *,
+        max_bytes: "int | None" = None,
+    ) -> bytes: ...
+
     async def read_file(
         self,
         path: str,
