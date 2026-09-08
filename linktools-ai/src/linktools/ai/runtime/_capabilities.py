@@ -1068,13 +1068,11 @@ async def compose_platform_capabilities(
     tool_operations: ToolOperationBridge | None,
     background_tasks: set[asyncio.Task[object]],
     plan_store_resolver: Callable[[RunContext[None]], RuntimePlanStore] | None,
-    operation_identity_run_id: str | None = None,
     deferred_pause_sink: Callable[[int], None] | None = None,
     tool_metrics: _ToolMetricContext | None = None,
     model_journal: ModelRequestJournal | None = None,
     external_model_request_observer: ExternalModelRequestObserver | None = None,
 ) -> tuple[AbstractCapability[None], ...]:
-    del operation_identity_run_id
     _native._validate_compaction_target(context_target_tokens)
     _native._validate_trusted_tool_classes(trusted_tool_classes)
     _native._validate_trusted_mcp_selectors(trusted_mcp_selectors)
