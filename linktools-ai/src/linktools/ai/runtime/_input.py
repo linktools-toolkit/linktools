@@ -153,9 +153,7 @@ class ExecutionInputMaterializer:
         self,
         value: _UserPromptInput,
         canonical_files: Sequence[str],
-        *,
-        tenant_id: str,
-    ) -> tuple[CanonicalUserInput, "StoredUserInput"]:
+    ) -> CanonicalUserInput:
         canonical = validate_user_input(value)
         files = _require_canonical_files(canonical_files)
         direct_binary = _binary_parts(canonical)
@@ -167,7 +165,7 @@ class ExecutionInputMaterializer:
         if len(direct_binary) + len(files) > self._policy.max_binary_input_parts:
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
         if not files:
-            return canonical, await self.store(canonical, tenant_id=tenant_id)
+            return canonical
 
         bodies: dict[str, BinaryContent] = {}
         for path in files:
@@ -191,14 +189,13 @@ class ExecutionInputMaterializer:
         else:
             materialized = (*canonical, *additions)
         validate_user_content(materialized)
-        stored = await self.store(materialized, tenant_id=tenant_id)
         _logger.info(
             "execution input materialized: files=%s distinct_files=%s binary_bytes=%s",
             len(files),
             len(bodies),
             total_bytes,
         )
-        return materialized, stored
+        return materialized
 
     async def store(
         self,
