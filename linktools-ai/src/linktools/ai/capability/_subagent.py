@@ -16,6 +16,7 @@ class SubagentDelegate(Protocol):
         ref: "SubagentRef",
         task: str,
         *,
+        attachments: tuple[str, ...],
         invocation_id: str,
     ) -> "dict[str, JsonValue]": ...
 
@@ -79,6 +80,7 @@ class SubagentCapability:
         subagent_id: str,
         task: str,
         *,
+        attachments: Sequence[str] = (),
         invocation_id: str,
     ) -> "dict[str, JsonValue]":
         if not isinstance(subagent_id, str) or not subagent_id.strip():
@@ -87,13 +89,23 @@ class SubagentCapability:
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
         if not isinstance(invocation_id, str) or not invocation_id.strip():
             raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+        if isinstance(attachments, (str, bytes, bytearray)):
+            raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+        paths = tuple(attachments)
+        if any(not isinstance(path, str) or not path for path in paths):
+            raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
         ref = self._by_id.get(subagent_id)
         if ref is None:
             raise AIError(
                 ErrorCode.CAPABILITY_RESOLUTION_INVALID,
                 safe_details={"subagent_id": subagent_id},
             )
-        result = await self._delegate(ref, task.strip(), invocation_id=invocation_id)
+        result = await self._delegate(
+            ref,
+            task.strip(),
+            attachments=paths,
+            invocation_id=invocation_id,
+        )
         if not isinstance(result, dict):
             raise AIError(ErrorCode.INTERNAL_ERROR)
         return result
