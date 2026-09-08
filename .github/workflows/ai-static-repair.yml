@@ -115,6 +115,11 @@ jobs:
           )
           replace_once(
               'tests/ai/test_spec_capability_refactor.py',
+              'from linktools.ai.runtime._agent_executor import _ToolPresentation\n',
+              'from linktools.ai.runtime._agent_executor import _RuntimePersistenceBoundary, _ToolPresentation\n',
+          )
+          replace_once(
+              'tests/ai/test_spec_capability_refactor.py',
               'from pydantic_ai.toolsets import FunctionToolset, PreparedToolset, RenamedToolset\n',
               'from pydantic_ai.toolsets import FunctionToolset, PreparedToolset, RenamedToolset\nfrom pydantic_ai_harness.step_persistence import StepPersistence\n',
           )
