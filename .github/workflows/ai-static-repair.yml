@@ -40,7 +40,7 @@ jobs:
           end = text.index('    async def _get_receipt(\n', start)
           text = text[:start] + '''    async def list_paths(self, prefix: str = "", *, limit: int) -> list[str]:\n        normalized_prefix = _normalize_prefix(prefix)\n        if not isinstance(limit, int) or isinstance(limit, bool) or limit <= 0:\n            raise ValueError("limit must be positive")\n        page = await self._state.records.list(\n            tenant_id=self._tenant_id,\n            memory_scope_digest=self._memory_scope_digest,\n            prefix=normalized_prefix,\n            cursor=None,\n            limit=limit,\n        )\n        paths = _record_paths(list(page.items))\n        if any(not path.startswith(normalized_prefix) for path in paths):\n            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)\n        return paths\n\n''' + text[end:]
           start = text.index('    async def _list_records(\n')
-          end = text.index('    async def _record(\n', start)
+          end = text.index('    async def _record(self, logical_path: str) -> MemoryRecord | None:\n', start)
           text = text[:start] + text[end:]
           if '_MAX_LIST_SCAN_RECORDS' in text or '_list_records(' in text:
               raise SystemExit('legacy memory listing scan remains')
