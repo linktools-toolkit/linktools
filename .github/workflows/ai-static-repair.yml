@@ -19,14 +19,11 @@ jobs:
       - uses: actions/setup-python@v7
         with:
           python-version: '3.10'
-      - name: Fetch master reference
-        run: git fetch origin master --depth=1
-      - name: Apply exact repairs
+      - name: Apply F5 request identity repair
         shell: bash
         run: |
           python - <<'PY'
           from pathlib import Path
-          import subprocess
 
           def replace_once(path: str, old: str, new: str) -> None:
               file = Path(path)
@@ -36,140 +33,100 @@ jobs:
                   raise SystemExit(f'{path}: expected one match, found {count}: {old!r}')
               file.write_text(text.replace(old, new, 1), encoding='utf-8')
 
+          journal = 'linktools-ai/src/linktools/ai/runtime/_journal.py'
           replace_once(
-              'linktools-ai/src/linktools/ai/capability/_workspace.py',
-              'WORKSPACE_FILESYSTEM_TOOL_NAMES = (\n    "create_directory",',
-              '_BASE_WORKSPACE_FILESYSTEM_TOOL_NAMES = (\n    "create_directory",',
-          )
-          replace_once(
-              'linktools-ai/src/linktools/ai/capability/__init__.py',
-              'from ._workspace import (\n    WORKSPACE_SHELL_TOOL_NAMES,\n',
-              'from ._workspace import (\n    WORKSPACE_FILESYSTEM_READ_TOOL_NAMES,\n    WORKSPACE_FILESYSTEM_TOOL_NAMES,\n    WORKSPACE_SHELL_TOOL_NAMES,\n',
+              journal,
+              '''        current = self._facts.get(step_index)\n        if current is not None and current.duration_ns is None:\n            if current.purpose != purpose:\n                raise ValueError("a step cannot have two active request purposes")\n            return current\n        sequence = self._next_sequence\n''',
+              '''        sequence = self._next_sequence\n''',
           )
           replace_once(
-              'linktools-ai/src/linktools/ai/capability/__init__.py',
-              'from .workspace import (\n    WORKSPACE_FILESYSTEM_READ_TOOL_NAMES,\n    WORKSPACE_FILESYSTEM_TOOL_NAMES,\n)\n\n',
-              '',
-          )
-          Path('linktools-ai/src/linktools/ai/capability/workspace.py').unlink()
-
-          agent_path = 'linktools-ai/src/linktools/ai/runtime/_agent_executor.py'
-          replace_once(
-              agent_path,
-              '    NodeResult,\n    ReinjectSystemPrompt,\n)',
-              '    NodeResult,\n    ReinjectSystemPrompt,\n    WrapperCapability,\n)',
+              journal,
+              '        self._facts[step_index] = fact\n        return fact\n\n    def finish(\n        self,\n        step_index: int,\n',
+              '        self._facts[sequence] = fact\n        return fact\n\n    def finish(\n        self,\n        request_sequence: int,\n',
           )
           replace_once(
-              agent_path,
-              'from pydantic_ai.usage import RunUsage, UsageLimitExceeded, UsageLimits\n',
-              'from pydantic_ai.usage import RunUsage, UsageLimitExceeded, UsageLimits\nfrom pydantic_ai_harness.step_persistence import StepPersistence\n',
+              journal,
+              '''        fact = self._facts.get(step_index)\n        if fact is None:\n            raise RuntimeError("model request fact is missing")\n''',
+              '''        fact = self._facts.get(request_sequence)\n        if fact is None:\n            raise RuntimeError("model request fact is missing")\n''',
           )
           replace_once(
-              agent_path,
-              'from ._input import _RuntimeUserPrompt, _restore_user_prompt\n',
-              'from ._input import CanonicalUserInput\n',
-          )
-          replace_once(
-              agent_path,
-              'from ._plan import RuntimePlanStore\nfrom .state import StepStore\n',
-              'from ._plan import RuntimePlanStore\nfrom ._workspace_binding import WorkspaceToolCallBinder\nfrom .state import StepStore\n',
-          )
-          master_agent = subprocess.check_output(
-              ['git', 'show', 'origin/master:linktools-ai/src/linktools/ai/runtime/_agent_executor.py'],
-              text=True,
-          )
-          start = master_agent.index('class _RuntimePersistenceBoundary')
-          end = master_agent.index('\n\nclass _ToolPresentation', start)
-          boundary = master_agent[start:end]
-          agent_file = Path(agent_path)
-          agent_text = agent_file.read_text(encoding='utf-8')
-          if 'class _RuntimePersistenceBoundary' in agent_text:
-              raise SystemExit('runtime persistence boundary unexpectedly already exists')
-          marker = 'class _ToolPresentation(AbstractCapability[AgentContext[object]]):'
-          if agent_text.count(marker) != 1:
-              raise SystemExit('tool presentation marker is not unique')
-          agent_file.write_text(
-              agent_text.replace(marker, boundary + '\n\n\n' + marker, 1),
-              encoding='utf-8',
-          )
-          replace_once(
-              agent_path,
-              '            metrics=self._metrics,\n            model_journal=model_journal,\n',
-              '            metrics=self._metrics,\n            workspace_binder=self._workspace_binder,\n            workspace_path_fields=workspace_path_fields,\n            model_journal=model_journal,\n',
-          )
-          replace_once(
-              agent_path,
-              '    deferred_pause_sink: Callable[[int], None],\n    metrics: MetricRecorder | None,\n    model_journal: ModelRequestJournal,\n',
-              '    deferred_pause_sink: Callable[[int], None],\n    metrics: MetricRecorder | None,\n    workspace_binder: WorkspaceToolCallBinder | None,\n    workspace_path_fields: Callable[[], Mapping[str, tuple[str, ...]]],\n    model_journal: ModelRequestJournal,\n',
-          )
-          replace_once(
-              agent_path,
-              '    capabilities.extend(cast("tuple[AbstractCapability[AgentContext[object]], ...]", platform))\n',
-              '''    platform = tuple(\n        _RuntimePersistenceBoundary(\n            capability,\n            workspace_binder=workspace_binder,\n            execution_id=scope.context.execution_id,\n            step_run_id=scope.step_run_id,\n            path_fields_provider=workspace_path_fields,\n        )\n        if isinstance(capability, StepPersistence)\n        else capability\n        for capability in platform\n    )\n    capabilities.extend(cast("tuple[AbstractCapability[AgentContext[object]], ...]", platform))\n''',
+              journal,
+              '''        self._facts[step_index] = return_value\n        return return_value\n\n    def current(self, step_index: int) -> ModelRequestFact:\n        try:\n            return self._facts[step_index]\n        except KeyError as error:\n            raise RuntimeError("model request fact is missing") from error\n\n    def consume(self, step_index: int) -> ModelRequestFact:\n        try:\n            return self._facts.pop(step_index)\n''',
+              '''        self._facts[request_sequence] = return_value\n        return return_value\n\n    def current(self, request_sequence: int) -> ModelRequestFact:\n        try:\n            return self._facts[request_sequence]\n        except KeyError as error:\n            raise RuntimeError("model request fact is missing") from error\n\n    def consume(self, request_sequence: int) -> ModelRequestFact:\n        try:\n            return self._facts.pop(request_sequence)\n''',
           )
 
+          compaction = 'linktools-ai/src/linktools/ai/runtime/_compaction.py'
           replace_once(
-              'linktools-ai/src/linktools/ai/runtime/_execution.py',
-              '    ResultRecord,\n    RuntimeDomain,\n    SessionRepository,\n',
-              '    ResultRecord,\n    RuntimeDomain,\n    RuntimeStorageContract,\n    SessionRepository,\n',
+              compaction,
+              '''        step_index = self._ctx.run_step\n        fact = self._journal.begin(step_index, purpose="compaction")\n        await self._observer(self._ctx, fact, "started", None, None)\n''',
+              '''        fact = self._journal.begin(self._ctx.run_step, purpose="compaction")\n        request_sequence = fact.request_sequence\n        await self._observer(self._ctx, fact, "started", None, None)\n''',
+          )
+          for status in ('CANCELLED', 'FAILED', 'SUCCEEDED'):
+              replace_once(
+                  compaction,
+                  f'            fact = self._journal.finish(step_index, status="{status}")\n            self._journal.consume(step_index)\n' if status != 'SUCCEEDED' else f'        fact = self._journal.finish(step_index, status="{status}")\n        self._journal.consume(step_index)\n',
+                  f'            fact = self._journal.finish(request_sequence, status="{status}")\n            self._journal.consume(request_sequence)\n' if status != 'SUCCEEDED' else f'        fact = self._journal.finish(request_sequence, status="{status}")\n        self._journal.consume(request_sequence)\n',
+              )
+
+          metrics = 'linktools-ai/src/linktools/ai/runtime/_metric_capability.py'
+          replace_once(
+              metrics,
+              '''        fact = self._journal.begin(step_index, purpose="agent")\n        try:\n''',
+              '''        fact = self._journal.begin(step_index, purpose="agent")\n        request_sequence = fact.request_sequence\n        try:\n''',
           )
           replace_once(
-              'linktools-ai/src/linktools/ai/runtime/_local.py',
-              '    ResultRecord,\n    RuntimeDomain,\n    RuntimeStateCommands,\n',
-              '    ResultRecord,\n    RuntimeDomain,\n    RuntimeStorageContract,\n    RuntimeStateCommands,\n',
+              metrics,
+              '''            fact = self._journal.finish(step_index, status="CANCELLED")\n            self._record_model(\n''',
+              '''            fact = self._journal.finish(request_sequence, status="CANCELLED")\n            self._journal.consume(request_sequence)\n            self._record_model(\n''',
           )
           replace_once(
-              'linktools-ai/src/linktools/ai/runtime/_local.py',
-              '    ToolRepositoryImpl,\n    ToolOperationRecord,\n)\n',
-              '    ToolRepositoryImpl,\n    ToolOperationRecord,\n    WorkspaceToolCallBindingStore,\n)\n',
+              metrics,
+              '''            fact = self._journal.finish(step_index, status="CANCELLED")\n            self._record_model(\n''',
+              '''            fact = self._journal.finish(request_sequence, status="CANCELLED")\n            self._journal.consume(request_sequence)\n            self._record_model(\n''',
           )
           replace_once(
-              'linktools-ai/src/linktools/ai/runtime/_tool.py',
-              '    ToolOperationAdmission,\n    ToolOperationRecord,\n    run_durable_commit,\n',
-              '    ToolOperationAdmission,\n    ToolOperationRecord,\n    WorkspaceToolCallBinding,\n    WorkspaceToolCallBindingStore,\n    run_durable_commit,\n',
+              metrics,
+              '''            fact = self._journal.finish(step_index, status="FAILED")\n            self._record_model(\n''',
+              '''            fact = self._journal.finish(request_sequence, status="FAILED")\n            self._journal.consume(request_sequence)\n            self._record_model(\n''',
+          )
+          replace_once(
+              metrics,
+              '''        fact = self._journal.finish(step_index, status="SUCCEEDED")\n        self._record_model(\n''',
+              '''        fact = self._journal.finish(request_sequence, status="SUCCEEDED")\n        self._journal.consume(request_sequence)\n        self._record_model(\n''',
           )
 
+          capabilities = 'linktools-ai/src/linktools/ai/runtime/_capabilities.py'
           replace_once(
-              'linktools-ai/src/linktools/ai/workspace/__init__.py',
-              '    SandboxResource,\n    SandboxSession,\n)\n',
-              '    SandboxResource,\n    SandboxSession,\n    normalize_workspace_path as normalize_workspace_input_path,\n)\n',
+              capabilities,
+              '''    _last_observed_step_index: int | None = field(\n        default=None,\n        init=False,\n        repr=False,\n        compare=False,\n    )\n''',
+              '''    _last_observed_step_index: int | None = field(\n        default=None,\n        init=False,\n        repr=False,\n        compare=False,\n    )\n    _model_request_tokens: dict[int, int] = field(\n        default_factory=dict,\n        init=False,\n        repr=False,\n        compare=False,\n    )\n''',
           )
           replace_once(
-              'linktools-ai/src/linktools/ai/workspace/__init__.py',
-              '    "normalize_workspace_path",\n    "trusted_workspace_principal",\n',
-              '    "normalize_workspace_input_path",\n    "normalize_workspace_path",\n    "trusted_workspace_principal",\n',
+              capabilities,
+              '''        fact = (\n            None\n            if self.model_journal is None\n            else self.model_journal.begin(ctx.run_step, purpose="agent")\n        )\n''',
+              '''        fact = None\n        request_sequence: int | None = None\n        if self.model_journal is not None:\n            if ctx.run_step in self._model_request_tokens:\n                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)\n            fact = self.model_journal.begin(ctx.run_step, purpose="agent")\n            request_sequence = fact.request_sequence\n            self._model_request_tokens[ctx.run_step] = request_sequence\n''',
           )
           replace_once(
-              'linktools-ai/src/linktools/ai/runtime/_capabilities_native.py',
-              '    WorkspacePolicy,\n    normalize_workspace_path,\n)',
-              '    WorkspacePolicy,\n    normalize_workspace_input_path,\n)',
+              capabilities,
+              '''            if self.model_journal is None:\n                raise\n            self.model_journal.finish(ctx.run_step, status="CANCELLED")\n            fact = self.model_journal.consume(ctx.run_step)\n            await self._harness_cancelled_model_request(\n''',
+              '''            if self.model_journal is None or request_sequence is None:\n                raise\n            self.model_journal.finish(request_sequence, status="CANCELLED")\n            fact = self.model_journal.consume(request_sequence)\n            if self._model_request_tokens.pop(ctx.run_step, None) != request_sequence:\n                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error\n            await self._harness_cancelled_model_request(\n''',
           )
           replace_once(
-              'linktools-ai/src/linktools/ai/runtime/_capabilities_native.py',
-              '    normalized = normalize_workspace_path(target)\n',
-              '    normalized = normalize_workspace_input_path(target)\n',
+              capabilities,
+              '''        except RunCancelled:\n            if self.model_journal is not None:\n                self.model_journal.finish(ctx.run_step, status="CANCELLED")\n            raise\n        except BaseException:\n            if self.model_journal is not None:\n                self.model_journal.finish(ctx.run_step, status="FAILED")\n            raise\n        if self.model_journal is not None:\n            self.model_journal.finish(ctx.run_step, status="SUCCEEDED")\n''',
+              '''        except RunCancelled:\n            if self.model_journal is not None and request_sequence is not None:\n                self.model_journal.finish(request_sequence, status="CANCELLED")\n            raise\n        except BaseException:\n            if self.model_journal is not None and request_sequence is not None:\n                self.model_journal.finish(request_sequence, status="FAILED")\n            raise\n        if self.model_journal is not None and request_sequence is not None:\n            self.model_journal.finish(request_sequence, status="SUCCEEDED")\n''',
+          )
+          replace_once(
+              capabilities,
+              '''        if self.model_journal is None:\n            return None\n        try:\n            fact = self.model_journal.current(ctx.run_step)\n        except RuntimeError:\n            return None\n        if fact.duration_ns is None:\n            self.model_journal.finish(ctx.run_step, status=status)\n        return self.model_journal.consume(ctx.run_step)\n''',
+              '''        if self.model_journal is None:\n            return None\n        request_sequence = self._model_request_tokens.pop(ctx.run_step, None)\n        if request_sequence is None:\n            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)\n        try:\n            fact = self.model_journal.current(request_sequence)\n        except RuntimeError as error:\n            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error\n        if fact.duration_ns is None:\n            self.model_journal.finish(request_sequence, status=status)\n        return self.model_journal.consume(request_sequence)\n''',
           )
 
+          test = 'tests/ai/test_compaction_harness_observability.py'
           replace_once(
-              'linktools-ai/src/linktools/ai/workspace/_local_sandbox.py',
-              '        return frozenset(values)\n\n    async def read_file(\n',
-              '''        return frozenset(values)\n\n    async def canonicalize_path(self, path: str) -> str:\n        normalized = _normalize_path(path)\n\n        def operation() -> str:\n            target = self._resolve_path(normalized, allow_missing=True)\n            return _relative(self._root, target)\n\n        return await self._run_sync(operation)\n\n    async def read_bytes(\n        self,\n        path: str,\n        *,\n        max_bytes: int | None = None,\n    ) -> bytes:\n        normalized = _normalize_path(path)\n        if max_bytes is not None and (\n            not isinstance(max_bytes, int)\n            or isinstance(max_bytes, bool)\n            or max_bytes < 0\n        ):\n            raise AIError(ErrorCode.REQUEST_FIELD_INVALID)\n\n        def operation() -> bytes:\n            target = self._file_path(normalized, write=False)\n            try:\n                info = target.stat()\n                if not stat.S_ISREG(info.st_mode):\n                    raise AIError(ErrorCode.REQUEST_FIELD_INVALID)\n                if max_bytes is not None and info.st_size > max_bytes:\n                    raise AIError(ErrorCode.REQUEST_FIELD_INVALID)\n                return target.read_bytes()\n            except AIError:\n                raise\n            except FileNotFoundError as error:\n                raise AIError(ErrorCode.STORAGE_NOT_FOUND) from error\n            except OSError as error:\n                raise AIError(ErrorCode.STORAGE_UNAVAILABLE) from error\n\n        return await self._run_sync(operation)\n\n    async def read_file(\n''',
-          )
-
-          replace_once(
-              'tests/ai/test_runtime_approval_recovery.py',
-              'from linktools.ai.spec import AgentSpec\n',
-              'from linktools.ai.spec import AgentSpec\nfrom linktools.ai.storage import StoredPayload\n',
-          )
-          replace_once(
-              'tests/ai/test_spec_capability_refactor.py',
-              'from linktools.ai.runtime._agent_executor import _ToolPresentation\n',
-              'from linktools.ai.runtime._agent_executor import _RuntimePersistenceBoundary, _ToolPresentation\n',
-          )
-          replace_once(
-              'tests/ai/test_spec_capability_refactor.py',
-              'from pydantic_ai.toolsets import FunctionToolset, PreparedToolset, RenamedToolset\n',
-              'from pydantic_ai.toolsets import FunctionToolset, PreparedToolset, RenamedToolset\nfrom pydantic_ai_harness.step_persistence import StepPersistence\n',
+              test,
+              '''    with pytest.raises(RuntimeError, match="missing"):\n        journal.current(ctx.run_step)\n''',
+              '''    with pytest.raises(RuntimeError, match="missing"):\n        journal.current(observed[-1][1].request_sequence)\n\n\ndef test_journal_keeps_agent_and_compaction_requests_distinct_on_same_step() -> None:\n    journal = ModelRequestJournal(\n        source_namespace="workspace",\n        tenant_id="tenant",\n        execution_id="execution",\n        step_run_id="run",\n    )\n    agent = journal.begin(3, purpose="agent")\n    compaction = journal.begin(3, purpose="compaction")\n\n    assert agent.request_sequence != compaction.request_sequence\n    assert agent.observation_id != compaction.observation_id\n    journal.finish(compaction.request_sequence, status="SUCCEEDED")\n    assert journal.consume(compaction.request_sequence).purpose == "compaction"\n    assert journal.current(agent.request_sequence) == agent\n    journal.finish(agent.request_sequence, status="SUCCEEDED")\n    assert journal.consume(agent.request_sequence).purpose == "agent"\n''',
           )
           PY
       - name: Install tooling
@@ -178,22 +135,24 @@ jobs:
           python -m pip install --quiet --upgrade pip
           python -m pip install --quiet -U -r requirements.txt
           python manage.py install --editable --quiet
-      - name: Validate linktools-ai
-        run: python manage.py check linktools-ai
-      - name: Commit repair
+      - name: Validate F5
+        shell: bash
+        run: |
+          python -m pytest -q -p no:cacheprovider \
+            tests/ai/test_compaction_harness_observability.py \
+            tests/ai/test_model_metric_trace_link.py \
+            tests/ai/test_model_usage_trace.py
+          python manage.py check linktools-ai
+      - name: Commit F5
         shell: bash
         run: |
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git add -A linktools-ai/src/linktools/ai/capability \
-                     linktools-ai/src/linktools/ai/runtime/_agent_executor.py \
-                     linktools-ai/src/linktools/ai/runtime/_capabilities_native.py \
-                     linktools-ai/src/linktools/ai/runtime/_execution.py \
-                     linktools-ai/src/linktools/ai/runtime/_local.py \
-                     linktools-ai/src/linktools/ai/runtime/_tool.py \
-                     linktools-ai/src/linktools/ai/workspace \
-                     tests/ai/test_runtime_approval_recovery.py \
-                     tests/ai/test_spec_capability_refactor.py
+          git add linktools-ai/src/linktools/ai/runtime/_journal.py \
+                  linktools-ai/src/linktools/ai/runtime/_compaction.py \
+                  linktools-ai/src/linktools/ai/runtime/_metric_capability.py \
+                  linktools-ai/src/linktools/ai/runtime/_capabilities.py \
+                  tests/ai/test_compaction_harness_observability.py
           git diff --cached --check
-          git commit -m 'fix(ai): restore merged runtime contracts'
+          git commit -m 'fix(ai): isolate model request journal identities'
           git push origin HEAD:refactor/ai-harness-capabilities
