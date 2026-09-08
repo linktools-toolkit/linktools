@@ -32,6 +32,7 @@ from .state import (
 _TEXT_CODEC = "text"
 _USER_CONTENT_CODEC = "pydantic-user-content-v1"
 _PORTABLE_INPUT_CODEC = "linktools-input-v2"
+_MANAGED_DRAFT_CODEC = "linktools-managed-draft"
 _WIRE_TIMESTAMP = datetime(1970, 1, 1, tzinfo=timezone.utc)
 
 _UserPromptInput: TypeAlias = str | Sequence[UserContent]
@@ -41,25 +42,43 @@ TaskPrompt: TypeAlias = JsonValue
 
 
 class UserPromptTransport(str):
-    """Internal text value carrying its explicit durable codec."""
+    """Internal prompt value carrying a durable codec or an in-memory draft."""
 
-    __slots__ = ("codec",)
+    __slots__ = ("codec", "draft")
 
-    def __new__(cls, value: str, codec: str) -> "UserPromptTransport":
+    def __new__(
+        cls,
+        value: str,
+        codec: str,
+        draft: "_UserPromptInput | None" = None,
+    ) -> "UserPromptTransport":
         if not isinstance(value, str) or not isinstance(codec, str) or not codec:
             raise TypeError("user prompt transport is invalid")
+        if draft is not None and codec != _MANAGED_DRAFT_CODEC:
+            raise TypeError("only managed draft transport can retain raw prompt content")
         instance = str.__new__(cls, value)
         instance.codec = codec
+        instance.draft = draft
         return instance
 
     def __add__(self, other: object) -> "UserPromptTransport":
         if not isinstance(other, str):
             return NotImplemented
-        return UserPromptTransport(str.__add__(self, other), self.codec)
+        if self.draft is None:
+            return UserPromptTransport(str.__add__(self, other), self.codec)
+        if isinstance(self.draft, str):
+            draft: _UserPromptInput = self.draft + other
+        else:
+            draft = (*tuple(self.draft), other)
+        return UserPromptTransport(
+            str.__add__(self, other),
+            self.codec,
+            draft,
+        )
 
 
 def prepare_user_prompt(value: _UserPromptInput) -> UserPromptTransport:
-    """Convert legacy Pydantic-native user content into durable text transport."""
+    """Prepare legacy durable transport or retain a binary-bearing in-memory draft."""
     if isinstance(value, str):
         validate_user_prompt(value)
         return UserPromptTransport(value, _TEXT_CODEC)
@@ -72,10 +91,32 @@ def prepare_user_prompt(value: _UserPromptInput) -> UserPromptTransport:
                 "reason": "uploaded_file_not_durable",
             },
         )
+    if any(isinstance(item, BinaryContent) for item in content):
+        _draft_prompt(content)
+        return UserPromptTransport(
+            "managed-input",
+            _MANAGED_DRAFT_CODEC,
+            content,
+        )
     payload = _encode_user_content(content)
     wire = canonical_json_bytes(payload).decode("utf-8")
     validate_user_prompt(wire)
     return UserPromptTransport(wire, _USER_CONTENT_CODEC)
+
+
+def managed_user_prompt_draft(
+    value: UserPromptTransport,
+) -> "_UserPromptInput | None":
+    """Return binary-bearing raw content before any durable request is constructed."""
+    if not isinstance(value, UserPromptTransport):
+        raise TypeError("value must be UserPromptTransport")
+    if value.codec == _MANAGED_DRAFT_CODEC:
+        if value.draft is None:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        return value.draft
+    if value.draft is not None:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    return None
 
 
 def input_intent_digest(
@@ -158,7 +199,14 @@ def user_prompt_transport(value: str, codec: str = _TEXT_CODEC) -> UserPromptTra
 
 
 def _restore_user_prompt(value: str) -> str | tuple[UserContent, ...]:
-    """Restore legacy durable text transport into Pydantic AI prompt content."""
+    """Restore legacy durable text transport or an in-memory managed draft."""
+    if isinstance(value, UserPromptTransport) and value.codec == _MANAGED_DRAFT_CODEC:
+        draft = managed_user_prompt_draft(value)
+        if isinstance(draft, str):
+            return draft
+        if draft is None:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        return tuple(draft)
     validate_user_prompt(value)
     codec = value.codec if isinstance(value, UserPromptTransport) else _TEXT_CODEC
     if codec == _TEXT_CODEC:
