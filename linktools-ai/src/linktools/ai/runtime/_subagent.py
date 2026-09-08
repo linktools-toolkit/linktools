@@ -20,7 +20,7 @@ from ..core import (
 )
 from ..errors import AIError, ErrorCode
 from ..spec import SubagentRef
-from ._attachment_admission import _ManagedAdmission, _admission_scope
+from ._attachment_context import ManagedAdmission, admission_scope
 from ._execution import DefaultExecutionService
 from ._input import prepared_user_prompt_transport
 from ._subagent_attachment import SubagentAttachmentPreparer
@@ -434,8 +434,8 @@ class SubagentDispatcher:
             planning=planning,
             thinking=thinking,
         )
-        with _admission_scope(
-            _ManagedAdmission(
+        with admission_scope(
+            ManagedAdmission(
                 "execution.subagent",
                 idempotency_key,
                 prepared,
