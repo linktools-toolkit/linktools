@@ -11,6 +11,7 @@ dev-dependencies:
   - linktools
   - pytest
   - pytest-asyncio
+  - httpx>=0.28.0,<1.0.0
   - sqlalchemy[asyncio]==2.0.51
   - aiosqlite==0.22.1
   - asyncpg
