@@ -43,6 +43,7 @@ def _tool_record() -> ToolOperationRecord:
     return ToolOperationRecord(
         tool_operation_id="operation",
         tenant_id="tenant",
+        execution_id="execution",
         step_run_id="run",
         tool_call_id="call",
         idempotency_key_digest="a" * 64,
