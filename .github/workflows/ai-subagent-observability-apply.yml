@@ -1,0 +1,837 @@
+name: Apply subagent observability implementation
+
+on:
+  push:
+    branches:
+      - feat/ai-subagent-observability
+    paths:
+      - .github/workflows/ai-subagent-observability-apply.yml
+
+permissions:
+  contents: write
+
+env:
+  PIP_DISABLE_PIP_VERSION_CHECK: "1"
+  PYTHONUNBUFFERED: "1"
+
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: feat/ai-subagent-observability
+          fetch-depth: 0
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.10'
+      - name: Apply implementation
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import re
+          import textwrap
+
+          def read(path: str) -> str:
+              return Path(path).read_text()
+
+          def write(path: str, value: str) -> None:
+              Path(path).write_text(value)
+
+          def replace_one(path: str, old: str, new: str) -> None:
+              value = read(path)
+              count = value.count(old)
+              if count != 1:
+                  raise RuntimeError(f"{path}: expected one match, got {count}: {old[:120]!r}")
+              write(path, value.replace(old, new, 1))
+
+          def replace_all(path: str, old: str, new: str, *, minimum: int = 1) -> None:
+              value = read(path)
+              count = value.count(old)
+              if count < minimum:
+                  raise RuntimeError(f"{path}: expected at least {minimum} matches, got {count}: {old[:120]!r}")
+              write(path, value.replace(old, new))
+
+          contracts = "linktools-ai/src/linktools/ai/runtime/state/_contracts.py"
+          replace_one(
+              contracts,
+              "    binding: AgentBindingSnapshot\n    memory_scope: str | None = None\n",
+              "    binding: AgentBindingSnapshot\n    parent_invocation_id: str | None = None\n    memory_scope: str | None = None\n",
+          )
+          replace_one(
+              contracts,
+              "        object.__setattr__(self, \"correlation\", normalize_correlation(self.correlation))\n        if (\n            not isinstance(self.binding, AgentBindingSnapshot)\n",
+              "        object.__setattr__(self, \"correlation\", normalize_correlation(self.correlation))\n        if self.lineage_kind is ExecutionLineageKind.SUBAGENT:\n            if (\n                not isinstance(self.parent_execution_id, str)\n                or not self.parent_execution_id\n                or not isinstance(self.parent_invocation_id, str)\n                or not self.parent_invocation_id\n                or self.source_execution_id is not None\n                or self.base_execution_id is not None\n            ):\n                raise ValueError(\"subagent execution lineage is invalid\")\n        elif self.parent_invocation_id is not None:\n            raise ValueError(\"non-subagent execution cannot carry parent invocation\")\n        if (\n            not isinstance(self.binding, AgentBindingSnapshot)\n",
+          )
+          replace_one(
+              contracts,
+              "    binding: AgentBindingSnapshot\n    storage_contract: RuntimeStorageContract\n    repository_instructions: RuntimePayloadRef | None = None\n",
+              "    binding: AgentBindingSnapshot\n    storage_contract: RuntimeStorageContract\n    parent_invocation_id: str | None = None\n    repository_instructions: RuntimePayloadRef | None = None\n",
+          )
+          marker = "        object.__setattr__(self, \"correlation\", normalize_correlation(self.correlation))\n        if (\n            not isinstance(self.binding, AgentBindingSnapshot)\n            or self.binding.binding_digest != self.binding_digest\n        ):\n            raise ValueError(\n                \"recovery binding snapshot does not match execution identity\"\n            )\n"
+          replacement = "        object.__setattr__(self, \"correlation\", normalize_correlation(self.correlation))\n        if self.lineage_kind == ExecutionLineageKind.SUBAGENT.value:\n            if (\n                not isinstance(self.parent_execution_id, str)\n                or not self.parent_execution_id\n                or not isinstance(self.parent_invocation_id, str)\n                or not self.parent_invocation_id\n                or self.source_execution_id is not None\n                or self.base_execution_id is not None\n            ):\n                raise ValueError(\"subagent recovery lineage is invalid\")\n        elif self.parent_invocation_id is not None:\n            raise ValueError(\"non-subagent recovery cannot carry parent invocation\")\n        if (\n            not isinstance(self.binding, AgentBindingSnapshot)\n            or self.binding.binding_digest != self.binding_digest\n        ):\n            raise ValueError(\n                \"recovery binding snapshot does not match execution identity\"\n            )\n"
+          replace_one(contracts, marker, replacement)
+
+          service_api = "linktools-ai/src/linktools/ai/runtime/service_api.py"
+          replace_one(
+              service_api,
+              "    ExecutionEventType,\n    ExecutionMode,\n",
+              "    ExecutionEventType,\n    ExecutionLineageKind,\n    ExecutionMode,\n",
+          )
+          replace_one(
+              service_api,
+              "@dataclass(frozen=True, slots=True)\nclass ExecutionView:\n    execution_id: str\n    status: ExecutionStatus\n",
+              "@dataclass(frozen=True, slots=True)\nclass ExecutionView:\n    execution_id: str\n    agent_id: str\n    status: ExecutionStatus\n    lineage_kind: ExecutionLineageKind\n    parent_execution_id: str | None\n    root_execution_id: str\n    parent_invocation_id: str | None\n",
+          )
+          replace_one(
+              service_api,
+              "@dataclass(frozen=True, slots=True)\nclass ExecutionStreamEvent:\n    execution_id: str\n    durable_sequence: int | None\n    event_type: \"ExecutionEventType | ExecutionDeltaType\"\n    payload: JsonValue\n\n\n@dataclass(frozen=True, slots=True)\nclass ArtifactView:\n",
+              "@dataclass(frozen=True, slots=True)\nclass ExecutionStreamEvent:\n    execution_id: str\n    durable_sequence: int | None\n    event_type: \"ExecutionEventType | ExecutionDeltaType\"\n    payload: JsonValue\n\n\n@dataclass(frozen=True, slots=True)\nclass ExecutionTreeEvent:\n    execution: ExecutionView\n    depth: int\n    event: ExecutionStreamEvent\n\n    def __post_init__(self) -> None:\n        if not isinstance(self.execution, ExecutionView):\n            raise TypeError(\"execution tree event requires an execution view\")\n        if isinstance(self.depth, bool) or not isinstance(self.depth, int) or self.depth < 0:\n            raise ValueError(\"execution tree event depth must be non-negative\")\n        if not isinstance(self.event, ExecutionStreamEvent):\n            raise TypeError(\"execution tree event requires an execution event\")\n        if self.execution.execution_id != self.event.execution_id:\n            raise ValueError(\"execution tree event identity does not match execution\")\n\n\n@dataclass(frozen=True, slots=True)\nclass ArtifactView:\n",
+          )
+          replace_one(
+              service_api,
+              "    async def inspect(\n        self, execution_id: str, *, principal: Principal\n    ) -> ExecutionView: ...\n",
+              "    async def inspect(\n        self, execution_id: str, *, principal: Principal\n    ) -> ExecutionView: ...\n    async def list_children(\n        self, execution_id: str, *, principal: Principal\n    ) -> tuple[ExecutionView, ...]: ...\n    def stream_tree(\n        self,\n        execution_id: str,\n        *,\n        principal: Principal,\n        after_sequences: \"Mapping[str, int] | None\" = None,\n    ) -> \"AsyncIterator[ExecutionTreeEvent]\": ...\n",
+          )
+
+          execution = "linktools-ai/src/linktools/ai/runtime/_execution.py"
+          replace_one(
+              execution,
+              "from collections.abc import Callable, Collection, Mapping\n",
+              "from collections.abc import AsyncIterator, Callable, Collection, Mapping\n",
+          )
+          replace_one(
+              execution,
+              "    ExecutionTraceItem,\n    ExecutionView,\n",
+              "    ExecutionTraceItem,\n    ExecutionTreeEvent,\n    ExecutionView,\n",
+          )
+          replace_one(
+              execution,
+              "class _SubagentCancellation(Protocol):\n    async def cancel_children(self, parent_execution_id: str, principal: Principal) -> None: ...\n\n\nclass _LocalExecutionWaiter(Protocol):\n",
+              "class _SubagentCancellation(Protocol):\n    async def cancel_children(self, parent_execution_id: str, principal: Principal) -> None: ...\n\n\nclass _ExecutionTreeStreamer(Protocol):\n    def stream(\n        self,\n        execution_id: str,\n        *,\n        principal: Principal,\n        after_sequences: Mapping[str, int] | None = None,\n    ) -> AsyncIterator[ExecutionTreeEvent]: ...\n\n\nclass _LocalExecutionWaiter(Protocol):\n",
+          )
+          replace_one(
+              execution,
+              "        self._subagent_cancellation: _SubagentCancellation | None = None\n",
+              "        self._subagent_cancellation: _SubagentCancellation | None = None\n        self._tree_streamer: _ExecutionTreeStreamer | None = None\n",
+          )
+          replace_one(
+              execution,
+              "    def bind_local_waiter(self, waiter: _LocalExecutionWaiter) -> None:\n",
+              "    def bind_tree_streamer(self, streamer: _ExecutionTreeStreamer) -> None:\n        if streamer is None:\n            raise ValueError(\"execution tree streamer is required\")\n        if self._tree_streamer is not None:\n            raise RuntimeError(\"execution tree streamer is already bound\")\n        self._tree_streamer = streamer\n\n    def bind_local_waiter(self, waiter: _LocalExecutionWaiter) -> None:\n",
+          )
+          replace_one(
+              execution,
+              "        *,\n        parent_execution_id: str,\n        root_execution_id: str,\n    ) -> ExecutionHandle:\n        return await self._start(\n            binding_digest,\n            request,\n            parent_execution_id=parent_execution_id,\n            root_execution_id=root_execution_id,\n            lineage_kind=ExecutionLineageKind.SUBAGENT,\n            scope=\"execution.subagent\",\n        )\n",
+              "        *,\n        parent_execution_id: str,\n        root_execution_id: str,\n        parent_invocation_id: str,\n    ) -> ExecutionHandle:\n        return await self._start(\n            binding_digest,\n            request,\n            parent_execution_id=parent_execution_id,\n            root_execution_id=root_execution_id,\n            parent_invocation_id=parent_invocation_id,\n            lineage_kind=ExecutionLineageKind.SUBAGENT,\n            scope=\"execution.subagent\",\n        )\n",
+          )
+          replace_one(
+              execution,
+              "        mode: ExecutionMode,\n        parent_execution_id: str,\n        root_execution_id: str,\n    ) -> \"ExecutionHandle | None\":\n",
+              "        mode: ExecutionMode,\n        parent_execution_id: str,\n        root_execution_id: str,\n        parent_invocation_id: str,\n    ) -> \"ExecutionHandle | None\":\n",
+          )
+          replace_one(
+              execution,
+              "            or execution.parent_execution_id != parent_execution_id\n            or execution.root_execution_id != root_execution_id\n",
+              "            or execution.parent_execution_id != parent_execution_id\n            or execution.root_execution_id != root_execution_id\n            or execution.parent_invocation_id != parent_invocation_id\n",
+          )
+          replace_one(
+              execution,
+              "            parent_execution_id=parent_execution_id,\n            root_execution_id=root_execution_id,\n        )\n\n    async def list_children",
+              "            parent_execution_id=parent_execution_id,\n            root_execution_id=root_execution_id,\n            parent_invocation_id=parent_invocation_id,\n        )\n\n    async def list_children",
+          )
+          replace_one(
+              execution,
+              "            return tuple(ExecutionView(child.execution_id, child.status) for child in children)\n\n    async def _start(\n",
+              "            return tuple(_execution_view(child) for child in children)\n\n    def stream_tree(\n        self,\n        execution_id: str,\n        *,\n        principal: Principal,\n        after_sequences: \"Mapping[str, int] | None\" = None,\n    ) -> AsyncIterator[ExecutionTreeEvent]:\n        if self._tree_streamer is None:\n            raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)\n        return self._tree_streamer.stream(\n            execution_id,\n            principal=principal,\n            after_sequences=after_sequences,\n        )\n\n    async def _start(\n",
+          )
+          replace_all(
+              execution,
+              "        root_execution_id: \"str | None\" = None,\n        lineage_kind: ExecutionLineageKind = ExecutionLineageKind.RUN,\n",
+              "        root_execution_id: \"str | None\" = None,\n        parent_invocation_id: \"str | None\" = None,\n        lineage_kind: ExecutionLineageKind = ExecutionLineageKind.RUN,\n",
+              minimum=2,
+          )
+          replace_all(
+              execution,
+              "                root_execution_id=root_execution_id,\n                lineage_kind=lineage_kind,\n",
+              "                root_execution_id=root_execution_id,\n                parent_invocation_id=parent_invocation_id,\n                lineage_kind=lineage_kind,\n",
+              minimum=2,
+          )
+          replace_one(
+              execution,
+              "        if lineage_kind is ExecutionLineageKind.SUBAGENT:\n            if parent_execution_id is None:\n",
+              "        if lineage_kind is ExecutionLineageKind.SUBAGENT:\n            if parent_execution_id is None or not parent_invocation_id:\n",
+          )
+          replace_one(
+              execution,
+              "request_digest = _request_digest(request, binding_digest, session_id=session_id, source_execution_id=source_execution_id, base_execution_id=base_execution_id, parent_execution_id=parent_execution_id, root_execution_id=root_execution_id, lineage_kind=lineage_kind)",
+              "request_digest = _request_digest(request, binding_digest, session_id=session_id, source_execution_id=source_execution_id, base_execution_id=base_execution_id, parent_execution_id=parent_execution_id, root_execution_id=root_execution_id, parent_invocation_id=parent_invocation_id, lineage_kind=lineage_kind)",
+          )
+          replace_one(
+              execution,
+              "            parent_execution_id=parent_execution_id,\n            root_execution_id=root_execution_id or execution_id,\n            status=ExecutionStatus.PENDING_START,\n",
+              "            parent_execution_id=parent_execution_id,\n            root_execution_id=root_execution_id or execution_id,\n            parent_invocation_id=parent_invocation_id,\n            status=ExecutionStatus.PENDING_START,\n",
+          )
+          replace_one(
+              execution,
+              "        return ExecutionView(execution.execution_id, execution.status)\n",
+              "        return _execution_view(execution)\n",
+          )
+          replace_one(
+              execution,
+              "    parent_execution_id: str | None,\n    root_execution_id: str | None,\n    lineage_kind: ExecutionLineageKind,\n",
+              "    parent_execution_id: str | None,\n    root_execution_id: str | None,\n    parent_invocation_id: str | None,\n    lineage_kind: ExecutionLineageKind,\n",
+          )
+          replace_one(
+              execution,
+              "            \"parent_execution_id\": parent_execution_id,\n            \"root_identity\": root_execution_id or \"$self\",\n",
+              "            \"parent_execution_id\": parent_execution_id,\n            \"parent_invocation_id\": parent_invocation_id,\n            \"root_identity\": root_execution_id or \"$self\",\n",
+          )
+          replace_one(
+              execution,
+              "            parent_execution_id=None,\n            root_execution_id=None,\n            lineage_kind=ExecutionLineageKind.RUN,\n",
+              "            parent_execution_id=None,\n            root_execution_id=None,\n            parent_invocation_id=None,\n            lineage_kind=ExecutionLineageKind.RUN,\n",
+          )
+          replace_one(
+              execution,
+              "def _terminal_error(\n    execution: ExecutionRecord,\n) -> \"tuple[str | None, Mapping[str, JsonValue]]\":\n",
+              "def _execution_view(execution: ExecutionRecord) -> ExecutionView:\n    return ExecutionView(\n        execution.execution_id,\n        execution.binding.agent_spec.id,\n        execution.status,\n        execution.lineage_kind,\n        execution.parent_execution_id,\n        execution.root_execution_id,\n        execution.parent_invocation_id,\n    )\n\n\ndef _terminal_error(\n    execution: ExecutionRecord,\n) -> \"tuple[str | None, Mapping[str, JsonValue]]\":\n",
+          )
+
+          subagent = "linktools-ai/src/linktools/ai/runtime/_subagent.py"
+          replace_one(subagent, "from typing import cast\n", "from typing import Protocol, cast\n")
+          replace_one(
+              subagent,
+              "_logger = environ.get_logger(\"ai.runtime.subagent\")\n\n\nclass SubagentDispatcher:\n",
+              "_logger = environ.get_logger(\"ai.runtime.subagent\")\n\n\nclass _ChildExecutionObserver(Protocol):\n    def publish(self, root_execution_id: str, child_execution_id: str) -> None: ...\n\n\nclass SubagentDispatcher:\n",
+          )
+          replace_one(
+              subagent,
+              "        execution: DefaultExecutionService,\n    ) -> None:\n",
+              "        execution: DefaultExecutionService,\n        child_observer: _ChildExecutionObserver | None = None,\n    ) -> None:\n",
+          )
+          replace_one(
+              subagent,
+              "        self._execution = execution\n        self._detached_tasks",
+              "        self._execution = execution\n        self._child_observer = child_observer\n        self._detached_tasks",
+          )
+          replace_one(
+              subagent,
+              "            files=files,\n            idempotency_key=idempotency_key,\n        )\n        return await self._wait_child(\n",
+              "            files=files,\n            idempotency_key=idempotency_key,\n            invocation_id=invocation_id,\n        )\n        if self._child_observer is not None:\n            self._child_observer.publish(root_execution_id, child.execution_id)\n        return await self._wait_child(\n",
+          )
+          replace_one(
+              subagent,
+              "        files: tuple[str, ...],\n        idempotency_key: str,\n    ):\n",
+              "        files: tuple[str, ...],\n        idempotency_key: str,\n        invocation_id: str,\n    ):\n",
+          )
+          replace_all(
+              subagent,
+              "            root_execution_id=root_execution_id,\n        )\n",
+              "            root_execution_id=root_execution_id,\n            parent_invocation_id=invocation_id,\n        )\n",
+              minimum=2,
+          )
+          replace_one(
+              subagent,
+              "                parent_execution_id=parent_execution_id,\n                root_execution_id=root_execution_id,\n            )\n",
+              "                parent_execution_id=parent_execution_id,\n                root_execution_id=root_execution_id,\n                parent_invocation_id=invocation_id,\n            )\n",
+          )
+
+          local = "linktools-ai/src/linktools/ai/runtime/_local.py"
+          replace_one(
+              local,
+              "            parent_execution_id=execution.parent_execution_id,\n            root_execution_id=execution.root_execution_id,\n",
+              "            parent_execution_id=execution.parent_execution_id,\n            root_execution_id=execution.root_execution_id,\n            parent_invocation_id=execution.parent_invocation_id,\n",
+          )
+          replace_one(
+              local,
+              "            or execution.parent_execution_id != recovery_input.parent_execution_id\n            or execution.root_execution_id != recovery_input.root_execution_id\n",
+              "            or execution.parent_execution_id != recovery_input.parent_execution_id\n            or execution.root_execution_id != recovery_input.root_execution_id\n            or execution.parent_invocation_id != recovery_input.parent_invocation_id\n",
+          )
+          replace_one(
+              local,
+              "            parent_execution_id=recovery_input.parent_execution_id,\n            root_execution_id=recovery_input.root_execution_id,\n",
+              "            parent_execution_id=recovery_input.parent_execution_id,\n            root_execution_id=recovery_input.root_execution_id,\n            parent_invocation_id=recovery_input.parent_invocation_id,\n",
+          )
+
+          repositories = "linktools-ai/src/linktools/ai/runtime/state/_repositories.py"
+          replace_one(
+              repositories,
+              "        and left.parent_execution_id == right.parent_execution_id\n        and left.root_execution_id == right.root_execution_id\n",
+              "        and left.parent_execution_id == right.parent_execution_id\n        and left.root_execution_id == right.root_execution_id\n        and left.parent_invocation_id == right.parent_invocation_id\n",
+          )
+
+          metrics = "linktools-ai/src/linktools/ai/runtime/_metrics.py"
+          replace_one(
+              metrics,
+              "        \"parent_execution_id\",\n        \"root_execution_id\",\n",
+              "        \"parent_execution_id\",\n        \"root_execution_id\",\n        \"parent_invocation_id\",\n",
+          )
+          replace_one(
+              metrics,
+              "        parent_execution_id=execution.parent_execution_id,\n        root_execution_id=execution.root_execution_id,\n",
+              "        parent_execution_id=execution.parent_execution_id,\n        root_execution_id=execution.root_execution_id,\n        parent_invocation_id=execution.parent_invocation_id,\n",
+          )
+
+          agent = "linktools-ai/src/linktools/ai/runtime/_agent.py"
+          replace_one(
+              agent,
+              "    ExecutionStreamEvent,\n    ExecutionTraceItem,\n",
+              "    ExecutionStreamEvent,\n    ExecutionTraceItem,\n    ExecutionTreeEvent,\n",
+          )
+          replace_one(
+              agent,
+              "    def stream(self, *, after_sequence: int = 0) -> AsyncIterator[ExecutionStreamEvent]:\n        return self._runtime._execution_stream(\n            self.execution_id,\n            principal=self._principal,\n            after_sequence=after_sequence,\n        )\n\n    async def cancel(\n",
+              "    def stream(self, *, after_sequence: int = 0) -> AsyncIterator[ExecutionStreamEvent]:\n        return self._runtime._execution_stream(\n            self.execution_id,\n            principal=self._principal,\n            after_sequence=after_sequence,\n        )\n\n    def stream_tree(\n        self,\n        *,\n        after_sequences: \"Mapping[str, int] | None\" = None,\n    ) -> AsyncIterator[ExecutionTreeEvent]:\n        return self._runtime.execution.stream_tree(\n            self.execution_id,\n            principal=self._principal,\n            after_sequences=after_sequences,\n        )\n\n    async def cancel(\n",
+          )
+
+          runtime_init = "linktools-ai/src/linktools/ai/runtime/__init__.py"
+          replace_one(
+              runtime_init,
+              "    ExecutionTraceItem,\n    ExecutionView,\n",
+              "    ExecutionTraceItem,\n    ExecutionTreeEvent,\n    ExecutionView,\n",
+          )
+          replace_one(
+              runtime_init,
+              "    \"ExecutionTraceItem\",\n    \"ExecutionView\",\n",
+              "    \"ExecutionTraceItem\",\n    \"ExecutionTreeEvent\",\n    \"ExecutionView\",\n",
+          )
+
+          factory = "linktools-ai/src/linktools/ai/runtime/_factory.py"
+          replace_one(
+              factory,
+              "from ._execution import DefaultExecutionService\n",
+              "from ._execution import DefaultExecutionService\nfrom ._execution_tree import ExecutionTreeBroker, ExecutionTreeStreamer\n",
+          )
+          replace_one(
+              factory,
+              "    dispatcher = SubagentDispatcher(catalog, compiler, execution)\n",
+              "    execution_tree_broker = ExecutionTreeBroker()\n    dispatcher = SubagentDispatcher(\n        catalog,\n        compiler,\n        execution,\n        child_observer=execution_tree_broker,\n    )\n",
+          )
+          replace_one(
+              factory,
+              "        event = DefaultEventService(\n            state.execution.executions,\n            state.execution.events,\n            authorization,\n            backend.worker_failure,\n            live_broker,\n        )\n        artifact = DefaultArtifactService(\n",
+              "        event = DefaultEventService(\n            state.execution.executions,\n            state.execution.events,\n            authorization,\n            backend.worker_failure,\n            live_broker,\n        )\n        execution.bind_tree_streamer(\n            ExecutionTreeStreamer(execution, event, execution_tree_broker)\n        )\n        artifact = DefaultArtifactService(\n",
+          )
+
+          tests = "tests/ai/test_skill_subagent_final_refactor.py"
+          replace_all(
+              tests,
+              "        root_execution_id: str,\n    ) ->",
+              "        root_execution_id: str,\n        parent_invocation_id: str,\n    ) ->",
+              minimum=2,
+          )
+
+          tree_module = Path("linktools-ai/src/linktools/ai/runtime/_execution_tree.py")
+          tree_module.write_text(textwrap.dedent('''\
+          #!/usr/bin/env python3
+          # -*- coding: utf-8 -*-
+          """Derived live event projection over one durable execution tree."""
+
+          import asyncio
+          from collections.abc import AsyncIterator, Mapping
+          from typing import Protocol
+
+          from ..core import ExecutionLineageKind, Principal
+          from ..errors import AIError, ErrorCode
+          from .service_api import ExecutionStreamEvent, ExecutionTreeEvent, ExecutionView
+
+
+          class _ExecutionTreeReader(Protocol):
+              async def inspect(
+                  self,
+                  execution_id: str,
+                  *,
+                  principal: Principal,
+              ) -> ExecutionView: ...
+
+              async def list_children(
+                  self,
+                  execution_id: str,
+                  *,
+                  principal: Principal,
+              ) -> tuple[ExecutionView, ...]: ...
+
+
+          class _ExecutionEventStreamer(Protocol):
+              def stream(
+                  self,
+                  execution_id: str,
+                  *,
+                  principal: Principal,
+                  after_sequence: int = 0,
+              ) -> AsyncIterator[ExecutionStreamEvent]: ...
+
+
+          class _ExecutionTreeSubscription:
+              def __init__(self, owner: "ExecutionTreeBroker", root_execution_id: str) -> None:
+                  self._owner = owner
+                  self._root_execution_id = root_execution_id
+                  self._pending: set[str] = set()
+                  self._event = asyncio.Event()
+                  self._closed = False
+
+              def publish(self, child_execution_id: str) -> None:
+                  if self._closed:
+                      return
+                  self._pending.add(child_execution_id)
+                  self._event.set()
+
+              def drain(self) -> tuple[str, ...]:
+                  values = tuple(sorted(self._pending))
+                  self._pending.clear()
+                  self._event.clear()
+                  if self._pending:
+                      self._event.set()
+                  return values
+
+              async def wait(self) -> tuple[str, ...]:
+                  while not self._pending:
+                      self._event.clear()
+                      if self._pending:
+                          break
+                      await self._event.wait()
+                  return self.drain()
+
+              async def close(self) -> None:
+                  if self._closed:
+                      return
+                  self._closed = True
+                  self._owner._remove(self._root_execution_id, self)
+                  self._event.set()
+
+
+          class ExecutionTreeBroker:
+              """Notify active tree readers about newly established child executions."""
+
+              def __init__(self) -> None:
+                  self._subscriptions: dict[str, set[_ExecutionTreeSubscription]] = {}
+
+              def subscribe(self, root_execution_id: str) -> _ExecutionTreeSubscription:
+                  subscription = _ExecutionTreeSubscription(self, root_execution_id)
+                  self._subscriptions.setdefault(root_execution_id, set()).add(subscription)
+                  return subscription
+
+              def publish(self, root_execution_id: str, child_execution_id: str) -> None:
+                  for subscription in tuple(
+                      self._subscriptions.get(root_execution_id, ())
+                  ):
+                      subscription.publish(child_execution_id)
+
+              def _remove(
+                  self,
+                  root_execution_id: str,
+                  subscription: _ExecutionTreeSubscription,
+              ) -> None:
+                  values = self._subscriptions.get(root_execution_id)
+                  if values is None:
+                      return
+                  values.discard(subscription)
+                  if not values:
+                      self._subscriptions.pop(root_execution_id, None)
+
+
+          class ExecutionTreeStreamer:
+              """Merge per-execution streams without creating a second durable event log."""
+
+              def __init__(
+                  self,
+                  executions: _ExecutionTreeReader,
+                  events: _ExecutionEventStreamer,
+                  broker: ExecutionTreeBroker,
+              ) -> None:
+                  self._executions = executions
+                  self._events = events
+                  self._broker = broker
+
+              def stream(
+                  self,
+                  execution_id: str,
+                  *,
+                  principal: Principal,
+                  after_sequences: Mapping[str, int] | None = None,
+              ) -> AsyncIterator[ExecutionTreeEvent]:
+                  cursors = _normalize_after_sequences(after_sequences)
+                  return self._stream(
+                      execution_id,
+                      principal=principal,
+                      after_sequences=cursors,
+                  )
+
+              async def _stream(
+                  self,
+                  execution_id: str,
+                  *,
+                  principal: Principal,
+                  after_sequences: Mapping[str, int],
+              ) -> AsyncIterator[ExecutionTreeEvent]:
+                  subscription = self._broker.subscribe(execution_id)
+                  queue: asyncio.Queue[
+                      tuple[ExecutionView, ExecutionStreamEvent | None, BaseException | None]
+                  ] = asyncio.Queue()
+                  views: dict[str, ExecutionView] = {}
+                  depths: dict[str, int] = {}
+                  tasks: dict[str, asyncio.Task[None]] = {}
+                  completed: set[str] = set()
+
+                  async def consume(view: ExecutionView) -> None:
+                      try:
+                          async for event in self._events.stream(
+                              view.execution_id,
+                              principal=principal,
+                              after_sequence=after_sequences.get(view.execution_id, 0),
+                          ):
+                              await queue.put((view, event, None))
+                      except BaseException as error:  # noqa: BLE001
+                          await queue.put((view, None, error))
+                      finally:
+                          await queue.put((view, None, None))
+
+                  def start(view: ExecutionView, depth: int) -> bool:
+                      existing = views.get(view.execution_id)
+                      if existing is not None:
+                          if existing != view or depths[view.execution_id] != depth:
+                              raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                          return False
+                      views[view.execution_id] = view
+                      depths[view.execution_id] = depth
+                      tasks[view.execution_id] = asyncio.create_task(
+                          consume(view),
+                          name=f"execution-tree-stream-{view.execution_id}",
+                      )
+                      return True
+
+                  async def discover(view: ExecutionView, depth: int) -> None:
+                      if depth == 0:
+                          if (
+                              view.execution_id != execution_id
+                              or view.parent_execution_id is not None
+                              or view.root_execution_id != execution_id
+                          ):
+                              raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+                      elif (
+                          view.lineage_kind is not ExecutionLineageKind.SUBAGENT
+                          or view.root_execution_id != execution_id
+                          or view.parent_execution_id is None
+                          or not view.parent_invocation_id
+                      ):
+                          raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                      start(view, depth)
+                      children = await self._executions.list_children(
+                          view.execution_id,
+                          principal=principal,
+                      )
+                      for child in children:
+                          if child.parent_execution_id != view.execution_id:
+                              raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                          await discover(child, depth + 1)
+
+                  broker_wait: asyncio.Task[tuple[str, ...]] | None = None
+                  queue_wait: asyncio.Task[
+                      tuple[ExecutionView, ExecutionStreamEvent | None, BaseException | None]
+                  ] | None = None
+                  try:
+                      root = await self._executions.inspect(
+                          execution_id,
+                          principal=principal,
+                      )
+                      await discover(root, 0)
+                      broker_wait = asyncio.create_task(
+                          subscription.wait(),
+                          name=f"execution-tree-children-{execution_id}",
+                      )
+                      queue_wait = asyncio.create_task(
+                          queue.get(),
+                          name=f"execution-tree-events-{execution_id}",
+                      )
+                      while True:
+                          done, _pending = await asyncio.wait(
+                              {broker_wait, queue_wait},
+                              return_when=asyncio.FIRST_COMPLETED,
+                          )
+                          if broker_wait in done:
+                              child_ids = broker_wait.result()
+                              broker_wait = asyncio.create_task(
+                                  subscription.wait(),
+                                  name=f"execution-tree-children-{execution_id}",
+                              )
+                              for child_id in child_ids:
+                                  child = await self._executions.inspect(
+                                      child_id,
+                                      principal=principal,
+                                  )
+                                  parent_id = child.parent_execution_id
+                                  parent = views.get(parent_id) if parent_id is not None else None
+                                  if parent is None:
+                                      await discover(root, 0)
+                                      parent = views.get(parent_id) if parent_id is not None else None
+                                  if parent is None:
+                                      raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                                  await discover(child, depths[parent.execution_id] + 1)
+                          if queue_wait in done:
+                              view, event, error = queue_wait.result()
+                              queue.task_done()
+                              queue_wait = asyncio.create_task(
+                                  queue.get(),
+                                  name=f"execution-tree-events-{execution_id}",
+                              )
+                              if error is not None:
+                                  raise error
+                              if event is None:
+                                  completed.add(view.execution_id)
+                              else:
+                                  yield ExecutionTreeEvent(
+                                      view,
+                                      depths[view.execution_id],
+                                      event,
+                                  )
+                          if (
+                              execution_id in completed
+                              and all(task.done() for task in tasks.values())
+                              and queue.empty()
+                          ):
+                              for child_id in subscription.drain():
+                                  child = await self._executions.inspect(
+                                      child_id,
+                                      principal=principal,
+                                  )
+                                  parent_id = child.parent_execution_id
+                                  parent = views.get(parent_id) if parent_id is not None else None
+                                  if parent is None:
+                                      raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                                  await discover(child, depths[parent.execution_id] + 1)
+                              before = len(tasks)
+                              await discover(root, 0)
+                              if len(tasks) == before and queue.empty():
+                                  return
+                  finally:
+                      if broker_wait is not None:
+                          broker_wait.cancel()
+                      if queue_wait is not None:
+                          queue_wait.cancel()
+                      for task in tasks.values():
+                          if not task.done():
+                              task.cancel()
+                      await asyncio.gather(
+                          *(task for task in (broker_wait, queue_wait) if task is not None),
+                          *tasks.values(),
+                          return_exceptions=True,
+                      )
+                      await subscription.close()
+
+
+          def _normalize_after_sequences(
+              value: Mapping[str, int] | None,
+          ) -> Mapping[str, int]:
+              if value is None:
+                  return {}
+              if not isinstance(value, Mapping):
+                  raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+              result: dict[str, int] = {}
+              for execution_id, sequence in value.items():
+                  if (
+                      not isinstance(execution_id, str)
+                      or not execution_id
+                      or isinstance(sequence, bool)
+                      or not isinstance(sequence, int)
+                      or sequence < 0
+                  ):
+                      raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+                  result[execution_id] = sequence
+              return result
+
+
+          __all__ = ["ExecutionTreeBroker", "ExecutionTreeStreamer"]
+          '''))
+
+          test_file = Path("tests/ai/test_subagent_execution_tree.py")
+          test_file.write_text(textwrap.dedent('''\
+          #!/usr/bin/env python3
+          # -*- coding: utf-8 -*-
+
+          from datetime import datetime, timezone
+
+          import pytest
+          from linktools.ai.agent import AgentBindingSnapshot
+          from linktools.ai.core import (
+              ExecutionEventType,
+              ExecutionLineageKind,
+              ExecutionStatus,
+              Principal,
+          )
+          from linktools.ai.runtime._execution_tree import (
+              ExecutionTreeBroker,
+              ExecutionTreeStreamer,
+          )
+          from linktools.ai.runtime.service_api import (
+              ExecutionStreamEvent,
+              ExecutionView,
+          )
+          from linktools.ai.runtime.state import ExecutionRecord
+          from linktools.ai.spec import AgentSpec
+
+
+          def _binding(agent_id: str = "agent") -> AgentBindingSnapshot:
+              spec = AgentSpec(agent_id)
+              return AgentBindingSnapshot(
+                  version=1,
+                  agent_spec=spec,
+                  model={},
+                  selected=(),
+                  subagents=(),
+                  output_mode="text",
+                  output_schema={},
+                  binding_digest="a" * 64,
+              )
+
+
+          def _record(*, subagent: bool, parent_invocation_id: str | None) -> ExecutionRecord:
+              now = datetime.now(timezone.utc)
+              return ExecutionRecord(
+                  execution_id="child" if subagent else "root",
+                  tenant_id="tenant",
+                  session_id=None,
+                  binding_digest="a" * 64,
+                  parent_execution_id="root" if subagent else None,
+                  root_execution_id="root",
+                  source_execution_id=None,
+                  base_execution_id=None,
+                  lineage_kind=(
+                      ExecutionLineageKind.SUBAGENT
+                      if subagent
+                      else ExecutionLineageKind.RUN
+                  ),
+                  status=ExecutionStatus.STARTED,
+                  revision=0,
+                  event_sequence=0,
+                  agent_run_sequence=0,
+                  error_code=None,
+                  safe_error_details={},
+                  created_at=now,
+                  updated_at=now,
+                  mode="run",
+                  planning=False,
+                  thinking=False,
+                  binding=_binding(),
+                  parent_invocation_id=parent_invocation_id,
+              )
+
+
+          def test_subagent_lineage_requires_parent_invocation() -> None:
+              with pytest.raises(ValueError):
+                  _record(subagent=True, parent_invocation_id=None)
+              child = _record(subagent=True, parent_invocation_id="tool-call")
+              assert child.parent_invocation_id == "tool-call"
+              with pytest.raises(ValueError):
+                  _record(subagent=False, parent_invocation_id="tool-call")
+
+
+          class _ExecutionReader:
+              def __init__(self) -> None:
+                  self.root = ExecutionView(
+                      "root",
+                      "root-agent",
+                      ExecutionStatus.STARTED,
+                      ExecutionLineageKind.RUN,
+                      None,
+                      "root",
+                      None,
+                  )
+                  self.child = ExecutionView(
+                      "child",
+                      "child-agent",
+                      ExecutionStatus.SUCCEEDED,
+                      ExecutionLineageKind.SUBAGENT,
+                      "root",
+                      "root",
+                      "delegate-call",
+                  )
+
+              async def inspect(
+                  self,
+                  execution_id: str,
+                  *,
+                  principal: Principal,
+              ) -> ExecutionView:
+                  del principal
+                  return self.root if execution_id == "root" else self.child
+
+              async def list_children(
+                  self,
+                  execution_id: str,
+                  *,
+                  principal: Principal,
+              ) -> tuple[ExecutionView, ...]:
+                  del principal
+                  return (self.child,) if execution_id == "root" else ()
+
+
+          class _EventStreamer:
+              def stream(
+                  self,
+                  execution_id: str,
+                  *,
+                  principal: Principal,
+                  after_sequence: int = 0,
+              ):
+                  del principal
+
+                  async def events():
+                      sequence = after_sequence + 1
+                      yield ExecutionStreamEvent(
+                          execution_id,
+                          sequence,
+                          ExecutionEventType.EXECUTION_SUCCEEDED,
+                          {},
+                      )
+
+                  return events()
+
+
+          @pytest.mark.asyncio
+          async def test_tree_stream_projects_root_and_child_without_global_sequence() -> None:
+              broker = ExecutionTreeBroker()
+              streamer = ExecutionTreeStreamer(
+                  _ExecutionReader(),
+                  _EventStreamer(),
+                  broker,
+              )
+              values = [
+                  item
+                  async for item in streamer.stream(
+                      "root",
+                      principal=Principal("owner", "tenant", "service"),
+                      after_sequences={"child": 4},
+                  )
+              ]
+              assert {(item.execution.execution_id, item.depth) for item in values} == {
+                  ("root", 0),
+                  ("child", 1),
+              }
+              child = next(
+                  item for item in values if item.execution.execution_id == "child"
+              )
+              assert child.execution.parent_invocation_id == "delegate-call"
+              assert child.event.durable_sequence == 5
+          '''))
+          PY
+      - name: Install tooling
+        run: |
+          python -m pip install --quiet --upgrade pip
+          python -m pip install --quiet -U -r requirements.txt
+          python manage.py install --editable --quiet
+      - name: Run targeted tests
+        run: |
+          python -m pytest -q tests/ai/test_subagent_execution_tree.py tests/ai/test_skill_subagent_final_refactor.py tests/ai/test_execution_context_durability.py
+      - name: Run linktools-ai gate
+        run: python manage.py check linktools-ai
+      - name: Commit implementation
+        shell: bash
+        run: |
+          rm .github/workflows/ai-subagent-observability-apply.yml
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -m "feat(ai): track subagent execution lineage"
+          git push origin HEAD:feat/ai-subagent-observability
