@@ -4,12 +4,15 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 from collections.abc import Callable, Sequence
 from typing import Any, Protocol
 
 from pydantic_ai.messages import ModelMessage, ModelResponse, ToolCallPart
-from pydantic_ai.models import ModelRequestContext
+from pydantic_ai.models import Model, ModelRequestContext, ModelRequestParameters
+from pydantic_ai.models.wrapper import WrapperModel
+from pydantic_ai.settings import ModelSettings
 from pydantic_ai.tools import RunContext
 from pydantic_ai_harness.compaction import (
     ClearToolResults,
@@ -63,6 +66,71 @@ class _ContextProjectionSink(Protocol):
     ) -> None: ...
 
 
+class _ObservedCompactionModel(WrapperModel):
+    """Observe one Harness summary request without changing model semantics."""
+
+    def __init__(
+        self,
+        wrapped: Model,
+        *,
+        ctx: RunContext[Any],
+        journal: ModelRequestJournal,
+        observer: ExternalModelRequestObserver,
+    ) -> None:
+        super().__init__(wrapped)
+        self._ctx = ctx
+        self._journal = journal
+        self._observer = observer
+
+    async def request(
+        self,
+        messages: list[ModelMessage],
+        model_settings: ModelSettings | None,
+        model_request_parameters: ModelRequestParameters,
+    ) -> ModelResponse:
+        step_index = self._ctx.run_step
+        fact = self._journal.begin(step_index, purpose="compaction")
+        await self._observer(self._ctx, fact, "started", None, None)
+        try:
+            response = await self.wrapped.request(
+                messages,
+                model_settings,
+                model_request_parameters,
+            )
+        except asyncio.CancelledError as error:
+            fact = self._journal.finish(step_index, status="CANCELLED")
+            self._journal.consume(step_index)
+            await self._observer(
+                self._ctx,
+                fact,
+                "cancelled",
+                None,
+                error,
+            )
+            raise
+        except BaseException as error:
+            fact = self._journal.finish(step_index, status="FAILED")
+            self._journal.consume(step_index)
+            await self._observer(
+                self._ctx,
+                fact,
+                "failed",
+                None,
+                error,
+            )
+            raise
+        fact = self._journal.finish(step_index, status="SUCCEEDED")
+        self._journal.consume(step_index)
+        await self._observer(
+            self._ctx,
+            fact,
+            "completed",
+            response,
+            None,
+        )
+        return response
+
+
 class RuntimeCompaction:
     """Adapt Harness compaction to Runtime context projection ownership."""
 
@@ -83,33 +151,17 @@ class RuntimeCompaction:
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
         if not isinstance(trusted_workspace_read, bool):
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
-        # Harness owns the compaction algorithms and nested summary request. Runtime keeps
-        # only the durable raw-history/model-context projection boundary.
-        del journal, observer
+        if (journal is None) != (observer is None):
+            raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+        self._target_tokens = target_tokens
+        self._journal = journal
+        self._observer = observer
         self._projection_sink = projection_sink
         self._deduplicate = DeduplicateFileReads(
             file_key=(
                 _workspace_file_key
                 if trusted_workspace_read
                 else lambda _call: None
-            )
-        )
-        self._tiered = (
-            None
-            if target_tokens is None
-            else TieredCompaction(
-                tiers=(
-                    ClearToolResults(
-                        max_tokens=1,
-                        keep_pairs=_KEEP_COMPLETED_PAIRS,
-                        exclude_tools=_CONTROL_TOOL_NAMES,
-                    ),
-                    SummarizingCompaction(
-                        max_messages=1,
-                        keep_messages=_SUMMARY_TAIL_MESSAGES,
-                    ),
-                ),
-                target_tokens=target_tokens,
             )
         )
 
@@ -123,8 +175,31 @@ class RuntimeCompaction:
             ctx,
             request_context,
         )
-        if self._tiered is not None:
-            request_context = await self._tiered.before_model_request(
+        if self._target_tokens is not None:
+            summary_model: Model | None = None
+            if self._journal is not None and self._observer is not None:
+                summary_model = _ObservedCompactionModel(
+                    request_context.model,
+                    ctx=ctx,
+                    journal=self._journal,
+                    observer=self._observer,
+                )
+            tiered = TieredCompaction(
+                tiers=(
+                    ClearToolResults(
+                        max_tokens=1,
+                        keep_pairs=_KEEP_COMPLETED_PAIRS,
+                        exclude_tools=_CONTROL_TOOL_NAMES,
+                    ),
+                    SummarizingCompaction(
+                        model=summary_model,
+                        max_messages=1,
+                        keep_messages=_SUMMARY_TAIL_MESSAGES,
+                    ),
+                ),
+                target_tokens=self._target_tokens,
+            )
+            request_context = await tiered.before_model_request(
                 ctx,
                 request_context,
             )
