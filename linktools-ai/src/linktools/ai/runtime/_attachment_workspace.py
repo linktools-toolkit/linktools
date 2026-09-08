@@ -43,10 +43,109 @@ _attachment_reader: ContextVar[Any | None] = ContextVar(
     default=None,
 )
 _installed = False
+_original_prepare_start: Any = None
 _original_run: Any = None
 _original_materialize_agent: Any = None
 _original_workspace_capabilities: Any = None
 _original_workspace_tool_contributions: Any = None
+
+
+def _binding_has_read_attachment(binding: Any) -> bool:
+    return any(
+        candidate.id == "read_attachment"
+        for candidate in binding.definition.selected_tools
+    )
+
+
+async def _prepare_start_with_attachment_owner(
+    self: local_runtime.LocalExecutionBackend,
+    request: Any,
+    execution: Any,
+    identity: Any,
+):
+    if _original_prepare_start is None:
+        raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+    if execution.attachment_manifest:
+        return await _original_prepare_start(self, request, execution, identity)
+    binding = self._catalog.binding(execution.binding_digest)
+    if not _binding_has_read_attachment(binding):
+        return await _original_prepare_start(self, request, execution, identity)
+
+    await self._validate_start(request, execution)
+    if execution.status is not local_runtime.ExecutionStatus.PENDING_START:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    if execution.binding != binding.snapshot:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    now = local_runtime.datetime.now(local_runtime.timezone.utc)
+    recovery_input = local_runtime.RecoveryExecutionInput(
+        user_prompt=local_runtime._recovery_prompt_payload(request.user_prompt),
+        user_prompt_codec=request.user_prompt_codec,
+        principal_id=request.principal.principal_id,
+        principal_kind=request.principal.kind,
+        session_id=execution.session_id,
+        memory_scope=execution.memory_scope,
+        binding_digest=execution.binding_digest,
+        lineage_kind=execution.lineage_kind.value,
+        parent_execution_id=execution.parent_execution_id,
+        root_execution_id=execution.root_execution_id,
+        source_execution_id=execution.source_execution_id,
+        base_execution_id=execution.base_execution_id,
+        conversation_step_run_id=execution.conversation_step_run_id,
+        idempotency=local_runtime.RecoveryIdempotencyInput(
+            scope=identity.scope,
+            idempotency_key_digest=identity.idempotency_key_digest,
+            request_digest=identity.request_digest,
+        ),
+        mode=execution.mode,
+        planning=execution.planning,
+        thinking=execution.thinking,
+        binding=execution.binding,
+        repository_instructions=execution.repository_instructions,
+        attachment_manifest=(),
+        input_digest=None,
+        path_origin=None,
+        correlation=execution.correlation,
+    )
+    candidate = local_runtime.RecoveryCheckpoint(
+        execution_id=execution.execution_id,
+        tenant_id=execution.tenant_id,
+        input=recovery_input,
+        step_run_id=None,
+        agent_run_sequence=execution.agent_run_sequence,
+        state=local_runtime.RecoveryCheckpointState.ADMITTED,
+        handoff_phase=local_runtime.RecoveryHandoffPhase.NONE,
+        terminal_handoff=None,
+        handoff_contract_digest=None,
+        pending_operation_id=None,
+        revision=0,
+        created_at=now,
+        updated_at=now,
+    )
+    expected = (
+        await self._expected_session_cursor(execution)
+        if execution.session_id is not None
+        else None
+    )
+    started = await self._runtime_commands.commit_start_attempt_checkpoint(
+        local_runtime.ExecutionStartClaim(
+            execution.execution_id,
+            execution.tenant_id,
+            execution.revision,
+            execution.event_sequence,
+            identity.scope,
+            identity.idempotency_key_digest,
+            identity.request_digest,
+            now,
+        ),
+        recovery_checkpoint=candidate,
+        session_id=execution.session_id,
+        expected_cursor=expected,
+    )
+    local_runtime._logger.info(
+        "read_attachment recovery owner admitted: execution=%s",
+        execution.execution_id,
+    )
+    return started
 
 
 async def _run_with_attachment_owner(
@@ -101,10 +200,7 @@ async def _materialize_agent_with_attachment_reader(*args: Any, **kwargs: Any):
     finally:
         _attachment_reader.reset(token)
 
-    read_enabled = any(
-        candidate.id == "read_attachment"
-        for candidate in scope.binding.definition.selected_tools
-    )
+    read_enabled = _binding_has_read_attachment(scope.binding)
     if managed is None and not read_enabled and not active.entries():
         return result
     agent, capabilities, runtime_tools, trusted_tools, trusted_mcp = result
@@ -296,15 +392,18 @@ def install_attachment_workspace() -> None:
     """Install the run-scoped read_attachment workspace binding exactly once."""
     global _installed
     global _original_materialize_agent
+    global _original_prepare_start
     global _original_run
     global _original_workspace_capabilities
     global _original_workspace_tool_contributions
     if _installed:
         return
+    _original_prepare_start = local_runtime.LocalExecutionBackend.prepare_start
     _original_run = local_runtime.LocalExecutionBackend._run
     _original_materialize_agent = agent_executor_runtime._materialize_agent
     _original_workspace_capabilities = agent_executor_runtime.workspace_capabilities
     _original_workspace_tool_contributions = factory_runtime.workspace_tool_contributions
+    local_runtime.LocalExecutionBackend.prepare_start = _prepare_start_with_attachment_owner
     local_runtime.LocalExecutionBackend._run = _run_with_attachment_owner
     agent_executor_runtime._materialize_agent = _materialize_agent_with_attachment_reader
     agent_executor_runtime.workspace_capabilities = (
