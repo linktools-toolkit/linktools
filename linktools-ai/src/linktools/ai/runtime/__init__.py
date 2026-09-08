@@ -6,6 +6,7 @@ from ..errors import ErrorDiagnostics
 from ._agent import Agent, Execution, Session
 from ._approval import DefaultApprovalService
 from ._artifact import DefaultArtifactService
+from ._attachment_admission import install_attachment_admission
 from ._context import RuntimeContext
 from ._evaluation import DefaultEvaluationService
 from ._event import DefaultEventService, ExecutionDelta, LiveExecutionEventBroker
@@ -84,6 +85,9 @@ from .state import (
     RuntimeStatePlan,
     RuntimeStateRoute,
 )
+
+install_attachment_admission()
+del install_attachment_admission
 
 __all__ = [
     "Agent",
