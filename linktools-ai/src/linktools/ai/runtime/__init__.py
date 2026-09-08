@@ -20,6 +20,15 @@ from ._runtime_history import RuntimeHistory
 from ._runtime_service import Runtime
 from ._session import DefaultSessionService
 from ._snapshot import RunSnapshot, snapshot_digest
+from .recovery import (
+    ExecutionRecoveryEffect,
+    ResolveToolEffectRequest,
+    ToolEffectApplied,
+    ToolEffectFailed,
+    ToolEffectNotApplied,
+    ToolEffectResolution,
+    ToolEffectResolutionResult,
+)
 from .service_api import (
     ApprovalCreateRequest,
     ApprovalDecisionRequest,
@@ -119,6 +128,7 @@ __all__ = [
     "ExecutionHistoryItem",
     "ExecutionHistoryReader",
     "ExecutionHistoryService",
+    "ExecutionRecoveryEffect",
     "ExecutionRequest",
     "ExecutionResult",
     "ExecutionService",
@@ -136,6 +146,7 @@ __all__ = [
     "LocalExecutionBackend",
     "Page",
     "ReplayEvaluationRequest",
+    "ResolveToolEffectRequest",
     "ResumeSessionRequest",
     "RetryExecutionRequest",
     "RunEvaluationRequest",
@@ -159,6 +170,11 @@ __all__ = [
     "TaskEvent",
     "TaskEventType",
     "TaskService",
+    "ToolEffectApplied",
+    "ToolEffectFailed",
+    "ToolEffectNotApplied",
+    "ToolEffectResolution",
+    "ToolEffectResolutionResult",
     "TranscriptItem",
     "UpdateSessionRequest",
     "put_runtime_object",
