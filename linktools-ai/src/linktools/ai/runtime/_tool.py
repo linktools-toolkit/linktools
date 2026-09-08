@@ -83,6 +83,7 @@ class ToolOperationRecord:
         except AIError as error:
             raise ValueError("tool operation lease identity is invalid") from error
 
+
 class ToolStateRepository(Protocol):
     async def admit(self, request: ToolOperationAdmission) -> ToolOperationRecord: ...
     async def reserve(self, record: ToolOperationRecord) -> ToolOperationRecord: ...
@@ -355,7 +356,7 @@ class RuntimeToolOperationBridge:
             except ValueError as error:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
             raise AIError(code)
-        return await _apply_workspace_binding(args, fields, binding)
+        return await _apply_workspace_binding(args, raw_args, fields, binding)
 
     async def existing_call_ids(
         self, tool_call_ids: Sequence[str]
@@ -882,8 +883,14 @@ class RuntimeToolOperationBridge:
         return self._step_run_id
 
 
+def _workspace_pointer(field: str, index: int | None = None) -> str:
+    pointer = "/" + field.replace("~", "~0").replace("/", "~1")
+    return pointer if index is None else f"{pointer}/{index}"
+
+
 async def _apply_workspace_binding(
     args: dict[str, Any],
+    raw_args: dict[str, Any],
     fields: Sequence[str],
     binding: WorkspaceToolCallBinding,
 ) -> dict[str, Any]:
@@ -891,43 +898,40 @@ async def _apply_workspace_binding(
     effective = dict(args)
     expected: set[str] = set()
     for field in fields:
-        value = args.get(field)
-        if isinstance(value, str):
-            values = (value,)
-        elif isinstance(value, Sequence) and not isinstance(
-            value,
+        if field not in raw_args:
+            continue
+        raw_value = raw_args[field]
+        if isinstance(raw_value, str):
+            pointers = (_workspace_pointer(field),)
+        elif isinstance(raw_value, Sequence) and not isinstance(
+            raw_value,
             (str, bytes, bytearray),
         ):
-            values = tuple(value)
-        else:
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        for index, _value in enumerate(values):
-            pointer = "/" + field.replace("~", "~0").replace("/", "~1")
-            if not isinstance(value, str):
-                pointer += f"/{index}"
-            expected.add(pointer)
-            if pointer not in by_pointer:
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        if isinstance(value, str):
-            effective[field] = by_pointer["/" + field.replace("~", "~0").replace("/", "~1")]
-        elif isinstance(value, tuple):
-            effective[field] = tuple(
-                by_pointer[
-                    "/"
-                    + field.replace("~", "~0").replace("/", "~1")
-                    + f"/{index}"
-                ]
-                for index in range(len(value))
+            pointers = tuple(
+                _workspace_pointer(field, index)
+                for index in range(len(raw_value))
             )
         else:
-            effective[field] = [
-                by_pointer[
-                    "/"
-                    + field.replace("~", "~0").replace("/", "~1")
-                    + f"/{index}"
-                ]
-                for index in range(len(value))
-            ]
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        if any(pointer not in by_pointer for pointer in pointers):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        expected.update(pointers)
+        replacements = tuple(by_pointer[pointer] for pointer in pointers)
+        value = args.get(field)
+        if isinstance(raw_value, str):
+            if not isinstance(value, str):
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            effective[field] = replacements[0]
+        elif isinstance(value, tuple):
+            if len(value) != len(replacements):
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            effective[field] = replacements
+        elif isinstance(value, list):
+            if len(value) != len(replacements):
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            effective[field] = list(replacements)
+        else:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     if expected != set(by_pointer):
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     return effective
