@@ -1,18 +1,23 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-import asyncio
 from collections.abc import Mapping
 from pathlib import Path
 
 import pytest
-from pydantic_ai.models.test import TestModel
+from pydantic_ai.messages import ModelMessage, ModelResponse, TextPart
+from pydantic_ai.models.function import AgentInfo, FunctionModel
 
 from linktools.ai.core import ExecutionStatus, JsonValue
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.runtime import Runtime, RuntimeState
 from linktools.ai.runtime.state._attachment_repository import AttachmentRepository
 from linktools.ai.workspace import Workspace
+
+
+async def _text_model(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+    del messages, info
+    return ModelResponse(parts=[TextPart("ok")])
 
 
 class _TextModelBinding:
@@ -25,8 +30,8 @@ class _TextModelBinding:
         "model": "test",
     }
 
-    def materialize(self) -> TestModel:
-        return TestModel(custom_output_text="ok")
+    def materialize(self) -> FunctionModel:
+        return FunctionModel(_text_model)
 
 
 class _TextModels:
@@ -52,20 +57,6 @@ class _TextModels:
         return _TextModelBinding()
 
 
-def _await_chain(value: object) -> str:
-    parts: list[str] = []
-    current = value
-    seen: set[int] = set()
-    while current is not None and id(current) not in seen:
-        seen.add(id(current))
-        frame = getattr(current, "cr_frame", None) or getattr(current, "ag_frame", None)
-        if frame is not None:
-            code = frame.f_code
-            parts.append(f"{Path(code.co_filename).name}:{frame.f_lineno}:{code.co_name}")
-        current = getattr(current, "cr_await", None) or getattr(current, "ag_await", None)
-    return " -> ".join(parts)
-
-
 @pytest.mark.asyncio
 async def test_managed_path_admission_replays_without_source_read(tmp_path: Path) -> None:
     source = tmp_path / "evidence.txt"
@@ -79,21 +70,12 @@ async def test_managed_path_admission_replays_without_source_read(tmp_path: Path
         models=_TextModels(),  # type: ignore[arg-type]
         state=state,
     ) as runtime:
-        pending = await runtime.agent("default").start(
+        first = await runtime.agent("default").run(
             "inspect the attachment",
             attachments=("evidence.txt",),
             idempotency_key=key,
+            timeout_seconds=10,
         )
-        await asyncio.sleep(1)
-        current_task = asyncio.current_task()
-        chains = sorted(
-            f"{task.get_name()}={_await_chain(task.get_coro())}"
-            for task in asyncio.all_tasks()
-            if task is not current_task and not task.done()
-        )
-        pytest.fail("managed execution task snapshot: " + " || ".join(chains))
-
-        first = await pending.wait(timeout_seconds=10)
         assert first.status is ExecutionStatus.SUCCEEDED
 
         execution = await state.execution.executions.get(
