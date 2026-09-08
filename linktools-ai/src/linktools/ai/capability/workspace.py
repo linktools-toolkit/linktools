@@ -22,6 +22,25 @@ from ._workspace import (
 if TYPE_CHECKING:
     from pydantic_ai import RunContext as PydanticRunContext
 
+WORKSPACE_FILESYSTEM_TOOL_NAMES = (
+    "create_directory",
+    "edit_file",
+    "file_info",
+    "find_files",
+    "list_directory",
+    "read_file",
+    "search_files",
+    "write_file",
+)
+WORKSPACE_FILESYSTEM_READ_TOOL_NAMES = (
+    "file_info",
+    "find_files",
+    "list_directory",
+    "read_file",
+    "search_files",
+)
+ATTACHMENT_TOOL_NAMES = ("read_attachment",)
+
 
 class _SharedWorkspaceSandboxToolset(_WorkspaceSandboxToolset):
     """Materialize workspace tools around one Runtime-owned WorkspaceAccess."""
@@ -81,4 +100,9 @@ def workspace_capabilities_with_access(
     return (Toolset(toolset, id=_WORKSPACE_SANDBOX_CAPABILITY_ID),)
 
 
-__all__ = ["workspace_capabilities_with_access"]
+__all__ = [
+    "ATTACHMENT_TOOL_NAMES",
+    "WORKSPACE_FILESYSTEM_READ_TOOL_NAMES",
+    "WORKSPACE_FILESYSTEM_TOOL_NAMES",
+    "workspace_capabilities_with_access",
+]
