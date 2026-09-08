@@ -1,10 +1,11 @@
-name: Native capability verification
+name: AI capability verification
 
 on:
   push:
     branches:
       - feat/ai-native-capabilities-v4
       - fix/ai-native-capabilities-v4-review
+      - refactor/ai-harness-capabilities
 
 permissions:
   contents: read
@@ -23,26 +24,27 @@ jobs:
         with:
           python-version: '3.13'
       - name: Archive tracked verification inputs
-        run: git archive --format=tar.gz --output=native-source.tar.gz HEAD
+        run: git archive --format=tar.gz --output=ai-source.tar.gz HEAD
       - name: Resolve offline verification dependencies
         run: |
           python -m pip download --dest wheelhouse --only-binary=:all: \
             'linktools-setup==0.0.3' \
             'pydantic-ai-slim[mcp,openai]==2.40.0' \
+            'pydantic-ai-harness==0.29.0' \
             'sqlalchemy[asyncio]==2.0.51' 'aiosqlite==0.22.1' \
             asyncpg asyncmy pytest pytest-asyncio httpx psutil filelock jsonschema \
             rich argcomplete 'requests[socks]' setuptools wheel jinja2 \
             -r requirements.txt
       - uses: actions/upload-artifact@v4
         with:
-          name: native-inputs-${{ github.sha }}
+          name: ai-inputs-${{ github.sha }}
           path: |
-            native-source.tar.gz
+            ai-source.tar.gz
             wheelhouse
           retention-days: 1
 
   clean-gates:
-    name: Clean native gates
+    name: Clean capability gates
     needs: source
     runs-on: ubuntu-latest
     steps:
@@ -50,42 +52,33 @@ jobs:
       - uses: actions/setup-python@v7
         with:
           python-version: '3.13'
-      - name: Install clean native environment
+      - name: Install clean capability environment
         run: |
           python -m pip install --quiet --upgrade pip
           python -m pip install --quiet -U -r requirements.txt
           python -m pip install --quiet \
-            'pydantic-ai-slim[mcp,openai]==2.40.0'
+            'pydantic-ai-slim[mcp,openai]==2.40.0' \
+            'pydantic-ai-harness==0.29.0'
           python manage.py install --editable --quiet
       - name: Record clean environment
         run: |
           git rev-parse HEAD
           python -V
-          python -c 'import importlib.metadata as m; print(m.version("pydantic-ai-slim"))'
-          if python -m pip show pydantic-ai-harness; then
-            echo "pydantic-ai-harness must not be installed" >&2
-            exit 1
-          fi
-          if git grep -n -i -E 'pydantic-ai-harness|harness' -- \
-            linktools-ai/src tests/ai scripts/check/ai linktools-ai/linktools.yml; then
-            echo "Harness references remain in the native verification surface" >&2
-            exit 1
-          else
-            status=$?
-            if [ "$status" -ne 1 ]; then
-              echo "Harness reference scan failed with status $status" >&2
-              exit "$status"
-            fi
-          fi
+          python - <<'PY'
+          import importlib.metadata as metadata
+
+          print("pydantic-ai", metadata.version("pydantic-ai-slim"))
+          print("pydantic-ai-harness", metadata.version("pydantic-ai-harness"))
+          PY
       - name: Run source checks
         run: python manage.py check linktools-ai
-      - name: Build native package
+      - name: Build package
         run: python manage.py build linktools-ai
-      - name: Verify native package
+      - name: Verify package
         run: python manage.py verify linktools-ai
 
   python310:
-    name: Python 3.10 with Pydantic AI 2.40.0
+    name: Python 3.10 with SDK floors
     needs: source
     runs-on: ubuntu-latest
     steps:
@@ -98,23 +91,27 @@ jobs:
           python -m pip install --quiet --upgrade pip
           python -m pip install --quiet -U -r requirements.txt
           python -m pip install --quiet \
-            'pydantic-ai-slim[mcp,openai]==2.40.0'
+            'pydantic-ai-slim[mcp,openai]==2.40.0' \
+            'pydantic-ai-harness==0.29.0'
           python manage.py install --editable --quiet
       - name: Record Python 3.10 environment
         run: |
           git rev-parse HEAD
           python -V
           python - <<'PY'
+          import importlib.metadata as metadata
           import pydantic_ai
 
           print(pydantic_ai.__version__)
+          print(metadata.version("pydantic-ai-harness"))
           assert pydantic_ai.__version__ == "2.40.0"
+          assert metadata.version("pydantic-ai-harness") == "0.29.0"
           PY
-      - name: Run Python 3.10 native checks
+      - name: Run Python 3.10 checks
         run: python manage.py check linktools-ai
 
   python-current:
-    name: Current Python native suite
+    name: Current Python AI suite
     needs: source
     runs-on: ubuntu-latest
     steps:
@@ -132,8 +129,14 @@ jobs:
         run: |
           git rev-parse HEAD
           python -V
-          python -c 'import pydantic_ai; print(pydantic_ai.__version__)'
-      - name: Run current native checks
+          python - <<'PY'
+          import importlib.metadata as metadata
+          import pydantic_ai
+
+          print(pydantic_ai.__version__)
+          print(metadata.version("pydantic-ai-harness"))
+          PY
+      - name: Run current checks
         run: python manage.py check linktools-ai
       - name: Run complete AI test suite
         id: ai-tests
@@ -157,7 +160,7 @@ jobs:
               f"skipped={suite.attrib.get('skipped', '0')}"
           )
           with Path("${{ github.step_summary }}").open("a", encoding="utf-8") as file:
-              file.write("## Native AI test suite\n\n" + summary + "\n")
+              file.write("## AI test suite\n\n" + summary + "\n")
           PY
 
   local-platform:
