@@ -1,0 +1,68 @@
+name: Finalize subagent execution tree export
+
+on:
+  push:
+    branches:
+      - feat/ai-subagent-observability
+    paths:
+      - .github/workflows/ai-subagent-observability-finalize.yml
+
+permissions:
+  contents: write
+
+env:
+  PIP_DISABLE_PIP_VERSION_CHECK: "1"
+  PYTHONUNBUFFERED: "1"
+
+jobs:
+  finalize:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: feat/ai-subagent-observability
+          fetch-depth: 0
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.10'
+      - name: Fix public export
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          path = Path("linktools-ai/src/linktools/ai/runtime/service_api.py")
+          value = path.read_text()
+          old = '''    "ExecutionStreamEvent",\n    "ExecutionTraceItem",\n'''
+          new = '''    "ExecutionStreamEvent",\n    "ExecutionTraceItem",\n    "ExecutionTreeEvent",\n'''
+          if value.count(old) != 1:
+              raise RuntimeError("unexpected service_api export layout")
+          path.write_text(value.replace(old, new, 1))
+          PY
+      - name: Install tooling
+        run: |
+          python -m pip install --quiet --upgrade pip
+          python -m pip install --quiet -U -r requirements.txt
+          python manage.py install --editable --quiet
+      - name: Verify public surface
+        run: |
+          python - <<'PY'
+          import linktools.ai.runtime.service_api as service_api
+          from linktools.ai.runtime import ExecutionTreeEvent
+
+          assert "ExecutionTreeEvent" in service_api.__all__
+          assert service_api.ExecutionTreeEvent is ExecutionTreeEvent
+          PY
+      - name: Run execution tree tests
+        run: python -m pytest -q tests/ai/test_subagent_execution_tree.py
+      - name: Run linktools-ai gate
+        run: python manage.py check linktools-ai
+      - name: Commit final export
+        shell: bash
+        run: |
+          rm .github/workflows/ai-subagent-observability-finalize.yml
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -m "fix(ai): export execution tree event"
+          git push origin HEAD:feat/ai-subagent-observability
