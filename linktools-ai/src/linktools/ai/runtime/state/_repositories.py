@@ -4107,7 +4107,7 @@ class MemoryRepositoryImpl(_ResourceRepository[MemoryRecord]):
                     or expected_storage_version != current.storage_version
                 ):
                     raise AIError(ErrorCode.STORAGE_CONFLICT)
-                if operation_record.sequence != current.storage_version + 1:
+                if operation_record.sequence <= current.storage_version:
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                 next_value = replace(
                     record,
@@ -4208,7 +4208,7 @@ class MemoryRepositoryImpl(_ResourceRepository[MemoryRecord]):
                     isinstance(current.storage_version, bool)
                     or current.storage_version < 1
                     or value.revision != current.storage_version
-                    or operation_record.sequence != current.storage_version + 1
+                    or operation_record.sequence <= current.storage_version
                 ):
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                 await _insert_operation(
@@ -4232,7 +4232,7 @@ class MemoryRepositoryImpl(_ResourceRepository[MemoryRecord]):
                 or current.storage_version != expected_storage_version
             ):
                 raise AIError(ErrorCode.STORAGE_CONFLICT)
-            if operation_record.sequence != current.storage_version + 1:
+            if operation_record.sequence <= current.storage_version:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             if not await transaction.delete_record(
                 key,
