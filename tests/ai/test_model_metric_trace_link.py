@@ -190,12 +190,12 @@ async def test_output_retry_metric_lineage_uses_pydantic_retry_state() -> None:
         TestModel(custom_output_text="done"),
         deps_type=object,
         capabilities=[_model_metrics(recorder, run_id), _persistence(store, run_id, recorder)],
-        retries={"output": 1},
+        retries={"output": 2},
     )
 
     @agent.output_validator
-    def retry_once(ctx: RunContext[object], output: str) -> str:
-        if ctx.retry == 0:
+    def retry_twice(ctx: RunContext[object], output: str) -> str:
+        if ctx.retry < 2:
             raise ModelRetry("retry output")
         return output
 
@@ -205,9 +205,10 @@ async def test_output_retry_metric_lineage_uses_pydantic_retry_state() -> None:
     model_observations = [
         value for value in recorder.observations if value.kind == "linktools.model.request"
     ]
-    assert len(model_observations) == 2
+    assert len(model_observations) == 3
     assert "linktools.output_retry_index" not in model_observations[0].correlation
     assert model_observations[1].correlation["linktools.output_retry_index"] == 1
+    assert model_observations[2].correlation["linktools.output_retry_index"] == 2
 
 
 @pytest.mark.asyncio
