@@ -33,32 +33,41 @@ if TYPE_CHECKING:
     from pydantic_ai_harness.shell import ShellToolset
 
 AttachmentReader = Callable[["WorkspaceAccess", str], Awaitable[dict[str, Any]]]
-SessionOpener = Callable[[], Awaitable[SandboxSession]]
 
-WORKSPACE_FILESYSTEM_TOOL_NAMES = (
+_BASE_WORKSPACE_FILESYSTEM_TOOL_NAMES = (
     "create_directory",
     "edit_file",
     "file_info",
     "find_files",
     "list_directory",
-    "read_attachment",
     "read_file",
     "search_files",
     "write_file",
 )
-WORKSPACE_FILESYSTEM_READ_TOOL_NAMES = (
+_BASE_WORKSPACE_FILESYSTEM_READ_TOOL_NAMES = (
     "file_info",
     "find_files",
     "list_directory",
-    "read_attachment",
     "read_file",
     "search_files",
+)
+WORKSPACE_FILESYSTEM_TOOL_NAMES = (
+    *_BASE_WORKSPACE_FILESYSTEM_TOOL_NAMES,
+    "read_attachment",
+)
+WORKSPACE_FILESYSTEM_READ_TOOL_NAMES = (
+    *_BASE_WORKSPACE_FILESYSTEM_READ_TOOL_NAMES,
+    "read_attachment",
 )
 WORKSPACE_SHELL_TOOL_NAMES = (
     "check_command",
     "run_command",
     "start_command",
     "stop_command",
+)
+_LEGACY_WORKSPACE_TOOL_NAMES = (
+    *_BASE_WORKSPACE_FILESYSTEM_TOOL_NAMES,
+    *WORKSPACE_SHELL_TOOL_NAMES,
 )
 _WORKSPACE_TOOL_NAMES = (*WORKSPACE_FILESYSTEM_TOOL_NAMES, *WORKSPACE_SHELL_TOOL_NAMES)
 _WORKSPACE_METADATA_KEY = "linktools.ai.workspace_tool_class"
@@ -183,11 +192,7 @@ class _LocalSandboxSession:
         *,
         expected_hash: "str | None" = None,
     ) -> str:
-        return await self._filesystem.write_file(
-            path,
-            content,
-            expected_hash=expected_hash,
-        )
+        return await self._filesystem.write_file(path, content, expected_hash=expected_hash)
 
     async def edit_file(
         self,
@@ -264,20 +269,17 @@ class _LocalSandboxSession:
 
 
 class WorkspaceAccess:
-    """Lazily own one SandboxSession without exposing it across module boundaries."""
+    """Lazily own one SandboxSession and expose the public byte-read boundary."""
 
     def __init__(
         self,
         sandbox: Sandbox,
         *,
-        session: "SandboxSession | None" = None,
-        opener: "SessionOpener | None" = None,
+        run_context: "PydanticRunContext[AgentContext[object]] | None" = None,
     ) -> None:
-        if session is not None and opener is not None:
-            raise ValueError("WorkspaceAccess accepts either session or opener")
         self._sandbox = sandbox
-        self._session = session
-        self._opener = opener or sandbox.open
+        self._run_context = run_context
+        self._session: SandboxSession | None = None
         self._lock = asyncio.Lock()
         self._closed = False
 
@@ -296,7 +298,10 @@ class WorkspaceAccess:
                 raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
             session = self._session
             if session is None:
-                session = await self._opener()
+                if isinstance(self._sandbox, _LocalSandbox) and self._run_context is not None:
+                    session = await self._sandbox._open_for_run(self._run_context)
+                else:
+                    session = await self._sandbox.open()
                 self._session = session
             return session
 
@@ -355,19 +360,6 @@ class _WorkspaceToolSurface:
         if self._access is None:
             raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
         return await self._access._session_for_tools()
-
-    async def read_attachment(self, path: str) -> dict[str, Any]:
-        """Read an authorized attachment for use in the next model request.
-
-        Args:
-            path: Workspace-relative file path or an authorized managed attachment path.
-
-        Returns:
-            JSON-serializable attachment metadata and successful read status.
-        """
-        if self._access is None or self._attachment_reader is None:
-            raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
-        return await self._attachment_reader(self._access, path)
 
     async def read_file(
         self,
@@ -464,7 +456,7 @@ class _WorkspaceToolSurface:
 
         Args:
             pattern: Regex pattern to search for.
-            path: Directory to search in, relative to root.
+            path: Directory to search in, relative to the root directory.
             include_glob: If provided, only search files matching this glob (e.g. '*.py').
 
         Returns:
@@ -488,7 +480,7 @@ class _WorkspaceToolSurface:
         Args:
             pattern: Glob pattern to match, relative to `path` (e.g. '*.py',
                 '**/*.json'). Absolute patterns are rejected.
-            path: Directory to search in, relative to root.
+            path: Directory to search in, relative to the root directory.
 
         Returns:
             Newline-separated list of matching file paths relative to root.
@@ -577,6 +569,19 @@ class _WorkspaceToolSurface:
         session = await self._require_session()
         return await session.stop_command(command_id)
 
+    async def read_attachment(self, path: str) -> dict[str, Any]:
+        """Read an authorized attachment for use in the next model request.
+
+        Args:
+            path: Workspace-relative file path or an authorized managed attachment path.
+
+        Returns:
+            JSON-serializable attachment metadata and successful read status.
+        """
+        if self._access is None or self._attachment_reader is None:
+            raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+        return await self._attachment_reader(self._access, path)
+
 
 class _WorkspaceSandboxToolset(FunctionToolset[AgentContext[object]]):
     def __init__(
@@ -585,12 +590,14 @@ class _WorkspaceSandboxToolset(FunctionToolset[AgentContext[object]]):
         selected_tool_names: tuple[str, ...],
         *,
         access: "WorkspaceAccess | None" = None,
+        run_context: "PydanticRunContext[AgentContext[object]] | None" = None,
         attachment_reader: "AttachmentReader | None" = None,
     ) -> None:
         super().__init__()
         self._sandbox = sandbox
         self._selected_tool_names = selected_tool_names
         self._access = access
+        self._run_context = run_context
         self._attachment_reader = attachment_reader
         surface = _WorkspaceToolSurface(access, attachment_reader)
         for name in selected_tool_names:
@@ -600,16 +607,11 @@ class _WorkspaceSandboxToolset(FunctionToolset[AgentContext[object]]):
         self,
         ctx: "PydanticRunContext[AgentContext[object]]",
     ) -> "_WorkspaceSandboxToolset":
-        async def open_session() -> SandboxSession:
-            if isinstance(self._sandbox, _LocalSandbox):
-                return await self._sandbox._open_for_run(ctx)
-            return await self._sandbox.open()
-
-        access = WorkspaceAccess(self._sandbox, opener=open_session)
         return _WorkspaceSandboxToolset(
             self._sandbox,
             self._selected_tool_names,
-            access=access,
+            access=WorkspaceAccess(self._sandbox, run_context=ctx),
+            run_context=ctx,
             attachment_reader=self._attachment_reader,
         )
 
@@ -633,7 +635,7 @@ def workspace_tool_contributions(
     del workspace
     surface = _WorkspaceToolSurface(None)
     result = []
-    for name in _WORKSPACE_TOOL_NAMES:
+    for name in _LEGACY_WORKSPACE_TOOL_NAMES:
         tool = _workspace_tool(surface, name)
         semantic = contribution_semantic_contract("tool", name, tool)
         result.append(
@@ -647,19 +649,38 @@ def workspace_tool_contributions(
     return tuple(result)
 
 
+def attachment_tool_contribution(
+    workspace: Workspace,
+) -> CapabilityContribution[object]:
+    """Return the new read_attachment compiler candidate without changing old pins."""
+    del workspace
+    surface = _WorkspaceToolSurface(None)
+    name = "read_attachment"
+    tool = _workspace_tool(surface, name)
+    semantic = contribution_semantic_contract("tool", name, tool)
+    return CapabilityContribution(
+        "tool",
+        name,
+        capability_fingerprint("tool", name, semantic),
+        tool,
+    )
+
+
 def workspace_capabilities(
     workspace: Workspace,
     selected_tool_names: Sequence[str],
     *,
     attachment_reader: "AttachmentReader | None" = None,
 ) -> "tuple[AbstractCapability[AgentContext[object]], ...]":
-    """Materialize the selected workspace tools through one lazy per-run SandboxSession."""
+    """Materialize selected workspace tools through one lazy per-run SandboxSession."""
     selected = frozenset(selected_tool_names)
     unknown = selected.difference(_WORKSPACE_TOOL_NAMES)
     if unknown:
         raise ValueError(f"unknown workspace tools: {tuple(sorted(unknown))}")
     if not selected:
         return ()
+    if "read_attachment" in selected and attachment_reader is None:
+        raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
     ordered = tuple(name for name in _WORKSPACE_TOOL_NAMES if name in selected)
     sandbox = (
         workspace.sandbox
@@ -702,6 +723,7 @@ __all__ = [
     "WORKSPACE_FILESYSTEM_TOOL_NAMES",
     "WORKSPACE_SHELL_TOOL_NAMES",
     "WorkspaceAccess",
+    "attachment_tool_contribution",
     "workspace_capabilities",
     "workspace_tool_class",
     "workspace_tool_contributions",
