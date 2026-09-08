@@ -5,7 +5,7 @@
 from collections.abc import Awaitable, Callable
 from typing import cast
 
-from pydantic import JsonValue as PydanticJsonValue
+from pydantic import Field, JsonValue as PydanticJsonValue
 from pydantic_ai.capabilities import AbstractCapability
 from pydantic_ai.exceptions import ModelRetry, ToolFailed
 from pydantic_ai.tools import RunContext as PydanticRunContext
@@ -53,8 +53,9 @@ class _PydanticSubagentCapability(AbstractCapability[AgentContext[object]]):
             ctx: PydanticRunContext[AgentContext[object]],
             subagent_id: str,
             task: str,
+            attachments: list[str] = Field(default_factory=list),
         ) -> "dict[str, PydanticJsonValue]":
-            """Delegate one task to a selected subagent."""
+            """Delegate one task and an explicit attachment subset to a selected subagent."""
             if not ctx.tool_call_id:
                 raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
             try:
@@ -63,6 +64,7 @@ class _PydanticSubagentCapability(AbstractCapability[AgentContext[object]]):
                     await self._capability.delegate_task(
                         subagent_id,
                         task,
+                        attachments=tuple(attachments),
                         invocation_id=ctx.tool_call_id,
                     ),
                 )
@@ -71,7 +73,7 @@ class _PydanticSubagentCapability(AbstractCapability[AgentContext[object]]):
                     raise ToolFailed("subagent execution failed; adapt and continue") from error
                 if error.code not in _MODEL_CORRECTABLE_ERRORS:
                     raise
-                raise ModelRetry("requested subagent or task is invalid") from error
+                raise ModelRetry("requested subagent, task, or attachments are invalid") from error
 
         return toolset
 
