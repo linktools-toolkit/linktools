@@ -9,6 +9,7 @@ from pydantic_ai.messages import ModelResponse, ToolCallPart
 from linktools.ai.capability import WorkspaceAccess
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.runtime._input import ExecutionInputMaterializer
+from linktools.ai.runtime._tool import _apply_workspace_binding
 from linktools.ai.runtime._workspace_binding import WorkspaceToolCallBinder
 from linktools.ai.runtime.state import (
     RuntimeState,
@@ -115,6 +116,13 @@ async def test_workspace_binding_allows_omitted_default_path() -> None:
     binding = store.values[("step", "call")]
     assert binding.paths == ()
     assert binding.error_code is None
+    effective = await _apply_workspace_binding(
+        {"path": "."},
+        {},
+        ("path",),
+        binding,
+    )
+    assert effective == {"path": "."}
 
 
 @pytest.mark.asyncio
