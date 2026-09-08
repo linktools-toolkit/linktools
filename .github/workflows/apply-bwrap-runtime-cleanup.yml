@@ -1,0 +1,62 @@
+name: Apply Bubblewrap runtime cleanup
+
+on:
+  push:
+    branches:
+      - fix/ai-native-capabilities-v4-review
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: fix/ai-native-capabilities-v4-review
+      - name: Restore runtime security arguments and logging
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          path = Path("linktools-ai/src/linktools/ai/workspace/_bubblewrap.py")
+          text = path.read_text(encoding="utf-8")
+          old = (
+              '        "--as-pid-1",\n'
+              '        "--ro-bind",\n'
+          )
+          new = (
+              '        "--as-pid-1",\n'
+              '        "--cap-drop",\n'
+              '        "ALL",\n'
+              '        "--ro-bind",\n'
+          )
+          if text.count(old) != 1:
+              raise SystemExit("Bubblewrap launcher argument shape changed")
+          text = text.replace(old, new, 1)
+          old = (
+              '            _logger.warning(\n'
+              '                "bubblewrap guardian stderr: %s",\n'
+          )
+          new = (
+              '            _logger.debug(\n'
+              '                "bubblewrap guardian stderr: %s",\n'
+          )
+          if text.count(old) != 1:
+              raise SystemExit("Bubblewrap stderr logger shape changed")
+          path.write_text(text.replace(old, new, 1), encoding="utf-8")
+          PY
+          rm -f tests/ai/test_bubblewrap_args.py
+      - name: Commit cleanup and remove this workflow
+        run: |
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git rm .github/workflows/apply-bwrap-runtime-cleanup.yml
+          git add -A \
+            linktools-ai/src/linktools/ai/workspace/_bubblewrap.py \
+            tests/ai/test_bubblewrap_args.py
+          git diff --cached --check
+          git commit -m 'fix(ai): keep bubblewrap runtime boundary strict'
+          git push origin HEAD:fix/ai-native-capabilities-v4-review
