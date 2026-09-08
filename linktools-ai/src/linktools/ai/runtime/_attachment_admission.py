@@ -169,6 +169,7 @@ async def _adopt_prepare_in_transaction(
     prepared: PreparedInput,
     *,
     execution_id: str,
+    execution_record_key: str,
 ) -> None:
     stored = await transaction.get_record(bytes.fromhex(owner_key))
     if stored is None or stored.kind != "input_prepare":
@@ -180,7 +181,7 @@ async def _adopt_prepare_in_transaction(
     ):
         raise AIError(ErrorCode.IDEMPOTENCY_CONFLICT)
     target = InputTarget(
-        Locator("state:execution", "records", execution_id),
+        Locator("state:execution", "records", execution_record_key),
         None,
     )
     if current.status == "ADOPTED":
@@ -233,12 +234,16 @@ async def _managed_reserve_start(
     async def mutate(transaction: "StateTransaction") -> "ExecutionStartReservationResult":
         result = await _original_reserve_start(self, effective)
         _validate_execution_input(result.execution, prepared)
+        execution_record_key = self._key(
+            "execution", result.execution.execution_id
+        ).hex()
         await _adopt_prepare_in_transaction(
             transaction,
             attachments,
             owner_key,
             prepared,
             execution_id=result.execution.execution_id,
+            execution_record_key=execution_record_key,
         )
         return result
 
@@ -479,11 +484,23 @@ async def _replay_adopted_input(
     intent_digest = input_intent_digest(raw_prompt, attachments)
     if record.intent_digest != intent_digest:
         raise AIError(ErrorCode.IDEMPOTENCY_CONFLICT)
+    identity = await service._state.execution.idempotency.get(
+        scope,
+        idempotency_key_digest(idempotency_key),
+        tenant_id=principal.tenant_id,
+    )
+    if identity is None:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     execution = await service._state.execution.executions.get(
-        record.target.at.key,
+        identity.resource_id,
         tenant_id=principal.tenant_id,
     )
     if execution is None or not execution.attachment_manifest:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    expected_locator_key = repository._key(
+        "execution", execution.execution_id
+    ).hex()
+    if record.target.at.key != expected_locator_key:
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     if execution.path_origin != record.path_origin or execution.input_digest is None:
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
