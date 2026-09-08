@@ -1,19 +1,19 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Planning dependency upgrades must not widen the LinkTools tool surface."""
+"""Harness Planning must preserve the intentionally narrow LinkTools surface."""
 
 import pytest
 from linktools.ai.runtime._capabilities import (
     PLANNING_TOOL_NAMES,
-    _RuntimePlanningCapability,
     compose_platform_capabilities,
 )
 from linktools.ai.runtime.state import StagingStepStore
-from pydantic_ai.messages import ModelRequest, ModelResponse, UserPromptPart
+from pydantic_ai.messages import CachePoint, ModelRequest, ModelResponse, UserPromptPart
 from pydantic_ai.models import ModelRequestContext, ModelRequestParameters
 from pydantic_ai.models.test import TestModel
 from pydantic_ai.tools import RunContext
 from pydantic_ai.usage import RunUsage
+from pydantic_ai_harness.planning import InMemoryPlanStore, PlanItem, Planning, TaskStatus
 
 pytestmark = pytest.mark.asyncio
 
@@ -39,33 +39,20 @@ async def test_linktools_planning_registers_only_write_plan() -> None:
         plan_store_resolver=lambda _ctx: None,  # type: ignore[return-value]
     )
     planning = next(
-        capability
-        for capability in capabilities
-        if isinstance(capability, _RuntimePlanningCapability)
+        capability for capability in capabilities if isinstance(capability, Planning)
     )
     assert tuple(planning.get_toolset().tools) == PLANNING_TOOL_NAMES
 
 
-class _PlanView:
-    owner_kind = "session"
-    owner_id = "session"
-
-    def __init__(self) -> None:
-        self.reads = 0
-
-    async def get_plan(self) -> dict[str, object]:
-        self.reads += 1
-        return {
-            "items": [{"content": "ship it", "status": "in_progress"}],
-            "revision": 3,
-        }
-
-
-async def test_planning_prompt_is_request_scoped_and_not_transcript_content() -> None:
-    store = _PlanView()
-    capability = _RuntimePlanningCapability(
-        lambda _ctx: store,  # type: ignore[arg-type]
-        id="planning",
+async def test_harness_planning_prompt_is_request_scoped_and_cache_safe() -> None:
+    store = InMemoryPlanStore()
+    await store.set_items(
+        [PlanItem(content="ship it", status=TaskStatus.in_progress)]
+    )
+    capability = Planning(
+        store=store,
+        tools=PLANNING_TOOL_NAMES,
+        id="linktools-planning",
     )
     context = RunContext(
         deps=None,
@@ -73,7 +60,6 @@ async def test_planning_prompt_is_request_scoped_and_not_transcript_content() ->
         usage=RunUsage(),
         run_id="run",
     )
-    await capability.before_run(context)
     original = UserPromptPart("continue")
     request_context = ModelRequestContext(
         model=TestModel(),
@@ -81,20 +67,22 @@ async def test_planning_prompt_is_request_scoped_and_not_transcript_content() ->
         model_settings=None,
         model_request_parameters=ModelRequestParameters(),
     )
+    captured: list[ModelRequest] = []
 
-    await capability.before_model_request(context, request_context)
+    async def handler(current: ModelRequestContext) -> ModelResponse:
+        assert isinstance(current.messages[-1], ModelRequest)
+        captured.append(current.messages[-1])
+        return ModelResponse(parts=[])
 
-    assert store.reads == 1
-    assert len(request_context.messages[-1].parts) == 2
-    assert isinstance(request_context.messages[-1].parts[-1], UserPromptPart)
-    assert request_context.messages[-1].parts[-1].content.startswith(
-        "[linktools.plan.v1]"
-    )
-
-    await capability.after_model_request(
+    await capability.wrap_model_request(
         context,
         request_context=request_context,
-        response=ModelResponse(parts=[]),
+        handler=handler,
     )
 
-    assert request_context.messages == [ModelRequest(parts=[original])]
+    assert len(captured) == 1
+    reminder = captured[0].parts[-1]
+    assert isinstance(reminder, UserPromptPart)
+    assert not isinstance(reminder.content, str)
+    assert any(isinstance(item, CachePoint) for item in reminder.content)
+    assert request_context.messages[0].parts[0] is original
