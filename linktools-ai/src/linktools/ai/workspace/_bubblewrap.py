@@ -797,8 +797,6 @@ def _build_bwrap_args(
         "--new-session",
         "--die-with-parent",
         "--as-pid-1",
-        "--cap-drop",
-        "ALL",
         "--ro-bind",
         str(runtime_root),
         "/",
