@@ -159,11 +159,6 @@ class _RuntimeModelMetricCapability(AbstractCapability[AgentContext[object]]):
         output_retry_index: int | None,
     ) -> None:
         try:
-            retry_measurements = (
-                ()
-                if output_retry_index is None
-                else (MetricMeasurement("output_retry_count", 1, 1),)
-            )
             observation = Observation(
                 version=1,
                 observation_id=attempt_id,
@@ -189,7 +184,6 @@ class _RuntimeModelMetricCapability(AbstractCapability[AgentContext[object]]):
                 measurements=(
                     MetricMeasurement("latency_ns", 1, monotonic_ns() - started),
                     *measurements,
-                    *retry_measurements,
                 ),
             )
             self._recorder.try_record(observation)
