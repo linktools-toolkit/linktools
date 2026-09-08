@@ -39,6 +39,17 @@ jobs:
               '_BASE_WORKSPACE_FILESYSTEM_TOOL_NAMES = (\n    "create_directory",',
           )
           replace_once(
+              'linktools-ai/src/linktools/ai/capability/__init__.py',
+              'from ._workspace import (\n    WORKSPACE_SHELL_TOOL_NAMES,\n',
+              'from ._workspace import (\n    WORKSPACE_FILESYSTEM_READ_TOOL_NAMES,\n    WORKSPACE_FILESYSTEM_TOOL_NAMES,\n    WORKSPACE_SHELL_TOOL_NAMES,\n',
+          )
+          replace_once(
+              'linktools-ai/src/linktools/ai/capability/__init__.py',
+              'from .workspace import (\n    WORKSPACE_FILESYSTEM_READ_TOOL_NAMES,\n    WORKSPACE_FILESYSTEM_TOOL_NAMES,\n)\n\n',
+              '',
+          )
+          Path('linktools-ai/src/linktools/ai/capability/workspace.py').unlink()
+          replace_once(
               'linktools-ai/src/linktools/ai/runtime/_agent_executor.py',
               'from ._input import _RuntimeUserPrompt, _restore_user_prompt\n',
               'from ._input import CanonicalUserInput, _RuntimeUserPrompt, _restore_user_prompt\n',
@@ -82,11 +93,11 @@ jobs:
         run: |
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git add linktools-ai/src/linktools/ai/capability/_workspace.py \
-                  linktools-ai/src/linktools/ai/runtime/_agent_executor.py \
-                  linktools-ai/src/linktools/ai/runtime/_execution.py \
-                  linktools-ai/src/linktools/ai/runtime/_local.py \
-                  linktools-ai/src/linktools/ai/runtime/_tool.py
+          git add -A linktools-ai/src/linktools/ai/capability \
+                     linktools-ai/src/linktools/ai/runtime/_agent_executor.py \
+                     linktools-ai/src/linktools/ai/runtime/_execution.py \
+                     linktools-ai/src/linktools/ai/runtime/_local.py \
+                     linktools-ai/src/linktools/ai/runtime/_tool.py
           git diff --cached --check
-          git commit -m 'fix(ai): restore merged runtime imports'
+          git commit -m 'fix(ai): restore merged runtime contracts'
           git push origin HEAD:refactor/ai-harness-capabilities
