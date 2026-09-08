@@ -357,7 +357,14 @@ class _WorkspaceToolSurface:
         return await self._access._session_for_tools()
 
     async def read_attachment(self, path: str) -> dict[str, Any]:
-        """Read an authorized attachment and make it available to the next model step."""
+        """Read an authorized attachment for use in the next model request.
+
+        Args:
+            path: Workspace-relative file path or an authorized managed attachment path.
+
+        Returns:
+            JSON-serializable attachment metadata and successful read status.
+        """
         if self._access is None or self._attachment_reader is None:
             raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
         return await self._attachment_reader(self._access, path)
@@ -369,7 +376,16 @@ class _WorkspaceToolSurface:
         offset: int = 0,
         limit: "int | None" = None,
     ) -> str:
-        """Read a text file with line numbers."""
+        """Read a text file with line numbers.
+
+        Args:
+            path: File path relative to the root directory.
+            offset: Zero-based line offset to start reading from.
+            limit: Maximum number of lines to return (default: 2000).
+
+        Returns:
+            File content with line numbers, plus metadata header.
+        """
         session = await self._require_session()
         return await session.read_file(path, offset=offset, limit=limit)
 
@@ -380,7 +396,17 @@ class _WorkspaceToolSurface:
         *,
         expected_hash: "str | None" = None,
     ) -> str:
-        """Create or overwrite a file with conflict detection."""
+        """Create or overwrite a file with conflict detection.
+
+        Args:
+            path: File path relative to the root directory.
+            content: The text content to write.
+            expected_hash: If provided, the write is rejected when the file exists
+                and its current hash doesn't match (optimistic concurrency).
+
+        Returns:
+            Confirmation message with new hash.
+        """
         session = await self._require_session()
         return await session.write_file(path, content, expected_hash=expected_hash)
 
@@ -392,7 +418,21 @@ class _WorkspaceToolSurface:
         *,
         expected_hash: "str | None" = None,
     ) -> str:
-        """Edit a file by exact string replacement with conflict detection."""
+        """Edit a file by exact string replacement with conflict detection.
+
+        The old_text must appear exactly once in the file. Include surrounding
+        context lines to ensure uniqueness.
+
+        Args:
+            path: File path relative to the root directory.
+            old_text: The exact text to find (must appear exactly once).
+            new_text: The replacement text.
+            expected_hash: If provided, rejects the edit when the file's
+                current hash doesn't match (optimistic concurrency).
+
+        Returns:
+            Summary with new hash for subsequent operations.
+        """
         session = await self._require_session()
         return await session.edit_file(
             path,
@@ -402,7 +442,14 @@ class _WorkspaceToolSurface:
         )
 
     async def list_directory(self, path: str = ".") -> str:
-        """List the contents of a directory."""
+        """List the contents of a directory.
+
+        Args:
+            path: Directory path relative to the root directory.
+
+        Returns:
+            A newline-separated listing with type indicators and sizes.
+        """
         session = await self._require_session()
         return await session.list_directory(path)
 
@@ -413,7 +460,16 @@ class _WorkspaceToolSurface:
         path: str = ".",
         include_glob: "str | None" = None,
     ) -> str:
-        """Search file contents using a regular expression."""
+        """Search file contents using a regular expression.
+
+        Args:
+            pattern: Regex pattern to search for.
+            path: Directory to search in, relative to root.
+            include_glob: If provided, only search files matching this glob (e.g. '*.py').
+
+        Returns:
+            str: Matching lines formatted as file:line_number:text.
+        """
         session = await self._require_session()
         return await session.search_files(
             pattern,
@@ -427,17 +483,40 @@ class _WorkspaceToolSurface:
         *,
         path: str = ".",
     ) -> str:
-        """Find files by glob pattern."""
+        """Find files by glob pattern (name matching, not content search).
+
+        Args:
+            pattern: Glob pattern to match, relative to `path` (e.g. '*.py',
+                '**/*.json'). Absolute patterns are rejected.
+            path: Directory to search in, relative to root.
+
+        Returns:
+            Newline-separated list of matching file paths relative to root.
+        """
         session = await self._require_session()
         return await session.find_files(pattern, path=path)
 
     async def create_directory(self, path: str) -> str:
-        """Create a directory and any missing parents."""
+        """Create a directory and any missing parents.
+
+        Args:
+            path: Directory path relative to the root directory.
+
+        Returns:
+            Confirmation message.
+        """
         session = await self._require_session()
         return await session.create_directory(path)
 
     async def file_info(self, path: str) -> str:
-        """Get metadata about a file or directory."""
+        """Get metadata about a file or directory.
+
+        Args:
+            path: File or directory path relative to the root directory.
+
+        Returns:
+            Formatted metadata including size, type, and permissions.
+        """
         session = await self._require_session()
         return await session.file_info(path)
 
@@ -447,22 +526,54 @@ class _WorkspaceToolSurface:
         *,
         timeout_seconds: "float | None" = None,
     ) -> str:
-        """Execute a shell command and return its output."""
+        """Execute a shell command and return its output.
+
+        Args:
+            command: The shell command to run.
+            timeout_seconds: Maximum seconds to wait (default: 30).
+
+        Returns:
+            Labeled stdout/stderr output with exit code on non-zero exit.
+        """
         session = await self._require_session()
         return await session.run_command(command, timeout_seconds=timeout_seconds)
 
     async def start_command(self, command: str) -> str:
-        """Start a long-running command in the background."""
+        """Start a long-running command in the background (e.g. a server or watcher).
+
+        Callers MUST call `stop_command(command_id)` when done to terminate the
+        process and clean up temporary output files.
+
+        Args:
+            command: The shell command to run in the background.
+
+        Returns:
+            A message containing the unique command ID for later check/stop calls.
+        """
         session = await self._require_session()
         return await session.start_command(command)
 
     async def check_command(self, command_id: str) -> str:
-        """Check the status and recent output of a background command."""
+        """Check the status and recent output of a background command.
+
+        Args:
+            command_id: The ID returned by start_command.
+
+        Returns:
+            Status and recent output of the background command.
+        """
         session = await self._require_session()
         return await session.check_command(command_id)
 
     async def stop_command(self, command_id: str) -> str:
-        """Stop a background command and return its final output."""
+        """Stop a background command and return its final output.
+
+        Args:
+            command_id: The ID returned by start_command.
+
+        Returns:
+            Final output and exit status of the stopped command.
+        """
         session = await self._require_session()
         return await session.stop_command(command_id)
 
@@ -542,7 +653,7 @@ def workspace_capabilities(
     *,
     attachment_reader: "AttachmentReader | None" = None,
 ) -> "tuple[AbstractCapability[AgentContext[object]], ...]":
-    """Materialize selected workspace tools through one lazy per-run SandboxSession."""
+    """Materialize the selected workspace tools through one lazy per-run SandboxSession."""
     selected = frozenset(selected_tool_names)
     unknown = selected.difference(_WORKSPACE_TOOL_NAMES)
     if unknown:
