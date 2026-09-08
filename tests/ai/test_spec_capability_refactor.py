@@ -325,8 +325,8 @@ async def test_runtime_persistence_boundary_binds_before_snapshot() -> None:
 @pytest.mark.asyncio
 async def test_workspace_binding_validation_rejects_missing_durable_binding() -> None:
     class MissingBindingStore:
-        async def get(self, step_run_id, tool_call_id):  # type: ignore[no-untyped-def]
-            del step_run_id, tool_call_id
+        async def get(self, execution_id, step_run_id, tool_call_id):  # type: ignore[no-untyped-def]
+            del execution_id, step_run_id, tool_call_id
             return None
 
     binder = WorkspaceToolCallBinder(MissingBindingStore(), object())  # type: ignore[arg-type]
