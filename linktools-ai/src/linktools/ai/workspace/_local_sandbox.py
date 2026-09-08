@@ -278,6 +278,47 @@ class _LocalSandboxSession:
         )
         return frozenset(values)
 
+    async def canonicalize_path(self, path: str) -> str:
+        normalized = _normalize_path(path)
+
+        def operation() -> str:
+            target = self._resolve_path(normalized, allow_missing=True)
+            return _relative(self._root, target)
+
+        return await self._run_sync(operation)
+
+    async def read_bytes(
+        self,
+        path: str,
+        *,
+        max_bytes: int | None = None,
+    ) -> bytes:
+        normalized = _normalize_path(path)
+        if max_bytes is not None and (
+            not isinstance(max_bytes, int)
+            or isinstance(max_bytes, bool)
+            or max_bytes < 0
+        ):
+            raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+
+        def operation() -> bytes:
+            target = self._file_path(normalized, write=False)
+            try:
+                info = target.stat()
+                if not stat.S_ISREG(info.st_mode):
+                    raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+                if max_bytes is not None and info.st_size > max_bytes:
+                    raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+                return target.read_bytes()
+            except AIError:
+                raise
+            except FileNotFoundError as error:
+                raise AIError(ErrorCode.STORAGE_NOT_FOUND) from error
+            except OSError as error:
+                raise AIError(ErrorCode.STORAGE_UNAVAILABLE) from error
+
+        return await self._run_sync(operation)
+
     async def read_file(
         self,
         path: str,

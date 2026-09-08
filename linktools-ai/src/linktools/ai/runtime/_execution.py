@@ -86,6 +86,7 @@ from .state import (
     OperationTerminalUpdate,
     ResultRecord,
     RuntimeDomain,
+    RuntimeStorageContract,
     SessionRepository,
 )
 

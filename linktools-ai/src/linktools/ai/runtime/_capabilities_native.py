@@ -50,7 +50,7 @@ from ..workspace import (
     RepositoryInstructionResolver,
     RepositoryInstructions,
     WorkspacePolicy,
-    normalize_workspace_path,
+    normalize_workspace_input_path,
 )
 from ._compaction import ExternalModelRequestObserver, RuntimeCompaction
 from ._journal import ModelRequestJournal
@@ -475,7 +475,7 @@ def _normalize_workspace_tool_args(
     target = args.get("path")
     if not isinstance(target, str):
         raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
-    normalized = normalize_workspace_path(target)
+    normalized = normalize_workspace_input_path(target)
     if normalized == target:
         return args
     result = dict(args)

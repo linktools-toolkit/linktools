@@ -50,6 +50,7 @@ from linktools.ai.runtime.state._contracts import (
     StoredUserInput,
 )
 from linktools.ai.spec import AgentSpec
+from linktools.ai.storage import StoredPayload
 from pydantic_ai.messages import ModelRequest, UserPromptPart
 from linktools.ai.runtime.state import ContinuableSnapshot, RunRecord
 

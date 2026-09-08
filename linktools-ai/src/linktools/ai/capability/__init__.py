@@ -36,6 +36,8 @@ from ._subagent import (
     SubagentDelegate,
 )
 from ._workspace import (
+    WORKSPACE_FILESYSTEM_READ_TOOL_NAMES,
+    WORKSPACE_FILESYSTEM_TOOL_NAMES,
     WORKSPACE_SHELL_TOOL_NAMES,
     WorkspaceAccess,
     workspace_capabilities,
@@ -45,11 +47,6 @@ from ._workspace import (
     workspace_tool_path_metadata,
     workspace_tool_contributions,
 )
-from .workspace import (
-    WORKSPACE_FILESYSTEM_READ_TOOL_NAMES,
-    WORKSPACE_FILESYSTEM_TOOL_NAMES,
-)
-
 __all__ = [
     "AssetSkillResourceSource",
     "CapabilityContribution",

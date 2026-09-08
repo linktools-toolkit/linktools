@@ -28,7 +28,7 @@ from ._group import (
     contribution_semantic_contract,
 )
 
-WORKSPACE_FILESYSTEM_TOOL_NAMES = (
+_BASE_WORKSPACE_FILESYSTEM_TOOL_NAMES = (
     "create_directory",
     "edit_file",
     "file_info",

@@ -32,6 +32,7 @@ from pydantic_ai.capabilities import (
     CapabilityOrdering,
     NodeResult,
     ReinjectSystemPrompt,
+    WrapperCapability,
 )
 from pydantic_ai.exceptions import (
     ConcurrencyLimitExceeded,
@@ -66,6 +67,7 @@ from pydantic_ai.tools import (
 )
 from pydantic_ai.toolsets import AbstractToolset, PreparedToolset
 from pydantic_ai.usage import RunUsage, UsageLimitExceeded, UsageLimits
+from pydantic_ai_harness.step_persistence import StepPersistence
 
 from ..agent import AgentBinding, AgentDefinition, AssistantTextOutput
 from ..capability import (
@@ -118,7 +120,7 @@ from ._capabilities import (
     tool_is_control,
     tool_name_allowed,
 )
-from ._input import _RuntimeUserPrompt, _restore_user_prompt
+from ._input import CanonicalUserInput
 from ._journal import ModelRequestJournal
 from ._metric_capability import _RuntimeModelMetricCapability
 from ._skill_adapter import _PydanticSkillCapability
@@ -126,6 +128,7 @@ from ._subagent_adapter import _PydanticSubagentCapability
 from ._tool_metrics import _ToolMetricContext
 from ._memory import MemoryStore
 from ._plan import RuntimePlanStore
+from ._workspace_binding import WorkspaceToolCallBinder
 from .state import StepStore
 
 _logger = environ.get_logger("ai.runtime.agent_executor")
@@ -558,6 +561,8 @@ class AgentExecutor:
             skill_sources=self._skill_sources,
             deferred_pause_sink=capture_deferred_step,
             metrics=self._metrics,
+            workspace_binder=self._workspace_binder,
+            workspace_path_fields=workspace_path_fields,
             model_journal=model_journal,
         )
         presentation = _ToolPresentation(
@@ -760,6 +765,8 @@ async def _materialize_agent(
     skill_sources: SkillSourceRegistry,
     deferred_pause_sink: Callable[[int], None],
     metrics: MetricRecorder | None,
+    workspace_binder: WorkspaceToolCallBinder | None,
+    workspace_path_fields: Callable[[], Mapping[str, tuple[str, ...]]],
     model_journal: ModelRequestJournal,
 ) -> tuple[
     PydanticAgent[AgentContext[object], object],
@@ -901,6 +908,18 @@ async def _materialize_agent(
             else model_metric.record_external_model_request
         ),
     )
+    platform = tuple(
+        _RuntimePersistenceBoundary(
+            capability,
+            workspace_binder=workspace_binder,
+            execution_id=scope.context.execution_id,
+            step_run_id=scope.step_run_id,
+            path_fields_provider=workspace_path_fields,
+        )
+        if isinstance(capability, StepPersistence)
+        else capability
+        for capability in platform
+    )
     capabilities.extend(cast("tuple[AbstractCapability[AgentContext[object]], ...]", platform))
 
     business_output_type: object
@@ -995,6 +1014,130 @@ def _thinking_settings(model: Model, thinking: ThinkingValue) -> ModelSettings:
             safe_details={"field": "thinking", "reason": "model_not_supported"},
         )
     return ModelSettings(thinking=thinking)
+
+
+class _RuntimePersistenceBoundary(WrapperCapability[AgentContext[object]]):
+    def __init__(
+        self,
+        wrapped: StepPersistence[object],
+        *,
+        workspace_binder: WorkspaceToolCallBinder | None = None,
+        execution_id: str | None = None,
+        step_run_id: str | None = None,
+        path_fields_provider: (
+            Callable[[], Mapping[str, tuple[str, ...]]] | None
+        ) = None,
+    ) -> None:
+        super().__init__(wrapped=wrapped)
+        self._workspace_binder = workspace_binder
+        self._workspace_execution_id = execution_id
+        self._workspace_step_run_id = step_run_id
+        self._workspace_path_fields = path_fields_provider
+        self._workspace_initial_message_ids: frozenset[int] = frozenset()
+
+    def get_ordering(self) -> CapabilityOrdering:
+        return CapabilityOrdering(
+            position="outermost",
+            wraps=(AbstractCapability,),
+        )
+
+    async def before_run(
+        self,
+        ctx: PydanticRunContext[AgentContext[object]],
+    ) -> None:
+        self._workspace_initial_message_ids = frozenset(
+            id(message) for message in ctx.messages
+        )
+        await super().before_run(ctx)
+
+    def _workspace_new_messages(
+        self,
+        messages: Sequence[ModelMessage],
+    ) -> tuple[ModelMessage, ...]:
+        return tuple(
+            message
+            for message in messages
+            if id(message) not in self._workspace_initial_message_ids
+        )
+
+    async def before_model_request(
+        self,
+        ctx: PydanticRunContext[AgentContext[object]],
+        request_context: ModelRequestContext,
+    ) -> ModelRequestContext:
+        if self._workspace_binder is not None:
+            if (
+                self._workspace_execution_id is None
+                or self._workspace_step_run_id is None
+                or self._workspace_path_fields is None
+            ):
+                raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+            await self._workspace_binder.validate_messages(
+                ctx.messages,
+                execution_id=self._workspace_execution_id,
+                step_run_id=self._workspace_step_run_id,
+                path_fields=self._workspace_path_fields(),
+            )
+        return await super().before_model_request(ctx, request_context)
+
+    async def after_run(
+        self,
+        ctx: PydanticRunContext[AgentContext[object]],
+        *,
+        result: AgentRunResult[object],
+    ) -> AgentRunResult[object]:
+        if self._workspace_binder is not None:
+            if (
+                self._workspace_execution_id is None
+                or self._workspace_step_run_id is None
+                or self._workspace_path_fields is None
+            ):
+                raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+            path_fields = self._workspace_path_fields()
+            await self._workspace_binder.bind_result(
+                result,
+                execution_id=self._workspace_execution_id,
+                step_run_id=self._workspace_step_run_id,
+                path_fields=path_fields,
+            )
+            await self._workspace_binder.validate_messages(
+                result.all_messages(),
+                execution_id=self._workspace_execution_id,
+                step_run_id=self._workspace_step_run_id,
+                path_fields=path_fields,
+            )
+        return await super().after_run(ctx, result=result)
+
+    async def after_node_run(
+        self,
+        ctx: PydanticRunContext[AgentContext[object]],
+        *,
+        node: AgentNode[AgentContext[object]],
+        result: NodeResult[AgentContext[object]],
+    ) -> NodeResult[AgentContext[object]]:
+        if self._workspace_binder is not None:
+            if (
+                self._workspace_execution_id is None
+                or self._workspace_step_run_id is None
+                or self._workspace_path_fields is None
+            ):
+                raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+            path_fields = self._workspace_path_fields()
+            messages = tuple(ctx.messages)
+            await self._workspace_binder.bind_messages(
+                self._workspace_new_messages(messages),
+                execution_id=self._workspace_execution_id,
+                step_run_id=self._workspace_step_run_id,
+                path_fields=path_fields,
+            )
+            await self._workspace_binder.validate_messages(
+                messages,
+                execution_id=self._workspace_execution_id,
+                step_run_id=self._workspace_step_run_id,
+                path_fields=path_fields,
+            )
+        return await super().after_node_run(ctx, node=node, result=result)
+
 
 
 class _ToolPresentation(AbstractCapability[AgentContext[object]]):

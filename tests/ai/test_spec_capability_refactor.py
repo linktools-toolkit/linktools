@@ -7,7 +7,7 @@ import json
 import pytest
 from linktools.ai.capability import SkillCapability, SkillDefinition, SkillSourceRegistry
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.runtime._agent_executor import _ToolPresentation
+from linktools.ai.runtime._agent_executor import _RuntimePersistenceBoundary, _ToolPresentation
 from linktools.ai.runtime._capabilities import (
     PLAN_SAFE_METADATA_KEY,
     select_runtime_tool_names,
@@ -28,6 +28,7 @@ from pydantic_ai.capabilities import AbstractCapability, CapabilityOrdering, Com
 from pydantic_ai.messages import ModelResponse, ToolCallPart
 from pydantic_ai.tools import ToolDefinition
 from pydantic_ai.toolsets import FunctionToolset, PreparedToolset, RenamedToolset
+from pydantic_ai_harness.step_persistence import StepPersistence
 
 
 def test_runtime_tool_selection_keeps_planning_outside_allow_tools() -> None:
