@@ -57,6 +57,7 @@ from ._metrics import _RuntimeMetricBuffer
 from ._object import RuntimeObjectKeyFactory
 from ._planner import DefaultTaskService, RuntimeTaskNodeRunner
 from ._recovery_impl import RecoveryExecutionService, RecoveryLocalExecutionBackend
+from ._recovery_task import RecoveryRuntimeTaskNodeRunner
 from ._session import DefaultSessionService
 from ._subagent import SubagentDispatcher
 from .service_api import ExecutionHistoryReader, SessionHistoryReader
@@ -565,7 +566,7 @@ async def _build_local_components(
             transcript_store=state.steps.read_store(RuntimeDomain.CONVERSATION),
             release_terminal=state.retention.release_session,
         )
-        task_runner = RuntimeTaskNodeRunner(
+        task_runner = RecoveryRuntimeTaskNodeRunner(
             execution,
             catalog,
             compiler,
