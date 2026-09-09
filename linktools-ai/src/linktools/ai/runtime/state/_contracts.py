@@ -652,6 +652,7 @@ class ExecutionRecord:
     planning: bool
     thinking: ThinkingValue
     binding: AgentBindingSnapshot
+    parent_invocation_id: str | None = None
     memory_scope: str | None = None
     conversation_step_run_id: str | None = None
     result: ResultRecord | None = None
@@ -669,6 +670,21 @@ class ExecutionRecord:
         object.__setattr__(self, "mode", mode)
         object.__setattr__(self, "thinking", thinking)
         object.__setattr__(self, "correlation", normalize_correlation(self.correlation))
+        if self.lineage_kind is ExecutionLineageKind.SUBAGENT:
+            if (
+                not isinstance(self.parent_execution_id, str)
+                or not self.parent_execution_id
+                or not isinstance(self.parent_invocation_id, str)
+                or not self.parent_invocation_id
+                or self.source_execution_id is not None
+                or self.base_execution_id is not None
+            ):
+                raise ValueError("subagent execution lineage is invalid")
+        elif (
+            self.parent_execution_id is not None
+            or self.parent_invocation_id is not None
+        ):
+            raise ValueError("non-subagent execution cannot carry parent lineage")
         if (
             not isinstance(self.binding, AgentBindingSnapshot)
             or self.binding.binding_digest != self.binding_digest
@@ -1200,6 +1216,7 @@ class RecoveryExecutionInput:
     thinking: ThinkingValue
     binding: AgentBindingSnapshot
     storage_contract: RuntimeStorageContract
+    parent_invocation_id: str | None = None
     repository_instructions: RuntimePayloadRef | None = None
     correlation: Mapping[str, str | int] = field(default_factory=dict)
 
@@ -1217,6 +1234,21 @@ class RecoveryExecutionInput:
         object.__setattr__(self, "mode", mode)
         object.__setattr__(self, "thinking", thinking)
         object.__setattr__(self, "correlation", normalize_correlation(self.correlation))
+        if self.lineage_kind == ExecutionLineageKind.SUBAGENT.value:
+            if (
+                not isinstance(self.parent_execution_id, str)
+                or not self.parent_execution_id
+                or not isinstance(self.parent_invocation_id, str)
+                or not self.parent_invocation_id
+                or self.source_execution_id is not None
+                or self.base_execution_id is not None
+            ):
+                raise ValueError("subagent recovery lineage is invalid")
+        elif (
+            self.parent_execution_id is not None
+            or self.parent_invocation_id is not None
+        ):
+            raise ValueError("non-subagent recovery cannot carry parent lineage")
         if (
             not isinstance(self.binding, AgentBindingSnapshot)
             or self.binding.binding_digest != self.binding_digest

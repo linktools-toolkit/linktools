@@ -15,6 +15,7 @@ from ..core import (
     EvaluationStatus,
     ExecutionDeltaType,
     ExecutionEventType,
+    ExecutionLineageKind,
     ExecutionMode,
     ExecutionStatus,
     JsonValue,
@@ -166,7 +167,12 @@ class ExecutionHandle:
 @dataclass(frozen=True, slots=True)
 class ExecutionView:
     execution_id: str
+    agent_id: str
     status: ExecutionStatus
+    lineage_kind: ExecutionLineageKind
+    parent_execution_id: str | None
+    root_execution_id: str
+    parent_invocation_id: str | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -659,6 +665,50 @@ class ExecutionStreamEvent:
 
 
 @dataclass(frozen=True, slots=True)
+class ExecutionTreeEvent:
+    execution_id: str
+    agent_id: str
+    lineage_kind: ExecutionLineageKind
+    parent_execution_id: str | None
+    root_execution_id: str
+    parent_invocation_id: str | None
+    depth: int
+    event: ExecutionStreamEvent
+
+    def __post_init__(self) -> None:
+        if not all(
+            isinstance(value, str) and value
+            for value in (self.execution_id, self.agent_id, self.root_execution_id)
+        ):
+            raise ValueError("execution tree event identity is invalid")
+        if not isinstance(self.lineage_kind, ExecutionLineageKind):
+            raise TypeError("execution tree event lineage kind is invalid")
+        if (
+            isinstance(self.depth, bool)
+            or not isinstance(self.depth, int)
+            or self.depth not in (0, 1)
+        ):
+            raise ValueError("execution tree event depth must be zero or one")
+        if not isinstance(self.event, ExecutionStreamEvent):
+            raise TypeError("execution tree event requires an execution event")
+        if self.execution_id != self.event.execution_id:
+            raise ValueError("execution tree event identity does not match execution")
+        if self.depth == 0:
+            if (
+                self.parent_execution_id is not None
+                or self.parent_invocation_id is not None
+                or self.lineage_kind is ExecutionLineageKind.SUBAGENT
+            ):
+                raise ValueError("root execution tree event lineage is invalid")
+        elif (
+            self.lineage_kind is not ExecutionLineageKind.SUBAGENT
+            or not self.parent_execution_id
+            or not self.parent_invocation_id
+        ):
+            raise ValueError("child execution tree event lineage is invalid")
+
+
+@dataclass(frozen=True, slots=True)
 class ArtifactView:
     artifact_id: str
     execution_id: str
@@ -713,6 +763,13 @@ class ExecutionService(Protocol):
     async def inspect(
         self, execution_id: str, *, principal: Principal
     ) -> ExecutionView: ...
+    def stream_tree(
+        self,
+        execution_id: str,
+        *,
+        principal: Principal,
+        after_sequences: "Mapping[str, int] | None" = None,
+    ) -> "AsyncIterator[ExecutionTreeEvent]": ...
     async def result(
         self, execution_id: str, *, principal: Principal
     ) -> ExecutionResult: ...
@@ -936,6 +993,7 @@ __all__ = [
     "ExecutionService",
     "ExecutionStreamEvent",
     "ExecutionTraceItem",
+    "ExecutionTreeEvent",
     "ExecutionView",
     "ExternalService",
     "ExternalSupplyRequest",
