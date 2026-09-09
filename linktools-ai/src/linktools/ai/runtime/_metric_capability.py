@@ -8,8 +8,6 @@ import asyncio
 import uuid
 from datetime import datetime, timezone
 from time import monotonic_ns
-from typing import Any
-
 from linktools.core import environ
 from openai import (
     APIConnectionError as OpenAIAPIConnectionError,

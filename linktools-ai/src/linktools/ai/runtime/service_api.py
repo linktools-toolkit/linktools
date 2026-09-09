@@ -4,30 +4,32 @@
 
 from collections.abc import AsyncIterator, Mapping, Sequence
 from dataclasses import dataclass, field
-from typing import Protocol
+from typing import TYPE_CHECKING, Protocol
+
+from pydantic_ai.messages import UserContent
 
 from ..core import (
     ApprovalDecision,
     ApprovalStatus,
+    CorrelationData,
     EvaluationStatus,
     ExecutionDeltaType,
     ExecutionEventType,
+    ExecutionLineageKind,
     ExecutionMode,
     ExecutionStatus,
     JsonValue,
     Page,
     Principal,
-    CorrelationData,
     SessionStatus,
     ThinkingValue,
     UsageMetrics,
-    normalize_execution_mode,
     normalize_correlation,
+    normalize_execution_mode,
     normalize_thinking,
     validate_idempotency_key,
     validate_memory_scope,
     validate_resource_id,
-    validate_user_prompt,
 )
 from ..errors import AIError, ErrorCode, ErrorDiagnostics
 from ..storage import ObjectRef
@@ -40,12 +42,16 @@ from ..task import (
     TaskGraphSnapshot,
     TaskGraphView,
 )
+from ._input_contract import validate_user_input
 from ._snapshot import RunSnapshot
 from .recovery import (
     ExecutionRecoveryEffect,
     ResolveToolEffectRequest,
     ToolEffectResolutionResult,
 )
+
+if TYPE_CHECKING:
+    from .state import RuntimeStorageContract, StoredUserInput
 
 
 def _request_correlation(value: Mapping[str, object] | None) -> CorrelationData:
@@ -55,10 +61,21 @@ def _request_correlation(value: Mapping[str, object] | None) -> CorrelationData:
         raise AIError(ErrorCode.REQUEST_FIELD_INVALID) from error
 
 
+def _request_files(value: Sequence[str]) -> tuple[str, ...]:
+    if not isinstance(value, Sequence) or isinstance(
+        value,
+        (str, bytes, bytearray),
+    ):
+        raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+    files = tuple(value)
+    if any(not isinstance(item, str) or not item for item in files):
+        raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+    return files
+
+
 @dataclass(frozen=True, slots=True)
 class ExecutionRequest:
-    user_prompt: str
-    user_prompt_codec: str
+    user_prompt: "str | Sequence[UserContent]"
     principal: Principal
     idempotency_key: str
     memory_scope: "str | None"
@@ -66,11 +83,26 @@ class ExecutionRequest:
     planning: bool
     thinking: ThinkingValue
     correlation: CorrelationData = field(default_factory=dict)
+    files: tuple[str, ...] = ()
+    input_intent_digest: "str | None" = field(
+        default=None,
+        compare=False,
+        repr=False,
+    )
+    stored_user_input: "StoredUserInput | None" = field(
+        default=None,
+        compare=False,
+        repr=False,
+    )
+    storage_contract: "RuntimeStorageContract | None" = field(
+        default=None,
+        compare=False,
+        repr=False,
+    )
 
     def __post_init__(self) -> None:
-        validate_user_prompt(self.user_prompt)
-        if self.user_prompt_codec not in {"text", "pydantic-user-content-v1"}:
-            raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+        object.__setattr__(self, "user_prompt", validate_user_input(self.user_prompt))
+        files = _request_files(self.files)
         validate_idempotency_key(self.idempotency_key)
         if self.memory_scope is not None:
             validate_memory_scope(self.memory_scope)
@@ -81,38 +113,39 @@ class ExecutionRequest:
         object.__setattr__(self, "mode", mode)
         object.__setattr__(self, "thinking", thinking)
         object.__setattr__(self, "correlation", _request_correlation(self.correlation))
+        object.__setattr__(self, "files", files)
 
 
 @dataclass(frozen=True, slots=True)
 class RetryExecutionRequest:
-    user_prompt: str
-    user_prompt_codec: str
+    user_prompt: "str | Sequence[UserContent]"
     principal: Principal
     idempotency_key: str
     correlation: CorrelationData = field(default_factory=dict)
+    files: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
-        validate_user_prompt(self.user_prompt)
-        if self.user_prompt_codec not in {"text", "pydantic-user-content-v1"}:
-            raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+        object.__setattr__(self, "user_prompt", validate_user_input(self.user_prompt))
+        files = _request_files(self.files)
         validate_idempotency_key(self.idempotency_key)
         object.__setattr__(self, "correlation", _request_correlation(self.correlation))
+        object.__setattr__(self, "files", files)
 
 
 @dataclass(frozen=True, slots=True)
 class ForkExecutionRequest:
-    user_prompt: str
-    user_prompt_codec: str
+    user_prompt: "str | Sequence[UserContent]"
     principal: Principal
     idempotency_key: str
     correlation: CorrelationData = field(default_factory=dict)
+    files: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
-        validate_user_prompt(self.user_prompt)
-        if self.user_prompt_codec not in {"text", "pydantic-user-content-v1"}:
-            raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+        object.__setattr__(self, "user_prompt", validate_user_input(self.user_prompt))
+        files = _request_files(self.files)
         validate_idempotency_key(self.idempotency_key)
         object.__setattr__(self, "correlation", _request_correlation(self.correlation))
+        object.__setattr__(self, "files", files)
 
 
 @dataclass(frozen=True, slots=True)
@@ -139,7 +172,12 @@ class ExecutionHandle:
 @dataclass(frozen=True, slots=True)
 class ExecutionView:
     execution_id: str
+    agent_id: str
     status: ExecutionStatus
+    lineage_kind: ExecutionLineageKind
+    parent_execution_id: str | None
+    root_execution_id: str
+    parent_invocation_id: str | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -362,19 +400,18 @@ class ListSessionRequest:
 @dataclass(frozen=True, slots=True)
 class ResumeSessionRequest:
     principal: Principal
-    user_prompt: str
-    user_prompt_codec: str
+    user_prompt: "str | Sequence[UserContent]"
     idempotency_key: str
     memory_scope: "str | None"
     mode: ExecutionMode
     planning: bool
     thinking: ThinkingValue
     correlation: CorrelationData = field(default_factory=dict)
+    files: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
-        validate_user_prompt(self.user_prompt)
-        if self.user_prompt_codec not in {"text", "pydantic-user-content-v1"}:
-            raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+        object.__setattr__(self, "user_prompt", validate_user_input(self.user_prompt))
+        files = _request_files(self.files)
         validate_idempotency_key(self.idempotency_key)
         if self.memory_scope is not None:
             validate_memory_scope(self.memory_scope)
@@ -385,6 +422,7 @@ class ResumeSessionRequest:
         object.__setattr__(self, "mode", mode)
         object.__setattr__(self, "thinking", thinking)
         object.__setattr__(self, "correlation", _request_correlation(self.correlation))
+        object.__setattr__(self, "files", files)
 
 
 @dataclass(frozen=True, slots=True)
@@ -632,6 +670,50 @@ class ExecutionStreamEvent:
 
 
 @dataclass(frozen=True, slots=True)
+class ExecutionTreeEvent:
+    execution_id: str
+    agent_id: str
+    lineage_kind: ExecutionLineageKind
+    parent_execution_id: str | None
+    root_execution_id: str
+    parent_invocation_id: str | None
+    depth: int
+    event: ExecutionStreamEvent
+
+    def __post_init__(self) -> None:
+        if not all(
+            isinstance(value, str) and value
+            for value in (self.execution_id, self.agent_id, self.root_execution_id)
+        ):
+            raise ValueError("execution tree event identity is invalid")
+        if not isinstance(self.lineage_kind, ExecutionLineageKind):
+            raise TypeError("execution tree event lineage kind is invalid")
+        if (
+            isinstance(self.depth, bool)
+            or not isinstance(self.depth, int)
+            or self.depth not in (0, 1)
+        ):
+            raise ValueError("execution tree event depth must be zero or one")
+        if not isinstance(self.event, ExecutionStreamEvent):
+            raise TypeError("execution tree event requires an execution event")
+        if self.execution_id != self.event.execution_id:
+            raise ValueError("execution tree event identity does not match execution")
+        if self.depth == 0:
+            if (
+                self.parent_execution_id is not None
+                or self.parent_invocation_id is not None
+                or self.lineage_kind is ExecutionLineageKind.SUBAGENT
+            ):
+                raise ValueError("root execution tree event lineage is invalid")
+        elif (
+            self.lineage_kind is not ExecutionLineageKind.SUBAGENT
+            or not self.parent_execution_id
+            or not self.parent_invocation_id
+        ):
+            raise ValueError("child execution tree event lineage is invalid")
+
+
+@dataclass(frozen=True, slots=True)
 class ArtifactView:
     artifact_id: str
     execution_id: str
@@ -686,6 +768,13 @@ class ExecutionService(Protocol):
     async def inspect(
         self, execution_id: str, *, principal: Principal
     ) -> ExecutionView: ...
+    def stream_tree(
+        self,
+        execution_id: str,
+        *,
+        principal: Principal,
+        after_sequences: "Mapping[str, int] | None" = None,
+    ) -> "AsyncIterator[ExecutionTreeEvent]": ...
     async def result(
         self, execution_id: str, *, principal: Principal
     ) -> ExecutionResult: ...
@@ -902,7 +991,6 @@ __all__ = [
     "ApprovalDecisionResult",
     "ApprovalService",
     "ApprovalView",
-    "ToolApprovalContext",
     "ArtifactDownload",
     "ArtifactService",
     "ArtifactView",
@@ -927,6 +1015,7 @@ __all__ = [
     "ExecutionService",
     "ExecutionStreamEvent",
     "ExecutionTraceItem",
+    "ExecutionTreeEvent",
     "ExecutionView",
     "ExternalService",
     "ExternalSupplyRequest",
@@ -947,6 +1036,7 @@ __all__ = [
     "TaskEvent",
     "TaskEventType",
     "TaskService",
+    "ToolApprovalContext",
     "TranscriptItem",
     "UpdateSessionRequest",
 ]

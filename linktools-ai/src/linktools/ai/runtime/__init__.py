@@ -11,7 +11,6 @@ from ._evaluation import DefaultEvaluationService
 from ._event import DefaultEventService, ExecutionDelta, LiveExecutionEventBroker
 from ._execution import DefaultExecutionService
 from ._history_service import DefaultExecutionHistoryService
-from ._input import user_prompt_transport
 from ._local import LocalExecutionBackend
 from ._metrics import RuntimeMetricFlushResult, RuntimeMetricStatus
 from ._object import RuntimeObjectKeyFactory, put_runtime_object, read_runtime_object
@@ -59,6 +58,7 @@ from .service_api import (
     ExecutionService,
     ExecutionStreamEvent,
     ExecutionTraceItem,
+    ExecutionTreeEvent,
     ExecutionView,
     ExternalService,
     ExternalSupplyRequest,
@@ -88,6 +88,8 @@ from .state import (
     RuntimeState,
     RuntimeStatePlan,
     RuntimeStateRoute,
+    RuntimeStorageContract,
+    StoredUserInput,
 )
 
 __all__ = [
@@ -134,6 +136,7 @@ __all__ = [
     "ExecutionService",
     "ExecutionStreamEvent",
     "ExecutionTraceItem",
+    "ExecutionTreeEvent",
     "ExecutionView",
     "ExternalService",
     "ExternalSupplyRequest",
@@ -162,11 +165,13 @@ __all__ = [
     "RuntimeState",
     "RuntimeStatePlan",
     "RuntimeStateRoute",
+    "RuntimeStorageContract",
     "RuntimeTaskNodeRunner",
     "SessionHistoryItem",
     "SessionHistoryReader",
     "SessionService",
     "SessionView",
+    "StoredUserInput",
     "TaskEvent",
     "TaskEventType",
     "TaskService",
@@ -180,5 +185,4 @@ __all__ = [
     "put_runtime_object",
     "read_runtime_object",
     "snapshot_digest",
-    "user_prompt_transport",
 ]

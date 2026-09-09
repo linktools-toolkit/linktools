@@ -25,7 +25,6 @@ from ..spec import (
     MCPServerSpecCodec,
     SkillMarkdownSpecAdapter,
     SkillMarkdownSpecCodec,
-    SkillSpec,
     SkillSpecCodec,
     ThinkingValue,
 )

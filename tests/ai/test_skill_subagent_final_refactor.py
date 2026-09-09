@@ -29,7 +29,6 @@ from linktools.ai.model import ModelRegistry
 from linktools.ai.runtime._execution import DefaultExecutionService
 from linktools.ai.runtime._factory import _default_workspace_store
 from linktools.ai.runtime._planner import (
-    RuntimeTaskNodeRunner,
     _AgentTaskNodeHandler,
 )
 from linktools.ai.runtime._subagent import SubagentDispatcher
@@ -193,8 +192,7 @@ def test_agent_task_recovery_preserves_future_binding_version_error() -> None:
     binding["version"] = 2
     body = {
         "binding": binding,
-        "user_prompt": "work",
-        "user_prompt_codec": "text",
+        "user_prompt": {"kind": "text", "text": "work"},
         "mode": "run",
         "planning": False,
         "thinking": False,
@@ -504,15 +502,18 @@ class _CaptureExecution:
         *,
         agent_id: str,
         user_prompt: str,
+        files: tuple[str, ...],
         principal: Principal,
         idempotency_key: str,
         memory_scope: "str | None",
         mode: str,
         parent_execution_id: str,
         root_execution_id: str,
+        parent_invocation_id: str,
     ) -> "ExecutionHandle | None":
         assert agent_id == "child"
         assert user_prompt
+        assert files == ()
         assert principal == Principal("principal", "tenant", "service")
         assert idempotency_key.startswith("subagent:")
         assert parent_execution_id == "parent-execution"
@@ -528,6 +529,7 @@ class _CaptureExecution:
         *,
         parent_execution_id: str,
         root_execution_id: str,
+        parent_invocation_id: str,
     ) -> ExecutionHandle:
         assert parent_execution_id == "parent-execution"
         assert root_execution_id == "root-execution"
@@ -714,6 +716,7 @@ async def test_execution_service_replays_subagent_from_persisted_child_binding()
         lineage_kind=ExecutionLineageKind.SUBAGENT,
         parent_execution_id="parent-execution",
         root_execution_id="root-execution",
+        parent_invocation_id="delegate-call",
         planning=True,
         thinking="high",
         correlation={},
@@ -737,6 +740,7 @@ async def test_execution_service_replays_subagent_from_persisted_child_binding()
         mode="run",
         parent_execution_id="parent-execution",
         root_execution_id="root-execution",
+        parent_invocation_id="delegate-call",
     )
 
     assert handle == ExecutionHandle("child-execution")
@@ -744,6 +748,7 @@ async def test_execution_service_replays_subagent_from_persisted_child_binding()
     assert request.planning is True
     assert request.thinking == "high"
     assert start_subagent.await_args.args[0] == "a" * 64
+    assert start_subagent.await_args.kwargs["parent_invocation_id"] == "delegate-call"
 
 
 @pytest.mark.asyncio

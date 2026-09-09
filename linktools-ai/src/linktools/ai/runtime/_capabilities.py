@@ -38,7 +38,7 @@ from pydantic_ai.messages import (
     ToolCallPart,
     ToolReturnPart,
 )
-from pydantic_ai.models import Model, ModelRequestContext
+from pydantic_ai.models import ModelRequestContext
 from pydantic_ai.run import AgentRunResult
 from pydantic_ai.tools import DeferredToolRequests, RunContext, ToolDefinition
 from pydantic_ai.toolsets import AbstractToolset
@@ -50,7 +50,7 @@ from pydantic_ai_harness.compaction import (
 )
 from pydantic_ai_harness.memory import Memory, SearchableMemoryStore
 from pydantic_ai_harness.planning import PlanStore, Planning
-from pydantic_ai_harness.step_persistence import StepEvent, StepPersistence, StepStore
+from pydantic_ai_harness.step_persistence import StepPersistence, StepStore
 
 from ..capability import (
     SKILL_TOOL_NAMES,
@@ -179,6 +179,14 @@ class ToolOperationBridge(Protocol):
         self, tool_call_ids: Sequence[str]
     ) -> frozenset[str]: ...
 
+    async def effective_args(
+        self,
+        ctx: "RunContext[None]",
+        call: ToolCallPart,
+        tool_def: ToolDefinition,
+        args: dict[str, Any],
+    ) -> dict[str, Any]: ...
+
 
 class _MissingToolOperationBridge:
     async def begin(
@@ -213,6 +221,16 @@ class _MissingToolOperationBridge:
     ) -> frozenset[str]:
         del tool_call_ids
         raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+
+    async def effective_args(
+        self,
+        ctx: "RunContext[None]",
+        call: ToolCallPart,
+        tool_def: ToolDefinition,
+        args: dict[str, Any],
+    ) -> dict[str, Any]:
+        del ctx, call, tool_def
+        return args
 
 
 @dataclass(kw_only=True, eq=False)
@@ -430,6 +448,12 @@ class _RuntimeStepPersistence(StepPersistence[None]):
             tool_def,
             trusted_tool_classes=self.trusted_tool_classes,
         )
+        effective_args_method = getattr(self.tool_operations, "effective_args", None)
+        effective_args = (
+            args
+            if effective_args_method is None
+            else await effective_args_method(ctx, call, tool_def, args)
+        )
         try:
             decision = await self.tool_operations.begin(
                 ctx,
@@ -495,7 +519,7 @@ class _RuntimeStepPersistence(StepPersistence[None]):
                 ctx,
                 call=call,
                 tool_def=tool_def,
-                args=args,
+                args=effective_args,
                 handler=tracked_handler,
             ),
             name=f"tool-handler-{call.tool_call_id}",

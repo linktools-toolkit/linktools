@@ -3,12 +3,12 @@
 """RuntimeState lifecycle owner."""
 
 import asyncio
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Collection
 from enum import Enum
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from ...core import canonical_sha256, validate_persistence_namespace
+from ...core import validate_persistence_namespace
 from ...errors import AIError, ErrorCode
 from ...storage import ObjectStore
 from ._contracts import (
@@ -18,6 +18,7 @@ from ._contracts import (
     ExecutionState,
     MemoryState,
     RecoveryState,
+    RuntimeStorageContract,
     TaskState,
 )
 from ._plan import (
@@ -76,7 +77,7 @@ class RuntimeState:
         self._steps: RuntimeStepStore | None = None
         self._retention: RuntimeRetentionController | None = None
         self._maintenance: RuntimeStorageMaintenance | None = None
-        self._handoff_contract_digest: str | None = None
+        self._storage_contract: RuntimeStorageContract | None = None
 
     @classmethod
     def in_memory(cls) -> "RuntimeState":
@@ -165,13 +166,6 @@ class RuntimeState:
         return self._tenant_id
 
     @property
-    def handoff_contract_digest(self) -> str:
-        self._require_ready()
-        if self._handoff_contract_digest is None:
-            raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
-        return self._handoff_contract_digest
-
-    @property
     def conversation(self) -> ConversationState:
         return self._require_state(self._conversation)
 
@@ -236,10 +230,6 @@ class RuntimeState:
                     namespace,
                     tenant_id,
                 )
-                self._handoff_contract_digest = _handoff_digest(
-                    self._plan,
-                    self._external_object_store,
-                )
                 self._lifecycle = _RuntimeStateLifecycle.READY
             except BaseException:
                 self._lifecycle = _RuntimeStateLifecycle.CLOSED
@@ -302,6 +292,7 @@ class RuntimeState:
         self._retention = value.retention
         self._maintenance = value.maintenance
         self._close_actions = value.close_actions
+        self._storage_contract = value.storage_contract
         self._namespace = namespace
         self._tenant_id = tenant_id
 
@@ -366,6 +357,45 @@ class RuntimeState:
             owner_scope=owner_scope,
         )
 
+    def storage_contract(
+        self,
+        domains: Collection[RuntimeDomain],
+    ) -> RuntimeStorageContract:
+        self._require_ready()
+        if self._storage_contract is None:
+            raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+        selected = frozenset(domains)
+        if any(not isinstance(domain, RuntimeDomain) for domain in selected):
+            raise TypeError("domains must contain RuntimeDomain values")
+        selected_names = frozenset(domain.value for domain in selected)
+        resources = tuple(
+            resource
+            for resource in self._storage_contract.resources
+            if resource.domain in selected
+        )
+        state_groups = tuple(
+            group
+            for group in (
+                tuple(domain for domain in group if domain in selected_names)
+                for group in self._storage_contract.state_groups
+            )
+            if group
+        )
+        object_groups = tuple(
+            group
+            for group in (
+                tuple(domain for domain in group if domain in selected_names)
+                for group in self._storage_contract.object_groups
+            )
+            if group
+        )
+        return RuntimeStorageContract(
+            version=1,
+            resources=resources,
+            state_groups=state_groups,
+            object_groups=object_groups,
+        )
+
 
 def _validate_state_configuration(
     plan: RuntimeStatePlan,
@@ -414,47 +444,6 @@ def _normalize_path(value: "str | Path") -> Path:
     if not isinstance(value, (str, Path)) or not str(value).strip():
         raise ValueError("RuntimeState path is required")
     return Path(value).expanduser().resolve(strict=False)
-
-
-def _handoff_digest(
-    plan: RuntimeStatePlan,
-    object_store: "ObjectStore | None",
-) -> str:
-    object_domains = {
-        RuntimeDomain.CONVERSATION,
-        RuntimeDomain.EXECUTION,
-        RuntimeDomain.MEMORY,
-        RuntimeDomain.ARTIFACT,
-        RuntimeDomain.RECOVERY,
-    }
-    routes = {}
-    for domain in (
-        RuntimeDomain.CONVERSATION,
-        RuntimeDomain.EXECUTION,
-        RuntimeDomain.RECOVERY,
-    ):
-        route = plan.route(domain)
-        routes[domain.value] = {
-            "retention": route.retention.value,
-            "route_kind": route.kind,
-            "route_identity": route.route_identity,
-            "object_store_id": (
-                object_store.store_id
-                if object_store is not None
-                and domain in object_domains
-                and route.retention is RuntimeRetentionMode.DURABLE
-                else (
-                    "builtin"
-                    if route.retention is RuntimeRetentionMode.DURABLE
-                    else (
-                        "transient"
-                        if route.retention is RuntimeRetentionMode.TRANSIENT
-                        else "memory"
-                    )
-                )
-            ),
-        }
-    return canonical_sha256({"version": 6, **routes})
 
 
 __all__ = ["RuntimeState"]

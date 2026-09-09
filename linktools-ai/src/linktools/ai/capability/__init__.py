@@ -31,14 +31,24 @@ from ._skill_source import (
     SkillSourceRegistry,
     normalize_skill_resource_path,
 )
-from ._subagent import SubagentCapability, SubagentDelegate
+from ._subagent import (
+    SUBAGENT_CAPABILITY_ID,
+    SubagentCapability,
+    SubagentDelegate,
+)
 from ._workspace import (
-    WORKSPACE_FILESYSTEM_READ_TOOL_NAMES,
-    WORKSPACE_FILESYSTEM_TOOL_NAMES,
     WORKSPACE_SHELL_TOOL_NAMES,
+    WorkspaceAccess,
     workspace_capabilities,
     workspace_tool_class,
+    workspace_tool_path_fields,
+    workspace_tool_path_fields_from_metadata,
+    workspace_tool_path_metadata,
     workspace_tool_contributions,
+)
+from .workspace import (
+    WORKSPACE_FILESYSTEM_READ_TOOL_NAMES,
+    WORKSPACE_FILESYSTEM_TOOL_NAMES,
 )
 
 __all__ = [
@@ -60,10 +70,12 @@ __all__ = [
     "SkillSourceRegistry",
     "SubagentCapability",
     "SubagentDelegate",
+    "SUBAGENT_CAPABILITY_ID",
     "ToolEffectNotAppliedError",
     "WORKSPACE_FILESYSTEM_READ_TOOL_NAMES",
     "WORKSPACE_FILESYSTEM_TOOL_NAMES",
     "WORKSPACE_SHELL_TOOL_NAMES",
+    "WorkspaceAccess",
     "capability_fingerprint",
     "contribution_semantic_contract",
     "materialize_mcp_servers",
@@ -74,5 +86,8 @@ __all__ = [
     "normalize_skill_resource_path",
     "workspace_capabilities",
     "workspace_tool_class",
+    "workspace_tool_path_fields",
+    "workspace_tool_path_fields_from_metadata",
+    "workspace_tool_path_metadata",
     "workspace_tool_contributions",
 ]

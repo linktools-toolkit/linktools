@@ -6,7 +6,7 @@ import asyncio
 import json
 import re
 import uuid
-from collections.abc import Callable, Mapping
+from collections.abc import AsyncIterator, Callable, Collection, Mapping
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
@@ -54,9 +54,9 @@ from ..storage import (
     PayloadPolicy,
     StoredPayload,
     payload_fits_inline,
-    read_object,
 )
-from ._object import RuntimeObjectKeyFactory, put_runtime_object
+from ._object import RuntimeObjectKeyFactory, put_runtime_object, read_runtime_object
+from ._input import ExecutionInputMaterializer, input_intent, validate_user_input
 from .service_api import (
     CancelExecutionRequest,
     CancelExecutionResult,
@@ -66,6 +66,7 @@ from .service_api import (
     ExecutionRequest,
     ExecutionResult,
     ExecutionTraceItem,
+    ExecutionTreeEvent,
     ExecutionView,
     ForkExecutionRequest,
     RetryExecutionRequest,
@@ -85,6 +86,7 @@ from .state._contracts import (
     OperationLedgerRecord,
     OperationTerminalUpdate,
     ResultRecord,
+    RuntimeStorageContract,
     SessionRepository,
 )
 from .state._plan import RuntimeDomain
@@ -144,6 +146,16 @@ class _ExecutionTerminalCommitter(Protocol):
 
 class _SubagentCancellation(Protocol):
     async def cancel_children(self, parent_execution_id: str, principal: Principal) -> None: ...
+
+
+class _ExecutionTreeStreamer(Protocol):
+    def stream(
+        self,
+        execution_id: str,
+        *,
+        principal: Principal,
+        after_sequences: Mapping[str, int] | None = None,
+    ) -> AsyncIterator[ExecutionTreeEvent]: ...
 
 
 class _LocalExecutionWaiter(Protocol):
@@ -242,6 +254,10 @@ class DefaultExecutionService:
         instruction_resolver: "_RepositoryInstructionResolver | None" = None,
         object_key_factory: "RuntimeObjectKeyFactory | None" = None,
         payload_policy: "PayloadPolicy | None" = None,
+        input_materializer: "ExecutionInputMaterializer | None" = None,
+        storage_contract_factory: (
+            "Callable[[Collection[RuntimeDomain]], RuntimeStorageContract] | None"
+        ) = None,
         session_execution_ready: bool = True,
     ) -> None:
         self._state = state
@@ -256,7 +272,6 @@ class DefaultExecutionService:
         self._release_terminal = release_terminal or _no_release_terminal
         self._terminal_verifier = terminal_verifier or _missing_terminal_verifier
         self._terminal_verifier_is_default = terminal_verifier is None
-        self._terminal_committer: _ExecutionTerminalCommitter | None = None
         self._local_waiter = local_waiter
         if not isinstance(session_execution_ready, bool):
             raise TypeError("session_execution_ready must be bool")
@@ -269,10 +284,14 @@ class DefaultExecutionService:
         self._instruction_resolver = instruction_resolver
         self._object_key_factory = object_key_factory
         self._payload_policy = payload_policy
+        self._input_materializer = input_materializer
+        self._storage_contract_factory = storage_contract_factory
         self._session_execution_ready = session_execution_ready
+        self._terminal_committer: _ExecutionTerminalCommitter | None = None
         self._local_stream_prepare: Callable[[str], None] | None = None
         self._local_stream_abort: Callable[[str], None] | None = None
         self._subagent_cancellation: _SubagentCancellation | None = None
+        self._tree_streamer: _ExecutionTreeStreamer | None = None
         self._session_locks: dict[tuple[str, str], _SessionLockEntry] = {}
         self._session_locks_guard = asyncio.Lock()
         self._handoff_states: dict[tuple[str, str], _ExecutionHandoffState] = {}
@@ -311,6 +330,75 @@ class DefaultExecutionService:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         return RuntimePayloadRef(stored, RuntimeDomain.EXECUTION)
 
+    async def _canonicalize_request(
+        self,
+        request: ExecutionRequest,
+    ) -> ExecutionRequest:
+        if self._input_materializer is None:
+            if request.files:
+                raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+            return replace(
+                request,
+                user_prompt=validate_user_input(request.user_prompt),
+                input_intent_digest=input_intent(
+                    request.user_prompt,
+                    (),
+                ).digest,
+                stored_user_input=None,
+                storage_contract=None,
+            )
+        canonical_files = await self._input_materializer.canonicalize_files(
+            request.files
+        )
+        intent = self._input_materializer.intent(
+            request.user_prompt,
+            canonical_files,
+        )
+        return replace(
+            request,
+            files=canonical_files,
+            input_intent_digest=intent.digest,
+            stored_user_input=None,
+            storage_contract=None,
+        )
+
+    async def _materialize_request(
+        self,
+        request: ExecutionRequest,
+    ) -> ExecutionRequest:
+        if request.stored_user_input is not None:
+            if request.files:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            return request
+        if self._input_materializer is None:
+            if request.files:
+                raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+            return request
+        canonical = await self._input_materializer.materialize(
+            request.user_prompt,
+            request.files,
+        )
+        return replace(
+            request,
+            user_prompt=canonical,
+            files=(),
+            stored_user_input=None,
+        )
+
+    def _storage_contract(
+        self,
+        session_id: str | None,
+    ) -> RuntimeStorageContract | None:
+        if self._storage_contract_factory is None:
+            return None
+        domains = {
+            RuntimeDomain.EXECUTION,
+            RuntimeDomain.RECOVERY,
+        }
+        if session_id is not None:
+            domains.add(RuntimeDomain.CONVERSATION)
+        return self._storage_contract_factory(domains)
+
     def bind_backend(self, backend: ExecutionBackend) -> None:
         if backend is None:
             raise ValueError("execution backend is required")
@@ -337,6 +425,13 @@ class DefaultExecutionService:
         if self._subagent_cancellation is not None:
             raise RuntimeError("subagent cancellation is already bound")
         self._subagent_cancellation = cancellation
+
+    def bind_tree_streamer(self, streamer: _ExecutionTreeStreamer) -> None:
+        if streamer is None:
+            raise ValueError("execution tree streamer is required")
+        if self._tree_streamer is not None:
+            raise RuntimeError("execution tree streamer is already bound")
+        self._tree_streamer = streamer
 
     def bind_local_waiter(self, waiter: _LocalExecutionWaiter) -> None:
         if self._local_waiter is not None:
@@ -498,6 +593,7 @@ class DefaultExecutionService:
         if re.fullmatch(r"[0-9a-f]{64}", binding_digest) is None:
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
         binding = self._binding(binding_digest)
+        request = await self._canonicalize_request(request)
         scope = "execution.run"
         idempotency_key_digest = compute_idempotency_key_digest(request.idempotency_key)
         request_digest = _request_digest(
@@ -508,6 +604,7 @@ class DefaultExecutionService:
             base_execution_id=None,
             parent_execution_id=None,
             root_execution_id=None,
+            parent_invocation_id=None,
             lineage_kind=ExecutionLineageKind.RUN,
         )
         existing = await self._state.idempotency.get(
@@ -600,12 +697,14 @@ class DefaultExecutionService:
         *,
         parent_execution_id: str,
         root_execution_id: str,
+        parent_invocation_id: str,
     ) -> ExecutionHandle:
         return await self._start(
             binding_digest,
             request,
             parent_execution_id=parent_execution_id,
             root_execution_id=root_execution_id,
+            parent_invocation_id=parent_invocation_id,
             lineage_kind=ExecutionLineageKind.SUBAGENT,
             scope="execution.subagent",
         )
@@ -615,12 +714,14 @@ class DefaultExecutionService:
         *,
         agent_id: str,
         user_prompt: str,
+        files: tuple[str, ...] = (),
         principal: Principal,
         idempotency_key: str,
         memory_scope: "str | None",
         mode: ExecutionMode,
         parent_execution_id: str,
         root_execution_id: str,
+        parent_invocation_id: str,
     ) -> "ExecutionHandle | None":
         """Replay an already-established child using its own durable binding."""
         idempotency_key_digest = compute_idempotency_key_digest(idempotency_key)
@@ -644,11 +745,11 @@ class DefaultExecutionService:
             execution.lineage_kind is not ExecutionLineageKind.SUBAGENT
             or execution.parent_execution_id != parent_execution_id
             or execution.root_execution_id != root_execution_id
+            or execution.parent_invocation_id != parent_invocation_id
         ):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         request = ExecutionRequest(
             user_prompt=user_prompt,
-            user_prompt_codec="text",
             principal=principal,
             idempotency_key=idempotency_key,
             memory_scope=memory_scope,
@@ -656,12 +757,14 @@ class DefaultExecutionService:
             planning=execution.planning,
             thinking=execution.thinking,
             correlation=execution.correlation,
+            files=files,
         )
         return await self.start_subagent(
             execution.binding_digest,
             request,
             parent_execution_id=parent_execution_id,
             root_execution_id=root_execution_id,
+            parent_invocation_id=parent_invocation_id,
         )
 
     async def list_children(self, execution_id: str, *, principal: Principal) -> tuple[ExecutionView, ...]:
@@ -671,7 +774,22 @@ class DefaultExecutionService:
                 execution_id,
                 tenant_id=principal.tenant_id,
             )
-            return tuple(ExecutionView(child.execution_id, child.status) for child in children)
+            return tuple(_execution_view(child) for child in children)
+
+    def stream_tree(
+        self,
+        execution_id: str,
+        *,
+        principal: Principal,
+        after_sequences: "Mapping[str, int] | None" = None,
+    ) -> AsyncIterator[ExecutionTreeEvent]:
+        if self._tree_streamer is None:
+            raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+        return self._tree_streamer.stream(
+            execution_id,
+            principal=principal,
+            after_sequences=after_sequences,
+        )
 
     async def _start(
         self,
@@ -685,6 +803,7 @@ class DefaultExecutionService:
         conversation_step_run_id: "str | None" = None,
         parent_execution_id: "str | None" = None,
         root_execution_id: "str | None" = None,
+        parent_invocation_id: "str | None" = None,
         lineage_kind: ExecutionLineageKind = ExecutionLineageKind.RUN,
         scope: str = "execution.run",
         prepare_local_stream: bool = False,
@@ -700,6 +819,7 @@ class DefaultExecutionService:
                 conversation_step_run_id=conversation_step_run_id,
                 parent_execution_id=parent_execution_id,
                 root_execution_id=root_execution_id,
+                parent_invocation_id=parent_invocation_id,
                 lineage_kind=lineage_kind,
                 scope=scope,
                 prepare_local_stream=prepare_local_stream,
@@ -715,6 +835,7 @@ class DefaultExecutionService:
                 conversation_step_run_id=conversation_step_run_id,
                 parent_execution_id=parent_execution_id,
                 root_execution_id=root_execution_id,
+                parent_invocation_id=parent_invocation_id,
                 lineage_kind=lineage_kind,
                 scope=scope,
                 prepare_local_stream=prepare_local_stream,
@@ -732,6 +853,7 @@ class DefaultExecutionService:
         conversation_step_run_id: "str | None" = None,
         parent_execution_id: "str | None" = None,
         root_execution_id: "str | None" = None,
+        parent_invocation_id: "str | None" = None,
         lineage_kind: ExecutionLineageKind = ExecutionLineageKind.RUN,
         scope: str = "execution.run",
         prepare_local_stream: bool = False,
@@ -742,10 +864,11 @@ class DefaultExecutionService:
             raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
         if request.idempotency_key is None:
             raise AIError(ErrorCode.IDEMPOTENCY_KEY_INVALID)
+        request = await self._canonicalize_request(request)
         binding = self._binding(binding_digest)
         parent: ExecutionRecord | None = None
         if lineage_kind is ExecutionLineageKind.SUBAGENT:
-            if parent_execution_id is None:
+            if parent_execution_id is None or not parent_invocation_id:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             parent = await self._state.executions.get(
                 parent_execution_id,
@@ -770,11 +893,14 @@ class DefaultExecutionService:
             conversation_run_id = None if session.continuation is None else session.continuation.step_run_id
             base_execution_id = None
             lineage_kind = ExecutionLineageKind.SESSION_RESUME
+        storage_contract = self._storage_contract(session_id)
+        if storage_contract is not None:
+            request = replace(request, storage_contract=storage_contract)
         execution_id = self._operation_ids()
         resource = ResourceRef(ResourceKind.EXECUTION, execution_id, request.principal.tenant_id)
         await self._authorization.authorize(request.principal, AuthorizationAction.EXECUTION_RUN, resource)
         idempotency_key_digest = compute_idempotency_key_digest(request.idempotency_key)
-        request_digest = _request_digest(request, binding_digest, session_id=session_id, source_execution_id=source_execution_id, base_execution_id=base_execution_id, parent_execution_id=parent_execution_id, root_execution_id=root_execution_id, lineage_kind=lineage_kind)
+        request_digest = _request_digest(request, binding_digest, session_id=session_id, source_execution_id=source_execution_id, base_execution_id=base_execution_id, parent_execution_id=parent_execution_id, root_execution_id=root_execution_id, parent_invocation_id=parent_invocation_id, lineage_kind=lineage_kind)
         existing = await self._state.idempotency.get(
             scope,
             idempotency_key_digest,
@@ -800,6 +926,7 @@ class DefaultExecutionService:
                     return ExecutionHandle(existing.resource_id)
                 if pending is None or pending.status is not ExecutionStatus.PENDING_START:
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                request = await self._materialize_request(request)
                 await self._prepare_and_launch(
                     request,
                     pending,
@@ -879,6 +1006,7 @@ class DefaultExecutionService:
             binding_digest=binding_digest,
             parent_execution_id=parent_execution_id,
             root_execution_id=root_execution_id or execution_id,
+            parent_invocation_id=parent_invocation_id,
             status=ExecutionStatus.PENDING_START,
             revision=0,
             event_sequence=0,
@@ -923,6 +1051,7 @@ class DefaultExecutionService:
                 raise AIError(ErrorCode.IDEMPOTENCY_CONFLICT)
             self._validate_replayed_execution(reservation.execution, binding, request)
             if reservation.execution.status is ExecutionStatus.PENDING_START and reservation.idempotency.status is IdempotencyStatus.RESERVED:
+                request = await self._materialize_request(request)
                 await self._prepare_and_launch(
                     request,
                     reservation.execution,
@@ -956,6 +1085,7 @@ class DefaultExecutionService:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             return ExecutionHandle(reservation.execution.execution_id)
         execution_id = reservation.execution.execution_id
+        request = await self._materialize_request(request)
         await self._prepare_and_launch(
             request,
             reservation.execution,
@@ -1255,7 +1385,7 @@ class DefaultExecutionService:
             )
             if failure is not None:
                 raise failure
-        return ExecutionView(execution.execution_id, execution.status)
+        return _execution_view(execution)
 
     @_consumed_query
     async def result(self, execution_id: str, *, principal: Principal) -> ExecutionResult:
@@ -1295,12 +1425,7 @@ class DefaultExecutionService:
                 reference = result.output.ref
                 if reference is None:
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                payload = await read_object(
-                    self._object_store,
-                    reference.key,
-                    expected_digest=reference.digest,
-                    expected_size=reference.size,
-                )
+                payload = await read_runtime_object(self._object_store, reference)
                 if result.output.encoding == "utf-8":
                     output = payload.decode("utf-8")
                 else:
@@ -1331,14 +1456,14 @@ class DefaultExecutionService:
             )
             if self._local_stream_abort is not None:
                 self._local_stream_abort(execution_id)
-            view = ExecutionView(execution.execution_id, execution.status)
+            status = execution.status
             while True:
                 waiter = self._local_waiter
                 owns_execution = waiter is not None and waiter.owns_execution(
                     execution_id,
                     tenant_id=principal.tenant_id,
                 )
-                if view.status in {
+                if status in {
                     ExecutionStatus.SUCCEEDED,
                     ExecutionStatus.FAILED,
                     ExecutionStatus.CANCELLED,
@@ -1352,7 +1477,12 @@ class DefaultExecutionService:
                             execution_id,
                             tenant_id=principal.tenant_id,
                         )
-                        view = await self.inspect(execution_id, principal=principal)
+                        execution = await self._load_authorized(
+                            execution_id,
+                            principal,
+                            AuthorizationAction.EXECUTION_READ,
+                        )
+                        status = execution.status
                         continue
                     if self._backend is not None:
                         failure = self._backend.worker_failure(
@@ -1376,7 +1506,12 @@ class DefaultExecutionService:
                     )
                 else:
                     await asyncio.sleep(1.0)
-                view = await self.inspect(execution_id, principal=principal)
+                execution = await self._load_authorized(
+                    execution_id,
+                    principal,
+                    AuthorizationAction.EXECUTION_READ,
+                )
+                status = execution.status
 
         try:
             return await asyncio.wait_for(wait_once(), timeout_seconds)
@@ -1389,6 +1524,8 @@ class DefaultExecutionService:
 
     async def retry(self, binding_digest: str, execution_id: str, request: RetryExecutionRequest) -> ExecutionHandle:
         previous = await self._load_authorized(execution_id, request.principal, AuthorizationAction.EXECUTION_READ)
+        if previous.parent_execution_id is not None:
+            raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
         if previous.binding_digest != binding_digest:
             raise AIError(ErrorCode.RUNTIME_SERVICE_MISMATCH)
         binding = self._binding(previous.binding_digest, previous.binding)
@@ -1396,7 +1533,6 @@ class DefaultExecutionService:
             raise AIError(ErrorCode.RUNTIME_SERVICE_MISMATCH)
         retry_request = ExecutionRequest(
             user_prompt=request.user_prompt,
-            user_prompt_codec=request.user_prompt_codec,
             principal=request.principal,
             idempotency_key=request.idempotency_key,
             memory_scope=previous.memory_scope,
@@ -1404,6 +1540,7 @@ class DefaultExecutionService:
             planning=previous.planning,
             thinking=previous.thinking,
             correlation=_overlay_execution_correlation(previous.correlation, request.correlation),
+            files=request.files,
         )
         return await self._start(
             binding_digest,
@@ -1420,6 +1557,8 @@ class DefaultExecutionService:
 
     async def fork(self, binding_digest: str, execution_id: str, request: ForkExecutionRequest) -> ExecutionHandle:
         previous = await self._load_authorized(execution_id, request.principal, AuthorizationAction.EXECUTION_READ)
+        if previous.parent_execution_id is not None:
+            raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
         if previous.binding_digest != binding_digest:
             raise AIError(ErrorCode.RUNTIME_SERVICE_MISMATCH)
         binding = self._binding(previous.binding_digest, previous.binding)
@@ -1427,7 +1566,6 @@ class DefaultExecutionService:
             raise AIError(ErrorCode.RUNTIME_SERVICE_MISMATCH)
         fork_request = ExecutionRequest(
             user_prompt=request.user_prompt,
-            user_prompt_codec=request.user_prompt_codec,
             principal=request.principal,
             idempotency_key=request.idempotency_key,
             memory_scope=previous.memory_scope,
@@ -1435,6 +1573,7 @@ class DefaultExecutionService:
             planning=previous.planning,
             thinking=previous.thinking,
             correlation=_overlay_execution_correlation(previous.correlation, request.correlation),
+            files=request.files,
         )
         return await self._start(
             binding_digest,
@@ -1885,6 +2024,18 @@ class DefaultExecutionService:
         return record
 
 
+def _execution_view(execution: ExecutionRecord) -> ExecutionView:
+    return ExecutionView(
+        execution.execution_id,
+        execution.binding.agent_spec.id,
+        execution.status,
+        execution.lineage_kind,
+        execution.parent_execution_id,
+        execution.root_execution_id,
+        execution.parent_invocation_id,
+    )
+
+
 def _terminal_error(
     execution: ExecutionRecord,
 ) -> "tuple[str | None, Mapping[str, JsonValue]]":
@@ -1933,16 +2084,19 @@ def _request_digest(
     base_execution_id: str | None,
     parent_execution_id: str | None,
     root_execution_id: str | None,
+    parent_invocation_id: str | None,
     lineage_kind: ExecutionLineageKind,
 ) -> str:
-    user_prompt_identity: JsonValue = (
-        request.user_prompt
-        if request.user_prompt_codec == "text"
-        else {"codec": request.user_prompt_codec, "value": request.user_prompt}
-    )
+    if request.input_intent_digest is None:
+        user_prompt_identity = input_intent(
+            validate_user_input(request.user_prompt),
+            request.files,
+        ).digest
+    else:
+        user_prompt_identity = request.input_intent_digest
     return canonical_sha256(
         {
-            "user_prompt": user_prompt_identity,
+            "input_intent": user_prompt_identity,
             "binding_digest": binding_digest,
             "scope": session_id or "execution",
             "principal": principal_identity_payload(request.principal),
@@ -1950,6 +2104,7 @@ def _request_digest(
             "source_execution_id": source_execution_id,
             "base_execution_id": base_execution_id,
             "parent_execution_id": parent_execution_id,
+            "parent_invocation_id": parent_invocation_id,
             "root_identity": root_execution_id or "$self",
             "lineage_kind": lineage_kind.value,
             "memory_scope_digest": None if request.memory_scope is None else canonical_sha256(request.memory_scope),

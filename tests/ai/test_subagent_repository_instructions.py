@@ -107,7 +107,6 @@ class _Resolver:
 def _request(key: str) -> ExecutionRequest:
     return ExecutionRequest(
         user_prompt="work",
-        user_prompt_codec="text",
         principal=Principal("owner", "tenant"),
         idempotency_key=key,
         memory_scope="scope",
@@ -196,6 +195,7 @@ async def test_new_child_inherits_exact_parent_structured_pin_without_live_resol
             _request("child-key"),
             parent_execution_id="parent",
             root_execution_id="parent",
+            parent_invocation_id="delegate-call",
         )
         child = await state.execution.executions.get(handle.execution_id, tenant_id="tenant")
         assert child is not None
@@ -219,6 +219,7 @@ async def test_instruction_aware_child_resolves_root_when_parent_pin_is_none() -
             _request("child-key"),
             parent_execution_id="parent",
             root_execution_id="parent",
+            parent_invocation_id="delegate-call",
         )
         child = await state.execution.executions.get(handle.execution_id, tenant_id="tenant")
         assert child is not None and child.repository_instructions is not None
@@ -242,6 +243,7 @@ async def test_standalone_service_without_resolver_never_assigns_child_pin(with_
             _request("child-key"),
             parent_execution_id="parent",
             root_execution_id="parent",
+            parent_invocation_id="delegate-call",
         )
         child = await state.execution.executions.get(handle.execution_id, tenant_id="tenant")
         assert child is not None
@@ -265,6 +267,7 @@ async def test_subagent_idempotent_replay_keeps_first_persisted_pin_after_live_r
             request,
             parent_execution_id="parent",
             root_execution_id="parent",
+            parent_invocation_id="delegate-call",
         )
         first_child = await state.execution.executions.get(first_handle.execution_id, tenant_id="tenant")
         assert first_child is not None and first_child.repository_instructions is not None
@@ -275,6 +278,7 @@ async def test_subagent_idempotent_replay_keeps_first_persisted_pin_after_live_r
             request,
             parent_execution_id="parent",
             root_execution_id="parent",
+            parent_invocation_id="delegate-call",
         )
         replay_child = await state.execution.executions.get(replay.execution_id, tenant_id="tenant")
         assert replay.execution_id == first_handle.execution_id

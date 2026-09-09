@@ -220,6 +220,17 @@ A Session owns conversation continuity and the stable Agent id. Every new execut
 
 User prompt transport is also durable: plain text uses the `text` codec, while supported native Pydantic user content uses the v1 durable user-content codec. Unsupported external file lifecycle objects fail closed instead of being guessed or silently converted.
 
+Execution file input uses the same durable boundary:
+
+```python
+result = await agent.run(
+    "分析这些截图",
+    files=("screenshots/overview.png", "screenshots/details.png"),
+)
+```
+
+The Sandbox canonicalizes each logical path before reading it. The first model request receives the files as `BinaryContent`; each distinct logical file is read at most once, and the captured bytes are recovered from Runtime state rather than the Workspace path. `Agent.task()` remains a generic TaskGraph API and does not accept `files`; delegated subagents use the same `files=` execution input.
+
 ## 7. Runtime state
 
 `Runtime.open()` accepts an explicit `RuntimeState` when the application owns storage selection:
@@ -243,6 +254,20 @@ Built-in Runtime state supports in-memory, filesystem, SQLite, and SQL compositi
 SQLite-backed Runtime state supports the built-in durable TaskGraph scheduler without a SQLite-specific launcher or an external lock. Normal internal Task optimistic-CAS races are reread and converged by the Task domain. Durable ToolOperation terminal persistence is also lease-aware: a same-lease heartbeat racing terminal persistence is reconciled without replaying the tool effect. Genuine ownership, fence, idempotency, tool-result, effect-unknown, integrity, and storage errors remain observable. Runtime startup still does not provision or migrate database schemas; schema provisioning remains an explicit deployment step.
 
 Durable local execution and recovery are provided by Runtime state and recovery checkpoints and do not require an external workflow server.
+
+### Workspace relocation
+
+Use an explicit logical `workspace_id` when a Workspace must survive a physical move:
+
+```python
+workspace = Workspace.load(
+    "/new/project",
+    workspace_id="workspace-prod-01",
+)
+state = RuntimeState.filesystem("/new/runtime-state")
+```
+
+`Workspace.root`, Runtime state paths, SQLite paths, and SQL endpoints are deployment locations only. Runtime persistence stores logical Workspace paths and a location-independent storage contract, so `Runtime.open()` performs normal recovery after a consistent Workspace, state, and ObjectStore restore. The logical ObjectStore `store_id` and storage topology must remain unchanged; a separate `Runtime.restore()` migration step is not required.
 
 ## 8. Execution failure diagnostics
 

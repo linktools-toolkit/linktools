@@ -4,7 +4,7 @@
 
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
-from typing import Literal, TypeAlias, cast
+from typing import Literal, cast
 
 from ..core import (
     ImmutableJsonMapping,
