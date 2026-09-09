@@ -156,7 +156,7 @@ class _RuntimeModelMetricCapability(AbstractCapability[AgentContext[object]]):
         status: str,
         error_code: str | None,
         measurements: tuple[MetricMeasurement, ...],
-        output_retry_index: int | None,
+        output_retry_index: int | None = None,
     ) -> None:
         try:
             observation = Observation(

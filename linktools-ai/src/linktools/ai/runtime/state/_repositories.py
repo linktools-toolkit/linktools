@@ -5069,7 +5069,7 @@ def _restore_lease_fields(payload: object, target: type[ValueT]) -> object:
     restored["fields"] = {
         **fields,
         "owner": None,
-        "fence": 0,
+        "fence": 1,
         "lease_expires_at": None,
     }
     return restored

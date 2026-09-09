@@ -254,6 +254,12 @@ class _RuntimeStepPersistence(StepPersistence[None]):
         repr=False,
         compare=False,
     )
+    _model_retry_indices: "dict[int, int | None]" = field(
+        default_factory=dict,
+        init=False,
+        repr=False,
+        compare=False,
+    )
 
     def __post_init__(self) -> None:
         if not isinstance(self.plan_mode, bool):
@@ -294,11 +300,15 @@ class _RuntimeStepPersistence(StepPersistence[None]):
         ctx: "RunContext[None]",
         request_context: ModelRequestContext,
     ) -> ModelRequestContext:
+        if ctx.run_step in self._model_retry_indices:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        retry_index = None if ctx.retry <= 0 else ctx.retry
         await self._record_runtime_event(
             ctx,
             kind="model_request_started",
-            metadata=self._model_retry_metadata(ctx),
+            metadata=self._model_retry_metadata(retry_index),
         )
+        self._model_retry_indices[ctx.run_step] = retry_index
         if self.tool_metrics is not None:
             if ctx.run_step in self._model_metric_started_ns:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -331,14 +341,18 @@ class _RuntimeStepPersistence(StepPersistence[None]):
             event_index=event_index,
         )
 
-    def _model_retry_metadata(self, ctx: "RunContext[None]") -> dict[str, str]:
+    def _model_retry_metadata(self, retry_index: int | None) -> dict[str, str]:
         metadata = dict(self.metadata)
-        if ctx.retry > 0:
-            metadata[_OUTPUT_RETRY_INDEX_METADATA_KEY] = str(ctx.retry)
+        if retry_index is not None:
+            metadata[_OUTPUT_RETRY_INDEX_METADATA_KEY] = str(retry_index)
         return metadata
 
     def _model_metric_metadata(self, ctx: "RunContext[None]") -> dict[str, str]:
-        metadata = self._model_retry_metadata(ctx)
+        if ctx.run_step not in self._model_retry_indices:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        metadata = self._model_retry_metadata(
+            self._model_retry_indices.pop(ctx.run_step)
+        )
         if self.tool_metrics is not None:
             started = self._model_metric_started_ns.pop(ctx.run_step, None)
             if started is None:

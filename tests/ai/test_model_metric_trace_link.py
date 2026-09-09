@@ -15,7 +15,7 @@ from linktools.ai.runtime._metric_capability import _RuntimeModelMetricCapabilit
 from linktools.ai.runtime._metric_id import _model_observation_id
 from linktools.ai.runtime._tool_metrics import _ToolMetricContext
 from pydantic_ai import Agent, ModelRetry, RunContext
-from pydantic_ai.messages import ModelMessage, ModelResponse
+from pydantic_ai.messages import ModelMessage, ModelResponse, TextPart
 from pydantic_ai.models.function import AgentInfo, FunctionModel
 from pydantic_ai.models.test import TestModel
 from pydantic_ai_harness.step_persistence import InMemoryStepStore
@@ -28,6 +28,14 @@ class _Recorder:
     def try_record(self, observation: Observation) -> bool:
         self.observations.append(observation)
         return True
+
+
+async def _text_model(
+    messages: list[ModelMessage],
+    info: AgentInfo,
+) -> ModelResponse:
+    del messages, info
+    return ModelResponse(parts=[TextPart("done")])
 
 
 class _ToolOperations:
@@ -187,7 +195,7 @@ async def test_output_retry_metric_lineage_uses_pydantic_retry_state() -> None:
     recorder = _Recorder()
     run_id = "output-retry-metric-run"
     agent = Agent(
-        TestModel(custom_output_text="done"),
+        FunctionModel(_text_model),
         deps_type=object,
         capabilities=[_model_metrics(recorder, run_id), _persistence(store, run_id, recorder)],
         retries={"output": 2},
@@ -236,7 +244,7 @@ async def test_output_retry_trace_lineage_does_not_require_metrics() -> None:
     store = InMemoryStepStore()
     run_id = "output-retry-no-metrics-run"
     agent = Agent(
-        TestModel(custom_output_text="done"),
+        FunctionModel(_text_model),
         capabilities=[_persistence(store, run_id, None)],
         retries={"output": 1},
     )

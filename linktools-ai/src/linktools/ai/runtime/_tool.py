@@ -524,6 +524,8 @@ class RuntimeToolOperationBridge:
                 decision.operation_id,
                 type(error).__name__,
             )
+            if result.cancelled:
+                raise asyncio.CancelledError
             raise AIError(
                 ErrorCode.TOOL_EFFECT_UNKNOWN,
                 safe_details={

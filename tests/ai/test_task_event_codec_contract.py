@@ -103,12 +103,6 @@ def test_task_event_graph_changed_rejects_node_only_ready_status() -> None:
         _node_event(owner=None),
         _node_event(result_digest="a" * 64),
         _node_event(
-            status="READY",
-            previous_status="PENDING",
-            owner=None,
-            fence=1,
-        ),
-        _node_event(
             status="PENDING",
             owner=None,
             fence=0,

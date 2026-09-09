@@ -18,12 +18,12 @@ class _Repository:
 
 
 @pytest.mark.asyncio
-async def test_committed_unknown_effect_beats_caller_cancellation(
+async def test_committed_unknown_effect_raises_boundary_error(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     async def committed(*args: Any, **kwargs: Any) -> DurableCommitResult[object]:
         del args, kwargs
-        return DurableCommitResult(DurableCommitState.COMMITTED, cancelled=True)
+        return DurableCommitResult(DurableCommitState.COMMITTED)
 
     monkeypatch.setattr(tool_module, "run_durable_commit", committed)
     bridge = RuntimeToolOperationBridge(

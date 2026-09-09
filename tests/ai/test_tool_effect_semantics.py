@@ -656,6 +656,7 @@ async def test_tool_failed_error_payload_round_trips_structured_content() -> Non
     record = ToolOperationRecord(
         tool_operation_id="operation",
         tenant_id="tenant",
+        execution_id="execution",
         step_run_id="run",
         tool_call_id="call",
         idempotency_key_digest="idempotency",
@@ -692,6 +693,7 @@ async def test_tool_retry_error_payload_round_trips_retry_part() -> None:
     record = ToolOperationRecord(
         tool_operation_id="operation",
         tenant_id="tenant",
+        execution_id="execution",
         step_run_id="run",
         tool_call_id="call",
         idempotency_key_digest="idempotency",
