@@ -5,7 +5,6 @@
 import asyncio
 from collections.abc import Mapping, Sequence
 from dataclasses import replace
-from datetime import datetime, timezone
 
 from ...core import (
     ExecutionEventType,
@@ -202,10 +201,7 @@ class RuntimeRecoveryCommands:
                 )
                 if target_matches:
                     return CommitObservation(DurableCommitState.COMMITTED, value=current)
-                predecessor = (
-                    current == execution
-                    and not page.items
-                )
+                predecessor = current == execution and not page.items
                 if predecessor:
                     return CommitObservation(DurableCommitState.NOT_COMMITTED)
                 return _partial()
