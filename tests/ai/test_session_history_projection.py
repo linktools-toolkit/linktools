@@ -34,7 +34,10 @@ from pydantic_ai.messages import (
     ToolReturnPart,
     UserPromptPart,
 )
-from linktools.ai.runtime.state import ContinuableSnapshot, RunRecord
+from linktools.ai.runtime.state._step_contracts import (
+    ContinuableSnapshot,
+    RunRecord,
+)
 from sqlalchemy.ext.asyncio import create_async_engine
 
 
@@ -205,7 +208,9 @@ async def test_session_history_cursor_binds_to_current_continuation() -> None:
         await _materialize(state, first_run, ("A", "B"))
         await _advance(state, None, ConversationCursor(first_run))
         service = _service(state)
-        first_page = await service.history("session", principal=Principal("owner", "tenant"), limit=2)
+        first_page = await service.history(
+            "session", principal=Principal("owner", "tenant"), limit=2
+        )
         assert first_page.next_cursor is not None
 
         await _materialize(state, second_run, ("A", "B", "C"))
@@ -310,7 +315,9 @@ async def test_session_history_uses_projection_v1_mapping_and_empty_strings() ->
 
 
 @pytest.mark.asyncio
-async def test_session_history_fork_copies_continuation_without_execution_lookup() -> None:
+async def test_session_history_fork_copies_continuation_without_execution_lookup() -> (
+    None
+):
     state = RuntimeState.in_memory()
     await state.initialize(namespace="session-history-fork", tenant_id="tenant")
     try:

@@ -4,6 +4,7 @@
 
 from datetime import datetime, timezone
 from pathlib import Path
+import shutil
 from types import SimpleNamespace
 from typing import Any
 
@@ -222,5 +223,85 @@ async def test_filesystem_memory_listing_reads_only_requested_record_page(
     )
     assert [value.metadata["path"] for value in page.items] == ["memory/000.md"]
     assert page.next_cursor is not None
+    assert record_reads == 2
+    await reopened.close()
+
+
+async def test_filesystem_rebuilds_missing_record_index_before_bounded_query(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from linktools.ai.runtime.state import _filesystem as filesystem
+    from linktools.ai.runtime.state._filesystem import FilesystemStateStore
+    from linktools.ai.runtime.state._plan import RuntimeDomain
+
+    root = tmp_path / "memory-reindex"
+    state = FilesystemStateStore(
+        root,
+        namespace="memory-reindex",
+        tenant_id="tenant",
+        runtime_domain=RuntimeDomain.MEMORY.value,
+    )
+    await state.initialize()
+    repository = MemoryRepositoryImpl(
+        state,
+        namespace="memory-reindex",
+        tenant_id="tenant",
+    )
+    now = datetime.now(timezone.utc)
+    values = tuple(
+        MemoryRecord(
+            f"memory-{index}",
+            "tenant",
+            "scope-digest",
+            StoredPayload.inline_text("content"),
+            {"path": f"memory/{index:03d}.md"},
+            1,
+            now,
+            now,
+        )
+        for index in range(20)
+    )
+    await state.mutate(
+        lambda transaction: transaction.insert_records(
+            tuple(
+                repository._stored("memory", value.memory_id, value) for value in values
+            )
+        )
+    )
+    await state.close()
+    shutil.rmtree(root / "record-index")
+
+    reopened = FilesystemStateStore(
+        root,
+        namespace="memory-reindex",
+        tenant_id="tenant",
+        runtime_domain=RuntimeDomain.MEMORY.value,
+    )
+    await reopened.initialize()
+    assert (root / "record-index" / "complete").read_text(encoding="utf-8") == "1"
+    repository = MemoryRepositoryImpl(
+        reopened,
+        namespace="memory-reindex",
+        tenant_id="tenant",
+    )
+    original_read_json = filesystem._read_json
+    record_reads = 0
+
+    def counting_read_json(path: Path):
+        nonlocal record_reads
+        if "records" in path.parts:
+            record_reads += 1
+        return original_read_json(path)
+
+    monkeypatch.setattr(filesystem, "_read_json", counting_read_json)
+    page = await repository.list(
+        tenant_id="tenant",
+        memory_scope_digest="scope-digest",
+        prefix="memory/",
+        cursor=None,
+        limit=1,
+    )
+    assert [value.metadata["path"] for value in page.items] == ["memory/000.md"]
     assert record_reads == 2
     await reopened.close()

@@ -58,7 +58,7 @@ from pydantic_ai.messages import (
     ThinkingPart,
     UserPromptPart,
 )
-from linktools.ai.runtime.state import (
+from linktools.ai.runtime.state._step_contracts import (
     ContinuableSnapshot,
     RunRecord,
     StepEvent,
@@ -142,7 +142,10 @@ async def test_history_head_requires_open_for_mutations() -> None:
         assert head.seal_digest is None
 
         async def require_open(transaction: object) -> None:
-            open_head, record = await repository.require_open_history_head_in_transaction(
+            (
+                open_head,
+                record,
+            ) = await repository.require_open_history_head_in_transaction(
                 transaction,
                 "execution",
             )
@@ -259,7 +262,9 @@ async def test_execution_projection_paths_reject_a_sealed_history_head(
                 ContinuableSnapshot(
                     run_id=run_id,
                     step_index=4,
-                    messages=[ModelRequest(parts=[UserPromptPart(content="after-seal")])],
+                    messages=[
+                        ModelRequest(parts=[UserPromptPart(content="after-seal")])
+                    ],
                     conversation_id=run.conversation_id,
                     parent_run_id=run.parent_run_id,
                     agent_name=run.agent_name,
@@ -269,7 +274,10 @@ async def test_execution_projection_paths_reject_a_sealed_history_head(
             )
         assert snapshot_error.value.code is ErrorCode.STORAGE_CONFLICT
         assert await archive.list_events(run_id=run_id) == before_events
-        assert await repository.get_history_head("execution", tenant_id="tenant") == before_head
+        assert (
+            await repository.get_history_head("execution", tenant_id="tenant")
+            == before_head
+        )
     finally:
         await state.close()
 
@@ -393,7 +401,9 @@ async def test_projection_flight_resolves_waiters_after_abandon() -> None:
 
 
 @pytest.mark.asyncio
-async def test_terminal_commit_cancellation_still_finalizes_after_durable_commit() -> None:
+async def test_terminal_commit_cancellation_still_finalizes_after_durable_commit() -> (
+    None
+):
     class Lifecycle:
         def __init__(self) -> None:
             self.finalized = asyncio.Event()
@@ -405,7 +415,9 @@ async def test_terminal_commit_cancellation_still_finalizes_after_durable_commit
         async def discard_execution_terminal_seal(self, plan: object) -> None:
             del plan
 
-        async def prepare_execution_terminal_seal(self, **kwargs: object) -> ExecutionTerminalSealPlan:
+        async def prepare_execution_terminal_seal(
+            self, **kwargs: object
+        ) -> ExecutionTerminalSealPlan:
             del kwargs
             return plan
 
@@ -464,6 +476,7 @@ async def test_state_callback_cannot_acquire_run_history_lock() -> None:
     await state.initialize(namespace="lock-order", tenant_id="tenant")
     history_lock = _RunHistoryLock()
     try:
+
         async def callback(_transaction: object) -> None:
             async with history_lock.hold("run"):
                 pass
@@ -479,6 +492,7 @@ async def test_read_only_state_callback_rejects_mutation() -> None:
     state = RuntimeState.in_memory()
     await state.initialize(namespace="read-only", tenant_id="tenant")
     try:
+
         async def callback(transaction: object) -> None:
             await transaction.next_sequence(b"x" * 32)
 
@@ -493,6 +507,7 @@ async def test_read_only_state_callback_rejects_record_guard() -> None:
     state = RuntimeState.in_memory()
     await state.initialize(namespace="read-only-guard", tenant_id="tenant")
     try:
+
         async def callback(transaction: object) -> None:
             await transaction.guard_record(
                 b"x" * 32,
@@ -679,8 +694,12 @@ async def test_terminal_reader_pages_from_execution_read_model(tmp_path: Path) -
             read_model=read_model,
         )
 
-        trace = await reader.trace("execution", tenant_id="tenant", cursor=None, limit=1)
-        history = await reader.history("execution", tenant_id="tenant", cursor=None, limit=1)
+        trace = await reader.trace(
+            "execution", tenant_id="tenant", cursor=None, limit=1
+        )
+        history = await reader.history(
+            "execution", tenant_id="tenant", cursor=None, limit=1
+        )
         transcript = await reader.transcript(
             "execution",
             tenant_id="tenant",
@@ -755,9 +774,11 @@ async def test_read_model_rejects_a_different_complete_source() -> None:
             "seal",
         )
         await state.execution.executions.state_store.mutate(
-            lambda transaction: state.execution.executions.put_history_seal_in_transaction(
-                transaction,
-                seal,
+            lambda transaction: (
+                state.execution.executions.put_history_seal_in_transaction(
+                    transaction,
+                    seal,
+                )
             )
         )
         repository_a = ExecutionReadModelRepository(
@@ -824,9 +845,11 @@ async def test_read_model_accepts_current_v1_record() -> None:
         )
         store = state.execution.executions.state_store
         await store.mutate(
-            lambda transaction: state.execution.executions.put_history_seal_in_transaction(
-                transaction,
-                seal,
+            lambda transaction: (
+                state.execution.executions.put_history_seal_in_transaction(
+                    transaction,
+                    seal,
+                )
             )
         )
         key = record_key_digest(
@@ -914,9 +937,15 @@ async def test_failed_claimed_attempt_without_run_is_skipped() -> None:
         await state.execution.executions.create(_record(ExecutionStatus.FAILED, 1))
         reader = _reader(state)
 
-        history = await reader.history("execution", tenant_id="tenant", cursor=None, limit=200)
-        trace = await reader.trace("execution", tenant_id="tenant", cursor=None, limit=200)
-        transcript = await reader.transcript("execution", tenant_id="tenant", cursor=None, limit=200)
+        history = await reader.history(
+            "execution", tenant_id="tenant", cursor=None, limit=200
+        )
+        trace = await reader.trace(
+            "execution", tenant_id="tenant", cursor=None, limit=200
+        )
+        transcript = await reader.transcript(
+            "execution", tenant_id="tenant", cursor=None, limit=200
+        )
 
         assert history.items == ()
         assert trace.items == ()
@@ -935,11 +964,21 @@ async def test_history_skips_missing_non_final_attempt() -> None:
         await state.retention.release_execution_handoff("execution", tenant_id="tenant")
         reader = _reader(state)
 
-        history = await reader.history("execution", tenant_id="tenant", cursor=None, limit=200)
-        trace = await reader.trace("execution", tenant_id="tenant", cursor=None, limit=200)
-        transcript = await reader.transcript("execution", tenant_id="tenant", cursor=None, limit=200)
+        history = await reader.history(
+            "execution", tenant_id="tenant", cursor=None, limit=200
+        )
+        trace = await reader.trace(
+            "execution", tenant_id="tenant", cursor=None, limit=200
+        )
+        transcript = await reader.transcript(
+            "execution", tenant_id="tenant", cursor=None, limit=200
+        )
 
-        assert [item.content for item in history.items] == ["attempt-2", "plan", "response"]
+        assert [item.content for item in history.items] == [
+            "attempt-2",
+            "plan",
+            "response",
+        ]
         assert [item.payload["segment_sequence"] for item in trace.items] == [2, 2]
         assert [item.text for item in transcript.items] == ["attempt-2", "response"]
     finally:
@@ -948,7 +987,9 @@ async def test_history_skips_missing_non_final_attempt() -> None:
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("method_name", ("history", "trace", "transcript"))
-async def test_successful_execution_requires_final_history_evidence(method_name: str) -> None:
+async def test_successful_execution_requires_final_history_evidence(
+    method_name: str,
+) -> None:
     state = RuntimeState.in_memory()
     await state.initialize(namespace="history", tenant_id="tenant")
     try:
@@ -965,7 +1006,9 @@ async def test_successful_execution_requires_final_history_evidence(method_name:
 
 
 @pytest.mark.asyncio
-async def test_successful_history_preserves_user_prompt_and_projects_all_views() -> None:
+async def test_successful_history_preserves_user_prompt_and_projects_all_views() -> (
+    None
+):
     state = RuntimeState.in_memory()
     await state.initialize(namespace="history", tenant_id="tenant")
     try:
@@ -975,9 +1018,15 @@ async def test_successful_history_preserves_user_prompt_and_projects_all_views()
         await state.retention.release_execution_handoff("execution", tenant_id="tenant")
         reader = _reader(state)
 
-        history = await reader.history("execution", tenant_id="tenant", cursor=None, limit=200)
-        trace = await reader.trace("execution", tenant_id="tenant", cursor=None, limit=200)
-        transcript = await reader.transcript("execution", tenant_id="tenant", cursor=None, limit=200)
+        history = await reader.history(
+            "execution", tenant_id="tenant", cursor=None, limit=200
+        )
+        trace = await reader.trace(
+            "execution", tenant_id="tenant", cursor=None, limit=200
+        )
+        transcript = await reader.transcript(
+            "execution", tenant_id="tenant", cursor=None, limit=200
+        )
 
         assert [item.content for item in history.items] == [prompt, "plan", "response"]
         assert [item.payload["segment_sequence"] for item in trace.items] == [1, 1]

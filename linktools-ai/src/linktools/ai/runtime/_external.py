@@ -9,7 +9,12 @@ from ..core import AuthorizationAction, AuthorizationPolicy, ExternalCallStatus
 from ..errors import AIError, ErrorCode
 from ..storage import ObjectRef
 from .service_api import ExternalSupplyRequest, ExternalSupplyResult
-from .state import ExternalCallRecord, RecoveryState
+from .state import (
+    RecoveryState,
+)
+from .state._contracts import (
+    ExternalCallRecord,
+)
 
 
 class DefaultExternalService:
@@ -102,8 +107,10 @@ def _is_exact_replay(
 
 
 def _is_digest(value: object) -> bool:
-    return isinstance(value, str) and len(value) == 64 and all(
-        character in "0123456789abcdef" for character in value
+    return (
+        isinstance(value, str)
+        and len(value) == 64
+        and all(character in "0123456789abcdef" for character in value)
     )
 
 

@@ -12,7 +12,9 @@ from linktools.ai.runtime._capabilities import (
     ToolOperationDecision,
     _RuntimeStepPersistence,
 )
-from linktools.ai.runtime.state import StagingStepStore
+from linktools.ai.runtime.state._steps import (
+    StagingStepStore,
+)
 from linktools.ai.workspace import LocalSandbox, Workspace
 from pydantic_ai.exceptions import ModelRetry
 from pydantic_ai.messages import ToolCallPart

@@ -30,7 +30,9 @@ from pydantic_ai.messages import ToolCallPart
 from pydantic_ai.models.test import TestModel
 from pydantic_ai.tools import RunContext, ToolDefinition
 from pydantic_ai.usage import RunUsage
-from linktools.ai.runtime.state import RunRecord
+from linktools.ai.runtime.state._step_contracts import (
+    RunRecord,
+)
 from sqlalchemy import event
 from sqlalchemy.dialects import mysql
 from sqlalchemy.ext.asyncio import create_async_engine

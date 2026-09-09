@@ -6,16 +6,11 @@ from __future__ import annotations
 
 import asyncio
 import json
-import os
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Sequence
 from dataclasses import dataclass
-from pathlib import Path
-from time import monotonic_ns
 from typing import Any, Protocol
 
-from linktools.core import environ
 from pydantic import ValidationError
-from pydantic_ai.capabilities import AbstractCapability
 from pydantic_ai.exceptions import (
     ApprovalRequired,
     CallDeferred,
@@ -26,14 +21,11 @@ from pydantic_ai.exceptions import (
     ToolRetryError,
 )
 from pydantic_ai.messages import (
-    ModelMessage,
-    ModelRequest,
     ModelResponse,
     RetryPromptPart,
     ToolCallPart,
     ToolReturnPart,
 )
-from pydantic_ai.models import ModelRequestContext
 from pydantic_ai.tools import RunContext, ToolDefinition
 
 from ..capability import (
@@ -43,22 +35,9 @@ from ..capability import (
     WORKSPACE_FILESYSTEM_TOOL_NAMES,
     WORKSPACE_SHELL_TOOL_NAMES,
 )
-from ..core import canonical_json_bytes, normalize_json_value
 from ..errors import AIError, ErrorCode
-from ..workspace import (
-    RepositoryInstructionDocument,
-    RepositoryInstructionResolver,
-    RepositoryInstructions,
-    WorkspacePolicy,
-    normalize_workspace_input_path,
-)
-from ._compaction import ExternalModelRequestObserver, RuntimeCompaction
-from ._journal import ModelRequestJournal
-from ._metric_id import _tool_observation_id
 from ._tool import ToolOperationDecision
-from .state import ToolOperationRecord
-
-_logger = environ.get_logger("ai.runtime.capabilities")
+from .state._contracts import ToolOperationRecord
 
 MEMORY_TOOL_NAMES = ("delete_memory", "read_memory", "search_memory", "write_memory")
 MEMORY_READ_TOOL_NAMES = ("read_memory", "search_memory")
@@ -130,9 +109,13 @@ class ToolOperationBridge(Protocol):
 
     async def complete(self, decision: ToolOperationDecision, result: Any) -> bool: ...
 
-    async def fail(self, decision: ToolOperationDecision, error: BaseException) -> bool: ...
+    async def fail(
+        self, decision: ToolOperationDecision, error: BaseException
+    ) -> bool: ...
 
-    async def unknown(self, decision: ToolOperationDecision, error: BaseException) -> None: ...
+    async def unknown(
+        self, decision: ToolOperationDecision, error: BaseException
+    ) -> None: ...
 
     async def existing_call_ids(
         self,
@@ -174,7 +157,9 @@ class _MissingToolOperationBridge:
         del decision, error
         raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
 
-    async def unknown(self, decision: ToolOperationDecision, error: BaseException) -> None:
+    async def unknown(
+        self, decision: ToolOperationDecision, error: BaseException
+    ) -> None:
         del decision, error
         raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
 
@@ -204,8 +189,12 @@ def _model_usage_metadata(response: ModelResponse) -> dict[str, str]:
     return {
         _MODEL_USAGE_INPUT_METADATA_KEY: _model_usage_token(usage.input_tokens),
         _MODEL_USAGE_OUTPUT_METADATA_KEY: _model_usage_token(usage.output_tokens),
-        _MODEL_USAGE_CACHE_READ_METADATA_KEY: _model_usage_token(usage.cache_read_tokens),
-        _MODEL_USAGE_CACHE_WRITE_METADATA_KEY: _model_usage_token(usage.cache_write_tokens),
+        _MODEL_USAGE_CACHE_READ_METADATA_KEY: _model_usage_token(
+            usage.cache_read_tokens
+        ),
+        _MODEL_USAGE_CACHE_WRITE_METADATA_KEY: _model_usage_token(
+            usage.cache_write_tokens
+        ),
     }
 
 
@@ -235,7 +224,11 @@ def _validate_trusted_mcp_selectors(value: tuple[str, ...]) -> None:
     if len(set(value)) != len(value):
         raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
     for selector in value:
-        if not selector.startswith("mcp__") or selector.endswith("__") or "*" in selector:
+        if (
+            not selector.startswith("mcp__")
+            or selector.endswith("__")
+            or "*" in selector
+        ):
             raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
 
 
@@ -260,7 +253,11 @@ def _trusted_tool_capability(name: str, tool_class: str) -> str | None:
             return None
         return _WORKSPACE_SANDBOX_CAPABILITY_ID
     if tool_class == "shell":
-        return _WORKSPACE_SANDBOX_CAPABILITY_ID if name in WORKSPACE_SHELL_TOOL_NAMES else None
+        return (
+            _WORKSPACE_SANDBOX_CAPABILITY_ID
+            if name in WORKSPACE_SHELL_TOOL_NAMES
+            else None
+        )
     if tool_class in {"memory.read", "memory.write"}:
         if name not in MEMORY_TOOL_NAMES:
             return None
@@ -437,7 +434,10 @@ def tool_is_control(
     if tool_class != "control":
         return False
     expected_capability = _trusted_tool_capability(tool_def.name, tool_class)
-    return expected_capability is not None and tool_def.capability_id == expected_capability
+    return (
+        expected_capability is not None
+        and tool_def.capability_id == expected_capability
+    )
 
 
 def tool_allowed_in_planning(
@@ -457,7 +457,9 @@ def tool_allowed_in_planning(
         if not tool_def.name.startswith(f"{tool_def.capability_id}__"):
             raise AIError(ErrorCode.CAPABILITY_POLICY_CONFLICT)
         return False
-    if any(tool_def.name.startswith(f"{selector}__") for selector in trusted_mcp_selectors):
+    if any(
+        tool_def.name.startswith(f"{selector}__") for selector in trusted_mcp_selectors
+    ):
         return False
     metadata = (tool_def.metadata or {}).get(PLAN_SAFE_METADATA_KEY)
     if metadata is None:

@@ -80,7 +80,9 @@ from ._journal import ModelRequestFact, ModelRequestJournal
 from ._memory import MemoryStore
 from ._plan import RuntimePlanStore
 from ._tool_metrics import _ToolMetricContext
-from .state import StepStore
+from .state._step_contracts import (
+    StepStore,
+)
 from ..errors import AIError, ErrorCode
 
 _logger = environ.get_logger("ai.runtime.capabilities")
@@ -153,9 +155,7 @@ class _RuntimeStepPersistence(StepPersistence[None]):
 
     @property
     def _runtime_store(self) -> HarnessStepStoreAdapter:
-        if not isinstance(self.store, HarnessStepStoreAdapter):
-            raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
-        return self.store
+        return cast(HarnessStepStoreAdapter, self.store)
 
     def _runtime_run_id(self, ctx: RunContext[Any]) -> str:
         value = self.run_id or ctx.run_id

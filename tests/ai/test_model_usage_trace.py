@@ -21,7 +21,12 @@ from pydantic_ai.messages import ModelMessage, ModelResponse, TextPart
 from pydantic_ai.models.function import AgentInfo, FunctionModel
 from pydantic_ai.models.test import TestModel
 from pydantic_ai.usage import RequestUsage, RunUsage
-from linktools.ai.runtime.state import StagingStepStore, StepEvent
+from linktools.ai.runtime.state._steps import (
+    StagingStepStore,
+)
+from linktools.ai.runtime.state._step_contracts import (
+    StepEvent,
+)
 
 
 class _ToolOperations:

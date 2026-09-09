@@ -19,7 +19,9 @@ from pydantic_ai import Agent
 from pydantic_ai.messages import ModelMessage, ModelResponse
 from pydantic_ai.models.function import AgentInfo, FunctionModel
 from pydantic_ai.models.test import TestModel
-from linktools.ai.runtime.state import StagingStepStore
+from linktools.ai.runtime.state._steps import (
+    StagingStepStore,
+)
 
 
 class _Recorder:

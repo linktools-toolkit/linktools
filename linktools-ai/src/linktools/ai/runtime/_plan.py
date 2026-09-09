@@ -24,10 +24,12 @@ from ..core import (
 )
 from ..errors import AIError, ErrorCode
 from .state import (
-    OperationLedgerRepository,
     StateStore,
     StateTransaction,
     StoredRecord,
+)
+from .state._contracts import (
+    OperationLedgerRepository,
 )
 from .state import partition_digest, record_key_digest
 
@@ -192,7 +194,7 @@ class RuntimePlanStore:
                     self._owner_kind,
                     self._owner_id,
                     result,
-                )
+                ),
             )
             _logger.debug(
                 "runtime plan replaced: owner_kind=%s owner_id=%s revision=%s items=%s",
@@ -384,9 +386,7 @@ def _ensure_operation(
 
 
 def _plan_fingerprint(items: list[PlanItem]) -> str:
-    return canonical_sha256(
-        {"items": [_item_payload(item) for item in items]}
-    )
+    return canonical_sha256({"items": [_item_payload(item) for item in items]})
 
 
 def _operation_input(
@@ -398,9 +398,7 @@ def _operation_input(
 ) -> OperationLedgerInput:
     now = datetime.now(timezone.utc)
     resource_kind = (
-        ResourceKind.SESSION
-        if owner_kind == "session"
-        else ResourceKind.EXECUTION
+        ResourceKind.SESSION if owner_kind == "session" else ResourceKind.EXECUTION
     )
     return OperationLedgerInput(
         _operation_id(operation, owner_kind, owner_id),
@@ -499,9 +497,7 @@ def _plan_operation_matches(
     owner_id: str,
 ) -> bool:
     expected_resource = (
-        ResourceKind.SESSION
-        if owner_kind == "session"
-        else ResourceKind.EXECUTION
+        ResourceKind.SESSION if owner_kind == "session" else ResourceKind.EXECUTION
     )
     expected_execution = owner_id if owner_kind == "execution" else None
     return (

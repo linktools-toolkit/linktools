@@ -21,7 +21,9 @@ from linktools.ai.runtime.service_api import CancelExecutionRequest
 from linktools.ai.runtime.state import ExecutionRecord
 from linktools.ai.spec import AgentSpec
 from linktools.ai.workspace import RepositoryInstructions, trusted_workspace_principal
-from linktools.ai.runtime.state import StagingStepStore
+from linktools.ai.runtime.state._steps import (
+    StagingStepStore,
+)
 
 
 class _EmptyRepositoryInstructionResolver:

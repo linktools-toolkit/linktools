@@ -50,6 +50,8 @@ _WORKSPACE_SCOPED_TOOL_NAMES = frozenset(
         "find_files",
     }
 )
+
+
 class _WorkspaceToolGate(AbstractCapability[None]):
     def __init__(
         self,
@@ -93,7 +95,8 @@ class _WorkspaceToolGate(AbstractCapability[None]):
         self._exposure_map: dict[str, RepositoryInstructionDocument] = {}
         if repository_instructions is not None:
             self._exposure_map.update(
-                (document.source, document) for document in repository_instructions.documents
+                (document.source, document)
+                for document in repository_instructions.documents
             )
         self._marker_authority = repository_instruction_marker_authority
         self._refresh_required = False
@@ -138,7 +141,9 @@ class _WorkspaceToolGate(AbstractCapability[None]):
             tool_class=tool_class,
         )
         if decision == "deny":
-            raise ToolFailed("Tool execution is denied by the current workspace policy.")
+            raise ToolFailed(
+                "Tool execution is denied by the current workspace policy."
+            )
         if (
             self._repository_instructions_enabled
             and tool_def.name in _WORKSPACE_SCOPED_TOOL_NAMES
@@ -149,7 +154,9 @@ class _WorkspaceToolGate(AbstractCapability[None]):
                 _repository_instruction_lookup_target(self._workspace_root, target),
                 exclude_sources=frozenset(self._exposure_map),
             )
-            if any(document.source in self._exposure_map for document in subset.documents):
+            if any(
+                document.source in self._exposure_map for document in subset.documents
+            ):
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             if subset.documents:
                 candidate = RepositoryInstructions(
@@ -157,7 +164,10 @@ class _WorkspaceToolGate(AbstractCapability[None]):
                 )
                 self._validate_bundle_limits(candidate)
                 marker = _repository_instruction_marker(self._execution_id, subset)
-                if len(marker.encode("utf-8")) > self._policy.max_repository_instruction_bytes:
+                if (
+                    len(marker.encode("utf-8"))
+                    > self._policy.max_repository_instruction_bytes
+                ):
                     raise AIError(ErrorCode.PROMPT_TOO_LARGE)
                 self._exposure_map = {
                     document.source: document for document in candidate.documents
@@ -190,7 +200,9 @@ class _WorkspaceToolGate(AbstractCapability[None]):
                 if authority not in self._marker_authority:
                     continue
                 content = part.content
-                if not isinstance(content, str) or not content.startswith(_REPOSITORY_MARKER_HEADER):
+                if not isinstance(content, str) or not content.startswith(
+                    _REPOSITORY_MARKER_HEADER
+                ):
                     continue
                 current_execution = _marker_execution_id(content)
                 if current_execution != self._execution_id:
@@ -198,7 +210,9 @@ class _WorkspaceToolGate(AbstractCapability[None]):
                 paired = calls.get(authority, ())
                 if len(paired) != 1:
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                subset = self._parse_repository_instruction_marker(run_id, paired[0], part)
+                subset = self._parse_repository_instruction_marker(
+                    run_id, paired[0], part
+                )
                 if subset is None:
                     continue
                 for document in subset.documents:
@@ -282,7 +296,13 @@ class _WorkspaceToolGate(AbstractCapability[None]):
             }:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
             raise
-        except (json.JSONDecodeError, TypeError, ValueError, UnicodeError, OSError) as error:
+        except (
+            json.JSONDecodeError,
+            TypeError,
+            ValueError,
+            UnicodeError,
+            OSError,
+        ) as error:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
 
     def _validate_active_limits(self) -> None:
@@ -291,9 +311,15 @@ class _WorkspaceToolGate(AbstractCapability[None]):
         )
 
     def _validate_bundle_limits(self, instructions: RepositoryInstructions) -> None:
-        if len(instructions.documents) > self._policy.max_repository_instruction_documents:
+        if (
+            len(instructions.documents)
+            > self._policy.max_repository_instruction_documents
+        ):
             raise AIError(ErrorCode.PROMPT_TOO_LARGE)
-        if len(instructions.render().encode("utf-8")) > self._policy.max_repository_instruction_bytes:
+        if (
+            len(instructions.render().encode("utf-8"))
+            > self._policy.max_repository_instruction_bytes
+        ):
             raise AIError(ErrorCode.PROMPT_TOO_LARGE)
 
 
@@ -400,7 +426,6 @@ def _scope_applies_to_target(scope: str, target: str) -> bool:
         len(target_parts) >= len(scope_parts)
         and target_parts[: len(scope_parts)] == scope_parts
     )
-
 
 
 __all__ = []

@@ -8,8 +8,10 @@ import pytest
 from pydantic_ai import Agent
 from pydantic_ai.models.test import TestModel
 from pydantic_ai.tools import DeferredToolRequests
-from linktools.ai.runtime.state import (
+from linktools.ai.runtime.state._step_contracts import (
     ContinuableSnapshot,
+)
+from linktools.ai.runtime.state._steps import (
     StagingStepStore,
 )
 

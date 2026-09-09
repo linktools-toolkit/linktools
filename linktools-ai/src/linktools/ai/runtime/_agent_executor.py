@@ -129,7 +129,9 @@ from ._tool_metrics import _ToolMetricContext
 from ._memory import MemoryStore
 from ._plan import RuntimePlanStore
 from ._workspace_binding import WorkspaceToolCallBinder
-from .state import StepStore
+from .state._step_contracts import (
+    StepStore,
+)
 
 _logger = environ.get_logger("ai.runtime.agent_executor")
 _RUNTIME_RESERVED_TOOL_NAMES = frozenset(

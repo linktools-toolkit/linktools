@@ -36,7 +36,10 @@ from linktools.ai.runtime.state._contracts import (
 from linktools.ai.spec import AgentSpec
 from linktools.ai.task import TaskNode
 from pydantic_ai.messages import ModelRequest, UserPromptPart
-from linktools.ai.runtime.state import ContinuableSnapshot, RunRecord
+from linktools.ai.runtime.state._step_contracts import (
+    ContinuableSnapshot,
+    RunRecord,
+)
 
 
 def _binding_snapshot() -> AgentBindingSnapshot:
@@ -242,16 +245,22 @@ def test_v1_dataclass_reader_tolerates_ordinary_shape_changes() -> None:
     wire = encode_domain(cursor)
     fields = dict(wire["fields"])
     fields.pop("history_id")
-    assert decode_domain(
-        {"$dataclass": "conversation_cursor", "fields": fields},
-        ConversationCursor,
-    ) == cursor
+    assert (
+        decode_domain(
+            {"$dataclass": "conversation_cursor", "fields": fields},
+            ConversationCursor,
+        )
+        == cursor
+    )
     fields = dict(wire["fields"])
     fields["unknown"] = None
-    assert decode_domain(
-        {"$dataclass": "conversation_cursor", "fields": fields},
-        ConversationCursor,
-    ) == cursor
+    assert (
+        decode_domain(
+            {"$dataclass": "conversation_cursor", "fields": fields},
+            ConversationCursor,
+        )
+        == cursor
+    )
     _assert_integrity(
         lambda: decode_domain(
             {
@@ -275,10 +284,13 @@ def test_v1_dataclass_reader_tolerates_ordinary_shape_changes() -> None:
     )
     task_fields = dict(task_wire["fields"])
     task_fields["extra"] = None
-    assert decode_domain(
-        {"$dataclass": "task_node", "fields": task_fields},
-        TaskNode,
-    ) == task
+    assert (
+        decode_domain(
+            {"$dataclass": "task_node", "fields": task_fields},
+            TaskNode,
+        )
+        == task
+    )
     _assert_integrity(lambda: decode_domain({"plain": 1}, Any))
     _assert_integrity(lambda: decode_domain({"$tuple": [], "$mapping": []}, Any))
     assert decode_domain(encode_domain({"value": 1}), Any) == {"value": 1}

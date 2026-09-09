@@ -53,20 +53,30 @@ from .service_api import (
     UpdateSessionRequest,
 )
 from .state import (
-    ContinuableSnapshot,
-    ConversationCursor,
     ConversationState,
     ExecutionRecord,
     ExecutionRepository,
-    SESSION_AGENT_ID_METADATA_KEY,
     SessionRecord,
+)
+from .state._step_contracts import (
+    ContinuableSnapshot,
+)
+from .state._contracts import (
+    ConversationCursor,
+    SESSION_AGENT_ID_METADATA_KEY,
 )
 
 _logger = environ.get_logger("ai.runtime.session")
 
 
 class _SessionReleaseCallback(Protocol):
-    async def __call__(self, session_id: str, *, tenant_id: str, continuation: ConversationCursor | None) -> None: ...
+    async def __call__(
+        self,
+        session_id: str,
+        *,
+        tenant_id: str,
+        continuation: ConversationCursor | None,
+    ) -> None: ...
 
 
 class _SessionExecutionService(ExecutionService, Protocol):
@@ -109,10 +119,11 @@ class _SessionTranscriptStore(Protocol):
         include_interrupted: bool = False,
     ) -> ContinuableSnapshot | None: ...
 
-async def _no_release_terminal(session_id: str, *, tenant_id: str, continuation: ConversationCursor | None) -> None:
+
+async def _no_release_terminal(
+    session_id: str, *, tenant_id: str, continuation: ConversationCursor | None
+) -> None:
     del session_id, tenant_id, continuation
-
-
 
 
 @dataclass
@@ -162,9 +173,14 @@ class DefaultSessionService:
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
         cwd = await self._canonicalize_cwd(request.cwd)
         resource = ResourceRef(
-            ResourceKind.SESSION, request.session_id, request.principal.tenant_id, request.principal.principal_id
+            ResourceKind.SESSION,
+            request.session_id,
+            request.principal.tenant_id,
+            request.principal.principal_id,
         )
-        await self._authorization.authorize(request.principal, AuthorizationAction.SESSION_CREATE, resource)
+        await self._authorization.authorize(
+            request.principal, AuthorizationAction.SESSION_CREATE, resource
+        )
         digest = canonical_sha256(
             {
                 "action": "session.create",
@@ -205,12 +221,18 @@ class DefaultSessionService:
             record,
             operation=operation,
         )
-        _logger.debug("session created: session=%s tenant=%s", record.session_id, request.principal.tenant_id)
+        _logger.debug(
+            "session created: session=%s tenant=%s",
+            record.session_id,
+            request.principal.tenant_id,
+        )
         return await self._view(record, request.principal)
 
     async def get(self, session_id: str, *, principal: Principal) -> SessionView:
         async with self._session_consumer(session_id, principal.tenant_id):
-            record = await self._authorized(session_id, principal, AuthorizationAction.SESSION_READ)
+            record = await self._authorized(
+                session_id, principal, AuthorizationAction.SESSION_READ
+            )
             return await self._view(record, principal)
 
     async def history(
@@ -227,7 +249,9 @@ class DefaultSessionService:
                 principal,
                 AuthorizationAction.SESSION_READ,
             )
-            continuation = None if record.continuation is None else record.continuation.step_run_id
+            continuation = (
+                None if record.continuation is None else record.continuation.step_run_id
+            )
             continuation_history_id = (
                 None
                 if record.continuation is None
@@ -264,7 +288,11 @@ class DefaultSessionService:
             snapshot=snapshot,
         )
         values = page.items
-        views = tuple(await asyncio.gather(*(self._view(record, request.principal) for record in values)))
+        views = tuple(
+            await asyncio.gather(
+                *(self._view(record, request.principal) for record in values)
+            )
+        )
         next_cursor = _make_cursor(
             snapshot,
             request.principal.tenant_id,
@@ -276,10 +304,14 @@ class DefaultSessionService:
 
     async def load(self, session_id: str, *, principal: Principal) -> LoadedSession:
         async with self._session_consumer(session_id, principal.tenant_id):
-            record = await self._authorized(session_id, principal, AuthorizationAction.SESSION_READ)
+            record = await self._authorized(
+                session_id, principal, AuthorizationAction.SESSION_READ
+            )
             record = await self._reconcile_terminal_admission(record)
             active_execution = await self._active_admitted_execution(record)
-            active = () if active_execution is None else (active_execution.execution_id,)
+            active = (
+                () if active_execution is None else (active_execution.execution_id,)
+            )
             return LoadedSession(await self._view(record, principal), active)
 
     async def load_model_context(
@@ -289,7 +321,9 @@ class DefaultSessionService:
         principal: Principal,
     ) -> tuple[object, ...]:
         async with self._session_consumer(session_id, principal.tenant_id):
-            record = await self._authorized(session_id, principal, AuthorizationAction.SESSION_READ)
+            record = await self._authorized(
+                session_id, principal, AuthorizationAction.SESSION_READ
+            )
             if self._transcript_store is None or record.continuation is None:
                 return ()
             history_id = record.continuation.history_id or record.history_id
@@ -309,7 +343,9 @@ class DefaultSessionService:
         principal: Principal,
     ) -> AsyncIterator[object]:
         async with self._session_consumer(session_id, principal.tenant_id):
-            record = await self._authorized(session_id, principal, AuthorizationAction.SESSION_READ)
+            record = await self._authorized(
+                session_id, principal, AuthorizationAction.SESSION_READ
+            )
             if self._transcript_store is None or record.continuation is None:
                 return
             history_id = record.continuation.history_id or record.history_id
@@ -386,9 +422,13 @@ class DefaultSessionService:
             except AttributeError as error:
                 raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY) from error
 
-    async def fork(self, agent_id: str, session_id: str, request: ForkSessionRequest) -> SessionView:
+    async def fork(
+        self, agent_id: str, session_id: str, request: ForkSessionRequest
+    ) -> SessionView:
         async with self._session_consumer(session_id, request.principal.tenant_id):
-            source = await self._authorized(session_id, request.principal, AuthorizationAction.SESSION_READ)
+            source = await self._authorized(
+                session_id, request.principal, AuthorizationAction.SESSION_READ
+            )
             await self._authorization.authorize(
                 request.principal,
                 AuthorizationAction.SESSION_CREATE,
@@ -457,15 +497,23 @@ class DefaultSessionService:
                 expected_source_revision=source.revision,
                 operation=operation,
             )
-            _logger.debug("session forked: source=%s target=%s", session_id, target.session_id)
+            _logger.debug(
+                "session forked: source=%s target=%s", session_id, target.session_id
+            )
             return await self._view(target, request.principal)
 
-    async def update(self, agent_id: str, session_id: str, request: UpdateSessionRequest) -> SessionView:
+    async def update(
+        self, agent_id: str, session_id: str, request: UpdateSessionRequest
+    ) -> SessionView:
         async with self._session_consumer(session_id, request.principal.tenant_id):
             return await self._update(agent_id, session_id, request)
 
-    async def _update(self, agent_id: str, session_id: str, request: UpdateSessionRequest) -> SessionView:
-        current = await self._authorized(session_id, request.principal, AuthorizationAction.SESSION_UPDATE)
+    async def _update(
+        self, agent_id: str, session_id: str, request: UpdateSessionRequest
+    ) -> SessionView:
+        current = await self._authorized(
+            session_id, request.principal, AuthorizationAction.SESSION_UPDATE
+        )
         resolved_agent_id = current.resolved_agent_id()
         if resolved_agent_id != agent_id:
             raise AIError(ErrorCode.SESSION_BINDING_MISMATCH)
@@ -524,7 +572,9 @@ class DefaultSessionService:
             next_record=next_record,
             operation=operation,
         )
-        _logger.debug("session updated: session=%s revision=%s", session_id, updated.revision)
+        _logger.debug(
+            "session updated: session=%s revision=%s", session_id, updated.revision
+        )
         return await self._view(updated, request.principal)
 
     async def _canonicalize_cwd(self, value: str | None) -> str | None:
@@ -543,8 +593,12 @@ class DefaultSessionService:
         async with self._session_consumer(session_id, request.principal.tenant_id):
             return await self._close(session_id, request)
 
-    async def _close(self, session_id: str, request: CloseSessionRequest) -> SessionView:
-        await self._authorized(session_id, request.principal, AuthorizationAction.SESSION_CLOSE)
+    async def _close(
+        self, session_id: str, request: CloseSessionRequest
+    ) -> SessionView:
+        await self._authorized(
+            session_id, request.principal, AuthorizationAction.SESSION_CLOSE
+        )
         digest = canonical_sha256(
             {
                 "action": "session.close",
@@ -562,7 +616,9 @@ class DefaultSessionService:
             digest,
         )
         if operation.status is OperationStatus.SUCCEEDED:
-            closed = await self._conversation.sessions.get(session_id, tenant_id=request.principal.tenant_id)
+            closed = await self._conversation.sessions.get(
+                session_id, tenant_id=request.principal.tenant_id
+            )
             if closed is None:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             self._validate_close_replay(operation, closed, session_id)
@@ -585,7 +641,9 @@ class DefaultSessionService:
                 operation,
                 request.principal.tenant_id,
                 session_id,
-                canonical_sha256({"session_id": session_id, "revision": current.revision}),
+                canonical_sha256(
+                    {"session_id": session_id, "revision": current.revision}
+                ),
             )
             view = await self._view(current, request.principal)
             await self._request_session_release(
@@ -619,7 +677,10 @@ class DefaultSessionService:
                     )
                     if latest is None:
                         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                    if latest.status is SessionStatus.OPEN and latest.active_execution_id is not None:
+                    if (
+                        latest.status is SessionStatus.OPEN
+                        and latest.active_execution_id is not None
+                    ):
                         raise AIError(ErrorCode.SESSION_ACTIVE_EXECUTIONS)
                     if latest.status is SessionStatus.OPEN:
                         current = await self._conversation.sessions.transition_status(
@@ -719,7 +780,10 @@ class DefaultSessionService:
             )
             if current is None:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            if current.status in {SessionStatus.CLOSING, SessionStatus.CLEANUP_REQUIRED}:
+            if current.status in {
+                SessionStatus.CLOSING,
+                SessionStatus.CLEANUP_REQUIRED,
+            }:
                 current = await self._close_idle_session(
                     session_id,
                     request.principal.tenant_id,
@@ -806,14 +870,19 @@ class DefaultSessionService:
                     if state.release_requested and not state.release_in_progress:
                         state.release_in_progress = True
                         cleanup_owner = True
-                    elif not state.release_requested and self._handoff_states.get(key) is state:
+                    elif (
+                        not state.release_requested
+                        and self._handoff_states.get(key) is state
+                    ):
                         self._handoff_states.pop(key, None)
                 self._handoff_condition.notify_all()
             if cleanup_owner:
                 cleanup_succeeded = False
                 cleanup_error: BaseException | None = None
                 try:
-                    await self._release_terminal(session_id, tenant_id=tenant_id, continuation=state.continuation)
+                    await self._release_terminal(
+                        session_id, tenant_id=tenant_id, continuation=state.continuation
+                    )
                     cleanup_succeeded = True
                 except BaseException as error:
                     cleanup_error = error
@@ -831,7 +900,9 @@ class DefaultSessionService:
                             state.release_in_progress = False
                             state.release_requested = True
                     self._handoff_condition.notify_all()
-                if cleanup_error is not None and not isinstance(cleanup_error, Exception):
+                if cleanup_error is not None and not isinstance(
+                    cleanup_error, Exception
+                ):
                     raise cleanup_error
 
     async def _request_session_release(
@@ -868,12 +939,18 @@ class DefaultSessionService:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         await self._reconcile_terminal_admission(current)
 
-    async def _authorized(self, session_id: str, principal: Principal, action: AuthorizationAction) -> SessionRecord:
-        header = await self._conversation.sessions.get_header(session_id, tenant_id=principal.tenant_id)
+    async def _authorized(
+        self, session_id: str, principal: Principal, action: AuthorizationAction
+    ) -> SessionRecord:
+        header = await self._conversation.sessions.get_header(
+            session_id, tenant_id=principal.tenant_id
+        )
         if header is None:
             raise AIError(ErrorCode.AUTHORIZATION_DENIED)
         await self._authorization.authorize(principal, action, header)
-        record = await self._conversation.sessions.get(session_id, tenant_id=principal.tenant_id)
+        record = await self._conversation.sessions.get(
+            session_id, tenant_id=principal.tenant_id
+        )
         if record is None:
             raise AIError(ErrorCode.AUTHORIZATION_DENIED)
         return record
@@ -917,7 +994,9 @@ class DefaultSessionService:
             return None
         return execution
 
-    async def _reconcile_terminal_admission(self, record: SessionRecord) -> SessionRecord:
+    async def _reconcile_terminal_admission(
+        self, record: SessionRecord
+    ) -> SessionRecord:
         execution_id = record.active_execution_id
         if execution_id is None:
             return record
@@ -1015,11 +1094,19 @@ class DefaultSessionService:
         ):
             raise AIError(ErrorCode.IDEMPOTENCY_CONFLICT)
         if existing.status is OperationStatus.PENDING:
-            if existing.result_ref is not None or existing.result_digest is not None or existing.error_code is not None:
+            if (
+                existing.result_ref is not None
+                or existing.result_digest is not None
+                or existing.error_code is not None
+            ):
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             return existing
         if existing.status is OperationStatus.SUCCEEDED:
-            if existing.result_ref != session_id or existing.result_digest is None or existing.error_code is not None:
+            if (
+                existing.result_ref != session_id
+                or existing.result_digest is None
+                or existing.error_code is not None
+            ):
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             return existing
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -1059,7 +1146,9 @@ class DefaultSessionService:
         except AIError as error:
             if error.code is not ErrorCode.STORAGE_CONFLICT:
                 raise
-            current = await self._conversation.operations.get(operation.operation_id, tenant_id=tenant_id)
+            current = await self._conversation.operations.get(
+                operation.operation_id, tenant_id=tenant_id
+            )
             if current is None:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
             self._validate_close_operation_identity(
@@ -1149,9 +1238,14 @@ class DefaultSessionService:
         session: SessionRecord,
         session_id: str,
     ) -> None:
-        if session.status is not SessionStatus.CLOSED or session.active_execution_id is not None:
+        if (
+            session.status is not SessionStatus.CLOSED
+            or session.active_execution_id is not None
+        ):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        result_digest = canonical_sha256({"session_id": session_id, "revision": session.revision})
+        result_digest = canonical_sha256(
+            {"session_id": session_id, "revision": session.revision}
+        )
         DefaultSessionService._validate_close_operation_identity(
             operation,
             operation,
@@ -1171,7 +1265,11 @@ __all__ = ["DefaultSessionService"]
 
 
 def _make_cursor(
-    snapshot: int, tenant_id: str, owner_principal_id: str, sort_key: "str | None", signer: CursorSigner
+    snapshot: int,
+    tenant_id: str,
+    owner_principal_id: str,
+    sort_key: "str | None",
+    signer: CursorSigner,
 ) -> "str | None":
     if sort_key is None:
         return None
@@ -1199,13 +1297,20 @@ def _decode_session_cursor(
             payload.cursor_version != 1
             or payload.tenant_id != tenant_id
             or payload.resource_kind != "SESSION"
-            or payload.filter_digest != canonical_sha256({"owner_principal_id": owner_principal_id})
+            or payload.filter_digest
+            != canonical_sha256({"owner_principal_id": owner_principal_id})
         ):
             raise ValueError("session cursor identity mismatch")
         if not payload.sort_key.strip():
             raise ValueError("session cursor sort key is empty")
         return payload.sort_key, payload.snapshot_or_store_revision
-    except (Base64Error, KeyError, TypeError, ValueError, json.JSONDecodeError) as error:
+    except (
+        Base64Error,
+        KeyError,
+        TypeError,
+        ValueError,
+        json.JSONDecodeError,
+    ) as error:
         raise AIError(ErrorCode.CURSOR_INVALID) from error
     except AIError as error:
         raise AIError(ErrorCode.CURSOR_INVALID) from error

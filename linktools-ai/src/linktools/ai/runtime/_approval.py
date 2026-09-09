@@ -30,7 +30,13 @@ from .service_api import (
     ApprovalDecisionResult,
     ApprovalView,
 )
-from .state import ApprovalRecord, ApprovalRepository, ExecutionRepository
+from .state import (
+    ApprovalRepository,
+    ExecutionRepository,
+)
+from .state._contracts import (
+    ApprovalRecord,
+)
 
 _logger = environ.get_logger("ai.runtime.approval")
 
@@ -160,7 +166,9 @@ class DefaultApprovalService:
             tenant_id=principal.tenant_id,
         )
         if self._context_reader is None:
-            return tuple(ApprovalView(record.approval_id, record.status) for record in records)
+            return tuple(
+                ApprovalView(record.approval_id, record.status) for record in records
+            )
         approval_ids = tuple(record.approval_id for record in records)
         contexts = await self._context_reader.tool_approvals(
             approval_ids,

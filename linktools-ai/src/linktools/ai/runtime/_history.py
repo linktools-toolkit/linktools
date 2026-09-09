@@ -33,19 +33,21 @@ from .service_api import (
 )
 from .state import (
     SESSION_HISTORY_VIEW_V1,
-    ContinuableSnapshot,
     ExecutionReadModelBuild,
     ExecutionReadModelRepository,
     ExecutionRecord,
     ExecutionRepository,
     LoadedContextMessage,
     RuntimeDomain,
-    RunRecord,
-    StepEvent,
-    StepStore,
     TranscriptMessageRef,
     project_execution_transcript_message,
     project_session_history_message,
+)
+from .state._step_contracts import (
+    ContinuableSnapshot,
+    RunRecord,
+    StepEvent,
+    StepStore,
 )
 
 _logger = environ.get_logger("ai.runtime.history")
@@ -166,7 +168,9 @@ class StepExecutionHistoryReader:
         self._cursor_signer = cursor_signer
         self._read_model = read_model
 
-    async def trace(self, execution_id: str, *, tenant_id: str, cursor: "str | None", limit: int) -> "Page[ExecutionTraceItem]":
+    async def trace(
+        self, execution_id: str, *, tenant_id: str, cursor: "str | None", limit: int
+    ) -> "Page[ExecutionTraceItem]":
         record = await self._executions.get(execution_id, tenant_id=tenant_id)
         if record is None:
             raise AIError(ErrorCode.STORAGE_NOT_FOUND)
@@ -212,15 +216,32 @@ class StepExecutionHistoryReader:
                 for ordinal, event in enumerate(events):
                     mapped = _trace_item(item, segment_sequence, depth, ordinal, event)
                     if mapped is not None:
-                        projected.append(((_event_timestamp(event), depth, item.execution_id, segment_sequence, ordinal, mapped.payload.get("kind", "")), mapped))
+                        projected.append(
+                            (
+                                (
+                                    _event_timestamp(event),
+                                    depth,
+                                    item.execution_id,
+                                    segment_sequence,
+                                    ordinal,
+                                    mapped.payload.get("kind", ""),
+                                ),
+                                mapped,
+                            )
+                        )
         projected.sort(key=lambda value: value[0])
         values = [item for _, item in projected]
         start = _cursor_offset(cursor, len(values))
-        selected = tuple(ExecutionTraceItem(item.execution_id, start + index + 1, item.payload) for index, item in enumerate(values[start:start + limit]))
+        selected = tuple(
+            ExecutionTraceItem(item.execution_id, start + index + 1, item.payload)
+            for index, item in enumerate(values[start : start + limit])
+        )
         next_offset = start + len(selected)
         return Page(selected, str(next_offset) if next_offset < len(values) else None)
 
-    async def history(self, execution_id: str, *, tenant_id: str, cursor: str | None, limit: int) -> "Page[ExecutionHistoryItem]":
+    async def history(
+        self, execution_id: str, *, tenant_id: str, cursor: str | None, limit: int
+    ) -> "Page[ExecutionHistoryItem]":
         if not 1 <= limit <= 200:
             raise AIError(ErrorCode.PAGE_LIMIT_INVALID)
         record = await self._executions.get(execution_id, tenant_id=tenant_id)
@@ -276,11 +297,21 @@ class StepExecutionHistoryReader:
         entries = await self._history_tree(record, tenant_id)
         values: list[ExecutionHistoryItem] = []
         for item, _depth in entries:
-            for segment_sequence, _events in await self._segment_events(item, tenant_id):
-                run_id = step_run_id(namespace=self._namespace, tenant_id=tenant_id, execution_id=item.execution_id, segment_sequence=segment_sequence)
+            for segment_sequence, _events in await self._segment_events(
+                item, tenant_id
+            ):
+                run_id = step_run_id(
+                    namespace=self._namespace,
+                    tenant_id=tenant_id,
+                    execution_id=item.execution_id,
+                    segment_sequence=segment_sequence,
+                )
                 messages = await _canonical_transcript(self._store, run_id)
                 if not messages:
-                    if item.status is ExecutionStatus.SUCCEEDED and segment_sequence == item.agent_run_sequence:
+                    if (
+                        item.status is ExecutionStatus.SUCCEEDED
+                        and segment_sequence == item.agent_run_sequence
+                    ):
                         raise AIError(ErrorCode.EXECUTION_HISTORY_UNAVAILABLE)
                     continue
                 snapshot_items = [
@@ -300,18 +331,52 @@ class StepExecutionHistoryReader:
             {
                 "execution_id": execution_id,
                 "items": [
-                    {"item_kind": item.item_kind, "content": item.content, "tool_name": item.tool_name, "tool_call_id": item.tool_call_id}
+                    {
+                        "item_kind": item.item_kind,
+                        "content": item.content,
+                        "tool_name": item.tool_name,
+                        "tool_call_id": item.tool_call_id,
+                    }
                     for item in values
                 ],
             }
         )
-        start = _history_cursor_offset(cursor, tenant_id, execution_id, source_revision, len(values), self._cursor_signer)
-        selected = tuple(ExecutionHistoryItem(item.execution_id, start + index + 1, item.item_kind, item.content, item.tool_name, item.tool_call_id) for index, item in enumerate(values[start:start + limit]))
+        start = _history_cursor_offset(
+            cursor,
+            tenant_id,
+            execution_id,
+            source_revision,
+            len(values),
+            self._cursor_signer,
+        )
+        selected = tuple(
+            ExecutionHistoryItem(
+                item.execution_id,
+                start + index + 1,
+                item.item_kind,
+                item.content,
+                item.tool_name,
+                item.tool_call_id,
+            )
+            for index, item in enumerate(values[start : start + limit])
+        )
         next_offset = start + len(selected)
-        next_cursor = _history_cursor(tenant_id, execution_id, source_revision, next_offset, self._cursor_signer) if next_offset < len(values) else None
+        next_cursor = (
+            _history_cursor(
+                tenant_id,
+                execution_id,
+                source_revision,
+                next_offset,
+                self._cursor_signer,
+            )
+            if next_offset < len(values)
+            else None
+        )
         return Page(selected, next_cursor)
 
-    async def transcript(self, execution_id: str, *, tenant_id: str, cursor: str | None, limit: int) -> Page[TranscriptItem]:
+    async def transcript(
+        self, execution_id: str, *, tenant_id: str, cursor: str | None, limit: int
+    ) -> Page[TranscriptItem]:
         if not 1 <= limit <= 200:
             raise AIError(ErrorCode.PAGE_LIMIT_INVALID)
         record = await self._executions.get(execution_id, tenant_id=tenant_id)
@@ -355,7 +420,12 @@ class StepExecutionHistoryReader:
                 raise AIError(ErrorCode.EXECUTION_HISTORY_UNAVAILABLE)
             return Page((), None)
         await self._history_tree(record, tenant_id)
-        final_run_id = step_run_id(namespace=self._namespace, tenant_id=tenant_id, execution_id=execution_id, segment_sequence=record.agent_run_sequence)
+        final_run_id = step_run_id(
+            namespace=self._namespace,
+            tenant_id=tenant_id,
+            execution_id=execution_id,
+            segment_sequence=record.agent_run_sequence,
+        )
         if isinstance(self._store, _ExecutionTranscriptStore):
             total = await self._store.execution_transcript_item_count(final_run_id)
             if total == 0:
@@ -372,7 +442,9 @@ class StepExecutionHistoryReader:
             ):
                 if not isinstance(text, str):
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                values.append(TranscriptItem(execution_id, start + len(values) + 1, text))
+                values.append(
+                    TranscriptItem(execution_id, start + len(values) + 1, text)
+                )
             if len(values) != end - start:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             return Page(
@@ -384,14 +456,19 @@ class StepExecutionHistoryReader:
             if record.status is ExecutionStatus.SUCCEEDED:
                 raise AIError(ErrorCode.EXECUTION_HISTORY_UNAVAILABLE)
             return Page((), None)
-        conversation_id = step_conversation_id(namespace=self._namespace, tenant_id=tenant_id, execution_id=execution_id)
+        conversation_id = step_conversation_id(
+            namespace=self._namespace, tenant_id=tenant_id, execution_id=execution_id
+        )
         values = [
             value
             for message in messages
             for value in _transcript_message_values(message, conversation_id)
         ]
         start = _cursor_offset(cursor, len(values))
-        selected = tuple(TranscriptItem(execution_id, start + index + 1, value) for index, value in enumerate(values[start:start + limit]))
+        selected = tuple(
+            TranscriptItem(execution_id, start + index + 1, value)
+            for index, value in enumerate(values[start : start + limit])
+        )
         next_offset = start + len(selected)
         return Page(selected, str(next_offset) if next_offset < len(values) else None)
 
@@ -399,7 +476,8 @@ class StepExecutionHistoryReader:
         return (
             record.execution_id == record.root_execution_id
             and record.parent_execution_id is None
-            and record.status in {
+            and record.status
+            in {
                 ExecutionStatus.SUCCEEDED,
                 ExecutionStatus.FAILED,
                 ExecutionStatus.CANCELLED,
@@ -443,7 +521,10 @@ class StepExecutionHistoryReader:
                 )
                 messages = await _canonical_transcript(self._store, run_id)
                 if not messages:
-                    if item.status is ExecutionStatus.SUCCEEDED and segment_sequence == item.agent_run_sequence:
+                    if (
+                        item.status is ExecutionStatus.SUCCEEDED
+                        and segment_sequence == item.agent_run_sequence
+                    ):
                         raise AIError(ErrorCode.EXECUTION_HISTORY_UNAVAILABLE)
                     continue
                 snapshot_items = [
@@ -469,7 +550,9 @@ class StepExecutionHistoryReader:
                         },
                     )
                     for message_index, message in enumerate(messages)
-                    for projected_offset, projected in enumerate(_project_message(message))
+                    for projected_offset, projected in enumerate(
+                        _project_message(message)
+                    )
                 ]
                 history_values = _merge_history_refs(history_values, snapshot_items)
         trace_values.sort(key=lambda value: value[0])
@@ -555,31 +638,50 @@ class StepExecutionHistoryReader:
             tuple(transcript_values),
         )
 
-    async def _history_tree(self, root: ExecutionRecord, tenant_id: str) -> list[tuple[ExecutionRecord, int]]:
+    async def _history_tree(
+        self, root: ExecutionRecord, tenant_id: str
+    ) -> list[tuple[ExecutionRecord, int]]:
         result: list[tuple[ExecutionRecord, int]] = []
         visited: set[str] = set()
 
         async def visit(record: ExecutionRecord, depth: int) -> None:
-            if record.execution_id in visited or depth > 8 or record.tenant_id != tenant_id:
+            if (
+                record.execution_id in visited
+                or depth > 8
+                or record.tenant_id != tenant_id
+            ):
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             if depth == 0:
-                if record.parent_execution_id is not None or record.lineage_kind.value not in {"RUN", "RETRY", "FORK", "SESSION_RESUME"}:
+                if (
+                    record.parent_execution_id is not None
+                    or record.lineage_kind.value
+                    not in {"RUN", "RETRY", "FORK", "SESSION_RESUME"}
+                ):
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            elif record.lineage_kind.value != "SUBAGENT" or record.root_execution_id != root.root_execution_id:
+            elif (
+                record.lineage_kind.value != "SUBAGENT"
+                or record.root_execution_id != root.root_execution_id
+            ):
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             visited.add(record.execution_id)
             result.append((record, depth))
-            for child in await self._executions.list_children(record.execution_id, tenant_id=tenant_id):
+            for child in await self._executions.list_children(
+                record.execution_id, tenant_id=tenant_id
+            ):
                 await visit(child, depth + 1)
 
         await visit(root, 0)
         return result
 
-
-    async def _segment_events(self, record: ExecutionRecord, tenant_id: str) -> list[tuple[int, list[StepEvent]]]:
+    async def _segment_events(
+        self, record: ExecutionRecord, tenant_id: str
+    ) -> list[tuple[int, list[StepEvent]]]:
         if record.agent_run_sequence < 0:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        if record.status is ExecutionStatus.SUCCEEDED and record.agent_run_sequence == 0:
+        if (
+            record.status is ExecutionStatus.SUCCEEDED
+            and record.agent_run_sequence == 0
+        ):
             raise AIError(ErrorCode.EXECUTION_HISTORY_UNAVAILABLE)
         conversation_id = step_conversation_id(
             namespace=self._namespace,
@@ -790,7 +892,13 @@ class StepSessionHistoryReader:
         return Page(tuple(selected), next_cursor)
 
 
-def _trace_item(record: ExecutionRecord, segment_sequence: int, depth: int, ordinal: int, event: StepEvent) -> "ExecutionTraceItem | None":
+def _trace_item(
+    record: ExecutionRecord,
+    segment_sequence: int,
+    depth: int,
+    ordinal: int,
+    event: StepEvent,
+) -> "ExecutionTraceItem | None":
     mapping = {
         "model_request_started": ("MODEL_REQUEST", "STARTED"),
         "model_request_completed": ("MODEL_RESPONSE", "SUCCEEDED"),
@@ -835,7 +943,9 @@ def _trace_item(record: ExecutionRecord, segment_sequence: int, depth: int, ordi
         payload["request_sequence"] = int(request_sequence)
         payload["purpose"] = request_purpose
     if kind == "MODEL_RESPONSE":
-        payload["token_usage"] = _model_token_usage(event) if status == "SUCCEEDED" else None
+        payload["token_usage"] = (
+            _model_token_usage(event) if status == "SUCCEEDED" else None
+        )
     if event.agent_name is not None:
         payload["agent_name"] = event.agent_name
     if event.tool_call_id is not None:
@@ -948,7 +1058,13 @@ async def _resolve_history_refs(
     if len(loaded) != len(metadata):
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     values: list[ExecutionHistoryItem] = []
-    for loaded_message, (execution_id, projected_offset, item_kind, tool_name, tool_call_id) in zip(
+    for loaded_message, (
+        execution_id,
+        projected_offset,
+        item_kind,
+        tool_name,
+        tool_call_id,
+    ) in zip(
         loaded,
         metadata,
         strict=True,
@@ -1055,11 +1171,20 @@ def _ref_int(ref: Mapping[str, JsonValue], name: str) -> int:
     return value
 
 
-def _validate_run(run: RunRecord, expected_id: str, conversation_id: str, sequence: int) -> None:
-    if run.run_id != expected_id or run.conversation_id != conversation_id or run.metadata.get("segment_sequence") != str(sequence):
+def _validate_run(
+    run: RunRecord, expected_id: str, conversation_id: str, sequence: int
+) -> None:
+    if (
+        run.run_id != expected_id
+        or run.conversation_id != conversation_id
+        or run.metadata.get("segment_sequence") != str(sequence)
+    ):
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     agent_name = run.metadata.get("agent_name")
-    if agent_name is None or re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", agent_name) is None:
+    if (
+        agent_name is None
+        or re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", agent_name) is None
+    ):
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
 
 
@@ -1079,7 +1204,14 @@ def _cursor_offset(cursor: str | None, size: int) -> int:
     return offset
 
 
-def _history_cursor_offset(cursor: str | None, tenant_id: str, execution_id: str, source_revision: str, size: int, signer: CursorSigner) -> int:
+def _history_cursor_offset(
+    cursor: str | None,
+    tenant_id: str,
+    execution_id: str,
+    source_revision: str,
+    size: int,
+    signer: CursorSigner,
+) -> int:
     if cursor is None:
         return 0
     try:
@@ -1100,7 +1232,13 @@ def _history_cursor_offset(cursor: str | None, tenant_id: str, execution_id: str
     return offset
 
 
-def _history_cursor(tenant_id: str, execution_id: str, source_revision: str, offset: int, signer: CursorSigner) -> str:
+def _history_cursor(
+    tenant_id: str,
+    execution_id: str,
+    source_revision: str,
+    offset: int,
+    signer: CursorSigner,
+) -> str:
     return signer.encode(
         CursorPayload(
             1,
@@ -1136,10 +1274,7 @@ def _decode_session_history_cursor(
         or payload.history_view_version != SESSION_HISTORY_VIEW_V1
     ):
         raise AIError(ErrorCode.CURSOR_INVALID)
-    if (
-        payload.snapshot_message_count < 0
-        or payload.next_history_item_offset < 0
-    ):
+    if payload.snapshot_message_count < 0 or payload.next_history_item_offset < 0:
         raise AIError(ErrorCode.CURSOR_INVALID)
     return (
         payload.history_id,
@@ -1225,7 +1360,9 @@ def _project_message(message: object) -> tuple[_ProjectedHistoryItem, ...]:
     )
 
 
-def _transcript_message_values(message: object, conversation_id: str) -> tuple[str, ...]:
+def _transcript_message_values(
+    message: object, conversation_id: str
+) -> tuple[str, ...]:
     del conversation_id
     if not isinstance(message, (ModelRequest, ModelResponse)):
         return ()

@@ -30,7 +30,9 @@ from linktools.ai.runtime.state._contracts import (
 from linktools.ai.spec import AgentSpec
 from linktools.ai.storage import StoredPayload
 from linktools.ai.task import TaskNode
-from linktools.ai.runtime.state import RunRecord
+from linktools.ai.runtime.state._step_contracts import (
+    RunRecord,
+)
 
 
 def _session() -> SessionRecord:
@@ -94,20 +96,26 @@ def test_persisted_generic_writer_uses_current_schema() -> None:
     session = _session()
     payload = _encode_persisted_domain(session)
     assert payload["schema"] == 2
-    assert _decode_enveloped_domain(
-        _envelope(payload),
-        SessionRecord,
-    ) == session
+    assert (
+        _decode_enveloped_domain(
+            _envelope(payload),
+            SessionRecord,
+        )
+        == session
+    )
 
 
 def test_context_projection_persisted_writer_round_trips() -> None:
     projection = ContextProjection((), "d" * 64)
     payload = _encode_persisted_domain(projection)
 
-    assert _decode_enveloped_domain(
-        _envelope(payload, wire_id="context_projection"),
-        ContextProjection,
-    ) == projection
+    assert (
+        _decode_enveloped_domain(
+            _envelope(payload, wire_id="context_projection"),
+            ContextProjection,
+        )
+        == projection
+    )
 
 
 def test_context_projection_rejects_runtime_type_mismatch_at_construction() -> None:
@@ -156,10 +164,13 @@ def test_unknown_historical_field_is_ignored() -> None:
     session = _session()
     payload = copy.deepcopy(_encode_persisted_domain(session))
     payload["fields"]["removed_field"] = {"not": "decoded"}
-    assert _decode_enveloped_domain(
-        _envelope(payload),
-        SessionRecord,
-    ) == session
+    assert (
+        _decode_enveloped_domain(
+            _envelope(payload),
+            SessionRecord,
+        )
+        == session
+    )
 
 
 def test_malformed_known_field_is_integrity_error() -> None:

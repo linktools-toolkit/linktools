@@ -14,12 +14,17 @@ from linktools.ai.runtime._capabilities import (
     compose_platform_capabilities,
 )
 from linktools.ai.runtime._harness_memory import HarnessMemoryStoreAdapter
-from linktools.ai.runtime.state import StagingStepStore
+from linktools.ai.runtime.state._steps import (
+    StagingStepStore,
+)
 import linktools.ai.runtime.state as runtime_state
 
 
 def test_platform_composition_has_no_dead_conversation_id() -> None:
-    assert "conversation_id" not in inspect.signature(compose_platform_capabilities).parameters
+    assert (
+        "conversation_id"
+        not in inspect.signature(compose_platform_capabilities).parameters
+    )
 
 
 def test_runtime_step_persistence_requires_explicit_harness_adapter() -> None:

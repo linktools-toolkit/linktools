@@ -6,6 +6,7 @@ import asyncio
 import hashlib
 import json
 import os
+import shutil
 from collections.abc import (
     AsyncIterator,
     Iterator,
@@ -987,6 +988,8 @@ class FilesystemStateStorageGroup:
             member._recover_sync()
         self._recover_sync()
         for member in self._members:
+            member._ensure_record_index()
+        for member in self._members:
             member._index = member._new_index()
             member._index_generation = member._generation()
         self._generation = self._read_generation()
@@ -1381,6 +1384,7 @@ class FilesystemStateStore:
     def _initialize_sync(self) -> tuple[_FilesystemIndex, int]:
         self._provision()
         self._recover_sync()
+        self._ensure_record_index()
         index = self._new_index()
         generation = self._generation()
         return index, generation
@@ -1436,12 +1440,6 @@ class FilesystemStateStore:
         manifest = self._root / "manifest.json"
         if manifest.exists():
             self._validate_existing_root()
-            marker = self._root / _RECORD_INDEX_MARKER
-            if not marker.exists() and not any(
-                (self._root / "records").glob("*/*/*.json")
-            ):
-                _write_text(marker, "1")
-                sync_directory(marker.parent)
             return
         unexpected = [
             path for path in self._root.iterdir() if path.name != "state.lock"
@@ -1453,6 +1451,37 @@ class FilesystemStateStore:
         marker = self._root / _RECORD_INDEX_MARKER
         _write_text(marker, "1")
         sync_directory(marker.parent)
+        sync_directory(self._root)
+
+    def _ensure_record_index(self) -> None:
+        if _record_index_marker_valid(self._root):
+            return
+        index_root = self._root / "record-index"
+        if index_root.exists():
+            shutil.rmtree(index_root)
+            sync_directory(self._root)
+        index_root.mkdir(parents=True, exist_ok=True)
+        for source in (self._root / "records").glob("*/*/*.json"):
+            record = decode_record(_read_json(source))
+            _require_layout_path(
+                source,
+                self._root,
+                _record_path(record),
+            )
+            target_relative = _record_index_path(record)
+            if target_relative is None:
+                if record.scope_digest is not None:
+                    shutil.rmtree(index_root)
+                    sync_directory(self._root)
+                    return
+                continue
+            target = self._root / target_relative
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(b"")
+            _sync_file(target)
+        marker = self._root / _RECORD_INDEX_MARKER
+        _write_text(marker, "1")
+        sync_directory(index_root)
         sync_directory(self._root)
 
     def _load_index(self) -> _FilesystemIndex:

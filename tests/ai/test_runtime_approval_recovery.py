@@ -52,7 +52,10 @@ from linktools.ai.runtime.state._contracts import (
 from linktools.ai.spec import AgentSpec
 from linktools.ai.storage import StoredPayload
 from pydantic_ai.messages import ModelRequest, UserPromptPart
-from linktools.ai.runtime.state import ContinuableSnapshot, RunRecord
+from linktools.ai.runtime.state._step_contracts import (
+    ContinuableSnapshot,
+    RunRecord,
+)
 
 
 def _binding() -> AgentBindingSnapshot:
@@ -203,7 +206,12 @@ async def _enter_wait(
     approval_ids: tuple[str, ...] = ("approval-1",),
 ) -> tuple[RuntimeStateCommands, PendingApprovalContinuation, int, int]:
     now = datetime.now(timezone.utc)
-    run_id = step_run_id(namespace=namespace, tenant_id="tenant", execution_id="execution", segment_sequence=1)
+    run_id = step_run_id(
+        namespace=namespace,
+        tenant_id="tenant",
+        execution_id="execution",
+        segment_sequence=1,
+    )
     execution = _execution(now)
     checkpoint = RecoveryCheckpoint(
         "execution",
@@ -279,9 +287,14 @@ async def _enter_wait(
 
 
 @pytest.mark.asyncio
-async def test_wait_checkpoint_atomically_persists_snapshot_approvals_and_status(tmp_path: Path) -> None:
+async def test_wait_checkpoint_atomically_persists_snapshot_approvals_and_status(
+    tmp_path: Path,
+) -> None:
     namespace = "approval-wait"
-    state = RuntimeState.filesystem(tmp_path / "test_wait_checkpoint_atomically_persists_snapshot_approvals_and_status")
+    state = RuntimeState.filesystem(
+        tmp_path
+        / "test_wait_checkpoint_atomically_persists_snapshot_approvals_and_status"
+    )
     await state.initialize(namespace=namespace, tenant_id="tenant")
     try:
         _, continuation, execution_revision, recovery_revision = await _enter_wait(
@@ -313,12 +326,21 @@ async def test_wait_checkpoint_atomically_persists_snapshot_approvals_and_status
 
 
 @pytest.mark.asyncio
-async def test_resume_requires_terminal_batch_and_increments_sequence_once(tmp_path: Path) -> None:
+async def test_resume_requires_terminal_batch_and_increments_sequence_once(
+    tmp_path: Path,
+) -> None:
     namespace = "approval-resume"
-    state = RuntimeState.filesystem(tmp_path / "test_resume_requires_terminal_batch_and_increments_sequence_once")
+    state = RuntimeState.filesystem(
+        tmp_path / "test_resume_requires_terminal_batch_and_increments_sequence_once"
+    )
     await state.initialize(namespace=namespace, tenant_id="tenant")
     try:
-        commands, continuation, execution_revision, recovery_revision = await _enter_wait(
+        (
+            commands,
+            continuation,
+            execution_revision,
+            recovery_revision,
+        ) = await _enter_wait(
             state,
             namespace=namespace,
         )
@@ -360,9 +382,17 @@ async def test_resume_requires_terminal_batch_and_increments_sequence_once(tmp_p
         assert recovery.state is RecoveryCheckpointState.ACTIVE
         assert recovery.agent_run_sequence == 2
         assert recovery.pending_approval == continuation
-        assert recovery.step_run_id == step_run_id(namespace=namespace, tenant_id="tenant", execution_id="execution", segment_sequence=2)
+        assert recovery.step_run_id == step_run_id(
+            namespace=namespace,
+            tenant_id="tenant",
+            execution_id="execution",
+            segment_sequence=2,
+        )
 
-        replay_execution, replay_recovery = await commands.claim_approval_resume_checkpoint(
+        (
+            replay_execution,
+            replay_recovery,
+        ) = await commands.claim_approval_resume_checkpoint(
             execution_id="execution",
             tenant_id="tenant",
             expected_execution_revision=execution_revision,
@@ -381,9 +411,13 @@ async def test_resume_requires_terminal_batch_and_increments_sequence_once(tmp_p
 
 
 @pytest.mark.asyncio
-async def test_policy_checkpoint_cancels_only_explicit_denied_pending_subset(tmp_path: Path) -> None:
+async def test_policy_checkpoint_cancels_only_explicit_denied_pending_subset(
+    tmp_path: Path,
+) -> None:
     namespace = "approval-policy"
-    state = RuntimeState.filesystem(tmp_path / "test_policy_checkpoint_cancels_only_explicit_denied_pending_subset")
+    state = RuntimeState.filesystem(
+        tmp_path / "test_policy_checkpoint_cancels_only_explicit_denied_pending_subset"
+    )
     await state.initialize(namespace=namespace, tenant_id="tenant")
     try:
         commands, continuation, _, recovery_revision = await _enter_wait(
@@ -415,12 +449,21 @@ async def test_policy_checkpoint_cancels_only_explicit_denied_pending_subset(tmp
 
 
 @pytest.mark.asyncio
-async def test_waiting_cancel_atomically_cancels_pending_batch_and_execution(tmp_path: Path) -> None:
+async def test_waiting_cancel_atomically_cancels_pending_batch_and_execution(
+    tmp_path: Path,
+) -> None:
     namespace = "approval-cancel"
-    state = RuntimeState.filesystem(tmp_path / "test_waiting_cancel_atomically_cancels_pending_batch_and_execution")
+    state = RuntimeState.filesystem(
+        tmp_path / "test_waiting_cancel_atomically_cancels_pending_batch_and_execution"
+    )
     await state.initialize(namespace=namespace, tenant_id="tenant")
     try:
-        commands, continuation, execution_revision, recovery_revision = await _enter_wait(
+        (
+            commands,
+            continuation,
+            execution_revision,
+            recovery_revision,
+        ) = await _enter_wait(
             state,
             namespace=namespace,
             approval_ids=("approval-1", "approval-2"),
@@ -486,7 +529,9 @@ class _Continuation:
 
 
 @pytest.mark.asyncio
-async def test_decision_exact_replay_binds_full_principal_identity_and_retries_callback() -> None:
+async def test_decision_exact_replay_binds_full_principal_identity_and_retries_callback() -> (
+    None
+):
     state = RuntimeState.in_memory()
     await state.initialize(namespace="approval-decision", tenant_id="tenant")
     continuation = _Continuation(AIError(ErrorCode.STORAGE_UNAVAILABLE))

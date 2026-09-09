@@ -25,7 +25,7 @@ from pydantic_ai_harness.step_persistence import (
 from ..core import canonical_sha256
 from ..errors import AIError, ErrorCode
 from ._plan import PlanItem, PlanOperation, RuntimePlanStore
-from .state import (
+from .state._step_contracts import (
     ContinuableSnapshot,
     RunRecord,
     StepEvent,
@@ -89,7 +89,9 @@ class HarnessPlanStoreAdapter:
         await self._store.write_plan(values, operation=operation)
 
     async def get_item(self, item_id: str) -> HarnessPlanItem | None:
-        return next((item for item in await self.get_items() if item.id == item_id), None)
+        return next(
+            (item for item in await self.get_items() if item.id == item_id), None
+        )
 
     async def add_item(self, item: HarnessPlanItem) -> HarnessPlanItem:
         values = await self.get_items()
@@ -140,7 +142,11 @@ def _runtime_plan_items(items: list[HarnessPlanItem]) -> list[PlanItem]:
     for item in items:
         if not isinstance(item, HarnessPlanItem):
             raise TypeError("plan items must be Harness PlanItem values")
-        if item.status is TaskStatus.blocked or item.parent_id is not None or item.depends_on:
+        if (
+            item.status is TaskStatus.blocked
+            or item.parent_id is not None
+            or item.depends_on
+        ):
             raise ValueError("subtask planning is not enabled")
         values.append(PlanItem(item.content, cast(str, item.status.value)))
     return values
@@ -148,12 +154,7 @@ def _runtime_plan_items(items: list[HarnessPlanItem]) -> list[PlanItem]:
 
 def _plan_fingerprint(items: Sequence[PlanItem]) -> str:
     return canonical_sha256(
-        {
-            "items": [
-                {"content": item.content, "status": item.status}
-                for item in items
-            ]
-        }
+        {"items": [{"content": item.content, "status": item.status} for item in items]}
     )
 
 

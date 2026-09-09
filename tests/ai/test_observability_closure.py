@@ -19,7 +19,9 @@ from linktools.ai.runtime._history import _trace_item
 from linktools.ai.runtime._metric_id import _tool_observation_id
 from linktools.ai.task import TaskEvent, TaskEventType
 from linktools.ai.task._metrics import _TaskMetricProjector
-from linktools.ai.runtime.state import StepEvent
+from linktools.ai.runtime.state._step_contracts import (
+    StepEvent,
+)
 
 
 class _Recorder:
@@ -82,7 +84,9 @@ class _TaskEvents:
     ) -> Page[TaskEvent]:
         assert graph_id == "graph"
         assert tenant_id == "tenant"
-        values = tuple(event for event in self.events if event.sequence > after_sequence)
+        values = tuple(
+            event for event in self.events if event.sequence > after_sequence
+        )
         items = values[:limit]
         return Page(items, "more" if len(values) > limit else None)
 
@@ -101,7 +105,9 @@ class _TaskAdmissions:
     async def get(self, graph_id: str, *, tenant_id: str) -> object:
         assert graph_id == "graph"
         assert tenant_id == "tenant"
-        return SimpleNamespace(correlation={"audit_run_id": "audit-1", "stage": "analysis"})
+        return SimpleNamespace(
+            correlation={"audit_run_id": "audit-1", "stage": "analysis"}
+        )
 
 
 def _observation(observation_id: str) -> Observation:
