@@ -443,7 +443,7 @@ async def test_validation_error_is_prefixed_for_replay_safe_tool() -> None:
     assert not capability._calls
 
 
-async def test_historical_unknown_effect_is_model_visible_without_reexecution() -> None:
+async def test_historical_unknown_effect_stays_runtime_visible_without_reexecution() -> None:
     unknown = AIError(ErrorCode.TOOL_EFFECT_UNKNOWN)
     capability, bridge, store, context, call, definition = await _capability(
         False,
@@ -455,7 +455,7 @@ async def test_historical_unknown_effect_is_model_visible_without_reexecution() 
         nonlocal entered
         entered = True
 
-    with pytest.raises(ToolFailed) as raised:
+    with pytest.raises(AIError) as raised:
         await capability.wrap_tool_execute(
             context,
             call=call,
@@ -464,7 +464,8 @@ async def test_historical_unknown_effect_is_model_visible_without_reexecution() 
             handler=handler,
         )
 
-    assert raised.value.message == "TOOL_EFFECT_UNKNOWN: verify side effects before retry"
+    assert raised.value is unknown
+    assert raised.value.code is ErrorCode.TOOL_EFFECT_UNKNOWN
     assert entered is False
     assert bridge.calls == ["begin"]
     assert store.effects == []
@@ -656,6 +657,7 @@ async def test_tool_failed_error_payload_round_trips_structured_content() -> Non
     record = ToolOperationRecord(
         tool_operation_id="operation",
         tenant_id="tenant",
+        execution_id="execution",
         step_run_id="run",
         tool_call_id="call",
         idempotency_key_digest="idempotency",
@@ -692,6 +694,7 @@ async def test_tool_retry_error_payload_round_trips_retry_part() -> None:
     record = ToolOperationRecord(
         tool_operation_id="operation",
         tenant_id="tenant",
+        execution_id="execution",
         step_run_id="run",
         tool_call_id="call",
         idempotency_key_digest="idempotency",

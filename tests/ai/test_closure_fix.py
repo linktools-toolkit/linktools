@@ -4,12 +4,12 @@
 
 import asyncio
 from dataclasses import dataclass, field, replace
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from typing import Any
 
 import pytest
-from linktools.ai.core import Principal, TaskStatus, ToolOperationStatus
+from linktools.ai.core import Principal, TaskStatus, ToolOperationStatus, canonical_sha256
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.runtime._capabilities import (
     ToolOperationDecision,
@@ -19,8 +19,19 @@ from linktools.ai.runtime._capabilities import (
 from linktools.ai.runtime._tool import RuntimeToolOperationBridge, ToolOperationRecord
 from linktools.ai.runtime.state import ToolOperationAdmission
 from linktools.ai.storage import PayloadPolicy, StoredPayload
-from linktools.ai.task._graph import TaskGraph, TaskGraphLaunch, TaskGraphRequest, TaskGraphView, TaskNode
-from linktools.ai.task._local import LocalTaskGraphLauncher, TaskNodeRunResult
+from linktools.ai.task._graph import (
+    TaskGraph,
+    TaskGraphLaunch,
+    TaskGraphRequest,
+    TaskGraphView,
+    TaskLease,
+    TaskNode,
+)
+from linktools.ai.task._local import (
+    LocalTaskGraphLauncher,
+    TaskNodeRunResult,
+    _LeaseState,
+)
 from pydantic_ai.exceptions import ModelRetry
 from pydantic_ai.messages import ToolCallPart
 from pydantic_ai.models.test import TestModel
@@ -104,6 +115,7 @@ class _OperationRepository:
         return ToolOperationRecord(
             tool_operation_id=request.tool_operation_id,
             tenant_id=request.tenant_id,
+            execution_id=request.execution_id,
             step_run_id=request.step_run_id,
             tool_call_id=request.tool_call_id,
             idempotency_key_digest=request.idempotency_key_digest,
@@ -151,6 +163,7 @@ async def test_tool_operation_admission_uses_runtime_step_and_binding_digest() -
         True,
     )
     assert repository.request is not None
+    assert repository.request.execution_id == "execution"
     assert repository.request.step_run_id == "runtime-step"
     assert repository.request.binding_digest == "binding"
     assert not hasattr(repository.request, "binding_fingerprint")
@@ -244,6 +257,7 @@ class _TaskRepository:
     def __init__(self, status: TaskStatus = TaskStatus.RUNNING) -> None:
         self.status = status
         self.failure: BaseException | None = None
+        self.recovery: dict[str, object] | None = None
 
     async def reconcile_graph(self, graph_id: str, *, tenant_id: str) -> TaskGraphView:
         del graph_id, tenant_id
@@ -262,6 +276,24 @@ class _TaskRepository:
     async def claim(self, *args: Any, **kwargs: Any) -> Any:
         del args, kwargs
         raise AssertionError("terminal graph must not claim a node")
+
+    async def mark_recovery_required(
+        self,
+        lease: TaskLease,
+        *,
+        tenant_id: str,
+        error_code: str,
+        error_digest: str,
+        execution_id: str | None = None,
+    ) -> object:
+        self.recovery = {
+            "lease": lease,
+            "tenant_id": tenant_id,
+            "error_code": error_code,
+            "error_digest": error_digest,
+            "execution_id": execution_id,
+        }
+        return object()
 
 
 class _TaskRunner:
@@ -286,9 +318,11 @@ def _task_request() -> TaskGraphRequest:
         ErrorCode.TOOL_EFFECT_UNKNOWN,
     ),
 )
-async def test_task_recovery_preserves_original_error_code(code: ErrorCode) -> None:
+async def test_task_recovery_persists_bounded_original_error_code(code: ErrorCode) -> None:
+    repository = _TaskRepository()
     launcher = object.__new__(LocalTaskGraphLauncher)
     launcher._lock = asyncio.Lock()
+    launcher._repository = repository
     request = _task_request()
     run = SimpleNamespace(
         request=request,
@@ -298,17 +332,34 @@ async def test_task_recovery_preserves_original_error_code(code: ErrorCode) -> N
         closed=False,
     )
     launcher._graphs = {(request.principal.tenant_id, request.graph.graph_id): run}
-    cause = AIError(code, safe_details={"source": "original"})
+    cause = AIError(code, safe_details={"source": "must-not-be-copied"})
+    lease = TaskLease(
+        "graph",
+        "node",
+        "tenant",
+        "owner",
+        1,
+        datetime.now(timezone.utc) + timedelta(seconds=30),
+    )
 
-    await launcher._defer_recovery(run, request.graph.nodes[0], cause=cause)
+    await launcher._defer_recovery(
+        run,
+        request.graph.nodes[0],
+        _LeaseState(lease),
+        cause=cause,
+    )
 
-    assert run.failure is not None
-    assert run.failure.code is code
-    assert run.failure.safe_details["source"] == "original"
-    assert run.failure.safe_details["graph_id"] == "graph"
-    assert run.failure.safe_details["node_id"] == "node"
-    assert run.failure.safe_details["cause_code"] == code.value
+    assert run.failure is None
     assert run.closed is True
+    assert repository.recovery == {
+        "lease": lease,
+        "tenant_id": "tenant",
+        "error_code": code.value,
+        "error_digest": canonical_sha256(
+            {"graph_id": "graph", "node_id": "node", "code": code.value}
+        ),
+        "execution_id": None,
+    }
 
 
 async def test_local_scheduler_terminal_exit_wakes_waiter_and_cleans_entry() -> None:

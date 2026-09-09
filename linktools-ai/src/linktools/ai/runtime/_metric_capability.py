@@ -97,6 +97,7 @@ class _RuntimeModelMetricCapability(AbstractCapability[AgentContext[object]]):
             if ctx is None
             else _model_observation_id(self._step_run_id, ctx.run_step)
         )
+        output_retry_index = None if ctx is None or ctx.retry <= 0 else ctx.retry
         started = monotonic_ns()
         try:
             response = await handler(request_context)
@@ -108,6 +109,7 @@ class _RuntimeModelMetricCapability(AbstractCapability[AgentContext[object]]):
                 status="CANCELLED",
                 error_code=None,
                 measurements=(),
+                output_retry_index=output_retry_index,
             )
             raise
         except RunCancelled as error:
@@ -118,6 +120,7 @@ class _RuntimeModelMetricCapability(AbstractCapability[AgentContext[object]]):
                 status="CANCELLED",
                 error_code=_model_error_code(error),
                 measurements=(),
+                output_retry_index=output_retry_index,
             )
             raise
         except Exception as error:
@@ -128,6 +131,7 @@ class _RuntimeModelMetricCapability(AbstractCapability[AgentContext[object]]):
                 status="FAILED",
                 error_code=_model_error_code(error),
                 measurements=(),
+                output_retry_index=output_retry_index,
             )
             raise
         self._record_model(
@@ -137,6 +141,7 @@ class _RuntimeModelMetricCapability(AbstractCapability[AgentContext[object]]):
             status="SUCCEEDED",
             error_code=None,
             measurements=_provider_usage_measurements(response),
+            output_retry_index=output_retry_index,
         )
         return response
 
@@ -149,6 +154,7 @@ class _RuntimeModelMetricCapability(AbstractCapability[AgentContext[object]]):
         status: str,
         error_code: str | None,
         measurements: tuple[MetricMeasurement, ...],
+        output_retry_index: int | None = None,
     ) -> None:
         try:
             observation = Observation(
@@ -165,6 +171,7 @@ class _RuntimeModelMetricCapability(AbstractCapability[AgentContext[object]]):
                     execution_id=self._execution_id,
                     session_id=self._session_id,
                     step_run_id=self._step_run_id,
+                    output_retry_index=output_retry_index,
                 ),
                 dimensions={
                     "agent_id": self._agent_id,

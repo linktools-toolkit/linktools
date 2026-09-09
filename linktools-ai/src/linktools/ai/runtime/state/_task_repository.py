@@ -82,6 +82,14 @@ _TERMINAL_TASK_STATUSES = frozenset(
         TaskStatus.CANCELLED,
     }
 )
+_RECOVERY_REQUIRED_CODES = frozenset(
+    {
+        ErrorCode.TOOL_EFFECT_UNKNOWN.value,
+        ErrorCode.STORAGE_COMMIT_UNKNOWN.value,
+        ErrorCode.STORAGE_RECOVERY_REQUIRED.value,
+        ErrorCode.EXECUTION_START_UNKNOWN.value,
+    }
+)
 
 
 class _TaskEventAppendConflict(AIError):
@@ -138,6 +146,14 @@ def _require_live_task_lease(
 def _validate_task_lease_scope(lease: TaskLease, tenant_id: str) -> None:
     if lease.tenant_id != tenant_id:
         raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+
+
+def _is_sha256(value: object) -> bool:
+    return (
+        isinstance(value, str)
+        and len(value) == 64
+        and all(character in "0123456789abcdef" for character in value)
+    )
 
 
 def _task_submit_result_digest(graph: TaskGraph) -> str:
@@ -285,7 +301,10 @@ def _reconciled_task_nodes(
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     for node_id in order:
         node = values[node_id]
-        if node.status in _TERMINAL_TASK_STATUSES:
+        if (
+            node.status in _TERMINAL_TASK_STATUSES
+            or node.status is TaskStatus.RECOVERY_REQUIRED
+        ):
             continue
         dependencies = tuple(values[dependency] for dependency in node.dependencies)
         if any(
@@ -1087,6 +1106,204 @@ class TaskRepositoryImpl(RepositoryBase):
                 ) from error
             raise AIError(ErrorCode.STORAGE_CONFLICT) from error
 
+    async def mark_recovery_required(
+        self,
+        lease: TaskLease,
+        *,
+        tenant_id: str,
+        error_code: str,
+        error_digest: str,
+        execution_id: str | None = None,
+    ) -> TaskNodeView:
+        _validate_task_lease_scope(lease, tenant_id)
+        if tenant_id != self._tenant_id:
+            raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
+        if error_code not in _RECOVERY_REQUIRED_CODES or not _is_sha256(error_digest):
+            raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+
+        async def mutate(transaction: StateTransaction) -> TaskNodeView:
+            before = await self._event_state_in_transaction(transaction, lease.graph_id)
+            if before is None:
+                raise AIError(ErrorCode.TASK_FENCE_STALE)
+            graph_record = await transaction.get_record(self._graph_key(lease.graph_id))
+            if graph_record is None:
+                raise AIError(ErrorCode.TASK_FENCE_STALE)
+            current = next(
+                (node for node in before.node_states if node.node_id == lease.node_id),
+                None,
+            )
+            if current is None:
+                raise AIError(ErrorCode.TASK_FENCE_STALE)
+            if current.status is TaskStatus.RECOVERY_REQUIRED:
+                if current.fence != lease.fence:
+                    raise AIError(ErrorCode.TASK_FENCE_STALE)
+                resolved_execution_id = _resolve_task_execution_id(
+                    current.execution_id,
+                    execution_id,
+                )
+                if (
+                    current.error_code == error_code
+                    and current.error_digest == error_digest
+                    and current.execution_id == resolved_execution_id
+                ):
+                    return current
+                raise AIError(ErrorCode.TASK_RESULT_CONFLICT)
+            now = await transaction.now()
+            _require_live_task_lease(current, lease, now)
+            resolved_execution_id = _resolve_task_execution_id(
+                current.execution_id,
+                execution_id,
+            )
+            value = replace(
+                current,
+                status=TaskStatus.RECOVERY_REQUIRED,
+                owner=None,
+                lease_expires_at=None,
+                result_digest=None,
+                error_code=error_code,
+                error_digest=error_digest,
+                execution_id=resolved_execution_id,
+            )
+            next_nodes = tuple(
+                value if node.node_id == lease.node_id else node
+                for node in before.node_states
+            )
+            await self._apply_graph_transition(
+                transaction,
+                before,
+                graph_record,
+                next_nodes,
+                _isolated_graph_status(next_nodes),
+            )
+            return value
+
+        try:
+            return await self._mutate_with_event_retry(mutate)
+        except AIError as error:
+            if error.code not in _COMMIT_READBACK_CODES:
+                raise
+            current = await self._node(lease.graph_id, lease.node_id, tenant_id)
+            view, converged = await self._projection_readback(
+                lease.graph_id,
+                tenant_id=tenant_id,
+            )
+            if (
+                converged
+                and view.status is TaskStatus.RECOVERY_REQUIRED
+                and current.status is TaskStatus.RECOVERY_REQUIRED
+                and current.fence == lease.fence
+                and current.error_code == error_code
+                and current.error_digest == error_digest
+                and (execution_id is None or current.execution_id == execution_id)
+            ):
+                return current
+            if current.fence != lease.fence:
+                raise AIError(ErrorCode.TASK_FENCE_STALE) from error
+            if error.code is ErrorCode.STORAGE_COMMIT_UNKNOWN:
+                raise AIError(
+                    ErrorCode.STORAGE_RECOVERY_REQUIRED,
+                    safe_details={
+                        "phase": "task_recovery_required",
+                        "graph_id": lease.graph_id,
+                        "node_id": lease.node_id,
+                    },
+                ) from error
+            raise AIError(ErrorCode.STORAGE_CONFLICT) from error
+
+    async def recover_graph(
+        self,
+        graph_id: str,
+        *,
+        tenant_id: str,
+        cancel_requested: bool = False,
+    ) -> TaskGraphView:
+        if tenant_id != self._tenant_id:
+            raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
+        if not isinstance(cancel_requested, bool):
+            raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+
+        async def mutate(transaction: StateTransaction) -> TaskGraphView:
+            before = await self._event_state_in_transaction(transaction, graph_id)
+            if before is None:
+                raise AIError(ErrorCode.STORAGE_NOT_FOUND)
+            if (
+                _effective_graph_status(before.graph, before.node_states)
+                is not TaskStatus.RECOVERY_REQUIRED
+            ):
+                raise AIError(ErrorCode.TASK_NOT_READY)
+            graph_record = await transaction.get_record(self._graph_key(graph_id))
+            if graph_record is None:
+                raise AIError(ErrorCode.STORAGE_NOT_FOUND)
+            if cancel_requested:
+                next_nodes = tuple(
+                    (
+                        replace(
+                            node,
+                            status=TaskStatus.CANCELLED,
+                            owner=None,
+                            lease_expires_at=None,
+                            result_digest=None,
+                            error_code=None,
+                            error_digest=None,
+                        )
+                        if node.status not in _TERMINAL_TASK_STATUSES
+                        else node
+                    )
+                    for node in before.node_states
+                )
+                next_status = TaskStatus.CANCELLED
+            else:
+                cleared = tuple(
+                    (
+                        replace(
+                            node,
+                            status=TaskStatus.PENDING,
+                            owner=None,
+                            lease_expires_at=None,
+                            result_digest=None,
+                            error_code=None,
+                            error_digest=None,
+                        )
+                        if node.status is TaskStatus.RECOVERY_REQUIRED
+                        else node
+                    )
+                    for node in before.node_states
+                )
+                next_nodes = _reconciled_task_nodes(cleared)
+                next_status = _isolated_graph_status(next_nodes)
+            return await self._apply_graph_transition(
+                transaction,
+                before,
+                graph_record,
+                next_nodes,
+                next_status,
+            )
+
+        try:
+            return await self._mutate_with_event_retry(mutate)
+        except AIError as error:
+            if error.code not in _COMMIT_READBACK_CODES:
+                raise
+            view, converged = await self._projection_readback(
+                graph_id,
+                tenant_id=tenant_id,
+            )
+            if converged and (
+                view.status is TaskStatus.CANCELLED
+                if cancel_requested
+                else view.status is not TaskStatus.RECOVERY_REQUIRED
+            ):
+                return view
+            if error.code is ErrorCode.STORAGE_COMMIT_UNKNOWN:
+                raise AIError(
+                    ErrorCode.STORAGE_RECOVERY_REQUIRED,
+                    safe_details={
+                        "phase": "task_recover",
+                        "graph_id": graph_id,
+                    },
+                ) from error
+            raise AIError(ErrorCode.STORAGE_CONFLICT) from error
+
     async def reconcile_graph(self, graph_id: str, *, tenant_id: str) -> TaskGraphView:
         async def mutate(transaction: StateTransaction) -> TaskGraphView:
             before = await self._event_state_in_transaction(transaction, graph_id)
@@ -1096,10 +1313,12 @@ class TaskRepositoryImpl(RepositoryBase):
             if graph_record is None:
                 raise AIError(ErrorCode.STORAGE_NOT_FOUND)
             next_nodes = _reconciled_task_nodes(before.node_states)
+            isolated = _isolated_graph_status(next_nodes)
             next_status = (
                 TaskStatus.CANCELLED
                 if before.graph.status is TaskStatus.CANCELLED
-                else _isolated_graph_status(next_nodes)
+                and isolated is not TaskStatus.RECOVERY_REQUIRED
+                else isolated
             )
             return await self._apply_graph_transition(
                 transaction,
@@ -1140,7 +1359,9 @@ class TaskRepositoryImpl(RepositoryBase):
                 raise AIError(ErrorCode.STORAGE_NOT_FOUND)
             next_nodes = tuple(
                 (
-                    replace(
+                    node
+                    if node.status is TaskStatus.RECOVERY_REQUIRED
+                    else replace(
                         node,
                         status=TaskStatus.CANCELLED,
                         owner=None,
@@ -1151,11 +1372,14 @@ class TaskRepositoryImpl(RepositoryBase):
                 )
                 for node in before.node_states
             )
+            isolated = _isolated_graph_status(next_nodes)
             next_status = (
-                TaskStatus.CANCELLED
+                TaskStatus.RECOVERY_REQUIRED
+                if isolated is TaskStatus.RECOVERY_REQUIRED
+                else TaskStatus.CANCELLED
                 if before.graph.status is TaskStatus.CANCELLED
                 or next_nodes != before.node_states
-                else _isolated_graph_status(next_nodes)
+                else isolated
             )
             return await self._apply_graph_transition(
                 transaction,
@@ -1174,7 +1398,10 @@ class TaskRepositoryImpl(RepositoryBase):
                 graph_id,
                 tenant_id=tenant_id,
             )
-            if converged and view.status is TaskStatus.CANCELLED:
+            if converged and view.status in {
+                TaskStatus.CANCELLED,
+                TaskStatus.RECOVERY_REQUIRED,
+            }:
                 return view
             if view.status in {
                 TaskStatus.SUCCEEDED,
@@ -1220,6 +1447,8 @@ class TaskRepositoryImpl(RepositoryBase):
             self._validate_node_record(node_record, graph_id, node_id)
             graph = await self._decode(graph_record, TaskGraphView)
             _require_canonical_graph_status(graph.status)
+            if graph.status is TaskStatus.RECOVERY_REQUIRED:
+                raise AIError(ErrorCode.TASK_NOT_READY)
             node = await self._decode(node_record, TaskNodeView)
             if (
                 graph.graph_id != graph_id
@@ -1334,7 +1563,7 @@ class TaskRepositoryImpl(RepositoryBase):
                     current.fence,
                     current.lease_expires_at,
                 )
-            if current.status in _TERMINAL_TASK_STATUSES:
+            if current.status in _TERMINAL_TASK_STATUSES or current.status is TaskStatus.RECOVERY_REQUIRED:
                 raise AIError(ErrorCode.TASK_NOT_READY) from error
             if error.code is ErrorCode.STORAGE_COMMIT_UNKNOWN:
                 raise AIError(
@@ -1666,6 +1895,7 @@ class TaskRepositoryImpl(RepositoryBase):
             TaskStatus.FAILED,
             TaskStatus.CANCELLED,
             TaskStatus.BLOCKED,
+            TaskStatus.RECOVERY_REQUIRED,
         }:
             raise AIError(ErrorCode.TASK_TERMINAL_CONFLICT) from conflict
         if current.owner != lease.owner:
@@ -2436,6 +2666,8 @@ _RECOVERABLE_STATES = frozenset({TaskStatus.PENDING.value, TaskStatus.RUNNING.va
 
 def _isolated_graph_status(nodes: tuple[TaskNodeView, ...]) -> TaskStatus:
     statuses = {node.status for node in nodes}
+    if TaskStatus.RECOVERY_REQUIRED in statuses:
+        return TaskStatus.RECOVERY_REQUIRED
     if not statuses or statuses <= {TaskStatus.SUCCEEDED}:
         return TaskStatus.SUCCEEDED
     if TaskStatus.FAILED in statuses:
@@ -2453,9 +2685,12 @@ def _effective_graph_status(
     graph: TaskGraphView,
     nodes: tuple[TaskNodeView, ...],
 ) -> TaskStatus:
+    isolated = _isolated_graph_status(nodes)
+    if isolated is TaskStatus.RECOVERY_REQUIRED:
+        return isolated
     if graph.status is TaskStatus.CANCELLED:
         return TaskStatus.CANCELLED
-    return _isolated_graph_status(nodes)
+    return isolated
 
 
 __all__ = ["TaskAdmissionRepositoryImpl", "TaskRepositoryImpl"]

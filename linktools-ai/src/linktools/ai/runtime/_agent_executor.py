@@ -803,7 +803,10 @@ async def _materialize_agent(
             instructions=runtime_instructions,
             output_type=output_type,
             deps_type=AgentContext,
-            retries={"tools": _MAX_TOOL_RETRIES},
+            retries={
+                "tools": _MAX_TOOL_RETRIES,
+                "output": definition.spec.output_retries,
+            },
             tools=tuple(business_tools),
         ),
     )

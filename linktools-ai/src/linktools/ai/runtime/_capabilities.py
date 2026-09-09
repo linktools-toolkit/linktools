@@ -83,6 +83,7 @@ _MODEL_USAGE_CACHE_READ_METADATA_KEY = "linktools.ai.model_usage.cache_read_toke
 _MODEL_USAGE_CACHE_WRITE_METADATA_KEY = "linktools.ai.model_usage.cache_write_tokens"
 _OBSERVATION_ID_METADATA_KEY = "linktools.ai.observation_id"
 _DURATION_NS_METADATA_KEY = "linktools.ai.duration_ns"
+_OUTPUT_RETRY_INDEX_METADATA_KEY = "linktools.ai.output_retry_index"
 _MODEL_TOOL_ERROR_MAX_CHARS = 4096
 _MODEL_TOOL_ERROR_HEAD_CHARS = 1024
 _MODEL_TOOL_ERROR_TRUNCATION_MARKER = "...[truncated]..."
@@ -271,6 +272,12 @@ class _RuntimeStepPersistence(StepPersistence[None]):
         repr=False,
         compare=False,
     )
+    _model_retry_indices: "dict[int, int | None]" = field(
+        default_factory=dict,
+        init=False,
+        repr=False,
+        compare=False,
+    )
 
     def __post_init__(self) -> None:
         if not isinstance(self.plan_mode, bool):
@@ -311,12 +318,20 @@ class _RuntimeStepPersistence(StepPersistence[None]):
         ctx: "RunContext[None]",
         request_context: ModelRequestContext,
     ) -> ModelRequestContext:
-        observed = await super().before_model_request(ctx, request_context)
+        if ctx.run_step in self._model_retry_indices:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        retry_index = None if ctx.retry <= 0 else ctx.retry
+        await self._record_runtime_event(
+            ctx,
+            kind="model_request_started",
+            metadata=self._model_retry_metadata(retry_index),
+        )
+        self._model_retry_indices[ctx.run_step] = retry_index
         if self.tool_metrics is not None:
             if ctx.run_step in self._model_metric_started_ns:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             self._model_metric_started_ns[ctx.run_step] = monotonic_ns()
-        return observed
+        return request_context
 
     async def _record_runtime_event(
         self,
@@ -344,8 +359,18 @@ class _RuntimeStepPersistence(StepPersistence[None]):
             event_index=event_index,
         )
 
-    def _model_metric_metadata(self, ctx: "RunContext[None]") -> dict[str, str]:
+    def _model_retry_metadata(self, retry_index: int | None) -> dict[str, str]:
         metadata = dict(self.metadata)
+        if retry_index is not None:
+            metadata[_OUTPUT_RETRY_INDEX_METADATA_KEY] = str(retry_index)
+        return metadata
+
+    def _model_metric_metadata(self, ctx: "RunContext[None]") -> dict[str, str]:
+        if ctx.run_step not in self._model_retry_indices:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        metadata = self._model_retry_metadata(
+            self._model_retry_indices.pop(ctx.run_step)
+        )
         if self.tool_metrics is not None:
             started = self._model_metric_started_ns.pop(ctx.run_step, None)
             if started is None:
@@ -429,18 +454,13 @@ class _RuntimeStepPersistence(StepPersistence[None]):
             if effective_args_method is None
             else await effective_args_method(ctx, call, tool_def, args)
         )
-        try:
-            decision = await self.tool_operations.begin(
-                ctx,
-                call,
-                tool_def,
-                args,
-                policy.replay_safe,
-            )
-        except AIError as error:
-            if error.code is ErrorCode.TOOL_EFFECT_UNKNOWN:
-                raise ToolFailed(_MODEL_EFFECT_UNKNOWN_MESSAGE) from error
-            raise
+        decision = await self.tool_operations.begin(
+            ctx,
+            call,
+            tool_def,
+            args,
+            policy.replay_safe,
+        )
         if decision.replay_safe is not policy.replay_safe:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         key = self._decision_key(ctx, call)

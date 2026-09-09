@@ -43,6 +43,7 @@ from ...core import (
     normalize_correlation,
     normalize_thinking,
     validate_agent_id,
+    validate_resource_id,
 )
 from ...errors import AIError, ErrorCode, ErrorDiagnostics
 from ...storage import ObjectRef, StoredPayload
@@ -771,7 +772,7 @@ class ExecutionHistoryHeadRecord:
         if self.state is ExecutionHistoryState.SEALED and not self.seal_digest:
             raise ValueError("sealed history head requires a seal digest")
         if self.state is ExecutionHistoryState.OPEN and self.seal_digest is not None:
-            raise ValueError("open history head cannot carry a seal digest")
+            raise ValueError("open history head cannot carry seal digest")
 
 
 @dataclass(frozen=True, slots=True)
@@ -1733,6 +1734,7 @@ class ExecutionEventAppend:
 @dataclass(frozen=True, slots=True)
 class ToolOperationAdmission:
     tenant_id: str
+    execution_id: str
     tool_operation_id: str
     step_run_id: str
     recovery_step_run_id: str | None
@@ -1744,6 +1746,12 @@ class ToolOperationAdmission:
     replay_safe: bool
     owner: str
     lease_seconds: int
+
+    def __post_init__(self) -> None:
+        try:
+            validate_resource_id(self.execution_id)
+        except AIError as error:
+            raise ValueError("tool operation execution identifier is invalid") from error
 
 
 @dataclass(frozen=True, slots=True)

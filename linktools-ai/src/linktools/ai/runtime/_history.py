@@ -55,6 +55,7 @@ _MODEL_USAGE_CACHE_READ_METADATA_KEY = "linktools.ai.model_usage.cache_read_toke
 _MODEL_USAGE_CACHE_WRITE_METADATA_KEY = "linktools.ai.model_usage.cache_write_tokens"
 _OBSERVATION_ID_METADATA_KEY = "linktools.ai.observation_id"
 _DURATION_NS_METADATA_KEY = "linktools.ai.duration_ns"
+_OUTPUT_RETRY_INDEX_METADATA_KEY = "linktools.ai.output_retry_index"
 _MODEL_USAGE_METADATA_KEYS = frozenset(
     {
         _MODEL_USAGE_INPUT_METADATA_KEY,
@@ -575,7 +576,6 @@ class StepExecutionHistoryReader:
         await visit(root, 0)
         return result
 
-
     async def _segment_events(self, record: ExecutionRecord, tenant_id: str) -> list[tuple[int, list[StepEvent]]]:
         if record.agent_run_sequence < 0:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -819,6 +819,14 @@ def _trace_item(record: ExecutionRecord, segment_sequence: int, depth: int, ordi
         if not duration_ns.isdigit():
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         payload["duration_ns"] = int(duration_ns)
+    retry_index = event.metadata.get(_OUTPUT_RETRY_INDEX_METADATA_KEY)
+    if retry_index is not None:
+        if kind not in {"MODEL_REQUEST", "MODEL_RESPONSE"} or not retry_index.isdigit():
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        retry_value = int(retry_index)
+        if retry_value < 1:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        payload["output_retry_index"] = retry_value
     if kind == "MODEL_RESPONSE":
         payload["token_usage"] = _model_token_usage(event) if status == "SUCCEEDED" else None
     if event.agent_name is not None:

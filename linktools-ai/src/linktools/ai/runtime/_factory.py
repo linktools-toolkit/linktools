@@ -58,6 +58,8 @@ from ._memory import RuntimeMemoryStore
 from ._metrics import _RuntimeMetricBuffer
 from ._object import RuntimeObjectKeyFactory
 from ._planner import DefaultTaskService, RuntimeTaskNodeRunner
+from ._recovery_impl import RecoveryExecutionService, RecoveryLocalExecutionBackend
+from ._recovery_task import RecoveryRuntimeTaskNodeRunner
 from ._session import DefaultSessionService
 from ._subagent import SubagentDispatcher
 from ._workspace_binding import WorkspaceToolCallBinder
@@ -498,7 +500,7 @@ async def _build_local_components(
         )
         await workspace_binding_store.release_execution(execution_id)
 
-    execution = DefaultExecutionService(
+    execution = RecoveryExecutionService(
         state.execution,
         state.object_store(RuntimeDomain.EXECUTION),
         authorization,
@@ -561,7 +563,7 @@ async def _build_local_components(
     task_service: DefaultTaskService | None = None
     live_broker = LiveExecutionEventBroker()
     try:
-        backend = LocalExecutionBackend(
+        backend = RecoveryLocalExecutionBackend(
             state.conversation,
             state.execution,
             state.recovery,
@@ -622,7 +624,7 @@ async def _build_local_components(
             release_terminal=state.retention.release_session,
             workspace_access=input_materializer.access,
         )
-        task_runner = RuntimeTaskNodeRunner(
+        task_runner = RecoveryRuntimeTaskNodeRunner(
             execution,
             catalog,
             compiler,

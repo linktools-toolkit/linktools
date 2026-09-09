@@ -140,8 +140,6 @@ class TaskEvent:
         if self.status in {TaskStatus.PENDING, TaskStatus.READY}:
             if (
                 self.owner is not None
-                or self.fence != 0
-                or self.execution_id is not None
                 or self.result_digest is not None
                 or self.error_code is not None
                 or self.error_digest is not None
@@ -157,6 +155,16 @@ class TaskEvent:
                 or self.error_digest is not None
             ):
                 raise ValueError("running task event state is invalid")
+            return
+        if self.status is TaskStatus.RECOVERY_REQUIRED:
+            if (
+                self.owner is not None
+                or self.fence < 1
+                or self.result_digest is not None
+                or self.error_code is None
+                or self.error_digest is None
+            ):
+                raise ValueError("recovery-required task event state is invalid")
             return
         if self.status is TaskStatus.SUCCEEDED:
             if (

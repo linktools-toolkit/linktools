@@ -28,6 +28,7 @@ _AGENT_FIELDS = frozenset(
         "usage_limits",
         "planning",
         "thinking",
+        "output_retries",
         "description",
         "preload_skills",
     }
@@ -74,6 +75,8 @@ class AgentSpecCodec:
             "planning": value.planning,
             "thinking": value.thinking,
         }
+        if value.output_retries != 1:
+            payload["output_retries"] = value.output_retries
         if value.preload_skills:
             payload["preload_skills"] = list(value.preload_skills)
         return payload
@@ -96,6 +99,7 @@ class AgentSpecCodec:
         allow_subagents = raw.get("allow_subagents", ["*"])
         planning = raw.get("planning", False)
         thinking = raw.get("thinking", False)
+        output_retries = raw.get("output_retries", 1)
         description = raw.get("description")
         preload_skills: object = raw.get("preload_skills", [])
         if not isinstance(preload_skills, list) or any(
@@ -119,6 +123,8 @@ class AgentSpecCodec:
                 raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID, f"{name} must be a string array")
         if not isinstance(planning, bool):
             raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID, "planning must be bool")
+        if not isinstance(output_retries, int) or isinstance(output_retries, bool) or output_retries < 0:
+            raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID, "output_retries must be a non-negative integer")
         if description is not None and (
             not isinstance(description, str) or not 1 <= len(description) <= 1024
         ):
@@ -136,6 +142,7 @@ class AgentSpecCodec:
                 usage_limits=_decode_usage_limits(raw.get("usage_limits")),
                 planning=planning,
                 thinking=normalized_thinking,
+                output_retries=output_retries,
                 description=cast("str | None", description),
                 preload_skills=tuple(cast("list[str]", preload_skills)),
                 _extensions=_extensions(raw, _AGENT_FIELDS),

@@ -17,6 +17,7 @@ class AuthorizationAction(str, Enum):
     EXECUTION_RUN = "execution.run"
     EXECUTION_READ = "execution.read"
     EXECUTION_CANCEL = "execution.cancel"
+    EXECUTION_RECOVER = "execution.recover"
     SESSION_CREATE = "session.create"
     SESSION_READ = "session.read"
     SESSION_UPDATE = "session.update"
@@ -97,6 +98,7 @@ class TenantAuthorizationPolicy:
             AuthorizationAction.EXECUTION_RUN,
             AuthorizationAction.EXECUTION_READ,
             AuthorizationAction.EXECUTION_CANCEL,
+            AuthorizationAction.EXECUTION_RECOVER,
             AuthorizationAction.SESSION_CREATE,
             AuthorizationAction.SESSION_READ,
             AuthorizationAction.SESSION_UPDATE,
