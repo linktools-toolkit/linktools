@@ -1072,6 +1072,14 @@ def _thinking_settings(model: Model, thinking: ThinkingValue) -> ModelSettings:
     return ModelSettings(thinking=thinking)
 
 
+@dataclass(frozen=True, slots=True)
+class _WorkspacePersistenceContext:
+    binder: WorkspaceToolCallBinder
+    execution_id: str
+    step_run_id: str
+    path_fields_provider: Callable[[], Mapping[str, tuple[str, ...]]]
+
+
 class _RuntimePersistenceBoundary(WrapperCapability[AgentContext[object]]):
     def __init__(
         self,
@@ -1085,10 +1093,21 @@ class _RuntimePersistenceBoundary(WrapperCapability[AgentContext[object]]):
         ) = None,
     ) -> None:
         super().__init__(wrapped=wrapped)
-        self._workspace_binder = workspace_binder
-        self._workspace_execution_id = execution_id
-        self._workspace_step_run_id = step_run_id
-        self._workspace_path_fields = path_fields_provider
+        if workspace_binder is None:
+            self._workspace_context: _WorkspacePersistenceContext | None = None
+        else:
+            if (
+                execution_id is None
+                or step_run_id is None
+                or path_fields_provider is None
+            ):
+                raise TypeError("workspace persistence context is incomplete")
+            self._workspace_context = _WorkspacePersistenceContext(
+                workspace_binder,
+                execution_id,
+                step_run_id,
+                path_fields_provider,
+            )
         self._workspace_initial_message_ids: frozenset[int] = frozenset()
 
     def get_ordering(self) -> CapabilityOrdering:
@@ -1121,18 +1140,13 @@ class _RuntimePersistenceBoundary(WrapperCapability[AgentContext[object]]):
         ctx: PydanticRunContext[AgentContext[object]],
         request_context: ModelRequestContext,
     ) -> ModelRequestContext:
-        if self._workspace_binder is not None:
-            if (
-                self._workspace_execution_id is None
-                or self._workspace_step_run_id is None
-                or self._workspace_path_fields is None
-            ):
-                raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
-            await self._workspace_binder.validate_messages(
+        workspace = self._workspace_context
+        if workspace is not None:
+            await workspace.binder.validate_messages(
                 ctx.messages,
-                execution_id=self._workspace_execution_id,
-                step_run_id=self._workspace_step_run_id,
-                path_fields=self._workspace_path_fields(),
+                execution_id=workspace.execution_id,
+                step_run_id=workspace.step_run_id,
+                path_fields=workspace.path_fields_provider(),
             )
         return await super().before_model_request(ctx, request_context)
 
@@ -1142,24 +1156,19 @@ class _RuntimePersistenceBoundary(WrapperCapability[AgentContext[object]]):
         *,
         result: AgentRunResult[object],
     ) -> AgentRunResult[object]:
-        if self._workspace_binder is not None:
-            if (
-                self._workspace_execution_id is None
-                or self._workspace_step_run_id is None
-                or self._workspace_path_fields is None
-            ):
-                raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
-            path_fields = self._workspace_path_fields()
-            await self._workspace_binder.bind_result(
+        workspace = self._workspace_context
+        if workspace is not None:
+            path_fields = workspace.path_fields_provider()
+            await workspace.binder.bind_result(
                 result,
-                execution_id=self._workspace_execution_id,
-                step_run_id=self._workspace_step_run_id,
+                execution_id=workspace.execution_id,
+                step_run_id=workspace.step_run_id,
                 path_fields=path_fields,
             )
-            await self._workspace_binder.validate_messages(
+            await workspace.binder.validate_messages(
                 result.all_messages(),
-                execution_id=self._workspace_execution_id,
-                step_run_id=self._workspace_step_run_id,
+                execution_id=workspace.execution_id,
+                step_run_id=workspace.step_run_id,
                 path_fields=path_fields,
             )
         return await super().after_run(ctx, result=result)
@@ -1171,25 +1180,20 @@ class _RuntimePersistenceBoundary(WrapperCapability[AgentContext[object]]):
         node: AgentNode[AgentContext[object]],
         result: NodeResult[AgentContext[object]],
     ) -> NodeResult[AgentContext[object]]:
-        if self._workspace_binder is not None:
-            if (
-                self._workspace_execution_id is None
-                or self._workspace_step_run_id is None
-                or self._workspace_path_fields is None
-            ):
-                raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
-            path_fields = self._workspace_path_fields()
+        workspace = self._workspace_context
+        if workspace is not None:
+            path_fields = workspace.path_fields_provider()
             messages = tuple(ctx.messages)
-            await self._workspace_binder.bind_messages(
+            await workspace.binder.bind_messages(
                 self._workspace_new_messages(messages),
-                execution_id=self._workspace_execution_id,
-                step_run_id=self._workspace_step_run_id,
+                execution_id=workspace.execution_id,
+                step_run_id=workspace.step_run_id,
                 path_fields=path_fields,
             )
-            await self._workspace_binder.validate_messages(
+            await workspace.binder.validate_messages(
                 messages,
-                execution_id=self._workspace_execution_id,
-                step_run_id=self._workspace_step_run_id,
+                execution_id=workspace.execution_id,
+                step_run_id=workspace.step_run_id,
                 path_fields=path_fields,
             )
         return await super().after_node_run(ctx, node=node, result=result)

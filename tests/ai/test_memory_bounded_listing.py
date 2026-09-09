@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 """Runtime memory listing must keep prefix queries bounded at the repository."""
 
+import json
 from datetime import datetime, timezone
 from pathlib import Path
 import shutil
@@ -11,7 +12,7 @@ from typing import Any
 import pytest
 
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.runtime._memory import RuntimeMemoryStore
+from linktools.ai.runtime._memory import RuntimeMemoryStore, _decode_receipt
 from linktools.ai.runtime.state._contracts import MemoryRecord
 from linktools.ai.runtime.state._memory import MemoryStateStorageGroup, MemoryStateStore
 from linktools.ai.runtime.state._repositories import MemoryRepositoryImpl
@@ -28,11 +29,12 @@ class _RecordingMemoryRepository:
     async def list(self, **kwargs: Any) -> Any:
         self.calls.append(dict(kwargs))
         limit = kwargs["limit"]
+        start = 0 if kwargs["cursor"] is None else int(kwargs["cursor"])
+        selected = self._paths[start : start + limit]
+        end = start + len(selected)
         return SimpleNamespace(
-            items=tuple(
-                SimpleNamespace(metadata={"path": path}) for path in self._paths[:limit]
-            ),
-            next_cursor=None,
+            items=tuple(SimpleNamespace(metadata={"path": path}) for path in selected),
+            next_cursor=str(end) if end < len(self._paths) else None,
         )
 
 
@@ -58,6 +60,39 @@ async def test_list_paths_pushes_prefix_and_limit_to_repository_once() -> None:
             "limit": 10,
         }
     ]
+
+
+async def test_list_paths_pages_for_large_harness_limit() -> None:
+    records = _RecordingMemoryRepository(
+        tuple(f"memory/{index:04d}.md" for index in range(1600))
+    )
+    store = _runtime_store(records)
+
+    paths = await store.list_paths("memory/", limit=1500)
+
+    assert len(paths) == 1500
+    assert paths[0] == "memory/0000.md"
+    assert paths[-1] == "memory/1499.md"
+    assert [call["limit"] for call in records.calls] == [1000, 500]
+    assert records.calls[1]["cursor"] == "1000"
+
+
+async def test_memory_receipt_rejects_unwritten_appended_status() -> None:
+    payload = json.dumps(
+        {
+            "version": 2,
+            "result": {
+                "file": "memory/a.md",
+                "version": "m2:" + "a" * 64,
+                "status": "appended",
+            },
+        }
+    )
+
+    with pytest.raises(AIError) as raised:
+        _decode_receipt(payload)
+
+    assert raised.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
 
 
 async def test_list_paths_fails_closed_if_repository_breaks_prefix_contract() -> None:
@@ -162,6 +197,7 @@ async def test_filesystem_memory_listing_reads_only_requested_record_page(
         namespace="memory-bounded-fs",
         tenant_id="tenant",
         runtime_domain=RuntimeDomain.MEMORY.value,
+        _range_index=True,
     )
     await state.initialize()
     repository = MemoryRepositoryImpl(
@@ -197,6 +233,7 @@ async def test_filesystem_memory_listing_reads_only_requested_record_page(
         namespace="memory-bounded-fs",
         tenant_id="tenant",
         runtime_domain=RuntimeDomain.MEMORY.value,
+        _range_index=True,
     )
     await reopened.initialize()
     repository = MemoryRepositoryImpl(
@@ -241,6 +278,7 @@ async def test_filesystem_rebuilds_missing_record_index_before_bounded_query(
         namespace="memory-reindex",
         tenant_id="tenant",
         runtime_domain=RuntimeDomain.MEMORY.value,
+        _range_index=True,
     )
     await state.initialize()
     repository = MemoryRepositoryImpl(
@@ -277,6 +315,7 @@ async def test_filesystem_rebuilds_missing_record_index_before_bounded_query(
         namespace="memory-reindex",
         tenant_id="tenant",
         runtime_domain=RuntimeDomain.MEMORY.value,
+        _range_index=True,
     )
     await reopened.initialize()
     assert (root / "record-index" / "complete").read_text(encoding="utf-8") == "3"
@@ -348,6 +387,7 @@ async def test_filesystem_empty_prefix_query_does_not_enumerate_scope_index(
         namespace="memory-prefix-trie",
         tenant_id="tenant",
         runtime_domain=RuntimeDomain.MEMORY.value,
+        _range_index=True,
     )
     await state.initialize()
     repository = MemoryRepositoryImpl(
@@ -383,6 +423,7 @@ async def test_filesystem_empty_prefix_query_does_not_enumerate_scope_index(
         namespace="memory-prefix-trie",
         tenant_id="tenant",
         runtime_domain=RuntimeDomain.MEMORY.value,
+        _range_index=True,
     )
     await reopened.initialize()
     repository = MemoryRepositoryImpl(

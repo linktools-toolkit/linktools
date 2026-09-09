@@ -66,6 +66,7 @@ async def test_filesystem_range_index_is_generic_and_does_not_enumerate_index(
         namespace="generic-range",
         tenant_id="tenant",
         runtime_domain=RuntimeDomain.EXECUTION.value,
+        _range_index=True,
     )
     await store.initialize()
     await _seed(
@@ -79,6 +80,7 @@ async def test_filesystem_range_index_is_generic_and_does_not_enumerate_index(
         namespace="generic-range",
         tenant_id="tenant",
         runtime_domain=RuntimeDomain.EXECUTION.value,
+        _range_index=True,
     )
     await reopened.initialize()
     original_iterdir = Path.iterdir
@@ -96,6 +98,20 @@ async def test_filesystem_range_index_is_generic_and_does_not_enumerate_index(
     await reopened.close()
 
 
+async def test_filesystem_range_index_is_opt_in(tmp_path: Path) -> None:
+    root = tmp_path / "range-opt-in"
+    store = FilesystemStateStore(
+        root,
+        namespace="range-opt-in",
+        tenant_id="tenant",
+        runtime_domain=RuntimeDomain.EXECUTION.value,
+    )
+    await store.initialize()
+    await _seed(store, (_record("probe"),))
+    assert not (root / "record-index").exists()
+    await store.close()
+
+
 async def test_filesystem_range_index_does_not_write_one_node_per_character(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -105,6 +121,7 @@ async def test_filesystem_range_index_does_not_write_one_node_per_character(
         namespace="compressed-range",
         tenant_id="tenant",
         runtime_domain=RuntimeDomain.EXECUTION.value,
+        _range_index=True,
     )
     await store.initialize()
     commits: list[tuple[tuple[str, ...], tuple[str, ...]]] = []
@@ -117,9 +134,7 @@ async def test_filesystem_range_index_does_not_write_one_node_per_character(
     monkeypatch.setattr(store, "_commit_sync", capture_commit)
     await _seed(store, (_record("x" * 128),))
     assert len(commits) == 1
-    index_writes = [
-        path for path in commits[0][0] if path.startswith("record-index/")
-    ]
+    index_writes = [path for path in commits[0][0] if path.startswith("record-index/")]
     assert len(index_writes) == 2
     await store.close()
 

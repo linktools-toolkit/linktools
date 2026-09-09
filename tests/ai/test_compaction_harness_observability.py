@@ -7,7 +7,13 @@ from collections.abc import Sequence
 import pytest
 from linktools.ai.runtime._compaction import RuntimeCompaction
 from linktools.ai.runtime._journal import ModelRequestFact, ModelRequestJournal
-from pydantic_ai.messages import ModelMessage, ModelRequest, ModelResponse, TextPart, UserPromptPart
+from pydantic_ai.messages import (
+    ModelMessage,
+    ModelRequest,
+    ModelResponse,
+    TextPart,
+    UserPromptPart,
+)
 from pydantic_ai.models import ModelRequestContext, ModelRequestParameters
 from pydantic_ai.models.test import TestModel
 from pydantic_ai.tools import RunContext
@@ -25,8 +31,12 @@ async def test_harness_summary_request_uses_runtime_journal_and_observer() -> No
     )
     messages: list[ModelMessage] = []
     for index in range(15):
-        messages.append(ModelRequest(parts=[UserPromptPart(f"user {index} " + "x" * 200)]))
-        messages.append(ModelResponse(parts=[TextPart(f"assistant {index} " + "y" * 200)]))
+        messages.append(
+            ModelRequest(parts=[UserPromptPart(f"user {index} " + "x" * 200)])
+        )
+        messages.append(
+            ModelResponse(parts=[TextPart(f"assistant {index} " + "y" * 200)])
+        )
     request_context = ModelRequestContext(
         model=model,
         messages=messages,
@@ -40,7 +50,9 @@ async def test_harness_summary_request_uses_runtime_journal_and_observer() -> No
         step_run_id="run",
     )
     observed: list[tuple[str, ModelRequestFact, ModelResponse | None]] = []
-    projections: list[tuple[tuple[ModelMessage, ...], tuple[ModelMessage, ...] | None]] = []
+    projections: list[
+        tuple[tuple[ModelMessage, ...], tuple[ModelMessage, ...] | None]
+    ] = []
 
     async def observer(
         _ctx: RunContext[object],
@@ -99,3 +111,19 @@ def test_journal_keeps_agent_and_compaction_requests_distinct_on_same_step() -> 
     assert journal.current(agent.request_sequence) == agent
     journal.finish(agent.request_sequence, status="SUCCEEDED")
     assert journal.consume(agent.request_sequence).purpose == "agent"
+
+
+def test_journal_rejects_double_finish() -> None:
+    journal = ModelRequestJournal(
+        source_namespace="workspace",
+        tenant_id="tenant",
+        execution_id="execution",
+        step_run_id="run",
+    )
+    fact = journal.begin(1)
+    journal.finish(fact.request_sequence, status="SUCCEEDED")
+
+    with pytest.raises(RuntimeError, match="already finished"):
+        journal.finish(fact.request_sequence, status="FAILED")
+
+    journal.consume(fact.request_sequence)

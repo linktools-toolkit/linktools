@@ -117,9 +117,7 @@ class _RuntimeObjectRouter:
         groups: list[tuple[str, ...]] = []
         for store in self._stores.values():
             members = tuple(
-                domain.value
-                for domain in selected
-                if self._stores.get(domain) is store
+                domain.value for domain in selected if self._stores.get(domain) is store
             )
             group = tuple(sorted(members))
             if group and group not in groups:
@@ -246,6 +244,7 @@ async def materialize_runtime_state(
                     namespace=namespace,
                     tenant_id=tenant_id,
                     runtime_domain=domain.value,
+                    _range_index=domain is RuntimeDomain.MEMORY,
                     group=group,
                 )
                 stores[domain] = store

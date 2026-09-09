@@ -271,16 +271,23 @@ class RuntimeMemoryStore:
         normalized_prefix = _normalize_prefix(prefix)
         if not isinstance(limit, int) or isinstance(limit, bool) or limit <= 0:
             raise ValueError("limit must be positive")
-        page = await self._state.records.list(
-            tenant_id=self._tenant_id,
-            memory_scope_digest=self._memory_scope_digest,
-            prefix=normalized_prefix,
-            cursor=None,
-            limit=limit,
-        )
-        paths = _record_paths(list(page.items))
-        if any(not path.startswith(normalized_prefix) for path in paths):
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        paths: list[str] = []
+        cursor: str | None = None
+        while len(paths) < limit:
+            page = await self._state.records.list(
+                tenant_id=self._tenant_id,
+                memory_scope_digest=self._memory_scope_digest,
+                prefix=normalized_prefix,
+                cursor=cursor,
+                limit=min(1000, limit - len(paths)),
+            )
+            batch = _record_paths(list(page.items))
+            if any(not path.startswith(normalized_prefix) for path in batch):
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            paths.extend(batch)
+            if page.next_cursor is None:
+                break
+            cursor = page.next_cursor
         return paths
 
     async def _get_receipt(
@@ -594,9 +601,9 @@ def _decode_receipt(value: str) -> _MutationReceipt:
         path = _normalize_path(result["file"])
         version = result["version"]
         status = result["status"]
-        if status not in {"created", "appended", "updated", "deleted", "not_found"}:
+        if status not in {"created", "updated", "deleted", "not_found"}:
             raise ValueError("memory receipt status is invalid")
-        if status in {"created", "appended", "updated"}:
+        if status in {"created", "updated"}:
             if (
                 not isinstance(version, str)
                 or _MEMORY_VERSION.fullmatch(version) is None

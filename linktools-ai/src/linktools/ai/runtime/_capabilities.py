@@ -203,14 +203,6 @@ class _RuntimeStepPersistence(StepPersistence[None]):
             )
         return observed
 
-    async def on_run_error(
-        self,
-        ctx: RunContext[None],
-        *,
-        error: BaseException,
-    ) -> AgentRunResult[Any]:
-        return await super().on_run_error(ctx, error=error)
-
     def remember_context_projection(
         self,
         source: Sequence[ModelMessage],
@@ -223,6 +215,7 @@ class _RuntimeStepPersistence(StepPersistence[None]):
         ctx: RunContext[None],
         request_context: ModelRequestContext,
     ) -> ModelRequestContext:
+        """Defer Harness start persistence until Runtime request metadata is bound."""
         return request_context
 
     async def wrap_model_request(

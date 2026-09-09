@@ -1271,12 +1271,16 @@ class FilesystemStateStore:
         namespace: str,
         tenant_id: str,
         runtime_domain: str,
+        _range_index: bool = False,
         group: FilesystemStateStorageGroup | None = None,
     ) -> None:
         self._root = Path(root).expanduser().resolve()
         self._namespace = namespace
         self._tenant_id = tenant_id
+        if not isinstance(_range_index, bool):
+            raise TypeError("_range_index must be bool")
         self._runtime_domain = runtime_domain
+        self._range_index_enabled = _range_index
         self._writer_lock = FilesystemWriterLock(self._root / "state.lock")
         self._consistency_lock = asyncio.Lock()
         self._journal = FilesystemJournal(
@@ -1442,15 +1446,21 @@ class FilesystemStateStore:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         _write_json(manifest, self._expected_manifest())
         _write_text(self._root / "generation", "0")
-        marker = self._root / _RECORD_INDEX_MARKER
-        _write_text(marker, _RECORD_INDEX_VERSION)
-        sync_directory(marker.parent)
+        if self._range_index_enabled:
+            marker = self._root / _RECORD_INDEX_MARKER
+            _write_text(marker, _RECORD_INDEX_VERSION)
+            sync_directory(marker.parent)
         sync_directory(self._root)
 
     def _ensure_record_index(self) -> None:
+        index_root = self._root / "record-index"
+        if not self._range_index_enabled:
+            if index_root.exists():
+                shutil.rmtree(index_root)
+                sync_directory(self._root)
+            return
         if _record_index_marker_valid(self._root):
             return
-        index_root = self._root / "record-index"
         if index_root.exists():
             shutil.rmtree(index_root)
             sync_directory(self._root)

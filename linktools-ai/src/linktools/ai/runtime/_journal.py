@@ -93,7 +93,7 @@ class ModelRequestJournal:
         if fact is None:
             raise RuntimeError("model request fact is missing")
         if fact.duration_ns is not None:
-            return fact
+            raise RuntimeError("model request fact is already finished")
         elapsed = monotonic_ns() - fact.started_ns
         return_value = replace(
             fact,
