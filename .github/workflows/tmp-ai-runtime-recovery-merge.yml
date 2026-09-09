@@ -6,47 +6,142 @@ on:
       - feat/ai-runtime-durable-recovery
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
-  diagnose-merge:
-    if: "${{ github.event.head_commit.message == 'chore(ai): run merge helper' }}"
+  finalize-merge:
+    if: "${{ github.event.head_commit.message == 'chore(ai): finalize master merge' }}"
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
         with:
           fetch-depth: 0
-      - name: Diagnose recovery patch on latest master
+      - name: Merge latest master and validate
         shell: bash
         run: |
           set -euo pipefail
           helper='.github/workflows/tmp-ai-runtime-recovery-merge.yml'
           old_head="$(git rev-parse HEAD)"
           git fetch origin master
-          base="$(git merge-base "$old_head" origin/master)"
+          master_head="$(git rev-parse origin/master)"
+          base="$(git merge-base "$old_head" "$master_head")"
           git diff --binary "$base" "$old_head" -- . ":(exclude)$helper" > /tmp/recovery.patch
 
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git merge -s ours --no-commit origin/master
-          git read-tree --reset -u origin/master
+          git merge -s ours --no-commit "$master_head"
+          git read-tree --reset -u "$master_head"
 
           set +e
           git apply --index --3way /tmp/recovery.patch
           apply_status=$?
           set -e
+          if [ "$apply_status" -eq 0 ]; then
+            echo 'Expected the three reviewed conflicts, but patch applied without them.' >&2
+            exit 1
+          fi
 
-          echo "apply_status=$apply_status"
-          echo '--- unresolved paths ---'
-          git diff --name-only --diff-filter=U || true
-          echo '--- status ---'
+          mapfile -t conflicts < <(git diff --name-only --diff-filter=U | sort)
+          expected=(
+            'linktools-ai/src/linktools/ai/capability/__init__.py'
+            'linktools-ai/src/linktools/ai/runtime/_agent.py'
+            'linktools-ai/src/linktools/ai/runtime/_factory.py'
+          )
+          if [ "${conflicts[*]}" != "${expected[*]}" ]; then
+            printf 'Unexpected conflict set:\n%s\n' "${conflicts[*]}" >&2
+            exit 1
+          fi
+
+          for path in "${expected[@]}"; do
+            git checkout --conflict=diff3 -- "$path"
+          done
+
+          python - <<'PY'
+          from pathlib import Path
+          import re
+
+          pattern = re.compile(
+              r"<<<<<<< ours\n(?P<ours>.*?)\|\|\|\|\|\|\| base\n(?P<base>.*?)=======\n(?P<theirs>.*?)>>>>>>> theirs\n",
+              re.DOTALL,
+          )
+
+          def one_conflict(path: str):
+              file = Path(path)
+              text = file.read_text()
+              matches = list(pattern.finditer(text))
+              if len(matches) != 1:
+                  raise RuntimeError(f"{path}: expected one conflict, found {len(matches)}")
+              return file, text, matches[0]
+
+          file, text, match = one_conflict(
+              "linktools-ai/src/linktools/ai/capability/__init__.py"
+          )
+          ours = match.group("ours")
+          theirs = match.group("theirs")
+          if "SUBAGENT_CAPABILITY_ID" not in ours or "ToolEffectNotAppliedError" not in theirs:
+              raise RuntimeError("capability export conflict changed")
+          text = text[: match.start()] + ours + theirs + text[match.end() :]
+          file.write_text(text)
+
+          file, text, match = one_conflict(
+              "linktools-ai/src/linktools/ai/runtime/_agent.py"
+          )
+          ours = match.group("ours")
+          theirs = match.group("theirs")
+          if "validate_user_input" not in ours or "from .recovery import (" not in theirs:
+              raise RuntimeError("agent import conflict changed")
+          theirs = theirs.replace("from ._input import prepare_user_prompt\n", "", 1)
+          text = text[: match.start()] + ours + theirs + text[match.end() :]
+          file.write_text(text)
+
+          file, text, match = one_conflict(
+              "linktools-ai/src/linktools/ai/runtime/_factory.py"
+          )
+          ours = match.group("ours")
+          theirs = match.group("theirs")
+          if (
+              "release_execution_handoff" not in ours
+              or "execution = DefaultExecutionService(" not in ours
+              or "execution = RecoveryExecutionService(" not in theirs
+          ):
+              raise RuntimeError("factory execution conflict changed")
+          ours = ours.replace(
+              "execution = DefaultExecutionService(",
+              "execution = RecoveryExecutionService(",
+              1,
+          )
+          text = text[: match.start()] + ours + text[match.end() :]
+          file.write_text(text)
+          PY
+
+          git add "${expected[@]}"
+          if [ -n "$(git diff --name-only --diff-filter=U)" ]; then
+            git diff --name-only --diff-filter=U >&2
+            exit 1
+          fi
+          if git grep -n -E '^(<<<<<<<|\|\|\|\|\|\|\||=======|>>>>>>>)' -- '*.py'; then
+            echo 'Conflict marker remains in Python sources.' >&2
+            exit 1
+          fi
+
+          grep -q 'ToolEffectNotAppliedError' linktools-ai/src/linktools/ai/capability/__init__.py
+          grep -q 'from ._input import validate_user_input' linktools-ai/src/linktools/ai/runtime/_agent.py
+          ! grep -q 'prepare_user_prompt' linktools-ai/src/linktools/ai/runtime/_agent.py
+          grep -q 'RecoveryExecutionService' linktools-ai/src/linktools/ai/runtime/_factory.py
+          grep -q 'RecoveryLocalExecutionBackend' linktools-ai/src/linktools/ai/runtime/_factory.py
+          grep -q 'RecoveryRuntimeTaskNodeRunner' linktools-ai/src/linktools/ai/runtime/_factory.py
+          grep -q 'workspace_binding_store' linktools-ai/src/linktools/ai/runtime/_factory.py
+          grep -q 'release_terminal=release_execution_handoff' linktools-ai/src/linktools/ai/runtime/_factory.py
+
+          git diff --cached --check
+          python manage.py install --editable
+          python manage.py check linktools-ai
+
           git status --short
-
-          while IFS= read -r path; do
-            [ -n "$path" ] || continue
-            echo "--- conflict: $path ---"
-            git checkout --conflict=diff3 -- "$path" || true
-            grep -n -C 8 -E '^(<<<<<<<|\|\|\|\|\|\|\||=======|>>>>>>>)' "$path" || true
-          done < <(git diff --name-only --diff-filter=U)
-
-          exit 0
+          git commit -m 'merge: sync durable recovery with master'
+          parents="$(git rev-list --parents -n 1 HEAD)"
+          case "$parents" in
+            *" $master_head") ;;
+            *) echo "merge commit does not contain master parent: $parents" >&2; exit 1 ;;
+          esac
+          git push origin HEAD:feat/ai-runtime-durable-recovery
