@@ -1,17 +1,14 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Derived live event projection over one durable execution tree."""
+"""Derived live event projection over one root execution and its direct children."""
 
 import asyncio
 from collections.abc import AsyncIterator, Mapping
-from dataclasses import dataclass
 from typing import Protocol
 
 from ..core import ExecutionLineageKind, Principal
 from ..errors import AIError, ErrorCode
 from .service_api import ExecutionStreamEvent, ExecutionTreeEvent, ExecutionView
-
-_MAX_TREE_DEPTH = 8
 
 
 class _ExecutionTreeReader(Protocol):
@@ -62,17 +59,11 @@ class _ExecutionTreeSubscription:
         values = tuple(sorted(self._pending))
         self._pending.clear()
         self._event.clear()
-        if self._pending:
-            self._event.set()
         return values
 
     async def wait(self) -> tuple[str, ...]:
-        while not self._pending:
-            if self._closed:
-                return ()
+        while not self._pending and not self._closed:
             self._event.clear()
-            if self._pending:
-                break
             await self._event.wait()
         return self.drain()
 
@@ -114,32 +105,8 @@ class ExecutionTreeBroker:
             self._subscriptions.pop(parent_execution_id, None)
 
 
-@dataclass(frozen=True, slots=True)
-class _EventItem:
-    view: ExecutionView
-    event: ExecutionStreamEvent
-
-
-@dataclass(frozen=True, slots=True)
-class _DoneItem:
-    execution_id: str
-
-
-@dataclass(frozen=True, slots=True)
-class _ErrorItem:
-    error: BaseException
-
-
-@dataclass(frozen=True, slots=True)
-class _ChildItem:
-    execution_id: str
-
-
-_TreeItem = _EventItem | _DoneItem | _ErrorItem | _ChildItem
-
-
 class ExecutionTreeStreamer:
-    """Merge per-execution streams without creating a durable tree log."""
+    """Merge one root stream with its direct subagent streams on demand."""
 
     def __init__(
         self,
@@ -171,135 +138,101 @@ class ExecutionTreeStreamer:
         principal: Principal,
         after_sequences: Mapping[str, int],
     ) -> AsyncIterator[ExecutionTreeEvent]:
-        queue: asyncio.Queue[_TreeItem] = asyncio.Queue()
-        views: dict[str, ExecutionView] = {}
-        depths: dict[str, int] = {}
-        pumps: dict[str, asyncio.Task[None]] = {}
-        child_pumps: dict[str, asyncio.Task[None]] = {}
-        subscriptions: dict[str, _ExecutionTreeSubscription] = {}
-        completed: set[str] = set()
+        root = await self._executions.inspect(
+            execution_id,
+            principal=principal,
+        )
+        _validate_root(root, execution_id)
 
-        async def pump(view: ExecutionView) -> None:
-            try:
-                async for event in self._events.stream(
-                    view.execution_id,
-                    principal=principal,
-                    after_sequence=after_sequences.get(view.execution_id, 0),
-                ):
-                    await queue.put(_EventItem(view, event))
-            except asyncio.CancelledError:
-                raise
-            except BaseException as error:  # noqa: BLE001
-                await queue.put(_ErrorItem(error))
-            finally:
-                await queue.put(_DoneItem(view.execution_id))
+        subscription = self._broker.subscribe(execution_id)
+        views: dict[str, ExecutionView] = {execution_id: root}
+        streams: dict[str, AsyncIterator[ExecutionStreamEvent]] = {}
+        pending: dict[str, asyncio.Task[ExecutionStreamEvent]] = {}
 
-        async def pump_children(
-            subscription: _ExecutionTreeSubscription,
-        ) -> None:
-            while True:
-                child_ids = await subscription.wait()
-                if not child_ids:
-                    return
-                for child_id in child_ids:
-                    await queue.put(_ChildItem(child_id))
-
-        def start(view: ExecutionView, depth: int) -> bool:
-            current = views.get(view.execution_id)
-            if current is not None:
-                if (
-                    not _same_lineage(current, view)
-                    or depths[view.execution_id] != depth
-                ):
-                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        def add_child(child: ExecutionView) -> bool:
+            if child.execution_id in views:
                 return False
-            views[view.execution_id] = view
-            depths[view.execution_id] = depth
-            subscription = self._broker.subscribe(view.execution_id)
-            subscriptions[view.execution_id] = subscription
-            child_pumps[view.execution_id] = asyncio.create_task(
-                pump_children(subscription),
-                name=f"execution-tree-children-{view.execution_id}",
-            )
-            pumps[view.execution_id] = asyncio.create_task(
-                pump(view),
-                name=f"execution-tree-stream-{view.execution_id}",
-            )
+            _validate_child(root, child)
+            views[child.execution_id] = child
             return True
 
-        async def discover(
-            view: ExecutionView,
-            depth: int,
-            path: frozenset[str],
-        ) -> bool:
-            if depth > _MAX_TREE_DEPTH or view.execution_id in path:
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            if depth == 0:
-                if (
-                    view.execution_id != execution_id
-                    or view.parent_execution_id is not None
-                    or view.parent_invocation_id is not None
-                    or view.lineage_kind is ExecutionLineageKind.SUBAGENT
-                ):
-                    raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
-            elif (
-                view.lineage_kind is not ExecutionLineageKind.SUBAGENT
-                or view.root_execution_id != views[execution_id].root_execution_id
-                or not view.parent_execution_id
-                or not view.parent_invocation_id
-            ):
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            added = start(view, depth)
-            next_path = path | {view.execution_id}
-            children = await self._executions.list_children(
+        def start(view: ExecutionView) -> None:
+            stream = self._events.stream(
                 view.execution_id,
                 principal=principal,
+                after_sequence=after_sequences.get(view.execution_id, 0),
             )
-            for child in children:
-                if child.parent_execution_id != view.execution_id:
-                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                added = await discover(
-                    child,
-                    depth + 1,
-                    next_path,
-                ) or added
-            return added
+            streams[view.execution_id] = stream
+            pending[view.execution_id] = _next_event_task(stream, view.execution_id)
 
-        async def discover_child(child_id: str) -> bool:
+        async def discover_child(child_id: str) -> None:
+            if child_id in views:
+                return
             child = await self._executions.inspect(
                 child_id,
                 principal=principal,
             )
-            parent_id = child.parent_execution_id
-            parent = views.get(parent_id) if parent_id is not None else None
-            if parent is None:
-                fresh_root = await self._executions.inspect(
-                    execution_id,
-                    principal=principal,
-                )
-                await discover(fresh_root, 0, frozenset())
-                parent = views.get(parent_id) if parent_id is not None else None
-            if parent is None:
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            return await discover(
-                child,
-                depths[parent.execution_id] + 1,
-                frozenset(),
-            )
+            if add_child(child):
+                start(child)
 
         try:
-            root = await self._executions.inspect(
+            for child in await self._executions.list_children(
                 execution_id,
                 principal=principal,
-            )
-            await discover(root, 0, frozenset())
+            ):
+                add_child(child)
+
             if set(after_sequences) - set(views):
                 raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
-            while True:
-                item = await queue.get()
-                try:
-                    if isinstance(item, _EventItem):
-                        view = item.view
+
+            for view in tuple(views.values()):
+                start(view)
+
+            child_wait = asyncio.create_task(
+                subscription.wait(),
+                name=f"execution-tree-children-{execution_id}",
+            )
+            try:
+                while True:
+                    if not pending:
+                        child_ids = subscription.drain()
+                        if not child_ids:
+                            return
+                        for child_id in child_ids:
+                            await discover_child(child_id)
+                        continue
+
+                    done, _ = await asyncio.wait(
+                        (*pending.values(), child_wait),
+                        return_when=asyncio.FIRST_COMPLETED,
+                    )
+
+                    if child_wait in done:
+                        child_ids = child_wait.result()
+                        for child_id in child_ids:
+                            await discover_child(child_id)
+                        child_wait = asyncio.create_task(
+                            subscription.wait(),
+                            name=f"execution-tree-children-{execution_id}",
+                        )
+
+                    ready = sorted(
+                        (
+                            execution_key,
+                            task,
+                        )
+                        for execution_key, task in pending.items()
+                        if task in done
+                    )
+                    for execution_key, task in ready:
+                        pending.pop(execution_key, None)
+                        try:
+                            event = task.result()
+                        except StopAsyncIteration:
+                            streams.pop(execution_key, None)
+                            continue
+
+                        view = views[execution_key]
                         yield ExecutionTreeEvent(
                             view.execution_id,
                             view.agent_id,
@@ -307,60 +240,61 @@ class ExecutionTreeStreamer:
                             view.parent_execution_id,
                             view.root_execution_id,
                             view.parent_invocation_id,
-                            depths[view.execution_id],
-                            item.event,
+                            0 if execution_key == execution_id else 1,
+                            event,
                         )
-                    elif isinstance(item, _DoneItem):
-                        completed.add(item.execution_id)
-                    elif isinstance(item, _ErrorItem):
-                        raise item.error
-                    else:
-                        await discover_child(item.execution_id)
-                finally:
-                    queue.task_done()
-
-                if (
-                    execution_id in completed
-                    and all(task.done() for task in pumps.values())
-                    and queue.empty()
-                ):
-                    added = False
-                    fresh_root = await self._executions.inspect(
-                        execution_id,
-                        principal=principal,
-                    )
-                    added = await discover(
-                        fresh_root,
-                        0,
-                        frozenset(),
-                    ) or added
-                    for subscription in tuple(subscriptions.values()):
-                        for child_id in subscription.drain():
-                            added = await discover_child(child_id) or added
-                    if not added and queue.empty():
-                        return
+                        pending[execution_key] = _next_event_task(
+                            streams[execution_key],
+                            execution_key,
+                        )
+            finally:
+                if not child_wait.done():
+                    child_wait.cancel()
+                for task in pending.values():
+                    if not task.done():
+                        task.cancel()
+                await asyncio.gather(
+                    *pending.values(),
+                    child_wait,
+                    return_exceptions=True,
+                )
+                for stream in tuple(streams.values()):
+                    close = getattr(stream, "aclose", None)
+                    if close is not None:
+                        await close()
         finally:
-            for task in (*child_pumps.values(), *pumps.values()):
-                if not task.done():
-                    task.cancel()
-            await asyncio.gather(
-                *child_pumps.values(),
-                *pumps.values(),
-                return_exceptions=True,
-            )
-            for subscription in tuple(subscriptions.values()):
-                await subscription.close()
+            await subscription.close()
 
 
-def _same_lineage(left: ExecutionView, right: ExecutionView) -> bool:
-    return (
-        left.execution_id == right.execution_id
-        and left.agent_id == right.agent_id
-        and left.lineage_kind is right.lineage_kind
-        and left.parent_execution_id == right.parent_execution_id
-        and left.root_execution_id == right.root_execution_id
-        and left.parent_invocation_id == right.parent_invocation_id
+def _next_event_task(
+    stream: AsyncIterator[ExecutionStreamEvent],
+    execution_id: str,
+) -> asyncio.Task[ExecutionStreamEvent]:
+    return asyncio.create_task(
+        stream.__anext__(),
+        name=f"execution-tree-stream-{execution_id}",
     )
+
+
+def _validate_root(view: ExecutionView, execution_id: str) -> None:
+    if (
+        view.execution_id != execution_id
+        or view.parent_execution_id is not None
+        or view.parent_invocation_id is not None
+        or view.lineage_kind is ExecutionLineageKind.SUBAGENT
+    ):
+        raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+
+
+def _validate_child(root: ExecutionView, child: ExecutionView) -> None:
+    if (
+        child.execution_id == root.execution_id
+        or child.lineage_kind is not ExecutionLineageKind.SUBAGENT
+        or child.parent_execution_id != root.execution_id
+        or child.root_execution_id != root.root_execution_id
+        or not child.parent_invocation_id
+    ):
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
 
 
 def _normalize_after_sequences(

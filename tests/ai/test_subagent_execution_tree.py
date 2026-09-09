@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
+import asyncio
 from dataclasses import replace
 from datetime import datetime, timezone
 from unittest.mock import AsyncMock
@@ -121,7 +122,22 @@ class _ExecutionReader:
         principal: Principal,
     ) -> tuple[ExecutionView, ...]:
         del principal
-        return (self.child,) if execution_id == "root" else ()
+        if execution_id != "root":
+            raise AssertionError("execution tree must only list direct children")
+        return (self.child,)
+
+
+class _RootOnlyExecutionReader(_ExecutionReader):
+    async def list_children(
+        self,
+        execution_id: str,
+        *,
+        principal: Principal,
+    ) -> tuple[ExecutionView, ...]:
+        del principal
+        if execution_id != "root":
+            raise AssertionError("execution tree must only list direct children")
+        return ()
 
 
 class _EventStreamer:
@@ -173,6 +189,205 @@ async def test_tree_stream_projects_root_and_child_without_global_sequence() -> 
     assert child.event.durable_sequence == 5
 
 
+@pytest.mark.asyncio
+async def test_tree_stream_validates_cursors_before_starting_event_sources() -> None:
+    class RecordingEventStreamer(_EventStreamer):
+        def __init__(self) -> None:
+            self.started: list[str] = []
+
+        def stream(
+            self,
+            execution_id: str,
+            *,
+            principal: Principal,
+            after_sequence: int = 0,
+        ):
+            self.started.append(execution_id)
+            return super().stream(
+                execution_id,
+                principal=principal,
+                after_sequence=after_sequence,
+            )
+
+    events = RecordingEventStreamer()
+    streamer = ExecutionTreeStreamer(
+        _ExecutionReader(),
+        events,
+        ExecutionTreeBroker(),
+    )
+    stream = streamer.stream(
+        "root",
+        principal=Principal("owner", "tenant", "service"),
+        after_sequences={"unknown": 1},
+    )
+
+    with pytest.raises(AIError) as error:
+        await anext(stream)
+
+    assert error.value.code is ErrorCode.REQUEST_FIELD_INVALID
+    assert events.started == []
+
+
+@pytest.mark.asyncio
+async def test_tree_stream_keeps_at_most_one_prefetched_event_per_execution() -> None:
+    class BurstEventStreamer:
+        def __init__(self) -> None:
+            self.produced: dict[str, int] = {}
+
+        def stream(
+            self,
+            execution_id: str,
+            *,
+            principal: Principal,
+            after_sequence: int = 0,
+        ):
+            del principal
+
+            async def events():
+                for offset in range(1, 101):
+                    self.produced[execution_id] = (
+                        self.produced.get(execution_id, 0) + 1
+                    )
+                    yield ExecutionStreamEvent(
+                        execution_id,
+                        after_sequence + offset,
+                        ExecutionEventType.EXECUTION_STARTED,
+                        {},
+                    )
+
+            return events()
+
+    events = BurstEventStreamer()
+    streamer = ExecutionTreeStreamer(
+        _ExecutionReader(),
+        events,
+        ExecutionTreeBroker(),
+    )
+    stream = streamer.stream(
+        "root",
+        principal=Principal("owner", "tenant", "service"),
+    )
+
+    await anext(stream)
+
+    assert events.produced
+    assert max(events.produced.values()) == 1
+    await stream.aclose()
+
+
+@pytest.mark.asyncio
+async def test_tree_stream_does_not_close_terminal_source_before_delivery() -> None:
+    class TerminalAwareEventStreamer:
+        def __init__(self) -> None:
+            self.closed = False
+
+        def stream(
+            self,
+            execution_id: str,
+            *,
+            principal: Principal,
+            after_sequence: int = 0,
+        ):
+            del principal
+
+            async def events():
+                try:
+                    yield ExecutionStreamEvent(
+                        execution_id,
+                        after_sequence + 1,
+                        ExecutionEventType.EXECUTION_SUCCEEDED,
+                        {},
+                    )
+                finally:
+                    self.closed = True
+
+            return events()
+
+    events = TerminalAwareEventStreamer()
+    streamer = ExecutionTreeStreamer(
+        _RootOnlyExecutionReader(),
+        events,
+        ExecutionTreeBroker(),
+    )
+    stream = streamer.stream(
+        "root",
+        principal=Principal("owner", "tenant", "service"),
+    )
+
+    event = await anext(stream)
+
+    assert event.event.event_type is ExecutionEventType.EXECUTION_SUCCEEDED
+    assert events.closed is False
+
+    await stream.aclose()
+    assert events.closed is True
+
+
+@pytest.mark.asyncio
+async def test_tree_stream_adds_dynamic_direct_child_once() -> None:
+    class DynamicExecutionReader(_RootOnlyExecutionReader):
+        async def list_children(
+            self,
+            execution_id: str,
+            *,
+            principal: Principal,
+        ) -> tuple[ExecutionView, ...]:
+            del principal
+            if execution_id != "root":
+                raise AssertionError("execution tree must only list direct children")
+            return ()
+
+    class DynamicEventStreamer:
+        def __init__(self) -> None:
+            self.release_root = asyncio.Event()
+
+        def stream(
+            self,
+            execution_id: str,
+            *,
+            principal: Principal,
+            after_sequence: int = 0,
+        ):
+            del principal
+
+            async def events():
+                if execution_id == "root":
+                    await self.release_root.wait()
+                yield ExecutionStreamEvent(
+                    execution_id,
+                    after_sequence + 1,
+                    ExecutionEventType.EXECUTION_SUCCEEDED,
+                    {},
+                )
+
+            return events()
+
+    broker = ExecutionTreeBroker()
+    events = DynamicEventStreamer()
+    streamer = ExecutionTreeStreamer(
+        DynamicExecutionReader(),
+        events,
+        broker,
+    )
+    stream = streamer.stream(
+        "root",
+        principal=Principal("owner", "tenant", "service"),
+    )
+    first = asyncio.create_task(anext(stream))
+    await asyncio.sleep(0)
+
+    broker.publish("root", "child")
+    broker.publish("root", "child")
+    child = await first
+
+    assert child.execution_id == "child"
+    assert child.depth == 1
+
+    events.release_root.set()
+    remaining = [item async for item in stream]
+    assert [item.execution_id for item in remaining] == ["root"]
+
+
 def test_non_subagent_lineage_rejects_parent_execution() -> None:
     with pytest.raises(ValueError):
         replace(
@@ -218,7 +433,9 @@ class _RetryExecutionReader:
         principal: Principal,
     ) -> tuple[ExecutionView, ...]:
         del principal
-        return (self.child,) if execution_id == "retry" else ()
+        if execution_id != "retry":
+            raise AssertionError("execution tree must only list direct children")
+        return (self.child,)
 
 
 @pytest.mark.asyncio
