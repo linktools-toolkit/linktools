@@ -1,4 +1,4 @@
-name: Temporary AI Runtime Recovery Master Merge Diagnostic
+name: Temporary AI Runtime Recovery Master Merge Gate
 
 on:
   push:
@@ -6,42 +6,142 @@ on:
       - feat/ai-runtime-durable-recovery
 
 permissions:
-  contents: read
+  contents: write
+
+env:
+  PIP_DISABLE_PIP_VERSION_CHECK: "1"
+  PYTHONUNBUFFERED: "1"
 
 jobs:
-  diagnose:
-    if: "${{ github.event.head_commit.message == 'ci(ai): diagnose recovery master merge v2' }}"
+  merge:
+    if: "${{ github.event.head_commit.message == 'ci(ai): validate recovery master merge' }}"
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
         with:
           fetch-depth: 0
-      - name: Diagnose merge
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.10'
+      - name: Merge latest reviewed master
         shell: bash
         run: |
           set -euo pipefail
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           git fetch origin master
-          echo "FEATURE_HEAD=$(git rev-parse HEAD)"
-          echo "MASTER_HEAD=$(git rev-parse origin/master)"
-          echo "MERGE_BASE=$(git merge-base HEAD origin/master)"
+          master_head="$(git rev-parse origin/master)"
+          expected_master="84db917664b712f255cfbf02381dc773b547fa1a"
+          if [ "$master_head" != "$expected_master" ]; then
+            echo "master moved: expected=$expected_master actual=$master_head"
+            exit 1
+          fi
+
           set +e
           git merge --no-commit --no-ff origin/master
-          rc=$?
+          merge_rc=$?
           set -e
-          if [ "$rc" -eq 0 ]; then
-            echo "MERGE_CLEAN=true"
-            git status --short
-            git merge --abort
-            exit 0
+          if [ "$merge_rc" -eq 0 ]; then
+            echo "expected reviewed conflict set, but merge was clean"
+            exit 1
           fi
-          echo "MERGE_CLEAN=false"
-          echo "CONFLICT_FILES_BEGIN"
-          git diff --name-only --diff-filter=U
-          echo "CONFLICT_FILES_END"
-          echo "CONFLICT_DIFF_BEGIN"
-          git diff --cc --minimal
-          echo "CONFLICT_DIFF_END"
-          git merge --abort
-          exit 1
+
+          mapfile -t conflicts < <(git diff --name-only --diff-filter=U | sort)
+          expected=(
+            "linktools-ai/src/linktools/ai/capability/__init__.py"
+            "linktools-ai/src/linktools/ai/runtime/_agent.py"
+            "linktools-ai/src/linktools/ai/runtime/_factory.py"
+          )
+          if [ "${conflicts[*]}" != "${expected[*]}" ]; then
+            printf 'unexpected conflicts:\n%s\n' "${conflicts[*]}"
+            exit 1
+          fi
+
+          python - <<'PY'
+          from pathlib import Path
+          import re
+
+          def resolve(path: str, resolver) -> None:
+              file = Path(path)
+              text = file.read_text()
+              pattern = re.compile(
+                  r"<<<<<<< HEAD\n(?P<head>.*?)=======\n(?P<master>.*?)>>>>>>> origin/master\n",
+                  re.DOTALL,
+              )
+              matches = list(pattern.finditer(text))
+              if len(matches) != 1:
+                  raise RuntimeError(f"{path}: expected one conflict, found {len(matches)}")
+              match = matches[0]
+              replacement = resolver(match.group("head"), match.group("master"))
+              file.write_text(text[: match.start()] + replacement + text[match.end() :])
+
+          def capability(head: str, master: str) -> str:
+              if head != '    "ToolEffectNotAppliedError",\n':
+                  raise RuntimeError(f"unexpected capability HEAD conflict: {head!r}")
+              if master != '    "SUBAGENT_CAPABILITY_ID",\n':
+                  raise RuntimeError(f"unexpected capability master conflict: {master!r}")
+              return '    "SUBAGENT_CAPABILITY_ID",\n    "ToolEffectNotAppliedError",\n'
+
+          def agent(head: str, master: str) -> str:
+              expected_head = '''from ._input import prepare_user_prompt\nfrom .recovery import (\n    ExecutionRecoveryEffect,\n    ResolveToolEffectRequest,\n    ToolEffectResolution,\n    ToolEffectResolutionResult,\n)\n'''
+              if head != expected_head:
+                  raise RuntimeError(f"unexpected agent HEAD conflict: {head!r}")
+              if master != 'from ._input import validate_user_input\n':
+                  raise RuntimeError(f"unexpected agent master conflict: {master!r}")
+              return '''from ._input import validate_user_input\nfrom .recovery import (\n    ExecutionRecoveryEffect,\n    ResolveToolEffectRequest,\n    ToolEffectResolution,\n    ToolEffectResolutionResult,\n)\n'''
+
+          def factory(head: str, master: str) -> str:
+              if head != '    execution = RecoveryExecutionService(\n':
+                  raise RuntimeError(f"unexpected factory HEAD conflict: {head!r}")
+              expected_master = '''\n    async def release_execution_handoff(\n        execution_id: str,\n        *,\n        tenant_id: str,\n    ) -> None:\n        await state.retention.release_execution_handoff(\n            execution_id,\n            tenant_id=tenant_id,\n        )\n        await workspace_binding_store.release_execution(execution_id)\n\n    execution = DefaultExecutionService(\n'''
+              if master != expected_master:
+                  raise RuntimeError(f"unexpected factory master conflict: {master!r}")
+              return '''\n    async def release_execution_handoff(\n        execution_id: str,\n        *,\n        tenant_id: str,\n    ) -> None:\n        await state.retention.release_execution_handoff(\n            execution_id,\n            tenant_id=tenant_id,\n        )\n        await workspace_binding_store.release_execution(execution_id)\n\n    execution = RecoveryExecutionService(\n'''
+
+          resolve("linktools-ai/src/linktools/ai/capability/__init__.py", capability)
+          resolve("linktools-ai/src/linktools/ai/runtime/_agent.py", agent)
+          resolve("linktools-ai/src/linktools/ai/runtime/_factory.py", factory)
+          PY
+
+          git add \
+            linktools-ai/src/linktools/ai/capability/__init__.py \
+            linktools-ai/src/linktools/ai/runtime/_agent.py \
+            linktools-ai/src/linktools/ai/runtime/_factory.py
+          if git diff --name-only --diff-filter=U | grep -q .; then
+            echo 'unresolved merge conflicts remain'
+            git diff --name-only --diff-filter=U
+            exit 1
+          fi
+          if git grep -n -E '^(<<<<<<<|=======|>>>>>>>)' -- linktools-ai/src tests/ai; then
+            echo 'merge markers remain'
+            exit 1
+          fi
+          git diff --cached --check
+
+      - name: Install repository
+        run: |
+          python -m pip install --quiet --upgrade pip
+          python -m pip install --quiet -U -r requirements.txt
+          python manage.py install --editable --quiet
+
+      - name: Validate merged runtime
+        run: |
+          python manage.py check linktools-ai
+
+      - name: Commit merge
+        shell: bash
+        run: |
+          set -euo pipefail
+          master_head="$(git rev-parse origin/master)"
+          if [ "$master_head" != "84db917664b712f255cfbf02381dc773b547fa1a" ]; then
+            echo "master moved during validation"
+            exit 1
+          fi
+          git commit -m 'merge(ai): sync durable recovery with master'
+          parent_words="$(git rev-list --parents -n 1 HEAD | wc -w)"
+          if [ "$parent_words" -ne 3 ]; then
+            echo "expected two-parent merge commit"
+            exit 1
+          fi
+          git merge-base --is-ancestor "$master_head" HEAD
+          git push origin HEAD:feat/ai-runtime-durable-recovery
