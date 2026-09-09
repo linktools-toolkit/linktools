@@ -194,6 +194,15 @@ class ExecutionTreeStreamer:
             )
             try:
                 while True:
+                    if child_wait.done():
+                        child_ids = child_wait.result()
+                        for child_id in child_ids:
+                            await discover_child(child_id)
+                        child_wait = asyncio.create_task(
+                            subscription.wait(),
+                            name=f"execution-tree-children-{execution_id}",
+                        )
+
                     if not pending:
                         child_ids = subscription.drain()
                         if not child_ids:
