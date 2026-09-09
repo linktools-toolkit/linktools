@@ -13,8 +13,8 @@ env:
   PYTHONUNBUFFERED: "1"
 
 jobs:
-  finalize-merge:
-    if: "${{ github.event.head_commit.message == 'chore(ai): retry master merge' }}"
+  apply-ci-fixes:
+    if: "${{ github.event.head_commit.message == 'chore(ai): apply recovery ci fixes' }}"
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -27,133 +27,125 @@ jobs:
         run: |
           python -m pip install --quiet --upgrade pip
           python -m pip install --quiet -U -r requirements.txt
-      - name: Merge latest master and validate
+          python manage.py install --editable --quiet
+      - name: Apply reviewed fixes
         shell: bash
         run: |
           set -euo pipefail
-          helper='.github/workflows/tmp-ai-runtime-recovery-merge.yml'
-          old_head="$(git rev-parse HEAD)"
-          git fetch origin master
-          master_head="$(git rev-parse origin/master)"
-          base="$(git merge-base "$old_head" "$master_head")"
-          git diff --binary "$base" "$old_head" -- . ":(exclude)$helper" > /tmp/recovery.patch
-
-          git config user.name 'github-actions[bot]'
-          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git merge -s ours --no-commit "$master_head"
-          git read-tree --reset -u "$master_head"
-
-          set +e
-          git apply --index --3way /tmp/recovery.patch
-          apply_status=$?
-          set -e
-          if [ "$apply_status" -eq 0 ]; then
-            echo 'Expected the three reviewed conflicts, but patch applied without them.' >&2
-            exit 1
-          fi
-
-          mapfile -t conflicts < <(git diff --name-only --diff-filter=U | sort)
-          expected=(
-            'linktools-ai/src/linktools/ai/capability/__init__.py'
-            'linktools-ai/src/linktools/ai/runtime/_agent.py'
-            'linktools-ai/src/linktools/ai/runtime/_factory.py'
-          )
-          if [ "${conflicts[*]}" != "${expected[*]}" ]; then
-            printf 'Unexpected conflict set:\n%s\n' "${conflicts[*]}" >&2
-            exit 1
-          fi
-
-          for path in "${expected[@]}"; do
-            git checkout --conflict=diff3 -- "$path"
-          done
-
           python - <<'PY'
           from pathlib import Path
-          import re
 
-          pattern = re.compile(
-              r"<<<<<<< ours\n(?P<ours>.*?)\|\|\|\|\|\|\| base\n(?P<base>.*?)=======\n(?P<theirs>.*?)>>>>>>> theirs\n",
-              re.DOTALL,
-          )
-
-          def one_conflict(path: str):
+          def replace_once(path: str, old: str, new: str) -> None:
               file = Path(path)
               text = file.read_text()
-              matches = list(pattern.finditer(text))
-              if len(matches) != 1:
-                  raise RuntimeError(f"{path}: expected one conflict, found {len(matches)}")
-              return file, text, matches[0]
+              count = text.count(old)
+              if count != 1:
+                  raise RuntimeError(f"{path}: expected one match, found {count}")
+              file.write_text(text.replace(old, new, 1))
 
-          file, text, match = one_conflict(
-              "linktools-ai/src/linktools/ai/capability/__init__.py"
+          # A stale recovery transition is a normal CAS conflict, not an integrity failure.
+          replace_once(
+              "linktools-ai/src/linktools/ai/runtime/state/_recovery_commands.py",
+              """                predecessor = current == execution and not page.items\n                if predecessor:\n                    return CommitObservation(DurableCommitState.NOT_COMMITTED)\n                return _partial()\n""",
+              """                predecessor = current == execution and not page.items\n                if predecessor:\n                    return CommitObservation(DurableCommitState.NOT_COMMITTED)\n                if (\n                    current.revision > execution.revision\n                    or current.event_sequence > execution.event_sequence\n                ):\n                    return CommitObservation(\n                        DurableCommitState.NOT_COMMITTED,\n                        error=AIError(ErrorCode.STORAGE_CONFLICT),\n                    )\n                return _partial()\n""",
           )
-          ours = match.group("ours")
-          theirs = match.group("theirs")
-          if "SUBAGENT_CAPABILITY_ID" not in ours or "ToolEffectNotAppliedError" not in theirs:
-              raise RuntimeError("capability export conflict changed")
-          text = text[: match.start()] + ours + theirs + text[match.end() :]
-          file.write_text(text)
 
-          file, text, match = one_conflict(
-              "linktools-ai/src/linktools/ai/runtime/_agent.py"
+          # Direct internal callers that do not attach retry lineage remain valid.
+          replace_once(
+              "linktools-ai/src/linktools/ai/runtime/_metric_capability.py",
+              """        measurements: tuple[MetricMeasurement, ...],\n        output_retry_index: int | None,\n    ) -> None:\n""",
+              """        measurements: tuple[MetricMeasurement, ...],\n        output_retry_index: int | None = None,\n    ) -> None:\n""",
           )
-          ours = match.group("ours")
-          theirs = match.group("theirs")
-          if "validate_user_input" not in ours or "from .recovery import (" not in theirs:
-              raise RuntimeError("agent import conflict changed")
-          theirs = theirs.replace("from ._input import prepare_user_prompt\n", "", 1)
-          text = text[: match.start()] + ours + theirs + text[match.end() :]
-          file.write_text(text)
 
-          file, text, match = one_conflict(
-              "linktools-ai/src/linktools/ai/runtime/_factory.py"
+          # Lease-projected records must be valid before their dataclass constructors run.
+          replace_once(
+              "linktools-ai/src/linktools/ai/runtime/state/_repositories.py",
+              """        value = _decode_enveloped_domain(\n            record.data,\n            target,\n            payload_transform=lambda payload: _restore_lease_fields(payload, target),\n        )\n""",
+              """        value = _decode_enveloped_domain(\n            record.data,\n            target,\n            payload_transform=lambda payload: _restore_lease_fields(\n                payload,\n                target,\n                owner=record.lease_owner,\n                fence=record.lease_fence,\n                lease_expires_at=record.lease_expires_at,\n            ),\n        )\n""",
           )
-          ours = match.group("ours")
-          theirs = match.group("theirs")
-          if (
-              "release_execution_handoff" not in ours
-              or "execution = DefaultExecutionService(" not in ours
-              or "execution = RecoveryExecutionService(" not in theirs
-          ):
-              raise RuntimeError("factory execution conflict changed")
-          ours = ours.replace(
-              "execution = DefaultExecutionService(",
-              "execution = RecoveryExecutionService(",
+          replace_once(
+              "linktools-ai/src/linktools/ai/runtime/state/_repositories.py",
+              """def _restore_lease_fields(payload: object, target: type[ValueT]) -> object:\n    if target not in {TaskNodeView, ToolOperationRecord} or not isinstance(\n        payload, Mapping\n    ):\n        return payload\n    fields = payload.get(\"fields\")\n    if not isinstance(fields, Mapping):\n        return payload\n    restored = dict(payload)\n    restored[\"fields\"] = {\n        **fields,\n        \"owner\": None,\n        \"fence\": 0,\n        \"lease_expires_at\": None,\n    }\n    return restored\n""",
+              """def _restore_lease_fields(\n    payload: object,\n    target: type[ValueT],\n    *,\n    owner: str | None,\n    fence: int,\n    lease_expires_at: datetime | None,\n) -> object:\n    if target not in {TaskNodeView, ToolOperationRecord} or not isinstance(\n        payload, Mapping\n    ):\n        return payload\n    fields = payload.get(\"fields\")\n    if not isinstance(fields, Mapping):\n        return payload\n    restored = dict(payload)\n    restored[\"fields\"] = {\n        **fields,\n        \"owner\": owner,\n        \"fence\": fence,\n        \"lease_expires_at\": lease_expires_at,\n    }\n    return restored\n""",
+          )
+
+          # Durable truth wins first; a caller cancellation is propagated immediately after it is known.
+          replace_once(
+              "linktools-ai/src/linktools/ai/runtime/_tool.py",
+              """            _logger.error(\n                \"tool operation effect became unknown: execution=%s operation=%s error=%s\",\n                self._execution_id,\n                decision.operation_id,\n                type(error).__name__,\n            )\n            raise AIError(\n""",
+              """            _logger.error(\n                \"tool operation effect became unknown: execution=%s operation=%s error=%s\",\n                self._execution_id,\n                decision.operation_id,\n                type(error).__name__,\n            )\n            if result.cancelled:\n                raise asyncio.CancelledError\n            raise AIError(\n""",
+          )
+
+          # Output-retry lineage tests need a model that returns valid text on every retry attempt.
+          path = Path("tests/ai/test_model_metric_trace_link.py")
+          text = path.read_text()
+          replace = "from pydantic_ai.messages import ModelMessage, ModelResponse\n"
+          if text.count(replace) != 1:
+              raise RuntimeError("model metric trace import changed")
+          text = text.replace(
+              replace,
+              "from pydantic_ai.messages import ModelMessage, ModelResponse, TextPart\n",
               1,
           )
-          text = text[: match.start()] + ours + text[match.end() :]
-          file.write_text(text)
+          anchor = """class _ToolOperations:\n"""
+          if text.count(anchor) != 1:
+              raise RuntimeError("model metric trace helper anchor changed")
+          text = text.replace(
+              anchor,
+              """async def _text_model(\n    messages: list[ModelMessage],\n    info: AgentInfo,\n) -> ModelResponse:\n    del messages, info\n    return ModelResponse(parts=[TextPart(\"done\")])\n\n\nclass _ToolOperations:\n""",
+              1,
+          )
+          for run_id in ("output-retry-metric-run", "output-retry-no-metrics-run"):
+              old = f'''    run_id = "{run_id}"\n    agent = Agent(\n        TestModel(custom_output_text="done"),\n'''
+              new = f'''    run_id = "{run_id}"\n    agent = Agent(\n        FunctionModel(_text_model),\n'''
+              if text.count(old) != 1:
+                  raise RuntimeError(f"output retry fixture changed: {run_id}")
+              text = text.replace(old, new, 1)
+          path.write_text(text)
+
+          # READY may retain a historical fence after explicit graph recovery.
+          path = Path("tests/ai/test_task_event_codec_contract.py")
+          text = path.read_text()
+          stale = """        _node_event(\n            status=\"READY\",\n            previous_status=\"PENDING\",\n            owner=None,\n            fence=1,\n        ),\n"""
+          if text.count(stale) != 1:
+              raise RuntimeError("task event stale fixture changed")
+          path.write_text(text.replace(stale, "", 1))
+
+          # ToolOperation execution ownership is now part of the durable identity.
+          path = Path("tests/ai/test_tool_effect_semantics.py")
+          text = path.read_text()
+          old = """        tool_operation_id=\"operation\",\n        tenant_id=\"tenant\",\n        step_run_id=\"run\",\n"""
+          if text.count(old) != 2:
+              raise RuntimeError(f"tool effect fixtures changed: {text.count(old)}")
+          text = text.replace(
+              old,
+              """        tool_operation_id=\"operation\",\n        tenant_id=\"tenant\",\n        execution_id=\"execution\",\n        step_run_id=\"run\",\n""",
+          )
+          path.write_text(text)
           PY
 
-          git add "${expected[@]}"
-          if [ -n "$(git diff --name-only --diff-filter=U)" ]; then
-            git diff --name-only --diff-filter=U >&2
-            exit 1
-          fi
-          if git grep -n -E '^(<<<<<<<|\|\|\|\|\|\|\||=======|>>>>>>>)' -- '*.py'; then
-            echo 'Conflict marker remains in Python sources.' >&2
-            exit 1
-          fi
-
-          grep -q 'ToolEffectNotAppliedError' linktools-ai/src/linktools/ai/capability/__init__.py
-          grep -q 'SUBAGENT_CAPABILITY_ID' linktools-ai/src/linktools/ai/capability/__init__.py
-          grep -q 'from ._input import validate_user_input' linktools-ai/src/linktools/ai/runtime/_agent.py
-          ! grep -q 'prepare_user_prompt' linktools-ai/src/linktools/ai/runtime/_agent.py
-          grep -q 'RecoveryExecutionService' linktools-ai/src/linktools/ai/runtime/_factory.py
-          grep -q 'RecoveryLocalExecutionBackend' linktools-ai/src/linktools/ai/runtime/_factory.py
-          grep -q 'RecoveryRuntimeTaskNodeRunner' linktools-ai/src/linktools/ai/runtime/_factory.py
-          grep -q 'workspace_binding_store' linktools-ai/src/linktools/ai/runtime/_factory.py
-          grep -q 'release_terminal=release_execution_handoff' linktools-ai/src/linktools/ai/runtime/_factory.py
-
-          git diff --cached --check
-          python manage.py install --editable --quiet
-          python manage.py check linktools-ai
-
-          git status --short
-          git commit -m 'merge: sync durable recovery with master'
-          parents="$(git rev-list --parents -n 1 HEAD)"
-          case "$parents" in
-            *" $master_head") ;;
-            *) echo "merge commit does not contain master parent: $parents" >&2; exit 1 ;;
-          esac
+          git diff --check
+          python -m pytest -q \
+            tests/ai/test_execution_recovery_commands.py \
+            tests/ai/test_metrics_review_repairs.py \
+            tests/ai/test_model_metric_trace_link.py \
+            tests/ai/test_task_event_codec_contract.py \
+            tests/ai/test_task_*.py \
+            tests/ai/test_tool_cas_convergence.py \
+            tests/ai/test_tool_effect_semantics.py
+      - name: Commit fixes
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add \
+            linktools-ai/src/linktools/ai/runtime/state/_recovery_commands.py \
+            linktools-ai/src/linktools/ai/runtime/_metric_capability.py \
+            linktools-ai/src/linktools/ai/runtime/state/_repositories.py \
+            linktools-ai/src/linktools/ai/runtime/_tool.py \
+            tests/ai/test_model_metric_trace_link.py \
+            tests/ai/test_task_event_codec_contract.py \
+            tests/ai/test_tool_effect_semantics.py
+          git commit -m 'fix(ai): close durable recovery regressions'
           git push origin HEAD:feat/ai-runtime-durable-recovery
