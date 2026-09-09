@@ -1,0 +1,111 @@
+name: Retry AI generic range index repair
+
+on:
+  push:
+    branches:
+      - refactor/ai-harness-capabilities
+
+permissions:
+  contents: write
+
+jobs:
+  repair:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: refactor/ai-harness-capabilities
+          fetch-depth: 0
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.10'
+      - name: Apply corrected generic range index repair
+        shell: bash
+        run: |
+          python - <<'RUNNER'
+          from __future__ import annotations
+
+          import subprocess
+          import textwrap
+          from pathlib import Path
+
+          workflow = Path('.github/workflows/ai-range-index-repair.yml').read_text(encoding='utf-8')
+          start_marker = "          python - <<'PY'\n"
+          end_marker = "\n          PY\n"
+          start = workflow.index(start_marker) + len(start_marker)
+          end = workflow.index(end_marker, start)
+          repair = Path('/tmp/generic-range-repair.py')
+          repair.write_text(textwrap.dedent(workflow[start:end]), encoding='utf-8')
+          subprocess.run(['python', str(repair)], check=True)
+
+          test_path = Path('tests/ai/test_state_range_index.py')
+          text = test_path.read_text(encoding='utf-8')
+          text = text.replace(
+              '''    def capture_commit(writes, deletes, base, target):\n        commits.append((tuple(writes), tuple(deletes)))\n        return original_commit(writes, deletes, base, target)\n''',
+              '''    def capture_commit(transaction, base, target):\n        commits.append((tuple(transaction.writes), tuple(transaction.deletes)))\n        return original_commit(transaction, base, target)\n''',
+              1,
+          )
+          start = text.index('async def test_sql_sort_key_collation_is_explicit_for_supported_backends() -> None:\n')
+          replacement = '''async def test_sql_sort_key_collation_is_explicit_for_supported_backends() -> None:\n    metadata = build_runtime_sql_metadata(frozenset({RuntimeDomain.EXECUTION}))\n    column_type = metadata.tables["ai_state_records"].c.sort_key.type\n    assert column_type.dialect_impl(postgresql.dialect()).collation == "C"\n    assert column_type.dialect_impl(sqlite.dialect()).collation == "BINARY"\n    assert column_type.dialect_impl(mysql.dialect()).collation == "utf8mb4_bin"\n'''
+          text = text[:start] + replacement
+          test_path.write_text(text, encoding='utf-8')
+
+          memory_test = Path('tests/ai/test_memory_bounded_listing.py')
+          memory_text = memory_test.read_text(encoding='utf-8')
+          marker_old = 'assert (root / "record-index" / "complete").read_text(encoding="utf-8") == "2"'
+          if marker_old not in memory_text:
+              raise SystemExit('v2 record index marker expectation missing')
+          memory_test.write_text(
+              memory_text.replace(
+                  marker_old,
+                  'assert (root / "record-index" / "complete").read_text(encoding="utf-8") == "3"',
+                  1,
+              ),
+              encoding='utf-8',
+          )
+
+          for path in (
+              Path('linktools-ai/src/linktools/ai/runtime/state/_filesystem.py'),
+              Path('linktools-ai/src/linktools/ai/runtime/state/_sql.py'),
+              Path('linktools-ai/src/linktools/ai/storage/_dialects.py'),
+              test_path,
+              memory_test,
+          ):
+              compile(path.read_text(encoding='utf-8'), str(path), 'exec')
+          RUNNER
+      - name: Install project
+        shell: bash
+        run: |
+          python -m pip install --quiet --upgrade pip
+          python -m pip install --quiet -U -r requirements.txt
+          python manage.py install --editable --quiet
+      - name: Format changed Python
+        shell: bash
+        run: |
+          mapfile -t files < <(git diff --name-only --diff-filter=ACM -- '*.py')
+          if ((${#files[@]})); then
+            python -m ruff format "${files[@]}"
+          fi
+      - name: Run focused range regressions
+        shell: bash
+        run: |
+          python -m pytest -q -p no:cacheprovider \
+            tests/ai/test_state_range_index.py \
+            tests/ai/test_memory_bounded_listing.py \
+            tests/ai/test_runtime_storage_contracts.py \
+            tests/ai/test_persistence_compatibility.py
+      - name: Run package gate
+        shell: bash
+        run: |
+          python manage.py check linktools-ai
+          git diff --check
+      - name: Commit repair
+        shell: bash
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git rm .github/workflows/ai-range-index-repair.yml .github/workflows/ai-range-index-repair-retry.yml
+          git add -A
+          git commit -m 'fix(ai): generalize bounded state range index'
+          git push origin HEAD:refactor/ai-harness-capabilities
