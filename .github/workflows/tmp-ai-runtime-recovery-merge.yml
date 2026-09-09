@@ -1,0 +1,52 @@
+name: Temporary AI Runtime Recovery Merge Helper
+
+on:
+  push:
+    branches:
+      - feat/ai-runtime-durable-recovery
+
+permissions:
+  contents: read
+
+jobs:
+  diagnose-merge:
+    if: github.event.head_commit.message == 'chore(ai): run merge helper'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - name: Diagnose recovery patch on latest master
+        shell: bash
+        run: |
+          set -euo pipefail
+          helper='.github/workflows/tmp-ai-runtime-recovery-merge.yml'
+          old_head="$(git rev-parse HEAD)"
+          git fetch origin master
+          base="$(git merge-base "$old_head" origin/master)"
+          git diff --binary "$base" "$old_head" -- . ":(exclude)$helper" > /tmp/recovery.patch
+
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git merge -s ours --no-commit origin/master
+          git read-tree --reset -u origin/master
+
+          set +e
+          git apply --index --3way /tmp/recovery.patch
+          apply_status=$?
+          set -e
+
+          echo "apply_status=$apply_status"
+          echo '--- unresolved paths ---'
+          git diff --name-only --diff-filter=U || true
+          echo '--- status ---'
+          git status --short
+
+          while IFS= read -r path; do
+            [ -n "$path" ] || continue
+            echo "--- conflict: $path ---"
+            git checkout --conflict=diff3 -- "$path" || true
+            grep -n -C 8 -E '^(<<<<<<<|\|\|\|\|\|\|\||=======|>>>>>>>)' "$path" || true
+          done < <(git diff --name-only --diff-filter=U)
+
+          exit 0
