@@ -22,6 +22,7 @@ from linktools.ai.runtime._execution_tree import (
 )
 from linktools.ai.runtime.service_api import (
     ExecutionStreamEvent,
+    ExecutionTreeEvent,
     ExecutionView,
     ForkExecutionRequest,
     RetryExecutionRequest,
@@ -187,6 +188,26 @@ async def test_tree_stream_projects_root_and_child_without_global_sequence() -> 
     )
     assert child.parent_invocation_id == "delegate-call"
     assert child.event.durable_sequence == 5
+
+
+def test_execution_tree_event_rejects_nested_depth() -> None:
+    event = ExecutionStreamEvent(
+        "child",
+        1,
+        ExecutionEventType.EXECUTION_SUCCEEDED,
+        {},
+    )
+    with pytest.raises(ValueError):
+        ExecutionTreeEvent(
+            "child",
+            "child-agent",
+            ExecutionLineageKind.SUBAGENT,
+            "root",
+            "root",
+            "delegate-call",
+            2,
+            event,
+        )
 
 
 @pytest.mark.asyncio
