@@ -56,6 +56,7 @@ from ._memory import RuntimeMemoryStore
 from ._metrics import _RuntimeMetricBuffer
 from ._object import RuntimeObjectKeyFactory
 from ._planner import DefaultTaskService, RuntimeTaskNodeRunner
+from ._recovery_impl import RecoveryExecutionService, RecoveryLocalExecutionBackend
 from ._session import DefaultSessionService
 from ._subagent import SubagentDispatcher
 from .service_api import ExecutionHistoryReader, SessionHistoryReader
@@ -456,7 +457,7 @@ async def _build_local_components(
     _require_state_identity(state, namespace=namespace, tenant_id=tenant_id)
     metric_buffer = None if metrics is None else _RuntimeMetricBuffer(metrics)
     metric_source_namespace = None if metric_buffer is None else namespace
-    execution = DefaultExecutionService(
+    execution = RecoveryExecutionService(
         state.execution,
         state.object_store(RuntimeDomain.EXECUTION),
         authorization,
@@ -507,7 +508,7 @@ async def _build_local_components(
     task_service: DefaultTaskService | None = None
     live_broker = LiveExecutionEventBroker()
     try:
-        backend = LocalExecutionBackend(
+        backend = RecoveryLocalExecutionBackend(
             state.conversation,
             state.execution,
             state.recovery,
