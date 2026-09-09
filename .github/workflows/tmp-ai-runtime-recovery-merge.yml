@@ -10,7 +10,7 @@ permissions:
 
 jobs:
   diagnose-merge:
-    if: github.event.head_commit.message == 'chore(ai): run merge helper'
+    if: "${{ github.event.head_commit.message == 'chore(ai): run merge helper' }}"
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
