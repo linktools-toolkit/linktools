@@ -23,7 +23,6 @@ from ..core import (
     ToolOperationStatus,
     canonical_sha256,
     idempotency_key_digest,
-    normalize_json_value,
     principal_identity_payload,
 )
 from ..errors import AIError, ErrorCode
@@ -47,7 +46,6 @@ from .service_api import (
     ExecutionResult,
 )
 from .state._contracts import (
-    ExecutionCancelRequestCommit,
     ExecutionRecord,
     RecoveryCheckpoint,
     RecoveryCheckpointState,
@@ -68,6 +66,7 @@ class RecoveryLocalExecutionBackend(LocalExecutionBackend):
             self._execution.events,
             self._recovery.operations,
             self._tool_operations,
+            execution_operations=self._execution.operations,
             background_tasks=self._execution_task_set(execution_id),
         )
 
@@ -329,6 +328,15 @@ class RecoveryLocalExecutionBackend(LocalExecutionBackend):
             fence=resolved.fence,
         )
 
+    async def persist_cancel_intent(
+        self,
+        execution: ExecutionRecord,
+        operation: OperationLedgerInput,
+    ) -> OperationLedgerRecord:
+        return await self._recovery_commands_for(
+            execution.execution_id
+        ).commit_cancel_intent(execution, operation)
+
     async def recover_execution(
         self,
         execution_id: str,
@@ -427,18 +435,9 @@ class RecoveryLocalExecutionBackend(LocalExecutionBackend):
         checkpoint: RecoveryCheckpoint,
         operations: tuple[OperationLedgerRecord, ...],
     ) -> ExecutionRecord:
-        operation = operations[0]
-        cancelling = await self.commit_cancel_checkpoint(
-            ExecutionCancelRequestCommit(
-                resumed.execution_id,
-                resumed.tenant_id,
-                resumed.revision,
-                resumed.event_sequence,
-                operation.operation_id,
-                datetime.now(timezone.utc),
-            ),
-            expected_status=ExecutionStatus.STARTED,
-        )
+        cancelling = await self._recovery_commands_for(
+            resumed.execution_id
+        ).commit_cancel_claim(resumed)
         terminal = await self._commit_terminal(
             cancelling,
             ExecutionStatus.CANCELLED,
@@ -472,28 +471,48 @@ class RecoveryLocalExecutionBackend(LocalExecutionBackend):
             OperationStatus.RUNNING,
         }:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        await self._execution.operations.compare_and_swap(
+        updated = OperationLedgerRecord(
             current.operation_id,
-            tenant_id=execution.tenant_id,
-            expected_status=current.status,
-            next_record=OperationLedgerRecord(
-                current.operation_id,
-                current.tenant_id,
-                current.resource_kind,
-                current.resource_id,
-                current.execution_id,
-                current.operation_kind,
-                OperationStatus.SUCCEEDED,
-                current.request_digest,
-                execution.execution_id,
-                None,
-                None,
-                current.compactable,
-                current.sequence,
-                current.created_at,
-                datetime.now(timezone.utc),
-            ),
+            current.tenant_id,
+            current.resource_kind,
+            current.resource_id,
+            current.execution_id,
+            current.operation_kind,
+            OperationStatus.SUCCEEDED,
+            current.request_digest,
+            execution.execution_id,
+            None,
+            None,
+            current.compactable,
+            current.sequence,
+            current.created_at,
+            datetime.now(timezone.utc),
         )
+        try:
+            await self._execution.operations.compare_and_swap(
+                current.operation_id,
+                tenant_id=execution.tenant_id,
+                expected_status=current.status,
+                next_record=updated,
+            )
+        except AIError as error:
+            if error.code not in {
+                ErrorCode.STORAGE_COMMIT_UNKNOWN,
+                ErrorCode.STORAGE_CONFLICT,
+            }:
+                raise
+            latest = await self._execution.operations.get(
+                current.operation_id,
+                tenant_id=execution.tenant_id,
+            )
+            if (
+                latest is not None
+                and latest.status is OperationStatus.SUCCEEDED
+                and latest.result_ref == execution.execution_id
+                and latest.request_digest == current.request_digest
+            ):
+                return
+            raise
 
     async def _tool_result_payload(
         self,
@@ -507,7 +526,7 @@ class RecoveryLocalExecutionBackend(LocalExecutionBackend):
                     parts=[
                         ToolReturnPart(
                             "runtime",
-                            normalize_json_value(result),
+                            result,
                             tool_call_id=operation_id,
                         )
                     ]
@@ -711,39 +730,41 @@ class RecoveryExecutionService(DefaultExecutionService):
             }
         )
         operation_id = idempotency_key_digest(request.idempotency_key)
-        current = await self._state.operations.get(
+        now = datetime.now(timezone.utc)
+        candidate = OperationLedgerInput(
             operation_id,
-            tenant_id=request.principal.tenant_id,
+            request.principal.tenant_id,
+            ResourceKind.EXECUTION,
+            execution_id,
+            execution_id,
+            OperationKind.EXECUTION_CANCEL,
+            OperationStatus.PENDING,
+            operation_digest,
+            None,
+            None,
+            None,
+            True,
+            now,
+            now,
         )
-        if current is None:
-            now = datetime.now(timezone.utc)
-            candidate = OperationLedgerInput(
-                operation_id,
-                request.principal.tenant_id,
-                ResourceKind.EXECUTION,
-                execution_id,
-                execution_id,
-                OperationKind.EXECUTION_CANCEL,
-                OperationStatus.PENDING,
-                operation_digest,
-                None,
-                None,
-                None,
-                True,
-                now,
-                now,
+        try:
+            current = await self._recovery_backend().persist_cancel_intent(
+                execution,
+                candidate,
             )
-            try:
-                current = await self._state.operations.append(candidate)
-            except AIError as error:
-                if error.code is not ErrorCode.STORAGE_CONFLICT:
-                    raise
-                current = await self._state.operations.get(
-                    operation_id,
-                    tenant_id=request.principal.tenant_id,
-                )
-                if current is None:
-                    raise AIError(ErrorCode.STORAGE_CONFLICT) from error
+        except AIError as error:
+            if error.code is not ErrorCode.STORAGE_CONFLICT:
+                raise
+            latest_execution = await self._state.executions.get(
+                execution_id,
+                tenant_id=request.principal.tenant_id,
+            )
+            if (
+                latest_execution is not None
+                and latest_execution.status is not ExecutionStatus.RECOVERY_REQUIRED
+            ):
+                return await super()._cancel(execution_id, request)
+            raise
         if (
             current.request_digest != operation_digest
             or current.resource_kind is not ResourceKind.EXECUTION
