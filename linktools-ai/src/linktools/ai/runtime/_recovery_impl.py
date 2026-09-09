@@ -188,6 +188,38 @@ class RecoveryLocalExecutionBackend(LocalExecutionBackend):
             ):
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             return
+        if (
+            execution is not None
+            and execution.status
+            in {ExecutionStatus.STARTED, ExecutionStatus.CANCELLING}
+            and checkpoint.handoff_phase is RecoveryHandoffPhase.NONE
+            and checkpoint.state
+            in {
+                RecoveryCheckpointState.ACTIVE,
+                RecoveryCheckpointState.WAITING,
+            }
+        ):
+            self._validate_recovery_identity(execution, checkpoint.input)
+            effects = await self.recovery_effects(
+                execution.execution_id,
+                tenant_id=execution.tenant_id,
+            )
+            if effects:
+                first = effects[0]
+                await self._commit_recovery_required(
+                    execution,
+                    AIError(
+                        ErrorCode.TOOL_EFFECT_UNKNOWN,
+                        safe_details={
+                            "execution_id": execution.execution_id,
+                            "operation_id": first.operation_id,
+                            "fence": first.fence,
+                            "phase": "startup_reconcile",
+                        },
+                    ),
+                    effects,
+                )
+                return
         await super()._reconcile_checkpoint(checkpoint)
 
     async def recovery_effects(

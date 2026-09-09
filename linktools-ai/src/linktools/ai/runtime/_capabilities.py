@@ -454,18 +454,13 @@ class _RuntimeStepPersistence(StepPersistence[None]):
             if effective_args_method is None
             else await effective_args_method(ctx, call, tool_def, args)
         )
-        try:
-            decision = await self.tool_operations.begin(
-                ctx,
-                call,
-                tool_def,
-                args,
-                policy.replay_safe,
-            )
-        except AIError as error:
-            if error.code is ErrorCode.TOOL_EFFECT_UNKNOWN:
-                raise ToolFailed(_MODEL_EFFECT_UNKNOWN_MESSAGE) from error
-            raise
+        decision = await self.tool_operations.begin(
+            ctx,
+            call,
+            tool_def,
+            args,
+            policy.replay_safe,
+        )
         if decision.replay_safe is not policy.replay_safe:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         key = self._decision_key(ctx, call)

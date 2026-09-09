@@ -695,7 +695,12 @@ class Runtime(Generic[AppT]):
                 ErrorCode.STORAGE_NOT_FOUND,
                 safe_details={"graph_id": graph_id, "node_id": node_id},
             )
-        if state.status in {TaskStatus.PENDING, TaskStatus.READY, TaskStatus.RUNNING}:
+        if state.status in {
+            TaskStatus.PENDING,
+            TaskStatus.READY,
+            TaskStatus.RUNNING,
+            TaskStatus.RECOVERY_REQUIRED,
+        }:
             raise AIError(
                 ErrorCode.TASK_NOT_READY,
                 safe_details={"graph_id": graph_id, "node_id": node_id},
