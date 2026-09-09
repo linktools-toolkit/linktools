@@ -28,7 +28,7 @@ from ..core import (
 )
 from ..errors import AIError, ErrorCode
 from ..storage import StoredPayload, payload_fits_inline
-from ._execution import DefaultExecutionService
+from ._execution import DefaultExecutionService, _consumed_query
 from ._local import LocalExecutionBackend
 from ._message import encode_model_messages
 from ._object import RuntimeObjectKeyFactory, put_runtime_object
@@ -614,6 +614,7 @@ class RecoveryExecutionService(DefaultExecutionService):
         )
         return ExecutionHandle(execution_id)
 
+    @_consumed_query
     async def result(
         self,
         execution_id: str,
@@ -629,6 +630,7 @@ class RecoveryExecutionService(DefaultExecutionService):
             raise _execution_recovery_error(execution)
         return await super().result(execution_id, principal=principal)
 
+    @_consumed_query
     async def wait(
         self,
         execution_id: str,
@@ -640,12 +642,14 @@ class RecoveryExecutionService(DefaultExecutionService):
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
 
         async def wait_once() -> ExecutionResult:
+            execution = await self._load_authorized(
+                execution_id,
+                principal,
+                AuthorizationAction.EXECUTION_READ,
+            )
+            if self._local_stream_abort is not None:
+                self._local_stream_abort(execution_id)
             while True:
-                execution = await self._load_authorized(
-                    execution_id,
-                    principal,
-                    AuthorizationAction.EXECUTION_READ,
-                )
                 if execution.status is ExecutionStatus.RECOVERY_REQUIRED:
                     raise _execution_recovery_error(execution)
                 if execution.status in {
@@ -675,6 +679,11 @@ class RecoveryExecutionService(DefaultExecutionService):
                     )
                 else:
                     await asyncio.sleep(1.0)
+                execution = await self._load_authorized(
+                    execution_id,
+                    principal,
+                    AuthorizationAction.EXECUTION_READ,
+                )
 
         try:
             return await asyncio.wait_for(wait_once(), timeout_seconds)
