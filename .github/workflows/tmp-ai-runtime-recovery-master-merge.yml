@@ -1,0 +1,45 @@
+name: Temporary AI Runtime Recovery Master Merge Diagnostic
+
+on:
+  push:
+    branches:
+      - feat/ai-runtime-durable-recovery
+
+permissions:
+  contents: read
+
+jobs:
+  diagnose:
+    if: "${{ github.event.head_commit.message == 'ci(ai): diagnose recovery master merge' }}"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - name: Diagnose merge
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch origin master
+          echo "FEATURE_HEAD=$(git rev-parse HEAD)"
+          echo "MASTER_HEAD=$(git rev-parse origin/master)"
+          echo "MERGE_BASE=$(git merge-base HEAD origin/master)"
+          set +e
+          git merge --no-commit --no-ff origin/master
+          rc=$?
+          set -e
+          if [ "$rc" -eq 0 ]; then
+            echo "MERGE_CLEAN=true"
+            git status --short
+            git merge --abort
+            exit 0
+          fi
+          echo "MERGE_CLEAN=false"
+          echo "CONFLICT_FILES_BEGIN"
+          git diff --name-only --diff-filter=U
+          echo "CONFLICT_FILES_END"
+          echo "CONFLICT_DIFF_BEGIN"
+          git diff --cc --minimal
+          echo "CONFLICT_DIFF_END"
+          git merge --abort
+          exit 1
