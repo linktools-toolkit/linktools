@@ -1,0 +1,220 @@
+name: AI review contraction
+
+on:
+  push:
+    branches:
+      - refactor/ai-harness-capabilities
+
+permissions:
+  contents: write
+
+jobs:
+  repair:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: refactor/ai-harness-capabilities
+          fetch-depth: 0
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.10'
+      - name: Apply review contraction
+        shell: bash
+        run: |
+          python - <<'PY'
+          from __future__ import annotations
+
+          from pathlib import Path
+
+          def replace_once(path: Path, old: str, new: str) -> None:
+              text = path.read_text(encoding='utf-8')
+              count = text.count(old)
+              if count != 1:
+                  raise SystemExit(f'{path}: expected one match, found {count}: {old[:80]!r}')
+              path.write_text(text.replace(old, new, 1), encoding='utf-8')
+
+          def replace_between(path: Path, start: str, end: str, replacement: str) -> None:
+              text = path.read_text(encoding='utf-8')
+              first = text.find(start)
+              if first < 0:
+                  raise SystemExit(f'{path}: start marker missing: {start!r}')
+              second = text.find(end, first)
+              if second < 0:
+                  raise SystemExit(f'{path}: end marker missing: {end!r}')
+              path.write_text(text[:first] + replacement + text[second:], encoding='utf-8')
+
+          fs_path = Path('linktools-ai/src/linktools/ai/runtime/state/_filesystem.py')
+          replace_once(
+              fs_path,
+              '''        runtime_domain: str,\n        group: FilesystemStateStorageGroup | None = None,\n''',
+              '''        runtime_domain: str,\n        range_index: bool = False,\n        group: FilesystemStateStorageGroup | None = None,\n''',
+          )
+          replace_once(
+              fs_path,
+              '''        self._runtime_domain = runtime_domain\n        self._writer_lock = FilesystemWriterLock(self._root / "state.lock")\n''',
+              '''        if not isinstance(range_index, bool):\n            raise TypeError("range_index must be bool")\n        self._runtime_domain = runtime_domain\n        self._range_index_enabled = range_index\n        self._writer_lock = FilesystemWriterLock(self._root / "state.lock")\n''',
+          )
+          replace_once(
+              fs_path,
+              '''    def _ensure_record_index(self) -> None:\n        if _record_index_marker_valid(self._root):\n            return\n        index_root = self._root / "record-index"\n''',
+              '''    def _ensure_record_index(self) -> None:\n        index_root = self._root / "record-index"\n        if not self._range_index_enabled:\n            if index_root.exists():\n                shutil.rmtree(index_root)\n                sync_directory(self._root)\n            return\n        if _record_index_marker_valid(self._root):\n            return\n''',
+          )
+          replace_once(
+              fs_path,
+              '''        marker = self._root / _RECORD_INDEX_MARKER\n        _write_text(marker, _RECORD_INDEX_VERSION)\n        sync_directory(marker.parent)\n        sync_directory(self._root)\n''',
+              '''        if self._range_index_enabled:\n            marker = self._root / _RECORD_INDEX_MARKER\n            _write_text(marker, _RECORD_INDEX_VERSION)\n            sync_directory(marker.parent)\n        sync_directory(self._root)\n''',
+          )
+
+          materializer = Path('linktools-ai/src/linktools/ai/runtime/state/_materializer.py')
+          replace_once(
+              materializer,
+              '''                    runtime_domain=domain.value,\n                    group=group,\n''',
+              '''                    runtime_domain=domain.value,\n                    range_index=domain is RuntimeDomain.MEMORY,\n                    group=group,\n''',
+          )
+
+          memory_path = Path('linktools-ai/src/linktools/ai/runtime/_memory.py')
+          memory_list = '''    async def list_paths(self, prefix: str = "", *, limit: int) -> list[str]:\n        normalized_prefix = _normalize_prefix(prefix)\n        if not isinstance(limit, int) or isinstance(limit, bool) or limit <= 0:\n            raise ValueError("limit must be positive")\n        paths: list[str] = []\n        cursor: str | None = None\n        while len(paths) < limit:\n            page = await self._state.records.list(\n                tenant_id=self._tenant_id,\n                memory_scope_digest=self._memory_scope_digest,\n                prefix=normalized_prefix,\n                cursor=cursor,\n                limit=min(1000, limit - len(paths)),\n            )\n            batch = _record_paths(list(page.items))\n            if any(not path.startswith(normalized_prefix) for path in batch):\n                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)\n            paths.extend(batch)\n            if page.next_cursor is None:\n                break\n            cursor = page.next_cursor\n        return paths\n\n'''
+          replace_between(
+              memory_path,
+              '    async def list_paths(self, prefix: str = "", *, limit: int) -> list[str]:\n',
+              '    async def _get_receipt(',
+              memory_list,
+          )
+          replace_once(
+              memory_path,
+              '''        if status not in {"created", "appended", "updated", "deleted", "not_found"}:\n''',
+              '''        if status not in {"created", "updated", "deleted", "not_found"}:\n''',
+          )
+          replace_once(
+              memory_path,
+              '''        if status in {"created", "appended", "updated"}:\n''',
+              '''        if status in {"created", "updated"}:\n''',
+          )
+
+          journal_path = Path('linktools-ai/src/linktools/ai/runtime/_journal.py')
+          replace_once(
+              journal_path,
+              '''        if fact.duration_ns is not None:\n            return fact\n''',
+              '''        if fact.duration_ns is not None:\n            raise RuntimeError("model request fact is already finished")\n''',
+          )
+
+          capabilities_path = Path('linktools-ai/src/linktools/ai/runtime/_capabilities.py')
+          replace_once(
+              capabilities_path,
+              '''    async def on_run_error(\n        self,\n        ctx: RunContext[None],\n        *,\n        error: BaseException,\n    ) -> AgentRunResult[Any]:\n        return await super().on_run_error(ctx, error=error)\n\n''',
+              '',
+          )
+          replace_once(
+              capabilities_path,
+              '''    async def before_model_request(\n        self,\n        ctx: RunContext[None],\n        request_context: ModelRequestContext,\n    ) -> ModelRequestContext:\n        return request_context\n\n''',
+              '',
+          )
+
+          executor_path = Path('linktools-ai/src/linktools/ai/runtime/_agent_executor.py')
+          boundary = '''@dataclass(frozen=True, slots=True)\nclass _WorkspacePersistenceContext:\n    binder: WorkspaceToolCallBinder\n    execution_id: str\n    step_run_id: str\n    path_fields_provider: Callable[[], Mapping[str, tuple[str, ...]]]\n\n\nclass _RuntimePersistenceBoundary(WrapperCapability[AgentContext[object]]):\n    def __init__(\n        self,\n        wrapped: StepPersistence[object],\n        *,\n        workspace_binder: WorkspaceToolCallBinder | None = None,\n        execution_id: str | None = None,\n        step_run_id: str | None = None,\n        path_fields_provider: (\n            Callable[[], Mapping[str, tuple[str, ...]]] | None\n        ) = None,\n    ) -> None:\n        super().__init__(wrapped=wrapped)\n        if workspace_binder is None:\n            self._workspace_context: _WorkspacePersistenceContext | None = None\n        else:\n            if execution_id is None or step_run_id is None or path_fields_provider is None:\n                raise TypeError("workspace persistence context is incomplete")\n            self._workspace_context = _WorkspacePersistenceContext(\n                workspace_binder,\n                execution_id,\n                step_run_id,\n                path_fields_provider,\n            )\n        self._workspace_initial_message_ids: frozenset[int] = frozenset()\n\n    def get_ordering(self) -> CapabilityOrdering:\n        return CapabilityOrdering(\n            position="outermost",\n            wraps=(AbstractCapability,),\n        )\n\n    async def before_run(\n        self,\n        ctx: PydanticRunContext[AgentContext[object]],\n    ) -> None:\n        self._workspace_initial_message_ids = frozenset(\n            id(message) for message in ctx.messages\n        )\n        await super().before_run(ctx)\n\n    def _workspace_new_messages(\n        self,\n        messages: Sequence[ModelMessage],\n    ) -> tuple[ModelMessage, ...]:\n        return tuple(\n            message\n            for message in messages\n            if id(message) not in self._workspace_initial_message_ids\n        )\n\n    async def before_model_request(\n        self,\n        ctx: PydanticRunContext[AgentContext[object]],\n        request_context: ModelRequestContext,\n    ) -> ModelRequestContext:\n        workspace = self._workspace_context\n        if workspace is not None:\n            await workspace.binder.validate_messages(\n                ctx.messages,\n                execution_id=workspace.execution_id,\n                step_run_id=workspace.step_run_id,\n                path_fields=workspace.path_fields_provider(),\n            )\n        return await super().before_model_request(ctx, request_context)\n\n    async def after_run(\n        self,\n        ctx: PydanticRunContext[AgentContext[object]],\n        *,\n        result: AgentRunResult[object],\n    ) -> AgentRunResult[object]:\n        workspace = self._workspace_context\n        if workspace is not None:\n            path_fields = workspace.path_fields_provider()\n            await workspace.binder.bind_result(\n                result,\n                execution_id=workspace.execution_id,\n                step_run_id=workspace.step_run_id,\n                path_fields=path_fields,\n            )\n            await workspace.binder.validate_messages(\n                result.all_messages(),\n                execution_id=workspace.execution_id,\n                step_run_id=workspace.step_run_id,\n                path_fields=path_fields,\n            )\n        return await super().after_run(ctx, result=result)\n\n    async def after_node_run(\n        self,\n        ctx: PydanticRunContext[AgentContext[object]],\n        *,\n        node: AgentNode[AgentContext[object]],\n        result: NodeResult[AgentContext[object]],\n    ) -> NodeResult[AgentContext[object]]:\n        workspace = self._workspace_context\n        if workspace is not None:\n            path_fields = workspace.path_fields_provider()\n            messages = tuple(ctx.messages)\n            await workspace.binder.bind_messages(\n                self._workspace_new_messages(messages),\n                execution_id=workspace.execution_id,\n                step_run_id=workspace.step_run_id,\n                path_fields=path_fields,\n            )\n            await workspace.binder.validate_messages(\n                messages,\n                execution_id=workspace.execution_id,\n                step_run_id=workspace.step_run_id,\n                path_fields=path_fields,\n            )\n        return await super().after_node_run(ctx, node=node, result=result)\n'''
+          replace_between(
+              executor_path,
+              'class _RuntimePersistenceBoundary(WrapperCapability[AgentContext[object]]):\n',
+              '\n\nclass _ToolPresentation(',
+              boundary,
+          )
+
+          range_test = Path('tests/ai/test_state_range_index.py')
+          text = range_test.read_text(encoding='utf-8')
+          target = '        runtime_domain=RuntimeDomain.EXECUTION.value,\n    )\n'
+          if text.count(target) != 3:
+              raise SystemExit(f'unexpected range-index constructor count: {text.count(target)}')
+          text = text.replace(
+              target,
+              '        runtime_domain=RuntimeDomain.EXECUTION.value,\n        range_index=True,\n    )\n',
+          )
+          marker = 'async def test_filesystem_range_index_does_not_write_one_node_per_character(\n'
+          insert = '''async def test_filesystem_range_index_is_opt_in(tmp_path: Path) -> None:\n    root = tmp_path / "range-opt-in"\n    store = FilesystemStateStore(\n        root,\n        namespace="range-opt-in",\n        tenant_id="tenant",\n        runtime_domain=RuntimeDomain.EXECUTION.value,\n    )\n    await store.initialize()\n    await _seed(store, (_record("probe"),))\n    assert not (root / "record-index").exists()\n    await store.close()\n\n\n'''
+          if marker not in text:
+              raise SystemExit('range-index insertion marker missing')
+          range_test.write_text(text.replace(marker, insert + marker, 1), encoding='utf-8')
+
+          memory_test = Path('tests/ai/test_memory_bounded_listing.py')
+          text = memory_test.read_text(encoding='utf-8')
+          text = text.replace('from datetime import datetime, timezone\n', 'import json\nfrom datetime import datetime, timezone\n', 1)
+          text = text.replace(
+              'from linktools.ai.runtime._memory import RuntimeMemoryStore\n',
+              'from linktools.ai.runtime._memory import RuntimeMemoryStore, _decode_receipt\n',
+              1,
+          )
+          old_list = '''    async def list(self, **kwargs: Any) -> Any:\n        self.calls.append(dict(kwargs))\n        limit = kwargs["limit"]\n        return SimpleNamespace(\n            items=tuple(\n                SimpleNamespace(metadata={"path": path}) for path in self._paths[:limit]\n            ),\n            next_cursor=None,\n        )\n'''
+          new_list = '''    async def list(self, **kwargs: Any) -> Any:\n        self.calls.append(dict(kwargs))\n        limit = kwargs["limit"]\n        start = 0 if kwargs["cursor"] is None else int(kwargs["cursor"])\n        selected = self._paths[start : start + limit]\n        end = start + len(selected)\n        return SimpleNamespace(\n            items=tuple(\n                SimpleNamespace(metadata={"path": path}) for path in selected\n            ),\n            next_cursor=str(end) if end < len(self._paths) else None,\n        )\n'''
+          if old_list not in text:
+              raise SystemExit('recording memory repository block missing')
+          text = text.replace(old_list, new_list, 1)
+          memory_ctor = '        runtime_domain=RuntimeDomain.MEMORY.value,\n    )\n'
+          if text.count(memory_ctor) != 6:
+              raise SystemExit(f'unexpected memory filesystem constructor count: {text.count(memory_ctor)}')
+          text = text.replace(
+              memory_ctor,
+              '        runtime_domain=RuntimeDomain.MEMORY.value,\n        range_index=True,\n    )\n',
+          )
+          insertion_marker = 'async def test_list_paths_fails_closed_if_repository_breaks_prefix_contract() -> None:\n'
+          additions = '''async def test_list_paths_pages_for_large_harness_limit() -> None:\n    records = _RecordingMemoryRepository(\n        tuple(f"memory/{index:04d}.md" for index in range(1600))\n    )\n    store = _runtime_store(records)\n\n    paths = await store.list_paths("memory/", limit=1500)\n\n    assert len(paths) == 1500\n    assert paths[0] == "memory/0000.md"\n    assert paths[-1] == "memory/1499.md"\n    assert [call["limit"] for call in records.calls] == [1000, 500]\n    assert records.calls[1]["cursor"] == "1000"\n\n\ndef test_memory_receipt_rejects_unwritten_appended_status() -> None:\n    payload = json.dumps(\n        {\n            "version": 2,\n            "result": {\n                "file": "memory/a.md",\n                "version": "m2:" + "a" * 64,\n                "status": "appended",\n            },\n        }\n    )\n\n    with pytest.raises(AIError) as raised:\n        _decode_receipt(payload)\n\n    assert raised.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR\n\n\n'''
+          if insertion_marker not in text:
+              raise SystemExit('memory test insertion marker missing')
+          memory_test.write_text(text.replace(insertion_marker, additions + insertion_marker, 1), encoding='utf-8')
+
+          journal_test = Path('tests/ai/test_compaction_harness_observability.py')
+          text = journal_test.read_text(encoding='utf-8')
+          text += '''\n\ndef test_journal_rejects_double_finish() -> None:\n    journal = ModelRequestJournal(\n        source_namespace="workspace",\n        tenant_id="tenant",\n        execution_id="execution",\n        step_run_id="run",\n    )\n    fact = journal.begin(1)\n    journal.finish(fact.request_sequence, status="SUCCEEDED")\n\n    with pytest.raises(RuntimeError, match="already finished"):\n        journal.finish(fact.request_sequence, status="FAILED")\n\n    journal.consume(fact.request_sequence)\n'''
+          journal_test.write_text(text, encoding='utf-8')
+
+          for path in (
+              fs_path,
+              materializer,
+              memory_path,
+              journal_path,
+              capabilities_path,
+              executor_path,
+              range_test,
+              memory_test,
+              journal_test,
+          ):
+              compile(path.read_text(encoding='utf-8'), str(path), 'exec')
+          PY
+      - name: Install project
+        shell: bash
+        run: |
+          python -m pip install --quiet --upgrade pip
+          python -m pip install --quiet -U -r requirements.txt
+          python manage.py install --editable --quiet
+      - name: Format changed Python
+        shell: bash
+        run: |
+          mapfile -t files < <(git diff --name-only --diff-filter=ACM -- '*.py')
+          if ((${#files[@]})); then
+            python -m ruff format "${files[@]}"
+          fi
+      - name: Run focused regressions
+        shell: bash
+        run: |
+          python -m pytest -q -p no:cacheprovider \
+            tests/ai/test_memory_bounded_listing.py \
+            tests/ai/test_state_range_index.py \
+            tests/ai/test_compaction_harness_observability.py \
+            tests/ai/test_spec_capability_refactor.py \
+            tests/ai/test_deferred_harness_conformance.py \
+            tests/ai/test_tool_effect_semantics.py \
+            tests/ai/test_review_contract_cleanup.py
+      - name: Run package gate
+        shell: bash
+        run: |
+          python manage.py check linktools-ai
+          git diff --check
+      - name: Commit repair
+        shell: bash
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git rm .github/workflows/ai-review-contraction.yml
+          git add -A
+          git commit -m 'fix(ai): tighten review contracts'
+          git push origin HEAD:refactor/ai-harness-capabilities
