@@ -10,7 +10,7 @@ permissions:
 
 jobs:
   diagnose:
-    if: "${{ github.event.head_commit.message == 'ci(ai): diagnose recovery master merge' }}"
+    if: "${{ github.event.head_commit.message == 'ci(ai): diagnose recovery master merge v2' }}"
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -20,6 +20,8 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           git fetch origin master
           echo "FEATURE_HEAD=$(git rev-parse HEAD)"
           echo "MASTER_HEAD=$(git rev-parse origin/master)"
