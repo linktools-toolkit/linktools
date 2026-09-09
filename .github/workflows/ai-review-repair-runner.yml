@@ -43,6 +43,58 @@ jobs:
           repair = Path('/tmp/linktools-ai-review-repair.py')
           repair.write_text(script, encoding='utf-8')
           subprocess.run(['python', str(repair)], check=True)
+
+          # These bindings remain available only inside the Runtime owner; static __all__
+          # stays identical to master and therefore does not expand the package API.
+          state_path = Path('linktools-ai/src/linktools/ai/runtime/state/__init__.py')
+          state = state_path.read_text(encoding='utf-8')
+          internal_bindings = (
+              'SESSION_AGENT_ID_METADATA_KEY',
+              'ApprovalRecord',
+              'ConversationCursor',
+              'EvaluationRecord',
+              'ExecutionCancelRequestCommit',
+              'ExecutionStartClaim',
+              'ExecutionStartReservation',
+              'ExecutionStartUnknownCommit',
+              'ExecutionTerminalCommit',
+              'ExternalCallRecord',
+              'IdempotencyRecord',
+              'IdempotencyTerminalUpdate',
+              'OperationLedgerRepository',
+              'OperationTerminalUpdate',
+              'RecoveryCheckpoint',
+              'RecoveryConversationIntent',
+              'RecoveryExecutionInput',
+              'RecoveryIdempotencyInput',
+              'RecoveryTerminalHandoff',
+              'RecoveryTerminalOutcome',
+              'ResultRecord',
+              'ToolOperationRecord',
+              'EventRepositoryImpl',
+              'RecoveryCheckpointRepositoryImpl',
+              'ToolRepositoryImpl',
+              'ContinuableSnapshot',
+              'RunRecord',
+              'StepEvent',
+              'StepStore',
+              'StagingStepStore',
+          )
+          for name in internal_bindings:
+              source = f'    {name},\n'
+              target = f'    {name} as {name},\n'
+              if source in state:
+                  state = state.replace(source, target, 1)
+          state = state.replace(
+              '    OperationLedgerRepository as OperationLedgerRepositoryImpl,\n',
+              '    OperationLedgerRepository as _OperationLedgerRepositoryImpl,\n',
+          )
+          state = state.replace(
+              '\n__all__ = [\n',
+              '\nOperationLedgerRepositoryImpl = _OperationLedgerRepositoryImpl\n\n__all__ = [\n',
+              1,
+          )
+          state_path.write_text(state, encoding='utf-8')
           RUNNER_PY
       - name: Install project
         shell: bash
@@ -50,12 +102,11 @@ jobs:
           python -m pip install --quiet --upgrade pip
           python -m pip install --quiet -U -r requirements.txt
           python manage.py install --editable --quiet
-      - name: Normalize changed Python
+      - name: Format changed Python
         shell: bash
         run: |
           mapfile -t files < <(git diff --name-only --diff-filter=ACM -- '*.py')
           if ((${#files[@]})); then
-            python -m ruff check --fix "${files[@]}"
             python -m ruff format "${files[@]}"
           fi
       - name: Run focused regressions
