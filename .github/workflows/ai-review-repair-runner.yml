@@ -110,6 +110,23 @@ jobs:
           )
           regression_path.write_text(regression, encoding='utf-8')
 
+          for test_path in (
+              Path('tests/ai/test_repository_instruction_dynamic_scope.py'),
+              Path('tests/ai/test_workspace_root_instruction_target.py'),
+          ):
+              test_source = test_path.read_text(encoding='utf-8')
+              test_source = test_source.replace(
+                  'from linktools.ai.runtime._capabilities import (\n'
+                  '    _WorkspaceToolGate,\n'
+                  '    _repository_instruction_marker,\n'
+                  ')\n',
+                  'from linktools.ai.runtime._workspace_gate import (\n'
+                  '    _WorkspaceToolGate,\n'
+                  '    _repository_instruction_marker,\n'
+                  ')\n',
+              )
+              test_path.write_text(test_source, encoding='utf-8')
+
           filesystem_path = Path('linktools-ai/src/linktools/ai/runtime/state/_filesystem.py')
           filesystem = filesystem_path.read_text(encoding='utf-8')
           filesystem = filesystem.replace(
