@@ -7,7 +7,7 @@ from __future__ import annotations
 import asyncio
 import sys
 import uuid
-from collections.abc import Awaitable, Callable, Mapping, Sequence
+from collections.abc import AsyncIterable, Awaitable, Callable, Mapping, Sequence
 from contextlib import AsyncExitStack
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
@@ -25,13 +25,15 @@ from openai import (
 from pydantic import ValidationError
 from pydantic_ai import Agent as PydanticAgent
 from pydantic_ai import AgentRunResult
-from pydantic_ai import AgentRunResultEvent, ModelSettings, TextOutput, Tool
+from pydantic_ai import TextOutput, Tool
 from pydantic_ai.capabilities import (
     AbstractCapability,
     AgentNode,
     CapabilityOrdering,
     NodeResult,
+    ProcessEventStream,
     ReinjectSystemPrompt,
+    Thinking,
     WrapperCapability,
 )
 from pydantic_ai.exceptions import (
@@ -44,6 +46,7 @@ from pydantic_ai.exceptions import (
     UserError,
 )
 from pydantic_ai.messages import (
+    AgentStreamEvent,
     FunctionToolCallEvent,
     FunctionToolResultEvent,
     ModelMessage,
@@ -563,7 +566,6 @@ class AgentExecutor:
         if await scope.step_store.get_run(run_id=scope.step_run_id) is not None:
             raise AIError(ErrorCode.STORAGE_CONFLICT)
         model = definition.model.materialize()
-        model_settings = _thinking_settings(model, scope.thinking)
         deferred_step_index: int | None = None
         presentation: _ToolPresentation | None = None
 
@@ -627,6 +629,11 @@ class AgentExecutor:
         )
         if scope.replace_history_system_prompt:
             capabilities = (*capabilities, ReinjectSystemPrompt(replace_existing=True))
+        capabilities = (
+            *capabilities,
+            _thinking_capability(model, scope.thinking),
+            _event_stream_capability(cast(EventSink, scope.event_sink)),
+        )
         _logger.debug(
             "agent execution started: agent=%s definition=%s step=%s mode=%s planning=%s thinking=%s runtime_tools=%s",
             definition.spec.id,
@@ -637,12 +644,11 @@ class AgentExecutor:
             scope.thinking,
             runtime_tool_names,
         )
-        final_result = None
         user_prompt = scope.user_prompt
         deferred_kwargs: dict[str, object] = {}
         if scope.deferred_tool_results is not None:
             deferred_kwargs["deferred_tool_results"] = scope.deferred_tool_results
-        async with agent.run_stream_events(
+        final_result = await agent.run(
             user_prompt,
             deps=scope.context,
             message_history=scope.history or None,
@@ -651,20 +657,8 @@ class AgentExecutor:
             usage_limits=usage_limits,
             usage=run_usage,
             capabilities=capabilities,
-            model_settings=model_settings,
             **deferred_kwargs,
-        ) as events:
-            async for event in events:
-                if isinstance(event, AgentRunResultEvent):
-                    final_result = event.result
-                    continue
-                emission = _map_event(event)
-                if emission is not None:
-                    await cast(EventSink, scope.event_sink)(emission)
-        if final_result is None:
-            raise AIError(
-                ErrorCode.INTERNAL_ERROR, safe_details={"phase": "agent_result"}
-            )
+        )
         output = final_result.output
         if isinstance(output, DeferredToolRequests):
             if not output.approvals or output.calls or output.metadata:
@@ -1056,7 +1050,22 @@ def _assistant_text_output(value: str) -> AssistantTextOutput:
     return AssistantTextOutput(text=value)
 
 
-def _thinking_settings(model: Model, thinking: ThinkingValue) -> ModelSettings:
+def _event_stream_capability(
+    sink: EventSink,
+) -> ProcessEventStream[AgentContext[object]]:
+    async def forward(
+        _ctx: PydanticRunContext[AgentContext[object]],
+        events: AsyncIterable[AgentStreamEvent],
+    ) -> None:
+        async for event in events:
+            emission = _map_event(event)
+            if emission is not None:
+                await sink(emission)
+
+    return ProcessEventStream(forward)
+
+
+def _thinking_capability(model: Model, thinking: ThinkingValue) -> Thinking:
     profile = model.profile
     supports = bool(profile.get("supports_thinking", False))
     always = bool(profile.get("thinking_always_enabled", False))
@@ -1066,13 +1075,12 @@ def _thinking_settings(model: Model, thinking: ThinkingValue) -> ModelSettings:
                 ErrorCode.REQUEST_FIELD_INVALID,
                 safe_details={"field": "thinking", "reason": "model_always_enabled"},
             )
-        return ModelSettings(thinking=False)
-    if not supports:
+    elif not supports:
         raise AIError(
             ErrorCode.REQUEST_FIELD_INVALID,
             safe_details={"field": "thinking", "reason": "model_not_supported"},
         )
-    return ModelSettings(thinking=thinking)
+    return Thinking(effort=thinking)
 
 
 @dataclass(frozen=True, slots=True)
