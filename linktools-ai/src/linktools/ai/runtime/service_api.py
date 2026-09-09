@@ -714,6 +714,33 @@ class ExecutionTreeEvent:
 
 
 @dataclass(frozen=True, slots=True)
+class TaskGraphRunEvent:
+    graph_id: str
+    node_id: "str | None"
+    event: "TaskEvent | ExecutionTreeEvent"
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.graph_id, str) or not self.graph_id.strip():
+            raise ValueError("task graph run event graph id is required")
+        if self.node_id is not None and (
+            not isinstance(self.node_id, str) or not self.node_id.strip()
+        ):
+            raise ValueError("task graph run event node id is invalid")
+        if isinstance(self.event, TaskEvent):
+            if (
+                self.event.graph_id != self.graph_id
+                or self.event.node_id != self.node_id
+            ):
+                raise ValueError("task graph run event task identity is invalid")
+            return
+        if isinstance(self.event, ExecutionTreeEvent):
+            if self.node_id is None:
+                raise ValueError("task run execution event requires a node id")
+            return
+        raise TypeError("task graph run event payload is invalid")
+
+
+@dataclass(frozen=True, slots=True)
 class ArtifactView:
     artifact_id: str
     execution_id: str
@@ -757,7 +784,7 @@ class ExecutionHistoryService(Protocol):
 
 
 class ExecutionService(Protocol):
-    async def run(
+    async def start(
         self, binding_digest: str, request: ExecutionRequest
     ) -> ExecutionHandle: ...
     async def resolve_existing(
@@ -785,7 +812,7 @@ class ExecutionService(Protocol):
         principal: Principal,
         timeout_seconds: "float | None" = None,
     ) -> ExecutionResult: ...
-    async def run_and_wait(
+    async def run(
         self,
         binding_digest: str,
         request: ExecutionRequest,
@@ -878,14 +905,14 @@ class SessionService(Protocol):
 
 
 class TaskService(Protocol):
-    async def run_graph(self, request: TaskGraphRequest) -> TaskGraphResult: ...
-    async def run_graph_and_wait(
+    async def start_graph(self, request: TaskGraphRequest) -> TaskGraphResult: ...
+    async def run_graph(
         self, request: TaskGraphRequest, *, timeout_seconds: "float | None" = None
     ) -> TaskGraphResult: ...
     async def inspect_graph(
         self, graph_id: str, *, principal: Principal
     ) -> TaskGraphView: ...
-    async def inspect_graph_state(
+    async def snapshot_graph(
         self,
         graph_id: str,
         *,
@@ -1035,6 +1062,7 @@ __all__ = [
     "SessionView",
     "TaskEvent",
     "TaskEventType",
+    "TaskGraphRunEvent",
     "TaskService",
     "ToolApprovalContext",
     "TranscriptItem",

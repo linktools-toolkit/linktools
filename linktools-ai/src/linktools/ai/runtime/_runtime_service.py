@@ -52,6 +52,7 @@ from ..task import (
 )
 from ..workspace import Workspace
 from ._agent import Agent, Execution, Session
+from ._task import TaskGraphRun
 from ._context import RuntimeContext
 from ._input import CanonicalUserInput, task_prompt_draft
 from ._metrics import (
@@ -71,7 +72,6 @@ from .service_api import (
     EventService,
     ExecutionRequest,
     ExecutionService,
-    ExecutionStreamEvent,
     ForkExecutionRequest,
     ForkSessionRequest,
     ReplayEvaluationRequest,
@@ -87,16 +87,6 @@ from .state import RuntimeState
 
 _logger = environ.get_logger("ai.runtime")
 AppT = TypeVar("AppT")
-
-
-class _LocalRuntimeCoordinatorPort(Protocol):
-    def stream(
-        self,
-        execution_id: str,
-        *,
-        principal: Principal,
-        after_sequence: int = 0,
-    ) -> AsyncIterator[ExecutionStreamEvent]: ...
 
 
 class _TaskNodeRuntimePort(Protocol):
@@ -170,7 +160,6 @@ class Runtime(Generic[AppT]):
         workspace: Workspace,
         context: RuntimeContext[AppT],
         close_callback: "Callable[[], Awaitable[None]] | None" = None,
-        local_coordinator: "_LocalRuntimeCoordinatorPort | None" = None,
         task_node_runtime: "_TaskNodeRuntimePort | None" = None,
         metric_control: "_RuntimeMetricControl | None" = None,
     ) -> None:
@@ -209,7 +198,6 @@ class Runtime(Generic[AppT]):
             kind=PrincipalKind.LOCAL_TRUSTED.value,
         )
         self._close_callback = close_callback
-        self._local_coordinator = local_coordinator
         self._task_node_runtime = task_node_runtime
         self._metric_control = metric_control
         self._closed = False
@@ -394,7 +382,7 @@ class Runtime(Generic[AppT]):
             files=resolved_files,
         )
         if session_id is None:
-            handle = await self.execution.run(binding.digest, request)
+            handle = await self.execution.start(binding.digest, request)
         else:
             if not isinstance(session_id, str) or not session_id.strip():
                 raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
@@ -426,27 +414,6 @@ class Runtime(Generic[AppT]):
             resolved_thinking,
         )
         return Execution(self, handle.execution_id, binding.digest, resolved_principal)
-
-    def _execution_stream(
-        self,
-        execution_id: str,
-        *,
-        principal: Principal,
-        after_sequence: int = 0,
-    ) -> AsyncIterator[ExecutionStreamEvent]:
-        self._ensure_open()
-        validate_resource_id(execution_id)
-        if self._local_coordinator is not None:
-            return self._local_coordinator.stream(
-                execution_id,
-                principal=principal,
-                after_sequence=after_sequence,
-            )
-        return self.event.stream(
-            execution_id,
-            principal=principal,
-            after_sequence=after_sequence,
-        )
 
     async def _retry_execution(
         self,
@@ -668,7 +635,7 @@ class Runtime(Generic[AppT]):
             budget_cost=budget_cost,
         )
 
-    async def run_graph(
+    async def start_graph(
         self,
         graph: TaskGraph,
         *,
@@ -676,7 +643,7 @@ class Runtime(Generic[AppT]):
         idempotency_key: str,
         limits: "TaskGraphLimits | None" = None,
         correlation: "Mapping[str, object] | None" = None,
-    ) -> TaskGraphResult:
+    ) -> "TaskGraphRun[AppT]":
         request = await self._admit_graph(
             graph,
             principal=principal,
@@ -684,9 +651,10 @@ class Runtime(Generic[AppT]):
             limits=limits,
             correlation=correlation,
         )
-        return await self.task.run_graph(request)
+        await self.task.start_graph(request)
+        return TaskGraphRun(self, graph.graph_id, request.principal)
 
-    async def run_graph_and_wait(
+    async def run_graph(
         self,
         graph: TaskGraph,
         *,
@@ -696,17 +664,14 @@ class Runtime(Generic[AppT]):
         timeout_seconds: "float | None" = None,
         correlation: "Mapping[str, object] | None" = None,
     ) -> TaskGraphResult:
-        request = await self._admit_graph(
+        run = await self.start_graph(
             graph,
             principal=principal,
             idempotency_key=idempotency_key,
             limits=limits,
             correlation=correlation,
         )
-        return await self.task.run_graph_and_wait(
-            request,
-            timeout_seconds=timeout_seconds,
-        )
+        return await run.wait(timeout_seconds=timeout_seconds)
 
     async def read_task_result(
         self,
@@ -717,7 +682,7 @@ class Runtime(Generic[AppT]):
     ) -> JsonValue:
         self._ensure_open()
         resolved_principal = self._resolve_principal(principal)
-        snapshot = await self.task.inspect_graph_state(
+        snapshot = await self.task.snapshot_graph(
             graph_id,
             principal=resolved_principal,
         )
@@ -966,7 +931,6 @@ async def _open_runtime(
             workspace=workspace,
             context=context,
             close_callback=components.close_callback,
-            local_coordinator=components.local_coordinator,
             task_node_runtime=components.task_node_runtime,
             metric_control=components.metric_control,
         )

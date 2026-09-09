@@ -94,7 +94,6 @@ class _RuntimeComponents:
     artifact: DefaultArtifactService
     tenant_id: str
     close_callback: Callable[[], Awaitable[None]]
-    local_coordinator: _LocalRuntimeCoordinator
     task_node_runtime: RuntimeTaskNodeRunner[object]
     metric_control: _RuntimeMetricBuffer | None
 
@@ -733,7 +732,6 @@ async def _build_local_components(
         artifact=artifact,
         tenant_id=tenant_id,
         close_callback=coordinator.close,
-        local_coordinator=local_coordinator,
         task_node_runtime=cast("RuntimeTaskNodeRunner[object]", task_runner),
         metric_control=metric_buffer,
     )

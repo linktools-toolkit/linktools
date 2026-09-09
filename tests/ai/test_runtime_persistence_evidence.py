@@ -244,7 +244,10 @@ async def test_terminal_stream_allows_immediate_runtime_close(
         ) as runtime:
             execution = await runtime.agent("default").start("hello")
             terminal_events = []
-            async for event in execution.stream():
+            async for item in execution.watch():
+                if item.depth != 0:
+                    continue
+                event = item.event
                 if event.event_type in {
                     ExecutionEventType.EXECUTION_SUCCEEDED,
                     ExecutionEventType.EXECUTION_FAILED,

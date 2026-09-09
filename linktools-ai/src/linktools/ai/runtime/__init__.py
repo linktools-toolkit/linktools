@@ -17,6 +17,7 @@ from ._object import RuntimeObjectKeyFactory, put_runtime_object, read_runtime_o
 from ._planner import DefaultTaskService, RuntimeTaskNodeRunner
 from ._runtime_history import RuntimeHistory
 from ._runtime_service import Runtime
+from ._task import TaskGraphRun
 from ._session import DefaultSessionService
 from ._snapshot import RunSnapshot, snapshot_digest
 from .recovery import (
@@ -78,6 +79,7 @@ from .service_api import (
     SessionView,
     TaskEvent,
     TaskEventType,
+    TaskGraphRunEvent,
     TaskService,
     TranscriptItem,
     UpdateSessionRequest,
@@ -174,6 +176,8 @@ __all__ = [
     "StoredUserInput",
     "TaskEvent",
     "TaskEventType",
+    "TaskGraphRun",
+    "TaskGraphRunEvent",
     "TaskService",
     "ToolEffectApplied",
     "ToolEffectFailed",

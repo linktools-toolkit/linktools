@@ -131,7 +131,7 @@ async def test_task_service_replay_rejects_correlation_drift() -> None:
         )
 
         with pytest.raises(AIError) as raised:
-            await service.run_graph(
+            await service.start_graph(
                 _request(graph, correlation={"trace_id": "trace-b"})
             )
 
