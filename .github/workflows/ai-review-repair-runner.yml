@@ -127,6 +127,33 @@ jobs:
               )
               test_path.write_text(test_source, encoding='utf-8')
 
+          def add_effective_args(path_value: str, class_name: str) -> None:
+              path = Path(path_value)
+              source = path.read_text(encoding='utf-8')
+              class_start = source.index(f'class {class_name}:')
+              class_end = source.find('\nclass ', class_start + 1)
+              if class_end == -1:
+                  class_end = len(source)
+              class_source = source[class_start:class_end]
+              if '    async def effective_args(' in class_source:
+                  return
+              begin = source.index('    async def begin(', class_start, class_end)
+              method = (
+                  '    async def effective_args(self, ctx, call, tool_def, args):\n'
+                  '        del ctx, call, tool_def\n'
+                  '        return args\n\n'
+              )
+              path.write_text(source[:begin] + method + source[begin:], encoding='utf-8')
+
+          for path_value, class_name in (
+              ('tests/ai/test_closure_fix.py', '_ToolBridge'),
+              ('tests/ai/test_model_usage_trace.py', '_ToolOperations'),
+              ('tests/ai/test_runtime_tool_metrics.py', '_Bridge'),
+              ('tests/ai/test_tool_effect_semantics.py', '_Bridge'),
+              ('tests/ai/test_workspace_durable_error_regression.py', '_Bridge'),
+          ):
+              add_effective_args(path_value, class_name)
+
           filesystem_path = Path('linktools-ai/src/linktools/ai/runtime/state/_filesystem.py')
           filesystem = filesystem_path.read_text(encoding='utf-8')
           filesystem = filesystem.replace(
